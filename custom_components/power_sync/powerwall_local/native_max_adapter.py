@@ -94,12 +94,13 @@ class NativeMaxChargeAdapter:
             raise
 
     def _owned_before(self, baseline, before_write):
-        async def before_owned_write():
+        async def before_owned_write(native_config=None):
             observed = await self.read_tariff()
             if not any(self._matches(candidate, observed) for candidate in
                     (baseline["tariff"], baseline["forcing_tariff"])):
                 raise NativeMaxChargeError("Native Max tariff ownership changed; cleanup retained")
-            fence = await before_write()
+            fence = (await before_write() if native_config is None else
+                     await before_write(native_config))
             def checked():
                 if self.current_identity() != self.identity:
                     raise NativeMaxChargeError("Native Max paired identity changed")
@@ -233,17 +234,31 @@ class NativeMaxChargeAdapter:
         except (ValueError, TypeError, KeyError):
             return self._deny("native_limit_or_config_invalid")
 
-    async def guard(self):
-        # Keep the failed admission check for the caller's error report. It
-        # must never become permission or survive a later successful check.
+    def _sample_started(self, snapshot, fallback):
+        started = getattr(snapshot, "observed_monotonic", None)
+        return (started if type(started) in (int, float) and math.isfinite(started)
+                and fallback <= started <= self.monotonic() else fallback)
+
+    async def guard(self, *, native_config=None):
         self.guard_denial_reason = "native_max_control_not_permitted"
         if not self.authority():
             return False
         await self.budget.load()
-        observed_at = self.monotonic()
         try:
-            self._snapshot = await asyncio.wait_for(self.client.get_snapshot(), timeout=10)
-            self._observed_at = observed_at
+            started = self.monotonic()
+            refresh = getattr(self.client, "get_control_snapshot", None)
+            self._snapshot = await asyncio.wait_for(
+                refresh(native_config) if native_config is not None and callable(refresh)
+                else self.client.get_snapshot(), timeout=10)
+            self._observed_at = self._sample_started(self._snapshot, started)
+            if native_config is None and not 0 <= self.monotonic() - self._observed_at <= 5:
+                # Refresh telemetry once, not the slow config read/transaction.
+                raw = self._snapshot.raw.get("config")
+                started = self.monotonic()
+                self._snapshot = await asyncio.wait_for(
+                    refresh(raw) if isinstance(raw, dict) and callable(refresh)
+                    else self.client.get_snapshot(), timeout=10)
+                self._observed_at = self._sample_started(self._snapshot, started)
             self.guard_denial_reason = "native_max_policy_denied"
             permitted = self._forcing_permitted()
             if permitted:
@@ -258,14 +273,20 @@ class NativeMaxChargeAdapter:
             raise NativeMaxChargeError("Native Max ownership is unavailable")
         started = self.monotonic()
         snapshot, tariff = await asyncio.gather(self.client.get_snapshot(), self.read_tariff())
+        observed = self._sample_started(snapshot, started)
         config = snapshot.raw.get("config")
+        refresh = getattr(self.client, "get_control_snapshot", None)
+        if self.monotonic() - observed > 5 and isinstance(config, dict) and callable(refresh):
+            observed = self.monotonic()
+            snapshot = await asyncio.wait_for(refresh(config), timeout=10)
+            observed = self._sample_started(snapshot, observed)
         info = config.get("site_info") if isinstance(config, dict) else None
         mode = config.get("default_real_mode") if isinstance(config, dict) else None
         reserve = info.get("backup_reserve_percent") if isinstance(info, dict) else None
         if (mode not in ("self_consumption", "autonomous", "backup")
                 or type(reserve) not in (int, float) or not math.isfinite(reserve)
                 or not 0 <= reserve <= 100 or not self.restorable(tariff)
-                or not self._physical_sample(snapshot) or self.monotonic() - started > 5):
+                or not self._physical_sample(snapshot) or not 0 <= self.monotonic() - observed <= 5):
             raise NativeMaxChargeError("Exact native Max restoration baseline is unavailable")
         baseline = {"mode": mode, "reserve": reserve, "tariff": deepcopy(tariff),
                     "forcing_tariff": deepcopy(self.forcing_tariff),
@@ -322,7 +343,15 @@ class NativeMaxChargeAdapter:
                 return False
             started = self.monotonic()
             snapshot = await self.client.get_snapshot()
-            if (self.monotonic() - started > 5 or not self._physical_sample(snapshot)
+            observed = self._sample_started(snapshot, started)
+            raw = snapshot.raw.get("config")
+            refresh = getattr(self.client, "get_control_snapshot", None)
+            if self.monotonic() - observed > 5 and isinstance(raw, dict) and callable(refresh):
+                observed = self.monotonic()
+                snapshot = await asyncio.wait_for(refresh(raw), timeout=10)
+                observed = self._sample_started(snapshot, observed)
+            if (not 0 <= self.monotonic() - observed <= 5
+                    or not self._physical_sample(snapshot)
                     or (snapshot.battery_w > max(original, snapshot.load_w - snapshot.solar_w) + 250
                         if discharge else -snapshot.battery_w > max(original, snapshot.solar_w - snapshot.load_w) + 250)):
                 return False
@@ -349,22 +378,26 @@ class NativeMaxChargeAdapter:
             fence = await self._owned_before(baseline, before_write)()
             def owned(config):
                 nonlocal checked
-                checked = config
+                checked = deepcopy(config)
                 info = config.get("site_info", {}) if isinstance(config, dict) else {}
                 return (self.direction == "charge" and self.planning_request
                         and self.config().get("optimization_allow_grid_charge") is True
                         and info.get(field) is True
                         and config.get("default_real_mode") == baseline["mode"]
                         and info.get("backup_reserve_percent") == baseline["reserve"]
-                        and self._forcing_permitted(config))
+                        and self.authority())
+            async def record_grid_intent(until):
+                nonlocal fence
+                fence = await self._owned_before(baseline, before_write)(checked)
+                await write_intent("grid_charge", until)
             def submit():
                 fence()
-                if checked is None or not owned(checked):
+                if checked is None or not owned(checked) or not self._forcing_permitted(checked):
                     raise NativeMaxChargeError("Grid charge setup policy changed")
             if not await self._mutate(self.client._transport.write_config(self.client._din,
                     {"site_info." + field: False}, before_write=submit,
                     validate_config=owned,
-                    before_submit=lambda until: write_intent("grid_charge", until))):
+                    before_submit=record_grid_intent)):
                 return False
             current = await self.client._transport.read_config(self.client._din)
             if not isinstance(current, dict) or current.get("site_info", {}).get(field) is not False:
@@ -415,14 +448,18 @@ class NativeMaxChargeAdapter:
         checked_config = None
         def owned(config):
             nonlocal checked_config
-            checked_config = config
+            checked_config = deepcopy(config)
             info = config.get("site_info") if isinstance(config, dict) else None
             return (isinstance(info, dict) and config.get("default_real_mode") in
                     ("autonomous", "self_consumption", baseline["mode"])
                     and info.get("backup_reserve_percent") in (reserve, baseline["reserve"])
                     and (self.direction != "discharge" or info.get("customer_preferred_export_rule")
                          in (baseline["export_rule"], "battery_ok"))
-                    and self._forcing_permitted(config))
+                    and self.authority())
+        async def record_config_intent(until):
+            nonlocal fence
+            fence = await before_write(checked_config)
+            await write_intent("local", until)
         def checked_fence():
             fence()
             if checked_config is None or not self._forcing_permitted(checked_config):
@@ -433,7 +470,7 @@ class NativeMaxChargeAdapter:
         if not await self._mutate(self.client._transport.write_config(self.client._din,
                 updates,
                 before_write=checked_fence, validate_config=owned,
-                before_submit=lambda until: write_intent("local", until))):
+                before_submit=record_config_intent)):
             return False
         current = await self.client._transport.read_config(self.client._din)
         confirmed = (isinstance(current, dict) and current.get("default_real_mode") == mode

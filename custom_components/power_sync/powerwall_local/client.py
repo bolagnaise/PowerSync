@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import math
 import time
 from dataclasses import dataclass
 from enum import Enum
@@ -132,6 +133,8 @@ class PowerwallSnapshot:
     total_pack_remaining_wh: float | None = None
     battery_blocks: list[dict[str, Any]] | None = None
     alerts: list[dict[str, Any]] | None = None
+    # Request start of this exact returned DCQ attempt; never persisted/rebased.
+    observed_monotonic: float | None = None
 
 
 class PowerwallLocalClient:
@@ -257,22 +260,34 @@ class PowerwallLocalClient:
         return parse_device_controller_response(response.inner_bytes)
 
     async def get_snapshot(self) -> PowerwallSnapshot:
-        """Read live DCQ/config together, retrying an empty query once.
+        """Read live DCQ/config together with one bounded incomplete-read retry."""
+        return await self._read_snapshot()
 
-        Only reads are retried. Never use cached telemetry or retain limits
-        from the failed attempt, and preserve pairing/connection failures.
-        Callers retain their own deadline and control admission checks.
+    async def get_control_snapshot(self, native_config: dict) -> PowerwallSnapshot:
+        """Refresh only DCQ after a writer has read its hash-checked config.
+
+        The supplied config keeps its own provenance. It is never marked as
+        newly read by the DCQ timestamp; the writer still checks its native hash.
         """
+        return await self._read_snapshot(native_config)
+
+    async def _read_snapshot(self, native_config=None) -> PowerwallSnapshot:
         for attempt in range(2):
             if not self._local_access_enabled or is_loopback_host(self._host):
                 raise PowerwallUnreachableError(
                     "Powerwall local access disabled; gateway IP is not configured"
                 )
 
-            dcq, cfg = await asyncio.gather(
-                self._fetch_dcq_local(), self._transport.read_config(self._din),
-                return_exceptions=True,
-            )
+            started = time.monotonic()
+            if native_config is None:
+                dcq, cfg = await asyncio.gather(
+                    self._fetch_dcq_local(), self._transport.read_config(self._din),
+                    return_exceptions=True,
+                )
+            else:
+                # No cached/last-good SOC: each attempt replaces the whole DCQ.
+                dcq, cfg = (await asyncio.gather(self._fetch_dcq_local(),
+                                               return_exceptions=True))[0], native_config
 
             if isinstance(dcq, BaseException):
                 if not isinstance(dcq, Exception) or isinstance(
@@ -288,9 +303,14 @@ class PowerwallLocalClient:
                 cfg = None
 
             if dcq:
-                return _snapshot_from_dcq(dcq, cfg if isinstance(cfg, dict) else None)
+                snapshot = _snapshot_from_dcq(dcq, cfg if isinstance(cfg, dict) else None)
+                snapshot.observed_monotonic = started
+                required = (snapshot.soc, snapshot.battery_w, snapshot.grid_w,
+                            snapshot.load_w, snapshot.solar_w)
+                if attempt or all(type(v) in (int, float) and math.isfinite(v) for v in required):
+                    return snapshot
             if attempt == 0:
-                _LOGGER.debug("DeviceControllerQuery was empty; retrying a fresh snapshot once")
+                _LOGGER.debug("DeviceControllerQuery was empty or incomplete; retrying a fresh snapshot once")
                 await asyncio.sleep(0.25)
 
         raise PowerwallUnreachableError(

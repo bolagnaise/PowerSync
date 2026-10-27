@@ -42,7 +42,11 @@ def setup(monkeypatch):
             await asyncio.sleep(0)
             forcing=updates.get('default_real_mode')=='autonomous' and updates.get('site_info.backup_reserve_percent')==100
             if forcing and state.before_validate: state.before_validate()
-            if not validate_config(deepcopy(state.config)): return False
+            working = deepcopy(state.config)
+            if not validate_config(working): return False
+            for key, value in updates.items():
+                if key.startswith('site_info.'): working['site_info'][key[10:]] = value
+                else: working[key] = value
             if forcing and state.before_send: state.before_send()
             await before_submit(state.at-2)
             before_write()
@@ -1468,3 +1472,131 @@ async def test_invalid_saved_export_limit_never_becomes_a_restore_write(setup,fi
     assert s.state.config['site_info']['min_site_meter_power_ac']==-18.8
     s.session.record['baseline'].update(export_limit=-20,force_export_limit=-18.8)
     assert await s.session.stop()
+
+
+@pytest.mark.asyncio
+async def test_guard_uses_successful_retry_acquisition_time_not_first_failed_read(setup):
+    s = setup
+    get_snapshot = s.adapter.client.get_snapshot
+    async def internally_retried_snapshot():
+        # A failed read consumed six seconds; the actual returned sample is new.
+        s.state.at += 6
+        snap = await get_snapshot()
+        snap.observed_monotonic = s.state.at
+        s.state.at += 1
+        return snap
+    s.adapter.client.get_snapshot = internally_retried_snapshot
+    assert await s.adapter.guard()
+    assert s.adapter._observed_at == s.state.at - 1
+    assert not s.state.events
+
+
+@pytest.mark.asyncio
+async def test_guard_refreshes_once_after_slow_read_without_accepting_stale_sample(setup):
+    s = setup
+    get_snapshot = s.adapter.client.get_snapshot
+    reads = 0
+    async def slow_then_fresh():
+        nonlocal reads
+        reads += 1
+        snap = await get_snapshot()
+        if reads == 1: s.state.at += 6
+        return snap
+    s.adapter.client.get_snapshot = slow_then_fresh
+    assert await s.adapter.guard()
+    assert reads == 2
+    assert not s.state.events
+
+
+@pytest.mark.asyncio
+async def test_native_config_read_refreshes_admission_before_submission(setup):
+    s = setup
+    original = s.adapter.client._transport.write_config
+    async def delayed_config_read(*args, **kwargs):
+        s.state.at += 6
+        return await original(*args, **kwargs)
+    s.adapter.client._transport.write_config = delayed_config_read
+    assert (await s.session.start(120))['active']
+    assert await s.session.stop()
+    assert (s.state.config, s.state.tariff) == s.original
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('change', ['soc_full', 'grid_disconnected', 'policy_revoked'])
+async def test_config_pre_submit_refresh_cannot_reuse_old_admission(setup, change):
+    s = setup
+    original = s.adapter.client._transport.write_config
+    async def change_after_config_read(*args, **kwargs):
+        s.state.at += 6
+        if change == 'soc_full': s.state.soc = 100
+        elif change == 'grid_disconnected': s.state.grid = 'SystemIslandedActive'
+        else: s.state.policy = False
+        return await original(*args, **kwargs)
+    s.adapter.client._transport.write_config = change_after_config_read
+    with pytest.raises(s.m.NativeMaxChargeError): await s.session.start(120)
+    assert not any(kind == 'config' for kind, _ in s.state.events)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('elapsed,expected', [(5, True), (5.001, False)])
+async def test_final_config_submission_does_not_extend_freshness_through_storage(setup, elapsed, expected):
+    s = setup
+    assert await s.adapter.guard()
+    baseline = await s.adapter.capture()
+    async def authorize(config=None):
+        assert await s.adapter.guard(native_config=config)
+        return lambda: None
+    async def store(*_): s.state.at += elapsed
+    if expected:
+        assert await s.adapter._write_config('autonomous', 100, s.adapter._owned_before(baseline, authorize), baseline, store)
+    else:
+        with pytest.raises(s.m.NativeMaxChargeError):
+            await s.adapter._write_config('autonomous', 100, s.adapter._owned_before(baseline, authorize), baseline, store)
+        assert not any(kind == 'config' for kind, _ in s.state.events)
+
+
+@pytest.mark.asyncio
+async def test_real_hash_checked_writer_refreshes_dcq_after_slow_config_read(setup, monkeypatch):
+    import json
+    from test_powerwall_v1r_teslemetry_parity import (
+        _bare_client, _transport_without_key, _dcq_snapshot_reply,
+        client_mod, transport_mod, transport_pb2,
+    )
+    s = setup
+    client = _bare_client()
+    transport = _transport_without_key()
+    client._transport = transport
+    monkeypatch.setattr(client_mod, 'time', SimpleNamespace(monotonic=lambda:s.state.at))
+    posts = []
+    async def post(payload, din, **kwargs):
+        request = transport_pb2.MessageEnvelope.FromString(payload)
+        if not request.HasField('filestore'):
+            return _dcq_snapshot_reply()
+        reply = transport_pb2.MessageEnvelope()
+        if request.filestore.HasField('read_file_request'):
+            s.state.at += 6
+            reply.filestore.read_file_response.file.blob = json.dumps(s.state.config).encode()
+            reply.filestore.read_file_response.hash = b'current-config-hash'
+        else:
+            update = request.filestore.update_file_request
+            assert update.hash == b'current-config-hash'
+            await kwargs['before_submit'](s.state.at - 2)
+            kwargs['before_send']()
+            # Admission used the observed original, never the proposed edit.
+            assert s.adapter._snapshot.raw['config']['default_real_mode'] == 'self_consumption'
+            assert s.adapter._snapshot.raw['config']['site_info']['backup_reserve_percent'] == 5
+            s.state.config = json.loads(update.file.blob)
+            posts.append(s.state.config)
+            reply.filestore.SetInParent()
+        return transport_mod.TEDAPIResponse(True, reply.SerializeToString())
+    transport.post_v1r = post
+    s.adapter.client = client
+    baseline = {'mode':'self_consumption','reserve':5,'tariff':deepcopy(s.state.tariff),
+                'forcing_tariff':deepcopy(s.adapter.forcing_tariff)}
+    async def authorize(config=None):
+        assert await s.adapter.guard(native_config=config)
+        return lambda: None
+    async def store(*_): pass
+    assert await s.adapter._write_config('autonomous',100,
+        s.adapter._owned_before(baseline, authorize),baseline,store)
+    assert len(posts) == 1 and posts[0]['site_info']['backup_reserve_percent'] == 100

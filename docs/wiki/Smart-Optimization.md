@@ -164,11 +164,19 @@ When enabled, Smart Optimization may plan forced battery charging from grid
 import when prices make it worthwhile. When disabled, Charge By Time cannot force
 grid charging, but solar surplus can still charge the battery naturally.
 
-For paired Powerwalls using Automatic control's native tariff route, an
-authorised optimiser charge can temporarily enable Tesla's charge-from-grid
-setting. PowerSync verifies it before charging and restores the original setting
+For paired Powerwalls using Local V1R or Automatic control's native tariff
+route, an authorised optimiser charge can temporarily enable Tesla's
+charge-from-grid setting. PowerSync verifies it before charging and restores the original setting
 afterward, including after a restart. Disabling Tesla grid charging again during
 the action stops this control; PowerSync does not repeatedly enable it.
+Manual V1R requests do not gain this optimiser permission. If a native setting
+write or restoration is uncertain, PowerSync retains its recovery record and
+retries cleanup without restarting charging.
+
+Automatic control retries an incomplete local reading once and refreshes local
+telemetry after slow configuration reads before submitting a command. SOC and
+power readings must still be complete and no more than five seconds old; cloud
+or cached SOC does not substitute for missing local evidence.
 
 ### GloBird ZeroHero and ZeroCharge
 

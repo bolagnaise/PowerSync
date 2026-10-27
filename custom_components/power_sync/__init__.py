@@ -31459,6 +31459,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             state = force_charge_state if state_to_save["mode"] == "charge" else force_discharge_state
             if state.get("powerwall_local_dispatch"):
                 state_to_save["powerwall_local_dispatch"] = True
+                controller = hass.data[DOMAIN][entry.entry_id].get("powerwall_battery_dispatch")
+                state_to_save["local_grid_charge_restore"] = getattr(controller, "grid_charge_restore", None)
                 state_to_save["command_status"] = state.get("command_status")
                 state_to_save["grid_import_target_w"] = state.get("grid_import_target_w")
                 state_to_save["power_target_basis"] = state.get("power_target_basis", "battery")
@@ -31508,7 +31510,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if persisted_force_state.get("powerwall_local_dispatch"):
             state = force_charge_state if persisted_force_state.get("mode") == "charge" else force_discharge_state
             state.update(active=True, powerwall_local_dispatch=True,
-                         source=persisted_force_state.get("source", "user"))
+                         source=persisted_force_state.get("source", "user"),
+                         local_grid_charge_restore=persisted_force_state.get("local_grid_charge_restore"))
             await _stop_local_powerwall_dispatch()
             hass.data[DOMAIN][entry.entry_id]["optimizer_force_restart_restore_pending"] = False
             hass.data[DOMAIN][entry.entry_id]["powerwall_local_recovery_pending"] = False
@@ -33424,6 +33427,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         runtime["optimizer_force_restart_restore_pending"] = False
         for mode, state in (("charge", force_charge_state), ("discharge", force_discharge_state)):
             if state.pop("powerwall_local_dispatch", False):
+                state.pop("local_grid_charge_restore", None)
                 state.update(active=False, expires_at=None, hardware_expires_at=None,
                              commitment_eligible=False, command_status=None)
                 async_dispatcher_send(hass, f"{DOMAIN}_force_{mode}_state", {"active": False})
@@ -33505,6 +33509,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             lambda _mode: False, persist_force_mode_state,
             _clear_local_powerwall_dispatch,
             acknowledged=_local_powerwall_dispatch_acknowledged, failed=_local_powerwall_dispatch_failed,
+            cleanup_allowed=_local_powerwall_generation_current,
         )
         runtime["powerwall_battery_dispatch"] = controller
         return controller
@@ -33525,7 +33530,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if not pending and not (controller and controller.pending):
             return native_max_stopped
         controller = controller or await _get_local_powerwall_dispatch()
-        controller.assume_pending()
+        recovery = next((state.get("local_grid_charge_restore")
+                         for state in (force_charge_state, force_discharge_state)
+                         if state.get("local_grid_charge_restore") is not None), None)
+        if not controller.pending:
+            if recovery is not None:
+                controller.assume_pending(grid_charge_restore=recovery)
+            else:
+                controller.assume_pending()
         try:
             await controller.stop()
         except Exception as err:
@@ -34012,6 +34024,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             controller = await _get_local_powerwall_dispatch()
             if not _local_powerwall_generation_current() or _local_powerwall_runtime.get("powerwall_local_dispatch_stopping"):
                 raise HomeAssistantError("Powerwall dispatch setup generation was replaced or stopped")
+            grid_recovery = controller.grid_charge_restore
+            if controller.pending and grid_recovery and (mode != "charge" or source != "optimizer"
+                    or grid_recovery["phase"] != "applied"):
+                await controller.stop()
             state = force_charge_state if mode == "charge" else force_discharge_state
             other = force_discharge_state if mode == "charge" else force_charge_state
             _cancel_all_force_timers("local Powerwall dispatch")
@@ -34031,7 +34047,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             try:
                 result = await controller.start(mode, target, duration * 60,
                                                 allowed=allowed, guarded_write=local_export_guard if mode == "discharge" else None,
-                                                target_basis="grid_import" if grid_target is not None else "battery")
+                                                target_basis="grid_import" if grid_target is not None else "battery",
+                                                prepare_grid_charging=source == "optimizer")
             except Exception as err:
                 from .powerwall_local.battery_dispatch import DispatchCommandFailed
                 if grid_target is not None:

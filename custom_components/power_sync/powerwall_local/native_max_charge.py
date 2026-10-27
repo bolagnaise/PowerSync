@@ -139,11 +139,13 @@ class NativeMaxChargeSession:
                 raise NativeMaxChargeError("Native Max write authority expired or changed")
         return fence
 
-    async def _authorize(self, token, generation):
+    async def _authorize(self, token, generation, *, native_config=None):
         if not self.record or self.record["id"] != token:
             raise NativeMaxChargeError("Native Max request was replaced")
         # A denied/unknown current policy never authorizes a provider write.
-        if await self.adapter.guard() is not True:
+        permitted = (await self.adapter.guard() if native_config is None else
+                     await self.adapter.guard(native_config=native_config))
+        if permitted is not True:
             raise NativeMaxChargeError("Native Max current policy denied charging")
         fence = self._active_fence(token, generation, self.monotonic())
         fence()
@@ -243,7 +245,7 @@ class NativeMaxChargeSession:
                     fence()  # storage/admission awaits must not extend a grant
                     prepare = getattr(self.adapter, "prepare", None)
                     if prepare is not None and await prepare(deepcopy(baseline),
-                            lambda: self._authorize(token, generation), write_intent=self._write_intent) is not True:
+                            lambda native_config=None: self._authorize(token, generation, native_config=native_config), write_intent=self._write_intent) is not True:
                         raise NativeMaxChargeError("Native Max preparation readback was not confirmed")
                     kick = getattr(self.adapter, "kick", None)
                     if kick is not None:
@@ -258,7 +260,7 @@ class NativeMaxChargeSession:
                     await self._write_intent("kick_released")
                     await self._authorize(token, generation)
                     if await self.adapter.apply(deepcopy(baseline),
-                            lambda: self._authorize(token, generation), write_intent=self._write_intent) is not True:
+                            lambda native_config=None: self._authorize(token, generation, native_config=native_config), write_intent=self._write_intent) is not True:
                         raise NativeMaxChargeError("Native Max command readback was not confirmed")
                     await self._authorize(token, generation)
                 self._apply_task = asyncio.create_task(apply())

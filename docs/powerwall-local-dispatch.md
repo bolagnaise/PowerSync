@@ -105,3 +105,25 @@ solar contribution can increase available export.
 ### Full-rate Max discharge
 
 An explicit manual or automation **Max** discharge uses cloud tariff control when Tariff is selected. Its output is independent of the gateway’s learned timed-command ceiling. Numeric targets retain local wattage control and their live home/solar compensation. Max is not a promise to hold an exact grid-export target; installer site limits and reserves remain effective. When Automatic selects native tariff control, a stricter software export limit is temporarily applied and verified at the gateway. If that native takeover cannot be confirmed, it fails explicitly. The tariff, mode, reserve and export settings return through the existing restore lifecycle.
+
+
+### Grid charging and fresh evidence
+
+An optimiser charge using Local V1R may temporarily enable Tesla's grid-charging
+setting only when PowerSync explicitly allows grid charging and current demand
+and ownership checks permit it. The original disabled setting is saved before
+the native write, verified before watts, and restored after acknowledged resume,
+including on restart. Repeated requests retain the original baseline. Manual
+requests do not inherit that temporary permission, and an external disable stops
+renewal rather than triggering another enable.
+
+Unknown write outcomes retain the signed command acceptance deadline and the
+recovery obligation. A successful resume alone cannot clear a failed setting
+restore; cleanup retries do not replay watts. Native config writes retain their
+hash-checked merge, preserve unrelated fields, and reject conflicting edits.
+
+Local snapshots retry an empty or incomplete DCQ once without combining values
+from different attempts. Each returned sample carries its own acquisition start;
+Automatic refreshes DCQ after slow config work and rechecks admission at the final
+submission boundary. Missing or stale SOC still blocks control; the five-second
+freshness limit and configured site limits remain in force.

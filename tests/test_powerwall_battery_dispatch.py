@@ -1656,3 +1656,310 @@ async def test_force_discharge_recovers_empty_dcq_and_requires_current_limits(du
     finally:
         await native.stop()
         await local.stop()
+
+
+def install_grid_permission(client, *, disabled=True):
+    """Realistic native config CAS boundary for the owned grid setting."""
+    from copy import deepcopy
+    snap = client.get_snapshot.return_value
+    snap.raw['config']['site_info']['disallow_charge_from_grid_with_solar_installed'] = disabled
+    snap.grid_charging_enabled = not disabled
+    events = []
+    async def read(_): return deepcopy(snap.raw['config'])
+    async def write(_, updates, *, before_write, validate_config, before_submit):
+        if not validate_config(deepcopy(snap.raw['config'])): return False
+        await before_submit(__import__('time').time() - 1)
+        before_write()
+        events.append(('grid', updates.copy()))
+        for key, value in updates.items(): snap.raw['config']['site_info'][key.split('.')[-1]] = value
+        snap.grid_charging_enabled = not snap.raw['config']['site_info']['disallow_charge_from_grid_with_solar_installed']
+        return True
+    client._din = 'gateway'
+    client._transport = SimpleNamespace(read_config=AsyncMock(side_effect=read), write_config=AsyncMock(side_effect=write))
+    async def snapshot_read():
+        snap.grid_charging_enabled = not snap.raw['config']['site_info']['disallow_charge_from_grid_with_solar_installed']
+        return snap
+    client.get_snapshot.side_effect = snapshot_read
+    async def dispatch(*_):
+        assert snap.raw['config']['site_info']['disallow_charge_from_grid_with_solar_installed'] is False
+        events.append(('watts', None)); return True
+    client.dispatch_battery_power.side_effect = dispatch
+    async def resume(): events.append(('resume', None)); return True
+    client.resume_battery_operation.side_effect = resume
+    return snap, events
+
+
+def test_optimizer_local_charge_enables_grid_before_watts_and_restores_after_resume():
+    async def run():
+        ns, c, client, saved = load_routing(optimization_allow_grid_charge=True)
+        snap, events = install_grid_permission(client)
+        try:
+            result = await ns['handle_force_charge'](call(source='optimizer',power_w=1000,duration=1))
+            assert result['success']
+            assert [event[0] for event in events] == ['grid', 'watts']
+            assert saved['force_mode_state']['local_grid_charge_restore']
+            await c.stop()
+            assert [event[0] for event in events][-2:] == ['resume', 'grid']
+            assert snap.grid_charging_enabled is False
+            assert saved['force_mode_state'] is None
+        finally:
+            await c.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('source', ['user', 'optimizer'])
+def test_local_charge_does_not_enable_grid_without_optimizer_permission(source):
+    async def run():
+        ns, c, client, saved = load_routing(optimization_allow_grid_charge=source != 'optimizer')
+        snap, events = install_grid_permission(client)
+        try:
+            with pytest.raises(RuntimeError):
+                await ns['handle_force_charge'](call(source=source,power_w=1000,duration=15))
+            client._transport.write_config.assert_not_awaited()
+            client.dispatch_battery_power.assert_not_awaited()
+            assert snap.grid_charging_enabled is False
+        finally: await c.stop()
+    asyncio.run(run())
+
+
+def test_repeated_local_charge_keeps_original_grid_baseline_and_restart_restores_it():
+    async def run():
+        ns, c, client, saved = load_routing(optimization_allow_grid_charge=True)
+        snap, events = install_grid_permission(client)
+        try:
+            for _ in range(2):
+                await ns['handle_force_charge'](call(source='optimizer',power_w=1000,duration=1))
+            assert len([e for e in events if e[0] == 'grid']) == 1
+            record = saved['force_mode_state'].copy()
+            await c._cancel_task()  # Process ends; no more hardware writes.
+            recovered, next_c, next_client, next_saved = load_routing(optimization_allow_grid_charge=True)
+            next_snap, next_events = install_grid_permission(next_client, disabled=False)
+            recovered['persisted_force_state'] = record
+            try:
+                await recovered['restore_force_mode_from_persistence']()
+                assert next_snap.grid_charging_enabled is False
+                assert [e[0] for e in next_events] == ['resume', 'grid']
+                next_client.dispatch_battery_power.assert_not_awaited()
+                assert next_saved['force_mode_state'] is None
+            finally: await next_c.stop()
+        finally: await c.stop()
+    asyncio.run(run())
+
+
+def test_resume_does_not_clear_unconfirmed_grid_restore():
+    async def run():
+        ns, c, client, saved = load_routing(optimization_allow_grid_charge=True)
+        snap, events = install_grid_permission(client)
+        await ns['handle_force_charge'](call(source='optimizer',power_w=1000,duration=1))
+        write = client._transport.write_config.side_effect
+        client._transport.write_config.side_effect = None
+        client._transport.write_config.return_value = False
+        with pytest.raises(ValueError, match='grid'):
+            await c.stop()
+        assert c.pending and saved['force_mode_state']['local_grid_charge_restore']
+        client.resume_battery_operation.assert_awaited_once()
+        client._transport.write_config.side_effect = write
+        await c.stop()
+        assert snap.grid_charging_enabled is False and saved['force_mode_state'] is None
+    asyncio.run(run())
+
+
+def test_external_grid_disable_is_not_overwritten_or_reenabled():
+    async def run():
+        ns, c, client, saved = load_routing(optimization_allow_grid_charge=True)
+        snap, events = install_grid_permission(client)
+        await ns['handle_force_charge'](call(source='optimizer',power_w=1000,duration=1))
+        snap.raw['config']['site_info']['disallow_charge_from_grid_with_solar_installed'] = True
+        with pytest.raises(ValueError): await c._write()
+        await c.stop()
+        assert len([e for e in events if e[0] == 'grid']) == 1
+        assert snap.grid_charging_enabled is False
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('stage', ['unknown_readback', 'policy_before_submit', 'initial_save', 'applied_save'])
+def test_grid_setup_failure_never_issues_watts_and_restoration_survives(stage):
+    async def run():
+        ns, c, client, saved = load_routing(optimization_allow_grid_charge=True)
+        snap, events = install_grid_permission(client)
+        original_write = client._transport.write_config.side_effect
+        original_persist = c.persist
+        async def write(*args, **kwargs):
+            if stage == 'policy_before_submit': ns['entry'].options['optimization_allow_grid_charge'] = False
+            result = await original_write(*args, **kwargs)
+            if stage == 'unknown_readback': client._transport.read_config.return_value = {}
+            return result
+        if stage == 'unknown_readback':
+            read = client._transport.read_config.side_effect
+            async def readback(din):
+                return {} if events and events[-1][0] == 'grid' else await read(din)
+            client._transport.read_config.side_effect = readback
+        client._transport.write_config.side_effect = write
+        async def persist():
+            record = c.grid_charge_restore
+            if record and ((stage == 'initial_save' and record['phase'] == 'pending') or
+                           (stage == 'applied_save' and record['phase'] == 'applied')):
+                raise OSError('storage unavailable')
+            await original_persist()
+        c.persist = persist
+        try:
+            with pytest.raises((RuntimeError, ValueError, OSError)):
+                await ns['handle_force_charge'](call(source='optimizer',power_w=1000,duration=1))
+            client.dispatch_battery_power.assert_not_awaited()
+            if stage == 'unknown_readback':
+                assert c.pending and saved['force_mode_state']['local_grid_charge_restore']
+        finally:
+            c.persist = original_persist
+            client._transport.read_config.side_effect = lambda _: __import__('copy').deepcopy(snap.raw['config'])
+            await c.stop()
+    asyncio.run(run())
+
+
+def test_uncertain_enable_cannot_clear_journal_from_early_original_readback():
+    async def run():
+        import time
+        ns, c, client, saved = load_routing(optimization_allow_grid_charge=True)
+        snap, events = install_grid_permission(client)
+        async def uncertain(_, updates, *, before_write, validate_config, before_submit):
+            assert validate_config(snap.raw['config'])
+            await before_submit(time.time() + 12)
+            before_write()
+            return False  # Request can arrive later; readback still original.
+        client._transport.write_config.side_effect = uncertain
+        try:
+            with pytest.raises(RuntimeError):
+                await ns['handle_force_charge'](call(source='optimizer',power_w=1000,duration=1))
+            assert c.pending and saved['force_mode_state']['local_grid_charge_restore']
+            assert c._cleanup_task is not None
+            client.dispatch_battery_power.assert_not_awaited()
+            assert snap.grid_charging_enabled is False
+            # Signed lifetime has now expired; baseline is still observed.
+            c._grid_charge_restore['acceptance_until'] = 0
+            await c.stop()
+            assert saved['force_mode_state'] is None
+        finally:
+            c._grid_charge_restore and c._grid_charge_restore.update(acceptance_until=0)
+            await c.stop()
+    asyncio.run(run())
+
+
+def test_cancellation_drains_enable_before_resume_and_never_sends_watts():
+    async def run():
+        ns, c, client, saved = load_routing(optimization_allow_grid_charge=True)
+        snap, events = install_grid_permission(client)
+        entered, finish = asyncio.Event(), asyncio.Event()
+        original = client._transport.write_config.side_effect
+        async def delayed(*args, **kwargs):
+            result = await original(*args, **kwargs)
+            if snap.grid_charging_enabled:
+                entered.set(); await finish.wait()
+            return result
+        client._transport.write_config.side_effect = delayed
+        task = asyncio.create_task(ns['handle_force_charge'](call(source='optimizer',power_w=1000,duration=1)))
+        await entered.wait(); task.cancel(); await asyncio.sleep(0)
+        assert not task.done() and client.resume_battery_operation.await_count == 0
+        finish.set()
+        with pytest.raises(asyncio.CancelledError): await task
+        client.dispatch_battery_power.assert_not_awaited()
+        assert snap.grid_charging_enabled is False and saved['force_mode_state'] is None
+        assert [e[0] for e in events] == ['grid','resume','grid']
+        await c.stop()
+    asyncio.run(run())
+
+
+def test_already_enabled_local_grid_setting_has_no_restore_owner():
+    async def run():
+        ns, c, client, saved = load_routing(optimization_allow_grid_charge=True)
+        snap, events = install_grid_permission(client, disabled=False)
+        await ns['handle_force_charge'](call(source='optimizer',power_w=1000,duration=1))
+        assert c.grid_charge_restore is None
+        await c.stop()
+        assert snap.grid_charging_enabled is True
+        client._transport.write_config.assert_not_awaited()
+    asyncio.run(run())
+
+
+@pytest.mark.asyncio
+async def test_failed_grid_restore_retries_cleanup_without_restarting_watts(monkeypatch):
+    ns, c, client, saved = load_routing(optimization_allow_grid_charge=True)
+    snap, events = install_grid_permission(client)
+    await ns['handle_force_charge'](call(source='optimizer',power_w=1000,duration=1))
+    write = client._transport.write_config.side_effect
+    client._transport.write_config.side_effect = None
+    client._transport.write_config.return_value = False
+    with pytest.raises(ValueError): await c.stop()
+    assert c.pending and c._cleanup_task is not None
+    client._transport.write_config.side_effect = write
+    async def immediate(_): pass
+    monkeypatch.setattr(module, 'asyncio', SimpleNamespace(**(vars(asyncio) | {'sleep':immediate})))
+    await c._cleanup_task
+    assert snap.grid_charging_enabled is False
+    assert client.dispatch_battery_power.await_count == 1
+    assert not c.pending and saved['force_mode_state'] is None
+
+
+@pytest.mark.parametrize('bad', [{'din':'another-gateway'}, {'original':False}, {'acceptance_until':float('nan')}])
+def test_invalid_grid_recovery_never_guesses_a_baseline(bad):
+    async def run():
+        ns, c, client, saved = load_routing()
+        _, _events = install_grid_permission(client, disabled=False)
+        record = {'owner':'old-owner','din':'gateway','original':True,'phase':'applied','acceptance_until':0} | bad
+        ns['persisted_force_state'] = {'mode':'charge','powerwall_local_dispatch':True,
+                                      'local_grid_charge_restore':record}
+        with pytest.raises(ValueError): await ns['restore_force_mode_from_persistence']()
+        client.dispatch_battery_power.assert_not_awaited()
+        client._transport.write_config.assert_not_awaited()
+    asyncio.run(run())
+
+
+def test_manual_takeover_cannot_inherit_optimizer_grid_permission():
+    async def run():
+        ns, c, client, saved = load_routing(optimization_allow_grid_charge=True)
+        snap, events = install_grid_permission(client)
+        await ns['handle_force_charge'](call(source='optimizer',power_w=1000,duration=1))
+        with pytest.raises(RuntimeError):
+            await ns['handle_force_charge'](call(source='user',power_w=500,duration=15))
+        assert client.dispatch_battery_power.await_count == 1
+        assert snap.grid_charging_enabled is False
+        assert saved['force_mode_state'] is None
+        await c.stop()
+    asyncio.run(run())
+
+
+def test_replaced_setup_cannot_restore_grid_setting_from_old_controller():
+    async def run():
+        ns, c, client, saved = load_routing(optimization_allow_grid_charge=True)
+        snap, events = install_grid_permission(client)
+        await ns['handle_force_charge'](call(source='optimizer',power_w=1000,duration=1))
+        c._cleanup_allowed = lambda: False
+        with pytest.raises(ValueError): await c.stop()
+        assert c.pending and c.grid_charge_restore
+        assert len([e for e in events if e[0] == 'grid']) == 1
+        c._cleanup_allowed = lambda: True
+        await c.stop()
+        assert snap.grid_charging_enabled is False
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('when', ['initial_read', 'native_write_read'])
+def test_grid_enable_cannot_drop_a_known_native_import_limit(when):
+    async def run():
+        ns, c, client, saved = load_routing(optimization_allow_grid_charge=True)
+        snap, events = install_grid_permission(client)
+        c._site_limits = (4000, None)
+        snap.raw['config']['site_info']['max_site_meter_power_ac'] = 4
+        if when == 'initial_read':
+            del snap.raw['config']['site_info']['max_site_meter_power_ac']
+        else:
+            original = client._transport.write_config.side_effect
+            async def missing_config(*args, **kwargs):
+                del snap.raw['config']['site_info']['max_site_meter_power_ac']
+                return await original(*args, **kwargs)
+            client._transport.write_config.side_effect = missing_config
+        try:
+            with pytest.raises(RuntimeError):
+                await ns['handle_force_charge'](call(source='optimizer',power_w=1000,duration=1))
+            assert not [e for e in events if e[0] == 'grid']
+            client.dispatch_battery_power.assert_not_awaited()
+        finally: await c.stop()
+    asyncio.run(run())

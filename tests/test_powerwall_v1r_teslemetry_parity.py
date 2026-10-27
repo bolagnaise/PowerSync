@@ -1344,3 +1344,71 @@ async def test_gateway_charge_ceiling_never_increases_from_later_rejections():
     transport.post_v1r = AsyncMock(return_value=transport_mod.TEDAPIResponse(True, reply.SerializeToString()))
     assert not await transport.dispatch_battery_power('gateway', -12000, 30)
     assert transport.dispatch_charge_limit_w == 9000
+
+
+@async_test
+async def test_snapshot_retries_nonempty_dcq_missing_soc_before_control():
+    client = _bare_client()
+    partial = {"control": {"systemStatus": {}, "meterAggregates": []}}
+    client._transport = SimpleNamespace(
+        post_v1r=AsyncMock(side_effect=[_dcq_snapshot_reply(partial), _dcq_snapshot_reply()]),
+        read_config=AsyncMock(return_value={}))
+    snap = await client.get_snapshot()
+    assert snap.soc is not None
+    assert snap.grid_status == "SystemGridConnected"
+    assert client._transport.post_v1r.await_count == 2
+
+
+@async_test
+async def test_partial_snapshot_retry_is_bounded_and_never_fills_from_previous_read():
+    client = _bare_client()
+    first = {"control": {"systemStatus": {"nominalFullPackEnergyWh": 13500}, "meterAggregates": []}}
+    second = {"control": {"systemStatus": {"nominalEnergyRemainingWh": 9000}, "meterAggregates": []}}
+    client._transport = SimpleNamespace(
+        post_v1r=AsyncMock(side_effect=[_dcq_snapshot_reply(first), _dcq_snapshot_reply(second), _dcq_snapshot_reply()]),
+        read_config=AsyncMock(side_effect=[{"old": True}, {"latest": True}]))
+    snap = await client.get_snapshot()
+    assert snap.soc is None
+    assert snap.raw['config'] == {"latest": True}
+    assert client._transport.post_v1r.await_count == 2
+
+
+@async_test
+async def test_snapshot_retry_timestamp_belongs_to_returned_attempt(monkeypatch):
+    client = _bare_client()
+    clock = SimpleNamespace(at=1000.)
+    async def fetch(*_):
+        clock.at += 6
+        return _dcq_snapshot_reply({"control": {}}) if clock.at == 1006 else _dcq_snapshot_reply()
+    client._transport = SimpleNamespace(post_v1r=AsyncMock(side_effect=fetch),read_config=AsyncMock(return_value={}))
+    monkeypatch.setattr(client_mod, 'time', SimpleNamespace(monotonic=lambda: clock.at))
+    snap = await client.get_snapshot()
+    assert snap.observed_monotonic == 1006
+    assert clock.at == 1012
+
+
+@async_test
+async def test_control_snapshot_refresh_does_not_repeat_native_config_read():
+    client = _bare_client()
+    cfg = {"site_info": {"max_site_meter_power_ac": 14.9}}
+    client._transport = SimpleNamespace(post_v1r=AsyncMock(return_value=_dcq_snapshot_reply()),
+                                       read_config=AsyncMock(side_effect=AssertionError('unexpected config read')))
+    snap = await client.get_control_snapshot(cfg)
+    assert snap.soc is not None
+    assert snap.raw['config'] == cfg
+    client._transport.read_config.assert_not_awaited()
+    client._transport.post_v1r.assert_awaited_once()
+
+
+@async_test
+async def test_zero_soc_is_not_retried_as_missing():
+    client = _bare_client()
+    payload = {"control": {"systemStatus": {"nominalFullPackEnergyWh": 13500, "nominalEnergyRemainingWh": 0},
+        "islanding": {"contactorClosed": True, "gridOK": True, "microGridOK": True},
+        "meterAggregates": [{"location": key, "realPowerW": value} for key, value in
+                            (("site", 800), ("load", 1000), ("solar", 200), ("battery", 0))]}}
+    client._transport = SimpleNamespace(post_v1r=AsyncMock(return_value=_dcq_snapshot_reply(payload)),
+                                       read_config=AsyncMock(return_value={}))
+    snap = await client.get_snapshot()
+    assert snap.soc == 0
+    client._transport.post_v1r.assert_awaited_once()
