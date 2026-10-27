@@ -272,24 +272,17 @@ def test_widget_data_uses_canonical_display_snapshot():
     assert "_get_ev_vehicles_status" not in view_source
 
 
-def test_disabling_solar_surplus_awaits_immediate_runtime_teardown():
-    source = INIT_PATH.read_text()
-    view_start = source.index("class SolarSurplusConfigView")
-    view_source = source[
-        view_start:source.index("class ChargingSessionsView", view_start)
-    ]
+def test_solar_surplus_api_uses_shared_settings_writer():
+    import ast
 
-    assert "current_enabled = normalize_solar_surplus_config(" in view_source
-    assert (
-        'if current_enabled and not updated_config.get("enabled", False):'
-        in view_source
-    )
-    assert "await stop_solar_surplus_ev_charging(" in view_source
-    save_index = view_source.index("await store.async_save()")
-    teardown_index = view_source.index(
-        "await stop_solar_surplus_ev_charging("
-    )
-    assert save_index < teardown_index
+    source = INIT_PATH.read_text()
+    view = next(node for node in ast.parse(source).body
+                if isinstance(node, ast.ClassDef) and node.name == "SolarSurplusConfigView")
+    post = next(node for node in view.body
+                if isinstance(node, ast.AsyncFunctionDef) and node.name == "post")
+    post_source = ast.get_source_segment(source, post)
+    assert "await async_update_solar_surplus_config(" in post_source
+    assert "self._hass, entry, store, data" in post_source
 
 
 def test_policy_quick_stop_does_not_replace_dynamic_controller_timer():

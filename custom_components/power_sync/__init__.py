@@ -18180,12 +18180,7 @@ class SolarSurplusConfigView(HomeAssistantView):
     async def post(self, request: web.Request) -> web.Response:
         """Handle POST request - update solar surplus config."""
         try:
-            from .solar_surplus_config import normalize_solar_surplus_config
-
             data = await request.json()
-            if "min_battery_soc" in data and "home_battery_minimum" not in data:
-                data["home_battery_minimum"] = data["min_battery_soc"]
-
             store = self._get_store()
             if not store:
                 return web.json_response({
@@ -18193,58 +18188,17 @@ class SolarSurplusConfigView(HomeAssistantView):
                     "error": "Storage not available"
                 }, status=503)
 
-            # Get existing config (use _data directly)
-            stored_data = getattr(store, '_data', {}) or {}
-            current_config = stored_data.get("solar_surplus_config", {})
-            current_enabled = normalize_solar_surplus_config(
-                current_config
-            ).get("enabled", False)
-            updated_config = {**current_config, **data}
+            from .solar_surplus_control import async_update_solar_surplus_config
 
-            # Validate config values
-            if "household_buffer_kw" in updated_config:
-                updated_config["household_buffer_kw"] = max(0, min(5, float(updated_config["household_buffer_kw"])))
-            if "sustained_surplus_minutes" in updated_config:
-                updated_config["sustained_surplus_minutes"] = max(1, min(30, int(updated_config["sustained_surplus_minutes"])))
-            if "stop_delay_minutes" in updated_config:
-                updated_config["stop_delay_minutes"] = max(1, min(30, int(updated_config["stop_delay_minutes"])))
-            if "surplus_calculation" in updated_config:
-                if updated_config["surplus_calculation"] not in ("grid_based", "direct"):
-                    updated_config["surplus_calculation"] = "grid_based"
-            if "dual_vehicle_strategy" in updated_config:
-                if updated_config["dual_vehicle_strategy"] not in ("even", "priority_first", "priority_only"):
-                    updated_config["dual_vehicle_strategy"] = "priority_first"
-            if "home_battery_minimum" in updated_config:
-                updated_config["home_battery_minimum"] = max(0, min(100, int(updated_config["home_battery_minimum"])))
-            if "allow_parallel_charging" in updated_config:
-                updated_config["allow_parallel_charging"] = bool(updated_config["allow_parallel_charging"])
-            if "max_battery_charge_rate_kw" in updated_config:
-                updated_config["max_battery_charge_rate_kw"] = max(1, min(30, float(updated_config["max_battery_charge_rate_kw"])))
-            updated_config = normalize_solar_surplus_config(updated_config)
-
-            # Save updated config (update key in existing _data, don't overwrite)
-            if hasattr(store, '_data') and hasattr(store, 'async_save'):
-                store._data["solar_surplus_config"] = updated_config
-                await store.async_save()
-
-            if current_enabled and not updated_config.get("enabled", False):
-                from .automations.actions import stop_solar_surplus_ev_charging
-
-                entry = self._get_entry_for_store(store)
-                if entry:
-                    stopped = await stop_solar_surplus_ev_charging(
-                        self._hass,
-                        entry,
-                    )
-                    if not stopped:
-                        _LOGGER.warning(
-                            "Solar Surplus was disabled and ownership released, "
-                            "but one or more charger stop commands failed"
-                        )
-                else:
-                    _LOGGER.warning(
-                        "Solar Surplus was disabled but its config entry was not found"
-                    )
+            entry = self._get_entry_for_store(store)
+            if entry is None:
+                return web.json_response({
+                    "success": False,
+                    "error": "Solar Surplus config entry not available",
+                }, status=503)
+            updated_config = await async_update_solar_surplus_config(
+                self._hass, entry, store, data
+            )
 
             return web.json_response({
                 "success": True,

@@ -80,6 +80,10 @@ _ha_core.HomeAssistant = object
 _ha_core.callback = lambda func: func
 sys.modules["homeassistant.core"] = _ha_core
 
+_ha_exceptions = types.ModuleType("homeassistant.exceptions")
+_ha_exceptions.HomeAssistantError = type("HomeAssistantError", (Exception,), {})
+sys.modules["homeassistant.exceptions"] = _ha_exceptions
+
 _ha_helpers = sys.modules.setdefault("homeassistant.helpers", types.ModuleType("homeassistant.helpers"))
 _ha_registry = types.ModuleType("homeassistant.helpers.entity_registry")
 _ha_registry.async_get = lambda hass: types.SimpleNamespace(async_get_entity_id=lambda *args: None)
@@ -88,6 +92,7 @@ sys.modules["homeassistant.helpers.entity_registry"] = _ha_registry
 
 _ha_dispatcher = types.ModuleType("homeassistant.helpers.dispatcher")
 _ha_dispatcher.async_dispatcher_connect = lambda *args, **kwargs: lambda: None
+_ha_dispatcher.async_dispatcher_send = lambda *args, **kwargs: None
 sys.modules["homeassistant.helpers.dispatcher"] = _ha_dispatcher
 
 _ha_entity_platform = types.ModuleType("homeassistant.helpers.entity_platform")
@@ -158,6 +163,7 @@ _ps_const.ATTR_SYNC_STATUS = "sync_status"
 _ps_const.SENSOR_FAMILY_LP_OPTIMIZER = "lp_optimizer"
 _ps_const.SENSOR_FAMILY_BATTERY = "battery"
 _ps_const.SENSOR_FAMILY_CONTROLS = "controls"
+_ps_const.SENSOR_FAMILY_EV_CHARGING = "ev_charging"
 _ps_const.SENSOR_FAMILY_GRID_HOME = "grid_home"
 _ps_const.TESLA_SITE_INFO_CONTROL_MAX_AGE_SECONDS = 30
 _ps_const.TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS = 30

@@ -11,6 +11,7 @@ from homeassistant.components.switch import SwitchEntity, SwitchEntityDescriptio
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -75,6 +76,11 @@ from .const import (
 )
 from .monitoring import async_prepare_monitoring_handoff, finish_monitoring_handoff
 from .tesla_grid_control import tesla_grid_charging_enabled_from_site_info
+from .solar_surplus_config import get_stored_solar_surplus_config
+from .solar_surplus_control import (
+    SIGNAL_SOLAR_SURPLUS_CONFIG_UPDATED,
+    async_update_solar_surplus_config,
+)
 
 # Providers that use TOU schedule syncing (Amber, Octopus, Flow Power)
 # GloBird and AEMO VPP use spike detection only — no TOU sync
@@ -235,6 +241,7 @@ async def async_setup_entry(
     )
 
     entities = []
+    entities.append(SolarSurplusChargingSwitch(hass, entry))
     if native_amber := hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get("amber_smartshift_coordinator"):
         from .amber_smartshift.entities import AmberSmartShiftSwitch
         entities.append(AmberSmartShiftSwitch(native_amber, entry))
@@ -454,6 +461,67 @@ async def async_setup_entry(
             _add_capability_gated_switches(),
             name=f"{DOMAIN}_capability_gated_switches",
         )
+
+
+class SolarSurplusChargingSwitch(SwitchEntity):
+    """Control the same persistent Solar Surplus EV setting as the app."""
+
+    _attr_has_entity_name = True
+    _attr_name = "Solar Surplus EV Charging"
+    _attr_icon = "mdi:solar-power"
+    # Polling also picks up the automation store becoming ready after setup.
+    _attr_should_poll = True
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+        self.hass = hass
+        self._entry = entry
+        self._attr_unique_id = f"{entry.entry_id}_solar_surplus_ev_charging"
+        self._attr_suggested_object_id = "power_sync_solar_surplus_ev_charging"
+
+    @property
+    def device_info(self):
+        from .const import SENSOR_FAMILY_EV_CHARGING
+
+        return family_device_info(self._entry.entry_id, SENSOR_FAMILY_EV_CHARGING)
+
+    def _entry_data(self) -> dict[str, Any]:
+        return self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
+
+    @property
+    def available(self) -> bool:
+        store = self._entry_data().get("automation_store")
+        return isinstance(getattr(store, "_data", None), dict)
+
+    @property
+    def is_on(self) -> bool:
+        return bool(get_stored_solar_surplus_config(self._entry_data())["enabled"])
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        self.async_on_remove(async_dispatcher_connect(
+            self.hass, SIGNAL_SOLAR_SURPLUS_CONFIG_UPDATED, self._config_updated
+        ))
+
+    @callback
+    def _config_updated(self, entry_id: str) -> None:
+        if entry_id == self._entry.entry_id:
+            self.async_write_ha_state()
+
+    async def _async_set_enabled(self, enabled: bool) -> None:
+        try:
+            await async_update_solar_surplus_config(
+                self.hass, self._entry,
+                self._entry_data().get("automation_store"), {"enabled": enabled},
+            )
+        except Exception as err:
+            raise HomeAssistantError(f"Could not update Solar Surplus: {err}") from err
+        self.async_write_ha_state()
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        await self._async_set_enabled(True)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        await self._async_set_enabled(False)
 
 
 class AutoSyncSwitch(SwitchEntity):
