@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import math
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,151 @@ SPEC = importlib.util.spec_from_file_location("tesla_grid_control_test", MODULE_
 assert SPEC and SPEC.loader
 tesla_grid_control = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(tesla_grid_control)
+
+
+RETRY_POLLS = (0.5, 1.5, 3.5, 5.5, 7.5, 12.5, 20, 30, 40, 45, 47, 50, 55, 59)
+
+
+class _DelayedSession:
+    def __init__(self, clock, *, off_at=math.inf, off_after_retry=False, missing=False):
+        self.clock = clock
+        self.off_at = off_at
+        self.off_after_retry = off_after_retry
+        self.missing = missing
+        self.post_calls = []
+        self.get_calls = []
+        self.on_read = None
+
+    def post(self, url, **kwargs):
+        self.post_calls.append((self.clock.now, kwargs))
+        return _Response(200, {"response": {"result": True}})
+
+    def get(self, url, **kwargs):
+        self.get_calls.append((self.clock.now, kwargs))
+        if self.on_read:
+            self.on_read()
+        if self.missing:
+            return _site_info_without_grid_charging_field()
+        off = self.clock.now >= self.off_at or (
+            self.off_after_retry and len(self.post_calls) > 1
+        )
+        return _site_info(not off)
+
+
+async def _set_with_retry(session, clock, **kwargs):
+    return await tesla_grid_control.async_set_tesla_grid_charging_confirmed(
+        session, "https://example.invalid", "site", {}, False,
+        confirmation_deadline=60, poll_offsets=RETRY_POLLS,
+        retry_after=45, operation_deadline=60,
+        sleep=clock.sleep, monotonic=clock.monotonic, **kwargs,
+    )
+
+
+def test_delayed_disable_confirms_without_resending_an_accepted_write():
+    clock = _Clock()
+    session = _DelayedSession(clock, off_at=30)
+    result = asyncio.run(_set_with_retry(session, clock))
+    assert result.applied
+    assert clock.now == 30
+    assert len(session.post_calls) == 1
+
+
+def test_explicit_contrary_readback_allows_exactly_one_bounded_resend():
+    clock = _Clock()
+    session = _DelayedSession(clock, off_after_retry=True)
+    result = asyncio.run(_set_with_retry(session, clock))
+    assert result.applied
+    assert [at for at, _ in session.post_calls] == [0, 45]
+    assert 45 < clock.now <= 60
+
+
+def test_retry_cannot_turn_a_never_applied_disable_into_success():
+    clock = _Clock()
+    session = _DelayedSession(clock)
+    result = asyncio.run(_set_with_retry(session, clock))
+    assert result.status is tesla_grid_control.TeslaGridWriteStatus.ACCEPTED_UNCONFIRMED
+    assert len(session.post_calls) == 2
+    assert clock.now <= 60
+
+
+def test_missing_fields_never_authorize_a_resend_or_confirm_disable():
+    clock = _Clock()
+    session = _DelayedSession(clock, missing=True)
+    result = asyncio.run(_set_with_retry(session, clock))
+    assert not result.applied
+    assert result.status is tesla_grid_control.TeslaGridWriteStatus.ACCEPTED_FIELD_ABSENT
+    assert len(session.post_calls) == 1
+
+
+def test_generation_changed_inside_read_cannot_confirm_or_resend():
+    clock = _Clock()
+    session = _DelayedSession(clock, off_at=45)
+    current = True
+
+    def supersede():
+        nonlocal current
+        if clock.now >= 45:
+            current = False
+
+    session.on_read = supersede
+    result = asyncio.run(_set_with_retry(session, clock, is_current=lambda: current))
+    assert not result.applied
+    assert result.detail == "superseded"
+    assert len(session.post_calls) == 1
+
+
+def test_contrary_read_followed_by_missing_fields_does_not_authorize_resend():
+    clock = _Clock()
+    session = _DelayedSession(clock)
+    session.on_read = lambda: setattr(session, "missing", clock.now >= 40)
+    result = asyncio.run(_set_with_retry(session, clock))
+    assert not result.applied
+    assert len(session.post_calls) == 1
+
+
+def test_cancellation_during_wait_stops_before_resend():
+    clock = _Clock()
+    session = _DelayedSession(clock)
+    result = asyncio.run(_set_with_retry(
+        session, clock, is_current=lambda: clock.now < 45,
+    ))
+    assert result.detail == "superseded"
+    assert len(session.post_calls) == 1
+    assert clock.now == 45
+
+
+def test_expired_shared_budget_prevents_even_the_initial_post():
+    clock = _Clock()
+    clock.now = 60
+    session = _DelayedSession(clock)
+    result = asyncio.run(_set_with_retry(session, clock))
+    assert not result.applied
+    assert not session.post_calls
+
+
+def test_confirmation_after_deadline_is_not_accepted():
+    clock = _Clock()
+    session = _DelayedSession(clock, off_at=0)
+    session.on_read = lambda: setattr(clock, "now", 61)
+    result = asyncio.run(_set_with_retry(session, clock))
+    assert not result.applied
+
+
+def test_rejected_resend_does_not_confirm_the_original_accepted_write():
+    clock = _Clock()
+
+    class RejectedRetry(_DelayedSession):
+        def post(self, url, **kwargs):
+            response = super().post(url, **kwargs)
+            if len(self.post_calls) > 1:
+                return _Response(200, {"response": {"result": False, "reason": "denied"}})
+            return response
+
+    session = RejectedRetry(clock)
+    result = asyncio.run(_set_with_retry(session, clock))
+    assert not result.applied
+    assert result.detail == "denied"
+    assert len(session.post_calls) == 2
 
 
 class _Clock:

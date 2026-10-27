@@ -15,6 +15,10 @@ _LOGGER = logging.getLogger(__name__)
 
 _TRANSIENT_HTTP_STATUSES = {429, 500, 502, 503, 504}
 _ACCEPTED_HTTP_STATUSES = {200, 201, 202}
+GRID_CONFIRMATION_POLL_OFFSETS = (
+    0.5, 1.5, 3.5, 5.5, 7.5, 12.5, 20.0, 30.0, 40.0,
+    45.0, 47.0, 50.0, 55.0, 59.0,
+)
 
 
 class TeslaGridWriteStatus(str, Enum):
@@ -180,14 +184,18 @@ async def async_set_tesla_grid_charging_confirmed(
     confirmation_deadline: float = 10.0,
     poll_offsets: tuple[float, ...] = (0.5, 1.5, 3.5, 5.5, 7.5),
     max_post_attempts: int = 3,
+    retry_after: float | None = None,
+    operation_deadline: float | None = None,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     monotonic: Callable[[], float] = time.monotonic,
     is_current: Callable[[], bool] | None = None,
 ) -> TeslaGridWriteOutcome:
     """Write Tesla grid charging and confirm it through direct site_info reads.
 
-    Transport failures may retry the POST. Once Tesla accepts a POST, this
-    function only polls readback and never duplicates the accepted command.
+    Transport failures may retry the POST. By default an accepted POST is
+    only polled. An opt-in retry permits one resend after a fresh explicit
+    contrary read, inside the original operation deadline. Missing fields
+    never authorize that resend or confirm a disable.
     Reads are deliberately direct and uncached so a coordinator cache or prior
     ``_site_info_fetch_failed`` latch cannot produce a false confirmation.
     """
@@ -208,18 +216,28 @@ async def async_set_tesla_grid_charging_confirmed(
                 detail="superseded",
             )
         if attempt > 1:
-            await sleep(retry_delay)
+            await sleep(min(retry_delay, max(0.0, operation_deadline - monotonic()))
+                        if operation_deadline is not None else retry_delay)
             if is_current is not None and not is_current():
                 return TeslaGridWriteOutcome(
                     TeslaGridWriteStatus.TRANSPORT_ERROR,
                     detail="superseded",
                 )
+        remaining = (
+            operation_deadline - monotonic()
+            if operation_deadline is not None else 5.0
+        )
+        if remaining <= 0:
+            return TeslaGridWriteOutcome(
+                TeslaGridWriteStatus.TRANSPORT_ERROR, last_status,
+                "grid charging operation deadline expired",
+            )
         try:
             async with session.post(
                 write_url,
                 headers=headers,
                 json=payload,
-                timeout=aiohttp.ClientTimeout(total=5),
+                timeout=aiohttp.ClientTimeout(total=min(5.0, remaining)),
             ) as response:
                 last_status = response.status
                 response_payload = await _response_json(response)
@@ -255,6 +273,9 @@ async def async_set_tesla_grid_charging_confirmed(
 
     accepted_at = monotonic()
     deadline_at = accepted_at + max(0.0, confirmation_deadline)
+    if operation_deadline is not None:
+        deadline_at = min(deadline_at, operation_deadline)
+    resent = False
     read_attempts = 0
     valid_site_info_reads = 0
     field_absent_reads = 0
@@ -297,6 +318,15 @@ async def async_set_tesla_grid_charging_confirmed(
             ) as response:
                 if response.status == 200:
                     response_payload = await _response_json(response)
+                    # A newer command or permission change during the HTTP
+                    # await must not be reported as this command's success.
+                    if is_current is not None and not is_current():
+                        return TeslaGridWriteOutcome(
+                            TeslaGridWriteStatus.ACCEPTED_UNCONFIRMED,
+                            last_status, "superseded",
+                        )
+                    if monotonic() >= deadline_at:
+                        break
                     site_info = (
                         response_payload.get("response", response_payload)
                         if response_payload
@@ -339,6 +369,48 @@ async def async_set_tesla_grid_charging_confirmed(
                             TeslaGridWriteStatus.APPLIED,
                             last_status,
                         )
+                    if (
+                        retry_after is not None
+                        and not resent
+                        and monotonic() - accepted_at >= retry_after
+                        and deadline_at - monotonic() > 3.0
+                        and isinstance(site_info, dict)
+                        and tesla_site_info_has_structure(site_info)
+                        and observed is (not bool(enabled))
+                    ):
+                        # This same-payload resend stays in the original
+                        # transaction and never restarts its confirmation clock.
+                        # Do not retry transport/unknown/missing-field evidence.
+                        resent = True
+                        _LOGGER.info(
+                            "Retrying Tesla grid charging %s once after %.1fs "
+                            "of explicit contrary readback for site %s",
+                            "enable" if enabled else "disable",
+                            monotonic() - accepted_at, site_id,
+                        )
+                        async with session.post(
+                            write_url, headers=headers, json=payload,
+                            timeout=aiohttp.ClientTimeout(
+                                total=min(5.0, deadline_at - monotonic())
+                            ),
+                        ) as retry_response:
+                            last_status = retry_response.status
+                            retry_payload = await _response_json(retry_response)
+                            if is_current is not None and not is_current():
+                                return TeslaGridWriteOutcome(
+                                    TeslaGridWriteStatus.ACCEPTED_UNCONFIRMED,
+                                    retry_response.status, "superseded",
+                                )
+                            rejection = _response_rejection(retry_payload)
+                            if (
+                                retry_response.status not in _ACCEPTED_HTTP_STATUSES
+                                or rejection is not None
+                            ):
+                                return TeslaGridWriteOutcome(
+                                    TeslaGridWriteStatus.ACCEPTED_UNCONFIRMED,
+                                    retry_response.status,
+                                    rejection or "grid charging resend was not accepted",
+                                )
                     continue
 
                 if response.status in (401, 403, 404):

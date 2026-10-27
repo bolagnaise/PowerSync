@@ -60,6 +60,12 @@ Before native Max captures its restore tariff, PowerSync waits for an earlier pr
 
 Cloud Max charging has a separate implementation and delivery history. This section describes the Home Assistant control path.
 
+## Grid Charging confirmation for Tariff discharge
+
+Manual Grid Charging changes and Tariff discharge preparation allow more time for Tesla's cloud setting to update. PowerSync polls the accepted request for 45 seconds, then resends it at most once if a fresh response still explicitly reports the opposite setting. The grid-setting step has a shared 60-second budget across configured sites; a later site receives only the remaining time. A missing setting does not trigger a resend.
+
+Tariff discharge still requires confirmed Grid Charging Off for every configured site. PowerSync rechecks the current optimiser plan, telemetry, reserve, permissions and export restrictions before proceeding. Cancellation or failed confirmation retains the saved settings for restoration; another attempt cannot bypass unfinished restoration. A successful setting change is not proof of battery discharge. Update through HACS and restart Home Assistant to apply the change.
+
 ## Full battery and cached charging plans
 
 From v2.12.1479, the optimiser checks fresh paired-gateway SOC before applying or extending a charge. At the configured charge ceiling, including 100%, it restores normal operation once and suppresses repeated cached charge attempts. It can resume charging when a later fresh reading is below the ceiling. Stale, failed or invalid local readings do not establish that the battery is full. The local command retains its independent safety check.

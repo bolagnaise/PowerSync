@@ -1012,6 +1012,7 @@ from .coordinator import (
     LocalvoltsPriceCoordinator,
 )
 from .tesla_grid_control import (
+    GRID_CONFIRMATION_POLL_OFFSETS,
     TeslaGridWriteStatus,
     async_set_tesla_grid_charging_confirmed,
     tesla_grid_charging_enabled_from_site_info,
@@ -31352,6 +31353,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "source": force_discharge_state.get("source", "user"),
                 "scope": force_discharge_state.get("scope", "external"),
                 "command_status": force_discharge_state.get("command_status"),
+                "saved_states": {
+                    site_id: {**saved, "saved_tariff": _select_restorable_tesla_tariff(
+                        saved.get("saved_tariff")
+                    )}
+                    for site_id, saved in (force_discharge_state.get("saved_states") or {}).items()
+                },
                 "started_at": (
                     force_discharge_state["started_at"].isoformat()
                     if isinstance(force_discharge_state.get("started_at"), datetime)
@@ -31723,6 +31730,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if persisted_force_state.get("source") == "optimizer":
                 hass.data[DOMAIN][entry.entry_id]["optimizer_force_restart_restore_pending"] = False
             return
+
+        if mode == "discharge" and isinstance(persisted_force_state.get("saved_states"), dict):
+            force_discharge_state["saved_states"] = persisted_force_state["saved_states"]
 
         if mode in ("charge", "discharge"):
             solax_coord = (
@@ -32806,6 +32816,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         prefer_local = prefer_local and entry.options.get(
             "tesla_control_method", entry.data.get("tesla_control_method", "tariff")
         ) != "tariff"
+        # Manual toggles and discharge preparation share one bounded wait
+        # across all gateways. Restore/charge paths retain their short policy.
+        retry_deadline = (
+            time.monotonic() + 60.0
+            if reason in {"force discharge", "set grid charging"} else None
+        )
+        command_generation = _command_generation[0] if retry_deadline is not None else None
+        kick_generation = _tesla_charge_kick_generation[0] if retry_deadline is not None else None
+
+        def _grid_request_current() -> bool:
+            return (
+                _command_generation[0] == command_generation
+                and _tesla_charge_kick_generation[0] == kick_generation
+                and (is_current is None or is_current())
+            )
 
         async def _cloud_apply(
             site_id: str,
@@ -32820,13 +32845,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 provider,
                 entry.data.get(CONF_FLEET_API_BASE_URL),
             )
+            retry_options = (
+                {"confirmation_deadline": 60.0,
+                 "poll_offsets": GRID_CONFIRMATION_POLL_OFFSETS,
+                 "retry_after": 45.0, "operation_deadline": retry_deadline}
+                if retry_deadline is not None else {}
+            )
             outcome = await async_set_tesla_grid_charging_confirmed(
                 session,
                 api_base,
                 site_id,
                 headers,
                 enabled,
-                is_current=is_current,
+                is_current=_grid_request_current if retry_deadline is not None else is_current,
+                **retry_options,
             )
             if outcome.applied:
                 return True
@@ -35704,17 +35736,48 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             # Force discharge is tariff-driven on Tesla. Grid charging must be
             # confirmed disabled before the high-export tariff is uploaded, or
             # the gateway could import and charge during the force window.
+            def _discharge_request_current() -> bool:
+                if (_command_generation[0] != _restore_gen
+                        or _monitoring_mode_should_block_control(call)
+                        or not _local_powerwall_generation_current()
+                        or _local_powerwall_runtime.get("powerwall_local_dispatch_stopping")
+                        or _local_powerwall_runtime.get("tesla_control_method_changing")
+                        or _local_powerwall_runtime.get("pending_tesla_restore")
+                        or (network_guard is not None
+                            and network_guard.manager.snapshot.mode != "off")):
+                    return False
+                if hass.data.get("power_sync_license_manager") is not None:
+                    from .licensing.guard import service_allowed
+                    if not service_allowed(hass, call.data, "handle_force_discharge"):
+                        return False
+                if source == "optimizer":
+                    coordinator = hass.data.get(DOMAIN, {}).get(
+                        entry.entry_id, {}
+                    ).get("optimization_coordinator")
+                    check = getattr(coordinator, "tesla_tariff_export_still_allowed", None)
+                    return callable(check) and check(duration)
+                return True
+
+            # The longer confirmation may outlive a task or HA restart. Keep
+            # the original baseline durable before changing grid permission.
+            force_discharge_state["command_status"] = "awaiting_grid_confirmation"
+            # A restart during preparation must restore immediately, never
+            # replay this not-yet-confirmed request as an active discharge.
+            force_discharge_state["expires_at"] = dt_util.utcnow()
+            await persist_force_mode_state()
             tesla_force_discharge_mutated = True
             grid_result = await _tesla_force_apply_grid_charging(
                 site_configs,
                 False,
                 reason="force discharge",
-                is_current=lambda: _command_generation[0] == _restore_gen,
+                is_current=_discharge_request_current,
             )
             if not _tesla_force_result_all_confirmed(grid_result, site_configs):
                 raise HomeAssistantError(
                     "Could not verify Tesla grid charging was disabled before force discharge"
                 )
+            if not _discharge_request_current():
+                raise HomeAssistantError("Tesla discharge request changed while confirming grid charging")
 
             # Step 3: Switch to autonomous mode locally first, with cloud
             # fallback per gateway when no paired local transport confirms it.
@@ -35728,6 +35791,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 mode_result,
                 site_configs,
             )
+            if not _discharge_request_current():
+                raise HomeAssistantError("Tesla discharge request changed before tariff upload")
 
             if not mode_success:
                 _LOGGER.error(
@@ -35955,6 +36020,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 hass.async_create_task(_notify_api_error(hass, "Force Discharge Failed", "Could not upload discharge tariff to Tesla"))
                 return {"success": False, "error": "tariff upload did not verify"}
 
+        except asyncio.CancelledError:
+            if tesla_force_discharge_mutated and _command_generation[0] == _restore_gen:
+                # Cancellation cannot release ownership of a possibly applied
+                # grid write. Shield cleanup; its existing retry journal stays
+                # armed if restoration cannot yet be confirmed.
+                await asyncio.shield(_cleanup_failed_tesla_force_discharge(
+                    "force discharge cancelled during preparation"
+                ))
+            raise
         except HomeAssistantError as e:
             _LOGGER.error("Force discharge rejected: %s", e)
             if _command_generation[0] != _restore_gen:

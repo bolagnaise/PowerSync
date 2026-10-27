@@ -2597,6 +2597,41 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         return min(requested, safe_minutes), hardware_projected_soc
 
+    def tesla_tariff_export_still_allowed(self, duration_minutes: int) -> bool:
+        """Recheck a waiting Tesla discharge against the live plan and reserve."""
+        if (not self._enabled or self._monitoring_mode_active()
+                or not self._energy_telemetry_ready()):
+            return False
+        action = self._get_current_action()
+        if getattr(action, "action", None) not in {"discharge", "export"}:
+            return False
+        remaining_minutes = self._force_duration_for_action_window(
+            action, {"discharge", "export"},
+            allow_boundary_overrun=False, minimum_minutes=1,
+        )
+        if remaining_minutes < duration_minutes:
+            return False
+        if not self._battery_export_price_status(action)["price_allows_battery_export"]:
+            return False
+        data = self._get_energy_data() or {}
+        try:
+            observed_at = data["last_update"]
+            if not isinstance(observed_at, datetime):
+                return False
+            if not 0 <= (dt_util.utcnow() - observed_at).total_seconds() <= 60:
+                return False
+            soc = float(data["battery_level"]) / 100.0
+        except (KeyError, TypeError, ValueError):
+            return False
+        if not math.isfinite(soc) or not 0 <= soc <= 1:
+            return False
+        floor = self._force_discharge_reserve_floor(action)
+        reaches_floor, _ = self._force_discharge_reaches_reserve(action, soc, floor)
+        safe_minutes, _ = self._targetless_export_safe_duration(
+            action, soc, floor, duration_minutes,
+        )
+        return not reaches_floor and safe_minutes >= duration_minutes
+
     def _targetless_charge_safe_duration(
         self,
         action: Any,
