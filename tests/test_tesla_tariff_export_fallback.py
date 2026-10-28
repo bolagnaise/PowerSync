@@ -11,7 +11,9 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from test_tesla_local_settings import ROOT, load_function, restore_context, settings_context
+from test_tesla_local_settings import (
+    ROOT, export_confirmation_context, load_function, restore_context, settings_context,
+)
 
 
 def preparation(states, *, local_config=None, export_confirmed=True, grid_confirmed=True):
@@ -186,3 +188,30 @@ async def test_tariff_restore_uses_persisted_fallback_and_retains_failed_restore
     else:
         assert saved["force_mode_state"]["saved_states"]["site"]["saved_export_rule_source"] == "fallback_missing"
         assert runtime["pending_tesla_restore"]
+
+
+@pytest.mark.asyncio
+async def test_tariff_export_receipt_retains_failed_restore_then_completes_on_readback(monkeypatch):
+    ns, runtime, saved, call = restore_context(direction="discharge")
+    state = ns["force_discharge_state"]
+    state.update(saved_export_rule="battery_ok", saved_states={"site": {
+        "saved_export_rule": "battery_ok", "saved_export_rule_source": "fallback_missing"}})
+    readback = {"components": {"customer_preferred_export_rule": None}}
+    _, _, _, session = export_confirmation_context(
+        monkeypatch, {"response": {"code": 204, "message": "Updated"}},
+        readback, context=(ns, runtime),
+    )
+    result = await ns["handle_restore_normal"](call)
+    assert result["success"] is False
+    assert state["active"] and runtime["pending_tesla_restore"]
+    assert saved["force_mode_state"]["saved_states"]["site"]["saved_export_rule_source"] == "fallback_missing"
+
+    readback["components"]["customer_preferred_export_rule"] = "battery_ok"
+    result = await ns["handle_restore_normal"](call)
+    assert result["success"] is True
+    assert not state["active"]
+    assert saved["force_mode_state"] is None
+    assert saved["pending_tesla_restore"] is None
+    assert runtime["pending_tesla_restore"] is None
+    assert session.post.call_count == 2
+    assert session.get.call_count == 4

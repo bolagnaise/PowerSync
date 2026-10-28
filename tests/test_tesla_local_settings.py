@@ -215,6 +215,125 @@ def settings_context(transport=None, *, paired=True):
     return ns, runtime
 
 
+def export_confirmation_context(monkeypatch, acknowledgement, readback, *, status=200, context=None):
+    """Replay the real export dispatcher and cloud confirmation with no device."""
+    ns, runtime = context or settings_context()
+    session = SimpleNamespace(
+        post=Mock(return_value=HttpReply(acknowledgement, status)),
+        get=Mock(return_value=HttpReply({"response": readback})),
+    )
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+    ns.update(
+        _command_generation=[0], _tesla_charge_kick_generation=[0],
+        _record_tesla_settings_submission=AsyncMock(),
+        async_get_clientsession=lambda h: session,
+        get_tesla_api_base_url=lambda *args: "https://tesla.test",
+        CONF_FLEET_API_BASE_URL="base", aiohttp=aiohttp,
+    )
+    load_function(ROOT / "__init__.py", "_tesla_grid_export_write_result", ns)
+    fn = load_function(ROOT / "__init__.py", "_tesla_force_apply_export_rule", ns,
+                       strip_imports=True)
+    return fn, ns, runtime, session
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("acknowledgement", [
+    {"response": {"result": True}},
+    {"response": {"code": 204, "message": "Updated"}},
+    {"response": {"code": 201, "message": "Updated"}},
+    {"response": '{"Message":"Updated","Code":201}\n'},
+])
+@pytest.mark.parametrize("restoring", [False, True])
+async def test_energy_export_acknowledgement_requires_exact_readback(
+    monkeypatch, acknowledgement, restoring,
+):
+    fn, _, runtime, session = export_confirmation_context(
+        monkeypatch, acknowledgement,
+        {"components": {"customer_preferred_export_rule": "battery_ok"}},
+    )
+    assert await fn([("site", "token", "fleet")], "battery_ok",
+                    reason="tariff export", restoring=restoring)
+    assert session.post.call_count == 1
+    assert session.get.call_count == 1
+    assert runtime["powerwall_setting_observations"]["grid_export_rule"]["source"] == "cloud"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("readback", [
+    {}, {"components": {"customer_preferred_export_rule": None}},
+    {"components": {"customer_preferred_export_rule": "never"}},
+    {"components": {"customer_preferred_export_rule": "battery_ok"},
+     "customer_preferred_export_rule": "pv_only"},
+])
+async def test_energy_export_update_without_matching_permission_stays_unconfirmed(
+    monkeypatch, readback,
+):
+    fn, _, runtime, session = export_confirmation_context(
+        monkeypatch, {"response": {"code": 204, "message": "Updated"}}, readback,
+    )
+    assert not await fn([("site", "token", "fleet")], "battery_ok", reason="tariff export")
+    assert session.get.call_count == 3
+    assert runtime["powerwall_setting_observations"]["grid_export_rule"]["source"] == "unknown"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("acknowledgement", [
+    {"response": {"result": False, "code": 204, "message": "Updated"}},
+    {"response": {"code": 403, "message": "Updated"}},
+    {"response": {"code": 204, "message": "Rejected"}},
+    {"response": {"code": "204", "message": "Updated"}},
+    {"response": {}}, {"response": ""}, {"response": "not-json"},
+])
+async def test_export_rejection_or_unknown_ack_cannot_use_matching_snapshot(
+    monkeypatch, acknowledgement,
+):
+    fn, _, _, session = export_confirmation_context(
+        monkeypatch, acknowledgement,
+        {"components": {"customer_preferred_export_rule": "battery_ok"}},
+    )
+    assert not await fn([("site", "token", "fleet")], "battery_ok", reason="tariff export")
+    session.get.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_energy_export_receipt_cannot_confirm_a_superseded_request(monkeypatch):
+    fn, ns, runtime, session = export_confirmation_context(
+        monkeypatch, {"response": {"code": 204, "message": "Updated"}}, {},
+    )
+    def superseding_read(*args, **kwargs):
+        ns["_command_generation"][0] += 1
+        return HttpReply({"response": {"customer_preferred_export_rule": "battery_ok"}})
+    session.get.side_effect = superseding_read
+    with pytest.raises(asyncio.CancelledError):
+        await fn([("site", "token", "fleet")], "battery_ok", reason="tariff export")
+    assert runtime["powerwall_setting_observations"]["grid_export_rule"]["source"] == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_energy_export_receipt_on_failed_http_status_cannot_confirm(monkeypatch):
+    fn, _, _, session = export_confirmation_context(
+        monkeypatch, {"response": {"code": 204, "message": "Updated"}},
+        {"customer_preferred_export_rule": "battery_ok"}, status=403,
+    )
+    assert not await fn([("site", "token", "fleet")], "battery_ok", reason="tariff export")
+    session.get.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_energy_export_receipt_requires_each_gateway_to_confirm(monkeypatch):
+    fn, _, _, session = export_confirmation_context(
+        monkeypatch, {"response": {"code": 204, "message": "Updated"}}, {},
+    )
+    session.get.side_effect = [
+        HttpReply({"response": {"customer_preferred_export_rule": "battery_ok"}}),
+        *[HttpReply({"response": {"customer_preferred_export_rule": "never"}}) for _ in range(3)],
+    ]
+    assert not await fn([("site", "token", "fleet"), ("other", "token", "fleet")],
+                        "battery_ok", reason="tariff export")
+    assert session.post.call_count == 2
+    assert session.get.call_count == 4
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("paired", [True, False])
 @pytest.mark.parametrize("site", ["site", "other-site"])

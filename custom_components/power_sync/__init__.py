@@ -53,9 +53,9 @@ async def _tesla_grid_export_write_result(
 ) -> tuple[bool, str | None]:
     """Return whether Tesla explicitly accepted a grid-export write.
 
-    Tesla can return HTTP 200 while reporting an application-level rejection
-    in ``response.result``.  Treat only an explicit ``True`` as delivery
-    success so callers do not promote a requested rule into live status.
+    Accept explicit vehicle-style results and energy-style update receipts.
+    This acknowledges submission only; callers must still confirm the exact
+    export rule from independent readback before publishing success.
     """
     try:
         payload = await response.json()
@@ -65,10 +65,23 @@ async def _tesla_grid_export_write_result(
     if not isinstance(payload, dict):
         return False, "Tesla returned an invalid grid export response"
     result = payload.get("response")
-    if not isinstance(result, dict) or result.get("result") is not True:
-        reason = result.get("reason") if isinstance(result, dict) else None
-        return False, str(reason or "Tesla rejected the grid export rule")
-    return True, None
+    if isinstance(result, str):
+        import json
+        try:
+            result = json.loads(result)
+        except ValueError:
+            return False, "Tesla returned an unreadable grid export response"
+    if isinstance(result, dict):
+        if "result" in result:
+            if result["result"] is True:
+                return True, None
+        else:
+            code = result.get("code", result.get("Code"))
+            message = result.get("message", result.get("Message"))
+            if type(code) is int and code in (201, 204) and message == "Updated":
+                return True, None
+        return False, str(result.get("reason") or "Tesla rejected the grid export rule")
+    return False, "Tesla returned an invalid grid export response"
 
 
 def _should_sync_sigenergy_static_tariff_on_startup(
