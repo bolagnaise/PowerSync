@@ -171,9 +171,10 @@ async def test_tariff_change_keeps_successful_local_restore_independent_of_cloud
 
 
 @pytest.mark.asyncio
-async def test_tariff_change_recovers_existing_v1519_journal_after_restart():
+async def test_tariff_change_recovers_existing_v1519_journal_after_restart(monkeypatch):
     from test_powerwall_battery_dispatch import load_routing, install_grid_permission
-    from unittest.mock import AsyncMock
+    from test_tesla_grid_control import tesla_grid_control, _Session, _Response, _Clock, _recovery_info
+    from functools import partial
     ns, local, client, saved = load_routing(optimization_allow_grid_charge=True)
     snap, _ = install_grid_permission(client, disabled=False)
     entry = ns['entry']
@@ -181,20 +182,28 @@ async def test_tariff_change_recovers_existing_v1519_journal_after_restart():
     ns['hass'].config_entries = SimpleNamespace(async_get_entry=lambda _: entry,
         async_update_entry=lambda current, **kw: setattr(current, 'options', kw['options']))
     ns['_get_tesla_site_configs'] = lambda *_: [('site', 'token', 'fleet')]
-    ns['async_get_clientsession'] = lambda _: object()
-    ns['async_restore_tesla_grid_charging_confirmed'] = AsyncMock(return_value=True)
+    clock = _Clock()
+    original = tesla_grid_control.async_set_tesla_grid_charging_confirmed
+    monkeypatch.setattr(tesla_grid_control, 'async_set_tesla_grid_charging_confirmed',
+                        partial(original, sleep=clock.sleep, monotonic=clock.monotonic))
+    session = _Session(posts=[_Response(200, {'response': {'result': True}})],
+                       gets=[_recovery_info(None), _recovery_info(True)])
+    ns['async_get_clientsession'] = lambda _: session
+    ns['async_restore_tesla_grid_charging_confirmed'] = tesla_grid_control.async_restore_tesla_grid_charging_confirmed
     ns['persisted_force_state'] = {'mode': 'charge', 'powerwall_local_dispatch': True,
         'local_grid_charge_restore': {'owner': 'v1519-owner', 'din': 'gateway',
                                      'original': True, 'phase': 'restoring', 'acceptance_until': 0}}
     client._transport.read_config.side_effect = lambda _: None
     with pytest.raises(RuntimeError, match='restoration unconfirmed'):
         await ns['restore_force_mode_from_persistence']()
-    ns['async_restore_tesla_grid_charging_confirmed'].assert_not_awaited()
+    assert not session.get_calls and not session.post_calls
     assert local.pending and saved['force_mode_state']['local_grid_charge_restore']['owner'] == 'v1519-owner'
     await ns['_set_tesla_control_method']('tariff')
     assert entry.options['tesla_control_method'] == 'tariff' and not local.pending
     assert saved['force_mode_state'] is None
     client.dispatch_battery_power.assert_not_awaited()
+    assert len(session.post_calls) == 1
+    assert session.post_calls[0]['json'] == {'disallow_charge_from_grid_with_solar_installed': True}
 
 
 @pytest.mark.asyncio

@@ -78,6 +78,12 @@ the previous control preference unchanged. A settings-restoration failure is
 reported separately from an unconfirmed local resume. Update through HACS and
 restart Home Assistant before retrying the Tariff selection.
 
+From v2.12.1521, an omitted current cloud permission does not prevent a single
+attempt to restore the saved **Grid Charging Off** setting for that verified
+gateway. Omission is not confirmation: the setting must be explicitly reported
+as restored before cleanup is cleared or the Tariff selection completes. An
+explicitly malformed value still blocks recovery.
+
 Manual Grid Charging changes and Tariff discharge preparation allow more time for Tesla's cloud setting to update. PowerSync polls the accepted request for 45 seconds, then resends it at most once if a fresh response still explicitly reports the opposite setting. The grid-setting step has a shared 60-second budget across configured sites; a later site receives only the remaining time. A missing setting does not trigger a resend.
 
 Tariff discharge still requires confirmed Grid Charging Off for every configured site. PowerSync rechecks the current optimiser plan, telemetry, reserve, permissions and export restrictions before proceeding. Cancellation or failed confirmation retains the saved settings for restoration; another attempt cannot bypass unfinished restoration. A successful setting change is not proof of battery discharge. Update through HACS and restart Home Assistant to apply the change.

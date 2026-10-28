@@ -33521,6 +33521,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         sites = _get_tesla_site_configs(hass, current_entry)
         if (record.get('original') is not True or not site_id or not current()
                 or len(sites) != 1 or sites[0][0] != site_id):
+            _LOGGER.warning('Powerwall Tariff recovery blocked before cloud request: recovery owner or configured site/gateway could not be verified')
             return False
         _, token, provider = sites[0]
         confirmed = await async_restore_tesla_grid_charging_confirmed(
@@ -33792,7 +33793,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         async with _local_powerwall_route_lock:
             _local_powerwall_runtime["tesla_control_method_changing"] = True
             try:
-                _cancel_all_force_timers("Tesla control preference changed")
+                _cancel_all_force_timers(f"Tesla control preference changed to {method}")
                 _command_generation[0] += 1
                 await _stop_local_powerwall_dispatch(restore_grid_charging=(
                     _restore_local_grid_charging_via_cloud if method == 'tariff' else None))

@@ -851,7 +851,7 @@ def _recovery_info(disallow, *, din='gateway'):
     return _Response(200, {'response': {'components': components}})
 
 
-@pytest.mark.parametrize('initial', [False, True])
+@pytest.mark.parametrize('initial', [False, True, None])
 def test_local_permission_recovery_verifies_gateway_and_original_setting(monkeypatch, initial):
     clock = _Clock()
     original = tesla_grid_control.async_set_tesla_grid_charging_confirmed
@@ -861,16 +861,18 @@ def test_local_permission_recovery_verifies_gateway_and_original_setting(monkeyp
                        gets=[_recovery_info(initial), _recovery_info(True)])
     assert asyncio.run(tesla_grid_control.async_restore_tesla_grid_charging_confirmed(
         session, 'https://example.invalid', 'site', {}, gateway_din='gateway', is_current=lambda: True))
-    assert len(session.post_calls) == (0 if initial else 1)
-    if not initial:
+    assert len(session.post_calls) == (0 if initial is True else 1)
+    if initial is not True:
         assert session.post_calls[0]['json'] == {'disallow_charge_from_grid_with_solar_installed': True}
 
 
-@pytest.mark.parametrize('case', ['wrong_gateway', 'missing_field', 'non_boolean', 'superseded', 'http_error'])
+@pytest.mark.parametrize('case', ['wrong_gateway', 'explicit_null', 'non_boolean', 'superseded', 'http_error'])
 def test_local_permission_recovery_never_writes_without_current_explicit_identity(case):
     current = [True]
-    response = _recovery_info(None if case == 'missing_field' else 'false' if case == 'non_boolean' else False,
+    response = _recovery_info('false' if case == 'non_boolean' else False,
                               din='another-gateway' if case == 'wrong_gateway' else 'gateway')
+    if case == 'explicit_null':
+        response._payload['response']['components']['disallow_charge_from_grid_with_solar_installed'] = None
     if case == 'superseded':
         response._on_enter = lambda: current.__setitem__(0, False)
     if case == 'http_error': response.status = 503
@@ -881,13 +883,14 @@ def test_local_permission_recovery_never_writes_without_current_explicit_identit
 
 
 @pytest.mark.parametrize('readback', [None, False, 1, 'true'])
-def test_local_permission_recovery_rejects_accepted_but_unconfirmed_restore(monkeypatch, readback):
+@pytest.mark.parametrize('initial', [False, None])
+def test_local_permission_recovery_rejects_accepted_but_unconfirmed_restore(monkeypatch, readback, initial):
     clock = _Clock()
     original = tesla_grid_control.async_set_tesla_grid_charging_confirmed
     monkeypatch.setattr(tesla_grid_control, 'async_set_tesla_grid_charging_confirmed',
                         functools.partial(original, sleep=clock.sleep, monotonic=clock.monotonic))
     session = _Session(posts=[_Response(200, {'response': {'result': True}})],
-                       gets=[_recovery_info(False)] + [_recovery_info(readback) for _ in range(5)])
+                       gets=[_recovery_info(initial)] + [_recovery_info(readback) for _ in range(5)])
     assert not asyncio.run(tesla_grid_control.async_restore_tesla_grid_charging_confirmed(
         session, 'https://example.invalid', 'site', {}, gateway_din='gateway', is_current=lambda: True))
     assert len(session.post_calls) == 1

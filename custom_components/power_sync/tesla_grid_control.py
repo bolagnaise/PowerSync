@@ -185,9 +185,10 @@ async def async_restore_tesla_grid_charging_confirmed(
 ) -> bool:
     """Restore a local owner's original disabled permission for a Tariff handoff.
 
-    Direct cloud identity and an explicit boolean are required even for older
-    recovery journals that recorded only a gateway DIN. Never infer permission
-    from a missing field or accept an HTTP acknowledgement as restoration.
+    Direct cloud identity is required even for older recovery journals that
+    recorded only a gateway DIN. A missing permission can authorize only the
+    saved restrictive restore, never confirmation or a new enable. Require
+    explicit boolean readback before releasing the recovery owner.
     """
     if not is_current() or not gateway_din:
         return False
@@ -197,9 +198,11 @@ async def async_restore_tesla_grid_charging_confirmed(
             headers=headers, timeout=aiohttp.ClientTimeout(total=5),
         ) as response:
             if response.status != 200:
+                _LOGGER.warning('Powerwall Tariff recovery cloud preflight failed: HTTP %s', response.status)
                 return False
             payload = await _response_json(response)
     except (asyncio.TimeoutError, aiohttp.ClientError):
+        _LOGGER.warning('Powerwall Tariff recovery cloud preflight transport failed')
         return False
     if not is_current() or not payload:
         return False
@@ -213,17 +216,27 @@ async def async_restore_tesla_grid_charging_confirmed(
         isinstance(gateway, dict) and gateway.get('din') == gateway_din
         for gateway in gateways
     ):
+        _LOGGER.warning('Powerwall Tariff recovery cloud gateway identity did not match')
         return False
     field = 'disallow_charge_from_grid_with_solar_installed'
     disallow = components.get(field, info.get(field))
-    if type(disallow) is not bool:
+    field_present = field in components or field in info
+    if field_present and type(disallow) is not bool:
+        _LOGGER.warning('Powerwall Tariff recovery cloud permission had an invalid type')
         return False
     if disallow is True:
         return is_current()  # Original setting already restored; no write.
+    # The retained owner authorizes restoring its saved "grid charging off"
+    # baseline even when Tesla omits the current value. Absence is not proof
+    # of either state: the single restore still needs explicit confirmation.
+    if not field_present:
+        _LOGGER.info('Powerwall Tariff recovery cloud permission omitted; attempting saved Grid Charging Off restore')
     outcome = await async_set_tesla_grid_charging_confirmed(
         session, api_base_url, site_id, headers, False,
         max_post_attempts=1, is_current=is_current, require_boolean_readback=True,
     )
+    if not outcome.applied:
+        _LOGGER.warning('Powerwall Tariff recovery cloud restore did not confirm: %s', outcome.status.value)
     return outcome.applied and is_current()
 
 
