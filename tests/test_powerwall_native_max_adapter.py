@@ -1587,7 +1587,7 @@ async def test_real_hash_checked_writer_refreshes_dcq_after_slow_config_read(set
             assert s.adapter._snapshot.raw['config']['site_info']['backup_reserve_percent'] == 5
             s.state.config = json.loads(update.file.blob)
             posts.append(s.state.config)
-            reply.filestore.SetInParent()
+            reply.filestore.update_file_response.SetInParent()
         return transport_mod.TEDAPIResponse(True, reply.SerializeToString())
     transport.post_v1r = post
     s.adapter.client = client

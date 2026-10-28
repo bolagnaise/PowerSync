@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -86,6 +85,8 @@ from .solar_surplus_control import (
 # GloBird and AEMO VPP use spike detection only — no TOU sync
 PROVIDERS_WITH_TOU_SYNC = {"amber", "octopus", "flow_power"}
 
+from .powerwall_host import confirmed_local_powerwall_setting
+
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -104,27 +105,6 @@ def _grid_status_is_off_grid(value: Any) -> bool | None:
     }:
         return True
     return None
-
-
-def _fresh_powerwall_local_snapshot(
-    hass: HomeAssistant, entry: ConfigEntry
-) -> Any | None:
-    """Return a fresh paired local Powerwall snapshot, if available."""
-    if not entry.data.get(CONF_POWERWALL_LOCAL_PAIRED):
-        return None
-    coordinator = (
-        hass.data.get(DOMAIN, {})
-        .get(entry.entry_id, {})
-        .get("powerwall_local", {})
-        .get("coordinator")
-    )
-    data = getattr(coordinator, "data", None)
-    last_success_monotonic = getattr(coordinator, "last_success_monotonic", None)
-    if data is None or last_success_monotonic is None:
-        return None
-    if time.monotonic() - last_success_monotonic > TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS:
-        return None
-    return data
 
 
 def _coerce_duration(value: Any, default: int = DEFAULT_DISCHARGE_DURATION) -> int:
@@ -1892,10 +1872,10 @@ class GridChargingSwitch(_TeslaSiteSwitchBase):
 
     @property
     def is_on(self) -> bool | None:
-        local_snapshot = _fresh_powerwall_local_snapshot(self.hass, self._entry)
-        local_enabled = getattr(local_snapshot, "grid_charging_enabled", None)
-        if local_enabled is not None:
-            return bool(local_enabled)
+        observed = confirmed_local_powerwall_setting(
+            self.hass, self._entry, "grid_charging_enabled", max_age=TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS)
+        if type(observed) is bool:
+            return observed
         coord = self._tesla_coord()
         if getattr(coord, "_site_info_fetch_failed", False):
             # A failed refresh cannot confirm an old permission or user intent.
@@ -1919,9 +1899,8 @@ class GridChargingSwitch(_TeslaSiteSwitchBase):
             DOMAIN,
             "set_grid_charging",
             {"enabled": True, "source": "user"},
-            blocking=False,
+            blocking=True,
         )
-        self._attr_is_on = True
         self.async_write_ha_state()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
@@ -1929,9 +1908,8 @@ class GridChargingSwitch(_TeslaSiteSwitchBase):
             DOMAIN,
             "set_grid_charging",
             {"enabled": False, "source": "user"},
-            blocking=False,
+            blocking=True,
         )
-        self._attr_is_on = False
         self.async_write_ha_state()
 
 

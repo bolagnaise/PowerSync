@@ -1006,10 +1006,10 @@ def test_grid_charging_service_is_local_first_with_cloud_fallback_and_refresh():
     source = _function_source("handle_set_grid_charging")
     helper = _function_source("_tesla_force_apply_grid_charging")
     assert "await _tesla_force_apply_grid_charging(" in source
-    assert "dispatch_powerwall_write(" in helper
+    assert "dispatch_powerwall_setting(" in helper
     assert '"site_info.disallow_charge_from_grid_with_solar_installed": not enabled' in helper
     assert 'label=f"{reason} grid charging"' in helper
-    assert "config = await transport.read_config(din)" in helper
+    assert "config = await transport.read_config(din)" in (LOCAL_ROOT / "dispatch.py").read_text()
     assert 'refresh_powerwall_local_after_settings_write(' in source
 
 

@@ -8,7 +8,7 @@ From v2.12.1494, an empty gateway telemetry reply is retried once before a contr
 
 The Tesla-only **Preferred battery control** selector is saved per Home Assistant entry and shared with the mobile app. It is available independently of an optimiser subscription; actual controls retain their existing admission checks.
 
-- **Tariff** (default): use the Tesla cloud API for Max and optimiser charge/export. A paired gateway being unreachable does not block tariff control. Mode, grid-charging permission, reserve and tariff writes retain their cloud acknowledgement/readback and restore checks; no local startup kick is required.
+- **Tariff** (default): use the Tesla cloud API for Max and optimiser charge/export. A paired gateway being unreachable does not block tariff control. For a paired gateway that is already available, mode, grid-charging permission and export settings can use a brief signed local write with independent readback, then cloud fallback. This does not wait for local telemetry or acquire local battery control. Reserve and tariff uploads continue through the cloud; no local startup kick is required. Manual settings first finish any active owned force restoration so an older cleanup cannot revert the new setting.
 - **Local V1R**: use timed gateway commands capped at 10 kW or a lower learned charge/discharge ceiling. This requires pairing and fails explicitly if local control is unavailable; it does not silently upload a tariff.
 - **Automatic**: choose charge and discharge independently using fresh home load, solar, connection limits and available battery power. A multi-Powerwall site can therefore use Local V1R for a modest export and Tariff for charging. Missing or unsafe telemetry selects Tariff, whose own safety checks must still pass. A running native tariff action retains its route until restored.
 
@@ -120,6 +120,8 @@ Tesla defines `self_consumption` as Self-Powered and `autonomous` as Time-Based 
 
 References: [Tesla energy operation endpoint](https://developer.tesla.com/docs/fleet-api/endpoints/energy), [aiopowerwall local protocol documentation](https://github.com/Teslemetry/aiopowerwall).
 
+
+If the reply to a signed settings update is lost after submission, PowerSync retains that unresolved update across restart and blocks subsequent settings transactions. Signature expiry and a matching cloud value do not prove that a queued gateway update has completed. A confirmed update reply retires the submission; independent readback still determines whether the requested setting is confirmed.
 
 ## Available grid-export targets
 

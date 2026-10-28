@@ -57,7 +57,9 @@ def _optional_bool(value: Any) -> bool | None:
         if lowered in ("false", "0", "no", "off"):
             return False
         return None
-    return bool(value)
+    if type(value) in (int, float) and value in (0, 1):
+        return value == 1
+    return None
 
 
 def tesla_grid_charging_enabled_from_site_info(

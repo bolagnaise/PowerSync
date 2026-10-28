@@ -44,6 +44,7 @@ from .exceptions import (
     PowerwallLocalError,
     PowerwallSignatureError,
     PowerwallUnreachableError,
+    PowerwallWriteRejected,
 )
 from ..powerwall_host import normalize_powerwall_gateway_host
 
@@ -284,10 +285,10 @@ class TEDAPIv1rTransport:
                 # can leave this process. HTTP timeout alone does not expire it.
                 if before_submit is not None:
                     await before_submit(expires_at)
-                if before_send is not None:
-                    before_send()
                 if time.time() >= expires_at:
                     raise PowerwallLocalError("Signed command expired before submission")
+                if before_send is not None:
+                    before_send()
                 async with sess.post(url, data=payload, headers=headers) as resp:
                     http_status = resp.status
                     if http_status != 200:
@@ -423,9 +424,10 @@ class TEDAPIv1rTransport:
         try:
             env = transport_pb2.MessageEnvelope()
             env.ParseFromString(resp.inner_bytes)
-            if env.HasField("filestore"):
+            if env.HasField("filestore") and env.filestore.WhichOneof("message") == "read_file_response":
                 blob = env.filestore.read_file_response.file.blob
-                return json.loads(blob.decode("utf-8"))
+                config = json.loads(blob.decode("utf-8"))
+                return config if isinstance(config, dict) else None
         except Exception as err:
             _LOGGER.debug("read_config parse error: %s", err)
         return None
@@ -453,7 +455,7 @@ class TEDAPIv1rTransport:
         try:
             env = transport_pb2.MessageEnvelope()
             env.ParseFromString(read_resp.inner_bytes)
-            if not env.HasField("filestore"):
+            if not env.HasField("filestore") or env.filestore.WhichOneof("message") != "read_file_response":
                 return False
             blob = env.filestore.read_file_response.file.blob
             config_hash = env.filestore.read_file_response.hash
@@ -462,6 +464,8 @@ class TEDAPIv1rTransport:
             _LOGGER.error("write_config read-phase parse error: %s", err)
             return False
 
+        if not isinstance(config, dict) or not isinstance(config.get("site_info", {}), dict):
+            return False
         if validate_config is not None and validate_config(config) is not True:
             return False
 
@@ -487,12 +491,27 @@ class TEDAPIv1rTransport:
         write_resp = await self.post_v1r(w_env.SerializeToString(), din,
             **({"before_send": before_write} if before_write is not None else {}),
             **({"before_submit": before_submit} if before_submit is not None else {}))
+        # Preserve explicit routing/validation rejection. Timeout, internal
+        # faults and malformed/empty replies still have an unknown outcome.
+        if write_resp.fault_name in {
+            "MESSAGEFAULT_ERROR_BUSY", "MESSAGEFAULT_ERROR_INVALID_SIGNATURE",
+            "MESSAGEFAULT_ERROR_INVALID_TOKEN_OR_COUNTER", "MESSAGEFAULT_ERROR_INSUFFICIENT_PRIVILEGES",
+            "MESSAGEFAULT_ERROR_INVALID_DOMAINS", "MESSAGEFAULT_ERROR_INVALID_COMMAND",
+            "MESSAGEFAULT_ERROR_DECODING", "MESSAGEFAULT_ERROR_WRONG_PERSONALIZATION",
+            "MESSAGEFAULT_ERROR_BAD_PARAMETER", "MESSAGEFAULT_ERROR_KEYCHAIN_IS_FULL",
+            "MESSAGEFAULT_ERROR_INCORRECT_EPOCH", "MESSAGEFAULT_ERROR_IV_INCORRECT_LENGTH",
+            "MESSAGEFAULT_ERROR_TIME_EXPIRED", "MESSAGEFAULT_ERROR_NOT_PROVISIONED_WITH_IDENTITY",
+            "MESSAGEFAULT_ERROR_COULD_NOT_HASH_METADATA", "MESSAGEFAULT_ERROR_TIME_TO_LIVE_TOO_LONG",
+            "MESSAGEFAULT_ERROR_REMOTE_ACCESS_DISABLED", "MESSAGEFAULT_ERROR_REMOTE_SERVICE_REQUEST_NOT_SUPPORTED",
+        }:
+            raise PowerwallWriteRejected(write_resp.fault_name)
         if not write_resp.ok or not write_resp.inner_bytes:
             return False
         try:
             wenv = transport_pb2.MessageEnvelope()
             wenv.ParseFromString(write_resp.inner_bytes)
-            return wenv.HasField("filestore")
+            return (wenv.HasField("filestore")
+                    and wenv.filestore.WhichOneof("message") == "update_file_response")
         except Exception:
             return False
 

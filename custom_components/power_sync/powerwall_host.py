@@ -1,4 +1,4 @@
-"""Powerwall gateway host validation and normalization."""
+"""Shared Powerwall gateway configuration and local observation helpers."""
 
 from __future__ import annotations
 
@@ -78,3 +78,25 @@ def normalize_powerwall_gateway_host(value: object) -> str:
     if ":" in hostname and not hostname.startswith("["):
         hostname = f"[{hostname}]"
     return f"{hostname}:{port}" if port is not None else hostname
+
+
+def confirmed_local_powerwall_setting(hass, entry, attribute, *, max_age):
+    """Read settings-specific evidence without borrowing meter/SOC freshness."""
+    import time
+    if entry.data.get("powerwall_local_paired") is not True:
+        return None
+    runtime = hass.data.get("power_sync", {}).get(entry.entry_id, {})
+    record = runtime.get("powerwall_setting_observations", {}).get(attribute)
+    if isinstance(record, dict):
+        if (record.get("source") == "local"
+                and 0 <= time.monotonic() - record["at"] <= max_age):
+            return record["value"]
+        # A snapshot may contain an overlaid setting from an older poll.
+        # Never recover an expired/invalidated value through DCQ freshness.
+        return None
+    coordinator = (runtime.get("powerwall_local") or {}).get("coordinator")
+    snapshot = getattr(coordinator, "data", None)
+    observed = getattr(coordinator, "last_success_monotonic", None)
+    if snapshot is not None and observed is not None and 0 <= time.monotonic() - observed <= max_age:
+        return getattr(snapshot, attribute, None)
+    return None

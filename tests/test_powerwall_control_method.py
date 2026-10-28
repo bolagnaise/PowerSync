@@ -6,6 +6,7 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 import pytest
+from unittest.mock import AsyncMock
 
 ROOT = Path(__file__).parents[1] / "custom_components/power_sync"
 PREFIX = "tesla_method_probe"
@@ -424,37 +425,24 @@ async def test_tariff_cleanup_cannot_continue_from_a_replaced_setup():
 @pytest.mark.asyncio
 @pytest.mark.parametrize('setting', ['operation_mode', 'grid_charging'])
 @pytest.mark.parametrize('accepted', [True, False])
-async def test_tariff_prerequisite_settings_use_confirmed_cloud_writes(setting, accepted):
-    import ast
-    import logging
-    from unittest.mock import AsyncMock
+async def test_tariff_unpaired_settings_keep_confirmed_cloud_fallback(setting, accepted):
+    from test_tesla_local_settings import settings_context, load_function
     from test_tesla_grid_control import tesla_grid_control
-    path = ROOT / '__init__.py'
-    setup = next(n for n in ast.parse(path.read_text()).body if getattr(n, 'name', '') == 'async_setup_entry')
-    node = next(n for n in setup.body if getattr(n, 'name', '') == '_tesla_force_apply_' + setting)
-    class StripImports(ast.NodeTransformer):
-        def visit_ImportFrom(self, node):
-            return ast.copy_location(ast.Pass(), node)
-    local = AsyncMock(side_effect=AssertionError('Tariff must not attempt local V1R'))
-    cloud_mode = AsyncMock(return_value=accepted)
-    cloud_grid = AsyncMock(return_value=tesla_grid_control.TeslaGridWriteOutcome(
-        tesla_grid_control.TeslaGridWriteStatus.APPLIED if accepted
-        else tesla_grid_control.TeslaGridWriteStatus.REJECTED))
-    ns = dict(entry=SimpleNamespace(data={'tesla_control_method': 'local'}, options={'tesla_control_method': 'tariff'}),
-        async_get_clientsession=lambda hass: object(), hass=object(),
-        dispatch_powerwall_write=local, _tesla_force_set_operation_mode=cloud_mode,
-        async_set_tesla_grid_charging_confirmed=cloud_grid,
-        TeslaGridWriteStatus=tesla_grid_control.TeslaGridWriteStatus,
-        get_tesla_api_base_url=lambda provider, base: 'https://tesla.test',
-        CONF_FLEET_API_BASE_URL='base', _LOGGER=logging.getLogger(__name__))
-    exec(compile(ast.fix_missing_locations(ast.Module(body=[StripImports().visit(node)], type_ignores=[])),
-                 str(path), 'exec', flags=__import__('__future__').annotations.compiler_flag), ns)
-    result = await ns[node.name]([('site', 'token', 'provider')],
-        'autonomous' if setting == 'operation_mode' else True, reason='force charge')
+    ns, _ = settings_context(paired=False)
+    ns.update(_command_generation=[0], _tesla_charge_kick_generation=[0], _tesla_operation_generation=[0],
+              _record_tesla_settings_submission=AsyncMock(),
+              async_get_clientsession=lambda hass: object(),
+              _tesla_force_set_operation_mode=AsyncMock(return_value=accepted),
+              async_set_tesla_grid_charging_confirmed=AsyncMock(return_value=tesla_grid_control.TeslaGridWriteOutcome(
+                  tesla_grid_control.TeslaGridWriteStatus.APPLIED if accepted else tesla_grid_control.TeslaGridWriteStatus.REJECTED)),
+              TeslaGridWriteStatus=tesla_grid_control.TeslaGridWriteStatus,
+              get_tesla_api_base_url=lambda *args: 'https://tesla.test',
+              CONF_FLEET_API_BASE_URL='base', CONF_POWERWALL_LOCAL_DIN='powerwall_local_din')
+    fn=load_function(ROOT/'__init__.py', '_tesla_force_apply_'+setting, ns, strip_imports=True)
+    result=await fn([('site','token','fleet')], 'autonomous' if setting=='operation_mode' else True, reason='force charge')
     assert result['confirmed_sites'] == (['site'] if accepted else [])
     assert result['failed_sites'] == ([] if accepted else ['site'])
-    local.assert_not_awaited()
-    (cloud_mode if setting == 'operation_mode' else cloud_grid).assert_awaited_once()
+    (ns['_tesla_force_set_operation_mode'] if setting=='operation_mode' else ns['async_set_tesla_grid_charging_confirmed']).assert_awaited_once()
 
 
 @pytest.mark.asyncio

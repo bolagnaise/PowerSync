@@ -127,7 +127,7 @@ def test_force_mode_persistence_uses_setup_store_reference():
 
     assert function_source is not None
     assert 'hass.data[DOMAIN][entry.entry_id]["store"]' not in function_source
-    assert "await store.async_load()" in function_source
+    assert "await _update_powerwall_store(" in function_source
 
 
 def test_solax_force_current_baseline_is_persisted_before_restart_reissue():
@@ -428,7 +428,7 @@ def test_monitoring_mode_blocks_automation_but_allows_manual_controls():
         "handle_set_self_consumption": 'self_consumption_state["active"] = True',
         "handle_set_autonomous": "is_foxess = bool",
         "handle_set_backup_reserve": "is_sigenergy = bool",
-        "handle_set_operation_mode": "dispatch_powerwall_write",
+        "handle_set_operation_mode": "dispatch_powerwall_setting",
         "handle_set_grid_export": 'entry_data.get("alphaess_coordinator")',
         "handle_set_grid_charging": "_get_tesla_site_configs",
         "handle_set_storm_watch": '_get_tesla_coordinator_for_service("set_storm_watch")',
@@ -533,7 +533,7 @@ def test_monitoring_mode_restores_persisted_force_without_replay_after_restart()
     assert '"_force_restore": True' in restore
     assert '"_allow_monitoring_restore": True' in restore
     assert "SERVICE_RESTORE_NORMAL" in restore
-    assert 'stored_data["force_mode_state"] = None' in restore
+    assert "await _update_powerwall_store(store, {'force_mode_state': None})" in restore
 
 
 def test_force_mode_persistence_keeps_requested_power_setpoint():
@@ -1084,11 +1084,12 @@ def test_tesla_grid_charging_force_helper_confirms_local_state_then_cloud_falls_
     helper_source = ast.get_source_segment(source, helper)
 
     assert helper_source is not None
-    assert "await transport.write_config(" in helper_source
-    assert "config = await transport.read_config(din)" in helper_source
-    assert "tesla_grid_charging_enabled_from_site_info(" in helper_source
+    transaction_source = (INIT_PATH.parent / "powerwall_local/dispatch.py").read_text()
+    assert "await transport.write_config(" in transaction_source
+    assert "config = await transport.read_config(din)" in transaction_source
+    assert "is_current=_grid_request_current" in helper_source
     assert "async_set_tesla_grid_charging_confirmed(" in helper_source
-    assert "dispatch_powerwall_write(" in helper_source
+    assert "dispatch_powerwall_setting(" in helper_source
     assert 'result["accepted_sites"].append(site_id)' in helper_source
 
 
@@ -1524,6 +1525,7 @@ def test_tesla_hold_soc_tracks_failed_transition_and_preserves_supersession():
                 )
             ),
             "_command_generation": command_generation,
+        "_restore_generation": command_generation[0],
             "_tesla_reserve_generation": reserve_generation,
             "_hold_soc_transition_token": object(),
             "hold_soc_state": hold_state,
@@ -1779,9 +1781,8 @@ def test_tesla_full_force_restore_clears_concurrent_hold_state_before_persisting
         "                _clear_hold_soc_state()"
     )
     assert hold_clear in full_restore_success
-    assert full_restore_success.index(hold_clear) < full_restore_success.rindex(
-        "await persist_force_mode_state()"
-    )
+    assert full_restore_success.index('store, {"force_mode_state": None, "pending_tesla_restore": None}') < full_restore_success.index(hold_clear)
+    assert 'if _restore_superseded("restore notification"):' in full_restore_success
 
 
 def test_optional_write_guard_rechecks_before_cloud_fallback_attempt():
@@ -1831,12 +1832,13 @@ def test_optional_write_guard_rechecks_before_cloud_fallback_attempt():
         return writes
 
     assert asyncio.run(scenario()) == ["cloud-1"]
-    assert "local_call=_guarded_local" in apply_source
-    assert "cloud_call=_cloud" in apply_source
+    assert "dispatch_powerwall_setting(" in apply_source
+    assert "cloud_call=cloud" in apply_source
     assert "guard_write=guard_write" in apply_source
     guard_index = set_source.index("_run_optional_write_guard(")
     post_index = set_source.index("async with session.post(")
-    assert set_source.index("for attempt in range(") < guard_index < post_index
+    assert set_source.index("for attempt in range(") < post_index < guard_index
+    assert "_run_optional_write_guard(post, guard_write)" in set_source
 
 
 def test_self_consumption_service_is_timed_and_persisted():
@@ -2053,15 +2055,16 @@ def test_tesla_force_modes_use_local_first_operation_mode_dispatch():
     assert "_tesla_force_apply_operation_mode(" in force_charge_source
     assert '"autonomous"' in force_discharge_source
     assert '"autonomous"' in force_charge_source
-    assert "dispatch_powerwall_write(" in force_apply_mode_source
-    assert "transport.write_config(" in force_apply_mode_source
-    assert "transport.read_config(din)" in force_apply_mode_source
+    assert "dispatch_powerwall_setting(" in force_apply_mode_source
+    transaction_source = (INIT_PATH.parent / "powerwall_local/dispatch.py").read_text()
+    assert "transport.write_config(" in transaction_source
+    assert "transport.read_config(din)" in transaction_source
     assert "hass.services.async_call" not in force_apply_mode_source
     assert "_tesla_force_set_operation_mode(" in force_apply_mode_source
     assert 'json={"default_real_mode": mode}' in force_set_mode_source
     assert "from .coordinator import _parse_retry_after" in force_set_mode_source
     assert "_tesla_force_confirm_operation_mode(" in force_set_mode_source
-    assert "response.status in (429, 500, 502, 503, 504)" in force_set_mode_source
+    assert "status not in (429, 500, 502, 503, 504)" in force_set_mode_source
 
 
 def test_tesla_force_discharge_nudge_uses_cloud_verified_backup_reserve_primitive():
@@ -2596,7 +2599,7 @@ def test_set_operation_mode_verifies_readback_and_raises_for_automation_retries(
     function_source = ast.get_source_segment(source, function)
 
     assert function_source is not None
-    assert "transport.read_config(din)" in function_source
+    assert "dispatch_powerwall_setting(" in function_source
     assert "default_real_mode" in function_source
     assert "_confirm_mode" in function_source
     assert "_bounce_to_autonomous" in function_source
@@ -2741,7 +2744,7 @@ def test_optimizer_force_modes_are_not_reissued_after_restart():
     )[1].split("if now >= expires_at:", 1)[0]
     assert "_restore_persisted_normal" in optimizer_branch
     assert '"set_self_consumption"' not in optimizer_branch
-    assert 'stored_data["force_mode_state"] = None' in optimizer_branch
+    assert "await _update_powerwall_store(store, {'force_mode_state': None})" in optimizer_branch
     assert '"optimizer_force_restart_restore_pending"] = False' in optimizer_branch
     assert "SERVICE_FORCE_DISCHARGE" not in optimizer_branch
     assert "SERVICE_FORCE_CHARGE" not in optimizer_branch
@@ -2771,7 +2774,7 @@ def test_native_optimizer_startup_restore_waits_and_preserves_failed_cleanup():
         '"optimizer_force_restart_restore_pending"] = False'
     )
     assert optimizer_branch.index("if not restore_completed:") < optimizer_branch.index(
-        'stored_data["force_mode_state"] = None'
+        "await _update_powerwall_store(store, {'force_mode_state': None})"
     )
 
 
@@ -2881,7 +2884,7 @@ def test_expired_persisted_force_state_clears_only_after_confirmed_restore():
     )[0]
     assert "restore_completed = await _restore_persisted_normal(" in expired_branch
     assert "if restore_completed:" in expired_branch
-    clear_index = expired_branch.index('stored_data["force_mode_state"] = None')
+    clear_index = expired_branch.index("await _update_powerwall_store(store, {'force_mode_state': None})")
     confirmed_index = expired_branch.index("if restore_completed:")
     pending_index = expired_branch.index("cleanup remains stored")
     assert confirmed_index < clear_index < pending_index
@@ -3348,14 +3351,15 @@ def test_tesla_force_discharge_always_applies_battery_export_before_tariff_uploa
     function_source = ast.get_source_segment(source, function)
 
     assert function_source is not None
-    export_rule_index = function_source.index('"customer_preferred_export_rule": "battery_ok"')
+    export_rule_index = function_source.index('site_configs, "battery_ok", reason="force discharge export preparation"')
     grid_disable_index = function_source.index(
         "grid_result = await _tesla_force_apply_grid_charging("
     )
     tariff_upload_index = function_source.index("send_tariff_to_tesla(")
 
     assert 'site_state.get("saved_export_rule") != "battery_ok"' not in function_source
-    assert 'await update_cached_export_rule("battery_ok")' in function_source
+    assert 'await persist_force_mode_state()' in function_source
+    assert function_source.index('await persist_force_mode_state()') < export_rule_index
     assert export_rule_index < grid_disable_index < tariff_upload_index
 
 
@@ -3367,16 +3371,17 @@ def test_tesla_restore_updates_cached_export_rule_after_saved_rule_restore():
 
     assert function_source is not None
     restore_log_index = function_source.index(
-        "Restored export rule to %s for site %s"
+        'reason="restore export permission"'
     )
     cache_update_index = function_source.index(
-        "await update_cached_export_rule(saved_export_rule)"
+        "await update_cached_export_rule(saved_export_rule,"
     )
     restore_failed_index = function_source.index(
         "export rule restore failed for site {site_id}"
     )
 
-    assert restore_log_index < cache_update_index < restore_failed_index
+    assert restore_log_index < restore_failed_index < cache_update_index
+    assert "is_current=_restore_current" in function_source[cache_update_index:cache_update_index + 220]
 
 
 def test_tesla_force_discharge_tariff_reads_configured_prices():
@@ -3570,6 +3575,7 @@ def _run_tesla_restore_retry_generation_case(
         "force_charge_state": force_charge_state,
         "force_discharge_state": force_discharge_state,
         "_command_generation": command_generation,
+        "_restore_generation": command_generation[0],
         "dt_util": SimpleNamespace(
             utcnow=lambda: datetime(2026, 10, 12, tzinfo=timezone.utc)
         ),
@@ -3815,9 +3821,7 @@ def test_tesla_grid_charging_controls_persist_field_absent_preference():
         not in handler_source
     )
     assert "await _persist_tesla_grid_charging_preference(" in handler_source
-    assert handler_source.index(
-        "await _persist_tesla_grid_charging_preference("
-    ) < handler_source.index("local_snapshot.grid_charging_enabled = enabled")
+    assert "local_snapshot.grid_charging_enabled = enabled" not in handler_source
 
 
 def test_tesla_charge_compatibility_requires_full_nonfailed_coverage():
@@ -3956,9 +3960,14 @@ def test_tesla_charge_kick_retry_is_generation_guarded_and_direct_controls_super
             _find_function(tree, handler_name),
         )
         assert handler_source is not None
-        supersede_index = handler_source.index("_supersede_tesla_charge_kick(")
+        if handler_name in {"handle_set_operation_mode", "handle_set_grid_charging"}:
+            supersede_index = handler_source.index("await _prepare_tesla_setting_change(")
+            helper_source = ast.get_source_segment(source, _find_function(tree, "_prepare_tesla_setting_change"))
+            assert helper_source.index("_supersede_tesla_charge_kick(") < helper_source.index("await ")
+        else:
+            supersede_index = handler_source.index("_supersede_tesla_charge_kick(")
         first_await_index = handler_source.index("await ")
-        assert supersede_index < first_await_index
+        assert supersede_index <= first_await_index
 
     operation_source = ast.get_source_segment(
         source,
@@ -4117,9 +4126,9 @@ def test_tesla_grid_export_write_sets_manual_override_before_cache_persist():
     function_source = ast.get_source_segment(source, function)
 
     assert function_source is not None
-    assert "await update_cached_export_rule(rule)" in function_source
+    assert "await update_cached_export_rule(rule, is_current=current)" in function_source
     assert function_source.index("manual_export_override") < (
-        function_source.index("await update_cached_export_rule(rule)")
+        function_source.index("await update_cached_export_rule(rule, is_current=current)")
     )
 
 

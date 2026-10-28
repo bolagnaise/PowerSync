@@ -1947,6 +1947,8 @@ def test_solaredge_curtailment_permission_rejection_does_not_latch(
             "math": __import__("math"),
         }
         source = ROOT / "__init__.py"
+        from test_tesla_local_settings import load_function
+        namespace["_update_powerwall_store"] = load_function(source, "_update_powerwall_store", {"asyncio": asyncio})
         setup = next(n for n in ast.parse(source.read_text()).body if getattr(n, "name", None) == "async_setup_entry")
         for name in ("_solaredge_curtailment_write", "handle_solaredge_curtailment"):
             node = next(n for n in setup.body if getattr(n, "name", None) == name)
@@ -3062,6 +3064,8 @@ def test_solaredge_curtailment_release_survives_a_reload(marker_persisted):
             "export_earnings_are_uneconomic": lambda *_: False,
         }
         source = ROOT / "__init__.py"
+        from test_tesla_local_settings import load_function
+        namespace["_update_powerwall_store"] = load_function(source, "_update_powerwall_store", {"asyncio": asyncio})
         setup = next(
             n
             for n in ast.parse(source.read_text()).body
@@ -3134,6 +3138,8 @@ def test_solaredge_curtailment_records_ownership_across_a_restart(limit):
             "math": __import__("math"),
         }
         source = ROOT / "__init__.py"
+        from test_tesla_local_settings import load_function
+        namespace["_update_powerwall_store"] = load_function(source, "_update_powerwall_store", {"asyncio": asyncio})
         setup = next(
             n
             for n in ast.parse(source.read_text()).body

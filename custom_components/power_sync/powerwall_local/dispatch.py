@@ -26,6 +26,7 @@ from .exceptions import (
     PowerwallLocalError,
     PowerwallSignatureError,
     PowerwallUnreachableError,
+    PowerwallWriteRejected,
 )
 from .transport import TEDAPIv1rTransport
 
@@ -42,6 +43,232 @@ _CLOUD_FALLBACK_PENDING_KEY = "powerwall_local_cloud_fallback_pending"
 
 LocalCall = Callable[[TEDAPIv1rTransport], Awaitable[Any]]
 CloudCall = Callable[[], Awaitable[Any]]
+
+
+class _SettingsPolicyDenied(Exception):
+    """The current owner lost permission; this is not caller cancellation."""
+
+
+async def write_config_confirmed(
+    transport, din: str, updates: dict[str, Any], *,
+    is_current: Callable[[], bool], deadline: float,
+    acknowledged: Callable[[], None] | None = None, before_submit=None,
+    completed=None, submissions=None, is_allowed=None,
+) -> bool:
+    """Submit once and confirm exact fields; retain an in-flight submission."""
+    def check_current():
+        if not is_current():
+            raise asyncio.CancelledError("Powerwall settings request superseded")
+        if is_allowed is not None and not is_allowed():
+            raise _SettingsPolicyDenied
+        if time.monotonic() >= deadline:
+            raise asyncio.TimeoutError
+
+    did_submit = False
+    def before_write():
+        nonlocal did_submit
+        check_current()
+        did_submit = True
+
+    async def stage(expires_at):
+        check_current()
+        if before_submit is not None:
+            await before_submit(expires_at)
+
+    async def write():
+        try:
+            result = await transport.write_config(
+                din, updates, before_write=before_write, before_submit=stage,
+            )
+        except BaseException as err:
+            if completed is not None:
+                await completed(False, did_submit, err)
+            raise
+        if completed is not None:
+            await completed(result, did_submit, None)
+        return result
+
+    if time.monotonic() >= deadline:
+        return False
+    check_current()
+    if submissions is None:
+        result = await write()
+    else:
+        # The request's local slice may end before the HTTP response arrives.
+        # Keep the actual RPC owned/tracked, so unload can drain it and its
+        # exact update response can retire the pending submission safely.
+        task = asyncio.create_task(write())
+        submissions.add(task)
+        def finished(done):
+            submissions.discard(done)
+            if not done.cancelled():
+                done.exception()
+        task.add_done_callback(finished)
+        result = await asyncio.shield(task)
+    if not result:
+        return False
+    if acknowledged is not None:
+        acknowledged()
+    check_current()
+    accepted_at = time.monotonic()
+    for offset in (0.0, 0.5, 1.5):
+        delay = min(accepted_at + offset, deadline) - time.monotonic()
+        if delay > 0:
+            await asyncio.sleep(delay)
+        if time.monotonic() >= deadline:
+            return False
+        check_current()
+        config = await transport.read_config(din)
+        check_current()
+        for dotted, expected in updates.items():
+            observed = config
+            for key in dotted.split("."):
+                observed = observed.get(key) if isinstance(observed, dict) else None
+            if type(observed) is not type(expected) or observed != expected:
+                break
+        else:
+            return True
+    return False
+
+
+async def dispatch_powerwall_setting(
+    hass, entry, *, site_id: str, updates: dict[str, Any],
+    cloud_call: CloudCall, is_current: Callable[[], bool], deadline: float,
+    acknowledged=None, before_submit=None, prefer_local=True,
+    guard_write=None, operation_id=None, is_allowed=None, label: str,
+) -> bool:
+    """One bounded optional settings transaction, separate from watt control."""
+    runtime = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+    lock = runtime.setdefault("powerwall_settings_lock", asyncio.Lock())
+    tasks = runtime.setdefault("powerwall_settings_tasks", set())
+    submissions = runtime.setdefault("powerwall_settings_submissions", set())
+    task = asyncio.current_task()
+    tasks.add(task)
+    acquired = False
+
+    def current():
+        return (hass.data.get(DOMAIN, {}).get(entry.entry_id) is runtime
+                and not runtime.get("powerwall_local_dispatch_stopping") and is_current())
+    def check_current():
+        if not current():
+            raise asyncio.CancelledError("Powerwall settings request superseded")
+    def allowed():
+        return is_allowed is None or is_allowed()
+    def remaining():
+        return max(0.0, deadline - time.monotonic())
+
+    try:
+        check_current()
+        if not allowed() or not remaining():
+            return False
+        try:
+            await asyncio.wait_for(lock.acquire(), remaining())
+            acquired = True
+            check_current()
+            active = tuple(t for t in submissions if not t.done())
+            if active:
+                await asyncio.wait_for(asyncio.gather(
+                    *(asyncio.shield(t) for t in active), return_exceptions=True), remaining())
+        except asyncio.TimeoutError:
+            return False
+        check_current()
+        if runtime.get("powerwall_settings_pending"):
+            # Expiry is an acceptance deadline, not a FileStore completion
+            # guarantee. No contrary/new transaction can retire this record.
+            _LOGGER.warning("%s blocked: previous signed settings update remains unresolved", label)
+            return False
+        if not allowed() or not remaining():
+            return False
+        din = entry.data.get("powerwall_local_din")
+        transport = (get_local_transport(hass, entry)
+                     if prefer_local and site_id is not None
+                     and str(site_id) == str(entry.data.get("tesla_energy_site_id"))
+                     and (operation_id is None or runtime.get("powerwall_settings_local_failed") != operation_id) else None)
+        record = None
+        async def staged(expires_at):
+            nonlocal record
+            import uuid
+            record = {"id": uuid.uuid4().hex, "expires_at": expires_at,
+                      "site_id": str(site_id), "updates": dict(updates)}
+            if before_submit is not None:
+                await before_submit(record)
+            runtime["powerwall_settings_pending"] = record
+
+        async def completed(ok, submitted, error):
+            import aiohttp
+            definitely_finished = (ok or not submitted
+                or isinstance(error, (PowerwallSignatureError, PowerwallAuthError, PowerwallWriteRejected))
+                or isinstance(getattr(error, "__cause__", None), aiohttp.ClientConnectorError))
+            if record is not None and runtime.get("powerwall_settings_pending") is record:
+                if definitely_finished:
+                    if before_submit is not None:
+                        await before_submit(None, previous=record)
+                    runtime["powerwall_settings_pending"] = None
+                else:
+                    _LOGGER.warning("%s signed update outcome unresolved; recovery retained", label)
+
+        confirmed = False
+        primary_site = str(site_id) == str(entry.data.get("tesla_energy_site_id"))
+        if primary_site:
+            _record_setting_observation(runtime, updates, "unknown")
+        if transport is not None and din:
+            try:
+                local_deadline = min(deadline, time.monotonic() + 5.0)
+                async def local():
+                    return await write_config_confirmed(
+                        transport, din, updates, is_current=current, is_allowed=allowed,
+                        deadline=local_deadline, acknowledged=acknowledged,
+                        before_submit=staged, completed=completed, submissions=submissions,
+                    )
+                confirmed = await asyncio.wait_for(
+                    guard_write(local) if guard_write else local(),
+                    max(0.0, local_deadline - time.monotonic()),
+                )
+            except _SettingsPolicyDenied:
+                return False
+            except _LOCAL_FALLBACK_EXC as err:
+                if operation_id is not None:
+                    runtime["powerwall_settings_local_failed"] = operation_id
+                _LOGGER.debug("%s local settings unconfirmed: %s", label, err)
+        check_current()
+        source = "local" if confirmed else "cloud"
+        if not confirmed:
+            if not allowed() or not remaining():
+                return False
+            # The same owner may use its same-target cloud fallback. Any
+            # ambiguous local RPC remains a separate recovery obligation.
+            try:
+                confirmed = bool(await asyncio.wait_for(cloud_call(), remaining()))
+            except asyncio.TimeoutError:
+                confirmed = False
+            check_current()
+        if not allowed():
+            return False
+        if confirmed and primary_site:
+            _record_setting_observation(runtime, updates, source)
+        return confirmed
+    finally:
+        if acquired:
+            lock.release()
+        tasks.discard(task)
+
+
+def _record_setting_observation(runtime, updates, source):
+    """Fence old local polls using per-setting evidence, not meter timestamps."""
+    fields = {"default_real_mode": "operation_mode",
+              "site_info.disallow_charge_from_grid_with_solar_installed": "grid_charging_enabled",
+              "site_info.customer_preferred_export_rule": "grid_export_rule"}
+    records = runtime.setdefault("powerwall_setting_observations", {})
+    coordinator = (runtime.get("powerwall_local") or {}).get("coordinator")
+    snapshot = getattr(coordinator, "data", None)
+    for dotted, value in updates.items():
+        attribute = fields[dotted]
+        if attribute == "grid_charging_enabled":
+            value = not value
+        records[attribute] = {"value": value, "source": source,
+                              "at": time.monotonic()}
+        if snapshot is not None:
+            setattr(snapshot, attribute, value if source == "local" else None)
 
 # Exceptions we treat as "local failed, try cloud" rather than re-raising.
 _LOCAL_FALLBACK_EXC = (

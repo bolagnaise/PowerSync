@@ -69,6 +69,8 @@ def _setup_node(name):
 
 
 def _load_node(node, namespace):
+    from test_tesla_local_settings import load_function
+    namespace["_update_powerwall_store"] = load_function(INIT_PATH, "_update_powerwall_store", {"asyncio": asyncio})
     node = copy.deepcopy(node)
     node.returns = None
     for arg in node.args.args:

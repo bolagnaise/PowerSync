@@ -173,6 +173,8 @@ def _build_goodwe_curtailment_handler(
         handler_source = handler_source.replace(
             "import time as _time_mod", "_time_mod = _test_time"
         )
+    from test_tesla_local_settings import load_function
+    namespace["_update_powerwall_store"] = load_function(INIT_PATH, "_update_powerwall_store", {"asyncio": asyncio})
     exec(handler_source, namespace)
     exec(_nested_function_source("handle_goodwe_curtailment"), namespace)
     return namespace["handle_goodwe_curtailment"], entry_data, logger, dispatches

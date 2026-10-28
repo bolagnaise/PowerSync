@@ -19,3 +19,7 @@ class PowerwallPairingError(PowerwallLocalError):
 
 class PowerwallSignatureError(PowerwallLocalError):
     """Gateway rejected an RSA signature (unknown key, expired, etc)."""
+
+
+class PowerwallWriteRejected(PowerwallLocalError):
+    """A negative signed response proves the update was rejected."""

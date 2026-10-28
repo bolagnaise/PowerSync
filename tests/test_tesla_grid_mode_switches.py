@@ -7,6 +7,7 @@ import ast
 import importlib
 import logging
 import sys
+import time
 import types
 from pathlib import Path
 
@@ -396,7 +397,7 @@ def test_grid_charging_switch_prefers_fresh_local_readback(cloud_failed):
     hass = _Hass("SystemGridConnected")
     coord = hass.data["power_sync"]["entry-1"]["powerwall_local"]["coordinator"]
     coord.data.grid_charging_enabled = False
-    coord.last_success_monotonic = switch.time.monotonic()
+    coord.last_success_monotonic = time.monotonic()
     hass.data["power_sync"]["entry-1"]["tesla_coordinator"] = types.SimpleNamespace(
         _site_info_fetch_failed=cloud_failed,
         _site_info_cache={

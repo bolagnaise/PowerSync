@@ -214,6 +214,27 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
         self._consecutive_failures = 0
         self._discard_unverified_backup_reserve(snap)
         await self._sync_calibration_alert(snap)
+        # A poll can have started before a settings write. Apply newer signed
+        # readback only to those settings; never refresh meter/SOC evidence.
+        records = entry_data.get("powerwall_setting_observations", {})
+        observed_at = getattr(snap, "observed_monotonic", 0) or 0
+        for attribute, record in list(records.items()):
+            if record["source"] == "local" and observed_at < record["at"]:
+                setattr(snap, attribute, record["value"])
+            elif (record["source"] == "local" and getattr(snap, attribute, None) is None
+                  and time.monotonic() - record["at"] < TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS):
+                # Keep independent confirmation at its original age. A newer
+                # DCQ without config must not acquire that older setting.
+                continue
+            elif record["source"] != "local" and (
+                observed_at < record["at"] or (
+                    getattr(snap, attribute, None) != record["value"]
+                    and time.monotonic() - record["at"] < TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS
+                )
+            ):
+                setattr(snap, attribute, None)
+            else:
+                records.pop(attribute, None)
         return snap
 
     async def _sync_calibration_alert(self, snap: PowerwallSnapshot) -> None:

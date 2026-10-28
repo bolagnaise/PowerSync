@@ -385,7 +385,7 @@ def load_routing(monitored=False, paired=True, **options):
     source = (ROOT / 'custom_components/power_sync/__init__.py').read_text()
     tree = ast.parse(source)
     setup = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == 'async_setup_entry')
-    names = {'_clear_local_powerwall_dispatch', '_stop_local_powerwall_dispatch', '_try_local_powerwall_force',
+    names = {'_track_tesla_settings_control', '_clear_local_powerwall_dispatch', '_stop_local_powerwall_dispatch', '_try_local_powerwall_force',
              '_try_local_powerwall_force_locked',
              '_stop_local_powerwall_dispatch_locked', '_stop_native_max_charge_locked',
              '_set_tesla_control_method', '_restore_local_grid_charging_via_cloud', '_stop_native_max_charge', '_try_native_max_charge', '_try_native_powerwall_force', '_powerwall_prefers_native_tariff',
@@ -396,6 +396,7 @@ def load_routing(monitored=False, paired=True, **options):
     class StripImports(ast.NodeTransformer):
         def visit_ImportFrom(self, node): return ast.copy_location(ast.Pass(), node)
     nodes = [StripImports().visit(n) for n in nodes]
+    nodes += [n for n in tree.body if getattr(n, 'name', '') == '_update_powerwall_store']
     state = lambda: dict(active=False, saved_tariff=None, saved_operation_mode=None, saved_backup_reserve=None,
                          saved_grid_charging_enabled=None, saved_export_rule=None, expires_at=None,
                          hardware_expires_at=None, power_w=0)
