@@ -33500,15 +33500,46 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         runtime["powerwall_battery_dispatch"] = controller
         return controller
 
-    async def _stop_local_powerwall_dispatch() -> bool:
+    async def _restore_local_grid_charging_via_cloud(record, is_current):
+        """Restore a local owner's permission only for an explicit Tariff handoff."""
+        from .tesla_grid_control import async_restore_tesla_grid_charging_confirmed
+        from .const import CONF_POWERWALL_LOCAL_DIN
+        generation = _command_generation[0]
+        current_entry = hass.config_entries.async_get_entry(entry.entry_id)
+        if current_entry is None:
+            return False
+        site_id = current_entry.data.get(CONF_TESLA_ENERGY_SITE_ID)
+        din = record['din']
+        def current():
+            latest = hass.config_entries.async_get_entry(entry.entry_id)
+            return (is_current() and _local_powerwall_generation_current()
+                    and _command_generation[0] == generation
+                    and _local_powerwall_runtime.get('tesla_control_method_changing') is True
+                    and not _local_powerwall_runtime.get('powerwall_local_dispatch_stopping')
+                    and latest is not None and latest.data.get(CONF_TESLA_ENERGY_SITE_ID) == site_id
+                    and latest.data.get(CONF_POWERWALL_LOCAL_DIN) == din)
+        sites = _get_tesla_site_configs(hass, current_entry)
+        if (record.get('original') is not True or not site_id or not current()
+                or len(sites) != 1 or sites[0][0] != site_id):
+            return False
+        _, token, provider = sites[0]
+        confirmed = await async_restore_tesla_grid_charging_confirmed(
+            async_get_clientsession(hass),
+            get_tesla_api_base_url(provider, current_entry.data.get(CONF_FLEET_API_BASE_URL)),
+            site_id, {'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'},
+            gateway_din=din, is_current=current,
+        )
+        return confirmed is True and current()
+
+    async def _stop_local_powerwall_dispatch(*, restore_grid_charging=None) -> bool:
         native = _local_powerwall_runtime.get("powerwall_native_max_charge")
         was_native_pending = bool(native and native.pending)
         if was_native_pending and callable(revoke := getattr(native, "revoke", None)):
             revoke()
         async with _local_powerwall_route_lock:
-            return await _stop_local_powerwall_dispatch_locked() or was_native_pending
+            return await _stop_local_powerwall_dispatch_locked(restore_grid_charging=restore_grid_charging) or was_native_pending
 
-    async def _stop_local_powerwall_dispatch_locked() -> bool:
+    async def _stop_local_powerwall_dispatch_locked(*, restore_grid_charging=None) -> bool:
         runtime = _local_powerwall_runtime
         native_max_stopped = await _stop_native_max_charge()
         controller = runtime.get("powerwall_battery_dispatch")
@@ -33525,9 +33556,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             else:
                 controller.assume_pending()
         try:
-            await controller.stop()
+            if restore_grid_charging is None:
+                await controller.stop()
+            else:
+                await controller.stop(restore_grid_charging=restore_grid_charging)
         except Exception as err:
-            raise HomeAssistantError("Local Powerwall resume unconfirmed; cleanup remains pending") from err
+            message = ("Local Powerwall grid-charging restoration unconfirmed; cleanup remains pending"
+                       if getattr(controller, 'grid_charge_restore', None) and getattr(controller, '_resume_confirmed', False)
+                       else "Local Powerwall resume unconfirmed; cleanup remains pending")
+            raise HomeAssistantError(message) from err
         return True
 
     _native_max_context = {"call": None, "direction": "charge", "targetless": False}
@@ -33757,7 +33794,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             try:
                 _cancel_all_force_timers("Tesla control preference changed")
                 _command_generation[0] += 1
-                await _stop_local_powerwall_dispatch()
+                await _stop_local_powerwall_dispatch(restore_grid_charging=(
+                    _restore_local_grid_charging_via_cloud if method == 'tariff' else None))
                 # Resuming a local dispatch clears its force-mode projection,
                 # but cannot finish an older cloud settings restore. Recover
                 # that durable owner before changing the control preference.

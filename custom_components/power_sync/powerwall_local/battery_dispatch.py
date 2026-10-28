@@ -476,7 +476,7 @@ class LocalBatteryDispatch:
         await self._write_grid_setting(False)
         return True
 
-    async def _restore_grid_charging(self):
+    async def _restore_grid_charging(self, restore_via_cloud=None):
         record = self._grid_charge_restore
         if record is None:
             return
@@ -484,16 +484,42 @@ class LocalBatteryDispatch:
             raise ValueError("Local grid charging recovery gateway changed")
         if record["acceptance_until"] > time.time():
             raise ValueError("Local grid charging signed write may still arrive; recovery retained")
-        current = await self.client._transport.read_config(self.client._din)
+        try:
+            config = await self.client._transport.read_config(self.client._din)
+        except Exception:
+            if restore_via_cloud is None:
+                raise
+            config = None
         if not self._cleanup_allowed():
             raise ValueError("Local grid charging recovery owner changed")
-        value = self._grid_value(current)
-        if type(value) is not bool:
-            raise ValueError("Local grid charging restoration readback is unknown")
+        value = self._grid_value(config)
         if value is False:
             record["phase"] = "restoring"
             await self.persist()
-            await self._write_grid_setting(True)
+            try:
+                await self._write_grid_setting(True)
+                value = True
+            except Exception:
+                if restore_via_cloud is None or record["acceptance_until"] > time.time():
+                    raise
+                value = None
+        # A failed local config path must not also be the only way out of it.
+        # Only an explicit Tariff transition supplies this recovery callback.
+        if value is not True and restore_via_cloud is not None:
+            generation = self._generation
+            def current_owner():
+                return (self._cleanup_allowed() and self.pending and self._resume_confirmed
+                        and not self._command_may_have_reached
+                        and self._grid_charge_restore is record and self._generation == generation
+                        and record['din'] == getattr(self.client, '_din', None)
+                        and record['acceptance_until'] <= time.time())
+            if not current_owner():
+                raise ValueError('Local grid charging recovery owner changed')
+            confirmed = await self._grid_mutation(restore_via_cloud(deepcopy(record), current_owner))
+            if confirmed is not True or not current_owner():
+                raise ValueError('Cloud grid charging restoration is unconfirmed; cleanup remains pending')
+        elif value is not True:
+            raise ValueError("Local grid charging restoration readback is unknown")
         self._grid_charge_restore = None
         try:
             await self.persist()
@@ -636,7 +662,7 @@ class LocalBatteryDispatch:
                 with suppress(asyncio.CancelledError, Exception):
                     await task
 
-    async def _release(self, *, retain_intent=False):
+    async def _release(self, *, retain_intent=False, restore_grid_charging=None):
         if not self.pending:
             return
         try:
@@ -655,7 +681,7 @@ class LocalBatteryDispatch:
             self._last_watts = 0.0
             if retain_intent:
                 return
-            await self._restore_grid_charging()
+            await self._restore_grid_charging(restore_grid_charging)
         except BaseException:
             try:
                 if self.failed is not None:
@@ -670,8 +696,8 @@ class LocalBatteryDispatch:
             self.pending = True
             raise
 
-    async def stop(self):
+    async def stop(self, *, restore_grid_charging=None):
         async with self._lock:
             self._generation += 1
             await self._cancel_task()
-            await self._release()
+            await self._release(restore_grid_charging=restore_grid_charging)

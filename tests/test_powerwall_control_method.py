@@ -110,6 +110,131 @@ async def test_failed_cleanup_keeps_previous_preference_and_retains_owner():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('confirmed', [True, False])
+async def test_tariff_change_recovers_unknown_local_permission_through_confirmed_cloud(confirmed):
+    from test_powerwall_battery_dispatch import load_routing, install_grid_permission, call
+    from unittest.mock import AsyncMock, Mock
+    ns, local, client, saved = load_routing(optimization_allow_grid_charge=True)
+    snap, events = install_grid_permission(client)
+    entry = ns['entry']
+    entry.data.update(tesla_control_method='local', tesla_energy_site_id='site', powerwall_local_din='gateway')
+    update = Mock(side_effect=lambda current, **kw: setattr(current, 'options', kw['options']))
+    ns['hass'].config_entries = SimpleNamespace(async_get_entry=lambda _: entry, async_update_entry=update)
+    ns['_get_tesla_site_configs'] = lambda *_: [('site', 'token', 'fleet')]
+    async def cloud(*args, **kw):
+        assert local._resume_confirmed and local.pending and local.grid_charge_restore
+        assert kw['gateway_din'] == 'gateway' and kw['is_current']()
+        assert not update.called
+        events.append(('cloud_restore', None))
+        return confirmed
+    ns['async_restore_tesla_grid_charging_confirmed'] = AsyncMock(side_effect=cloud)
+    ns['async_get_clientsession'] = lambda _: object()
+    client._transport.read_config.side_effect = lambda _: {'site_info': {}}
+    try:
+        with pytest.raises(RuntimeError):
+            await ns['handle_force_charge'](call(source='optimizer', power_w=1000, duration=1))
+        client.dispatch_battery_power.assert_not_awaited()
+        if confirmed:
+            await ns['_set_tesla_control_method']('tariff')
+            assert entry.options['tesla_control_method'] == 'tariff'
+            assert not local.pending and saved['force_mode_state'] is None
+            assert [e[0] for e in events] == ['grid', 'resume', 'cloud_restore']
+        else:
+            with pytest.raises(RuntimeError, match='cleanup remains pending'):
+                await ns['_set_tesla_control_method']('tariff')
+            update.assert_not_called()
+            assert local.pending and saved['force_mode_state']['local_grid_charge_restore']
+        ns['async_restore_tesla_grid_charging_confirmed'].assert_awaited_once()
+        client.dispatch_battery_power.assert_not_awaited()
+    finally:
+        client._transport.read_config.side_effect = lambda _: snap.raw['config']
+        await local.stop()
+
+
+@pytest.mark.asyncio
+async def test_tariff_change_keeps_successful_local_restore_independent_of_cloud():
+    from test_powerwall_battery_dispatch import load_routing, install_grid_permission, call
+    from unittest.mock import AsyncMock, Mock
+    ns, local, client, saved = load_routing(optimization_allow_grid_charge=True)
+    snap, events = install_grid_permission(client)
+    entry = ns['entry']
+    entry.data['tesla_control_method'] = 'local'
+    ns['hass'].config_entries = SimpleNamespace(async_get_entry=lambda _: entry,
+        async_update_entry=lambda current, **kw: setattr(current, 'options', kw['options']))
+    cloud = ns['_restore_local_grid_charging_via_cloud'] = AsyncMock(side_effect=AssertionError('cloud not required'))
+    await ns['handle_force_charge'](call(source='optimizer', power_w=1000, duration=1))
+    await ns['_set_tesla_control_method']('tariff')
+    assert entry.options['tesla_control_method'] == 'tariff' and not local.pending
+    assert snap.grid_charging_enabled is False and saved['force_mode_state'] is None
+    assert [e[0] for e in events] == ['grid', 'watts', 'resume', 'grid']
+    cloud.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_tariff_change_recovers_existing_v1519_journal_after_restart():
+    from test_powerwall_battery_dispatch import load_routing, install_grid_permission
+    from unittest.mock import AsyncMock
+    ns, local, client, saved = load_routing(optimization_allow_grid_charge=True)
+    snap, _ = install_grid_permission(client, disabled=False)
+    entry = ns['entry']
+    entry.data.update(tesla_control_method='local', tesla_energy_site_id='site', powerwall_local_din='gateway')
+    ns['hass'].config_entries = SimpleNamespace(async_get_entry=lambda _: entry,
+        async_update_entry=lambda current, **kw: setattr(current, 'options', kw['options']))
+    ns['_get_tesla_site_configs'] = lambda *_: [('site', 'token', 'fleet')]
+    ns['async_get_clientsession'] = lambda _: object()
+    ns['async_restore_tesla_grid_charging_confirmed'] = AsyncMock(return_value=True)
+    ns['persisted_force_state'] = {'mode': 'charge', 'powerwall_local_dispatch': True,
+        'local_grid_charge_restore': {'owner': 'v1519-owner', 'din': 'gateway',
+                                     'original': True, 'phase': 'restoring', 'acceptance_until': 0}}
+    client._transport.read_config.side_effect = lambda _: None
+    with pytest.raises(RuntimeError, match='restoration unconfirmed'):
+        await ns['restore_force_mode_from_persistence']()
+    ns['async_restore_tesla_grid_charging_confirmed'].assert_not_awaited()
+    assert local.pending and saved['force_mode_state']['local_grid_charge_restore']['owner'] == 'v1519-owner'
+    await ns['_set_tesla_control_method']('tariff')
+    assert entry.options['tesla_control_method'] == 'tariff' and not local.pending
+    assert saved['force_mode_state'] is None
+    client.dispatch_battery_power.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('change', ['site', 'din', 'setup', 'command'])
+async def test_cloud_recovery_does_not_clear_owner_after_identity_changes(change):
+    from test_powerwall_battery_dispatch import load_routing, install_grid_permission, call
+    from unittest.mock import Mock
+    ns, local, client, saved = load_routing(optimization_allow_grid_charge=True)
+    snap, _ = install_grid_permission(client)
+    entry = ns['entry']
+    entry.data.update(tesla_control_method='local', tesla_energy_site_id='site', powerwall_local_din='gateway')
+    update = Mock()
+    ns['hass'].config_entries = SimpleNamespace(async_get_entry=lambda _: entry, async_update_entry=update)
+    ns['_get_tesla_site_configs'] = lambda *_: [('site', 'token', 'fleet')]
+    ns['async_get_clientsession'] = lambda _: object()
+    async def cloud(*args, **kw):
+        assert kw['is_current']()
+        if change == 'site': entry.data['tesla_energy_site_id'] = 'another-site'
+        elif change == 'din': entry.data['powerwall_local_din'] = 'another-gateway'
+        elif change == 'setup': ns['hass'].data['power_sync']['entry'] = {}
+        else: ns['_command_generation'][0] += 1
+        assert not kw['is_current']()
+        return True
+    ns['async_restore_tesla_grid_charging_confirmed'] = cloud
+    client._transport.read_config.side_effect = lambda _: None
+    try:
+        with pytest.raises(RuntimeError):
+            await ns['handle_force_charge'](call(source='optimizer', power_w=1000, duration=1))
+        with pytest.raises(RuntimeError, match='restoration unconfirmed'):
+            await ns['_set_tesla_control_method']('tariff')
+        update.assert_not_called()
+        assert local.pending and local.grid_charge_restore
+        client.dispatch_battery_power.assert_not_awaited()
+    finally:
+        ns['hass'].data['power_sync']['entry'] = ns['_local_powerwall_runtime']
+        client._transport.read_config.side_effect = lambda _: snap.raw['config']
+        await local.stop()
+
+
+@pytest.mark.asyncio
 async def test_local_preference_never_enables_a_tariff_fallback():
     from test_powerwall_battery_dispatch import load_routing,call
     ns,local,client,_=load_routing(tesla_control_method='local')

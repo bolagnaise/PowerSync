@@ -174,6 +174,59 @@ def _retry_after_seconds(response: Any) -> float | None:
     return max(0.0, min(value, 5.0))
 
 
+async def async_restore_tesla_grid_charging_confirmed(
+    session: Any,
+    api_base_url: str,
+    site_id: str,
+    headers: dict[str, str],
+    *,
+    gateway_din: str,
+    is_current: Callable[[], bool],
+) -> bool:
+    """Restore a local owner's original disabled permission for a Tariff handoff.
+
+    Direct cloud identity and an explicit boolean are required even for older
+    recovery journals that recorded only a gateway DIN. Never infer permission
+    from a missing field or accept an HTTP acknowledgement as restoration.
+    """
+    if not is_current() or not gateway_din:
+        return False
+    try:
+        async with session.get(
+            f"{api_base_url.rstrip('/')}/api/1/energy_sites/{site_id}/site_info",
+            headers=headers, timeout=aiohttp.ClientTimeout(total=5),
+        ) as response:
+            if response.status != 200:
+                return False
+            payload = await _response_json(response)
+    except (asyncio.TimeoutError, aiohttp.ClientError):
+        return False
+    if not is_current() or not payload:
+        return False
+    info = payload.get('response', payload)
+    if not isinstance(info, dict):
+        return False
+    components = info.get('components')
+    components = components if isinstance(components, dict) else {}
+    gateways = components.get('gateways') or info.get('gateways')
+    if not isinstance(gateways, list) or not any(
+        isinstance(gateway, dict) and gateway.get('din') == gateway_din
+        for gateway in gateways
+    ):
+        return False
+    field = 'disallow_charge_from_grid_with_solar_installed'
+    disallow = components.get(field, info.get(field))
+    if type(disallow) is not bool:
+        return False
+    if disallow is True:
+        return is_current()  # Original setting already restored; no write.
+    outcome = await async_set_tesla_grid_charging_confirmed(
+        session, api_base_url, site_id, headers, False,
+        max_post_attempts=1, is_current=is_current, require_boolean_readback=True,
+    )
+    return outcome.applied and is_current()
+
+
 async def async_set_tesla_grid_charging_confirmed(
     session: Any,
     api_base_url: str,
@@ -189,6 +242,7 @@ async def async_set_tesla_grid_charging_confirmed(
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     monotonic: Callable[[], float] = time.monotonic,
     is_current: Callable[[], bool] | None = None,
+    require_boolean_readback: bool = False,
 ) -> TeslaGridWriteOutcome:
     """Write Tesla grid charging and confirm it through direct site_info reads.
 
@@ -337,6 +391,13 @@ async def async_set_tesla_grid_charging_confirmed(
                         if isinstance(site_info, dict)
                         else None
                     )
+                    if require_boolean_readback and isinstance(site_info, dict):
+                        components = site_info.get('components')
+                        components = components if isinstance(components, dict) else {}
+                        field = 'disallow_charge_from_grid_with_solar_installed'
+                        raw_value = components.get(field, site_info.get(field))
+                        if type(raw_value) is not bool:
+                            observed = None
                     if (
                         isinstance(site_info, dict)
                         and tesla_site_info_has_structure(site_info)

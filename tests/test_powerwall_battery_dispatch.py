@@ -388,7 +388,7 @@ def load_routing(monitored=False, paired=True, **options):
     names = {'_clear_local_powerwall_dispatch', '_stop_local_powerwall_dispatch', '_try_local_powerwall_force',
              '_try_local_powerwall_force_locked',
              '_stop_local_powerwall_dispatch_locked', '_stop_native_max_charge_locked',
-             '_set_tesla_control_method', '_stop_native_max_charge', '_try_native_max_charge', '_try_native_powerwall_force', '_powerwall_prefers_native_tariff',
+             '_set_tesla_control_method', '_restore_local_grid_charging_via_cloud', '_stop_native_max_charge', '_try_native_max_charge', '_try_native_powerwall_force', '_powerwall_prefers_native_tariff',
              '_cloud_tariff_control_requested', '_prepare_cloud_tariff_control',
              'handle_force_charge', 'handle_force_discharge', 'persist_force_mode_state', 'restore_force_mode_from_persistence',
              '_local_powerwall_dispatch_config', '_local_powerwall_dispatch_acknowledged', '_local_powerwall_dispatch_failed', '_local_powerwall_generation_current'}
@@ -422,6 +422,7 @@ def load_routing(monitored=False, paired=True, **options):
               reserve_tariff_upload=uploads.reserve_tariff_upload,
               TariffUploadReservationError=uploads.TariffUploadReservationError,
               get_tesla_api_base_url=lambda provider, base: base or provider, CONF_FLEET_API_BASE_URL='fleet_api_base_url',
+              CONF_TESLA_ENERGY_SITE_ID='tesla_energy_site_id', CONF_POWERWALL_LOCAL_DIN='powerwall_local_din',
               validate_method=policy.validate_method, CONF_CONTROL_METHOD=policy.CONF_CONTROL_METHOD, prefers_native_tariff=prefers_native_tariff, routing_site_info=routing_site_info, native_capacity_w=native_capacity_w, math=__import__('math'), time=__import__('time'), uuid4=__import__('uuid').uuid4,
               _get_tesla_site_configs=lambda *_: [],
               local_battery_dispatch_configured=hm.local_battery_dispatch_configured, asyncio=asyncio, Any=object, ServiceCall=object, HomeAssistantError=RuntimeError,
@@ -1963,3 +1964,59 @@ def test_grid_enable_cannot_drop_a_known_native_import_limit(when):
             client.dispatch_battery_power.assert_not_awaited()
         finally: await c.stop()
     asyncio.run(run())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('blocker', ['signed_write', 'resume', 'gateway'])
+async def test_tariff_cloud_recovery_cannot_bypass_local_release_requirements(blocker):
+    ns, c, client, saved = load_routing(optimization_allow_grid_charge=True)
+    snap, _ = install_grid_permission(client)
+    resume = client.resume_battery_operation.side_effect
+    client._transport.read_config.side_effect = lambda _: None
+    with pytest.raises(RuntimeError):
+        await ns['handle_force_charge'](call(source='optimizer', power_w=1000, duration=1))
+    callback = AsyncMock(return_value=True)
+    if blocker == 'signed_write': c._grid_charge_restore['acceptance_until'] = __import__('time').time() + 30
+    elif blocker == 'resume':
+        c._resume_confirmed = False
+        client.resume_battery_operation.side_effect = None
+        client.resume_battery_operation.return_value = False
+    else: client._din = 'other-gateway'
+    try:
+        with pytest.raises(ValueError): await c.stop(restore_grid_charging=callback)
+        callback.assert_not_awaited()
+        assert c.pending and saved['force_mode_state']['local_grid_charge_restore']
+        client.dispatch_battery_power.assert_not_awaited()
+    finally:
+        client._din = 'gateway'
+        client.resume_battery_operation.side_effect = resume
+        client.resume_battery_operation.return_value = True
+        c._grid_charge_restore['acceptance_until'] = 0
+        client._transport.read_config.side_effect = lambda _: snap.raw['config']
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_tariff_cloud_recovery_drains_without_dropping_journal():
+    ns, c, client, saved = load_routing(optimization_allow_grid_charge=True)
+    snap, _ = install_grid_permission(client)
+    client._transport.read_config.side_effect = lambda _: None
+    with pytest.raises(RuntimeError):
+        await ns['handle_force_charge'](call(source='optimizer', power_w=1000, duration=1))
+    entered, finish = asyncio.Event(), asyncio.Event()
+    async def cloud(record, current):
+        assert current()
+        entered.set()
+        await finish.wait()
+        return True
+    task = asyncio.create_task(c.stop(restore_grid_charging=cloud))
+    await entered.wait()
+    task.cancel()
+    await asyncio.sleep(0)
+    assert not task.done() and c.pending and c.grid_charge_restore
+    finish.set()
+    with pytest.raises(asyncio.CancelledError): await task
+    assert c.pending and saved['force_mode_state']['local_grid_charge_restore']
+    client.dispatch_battery_power.assert_not_awaited()
+    client._transport.read_config.side_effect = lambda _: snap.raw['config']
+    await c.stop()

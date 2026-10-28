@@ -5,8 +5,11 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import math
+import functools
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 MODULE_PATH = (
     Path(__file__).parents[1]
@@ -839,3 +842,52 @@ def test_last_observed_is_not_reset_by_a_structurally_invalid_payload(caplog):
     message = "\n".join(record.getMessage() for record in caplog.records)
     assert "last observed enabled=False" in message
     assert "invalid readback=True" in message
+
+
+def _recovery_info(disallow, *, din='gateway'):
+    components = {'gateways': [{'din': din}]}
+    if disallow is not None:
+        components['disallow_charge_from_grid_with_solar_installed'] = disallow
+    return _Response(200, {'response': {'components': components}})
+
+
+@pytest.mark.parametrize('initial', [False, True])
+def test_local_permission_recovery_verifies_gateway_and_original_setting(monkeypatch, initial):
+    clock = _Clock()
+    original = tesla_grid_control.async_set_tesla_grid_charging_confirmed
+    monkeypatch.setattr(tesla_grid_control, 'async_set_tesla_grid_charging_confirmed',
+                        functools.partial(original, sleep=clock.sleep, monotonic=clock.monotonic))
+    session = _Session(posts=[_Response(200, {'response': {'result': True}})],
+                       gets=[_recovery_info(initial), _recovery_info(True)])
+    assert asyncio.run(tesla_grid_control.async_restore_tesla_grid_charging_confirmed(
+        session, 'https://example.invalid', 'site', {}, gateway_din='gateway', is_current=lambda: True))
+    assert len(session.post_calls) == (0 if initial else 1)
+    if not initial:
+        assert session.post_calls[0]['json'] == {'disallow_charge_from_grid_with_solar_installed': True}
+
+
+@pytest.mark.parametrize('case', ['wrong_gateway', 'missing_field', 'non_boolean', 'superseded', 'http_error'])
+def test_local_permission_recovery_never_writes_without_current_explicit_identity(case):
+    current = [True]
+    response = _recovery_info(None if case == 'missing_field' else 'false' if case == 'non_boolean' else False,
+                              din='another-gateway' if case == 'wrong_gateway' else 'gateway')
+    if case == 'superseded':
+        response._on_enter = lambda: current.__setitem__(0, False)
+    if case == 'http_error': response.status = 503
+    session = _Session(posts=[], gets=[response])
+    assert not asyncio.run(tesla_grid_control.async_restore_tesla_grid_charging_confirmed(
+        session, 'https://example.invalid', 'site', {}, gateway_din='gateway', is_current=lambda: current[0]))
+    assert not session.post_calls
+
+
+@pytest.mark.parametrize('readback', [None, False, 1, 'true'])
+def test_local_permission_recovery_rejects_accepted_but_unconfirmed_restore(monkeypatch, readback):
+    clock = _Clock()
+    original = tesla_grid_control.async_set_tesla_grid_charging_confirmed
+    monkeypatch.setattr(tesla_grid_control, 'async_set_tesla_grid_charging_confirmed',
+                        functools.partial(original, sleep=clock.sleep, monotonic=clock.monotonic))
+    session = _Session(posts=[_Response(200, {'response': {'result': True}})],
+                       gets=[_recovery_info(False)] + [_recovery_info(readback) for _ in range(5)])
+    assert not asyncio.run(tesla_grid_control.async_restore_tesla_grid_charging_confirmed(
+        session, 'https://example.invalid', 'site', {}, gateway_din='gateway', is_current=lambda: True))
+    assert len(session.post_calls) == 1

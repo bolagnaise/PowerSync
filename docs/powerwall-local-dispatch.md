@@ -62,6 +62,22 @@ Cloud Max charging has a separate implementation and delivery history. This sect
 
 ## Grid Charging confirmation for Tariff discharge
 
+### Returning to Tariff after failed Local V1R setup
+
+If Local V1R cannot confirm its temporary grid-charging setting, PowerSync keeps
+the original setting for recovery. Selecting **Tariff** first tries normal local
+restoration. If local configuration readback remains unavailable, that explicit
+selection can recover the saved setting through Tesla's cloud API instead.
+
+Recovery requires acknowledged local resume, expiry of outstanding signed local
+writes, and a direct cloud response identifying the same gateway and confirming
+the original grid-charging setting. It does not start charging or replay the
+failed power request. Missing cloud permission fields, unavailable credentials,
+unconfirmed resume, or changed gateway identity keep cleanup pending and leave
+the previous control preference unchanged. A settings-restoration failure is
+reported separately from an unconfirmed local resume. Update through HACS and
+restart Home Assistant before retrying the Tariff selection.
+
 Manual Grid Charging changes and Tariff discharge preparation allow more time for Tesla's cloud setting to update. PowerSync polls the accepted request for 45 seconds, then resends it at most once if a fresh response still explicitly reports the opposite setting. The grid-setting step has a shared 60-second budget across configured sites; a later site receives only the remaining time. A missing setting does not trigger a resend.
 
 Tariff discharge still requires confirmed Grid Charging Off for every configured site. PowerSync rechecks the current optimiser plan, telemetry, reserve, permissions and export restrictions before proceeding. Cancellation or failed confirmation retains the saved settings for restoration; another attempt cannot bypass unfinished restoration. A successful setting change is not proof of battery discharge. Update through HACS and restart Home Assistant to apply the change.
