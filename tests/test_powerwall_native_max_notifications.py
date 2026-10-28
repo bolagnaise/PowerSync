@@ -1,4 +1,4 @@
-"""Scheduled native discharge refusals must reach the user without alert spam."""
+"""Scheduled native refusals must reach the user without alert spam."""
 import ast
 import asyncio
 import importlib
@@ -14,15 +14,19 @@ ROOT = Path(__file__).parents[1] / 'custom_components/power_sync'
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('direction,source,allowed,expected', [
-    ('discharge', 'optimizer', False, 'native_export_rule_invalid'),
-    ('charge', 'optimizer', False, 'unused'),
-    ('discharge', 'user', False, 'unused'),
-    ('discharge', 'optimizer', True, None),
-    ('discharge', 'user', True, None),
+@pytest.mark.parametrize('direction,source,allowed,reason,expected', [
+    ('discharge', 'optimizer', False, 'native_export_rule_invalid', True),
+    ('charge', 'optimizer', False, 'grid_charging_not_permitted', True),
+    ('charge', 'optimizer', False, 'software_import_limit_requires_local_control', True),
+    ('discharge', 'user', False, 'native_export_rule_invalid', False),
+    ('charge', 'user', False, 'grid_charging_not_permitted', False),
+    ('discharge', 'optimizer', True, None, True),
+    ('discharge', 'user', True, None, True),
+    ('charge', 'optimizer', True, None, True),
+    ('charge', 'user', True, None, True),
 ])
-async def test_native_route_notifies_scheduled_discharge_admission_failure(
-        monkeypatch, direction, source, allowed, expected):
+async def test_native_route_notifies_scheduled_admission_failure(
+        monkeypatch, direction, source, allowed, reason, expected):
     package = 'native_alert_route_probe'
     parent = ModuleType(package)
     parent.__path__ = [str(ROOT)]
@@ -32,10 +36,11 @@ async def test_native_route_notifies_scheduled_discharge_admission_failure(
     monkeypatch.setitem(sys.modules, host.__name__, host)
     alerts = []
     notifications = ModuleType(package + '.powerwall_local.native_max_notifications')
-    notifications.update_native_discharge_alert = lambda *args: alerts.append(args)
+    notifications.update_native_discharge_alert = lambda *args: alerts.append(('discharge', *args))
+    notifications.update_native_charge_alert = lambda *args: alerts.append(('charge', *args))
     monkeypatch.setitem(sys.modules, notifications.__name__, notifications)
     adapter = SimpleNamespace(guard=AsyncMock(return_value=allowed),
-                              guard_denial_reason='native_export_rule_invalid')
+                              guard_denial_reason=reason)
     controller = SimpleNamespace(pending=False, record=None, adapter=adapter,
                                  start=AsyncMock(), stop=AsyncMock())
     hass = SimpleNamespace()
@@ -50,15 +55,16 @@ async def test_native_route_notifies_scheduled_discharge_admission_failure(
         hold_soc_state={}, self_consumption_state={},
         _get_native_max_charge=AsyncMock(return_value=controller),
         _native_max_context={}, HomeAssistantError=RuntimeError,
-        _create_discharge_tariff=Mock(side_effect=RuntimeError('tariff boundary')))
+        _create_discharge_tariff=Mock(side_effect=RuntimeError('tariff boundary')),
+        _create_charge_tariff=Mock(side_effect=RuntimeError('tariff boundary')))
     tree = ast.parse((ROOT / '__init__.py').read_text())
     node = next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef)
                 and n.name == '_try_native_powerwall_force')
     exec(compile(ast.Module(body=[node], type_ignores=[]), '<native-route>', 'exec'), scope)
-    with pytest.raises(RuntimeError, match='tariff boundary' if allowed else 'native_export_rule_invalid'):
+    with pytest.raises(RuntimeError, match='tariff boundary' if allowed else reason):
         await scope['_try_native_powerwall_force'](
             direction, SimpleNamespace(data={'power_w': 0}), 5, 2000)
-    assert alerts == ([(hass, 'one', expected)] if expected != 'unused' else [])
+    assert alerts == ([(direction, hass, 'one', reason)] if expected else [])
     controller.start.assert_not_awaited()
 
 
@@ -86,6 +92,8 @@ def notification_probe(monkeypatch):
                            async_create_task=queued.append)
     yield SimpleNamespace(hass=hass, update=lambda reason, entry='one':
                           module.update_native_discharge_alert(hass, entry, reason),
+                          charge=lambda reason, entry='one':
+                          module.update_native_charge_alert(hass, entry, reason),
                           persistent=persistent, push=actions._send_expo_push,
                           queued=queued)
     for pending in queued:
@@ -170,3 +178,77 @@ def test_push_scheduling_failure_cannot_replace_control_error(notification_probe
     p.update('native_export_rule_invalid')
     p.persistent.async_create.assert_called_once()
     assert not p.queued
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('reason', [
+    'configured_charge_disabled', 'grid_charging_not_permitted',
+    'native_import_limit_blocks_charge', 'software_import_limit_invalid',
+    'software_import_limit_requires_local_control', 'native_limit_evidence_unavailable',
+    'native_site_limits_invalid', 'native_limit_or_config_invalid',
+    'native_capacity_unavailable', 'native_snapshot_unavailable',
+    'native_max_local_access_disabled', 'native_max_dispatch_config_invalid',
+    'native_max_policy_denied',
+])
+async def test_actionable_charge_refusals_notify_without_raw_reason_text(notification_probe, reason):
+    p = notification_probe
+    p.charge(reason)
+    p.charge(reason)
+    p.persistent.async_create.assert_called_once()
+    assert not p.push.await_count  # Delivery is queued, never on the control path.
+    await p.queued[0]
+    p.push.assert_awaited_once()
+    assert p.push.await_args.args[1] == 'Powerwall charging blocked'
+    assert 'Scheduled battery charging did not start:' in p.push.await_args.args[2]
+    assert reason not in p.push.await_args.args[2]
+
+
+@pytest.mark.asyncio
+async def test_charge_reason_changes_update_alert_without_repeated_push(notification_probe):
+    p = notification_probe
+    p.charge('grid_charging_not_permitted')
+    p.hass.data['power_sync']['one'] = {'replacement_runtime': True}
+    p.charge('grid_charging_not_permitted')
+    p.charge('software_import_limit_requires_local_control')
+    assert p.persistent.async_create.call_count == 2
+    assert len(p.queued) == 1
+    await p.queued[0]
+    p.push.assert_awaited_once()
+    assert 'cannot enforce the configured grid-import limit' in p.push.await_args.args[2]
+    p.charge(None)
+    p.charge('grid_charging_not_permitted')
+    await p.queued[1]
+    assert p.push.await_count == 2
+
+
+def test_expected_charge_deferrals_do_not_alert(notification_probe):
+    p = notification_probe
+    for reason in ['charge_soc_limit_reached_or_unknown', 'ev_demand_requires_local_control',
+                   'managed_ev_ownership_present', 'native_max_site_already_owned',
+                   'native_max_control_policy_denied', 'unknown_private_reason', None]:
+        p.charge(reason)
+    p.persistent.async_create.assert_not_called()
+    assert not p.queued
+
+
+@pytest.mark.asyncio
+async def test_charge_recovery_does_not_clear_discharge_alert_or_send_stale_push(notification_probe):
+    p = notification_probe
+    p.update('native_export_rule_invalid')
+    p.charge('grid_charging_not_permitted')
+    p.charge(None)
+    await asyncio.gather(*p.queued)
+    p.push.assert_awaited_once()
+    assert p.push.await_args.args[1] == 'Powerwall discharge blocked'
+    p.persistent.async_dismiss.assert_called_once_with(
+        p.hass, 'power_sync_one_native_charge_blocked')
+    assert 'one' in p.hass.data['power_sync']['_native_discharge_alerts']
+
+
+def test_previous_discharge_alert_marker_remains_deduplicated(notification_probe):
+    p = notification_probe
+    p.hass.data['power_sync']['_native_discharge_alerts'] = {'one': object()}
+    p.update('native_export_rule_invalid')
+    p.persistent.async_create.assert_not_called()
+    p.update(None)
+    p.persistent.async_dismiss.assert_called_once()

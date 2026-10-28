@@ -191,6 +191,14 @@ Grid Export preference cannot be confirmed, Home Assistant shows a
 devices also receive a push. Repeated retries share one alert, which clears
 when a later native discharge passes the admission check.
 
+Scheduled native charging refusals caused by gateway/site-limit readings,
+grid-charging permission or charging configuration also create a
+**Powerwall charging blocked** notification and a push to registered mobile
+devices. Retries share one alert, and changed reasons update the Home Assistant
+message without another push. Charging and discharge alerts clear independently
+when their respective admission check succeeds. Routine SOC-limit and EV or
+ownership deferrals do not generate charging alerts.
+
 Automatic control retries an incomplete local reading once and refreshes local
 telemetry after slow configuration reads before submitting a command. SOC and
 power readings must still be complete and no more than five seconds old; cloud
