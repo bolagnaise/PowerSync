@@ -121,7 +121,13 @@ Tesla defines `self_consumption` as Self-Powered and `autonomous` as Time-Based 
 References: [Tesla energy operation endpoint](https://developer.tesla.com/docs/fleet-api/endpoints/energy), [aiopowerwall local protocol documentation](https://github.com/Teslemetry/aiopowerwall).
 
 
-If the reply to a signed settings update is lost after submission, PowerSync retains that unresolved update across restart and blocks subsequent settings transactions. Signature expiry and a matching cloud value do not prove that a queued gateway update has completed. A confirmed update reply retires the submission; independent readback still determines whether the requested setting is confirmed.
+If the reply to a signed settings update is lost after submission, PowerSync retains the incident across restart. **Settings > System > Repairs** shows the affected site, attempted settings and incident ID. Ordinary settings pause until the request finishes or you explicitly resume through cloud.
+
+To resume, run **PowerSync: Resume Powerwall settings through cloud** (`power_sync.resume_powerwall_settings`) from **Developer tools > Actions** with the entry, site and incident IDs in the notice and `acknowledge: true`. This action does not change the Powerwall settings. Then use **Restore Normal** or make the intended settings change and supervise Tesla settings and measured Battery/Grid Power. Cloud confirmation and subsequent attempts remain available after restart or a failed cloud request. Local settings writes stay suspended and the original restore evidence remains with the incident; finishing active forcing does not settle that retained uncertainty.
+
+This is supervised resumption, not proof that the old write finished. The local request contained a full configuration snapshot and may still apply after newer changes. Signature expiry, restart and matching readback do not prove completion. A genuine terminal reply updates only its incident and never replays an old setting or starts an old restore. Receipt observation cannot hold later authorised cloud requests or reload indefinitely. Dismissing the Repairs notice does not grant resumption.
+
+**Restore Normal** finishes a current forcing override. After that owner has finished, the retained basis is a reference for supervised manual recovery; it is not replayed over newer settings. If the old write later changes settings, explicitly apply the intended settings through the normal cloud controls. An unrelated active override must still complete its confirmed cleanup before a new manual setting takes over; cloud recovery permission remains available if cleanup needs another attempt.
 
 ## Available grid-export targets
 

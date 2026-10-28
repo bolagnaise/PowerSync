@@ -145,9 +145,16 @@ async def dispatch_powerwall_setting(
     task = asyncio.current_task()
     tasks.add(task)
     acquired = False
+    epoch = runtime.get("powerwall_settings_epoch", 0)
 
     def current():
+        pending = runtime.get("powerwall_settings_pending")
         return (hass.data.get(DOMAIN, {}).get(entry.entry_id) is runtime
+                and runtime.get("powerwall_settings_lock") is lock
+                and runtime.get("powerwall_settings_epoch", 0) == epoch
+                and not runtime.get("powerwall_settings_recovering")
+                and (not pending or pending.get("resume_cloud") is not True
+                     or runtime.get("powerwall_settings_cloud_handoff") == pending.get("id"))
                 and not runtime.get("powerwall_local_dispatch_stopping") and is_current())
     def check_current():
         if not current():
@@ -166,13 +173,16 @@ async def dispatch_powerwall_setting(
             acquired = True
             check_current()
             active = tuple(t for t in submissions if not t.done())
-            if active:
+            pending = runtime.get("powerwall_settings_pending")
+            affected = not pending or pending.get("site_id") == str(site_id)
+            if active and affected and not (pending and pending.get("resume_cloud") is True):
                 await asyncio.wait_for(asyncio.gather(
                     *(asyncio.shield(t) for t in active), return_exceptions=True), remaining())
         except asyncio.TimeoutError:
             return False
         check_current()
-        if runtime.get("powerwall_settings_pending"):
+        pending = runtime.get("powerwall_settings_pending")
+        if pending and pending.get("site_id") == str(site_id) and pending.get("resume_cloud") is not True:
             # Expiry is an acceptance deadline, not a FileStore completion
             # guarantee. No contrary/new transaction can retire this record.
             _LOGGER.warning("%s blocked: previous signed settings update remains unresolved", label)
@@ -181,7 +191,7 @@ async def dispatch_powerwall_setting(
             return False
         din = entry.data.get("powerwall_local_din")
         transport = (get_local_transport(hass, entry)
-                     if prefer_local and site_id is not None
+                     if not pending and prefer_local and site_id is not None
                      and str(site_id) == str(entry.data.get("tesla_energy_site_id"))
                      and (operation_id is None or runtime.get("powerwall_settings_local_failed") != operation_id) else None)
         record = None
@@ -192,6 +202,7 @@ async def dispatch_powerwall_setting(
                       "site_id": str(site_id), "updates": dict(updates)}
             if before_submit is not None:
                 await before_submit(record)
+            check_current()
             runtime["powerwall_settings_pending"] = record
 
         async def completed(ok, submitted, error):
@@ -199,11 +210,15 @@ async def dispatch_powerwall_setting(
             definitely_finished = (ok or not submitted
                 or isinstance(error, (PowerwallSignatureError, PowerwallAuthError, PowerwallWriteRejected))
                 or isinstance(getattr(error, "__cause__", None), aiohttp.ClientConnectorError))
-            if record is not None and runtime.get("powerwall_settings_pending") is record:
+            if record is not None:
                 if definitely_finished:
+                    saved = None
                     if before_submit is not None:
-                        await before_submit(None, previous=record)
-                    runtime["powerwall_settings_pending"] = None
+                        saved = await before_submit(None, previous=record)
+                    active_runtime = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                    latest = active_runtime.get("powerwall_settings_pending")
+                    if latest and latest.get("id") == record["id"]:
+                        active_runtime["powerwall_settings_pending"] = saved
                 else:
                     _LOGGER.warning("%s signed update outcome unresolved; recovery retained", label)
 

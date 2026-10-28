@@ -4,10 +4,11 @@ from __future__ import annotations
 import ast
 import asyncio
 import logging
+import copy
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 import aiohttp
@@ -127,6 +128,7 @@ def settings_context(transport=None, *, paired=True):
                             data={"tesla_energy_site_id": "site", "powerwall_local_din": "din",
                                   "powerwall_local_paired": paired})
     ns = dict(asyncio=asyncio, time=time, DOMAIN="power_sync", _LOGGER=logging.getLogger(__name__),
+              _sync_powerwall_settings_issue=Mock(), CONF_TESLA_ENERGY_SITE_ID="tesla_energy_site_id",
               get_local_transport=lambda h, e: transport if e.data["powerwall_local_paired"] else None,
               hass=hass, entry=entry, _local_powerwall_generation_current=lambda: True,
               active_battery_system="tesla", BATTERY_SYSTEM_TESLA="tesla", HomeAssistantError=RuntimeError)
@@ -347,6 +349,568 @@ def staged_transport(write_result=True, *, submitted=None, release=None, error=N
         return write_result
     return SimpleNamespace(write_config=write, read_config=AsyncMock(
         return_value={"default_real_mode": "autonomous"}))
+
+
+def recovery_context(saved=None, *, paired=True):
+    ns, runtime = settings_context(staged_transport(), paired=paired)
+    saved = saved if saved is not None else {
+        "tesla_settings_pending": {"id": "incident", "site_id": "site", "expires_at": 0,
+                                   "updates": {"default_real_mode": "autonomous"}},
+        "force_mode_state": {"mode": "charge", "saved_operation_mode": "backup"},
+        "pending_tesla_restore": {"reason": "original restore"},
+    }
+    runtime["powerwall_settings_pending"] = copy.deepcopy(saved.get("tesla_settings_pending"))
+    if runtime["powerwall_settings_pending"] and runtime["powerwall_settings_pending"].get("resume_cloud") is True:
+        runtime["powerwall_settings_cloud_handoff"] = runtime["powerwall_settings_pending"]["id"]
+    async def save(value):
+        saved.clear()
+        saved.update(copy.deepcopy(value))
+    store = SimpleNamespace(async_load=AsyncMock(side_effect=lambda: copy.deepcopy(saved)),
+                            async_save=AsyncMock(side_effect=save))
+    add_store_reader(ns, store)
+    ns.update(store=store, _command_generation=[0], copy=copy,
+              _cancel_all_force_timers=Mock(), _sync_powerwall_settings_issue=Mock())
+    ns["hass"].config_entries = SimpleNamespace(async_get_entry=lambda _: ns["entry"])
+    load_function(ROOT / "__init__.py", "_update_powerwall_store", ns)
+    load_function(ROOT / "__init__.py", "_record_tesla_settings_submission", ns)
+    load_function(ROOT / "__init__.py", "handle_resume_powerwall_settings", ns)
+    return ns, runtime, saved
+
+
+def add_store_reader(ns, store):
+    """A new Store reads persisted data, without the writer's pending buffer."""
+    store.hass, store.version, store.minor_version, store.key = ns["hass"], 1, 1, "test-store"
+    ns["Store"] = lambda *args, **kwargs: SimpleNamespace(async_load=store.async_load)
+
+
+def recovery_call(**changes):
+    return SimpleNamespace(data={"entry_id": "entry", "site_id": "site",
+                                 "incident_id": "incident", "acknowledge": True, **changes})
+
+
+@pytest.mark.asyncio
+async def test_explicit_recovery_admits_cloud_despite_hung_receipt_and_old_mutex():
+    ns, runtime, saved = recovery_context()
+    old_lock = runtime["powerwall_settings_lock"] = asyncio.Lock()
+    await old_lock.acquire()
+    receipt = asyncio.create_task(asyncio.Event().wait())
+    runtime["powerwall_settings_submissions"] = {receipt}
+    try:
+        result = await asyncio.wait_for(ns["handle_resume_powerwall_settings"](recovery_call()), .2)
+        assert result["success"] and not receipt.done()
+        assert saved["tesla_settings_pending"]["resume_cloud"] is True
+        assert saved["tesla_settings_pending"]["restore_basis"]["force_mode_state"]["saved_operation_mode"] == "backup"
+        assert saved["force_mode_state"]["saved_operation_mode"] == "backup"
+        cloud = AsyncMock(return_value=True)
+        ns["get_local_transport"] = Mock(side_effect=AssertionError("local must stay suspended"))
+        assert await ns["dispatch_powerwall_setting"](ns["hass"], ns["entry"], site_id="site",
+            updates={"default_real_mode": "backup"}, cloud_call=cloud,
+            is_current=lambda: True, deadline=time.monotonic()+.1, label="restore")
+        cloud.assert_awaited_once()
+        assert not receipt.done()
+        assert not saved["tesla_settings_pending"].get("terminal")
+    finally:
+        receipt.cancel()
+        await asyncio.gather(receipt, return_exceptions=True)
+        old_lock.release()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_release_then_late_receipt_retry_completes_mutex_handoff_once():
+    ns, runtime, saved = recovery_context({"force_mode_state": {"saved_operation_mode": "backup"}})
+    submitted, receipt = asyncio.Event(), asyncio.Event()
+    ns["get_local_transport"] = lambda *_: staged_transport(submitted=submitted, release=receipt)
+    old = asyncio.create_task(ns["dispatch_powerwall_setting"](ns["hass"], ns["entry"], site_id="site",
+        updates={"default_real_mode": "autonomous"}, cloud_call=AsyncMock(return_value=False),
+        before_submit=ns["_record_tesla_settings_submission"], is_current=lambda: True,
+        deadline=time.monotonic()+.03, label="old"))
+    await submitted.wait()
+    assert not await old
+    incident_id = saved["tesla_settings_pending"]["id"]
+    old_lock = runtime["powerwall_settings_lock"]
+    await old_lock.acquire()
+    started, finish_save = asyncio.Event(), asyncio.Event()
+    save = ns["store"].async_save.side_effect
+    async def paused_save(value):
+        if value.get("tesla_settings_pending", {}).get("resume_cloud") and not value["tesla_settings_pending"].get("terminal"):
+            started.set()
+            await finish_save.wait()
+        await save(value)
+    ns["store"].async_save.side_effect = paused_save
+    release = asyncio.create_task(ns["handle_resume_powerwall_settings"](recovery_call(incident_id=incident_id)))
+    await started.wait()
+    release.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await release
+    finish_save.set()
+    await asyncio.gather(*ns["store"]._power_sync_update_tasks)
+    resumed_at = saved["tesla_settings_pending"]["resumed_at"]
+    receipt.set()
+    await asyncio.gather(*runtime["powerwall_settings_submissions"])
+    assert runtime["powerwall_settings_pending"]["resume_cloud"] is True
+    try:
+        cloud = AsyncMock(return_value=True)
+        with pytest.raises(asyncio.CancelledError):
+            await ns["dispatch_powerwall_setting"](ns["hass"], ns["entry"], site_id="site",
+                updates={"default_real_mode": "backup"}, cloud_call=cloud,
+                is_current=lambda: True, deadline=time.monotonic()+.1, label="handoff missing")
+        cloud.assert_not_awaited()
+        await ns["handle_resume_powerwall_settings"](recovery_call(incident_id=incident_id))
+        assert runtime["powerwall_settings_lock"] is not old_lock
+        assert old_lock.locked()
+        assert saved["tesla_settings_pending"]["resumed_at"] == resumed_at
+        assert saved["tesla_settings_pending"]["terminal"] is True
+        assert saved["tesla_settings_pending"]["restore_basis"]["force_mode_state"]["saved_operation_mode"] == "backup"
+        assert await ns["dispatch_powerwall_setting"](ns["hass"], ns["entry"], site_id="site",
+            updates={"default_real_mode": "backup"}, cloud_call=AsyncMock(return_value=True),
+            is_current=lambda: True, deadline=time.monotonic()+.1, label="after handoff")
+        installed = runtime["powerwall_settings_lock"]
+        generation = ns["_command_generation"][0]
+        await installed.acquire()
+        await ns["handle_resume_powerwall_settings"](recovery_call(incident_id=incident_id))
+        assert runtime["powerwall_settings_lock"] is installed and installed.locked()
+        assert ns["_command_generation"][0] == generation
+        installed.release()
+    finally:
+        old_lock.release()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("changes", [{"acknowledge": False}, {"acknowledge": 1},
+    {"incident_id": "stale"}, {"entry_id": "wrong"}, {"site_id": "other"}])
+async def test_recovery_requires_explicit_ack_and_exact_incident_entry_site(changes):
+    ns, runtime, saved = recovery_context()
+    before = copy.deepcopy(saved)
+    with pytest.raises(RuntimeError):
+        await ns["handle_resume_powerwall_settings"](recovery_call(**changes))
+    assert saved == before
+    assert not runtime["powerwall_settings_pending"].get("resume_cloud")
+    ns["_cancel_all_force_timers"].assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_recovery_persistence_failure_never_opens_admission():
+    ns, runtime, saved = recovery_context()
+    ns["store"].async_save.side_effect = OSError("disk full")
+    with pytest.raises(OSError):
+        await ns["handle_resume_powerwall_settings"](recovery_call())
+    assert not saved["tesla_settings_pending"].get("resume_cloud")
+    assert not runtime["powerwall_settings_pending"].get("resume_cloud")
+
+
+@pytest.mark.asyncio
+async def test_store_save_swallowed_failure_cannot_release_or_submit_local_write():
+    ns, runtime, saved = recovery_context()
+    ns["store"].async_save.side_effect = None  # HA can log a write error and return normally.
+    with pytest.raises(RuntimeError):
+        await ns["handle_resume_powerwall_settings"](recovery_call())
+    assert not runtime["powerwall_settings_pending"].get("resume_cloud")
+    assert not saved["tesla_settings_pending"].get("resume_cloud")
+    saved.clear()
+    runtime["powerwall_settings_pending"] = None
+    sent = []
+    async def write(din, updates, *, before_submit, before_write):
+        await before_submit(int(time.time())+12)
+        before_write()
+        sent.append(updates)
+    ns["get_local_transport"] = lambda *_: SimpleNamespace(write_config=write)
+    with pytest.raises(RuntimeError):
+        await ns["dispatch_powerwall_setting"](ns["hass"], ns["entry"], site_id="site",
+            updates={"default_real_mode": "autonomous"}, cloud_call=AsyncMock(return_value=True),
+            before_submit=ns["_record_tesla_settings_submission"], is_current=lambda: True,
+            deadline=time.monotonic()+1, label="failed durable stage")
+    assert not sent
+
+
+@pytest.mark.asyncio
+async def test_cancelled_foreground_cannot_let_recovery_overtake_its_storage_worker():
+    ns, runtime, saved = recovery_context()
+    saved["tesla_settings_pending"]["restore_basis"] = {"force_mode_state": copy.deepcopy(saved["force_mode_state"])}
+    runtime["powerwall_settings_pending"] = copy.deepcopy(saved["tesla_settings_pending"])
+    started, finish_worker = asyncio.Event(), asyncio.Event()
+    save = ns["store"].async_save.side_effect
+    first = True
+    async def worker_write(value):
+        nonlocal first
+        if first:
+            first = False
+            started.set()
+            await finish_worker.wait()
+        await save(value)
+    ns["store"].async_save.side_effect = worker_write
+    old = asyncio.create_task(ns["_update_powerwall_store"](ns["store"], {"unrelated": "retained"}))
+    runtime["powerwall_settings_control_tasks"] = {old}
+    await started.wait()
+    release = asyncio.create_task(ns["handle_resume_powerwall_settings"](recovery_call()))
+    await asyncio.sleep(.01)
+    assert not release.done()
+    assert ns["store"].async_save.await_count == 1
+    with pytest.raises(asyncio.CancelledError):
+        await old
+    finish_worker.set()
+    await release
+    assert saved["unrelated"] == "retained"
+    assert saved["tesla_settings_pending"]["resume_cloud"] is True
+    assert saved["tesla_settings_pending"]["restore_basis"]["force_mode_state"]["saved_operation_mode"] == "backup"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["disk_error", "shutdown_deferred", None])
+async def test_critical_store_verification_reads_disk_instead_of_pending_buffer(tmp_path, failure):
+    ns, runtime, saved = recovery_context()
+    path = tmp_path / "entry.json"
+    json = __import__("json")
+    path.write_text(json.dumps(saved))
+    class BufferedStore:
+        """Model HA storage.py's swallowed writer errors and stopping buffer."""
+        def __init__(self, hass, version, key, *, minor_version=1):
+            self.hass, self.version, self.key, self.minor_version = hass, version, key, minor_version
+            self.pending = None
+        async def async_load(self):
+            return copy.deepcopy(self.pending) if self.pending is not None else json.loads(path.read_text())
+        async def async_save(self, value):
+            self.pending = copy.deepcopy(value)
+            if failure == "shutdown_deferred":
+                return  # HA keeps _data for its final write; the writer can read it.
+            data, self.pending = self.pending, None
+            try:
+                if failure == "disk_error":
+                    raise OSError("disk full")
+                path.write_text(json.dumps(data))
+            except OSError:
+                pass  # HA logs the underlying WriteError and returns normally.
+    ns["Store"] = BufferedStore
+    ns["store"] = BufferedStore(ns["hass"], 1, "entry")
+    if failure:
+        with pytest.raises(RuntimeError):
+            await ns["handle_resume_powerwall_settings"](recovery_call())
+        assert not runtime["powerwall_settings_pending"].get("resume_cloud")
+        assert not json.loads(path.read_text())["tesla_settings_pending"].get("resume_cloud")
+    else:
+        await ns["handle_resume_powerwall_settings"](recovery_call())
+        assert runtime["powerwall_settings_pending"]["resume_cloud"] is True
+        assert json.loads(path.read_text())["tesla_settings_pending"]["resume_cloud"] is True
+
+
+@pytest.mark.asyncio
+async def test_recovery_save_closes_ingress_until_new_mutex_is_installed():
+    ns, runtime, saved = recovery_context()
+    started, release = asyncio.Event(), asyncio.Event()
+    save = ns["store"].async_save.side_effect
+    async def paused_save(value):
+        started.set()
+        await release.wait()
+        await save(value)
+    ns["store"].async_save.side_effect = paused_save
+    recovery = asyncio.create_task(ns["handle_resume_powerwall_settings"](recovery_call()))
+    await started.wait()
+    cloud = AsyncMock(return_value=True)
+    with pytest.raises(asyncio.CancelledError):
+        await ns["dispatch_powerwall_setting"](ns["hass"], ns["entry"], site_id="site",
+            updates={"default_real_mode": "backup"}, cloud_call=cloud,
+            is_current=lambda: True, deadline=time.monotonic()+.1, label="during save")
+    cloud.assert_not_awaited()
+    release.set()
+    await recovery
+    assert not runtime.get("powerwall_settings_recovering")
+    assert await ns["dispatch_powerwall_setting"](ns["hass"], ns["entry"], site_id="site",
+        updates={"default_real_mode": "backup"}, cloud_call=cloud,
+        is_current=lambda: True, deadline=time.monotonic()+.1, label="after save")
+
+
+@pytest.mark.asyncio
+async def test_old_site_incident_cannot_lock_out_new_site_or_capture_its_restore_basis():
+    ns, runtime, saved = recovery_context()
+    ns["entry"].data["tesla_energy_site_id"] = "new-site"
+    cloud = AsyncMock(return_value=True)
+    assert await ns["dispatch_powerwall_setting"](ns["hass"], ns["entry"], site_id="new-site",
+        updates={"default_real_mode": "backup"}, cloud_call=cloud,
+        is_current=lambda: True, deadline=time.monotonic()+.1, label="new site")
+    await ns["handle_resume_powerwall_settings"](recovery_call())
+    assert saved["tesla_settings_pending"]["site_id"] == "site"
+    assert saved["tesla_settings_pending"]["restore_basis"] == {}
+    assert saved["force_mode_state"]["saved_operation_mode"] == "backup"
+
+
+@pytest.mark.asyncio
+async def test_recovery_is_idempotent_and_survives_cloud_failure_and_restart():
+    ns, runtime, saved = recovery_context()
+    await ns["handle_resume_powerwall_settings"](recovery_call())
+    before = copy.deepcopy(saved)
+    await ns["handle_resume_powerwall_settings"](recovery_call())
+    assert saved == before
+    assert ns["_command_generation"] == [1]
+    ns2, runtime2, _ = recovery_context(copy.deepcopy(saved), paired=False)
+    cloud = AsyncMock(side_effect=[False, True])
+    for expected in (False, True):
+        assert await ns2["dispatch_powerwall_setting"](ns2["hass"], ns2["entry"], site_id="site",
+            updates={"default_real_mode": "backup"}, cloud_call=cloud,
+            is_current=lambda: True, deadline=time.monotonic()+.1, label="after restart") is expected
+    assert cloud.await_count == 2
+    assert runtime2["powerwall_settings_pending"]["restore_basis"] == before["tesla_settings_pending"]["restore_basis"]
+
+
+@pytest.mark.asyncio
+async def test_late_receipt_matches_immutable_id_and_preserves_released_restore_basis():
+    ns, runtime, saved = recovery_context()
+    original = copy.deepcopy(saved["tesla_settings_pending"])
+    await ns["handle_resume_powerwall_settings"](recovery_call())
+    result = await ns["_record_tesla_settings_submission"](None, previous=original)
+    assert result["terminal"] is True and result["resume_cloud"] is True
+    assert result["restore_basis"]["pending_tesla_restore"] == {"reason": "original restore"}
+    assert saved["tesla_settings_pending"] == result
+    saved["tesla_settings_pending"] = {"id": "new", "site_id": "site"}
+    with pytest.raises(RuntimeError):
+        await ns["_record_tesla_settings_submission"](None, previous=original)
+    assert saved["tesla_settings_pending"]["id"] == "new"
+
+
+@pytest.mark.asyncio
+async def test_recovery_revokes_an_old_rpc_before_its_actual_send():
+    ns, runtime, saved = recovery_context({"force_mode_state": {"saved_operation_mode": "backup"}})
+    staged, release = asyncio.Event(), asyncio.Event()
+    sent = []
+    async def write(din, updates, *, before_submit, before_write):
+        await before_submit(int(time.time()) + 12)
+        staged.set()
+        await release.wait()
+        before_write()
+        sent.append(updates)
+        return True
+    ns["get_local_transport"] = lambda *_: SimpleNamespace(write_config=write)
+    old = asyncio.create_task(ns["dispatch_powerwall_setting"](ns["hass"], ns["entry"], site_id="site",
+        updates={"default_real_mode": "autonomous"}, cloud_call=AsyncMock(),
+        before_submit=ns["_record_tesla_settings_submission"], is_current=lambda: True,
+        deadline=time.monotonic()+2, label="old"))
+    await staged.wait()
+    incident_id = runtime["powerwall_settings_pending"]["id"]
+    await ns["handle_resume_powerwall_settings"](recovery_call(incident_id=incident_id))
+    release.set()
+    await asyncio.gather(old, *runtime["powerwall_settings_submissions"], return_exceptions=True)
+    assert not sent
+    assert saved["tesla_settings_pending"]["resume_cloud"] is True
+    assert saved["tesla_settings_pending"]["terminal"] is True  # Definitely unsent.
+
+
+@pytest.mark.asyncio
+async def test_actual_late_ack_updates_replacement_runtime_without_publishing_old_intent():
+    ns, runtime, saved = recovery_context({"force_mode_state": {"saved_operation_mode": "backup"}})
+    submitted, release = asyncio.Event(), asyncio.Event()
+    transport = staged_transport(submitted=submitted, release=release)
+    ns["get_local_transport"] = lambda *_: transport
+    old = asyncio.create_task(ns["dispatch_powerwall_setting"](ns["hass"], ns["entry"], site_id="site",
+        updates={"default_real_mode": "autonomous"}, cloud_call=AsyncMock(return_value=True),
+        before_submit=ns["_record_tesla_settings_submission"], is_current=lambda: True,
+        deadline=time.monotonic()+.03, label="old"))
+    await submitted.wait()
+    assert not await old
+    await ns["handle_resume_powerwall_settings"](recovery_call(incident_id=saved["tesla_settings_pending"]["id"]))
+    replacement = {"powerwall_settings_pending": copy.deepcopy(saved["tesla_settings_pending"]),
+                   "powerwall_setting_observations": {"operation_mode": {"value": "backup", "source": "cloud"}}}
+    ns["hass"].data["power_sync"]["entry"] = replacement
+    release.set()
+    await asyncio.gather(*runtime["powerwall_settings_submissions"])
+    assert replacement["powerwall_settings_pending"]["terminal"] is True
+    assert replacement["powerwall_settings_pending"]["resume_cloud"] is True
+    assert replacement["powerwall_setting_observations"]["operation_mode"]["value"] == "backup"
+    transport.read_config.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_crash_after_release_save_reconstructs_permission_from_durable_record():
+    ns, runtime, saved = recovery_context()
+    save = ns["store"].async_save.side_effect
+    async def crash(value):
+        await save(value)
+        raise asyncio.CancelledError
+    ns["store"].async_save.side_effect = crash
+    with pytest.raises(asyncio.CancelledError):
+        await ns["handle_resume_powerwall_settings"](recovery_call())
+    assert not runtime["powerwall_settings_pending"].get("resume_cloud")
+    ns2, runtime2, _ = recovery_context(copy.deepcopy(saved))
+    assert runtime2["powerwall_settings_pending"]["resume_cloud"] is True
+    assert await ns2["dispatch_powerwall_setting"](ns2["hass"], ns2["entry"], site_id="site",
+        updates={"default_real_mode": "backup"}, cloud_call=AsyncMock(return_value=True),
+        is_current=lambda: True, deadline=time.monotonic()+.1, label="after crash")
+    before = copy.deepcopy(saved)
+    ns["store"].async_save.side_effect = save
+    await ns["handle_resume_powerwall_settings"](recovery_call())
+    assert runtime["powerwall_settings_pending"]["resume_cloud"] is True
+    assert saved == before  # Same-process retry adopts the saved decision.
+
+
+@pytest.mark.asyncio
+async def test_setup_install_cannot_recreate_old_gate_while_terminal_receipt_saves():
+    ns, runtime, saved = recovery_context()
+    original = copy.deepcopy(saved["tesla_settings_pending"])
+    started, release = asyncio.Event(), asyncio.Event()
+    load = ns["store"].async_load.side_effect
+    first = True
+    async def paused_load():
+        nonlocal first
+        value = load()
+        if first:
+            first = False
+            started.set()
+            await release.wait()
+        return value
+    ns["store"].async_load.side_effect = paused_load
+    runtime.clear()  # Replacement setup has not installed its pending state.
+    tree = ast.parse((ROOT / "__init__.py").read_text())
+    setup = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == "async_setup_entry")
+    load_install = next(n for n in setup.body if isinstance(n, ast.AsyncWith)
+                        and "_power_sync_update_lock" in ast.unparse(n.items))
+    wrapper = ast.parse("async def install_settings(): pass").body[0]
+    wrapper.body = [load_install]
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[wrapper], type_ignores=[])), "setup_settings", "exec"), ns)
+    install = asyncio.create_task(ns["install_settings"]())
+    await started.wait()
+    async def receipt():
+        value = await ns["_record_tesla_settings_submission"](None, previous=original)
+        if (runtime.get("powerwall_settings_pending") or {}).get("id") == original["id"]:
+            runtime["powerwall_settings_pending"] = value
+    terminal = asyncio.create_task(receipt())
+    await asyncio.sleep(0)
+    release.set()
+    await asyncio.gather(install, terminal)
+    assert saved["tesla_settings_pending"] is None
+    assert runtime["powerwall_settings_pending"] is None
+
+
+def test_repair_notice_is_persistent_and_cannot_release_by_dismissal():
+    ir = SimpleNamespace(async_create_issue=Mock(), async_delete_issue=Mock(),
+                         IssueSeverity=SimpleNamespace(WARNING="warning"))
+    ns = dict(ir=ir, DOMAIN="power_sync", json=__import__("json"))
+    sync = load_function(ROOT / "__init__.py", "_sync_powerwall_settings_issue", ns, strip_imports=True)
+    incident = {"id": "incident", "site_id": "site", "updates": {"default_real_mode": "autonomous"}}
+    before = copy.deepcopy(incident)
+    sync(object(), "entry", incident)
+    kwargs = ir.async_create_issue.call_args.kwargs
+    assert kwargs["is_persistent"] is True and kwargs["is_fixable"] is False
+    assert kwargs["translation_placeholders"]["incident_id"] == "incident"
+    assert incident == before  # Registry state never grants execution permission.
+    sync(object(), "entry", None)
+    ir.async_delete_issue.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_unload_bounds_receipt_wait_without_cancelling_observation():
+    tree = ast.parse((ROOT / "__init__.py").read_text())
+    unload = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == "async_unload_entry")
+    capture = next(n for n in ast.walk(unload) if isinstance(n, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == "submissions" for t in n.targets))
+    drain = next(n for n in ast.walk(unload) if isinstance(n, ast.If)
+        and isinstance(n.test, ast.Name) and n.test.id == "submissions")
+    receipt = asyncio.create_task(asyncio.Event().wait())
+    async def bounded_wait(tasks, *, timeout):
+        assert 0 < timeout <= 5
+        return await asyncio.wait(tasks, timeout=.01)
+    ns = dict(entry_data={"powerwall_settings_submissions": {receipt}},
+              asyncio=SimpleNamespace(wait=bounded_wait))
+    wrapper = ast.parse("async def unload_receipts(): pass").body[0]
+    wrapper.body = [capture, drain]
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[wrapper], type_ignores=[])), "receipt_unload", "exec"), ns)
+    try:
+        await asyncio.wait_for(ns["unload_receipts"](), .1)
+        assert not receipt.done()
+    finally:
+        receipt.cancel()
+        await asyncio.gather(receipt, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_full_unload_and_settings_setup_boundary_keep_released_cloud_available():
+    ns, runtime, saved = recovery_context()
+    await ns["handle_resume_powerwall_settings"](recovery_call())
+    receipt = asyncio.create_task(asyncio.Event().wait())
+    submissions = runtime["powerwall_settings_submissions"] = {receipt}
+    runtime["force_charge_state"] = {"active": True, "saved_operation_mode": "backup"}
+    runtime["powerwall_battery_dispatch"] = SimpleNamespace(stop=AsyncMock())
+    ns["hass"].data["power_sync_settings"] = {"entry": {"store": ns["store"], "submissions": submissions}}
+    ns["hass"].config_entries.async_unload_platforms = AsyncMock(return_value=True)
+    ns["hass"].services = SimpleNamespace(async_remove=Mock())
+    real_asyncio = asyncio
+    class BoundedClock:
+        def __getattr__(self, name):
+            return getattr(real_asyncio, name)
+        async def wait(self, tasks, *, timeout):
+            assert timeout == 5.0
+            return await real_asyncio.wait(tasks, timeout=.01)
+    ns.update(asyncio=BoundedClock(), _stop_tesla_native_rate=AsyncMock(), PLATFORMS=[],
+              SERVICE_SYNC_TOU="sync_tou", SERVICE_SYNC_NOW="sync_now",
+              cleanup_dynamic_ev_entry=Mock(), STORAGE_VERSION=1, STORAGE_KEY="test")
+    unload = load_function(ROOT / "__init__.py", "async_unload_entry", ns, strip_imports=True)
+    try:
+        assert await asyncio.wait_for(unload(ns["hass"], ns["entry"]), .5)
+        assert not receipt.done()
+        ns["hass"].data["power_sync"]["entry"] = {}
+        tree = ast.parse((ROOT / "__init__.py").read_text())
+        setup = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == "async_setup_entry")
+        first = next(i for i,n in enumerate(setup.body) if isinstance(n,ast.Assign)
+                     and any(isinstance(t,ast.Name) and t.id == "settings_state" for t in n.targets))
+        wrapper = ast.parse("async def install_settings(): pass").body[0]
+        wrapper.body = setup.body[first:first+4]  # Actual Store/tracking/load/publication boundary.
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[wrapper],type_ignores=[])),"settings_setup","exec"),ns)
+        await ns["install_settings"]()
+        replacement = ns["hass"].data["power_sync"]["entry"]
+        assert replacement["powerwall_settings_submissions"] is submissions
+        assert replacement["powerwall_settings_pending"]["resume_cloud"] is True
+        assert await ns["dispatch_powerwall_setting"](ns["hass"], ns["entry"], site_id="site",
+            updates={"default_real_mode": "backup"}, cloud_call=AsyncMock(return_value=True),
+            is_current=lambda: True, deadline=time.monotonic()+.1, label="after full unload")
+        assert saved["force_mode_state"]["saved_operation_mode"] == "backup"
+    finally:
+        receipt.cancel()
+        await asyncio.gather(receipt, return_exceptions=True)
+
+
+def test_tesla_tracking_wrapper_is_identity_for_other_battery_brands():
+    ns = dict(active_battery_system="solaredge", BATTERY_SYSTEM_TESLA="tesla")
+    wrap = load_function(ROOT / "__init__.py", "_track_tesla_settings_control", ns)
+    handler = lambda call: None
+    assert wrap(handler) is handler
+
+
+@pytest.mark.asyncio
+async def test_late_remote_full_file_commit_is_not_misreported_as_settled_by_cloud_readback():
+    ns, runtime, saved = recovery_context({"force_mode_state": {"saved_operation_mode": "backup"}})
+    accepted, commit = asyncio.Event(), asyncio.Event()
+    gateway = {"default_real_mode": "backup", "export": "pv_only"}
+    async def write(din, updates, *, before_submit, before_write):
+        old_snapshot = {**gateway, **updates}
+        await before_submit(int(time.time()) + 12)
+        before_write()
+        accepted.set()
+        await commit.wait()  # A model permitted by the unknown queue contract.
+        gateway.clear()
+        gateway.update(old_snapshot)
+        raise ns["PowerwallUnreachableError"]("receipt lost after remote commit")
+    ns["get_local_transport"] = lambda *_: SimpleNamespace(write_config=write)
+    old = asyncio.create_task(ns["dispatch_powerwall_setting"](ns["hass"], ns["entry"], site_id="site",
+        updates={"default_real_mode": "autonomous"}, cloud_call=AsyncMock(return_value=False),
+        before_submit=ns["_record_tesla_settings_submission"], is_current=lambda: True,
+        deadline=time.monotonic()+.02, label="old"))
+    await accepted.wait()
+    assert not await old
+    await ns["handle_resume_powerwall_settings"](recovery_call(incident_id=saved["tesla_settings_pending"]["id"]))
+    async def confirmed_cloud():
+        gateway["default_real_mode"] = "backup"
+        gateway["export"] = "never"
+        return gateway["default_real_mode"] == "backup"
+    assert await ns["dispatch_powerwall_setting"](ns["hass"], ns["entry"], site_id="site",
+        updates={"default_real_mode": "backup"}, cloud_call=confirmed_cloud,
+        is_current=lambda: True, deadline=time.monotonic()+.1, label="new")
+    commit.set()
+    await asyncio.gather(*runtime["powerwall_settings_submissions"], return_exceptions=True)
+    assert gateway == {"default_real_mode": "autonomous", "export": "pv_only"}
+    assert saved["tesla_settings_pending"]["resume_cloud"] is True
+    assert not saved["tesla_settings_pending"].get("terminal")
+    assert saved["tesla_settings_pending"]["restore_basis"]["force_mode_state"]["saved_operation_mode"] == "backup"
+    assert await ns["dispatch_powerwall_setting"](ns["hass"], ns["entry"], site_id="site",
+        updates={"default_real_mode": "backup"}, cloud_call=confirmed_cloud,
+        is_current=lambda: True, deadline=time.monotonic()+.1, label="supervised correction")
+    assert gateway == {"default_real_mode": "backup", "export": "never"}
+    assert not saved["tesla_settings_pending"].get("terminal")
 
 
 @pytest.mark.asyncio
@@ -620,6 +1184,7 @@ def restore_context(*, mode="backup", direction="discharge", envelope="off"):
     saved = {}
     store = SimpleNamespace(async_load=AsyncMock(side_effect=lambda: dict(saved)),
                             async_save=AsyncMock(side_effect=lambda value: saved.update(value)))
+    add_store_reader(ns, store)
     runtime["store"] = store
     confirmed = {"confirmed_sites": ["site"], "failed_sites": []}
     ns.update(store=store, force_charge_state=charge, force_discharge_state=discharge,
@@ -695,6 +1260,47 @@ async def test_complete_restore_retires_export_baseline_and_publishes_cache():
     assert ns["force_discharge_state"]["saved_export_rule"] is None
     assert saved["force_mode_state"] is None and saved["pending_tesla_restore"] is None
     ns["async_dispatcher_send"].assert_any_call(ns["hass"], "power_sync_curtailment_updated_entry")
+
+
+@pytest.mark.asyncio
+async def test_actual_restore_after_release_ends_forcing_but_retains_original_uncertain_basis():
+    ns, runtime, saved, call = restore_context()
+    await ns["persist_force_mode_state"]()
+    original_basis = copy.deepcopy(saved["force_mode_state"])
+    incident = {"id": "incident", "site_id": "site", "updates": {"default_real_mode": "autonomous"}}
+    saved["tesla_settings_pending"] = copy.deepcopy(incident)
+    runtime["powerwall_settings_pending"] = incident
+    ns["entry"].data[ns["CONF_TESLA_ENERGY_SITE_ID"]] = "site"
+    ns["hass"].config_entries = SimpleNamespace(async_get_entry=lambda _: ns["entry"])
+    load_function(ROOT / "__init__.py", "handle_resume_powerwall_settings", ns)
+    await ns["handle_resume_powerwall_settings"](recovery_call())
+    assert ns["_tesla_force_apply_operation_mode"].await_count == 0  # Resumption itself writes nothing.
+    assert (await ns["handle_restore_normal"](call))["success"] is True
+    assert saved["force_mode_state"] is None and saved["pending_tesla_restore"] is None
+    retained = saved["tesla_settings_pending"]
+    assert retained["resume_cloud"] is True and not retained.get("terminal")
+    assert retained["restore_basis"]["force_mode_state"] == original_basis
+    assert not ns["force_discharge_state"]["active"]
+    await ns["_prepare_tesla_setting_change"](SimpleNamespace())
+
+
+@pytest.mark.asyncio
+async def test_failed_live_restore_keeps_owner_but_does_not_revoke_cloud_resumption():
+    ns, runtime, saved, call = restore_context()
+    await ns["persist_force_mode_state"]()
+    incident = {"id": "incident", "site_id": "site", "resume_cloud": True,
+                "restore_basis": {"force_mode_state": copy.deepcopy(saved["force_mode_state"])}}
+    saved["tesla_settings_pending"] = runtime["powerwall_settings_pending"] = incident
+    runtime["powerwall_settings_cloud_handoff"] = incident["id"]
+    ns["_tesla_force_apply_export_rule"].return_value = False
+    with pytest.raises(RuntimeError, match="restoration remains pending"):
+        await ns["_prepare_tesla_setting_change"](call)
+    assert saved["tesla_settings_pending"]["resume_cloud"] is True
+    assert ns["force_discharge_state"]["active"] is True
+    ns["_tesla_force_apply_export_rule"].return_value = True
+    await ns["_prepare_tesla_setting_change"](call)
+    assert not ns["force_discharge_state"]["active"]
+    assert saved["tesla_settings_pending"]["resume_cloud"] is True
 
 
 @pytest.mark.asyncio

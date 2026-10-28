@@ -557,6 +557,40 @@ refresh_calibration:
     resets the integration's local guard.
   fields: {}
 
+resume_powerwall_settings:
+  name: Resume Powerwall settings through cloud
+  description: >-
+    Resume settings and restoration through Tesla cloud after a lost local
+    settings reply. Use the entry, site and incident IDs shown in Settings >
+    System > Repairs. This does not change device settings. The unresolved
+    request contained a full configuration snapshot and may still apply later;
+    supervise the next change or Restore Normal and check Tesla settings and
+    measured power. Original restore evidence is retained and local settings
+    writes stay suspended, including after restart.
+  fields:
+    entry_id:
+      name: PowerSync entry ID
+      required: true
+      selector:
+        text:
+    site_id:
+      name: Tesla site ID
+      required: true
+      selector:
+        text:
+    incident_id:
+      name: Incident ID from Repairs
+      required: true
+      selector:
+        text:
+    acknowledge:
+      name: Resume despite the unresolved local write
+      description: I understand that the earlier full configuration write may still apply later and will supervise recovery.
+      required: true
+      default: false
+      selector:
+        boolean:
+
 reconcile_solaredge_control:
   name: Reconcile SolarEdge control
   description: Read fresh storage settings through SolarEdge Modbus Multi and clear the persistent control block only when a safe baseline is verified. Run under supervision after inspecting the inverter. This service does not write inverter settings.

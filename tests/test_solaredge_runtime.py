@@ -70,6 +70,8 @@ def _setup_node(name):
 
 def _load_node(node, namespace):
     from test_tesla_local_settings import load_function
+    # These extracted SolarEdge branches bypass the Tesla-only task wrapper.
+    namespace.setdefault("_track_tesla_settings_control", lambda handler: handler)
     namespace["_update_powerwall_store"] = load_function(INIT_PATH, "_update_powerwall_store", {"asyncio": asyncio})
     node = copy.deepcopy(node)
     node.returns = None

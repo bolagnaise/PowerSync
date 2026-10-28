@@ -84,26 +84,76 @@ def _should_sync_sigenergy_static_tariff_on_startup(
     )
 
 
-async def _update_powerwall_store(store, changes, *, is_current=None, remove=(), expected=None) -> bool:
+async def _update_powerwall_store(store, changes, *, is_current=None, remove=(), expected=None, verify=False) -> bool:
     """Merge entry fields under one lock; stale owners cannot commit cleanup."""
     import copy
-    changes = copy.deepcopy(changes)
+    changes = changes if callable(changes) else copy.deepcopy(changes)
     lock = vars(store).get("_power_sync_update_lock")
     if lock is None:
         lock = store._power_sync_update_lock = asyncio.Lock()
-    async with lock:
-        if is_current is not None and not is_current():
-            return False
-        data = dict(await store.async_load() or {})
-        if is_current is not None and not is_current():
-            return False
-        if expected is not None and any(data.get(key) != value for key, value in expected.items()):
-            return False
-        data.update(changes)
-        for key in remove:
-            data.pop(key, None)
-        await store.async_save(data)
-        return is_current is None or is_current()
+    async def transaction():
+        async with lock:
+            if is_current is not None and not is_current():
+                return False
+            data = dict(await store.async_load() or {})
+            if is_current is not None and not is_current():
+                return False
+            if expected is not None and any(data.get(key) != value for key, value in expected.items()):
+                return False
+            update = changes(copy.deepcopy(data)) if callable(changes) else changes
+            if update is None:
+                return False
+            data.update(copy.deepcopy(update))
+            for key in remove:
+                data.pop(key, None)
+            await store.async_save(data)
+            if verify:
+                # HA can suppress write errors or defer a shutdown save. A
+                # separate reader cannot see the writer's pending buffer.
+                reader = Store(store.hass, store.version, store.key, minor_version=store.minor_version)
+                if await reader.async_load() != data:
+                    return False
+            return is_current is None or is_current()
+    # Cancelling a foreground owner must not release this lock while HA's
+    # executor is still writing its whole-store snapshot.
+    tasks = vars(store).setdefault("_power_sync_update_tasks", set())
+    task = asyncio.create_task(transaction())
+    tasks.add(task)
+    def finished(done):
+        tasks.discard(done)
+        if not done.cancelled():
+            done.exception()
+    task.add_done_callback(finished)
+    return await asyncio.shield(task)
+
+
+def _sync_powerwall_settings_issue(hass, entry_id, record):
+    """Expose recovery without treating dismissal as authority to write."""
+    from homeassistant.helpers import issue_registry as ir
+    issue_id = f"powerwall_settings_{entry_id}"
+    if not record:
+        ir.async_delete_issue(hass, DOMAIN, issue_id)
+        return
+    basis = (record.get("restore_basis") or {}).get("force_mode_state") or {}
+    restore_summary = {label: basis[key] for key, label in (
+        ("saved_operation_mode", "Mode"), ("saved_backup_reserve", "Backup reserve (%)"),
+        ("saved_grid_charging_enabled", "Grid charging"), ("saved_export_rule", "Export rule"),
+    ) if basis.get(key) is not None}
+    if basis.get("saved_tariff"):
+        restore_summary["Tariff"] = "Retained"
+    ir.async_create_issue(
+        hass, DOMAIN, issue_id, is_fixable=False, is_persistent=True,
+        severity=ir.IssueSeverity.WARNING, translation_key="powerwall_settings_uncertain",
+        translation_placeholders={
+            "entry_id": entry_id, "site_id": str(record.get("site_id", "unknown")),
+            "incident_id": str(record.get("id", "unknown")),
+            "updates": json.dumps(record.get("updates", {})),
+            "status": ("Cloud settings resumed; local settings remain suspended."
+                       if record.get("resume_cloud") is True else "Settings are waiting for supervised recovery."),
+            "outcome": "terminal outcome recorded" if record.get("terminal") else "unresolved",
+            "restore_basis": json.dumps(restore_summary) if restore_summary else "No saved forcing baseline",
+        },
+    )
 
 
 async def _run_optional_write_guard(
@@ -24223,9 +24273,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Initialize persistent storage for data that survives HA restarts
     # (like Teslemetry's RestoreEntity pattern for export rule state)
-    store = Store(hass, STORAGE_VERSION, f"{STORAGE_KEY}.{entry.entry_id}")
-    stored_data = await store.async_load() or {}
-    hass.data[DOMAIN][entry.entry_id]["powerwall_settings_pending"] = stored_data.get("tesla_settings_pending")
+    # Receipt-only RPCs may outlive unload. Reuse the Store lock and tracking
+    # set so a late receipt cannot race a replacement setup's durable writes.
+    settings_state = hass.data.setdefault(f"{DOMAIN}_settings", {}).setdefault(entry.entry_id, {})
+    store = settings_state.setdefault("store", Store(hass, STORAGE_VERSION, f"{STORAGE_KEY}.{entry.entry_id}", atomic_writes=True))
+    hass.data[DOMAIN][entry.entry_id]["powerwall_settings_submissions"] = settings_state.setdefault("submissions", set())
+    async with vars(store).setdefault("_power_sync_update_lock", asyncio.Lock()):
+        stored_data = await store.async_load() or {}
+        settings_runtime = hass.data[DOMAIN][entry.entry_id]
+        settings_runtime["powerwall_settings_pending"] = pending_settings = stored_data.get("tesla_settings_pending")
+        if pending_settings and pending_settings.get("resume_cloud") is True:
+            settings_runtime["powerwall_settings_lock"] = asyncio.Lock()
+            settings_runtime["powerwall_settings_cloud_handoff"] = pending_settings["id"]
+        _sync_powerwall_settings_issue(hass, entry.entry_id, stored_data.get("tesla_settings_pending"))
     stored_grid_charging_preferences = stored_data.get(
         "tesla_grid_charging_preferences",
         {},
@@ -32632,12 +32692,32 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             and expected.issubset(confirmed.union(field_absent))
         )
 
-    async def _record_tesla_settings_submission(record, *, previous=None) -> None:
+    async def _record_tesla_settings_submission(record, *, previous=None):
+        saved = None
+        def transition(data):
+            nonlocal saved
+            pending = data.get("tesla_settings_pending")
+            if record is not None:
+                if pending != previous:
+                    return None
+                record.setdefault("restore_basis", {key: data.get(key) for key in (
+                    "force_mode_state", "pending_tesla_restore")})
+                saved = record
+            elif (isinstance(pending, dict) and previous
+                  and pending.get("id") == previous.get("id")
+                  and pending.get("site_id") == previous.get("site_id")):
+                # A real terminal receipt is independent of foreground owner
+                # currency. Keep the operator decision and original basis.
+                saved = {**pending, "terminal": True} if pending.get("resume_cloud") is True else None
+            else:
+                return None
+            return {"tesla_settings_pending": saved}
         if not await _update_powerwall_store(
-            store, {"tesla_settings_pending": record},
-            expected={"tesla_settings_pending": previous},
+            store, transition, verify=True,
         ):
             raise HomeAssistantError("Powerwall settings recovery owner changed")
+        _sync_powerwall_settings_issue(hass, entry.entry_id, saved)
+        return saved
 
     async def _tesla_force_apply_operation_mode(
         site_configs: list[tuple[str, str, str]], mode: str, *, reason: str,
@@ -34130,6 +34210,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if (hass.data.get(DOMAIN, {}).get(entry.entry_id) is not runtime
                     or runtime.get("powerwall_local_dispatch_stopping")):
                 raise HomeAssistantError("Powerwall setup is stopping or was replaced")
+            pending = runtime.get("powerwall_settings_pending")
+            handoff_pending = (pending and pending.get("resume_cloud") is True
+                               and runtime.get("powerwall_settings_cloud_handoff") != pending.get("id"))
+            if ((runtime.get("powerwall_settings_recovering") or handoff_pending)
+                    and handler.__name__ != "handle_resume_powerwall_settings"):
+                raise HomeAssistantError("Supervised Powerwall settings recovery is in progress")
             tasks = runtime.setdefault("powerwall_settings_control_tasks", set())
             task = asyncio.current_task()
             nested = task in tasks
@@ -39957,7 +40043,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             notify_err,
                         )
 
-            if hass.data[DOMAIN][entry.entry_id].get("powerwall_settings_pending"):
+            if ((pending_settings := hass.data[DOMAIN][entry.entry_id].get("powerwall_settings_pending"))
+                    and pending_settings.get("site_id") in {str(site) for site, _token, _provider in site_configs}
+                    and pending_settings.get("resume_cloud") is not True):
                 _mark_tesla_restore_failed("signed settings submission remains unresolved")
             if tesla_restore_failed:
                 await persist_pending_tesla_restore(
@@ -41806,7 +41894,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 site_id: str,
                 headers: dict[str, str],
             ) -> bool:
-                if hass.data[DOMAIN][entry.entry_id].get("powerwall_settings_pending"):
+                if ((pending_settings := hass.data[DOMAIN][entry.entry_id].get("powerwall_settings_pending"))
+                        and pending_settings.get("site_id") == str(site_id)
+                        and pending_settings.get("resume_cloud") is not True):
                     return False
                 ok, status, text = await _post_mode(
                     api_base,
@@ -42550,6 +42640,73 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             "set" if transition.was_active else "already clear",
         )
 
+    @_track_tesla_settings_control
+    async def handle_resume_powerwall_settings(call: ServiceCall) -> dict:
+        """Release this incident to cloud control under explicit supervision."""
+        runtime = hass.data[DOMAIN][entry.entry_id]
+        if (active_battery_system != BATTERY_SYSTEM_TESLA
+                or call.data.get("entry_id") != entry.entry_id
+                or call.data.get("acknowledge") is not True):
+            raise HomeAssistantError("Select the Tesla entry and explicitly acknowledge the unresolved write risk")
+        task = asyncio.current_task()
+        recovery_tasks = runtime.setdefault("powerwall_settings_recovery_tasks", set())
+        recovery_tasks.add(task)
+        try:
+            async with runtime.setdefault("powerwall_settings_recovery_lock", asyncio.Lock()):
+                configured_site = entry.data.get(CONF_TESLA_ENERGY_SITE_ID)
+                def current():
+                    latest = hass.config_entries.async_get_entry(entry.entry_id)
+                    return (hass.data.get(DOMAIN, {}).get(entry.entry_id) is runtime
+                            and not runtime.get("powerwall_local_dispatch_stopping")
+                            and latest is not None
+                            and latest.data.get(CONF_TESLA_ENERGY_SITE_ID) == configured_site)
+                incident = runtime.get("powerwall_settings_pending")
+                if (not current() or not isinstance(incident, dict)
+                        or not incident.get("id") or incident.get("id") != call.data.get("incident_id")
+                        or incident.get("site_id") != call.data.get("site_id")):
+                    raise HomeAssistantError("Powerwall recovery incident or site changed; use the current Repairs notice")
+                if (incident.get("resume_cloud") is True
+                        and runtime.get("powerwall_settings_cloud_handoff") == incident["id"]):
+                    return {"success": True, "route": "cloud", "incident_id": incident["id"]}
+                runtime["powerwall_settings_recovering"] = task
+                # Supersede pre-send authority before the first persistence
+                # await. Actual submitted RPCs remain tracked for receipts.
+                _command_generation[0] += 1
+                runtime["powerwall_settings_epoch"] = runtime.get("powerwall_settings_epoch", 0) + 1
+                _cancel_all_force_timers("supervised Powerwall settings recovery")
+                foreground = set(runtime.get("powerwall_settings_tasks", ())) | set(runtime.get("powerwall_settings_control_tasks", ()))
+                for owner in foreground - recovery_tasks:
+                    if not owner.done():
+                        owner.cancel()
+                resumed = None
+                def transition(data):
+                    nonlocal resumed
+                    pending = data.get("tesla_settings_pending")
+                    if (not isinstance(pending, dict) or pending.get("id") != incident["id"]
+                            or pending.get("site_id") != incident["site_id"]):
+                        return None
+                    resumed = (dict(pending) if pending.get("resume_cloud") is True
+                               else {**pending, "resume_cloud": True, "resumed_at": time.time()})
+                    resumed.setdefault("restore_basis", {key: data.get(key) for key in (
+                        "force_mode_state", "pending_tesla_restore")}
+                        if pending.get("site_id") == str(configured_site) else {})
+                    return {"tesla_settings_pending": resumed}
+                if (not await _update_powerwall_store(store, transition, is_current=current, verify=True)
+                        or not current()):
+                    raise HomeAssistantError("Powerwall recovery state changed; settings remain blocked")
+                runtime["powerwall_settings_pending"] = resumed
+                # The old mutex can still belong to a superseded foreground
+                # request. Its pre-send epoch is revoked; new cloud requests
+                # serialize independently without waiting for its lost reply.
+                runtime["powerwall_settings_lock"] = asyncio.Lock()
+                runtime["powerwall_settings_cloud_handoff"] = resumed["id"]
+                _sync_powerwall_settings_issue(hass, entry.entry_id, resumed)
+                return {"success": True, "route": "cloud", "incident_id": resumed["id"]}
+        finally:
+            if runtime.get("powerwall_settings_recovering") is task:
+                runtime.pop("powerwall_settings_recovering", None)
+            recovery_tasks.discard(task)
+
     async def handle_reconcile_solaredge_control(call: ServiceCall) -> dict:
         """Validate fresh upstream storage readback before clearing the safety latch."""
         target_entry_id = call.data.get("entry_id")
@@ -42634,7 +42791,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         'set_autonomous': handle_set_autonomous,
         'set_backup_reserve': handle_set_backup_reserve,
         'hold_battery_soc': handle_hold_battery_soc,
+        'resume_powerwall_settings': handle_resume_powerwall_settings,
     })
+    hass.services.async_register(
+        DOMAIN, "resume_powerwall_settings",
+        routed_handler(hass, entry.entry_id, "resume_powerwall_settings", handle_resume_powerwall_settings),
+        supports_response=SupportsResponse.OPTIONAL,
+    )
     hass.services.async_register(
         DOMAIN,
         "reconcile_solaredge_control",
@@ -48565,11 +48728,12 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                          if task is not current_task and not task.done())
         if controls:
             await asyncio.gather(*controls, return_exceptions=True)
-        # These are actual signed RPCs, protected from the request's local
-        # timeout. Drain them explicitly before a replacement setup can write.
+        # Keep receipt observation alive without holding reload hostage to a
+        # lost reply. Setup reuses their Store lock and tracking set; the
+        # durable incident still blocks writes unless explicitly released.
         submissions = tuple(entry_data.get("powerwall_settings_submissions", ()))
         if submissions:
-            await asyncio.gather(*submissions, return_exceptions=True)
+            await asyncio.wait(submissions, timeout=5.0)
 
     # Fence callbacks from this setup before any await below.  A dispatcher
     # callback can already be queued on the event loop (or be waiting on the
