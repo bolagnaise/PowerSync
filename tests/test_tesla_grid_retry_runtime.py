@@ -188,7 +188,7 @@ def test_discharge_cannot_change_mode_after_admission_changes_during_grid_wait(c
     async def persist():
         persisted.append(force_state.get("command_status"))
 
-    async def capture(state, site_configs, *, is_current):
+    async def capture(state, site_configs, *, is_current, capture_export_rule=True):
         # The extracted preparation path normally obtains these from the
         # preceding Tesla site_info capture.
         state["saved_operation_mode"] = "self_consumption"

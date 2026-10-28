@@ -1,4 +1,4 @@
-"""Tariff discharge explicitly enables battery export when Tesla omits its rule."""
+"""Tariff export acceptance and recovery without an export-rule restore dependency."""
 from __future__ import annotations
 
 import ast
@@ -29,6 +29,7 @@ def preparation(states, *, local_config=None, export_confirmed=True, grid_confir
 
     async def export(*args, **kwargs):
         assert persisted, "restore targets must be durable before enabling export"
+        assert kwargs["require_readback"] is False
         writes.append(("export", args[1]))
         return export_confirmed
 
@@ -65,153 +66,113 @@ def preparation(states, *, local_config=None, export_confirmed=True, grid_confir
     return ns, state, persisted, writes
 
 
-@pytest.mark.parametrize("status", ["absent", "null", "unavailable"])
-def test_tariff_missing_original_rule_uses_explicit_durable_battery_export_fallback(status):
-    ns, state, persisted, writes = preparation({"site": {"saved_export_rule": None, "saved_export_rule_status": status}})
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ack", [{"response": {"result": True}}, {"response": {"code": 204, "message": "Updated"}}])
+async def test_tariff_accepts_export_receipt_without_claiming_readback(monkeypatch, ack):
+    fn, ns, runtime, session = export_confirmation_context(monkeypatch, ack, {})
+    assert await fn([("site", "token", "fleet")], "battery_ok", reason="force discharge export preparation", require_readback=False)
+    assert session.post.call_count == 1
+    assert session.get.call_count == 0
+    assert runtime["powerwall_setting_observations"]["grid_export_rule"]["source"] == "unknown"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ack", [{"response": {"result": False}}, {"response": {"code": 500, "message": "Error"}}, {}])
+async def test_tariff_rejected_or_unknown_receipt_still_fails(monkeypatch, ack):
+    fn, ns, runtime, session = export_confirmation_context(monkeypatch, ack, {})
+    assert not await fn([("site", "token", "fleet")], "battery_ok", reason="force discharge export preparation", require_readback=False)
+    assert not session.get.called
+
+
+@pytest.mark.parametrize("original", [None, "never", "pv_only", "battery_ok", "invalid"])
+def test_tariff_preparation_marks_export_untracked_and_keeps_grid_confirmation(original):
+    ns, state, persisted, writes = preparation({"site": {"saved_export_rule": original}})
     asyncio.run(ns["prepare"]())
     saved = persisted[0]["saved_states"]["site"]
-    assert saved["saved_export_rule"] == "battery_ok"
-    assert saved["saved_export_rule_source"] == "fallback_missing"
-    assert state["saved_export_rule"] == "battery_ok"
+    assert saved["export_permission_untracked"] is True
+    assert "saved_export_rule" not in saved
+    assert state["saved_export_rule"] is None
     assert writes == [("export", "battery_ok"), ("grid", False), ("mode", "autonomous")]
-
-
-@pytest.mark.parametrize("rule", ["never", "pv_only", "battery_ok"])
-def test_tariff_preserves_observed_original_rule(rule):
-    ns, state, persisted, writes = preparation({"site": {"saved_export_rule": rule, "saved_export_rule_source": "cloud"}})
-    asyncio.run(ns["prepare"]())
-    assert persisted[0]["saved_states"]["site"]["saved_export_rule"] == rule
-    assert persisted[0]["saved_states"]["site"]["saved_export_rule_source"] == "cloud"
-    assert writes[0] == ("export", "battery_ok")
-
-
-@pytest.mark.parametrize("status", ["invalid", "conflict"])
-def test_tariff_rejects_malformed_or_conflicting_original_without_writes(status):
-    ns, state, persisted, writes = preparation({"site": {"saved_export_rule": None, "saved_export_rule_status": status}})
-    with pytest.raises(RuntimeError, match="original Tesla export permission"):
-        asyncio.run(ns["prepare"]())
-    assert not persisted and not writes
-
-
-def test_tariff_missing_secondary_rule_does_not_inherit_primary_permission():
-    ns, state, persisted, writes = preparation({
-        "site": {"saved_export_rule": "never", "saved_export_rule_source": "cloud"},
-        "second": {"saved_export_rule": None, "saved_export_rule_status": "absent"}})
-    asyncio.run(ns["prepare"]())
-    saved = persisted[0]["saved_states"]
-    assert saved["site"]["saved_export_rule"] == "never"
-    assert saved["second"]["saved_export_rule"] == "battery_ok"
-    assert saved["second"]["saved_export_rule_source"] == "fallback_missing"
-
-
-@pytest.mark.parametrize("local_rule", ["never", "pv_only", "battery_ok"])
-def test_tariff_prefers_real_local_rule_over_missing_cloud(local_rule):
-    ns, state, persisted, writes = preparation({"site": {"saved_export_rule": None, "saved_export_rule_status": "absent"}},
-                                               local_config={"site_info": {"customer_preferred_export_rule": local_rule}})
-    asyncio.run(ns["prepare"]())
-    assert persisted[0]["saved_states"]["site"]["saved_export_rule"] == local_rule
-    assert persisted[0]["saved_states"]["site"]["saved_export_rule_source"] == "local"
+    ns["update_cached_export_rule"].assert_not_awaited()
 
 
 @pytest.mark.parametrize("export_confirmed,grid_confirmed,expected", [
     (False, True, [("export", "battery_ok")]),
     (True, False, [("export", "battery_ok"), ("grid", False)]),
 ])
-def test_tariff_fallback_keeps_post_write_confirmation_gates(export_confirmed, grid_confirmed, expected):
-    ns, state, persisted, writes = preparation({"site": {"saved_export_rule": None, "saved_export_rule_status": "absent"}},
-                                               export_confirmed=export_confirmed, grid_confirmed=grid_confirmed)
+def test_tariff_acceptance_does_not_bypass_rejection_or_grid_guard(export_confirmed, grid_confirmed, expected):
+    ns, state, persisted, writes = preparation({"site": {}}, export_confirmed=export_confirmed, grid_confirmed=grid_confirmed)
     with pytest.raises(RuntimeError):
         asyncio.run(ns["prepare"]())
     assert writes == expected
-    assert persisted[0]["saved_states"]["site"]["saved_export_rule_source"] == "fallback_missing"
-
-
-@pytest.mark.parametrize("local_rule", ["invalid", True, {}])
-def test_tariff_malformed_local_rule_is_not_treated_as_missing(local_rule):
-    ns, state, persisted, writes = preparation({"site": {"saved_export_rule": None, "saved_export_rule_status": "absent"}},
-                                               local_config={"site_info": {"customer_preferred_export_rule": local_rule}})
-    with pytest.raises(RuntimeError, match="original Tesla export permission"):
-        asyncio.run(ns["prepare"]())
-    assert not persisted and not writes
-
-
-@pytest.mark.parametrize("rule", [None, "pv_only"])
-def test_tariff_legacy_active_session_without_per_site_state_can_be_extended(rule):
-    ns, state, persisted, writes = preparation({"site": {"saved_export_rule": rule}})
-    ns["was_already_force_discharging"] = True
-    state["saved_states"] = {}
-    asyncio.run(ns["prepare"]())
-    assert persisted[0]["saved_states"]["site"]["saved_export_rule"] == (rule or "battery_ok")
-    assert writes[0] == ("export", "battery_ok")
-
-
-def test_tariff_legacy_multi_site_primary_original_remains_exact():
-    ns, state, persisted, writes = preparation({"site": {"saved_export_rule": "never"}, "second": {}})
-    ns["was_already_force_discharging"] = True
-    state["saved_states"] = {}
-    asyncio.run(ns["prepare"]())
-    states = persisted[0]["saved_states"]
-    assert states["site"]["saved_export_rule"] == "never"
-    assert states["second"]["saved_export_rule"] == "battery_ok"
-    assert states["second"]["saved_export_rule_source"] == "fallback_missing"
 
 
 @pytest.mark.asyncio
-async def test_tariff_fallback_provenance_survives_real_journal_save():
+@pytest.mark.parametrize("provenance", ["new", "fallback_missing"])
+async def test_retained_tariff_export_dependency_clears_after_other_restore_succeeds(provenance):
+    ns, runtime, saved, call = restore_context(direction="discharge")
+    basis = {"saved_export_rule": "battery_ok", "saved_tariff": {"name": "original"}}
+    basis.update({"export_permission_untracked": True} if provenance == "new" else {"saved_export_rule_source": "fallback_missing"})
+    state = ns["force_discharge_state"]
+    state.update(command_status="restore_pending", saved_export_rule="battery_ok", saved_states={"site": basis})
+    ns["_tesla_force_apply_export_rule"].return_value = False
+    runtime["pending_tesla_restore"] = {"reason": "old export confirmation failed"}
+    assert (await ns["handle_restore_normal"](call))["success"] is True
+    ns["_tesla_force_apply_export_rule"].assert_not_awaited()
+    assert saved["force_mode_state"] is None and saved["pending_tesla_restore"] is None
+    assert runtime["pending_tesla_restore"] is None and not state["active"]
+
+
+@pytest.mark.asyncio
+async def test_retained_untracked_export_still_preserves_failed_mode_restore():
+    ns, runtime, saved, call = restore_context(direction="discharge")
+    ns["force_discharge_state"].update(saved_states={"site": {"export_permission_untracked": True}})
+    ns["_tesla_force_apply_operation_mode"].return_value = {"confirmed_sites": [], "failed_sites": ["site"]}
+    assert (await ns["handle_restore_normal"](call))["success"] is False
+    assert saved["force_mode_state"] and runtime["pending_tesla_restore"]
+    ns["_tesla_force_apply_export_rule"].assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_legacy_known_export_preference_keeps_strict_restoration():
+    ns, runtime, saved, call = restore_context(direction="discharge")
+    ns["force_discharge_state"].update(saved_states={"site": {"saved_export_rule": "pv_only", "saved_export_rule_source": "cloud"}})
+    ns["_tesla_force_apply_export_rule"].return_value = False
+    assert (await ns["handle_restore_normal"](call))["success"] is False
+    assert ns["_tesla_force_apply_export_rule"].await_args.args[1] == "pv_only"
+    assert runtime["pending_tesla_restore"]
+
+
+@pytest.mark.asyncio
+async def test_untracked_export_policy_survives_journal_and_startup_replay():
+    from test_tesla_local_settings import hydrate_payload
     ns, runtime, saved, call = restore_context(direction="discharge")
     state = ns["force_discharge_state"]
-    state.update(command_status="awaiting_grid_confirmation", saved_export_rule="battery_ok",
-                 saved_states={"site": {"saved_export_rule": "battery_ok", "saved_export_rule_source": "fallback_missing"}})
+    state.update(command_status="awaiting_grid_confirmation", saved_states={"site": {"export_permission_untracked": True}})
     assert await ns["persist_force_mode_state"]()
-    journal = saved["force_mode_state"]
-    assert journal["saved_states"]["site"]["saved_export_rule_source"] == "fallback_missing"
-    # The durable JSON is the only state a restarted process can use.
     import json
-    replay = json.loads(json.dumps(journal))
-    assert replay["saved_states"]["site"]["saved_export_rule"] == "battery_ok"
+    payload = json.loads(json.dumps(saved["force_mode_state"]))
+    await hydrate_payload(ns, payload)
+    assert ns["force_discharge_state"]["saved_states"]["site"]["export_permission_untracked"] is True
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("confirmed", [True, False])
-async def test_tariff_restore_uses_persisted_fallback_and_retains_failed_restore(confirmed):
-    ns, runtime, saved, call = restore_context(direction="discharge")
-    state = ns["force_discharge_state"]
-    state.update(saved_export_rule="battery_ok", saved_states={"site": {
-        "saved_export_rule": "battery_ok", "saved_export_rule_source": "fallback_missing"}})
-    ns["_tesla_force_apply_export_rule"].return_value = confirmed
-    result = await ns["handle_restore_normal"](call)
-    export = ns["_tesla_force_apply_export_rule"]
-    assert export.await_args.args[1] == "battery_ok"
-    assert result["success"] is confirmed
-    if confirmed:
-        assert saved["force_mode_state"] is None
-    else:
-        assert saved["force_mode_state"]["saved_states"]["site"]["saved_export_rule_source"] == "fallback_missing"
-        assert runtime["pending_tesla_restore"]
+async def test_tariff_acceptance_still_requires_every_gateway(monkeypatch):
+    from test_tesla_local_settings import HttpReply
+    fn, ns, runtime, session = export_confirmation_context(monkeypatch, {}, {})
+    session.post.side_effect = [HttpReply({"response": {"code": 204, "message": "Updated"}}),
+                                HttpReply({"response": {"result": False}})]
+    assert not await fn([("site", "token", "fleet"), ("second", "token", "fleet")],
+                        "battery_ok", reason="force discharge export preparation", require_readback=False)
+    assert session.post.call_count == 2 and session.get.call_count == 0
 
 
 @pytest.mark.asyncio
-async def test_tariff_export_receipt_retains_failed_restore_then_completes_on_readback(monkeypatch):
+async def test_obsolete_export_target_cannot_clear_an_uncertain_signed_submission():
     ns, runtime, saved, call = restore_context(direction="discharge")
-    state = ns["force_discharge_state"]
-    state.update(saved_export_rule="battery_ok", saved_states={"site": {
-        "saved_export_rule": "battery_ok", "saved_export_rule_source": "fallback_missing"}})
-    readback = {"components": {"customer_preferred_export_rule": None}}
-    _, _, _, session = export_confirmation_context(
-        monkeypatch, {"response": {"code": 204, "message": "Updated"}},
-        readback, context=(ns, runtime),
-    )
-    result = await ns["handle_restore_normal"](call)
-    assert result["success"] is False
-    assert state["active"] and runtime["pending_tesla_restore"]
-    assert saved["force_mode_state"]["saved_states"]["site"]["saved_export_rule_source"] == "fallback_missing"
-
-    readback["components"]["customer_preferred_export_rule"] = "battery_ok"
-    result = await ns["handle_restore_normal"](call)
-    assert result["success"] is True
-    assert not state["active"]
-    assert saved["force_mode_state"] is None
-    assert saved["pending_tesla_restore"] is None
-    assert runtime["pending_tesla_restore"] is None
-    assert session.post.call_count == 2
-    assert session.get.call_count == 4
+    ns["force_discharge_state"].update(saved_states={"site": {"export_permission_untracked": True}})
+    runtime["powerwall_settings_pending"] = {"id": "uncertain", "site_id": "site"}
+    assert (await ns["handle_restore_normal"](call))["success"] is False
+    assert saved["force_mode_state"] and runtime["pending_tesla_restore"]
+    assert runtime["powerwall_settings_pending"]["id"] == "uncertain"
+    ns["_tesla_force_apply_export_rule"].assert_not_awaited()

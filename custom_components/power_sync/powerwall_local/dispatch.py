@@ -136,6 +136,7 @@ async def dispatch_powerwall_setting(
     cloud_call: CloudCall, is_current: Callable[[], bool], deadline: float,
     acknowledged=None, before_submit=None, prefer_local=True,
     guard_write=None, operation_id=None, is_allowed=None, allow_stopping=False, label: str,
+    cloud_observation_confirmed=True,
 ) -> bool:
     """One bounded optional settings transaction, separate from watt control."""
     runtime = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
@@ -260,7 +261,10 @@ async def dispatch_powerwall_setting(
         if not allowed():
             return False
         if confirmed and primary_site:
-            _record_setting_observation(runtime, updates, source)
+            _record_setting_observation(
+                runtime, updates,
+                source if source == "local" or cloud_observation_confirmed else "unknown",
+            )
         return confirmed
     finally:
         if acquired:
