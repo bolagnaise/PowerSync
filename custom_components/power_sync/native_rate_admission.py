@@ -212,7 +212,11 @@ async def refresh_managed_records(hass, budget):
         registration = registry.async_get(record.get("entity_id"))
         if _identity(registration) != record["identity"]:
             continue
-        state = hass.states.get(record.get("setting_entity_id"))
+        # Legacy starts may reserve demand without a usable current setting.
+        # HA's state lookup requires an entity ID; absent readback must remain
+        # unknown so reconciliation retains the uncertain reservation.
+        setting_entity_id = record.get("setting_entity_id")
+        state = hass.states.get(setting_entity_id) if setting_entity_id else None
         charge = _section(vehicle_report(hass, vin) or {}, "charge_state")
         current = _number(charge.get("charger_actual_current"))
         unit = charging_unit_w(charge, {})

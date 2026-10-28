@@ -82,6 +82,49 @@ async def test_current_and_start_reuse_one_vin_demand_without_double_counting(ad
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('platform', ['esphome', 'tesla_fleet'])
+@pytest.mark.parametrize('operation', ['start', 'rate'])
+@pytest.mark.parametrize('restart', [False, True])
+async def test_legacy_start_without_current_does_not_poison_later_commands(
+    admission, platform, operation, restart,
+):
+    a = admission
+    registry = sys.modules['homeassistant.helpers.entity_registry'].async_get(a.hass)
+    for registration in registry.entities.values():
+        registration.platform = platform
+
+    # HA normalizes entity IDs with lower(); unlike dict.get, it rejects None.
+    def get_state(entity_id):
+        entity_id = entity_id.lower()
+        return a.state if entity_id == a.state.entity_id else None
+
+    a.hass.states.get = get_state
+    a.budget.armed_sites.clear()
+    a.state.state = 'unavailable'
+    assert await a.m.prepare_ev_submission(a.hass, 'switch.car_charge', operation='start')
+    assert a.budget.managed[VIN]['setting_entity_id'] is None
+    reserved = a.budget.managed[VIN]['reserved_w']
+
+    if restart:
+        a.budget = a.b.SharedRateBudget(a.store, clock=lambda: NOW)
+        await a.budget.load()
+        a.hass.data[a.b.RUNTIME_KEY] = a.budget
+
+    # Missing readback must retain the uncertain demand, not abort all commands
+    # or release capacity on the strength of a missing current setting.
+    await a.m.refresh_managed_records(a.hass, a.budget)
+    assert a.budget.managed[VIN]['reserved_w'] == reserved
+    a.state.state = '10'
+    assert await a.m.prepare_ev_submission(
+        a.hass,
+        'switch.car_charge' if operation == 'start' else a.state.entity_id,
+        operation=operation,
+        amps=10 if operation == 'rate' else None,
+    )
+    assert a.budget.managed[VIN]['reserved_w'] >= reserved
+
+
+@pytest.mark.asyncio
 async def test_start_cannot_energize_unknown_or_zero_programmed_current(admission):
     a = admission
     for setting in ('unknown', '0'):
