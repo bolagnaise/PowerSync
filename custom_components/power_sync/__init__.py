@@ -24277,10 +24277,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # set so a late receipt cannot race a replacement setup's durable writes.
     settings_state = hass.data.setdefault(f"{DOMAIN}_settings", {}).setdefault(entry.entry_id, {})
     store = settings_state.setdefault("store", Store(hass, STORAGE_VERSION, f"{STORAGE_KEY}.{entry.entry_id}", atomic_writes=True))
-    hass.data[DOMAIN][entry.entry_id]["powerwall_settings_submissions"] = settings_state.setdefault("submissions", set())
+    # The entry runtime is published below, after storage has been restored.
+    # Build its settings state locally so fresh startup needs no prior entry.
+    settings_runtime = {
+        "powerwall_settings_submissions": settings_state.setdefault("submissions", set()),
+    }
     async with vars(store).setdefault("_power_sync_update_lock", asyncio.Lock()):
         stored_data = await store.async_load() or {}
-        settings_runtime = hass.data[DOMAIN][entry.entry_id]
         settings_runtime["powerwall_settings_pending"] = pending_settings = stored_data.get("tesla_settings_pending")
         if pending_settings and pending_settings.get("resume_cloud") is True:
             settings_runtime["powerwall_settings_lock"] = asyncio.Lock()
@@ -24378,6 +24381,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if tesla_site_country is None and tesla_coordinator:
         tesla_site_country = getattr(tesla_coordinator, "_site_country", None)
     hass.data[DOMAIN][entry.entry_id] = {
+        **settings_runtime,
         "amber_smartshift_coordinator": amber_smartshift_coordinator,
         "is_amber_smartshift": is_amber_smartshift,
         "amber_coordinator": amber_coordinator,

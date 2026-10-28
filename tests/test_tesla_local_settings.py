@@ -16,6 +16,76 @@ import aiohttp
 ROOT = Path(__file__).parents[1] / "custom_components/power_sync"
 
 
+def load_settings_startup(namespace):
+    """Run the actual storage prelude and full runtime publication from setup."""
+    import builtins
+
+    setup = next(node for node in ast.parse((ROOT / "__init__.py").read_text()).body
+                 if isinstance(node, ast.AsyncFunctionDef) and node.name == "async_setup_entry")
+    start = next(i for i, node in enumerate(setup.body)
+                 if isinstance(node, ast.Assign) and any(
+                     isinstance(target, ast.Name) and target.id == "settings_state"
+                     for target in node.targets))
+    stop = next(i for i, node in enumerate(setup.body[start:], start)
+                if isinstance(node, ast.Assign) and any(
+                    isinstance(target, ast.Name) and target.id == "stored_grid_charging_preferences"
+                    for target in node.targets))
+    publish_start = next(i for i, node in enumerate(setup.body)
+                         if isinstance(node, ast.Assign) and any(
+                             isinstance(target, ast.Name) and target.id == "existing_entry_data"
+                             for target in node.targets))
+    publish_end = next(i for i, node in enumerate(setup.body[publish_start:], publish_start)
+                       if isinstance(node, ast.Assign) and any(
+                           ast.unparse(target) == "hass.data[DOMAIN][entry.entry_id]"
+                           for target in node.targets))
+    wrapper = ast.AsyncFunctionDef(
+        name="settings_startup", args=ast.arguments(posonlyargs=[], args=[], kwonlyargs=[],
+                                                  kw_defaults=[], defaults=[]),
+        body=setup.body[start:stop] + setup.body[publish_start:publish_end + 1],
+        decorator_list=[])
+    # Unrelated coordinator fields are inert. Keep the real dictionary assembly
+    # so a later replacement cannot silently discard restored recovery state.
+    for node in ast.walk(wrapper):
+        if (isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+                and node.id not in namespace and not hasattr(builtins, node.id)):
+            namespace[node.id] = node.id if node.id.startswith("CONF_") else None
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[wrapper], type_ignores=[])),
+                 "settings_startup", "exec"), namespace)
+    return namespace["settings_startup"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("initial_data", [{}, {"power_sync": {"other": {"sentinel": True}}},
+                                         {"power_sync": {"entry": {"tesla_capabilities": {"probe": True}}}}])
+@pytest.mark.parametrize("pending", [None, {"id": "uncertain", "site_id": "site"},
+                                     {"id": "resumed", "site_id": "site", "resume_cloud": True}])
+async def test_settings_startup_publishes_recovery_state_without_preexisting_runtime(initial_data, pending):
+    hass = SimpleNamespace(data=copy.deepcopy(initial_data))
+    entry = SimpleNamespace(entry_id="entry", data={}, options={})
+    saved = {"tesla_settings_pending": pending}
+    store = SimpleNamespace(async_load=AsyncMock(return_value=saved))
+    submissions = set()
+    hass.data["power_sync_settings"] = {"entry": {"store": store, "submissions": submissions}}
+    ns = dict(hass=hass, entry=entry, asyncio=asyncio, DOMAIN="power_sync",
+              STORAGE_VERSION=1, STORAGE_KEY="settings", Store=Mock(return_value=store),
+              _sync_powerwall_settings_issue=Mock())
+    await load_settings_startup(ns)()
+    runtime = hass.data["power_sync"]["entry"]
+    assert runtime["store"] is store
+    assert runtime["powerwall_settings_submissions"] is submissions
+    assert runtime["powerwall_settings_pending"] is pending
+    ns["_sync_powerwall_settings_issue"].assert_called_once_with(hass, "entry", pending)
+    if pending and pending.get("resume_cloud"):
+        assert isinstance(runtime["powerwall_settings_lock"], asyncio.Lock)
+        assert runtime["powerwall_settings_cloud_handoff"] == "resumed"
+    else:
+        assert runtime.get("powerwall_settings_cloud_handoff") is None
+    if "other" in initial_data.get("power_sync", {}):
+        assert hass.data["power_sync"]["other"] == {"sentinel": True}
+    if "entry" in initial_data.get("power_sync", {}):
+        assert runtime["tesla_capabilities"] == {"probe": True}
+
+
 def load_function(path, name, namespace, *, strip_imports=False):
     node = next(n for n in ast.walk(ast.parse(path.read_text()))
                 if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and n.name == name)
@@ -756,25 +826,21 @@ async def test_setup_install_cannot_recreate_old_gate_while_terminal_receipt_sav
         return value
     ns["store"].async_load.side_effect = paused_load
     runtime.clear()  # Replacement setup has not installed its pending state.
-    tree = ast.parse((ROOT / "__init__.py").read_text())
-    setup = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == "async_setup_entry")
-    load_install = next(n for n in setup.body if isinstance(n, ast.AsyncWith)
-                        and "_power_sync_update_lock" in ast.unparse(n.items))
-    wrapper = ast.parse("async def install_settings(): pass").body[0]
-    wrapper.body = [load_install]
-    exec(compile(ast.fix_missing_locations(ast.Module(body=[wrapper], type_ignores=[])), "setup_settings", "exec"), ns)
-    install = asyncio.create_task(ns["install_settings"]())
+    ns["hass"].data["power_sync_settings"] = {"entry": {"store": ns["store"]}}
+    ns.update(STORAGE_VERSION=1, STORAGE_KEY="test")
+    install = asyncio.create_task(load_settings_startup(ns)())
     await started.wait()
     async def receipt():
         value = await ns["_record_tesla_settings_submission"](None, previous=original)
-        if (runtime.get("powerwall_settings_pending") or {}).get("id") == original["id"]:
-            runtime["powerwall_settings_pending"] = value
+        active_runtime = ns["hass"].data["power_sync"]["entry"]
+        if (active_runtime.get("powerwall_settings_pending") or {}).get("id") == original["id"]:
+            active_runtime["powerwall_settings_pending"] = value
     terminal = asyncio.create_task(receipt())
     await asyncio.sleep(0)
     release.set()
     await asyncio.gather(install, terminal)
     assert saved["tesla_settings_pending"] is None
-    assert runtime["powerwall_settings_pending"] is None
+    assert ns["hass"].data["power_sync"]["entry"]["powerwall_settings_pending"] is None
 
 
 def test_repair_notice_is_persistent_and_cannot_release_by_dismissal():
@@ -843,15 +909,8 @@ async def test_full_unload_and_settings_setup_boundary_keep_released_cloud_avail
     try:
         assert await asyncio.wait_for(unload(ns["hass"], ns["entry"]), .5)
         assert not receipt.done()
-        ns["hass"].data["power_sync"]["entry"] = {}
-        tree = ast.parse((ROOT / "__init__.py").read_text())
-        setup = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == "async_setup_entry")
-        first = next(i for i,n in enumerate(setup.body) if isinstance(n,ast.Assign)
-                     and any(isinstance(t,ast.Name) and t.id == "settings_state" for t in n.targets))
-        wrapper = ast.parse("async def install_settings(): pass").body[0]
-        wrapper.body = setup.body[first:first+4]  # Actual Store/tracking/load/publication boundary.
-        exec(compile(ast.fix_missing_locations(ast.Module(body=[wrapper],type_ignores=[])),"settings_setup","exec"),ns)
-        await ns["install_settings"]()
+        # A reload must not rely on an artificially pre-created entry mapping.
+        await load_settings_startup(ns)()
         replacement = ns["hass"].data["power_sync"]["entry"]
         assert replacement["powerwall_settings_submissions"] is submissions
         assert replacement["powerwall_settings_pending"]["resume_cloud"] is True
