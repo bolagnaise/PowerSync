@@ -230,7 +230,7 @@ def test_optimizer_solve_waits_for_deferred_startup_restore():
         "await self._optimization_lock.acquire()"
     )
     assert 'getattr(self, "_deferred_restore_task", None)' in wait_source
-    assert "await restore_task" in wait_source
+    assert "await asyncio.shield(restore_task)" in wait_source
     assert "restore_task is asyncio.current_task()" in wait_source
 
 

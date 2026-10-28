@@ -5930,6 +5930,135 @@ def test_optimizer_waits_for_startup_hardware_restore_task(opt_module):
     assert result is True
 
 
+def test_cancelled_solve_does_not_cancel_shared_startup_restore(opt_module):
+    async def run():
+        coordinator = object.__new__(opt_module.OptimizationCoordinator)
+        coordinator._enabled = True
+        allow_restore = asyncio.Event()
+        restore_task = asyncio.create_task(allow_restore.wait())
+        coordinator._deferred_restore_task = restore_task
+        waiter = asyncio.create_task(coordinator._wait_for_deferred_enable_restore())
+        await asyncio.sleep(0)
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        try:
+            assert not restore_task.done()
+            allow_restore.set()
+            assert await coordinator._wait_for_deferred_enable_restore() is True
+        finally:
+            restore_task.cancel()
+            await asyncio.gather(restore_task, return_exceptions=True)
+
+    asyncio.run(run())
+
+
+def test_superseded_startup_restore_does_not_stop_polling(opt_module):
+    async def run():
+        coordinator = object.__new__(opt_module.OptimizationCoordinator)
+        coordinator._enabled = True
+        coordinator.hass = SimpleNamespace(
+            async_create_background_task=lambda coro, _name: asyncio.create_task(coro)
+        )
+        restore_started = asyncio.Event()
+        supersede_restore = asyncio.Event()
+        restore_attempts = 0
+        solves = []
+
+        async def restore():
+            nonlocal restore_attempts
+            restore_attempts += 1
+            if restore_attempts == 1:
+                restore_started.set()
+                await supersede_restore.wait()
+                # The Tesla settings dispatcher uses cancellation when a newer
+                # settings owner supersedes the startup hardware operation.
+                raise asyncio.CancelledError("Powerwall settings request superseded")
+
+        async def optimize(**_kwargs):
+            ready = await coordinator._wait_for_deferred_enable_restore()
+            solves.append(ready)
+            if ready:
+                coordinator._enabled = False
+
+        async def no_action():
+            pass
+
+        coordinator._deferred_enable_restore = restore
+        coordinator._deferred_restore_task = asyncio.create_task(restore())
+        coordinator._should_restore_pre_idle_backup_reserve_from_polling = lambda: False
+        coordinator._seconds_until_next_interval = lambda: 0
+        coordinator._seconds_until_initial_optimization_allowed = lambda: 0
+        coordinator._execute_cached_current_action_if_changed = no_action
+        coordinator.async_set_updated_data = lambda _data: None
+        coordinator.get_api_data = lambda: {}
+        coordinator._run_optimization = optimize
+        polling = asyncio.create_task(coordinator._schedule_polling_loop())
+        await restore_started.wait()
+        await asyncio.sleep(0)
+        supersede_restore.set()
+        await asyncio.wait_for(polling, timeout=1)
+        assert solves == [False, True]
+        assert restore_attempts == 2
+
+    asyncio.run(run())
+
+
+def test_cancelled_startup_restore_retry_is_shared_and_still_blocks_solves(opt_module):
+    async def run():
+        coordinator = object.__new__(opt_module.OptimizationCoordinator)
+        coordinator._enabled = True
+        coordinator.hass = SimpleNamespace(
+            async_create_background_task=lambda coro, _name: asyncio.create_task(coro)
+        )
+        allow_restore = asyncio.Event()
+        restore_attempts = 0
+
+        async def restore():
+            nonlocal restore_attempts
+            restore_attempts += 1
+            await allow_restore.wait()
+
+        coordinator._deferred_enable_restore = restore
+        old_restore = asyncio.create_task(asyncio.sleep(0))
+        old_restore.cancel()
+        await asyncio.gather(old_restore, return_exceptions=True)
+        coordinator._deferred_restore_task = old_restore
+        waiters = [asyncio.create_task(coordinator._wait_for_deferred_enable_restore())
+                   for _ in range(3)]
+        try:
+            for _ in range(3):
+                await asyncio.sleep(0)
+            assert all(not task.done() for task in waiters)
+            assert restore_attempts == 1
+            allow_restore.set()
+            assert await asyncio.gather(*waiters) == [True, True, True]
+        finally:
+            for task in waiters:
+                task.cancel()
+            await asyncio.gather(*waiters, return_exceptions=True)
+
+    asyncio.run(run())
+
+
+def test_disabled_optimizer_does_not_retry_cancelled_startup_restore(opt_module):
+    async def run():
+        coordinator = object.__new__(opt_module.OptimizationCoordinator)
+        coordinator._enabled = True
+        restore = asyncio.create_task(asyncio.Event().wait())
+        coordinator._deferred_restore_task = restore
+        waiter = asyncio.create_task(coordinator._wait_for_deferred_enable_restore())
+        await asyncio.sleep(0)
+        coordinator._enabled = False
+        restore.cancel()
+        assert await waiter is False
+        # No hass/task factory is needed: disabled retries must not reach it.
+        assert await coordinator._wait_for_deferred_enable_restore() is False
+        assert coordinator._deferred_restore_task is restore
+
+    asyncio.run(run())
+
+
 def test_rejected_optimizer_export_does_not_record_active_force_state(opt_module):
     battery = _FakeBattery(force_discharge_result=False)
     coordinator = _execution_coordinator(opt_module, battery, soc=0.80)

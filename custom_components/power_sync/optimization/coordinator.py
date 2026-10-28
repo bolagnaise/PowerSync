@@ -6038,20 +6038,41 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         Otherwise a late startup self-consumption restore can cancel a force
         action that the first optimizer solve has just issued.
         """
+        if not self._enabled:
+            return False
         restore_task = getattr(self, "_deferred_restore_task", None)
         if restore_task is None or restore_task is asyncio.current_task():
             return self._enabled
+
+        if restore_task.cancelled():
+            # A superseded hardware write can cancel restoration without
+            # disabling the optimizer. Retry once on the next eligible run;
+            # never let the cancelled task permanently stop the polling loop.
+            # Replace it before awaiting so concurrent solves share the retry.
+            _LOGGER.info("Optimizer: retrying cancelled startup hardware restoration")
+            restore_task = self.hass.async_create_background_task(
+                self._deferred_enable_restore(), "powersync_enable_restore"
+            )
+            self._deferred_restore_task = restore_task
 
         if not restore_task.done():
             _LOGGER.debug(
                 "Optimizer: waiting for startup hardware restoration before solving"
             )
         try:
-            await restore_task
+            # A cancelled solve owns only its wait. disable() explicitly
+            # cancels the shared restoration when the lifecycle ends.
+            await asyncio.shield(restore_task)
         except asyncio.CancelledError:
             if not self._enabled:
                 return False
-            raise
+            if asyncio.current_task().cancelling():
+                raise
+            _LOGGER.info(
+                "Optimizer: startup hardware restoration was cancelled; "
+                "deferring solve until a later restore retry"
+            )
+            return False
         except Exception as err:
             _LOGGER.warning(
                 "Optimizer: startup hardware restoration failed; skipping solve: %s",

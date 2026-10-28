@@ -7,6 +7,10 @@ forecast, household load forecast, battery limits, and configured reserve floors
 Solar forecasting via Solcast or Open-Meteo Solar Forecast should be configured
 for accurate schedules.
 
+## Planning after a restart
+
+Smart Optimization waits for startup battery restoration before solving. If that restoration is cancelled by a newer control operation, a later optimization cycle retries it automatically. Cancelling a plan refresh does not cancel the shared restoration; unresolved force cleanup still blocks new control.
+
 ## Price interval boundaries
 
 Timestamped tariff rates apply only where their validity period overlaps the current planning horizon. Rates beyond that horizon are ignored until their period enters the plan; they do not replace the current import or export price. A period crossing the end of the horizon is included only for the part that overlaps.
