@@ -26,6 +26,23 @@ def _load(path, name, namespace):
     return namespace[name]
 
 
+async def _dispatch_grid_setting(_hass, _entry, *, cloud_call, **kwargs):
+    """Minimal dispatch shim: exercise the extracted cloud retry path."""
+    return bool(await cloud_call())
+
+
+async def _record_submission(*args, **kwargs):
+    return None
+
+
+async def _confirmed_export(*args, **kwargs):
+    return True
+
+
+async def _update_cached_export(*args, **kwargs):
+    return True
+
+
 def test_grid_confirmation_budget_is_shared_by_all_cloud_sites():
     clock = SimpleNamespace(now=100.0)
     generation, kick_generation = [1], [1]
@@ -40,11 +57,16 @@ def test_grid_confirmation_budget_is_shared_by_all_cloud_sites():
     namespace = {
         "Any": Any, "Callable": Callable, "time": SimpleNamespace(monotonic=lambda: clock.now),
         "_command_generation": generation, "_tesla_charge_kick_generation": kick_generation,
-        "async_get_clientsession": lambda hass: object(), "hass": object(),
-        "entry": SimpleNamespace(options={"tesla_control_method": "tariff"}, data={}),
+        "DOMAIN": "power_sync",
+        "async_get_clientsession": lambda hass: object(),
+        "hass": SimpleNamespace(data={"power_sync": {"entry": {}}}),
+        "entry": SimpleNamespace(entry_id="entry", options={"tesla_control_method": "tariff"}, data={}),
         "get_tesla_api_base_url": lambda *args: "https://example.invalid",
         "CONF_FLEET_API_BASE_URL": "fleet_base", "GRID_CONFIRMATION_POLL_OFFSETS": (1, 30, 45, 59),
         "async_set_tesla_grid_charging_confirmed": confirmed,
+        "dispatch_powerwall_setting": _dispatch_grid_setting,
+        "_local_powerwall_generation_current": lambda: True,
+        "_record_tesla_settings_submission": _record_submission,
         "_LOGGER": logging.getLogger(__name__),
     }
     apply = _load(ROOT / "__init__.py", "_tesla_force_apply_grid_charging", namespace)
@@ -68,11 +90,16 @@ def test_restore_and_charge_keep_short_confirmation_policy(reason):
     namespace = {
         "Any": Any, "Callable": Callable,
         "_command_generation": [1], "_tesla_charge_kick_generation": [1],
-        "async_get_clientsession": lambda hass: object(), "hass": object(),
-        "entry": SimpleNamespace(options={"tesla_control_method": "tariff"}, data={}),
+        "DOMAIN": "power_sync", "time": SimpleNamespace(monotonic=lambda: 100.0),
+        "async_get_clientsession": lambda hass: object(),
+        "hass": SimpleNamespace(data={"power_sync": {"entry": {}}}),
+        "entry": SimpleNamespace(entry_id="entry", options={"tesla_control_method": "tariff"}, data={}),
         "get_tesla_api_base_url": lambda *args: "https://example.invalid",
         "CONF_FLEET_API_BASE_URL": "fleet_base",
         "async_set_tesla_grid_charging_confirmed": confirmed,
+        "dispatch_powerwall_setting": _dispatch_grid_setting,
+        "_local_powerwall_generation_current": lambda: True,
+        "_record_tesla_settings_submission": _record_submission,
         "_LOGGER": logging.getLogger(__name__),
     }
     apply = _load(ROOT / "__init__.py", "_tesla_force_apply_grid_charging", namespace)
@@ -135,7 +162,11 @@ def test_discharge_cannot_change_mode_after_admission_changes_during_grid_wait(c
     modes = []
     runtime = {}
     persisted = []
-    force_state = {}
+    force_state = {
+        "saved_operation_mode": "self_consumption",
+        "saved_export_rule": "pv_only",
+        "saved_states": {"site": {}},
+    }
     guard = SimpleNamespace(manager=SimpleNamespace(snapshot=SimpleNamespace(mode="off")))
 
     async def grid(*args, **kwargs):
@@ -157,12 +188,22 @@ def test_discharge_cannot_change_mode_after_admission_changes_during_grid_wait(c
     async def persist():
         persisted.append(force_state.get("command_status"))
 
+    async def capture(state, site_configs, *, is_current):
+        # The extracted preparation path normally obtains these from the
+        # preceding Tesla site_info capture.
+        state["saved_operation_mode"] = "self_consumption"
+        state["saved_export_rule"] = "pv_only"
+
     def changed(name):
         return flags["after_wait"] and change == name
 
     coordinator = SimpleNamespace(tesla_tariff_export_still_allowed=lambda minutes: not changed("plan"))
     namespace = {
         "_command_generation": generation, "_restore_gen": 1,
+        "_tesla_charge_kick_generation": [1],
+        "_tesla_operation_generation": [1],
+        "was_already_force_discharging": False,
+        "asyncio": asyncio,
         "_monitoring_mode_should_block_control": lambda call: changed("monitoring"),
         "_local_powerwall_generation_current": lambda: not changed("setup"),
         "_local_powerwall_runtime": runtime, "network_guard": guard,
@@ -172,7 +213,11 @@ def test_discharge_cannot_change_mode_after_admission_changes_during_grid_wait(c
         "site_configs": [("site", "token", "fleet")],
         "_tesla_force_apply_grid_charging": grid,
         "_tesla_force_result_all_confirmed": lambda result, sites: True,
+        "_tesla_force_apply_export_rule": _confirmed_export,
+        "_capture_tesla_setting_baselines": capture,
+        "update_cached_export_rule": _update_cached_export,
         "_tesla_force_apply_operation_mode": mode, "HomeAssistantError": RuntimeError,
+        "_LOGGER": logging.getLogger(__name__),
         "force_discharge_state": force_state, "persist_force_mode_state": persist,
         "dt_util": SimpleNamespace(utcnow=lambda: datetime.now(timezone.utc)),
     }
@@ -243,12 +288,17 @@ def test_preparation_journal_preserves_each_sites_original_settings():
     store = Store()
     namespace = {
         "store": store, "force_charge_state": {"active": False}, "force_discharge_state": state,
+        "_command_generation": [1], "_local_powerwall_generation_current": lambda: True,
         "_coerce_force_power_w": lambda value: value,
         "_select_restorable_tesla_tariff": lambda value: value,
         "datetime": datetime, "hass": SimpleNamespace(data={}), "DOMAIN": "power_sync",
         "entry": SimpleNamespace(entry_id="entry"), "tesla_grid_charging_preferences": {},
         "_LOGGER": logging.getLogger(__name__),
     }
+    async def update_store(_store, updates, *, is_current=None):
+        await _store.async_save(updates)
+        return True
+    namespace["_update_powerwall_store"] = update_store
     persist = _load(ROOT / "__init__.py", "persist_force_mode_state", namespace)
     asyncio.run(persist())
     saved = store.value["force_mode_state"]

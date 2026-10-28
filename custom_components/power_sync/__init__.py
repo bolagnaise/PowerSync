@@ -32991,6 +32991,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     async def _capture_tesla_setting_baselines(state, site_configs, *, is_current) -> None:
         """Use a bounded local config read when available; never require LAN."""
         from .powerwall_local.dispatch import get_local_transport
+        from .tesla_export_permissions import read_export_rule
         transport = get_local_transport(hass, entry)
         local = None
         if transport is not None and entry.data.get("powerwall_local_din"):
@@ -33020,12 +33021,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 grid = info.get("disallow_charge_from_grid_with_solar_installed")
                 if type(grid) is bool:
                     baseline["saved_grid_charging_enabled"] = not grid
-                rule = info.get("customer_preferred_export_rule")
-                if state is force_discharge_state and rule in ("never", "pv_only", "battery_ok"):
-                    baseline["saved_export_rule"] = rule
-                    baseline["saved_export_rule_source"] = "local"
+                if state is force_discharge_state:
+                    reading = read_export_rule(info)
+                    if reading.value is not None:
+                        baseline["saved_export_rule"] = reading.value
+                        baseline["saved_export_rule_source"] = "local"
+                        baseline["saved_export_rule_status"] = reading.status
+                    elif (
+                        reading.status in ("invalid", "conflict")
+                        and baseline.get("saved_export_rule") is None
+                    ):
+                        baseline["saved_export_rule_status"] = reading.status
             for key in fields:
-                if baseline.get(key) is None:
+                if baseline.get(key) is None and (
+                    key != "saved_export_rule" or len(site_configs) == 1
+                ):
                     baseline[key] = state.get(key)
         state["saved_states"] = saved_states
         primary = saved_states.get(site_configs[0][0], {})
@@ -35830,6 +35840,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             saved_export_rule = export_reading.value
                             site_state["saved_export_rule"] = saved_export_rule
                             site_state["saved_export_rule_source"] = "cloud" if saved_export_rule else "unknown"
+                            site_state["saved_export_rule_status"] = export_reading.status
                             _LOGGER.info("Tesla cloud export baseline status=%s path=%s",
                                          export_reading.status, export_reading.path)
                             _LOGGER.info("Site %s: saved export rule: %s", site_id, saved_export_rule)
@@ -35947,8 +35958,28 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 raise HomeAssistantError("Cannot establish the original Tesla operation mode")
             if not _discharge_request_current():
                 raise asyncio.CancelledError("Tesla discharge preparation superseded")
-            if force_discharge_state.get("saved_export_rule") not in ("never", "pv_only", "battery_ok"):
-                raise HomeAssistantError("Cannot establish the original Tesla export permission")
+            # Tariff discharge deliberately enables battery export. When Tesla
+            # omits the original rule, retain that requested setting on restore
+            # rather than rejecting a usable tariff path. Record the policy
+            # fallback per site; it is not an observed original permission.
+            saved_states = force_discharge_state.get("saved_states") or {}
+            for site_id, _token, _provider in site_configs:
+                baseline = saved_states.setdefault(site_id, {})
+                if site_id == site_configs[0][0] and "saved_export_rule" not in baseline:
+                    baseline["saved_export_rule"] = force_discharge_state.get("saved_export_rule")
+                if baseline.get("saved_export_rule") not in ("never", "pv_only", "battery_ok"):
+                    if baseline.get("saved_export_rule") is not None or baseline.get(
+                        "saved_export_rule_status", "unavailable"
+                    ) not in ("absent", "null", "unavailable"):
+                        raise HomeAssistantError("Cannot establish the original Tesla export permission")
+                    baseline["saved_export_rule"] = "battery_ok"
+                    baseline["saved_export_rule_source"] = "fallback_missing"
+                    _LOGGER.warning(
+                        "Tesla Tariff discharge: original export permission unavailable for site %s; "
+                        "using battery_ok for discharge and restoration", site_id,
+                    )
+            force_discharge_state["saved_states"] = saved_states
+            force_discharge_state["saved_export_rule"] = saved_states[site_configs[0][0]]["saved_export_rule"]
             # The longer confirmation may outlive a task or HA restart. Keep
             # the original baseline durable before changing grid permission.
             force_discharge_state["command_status"] = "awaiting_grid_confirmation"

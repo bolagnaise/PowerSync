@@ -201,6 +201,7 @@ def settings_context(transport=None, *, paired=True):
                                   "powerwall_local_paired": paired})
     ns = dict(asyncio=asyncio, time=time, DOMAIN="power_sync", _LOGGER=logging.getLogger(__name__),
               tesla_export_rule_from_site_info=export_namespace["tesla_export_rule_from_site_info"],
+              read_export_rule=export_namespace["read_export_rule"],
               _sync_powerwall_settings_issue=Mock(), CONF_TESLA_ENERGY_SITE_ID="tesla_energy_site_id",
               get_local_transport=lambda h, e: transport if e.data["powerwall_local_paired"] else None,
               hass=hass, entry=entry, _local_powerwall_generation_current=lambda: True,
