@@ -185,6 +185,12 @@ unchanged preference does not block cleanup; settings changed by the action
 still need restoration evidence, and physical settling must finish before
 PowerSync releases the session.
 
+If scheduled native Powerwall discharge cannot start because the gateway's
+Grid Export preference cannot be confirmed, Home Assistant shows a
+**Powerwall discharge blocked** notification. Registered PowerSync mobile
+devices also receive a push. Repeated retries share one alert, which clears
+when a later native discharge passes the admission check.
+
 Automatic control retries an incomplete local reading once and refreshes local
 telemetry after slow configuration reads before submitting a command. SOC and
 power readings must still be complete and no more than five seconds old; cloud

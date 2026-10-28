@@ -33956,10 +33956,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 if targetless or large_site:
                     reason = getattr(controller.adapter, "guard_denial_reason", None) or "native_max_policy_denied"
                     _LOGGER.warning("Native Powerwall %s admission refused: %s", direction, reason)
+                    if direction == "discharge" and source == "optimizer":
+                        from .powerwall_local.native_max_notifications import update_native_discharge_alert
+                        update_native_discharge_alert(hass, entry.entry_id, reason)
                     raise HomeAssistantError(
                         "Native Powerwall tariff cannot enforce current software or EV limits; "
                         f"Max was not started ({reason})")
                 return None  # Preserve software, EV and connection limits.
+            if direction == "discharge":
+                from .powerwall_local.native_max_notifications import update_native_discharge_alert
+                update_native_discharge_alert(hass, entry.entry_id, None)
             from uuid import uuid4
             if direction == "charge":
                 tariff, _ = _create_charge_tariff(duration)
