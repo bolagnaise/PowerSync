@@ -753,6 +753,71 @@ async def test_large_site_one_shot_kick_releases_before_native_tariff_and_restor
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('baseline_rule', ['battery_ok', 'pv_only', 'never'])
+@pytest.mark.parametrize('readback', ['missing', 'null', 'offline', 'external'])
+@pytest.mark.parametrize('unsettled', [False, True])
+async def test_restart_releases_unchanged_export_rule_but_waits_for_physical_settling(
+        setup, readback, unsettled, baseline_rule):
+    s = setup
+    s.adapter.direction = 'discharge'
+    s.settings.update(optimization_max_discharge_w=20000,
+                      optimization_max_grid_export_w=15000,
+                      optimization_backup_reserve=.2)
+    s.state.config['site_info']['customer_preferred_export_rule'] = baseline_rule
+    await s.session.start(120)
+    await s.session._cancel_watch()
+    # Match a persisted discharge recovery whose other settings are released.
+    s.store.data['phase'] = 'restoring'
+    s.store.data['cleanup'] = dict(reserve_released=True, mode_released=True,
+                                 tariff_released=True)
+    s.state.config['default_real_mode'] = 'self_consumption'
+    s.state.config['site_info']['backup_reserve_percent'] = 5
+    s.state.tariff = deepcopy(s.original[1])
+    s.state.battery_w = 10000 if unsettled else 0
+    if readback == 'external':
+        s.state.config['site_info']['customer_preferred_export_rule'] = 'never'
+    read_config = s.adapter.client._transport.read_config
+    async def unavailable_export(din):
+        if readback == 'offline':
+            raise OSError('local config unavailable')
+        config = await read_config(din)
+        if readback == 'missing':
+            config['site_info'].pop('customer_preferred_export_rule')
+        elif readback == 'null':
+            config['site_info']['customer_preferred_export_rule'] = None
+        return config
+    s.adapter.client._transport.read_config = unavailable_export
+    recovered = type(s.session)(s.adapter, s.store, clock=lambda: s.state.at,
+                                monotonic=lambda: s.state.at)
+    events = deepcopy(s.state.events)
+    try:
+        if baseline_rule != 'battery_ok' and readback != 'external':
+            with pytest.raises(s.m.NativeMaxChargeError, match='restore was not confirmed'):
+                await recovered.recover()
+            assert s.store.data['phase'] == 'restoring'
+            assert not s.store.data['cleanup'].get('export_released')
+            assert s.budget.native_max_claim('site')
+            assert s.state.events == events
+            return
+        if unsettled:
+            with pytest.raises(s.m.NativeMaxChargeError, match='physical settling'):
+                await recovered.recover()
+            await recovered._cancel_watch()
+            assert s.store.data['cleanup']['export_released']
+            assert s.store.data['phase'] == 'settling'
+            assert s.budget.native_max_claim('site')
+            s.state.battery_w = 0
+        assert await recovered.recover()
+        assert not recovered.pending and not s.store.data
+        assert not s.budget.native_max_claim('site')
+        assert s.state.events == events
+        assert s.state.config['site_info']['customer_preferred_export_rule'] == (
+            'never' if readback == 'external' else 'battery_ok')
+    finally:
+        await recovered._cancel_watch()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize('busy', ['battery','solar','home'])
 async def test_busy_large_inverter_skips_kick_and_uses_tariff(setup,busy):
     s=setup;s.adapter.startup_kick=True

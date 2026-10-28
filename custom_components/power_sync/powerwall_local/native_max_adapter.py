@@ -693,8 +693,14 @@ class NativeMaxChargeAdapter:
         await release_field("reserve_released", "site_info.backup_reserve_percent",
                             baseline["reserve"], baseline.get("force_reserve", 100))
         if baseline.get("direction", "charge") == "discharge":
-            await release_field("export_released", "site_info.customer_preferred_export_rule",
-                                baseline["export_rule"], "battery_ok")
+            if baseline["export_rule"] == "battery_ok":
+                # Native discharge did not change this permission. There is
+                # nothing to restore even if the optional readback disappears;
+                # preserve any later external edit without writing the field.
+                await checkpoint(export_released=True)
+            else:
+                await release_field("export_released", "site_info.customer_preferred_export_rule",
+                                    baseline["export_rule"], "battery_ok")
         try:
             tariff = await self.read_tariff()
         except Exception:

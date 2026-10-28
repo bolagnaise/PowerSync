@@ -179,6 +179,12 @@ Manual V1R requests do not gain this optimiser permission. If a native setting
 write or restoration is uncertain, PowerSync retains its recovery record and
 retries cleanup without restarting charging.
 
+After native Max discharge, recovery does not rewrite a Grid Export preference
+that was already `battery_ok` before the action. An unavailable reading of that
+unchanged preference does not block cleanup; settings changed by the action
+still need restoration evidence, and physical settling must finish before
+PowerSync releases the session.
+
 Automatic control retries an incomplete local reading once and refreshes local
 telemetry after slow configuration reads before submitting a command. SOC and
 power readings must still be complete and no more than five seconds old; cloud
