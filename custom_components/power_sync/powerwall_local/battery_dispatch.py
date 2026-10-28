@@ -21,6 +21,14 @@ class DispatchCommandFailed(Exception):
     """Local access/command failed; fallback is safe only after release."""
 
 
+class GridChargingPermissionError(ValueError):
+    """A charging request was refused by an explicit permission gate."""
+
+    def __init__(self, message: str, reason: str):
+        super().__init__(message)
+        self.reason = reason
+
+
 _LOGGER = logging.getLogger(__name__)
 LEASE_SECONDS = 30
 RENEW_SECONDS = 10
@@ -52,7 +60,7 @@ def validate_dispatch_config(mode: str, config: dict) -> None:
         raise ValueError(f"{mode} limit blocks battery dispatch")
     if mode == "charge":
         if config.get("optimization_allow_grid_charge", True) is not True:
-            raise ValueError("Grid charging is disabled")
+            raise GridChargingPermissionError("Grid charging is disabled", "configured_grid_charging_disabled")
         if _percent(config.get("optimization_grid_charge_soc_cap", 1), "charge ceiling") <= 0:
             raise ValueError("Charge ceiling blocks battery dispatch")
     else:
@@ -157,7 +165,7 @@ def battery_watts(mode: str, target_w: float, snapshot: Any, config: dict, *, ta
     if soc >= ceiling:
         raise ValueError("Battery is at its charge ceiling")
     if config.get("optimization_allow_grid_charge", True) is not True:
-        raise ValueError("Grid charging is disabled")
+        raise GridChargingPermissionError("Grid charging is disabled", "configured_grid_charging_disabled")
     maximum = min(TIMED_DISPATCH_MAX_W, _number(config.get("optimization_max_charge_w", 5000), "charge limit"))
     import_limit = config.get("optimization_max_grid_import_w")
     # Existing setup uses None/zero for an automatic (unset) site import cap.
@@ -460,11 +468,13 @@ class LocalBatteryDispatch:
             return False
         if self._grid_charge_restore:
             # A user disabled it again. Do not fight that edit on renewal.
-            raise ValueError("Owned local grid charging permission changed")
+            raise GridChargingPermissionError("Owned local grid charging permission changed",
+                "grid_charging_not_permitted" if enabled is False else "grid_charging_permission_unknown")
         if (enabled is not False or not self._prepare_grid
                 or self.config().get("optimization_allow_grid_charge") is not True
                 or not self.allowed("charge")):
-            raise ValueError("Local grid charging is disabled or unknown")
+            raise GridChargingPermissionError("Local grid charging is disabled or unknown",
+                "grid_charging_not_permitted" if enabled is False else "grid_charging_permission_unknown")
         battery_watts("charge", self._target, snapshot, self.config(), target_basis=self._target_basis)
         din = getattr(self.client, "_din", None)
         if not isinstance(din, str) or not din:

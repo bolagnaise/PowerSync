@@ -34139,7 +34139,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                                 target_basis="grid_import" if grid_target is not None else "battery",
                                                 prepare_grid_charging=source == "optimizer")
             except Exception as err:
-                from .powerwall_local.battery_dispatch import DispatchCommandFailed
+                from .powerwall_local.battery_dispatch import DispatchCommandFailed, GridChargingPermissionError
+                if mode == "charge" and source == "optimizer" and isinstance(err, GridChargingPermissionError):
+                    from .powerwall_local.native_max_notifications import update_native_charge_alert
+                    update_native_charge_alert(hass, entry.entry_id, err.reason)
                 if grid_target is not None:
                     raise HomeAssistantError("Grid-import dispatch failed; tariff fallback cannot hold the target") from err
                 if isinstance(err, DispatchCommandFailed) and not controller.pending:
@@ -34196,6 +34199,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     _LOGGER.warning("Local Powerwall dispatch failed and released safely; using existing Tesla control: %s", err)
                     return {"fallback": True, "power_w": fallback_power}
                 raise HomeAssistantError(f"Local Powerwall dispatch failed: {err}") from err
+            if mode == "charge":
+                from .powerwall_local.native_max_notifications import update_native_charge_alert
+                update_native_charge_alert(hass, entry.entry_id, None)
             state["command_status"] = "accepted"
             state["gateway_discharge_limit_w"] = result.get("gateway_discharge_limit_w")
             state["gateway_charge_limit_w"] = result.get("gateway_charge_limit_w")

@@ -15,6 +15,8 @@ _DISCHARGE_MESSAGE = (
 _CHARGE_REASONS = {
     'configured_charge_disabled': 'the configured battery charging limit is disabled',
     'grid_charging_not_permitted': 'the gateway does not currently permit grid charging',
+    'configured_grid_charging_disabled': 'Allow Grid Charging is off or unavailable in PowerSync',
+    'grid_charging_permission_unknown': "the gateway's grid-charging permission could not be confirmed",
     'native_import_limit_blocks_charge': 'the gateway import limit blocks charging',
     'software_import_limit_invalid': 'the configured grid-import limit is invalid',
     'software_import_limit_requires_local_control': 'native charging cannot enforce the configured grid-import limit',

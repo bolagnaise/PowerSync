@@ -430,7 +430,7 @@ def load_routing(monitored=False, paired=True, **options):
               update_native_charge_alert=lambda *_: None,
               local_battery_dispatch_configured=hm.local_battery_dispatch_configured, asyncio=asyncio, Any=object, ServiceCall=object, HomeAssistantError=RuntimeError,
               selected_discharge_duration=durations.selected_discharge_duration, validate_native_discharge_duration=durations.validate_native_discharge_duration,
-              DOMAIN='power_sync', hass=hass, entry=entry, _local_powerwall_runtime=runtime, DispatchCommandFailed=module.DispatchCommandFailed, validate_dispatch_config=module.validate_dispatch_config, _LOGGER=logging.getLogger(__name__),
+              DOMAIN='power_sync', hass=hass, entry=entry, _local_powerwall_runtime=runtime, DispatchCommandFailed=module.DispatchCommandFailed, GridChargingPermissionError=module.GridChargingPermissionError, validate_dispatch_config=module.validate_dispatch_config, _LOGGER=logging.getLogger(__name__),
               force_charge_state=charge, force_discharge_state=discharge,
               hold_soc_state={'active':False}, self_consumption_state={'active':False},
               _local_powerwall_route_lock=lock_module.BatteryRouteLock(), _command_generation=[0],
@@ -2023,3 +2023,109 @@ async def test_cancelled_tariff_cloud_recovery_drains_without_dropping_journal()
     client.dispatch_battery_power.assert_not_awaited()
     client._transport.read_config.side_effect = lambda _: snap.raw['config']
     await c.stop()
+
+
+@pytest.mark.parametrize('permission,configured,reason', [
+    (None, True, 'grid_charging_permission_unknown'),
+    (False, False, 'configured_grid_charging_disabled'),
+    (False, None, 'configured_grid_charging_disabled'),
+])
+@pytest.mark.parametrize('grid_target', [None, 3000])
+@pytest.mark.parametrize('source', ['optimizer', 'user'])
+def test_grid_permission_refusal_notifies_only_requested_optimizer_charge(permission, configured, reason, grid_target, source):
+    from unittest.mock import Mock
+    async def run():
+        ns, c, client, saved = load_routing(optimization_allow_grid_charge=configured,
+                                          optimization_spread_import_enabled=True)
+        alert = ns['update_native_charge_alert'] = Mock()
+        client.get_snapshot.return_value.grid_charging_enabled = permission
+        request = dict(source=source, power_w=1000, duration=1)
+        if grid_target is not None:
+            request['grid_import_target_w'] = grid_target
+        try:
+            with pytest.raises(RuntimeError):
+                await ns['handle_force_charge'](call(**request))
+            if source == 'optimizer':
+                alert.assert_called_once_with(ns['hass'], 'entry', reason)
+            else:
+                alert.assert_not_called()
+            client.dispatch_battery_power.assert_not_awaited()
+            assert not ns['_local_powerwall_runtime'].get('powerwall_dispatch_fallback_pending')
+        finally:
+            await c.stop()
+    asyncio.run(run())
+
+
+def test_external_grid_disable_on_optimizer_retry_notifies_and_never_fights_edit():
+    from unittest.mock import Mock
+    async def run():
+        ns, c, client, saved = load_routing(optimization_allow_grid_charge=True)
+        snap, events = install_grid_permission(client)
+        alert = ns['update_native_charge_alert'] = Mock()
+        try:
+            await ns['handle_force_charge'](call(source='optimizer', power_w=1000, duration=1))
+            alert.assert_called_once_with(ns['hass'], 'entry', None)
+            alert.reset_mock()
+            client.dispatch_battery_power.reset_mock()
+            client._transport.write_config.reset_mock()
+            snap.raw['config']['site_info']['disallow_charge_from_grid_with_solar_installed'] = True
+            with pytest.raises(RuntimeError):
+                await ns['handle_force_charge'](call(source='optimizer', power_w=1000, duration=1))
+            alert.assert_called_once_with(ns['hass'], 'entry', 'grid_charging_not_permitted')
+            client.dispatch_battery_power.assert_not_awaited()
+            client._transport.write_config.assert_not_awaited()
+        finally:
+            await c.stop()
+    asyncio.run(run())
+
+
+def test_grid_permission_alert_clears_only_after_local_charge_acceptance():
+    from unittest.mock import Mock
+    async def run():
+        ns, c, client, saved = load_routing(optimization_allow_grid_charge=True)
+        alert = ns['update_native_charge_alert'] = Mock()
+        client.get_snapshot.return_value.grid_charging_enabled = None
+        try:
+            with pytest.raises(RuntimeError):
+                await ns['handle_force_charge'](call(source='optimizer', power_w=1000, duration=1))
+            client.get_snapshot.return_value.grid_charging_enabled = True
+            await ns['handle_force_discharge'](call(source='optimizer', power_w=1000, duration=1))
+            alert.assert_called_once_with(ns['hass'], 'entry', 'grid_charging_permission_unknown')
+            await ns['handle_force_charge'](call(source='optimizer', power_w=1000, duration=1))
+            assert alert.call_args.args == (ns['hass'], 'entry', None)
+            assert client.dispatch_battery_power.await_count == 2
+        finally:
+            await c.stop()
+    asyncio.run(run())
+
+
+def test_disabled_grid_charging_without_request_or_under_monitoring_is_quiet():
+    from unittest.mock import Mock
+    async def run():
+        ns, c, client, saved = load_routing(monitored=True, optimization_allow_grid_charge=False)
+        alert = ns['update_native_charge_alert'] = Mock()
+        alert.assert_not_called()
+        await ns['handle_force_charge'](call(source='optimizer', power_w=1000, duration=1))
+        alert.assert_not_called()
+        client.dispatch_battery_power.assert_not_awaited()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('failure', ['soc', 'transport'])
+def test_other_local_charge_failures_do_not_claim_grid_permission_refusal(failure):
+    from unittest.mock import Mock
+    async def run():
+        ns, c, client, saved = load_routing(optimization_allow_grid_charge=True)
+        alert = ns['update_native_charge_alert'] = Mock()
+        if failure == 'soc':
+            client.get_snapshot.return_value.soc = 100
+        else:
+            client.dispatch_battery_power.return_value = False
+        try:
+            with pytest.raises(RuntimeError):
+                await ns['handle_force_charge'](call(source='optimizer', power_w=1000, duration=1))
+            alert.assert_not_called()
+            assert bool(ns['_local_powerwall_runtime'].get('powerwall_dispatch_fallback_pending')) == (failure == 'transport')
+        finally:
+            await c.stop()
+    asyncio.run(run())

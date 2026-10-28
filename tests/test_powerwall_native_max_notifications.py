@@ -183,6 +183,7 @@ def test_push_scheduling_failure_cannot_replace_control_error(notification_probe
 @pytest.mark.asyncio
 @pytest.mark.parametrize('reason', [
     'configured_charge_disabled', 'grid_charging_not_permitted',
+    'configured_grid_charging_disabled', 'grid_charging_permission_unknown',
     'native_import_limit_blocks_charge', 'software_import_limit_invalid',
     'software_import_limit_requires_local_control', 'native_limit_evidence_unavailable',
     'native_site_limits_invalid', 'native_limit_or_config_invalid',
