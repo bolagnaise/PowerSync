@@ -334,6 +334,16 @@ released and the plan is re-solved without it. Released holds are reported as
 `grid_replenishment_costlier_than_export`, and holds whose feed-in price still
 beats the plan's own grid-charge cost are kept.
 
+PowerSync also compares the resulting plan with one that allows solar charging
+while keeping the same reserves, limits, schedules, and provider restrictions.
+If storing solar gives a better overall result, the discretionary solar-export
+holds are removed. This catches cheaper solar replenishment that arrives too
+late for an earlier valuable battery-use period. Profitable direct-solar export
+remains available; Profit Max still does not guarantee a full battery by a
+deadline. The comparison is exposed under
+`profit_max_solar_export.capability.post_solve_comparison` with reason
+`unheld_plan_has_better_objective` when it removes holds.
+
 The supported control paths are Sigenergy Modbus, Sungrow SH Modbus (including
 dual-inverter systems), FoxESS Modbus/entity/cloud variants with authoritative
 charge-limit readback, SolaX Modbus entities, Fronius Reserva/GEN24 Block

@@ -8074,6 +8074,27 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             "Profit Max solar-export hold revision was "
                             "infeasible; keeping the original solve"
                         )
+            result, checked_solar_export_slots = (
+                await self._check_solar_export_counterfactual(
+                    result,
+                    profit_max_solar_export_slots,
+                    hard_battery_charge_blocked,
+                    _run_optimizer_once,
+                    solve_reserve_override,
+                )
+            )
+            if checked_solar_export_slots != profit_max_solar_export_slots:
+                profit_max_solar_export_slots = checked_solar_export_slots
+                battery_charge_blocked = list(hard_battery_charge_blocked)
+                self._last_profit_max_solar_export_slots = list(
+                    profit_max_solar_export_slots
+                )
+                spread_import_blocked = [
+                    bool(blocked) or not bool(allowed)
+                    for blocked, allowed in zip(
+                        battery_charge_blocked, grid_charge_allowed, strict=False
+                    )
+                ]
             used_reference_override = solve_reserve_override is not None
 
             schedule = result.schedule
@@ -14602,6 +14623,64 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             ):
                 revised[idx] = False
         return revised
+
+    async def _check_solar_export_counterfactual(
+        self,
+        result: OptimizerResult,
+        solar_export_slots: list[bool],
+        hard_charge_blocks: list[bool],
+        run_optimizer: Any,
+        reserve_floor: float | None,
+    ) -> tuple[OptimizerResult, list[bool]]:
+        """Reject holds that lose value before their native-solar repayment.
+
+        The selector can fund a hold from solar arriving after a valuable
+        battery-use window. The grid-repayment guard cannot see that loss.
+        Compare the same solve with only discretionary holds removed; keep
+        all provider/manual blocks and every other solve input unchanged.
+        """
+        if (
+            not any(solar_export_slots)
+            or not result.feasible
+            or result.solver_used != "highs"
+        ):
+            return result, solar_export_slots
+        unheld_slots = [False] * len(solar_export_slots)
+        unheld = await run_optimizer(
+            reserve_floor,
+            charge_blocked_slots=list(hard_charge_blocks),
+            solar_export_slots=unheld_slots,
+        )
+        if (
+            not unheld.feasible
+            or unheld.solver_used != "highs"
+            or not math.isfinite(result.objective_value)
+            or not math.isfinite(unheld.objective_value)
+            or unheld.objective_value >= result.objective_value - 1e-6
+        ):
+            return result, solar_export_slots
+        _LOGGER.info(
+            "Profit Max: removed %d solar-export holds because storing solar "
+            "has a better full-horizon objective (%.6f vs %.6f)",
+            sum(solar_export_slots), unheld.objective_value, result.objective_value,
+        )
+        previous_status = getattr(self, "_solar_export_capability_status", {}) or {}
+        current_status = previous_status.get("current_slot")
+        reason = "unheld_plan_has_better_objective"
+        if solar_export_slots[0] and isinstance(current_status, dict):
+            current_status = {**current_status, "selected": False, "reason": reason}
+        self._solar_export_capability_status = {
+            **previous_status,
+            "selected_slots": 0,
+            "current_slot": current_status,
+            "post_solve_comparison": {
+                "reason": reason,
+                "dropped_slots": sum(solar_export_slots),
+                "held_objective": result.objective_value,
+                "unheld_objective": unheld.objective_value,
+            },
+        }
+        return unheld, unheld_slots
 
     def _time_window_slots(
         self,

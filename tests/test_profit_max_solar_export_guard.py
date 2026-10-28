@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import ast
 import importlib
+import asyncio
+import logging
 import math
 import sys
 import types
@@ -40,7 +42,10 @@ _STUBS = (
     "power_sync.optimization.schedule_reader",
 )
 
-_METHODS = ("_profit_max_solar_export_slots", "_revise_solar_export_holds")
+_METHODS = (
+    "_profit_max_solar_export_slots", "_revise_solar_export_holds",
+    "_check_solar_export_counterfactual",
+)
 
 INTERVAL_MINUTES = 5
 SLOTS = 288
@@ -101,10 +106,14 @@ def coordinator_methods():
     methods = [
         node
         for node in class_node.body
-        if isinstance(node, ast.FunctionDef) and node.name in _METHODS
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name in _METHODS
     ]
     assert {node.name for node in methods} == set(_METHODS)
-    namespace: dict[str, Any] = {"Any": Any, "math": math, "OptimizerResult": Any}
+    namespace: dict[str, Any] = {
+        "Any": Any, "math": math, "OptimizerResult": Any,
+        "_LOGGER": logging.getLogger(__name__),
+    }
     exec(
         compile(
             ast.fix_missing_locations(
@@ -341,6 +350,177 @@ def test_high_feed_in_hold_survives_the_guard_and_still_pays(
 
     unheld = _solve(optimizer_module, prices, solar, load, soc, [False] * SLOTS)
     assert _net_cost(held, prices) < _net_cost(unheld, prices)
+
+    async def run_optimizer(_reserve, **kwargs):
+        assert kwargs["charge_blocked_slots"] == [False] * SLOTS
+        assert kwargs["solar_export_slots"] == [False] * SLOTS
+        return unheld
+
+    chosen, chosen_mask = asyncio.run(
+        coordinator_methods["_check_solar_export_counterfactual"](
+            coordinator, held, held_mask, [False] * SLOTS, run_optimizer, None
+        )
+    )
+    assert chosen is held
+    assert chosen_mask == held_mask
+
+
+def test_solar_repayment_after_valuable_export_does_not_fund_hold(
+    optimizer_module, coordinator_methods
+):
+    """#128: cheaper native solar after the peak cannot repay missed export."""
+    imports = [0.20, 0.30, 0.20]
+    exports = [0.068, 0.15, 0.02]
+    solar = [5.0, 0.0, 5.0]
+    load = [1.0] * 3
+    coordinator = _fake_coordinator()
+    coordinator._config.battery_capacity_wh = 1000
+    coordinator._config.max_charge_w = 5000
+    coordinator._config.max_grid_import_w = 10000
+    mask = coordinator_methods["_profit_max_solar_export_slots"](
+        coordinator, imports, exports, solar, load, 0.2,
+        [False] * 3, [True] * 3,
+    )
+    assert mask == [True, False, False]
+
+    def solve(held_slots):
+        optimizer = optimizer_module.BatteryOptimizer(
+            capacity_wh=1000, max_charge_w=5000, max_discharge_w=5000,
+            max_grid_import_w=10000, max_grid_export_w=10000,
+            efficiency=EFFICIENCY, backup_reserve=0.1, hardware_reserve=0.1,
+            interval_minutes=5, horizon_hours=1,
+        )
+        return optimizer.optimize(
+            import_prices=imports, export_prices=exports,
+            solar_forecast=solar, load_forecast=load, current_soc=0.2,
+            allow_battery_export=True, block_battery_charge=held_slots,
+            profit_max_solar_export_slots=held_slots,
+        )
+
+    held = solve(mask)
+    unheld = solve([False] * 3)
+    assert held.feasible and unheld.feasible
+    assert not any(a.action == "charge" for a in held.schedule.actions)
+    assert unheld.objective_value < held.objective_value - 0.01
+    assert unheld.schedule.actions[-1].soc == held.schedule.actions[-1].soc
+    # The grid-only revision misses this native-solar repayment variant.
+    revised = coordinator_methods["_revise_solar_export_holds"](
+        coordinator, held, imports, exports, mask
+    )
+    assert revised == mask
+    calls = []
+
+    async def run_optimizer(reserve, *, charge_blocked_slots, solar_export_slots):
+        calls.append((reserve, charge_blocked_slots, solar_export_slots))
+        return solve(charge_blocked_slots)
+
+    chosen, chosen_mask = asyncio.run(
+        coordinator_methods["_check_solar_export_counterfactual"](
+            coordinator, held, mask, [False] * 3, run_optimizer, 0.1
+        )
+    )
+    assert chosen_mask == [False] * 3
+    assert chosen.objective_value == pytest.approx(unheld.objective_value)
+    assert chosen.schedule.actions[0].battery_charge_w > 0
+    assert calls == [(0.1, [False] * 3, [False] * 3)]
+    assert coordinator._solar_export_capability_status["selected_slots"] == 0
+    assert coordinator._solar_export_capability_status["current_slot"]["selected"] is False
+
+
+@pytest.mark.parametrize("offset", [0, 1, 2])
+def test_rolling_48_hour_holds_cannot_use_tomorrow_to_miss_todays_energy(
+    optimizer_module, coordinator_methods, offset
+):
+    """Successive five-minute replans keep today's useful solar available."""
+    slots = 576
+    base = datetime(2026, 10, 28, 8, tzinfo=timezone.utc)
+    timestamps = [base + timedelta(minutes=5 * (i + offset)) for i in range(slots)]
+    imports = [0.30] * slots
+    exports = []
+    solar = []
+    for ts in timestamps:
+        if ts.date() == base.date():
+            solar.append(6.8 if 8 <= ts.hour < 10 else 0.0)
+            exports.append(0.15 if 20 <= ts.hour < 21 else 0.068)
+        else:
+            solar.append(13.8 if 10 <= ts.hour < 16 else 0.0)
+            exports.append(0.02 if 10 <= ts.hour < 16 else 0.068)
+    load = [0.5] * slots
+    coordinator = _fake_coordinator()
+    coordinator._config.battery_capacity_wh = 48000
+    mask = coordinator_methods["_profit_max_solar_export_slots"](
+        coordinator, imports, exports, solar, load, 0.127,
+        [False] * slots, [True] * slots,
+    )
+    assert mask[0]
+
+    def solve(charge_blocks, holds):
+        optimizer = optimizer_module.BatteryOptimizer(
+            capacity_wh=48000, max_charge_w=25000, max_discharge_w=25000,
+            max_grid_import_w=25000, max_grid_export_w=15000,
+            efficiency=EFFICIENCY, backup_reserve=0.20, hardware_reserve=0.10,
+            interval_minutes=5, horizon_hours=48,
+        )
+        return optimizer.optimize(
+            import_prices=imports, export_prices=exports,
+            solar_forecast=solar, load_forecast=load, current_soc=0.127,
+            allow_battery_export=True, block_battery_charge=charge_blocks,
+            profit_max_solar_export_slots=holds, schedule_timestamps=timestamps,
+        )
+
+    held = solve(mask, mask)
+    assert held.feasible
+    assert not any(a.action == "charge" for a in held.schedule.actions)
+    assert coordinator_methods["_revise_solar_export_holds"](
+        coordinator, held, imports, exports, mask
+    ) == mask
+
+    async def run_optimizer(_reserve, **kwargs):
+        return solve(kwargs["charge_blocked_slots"], kwargs["solar_export_slots"])
+
+    chosen, chosen_mask = asyncio.run(
+        coordinator_methods["_check_solar_export_counterfactual"](
+            coordinator, held, mask, [False] * slots, run_optimizer, None
+        )
+    )
+    assert not any(chosen_mask)
+    assert chosen.objective_value < held.objective_value - 0.01
+    assert chosen.schedule.actions[0].battery_charge_w > 0
+    assert chosen.schedule.actions[-1].soc >= held.schedule.actions[-1].soc - 1e-4
+
+
+@pytest.mark.parametrize("variant", ["worse", "tie", "infeasible", "fallback", "nan"])
+def test_counterfactual_rejects_unproven_improvements_and_preserves_hard_blocks(
+    coordinator_methods, variant
+):
+    held = SimpleNamespace(feasible=True, solver_used="highs", objective_value=-1.0)
+    unheld = SimpleNamespace(feasible=True, solver_used="highs", objective_value=-2.0)
+    if variant == "worse":
+        unheld.objective_value = -0.5
+    elif variant == "tie":
+        unheld.objective_value = -1.0000001
+    elif variant == "infeasible":
+        unheld.feasible = False
+    elif variant == "fallback":
+        unheld.solver_used = "greedy"
+    else:
+        unheld.objective_value = math.nan
+    calls = []
+
+    async def run_optimizer(reserve, **kwargs):
+        calls.append((reserve, kwargs))
+        return unheld
+
+    chosen, mask = asyncio.run(
+        coordinator_methods["_check_solar_export_counterfactual"](
+            _fake_coordinator(), held, [True, False], [False, True], run_optimizer, 0.2
+        )
+    )
+    assert chosen is held
+    assert mask == [True, False]
+    assert calls == [(0.2, {
+        "charge_blocked_slots": [False, True], "solar_export_slots": [False, False],
+    })]
 
 
 def test_pre_deadline_hold_preserves_reachable_charge_by_time_target(
