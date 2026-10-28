@@ -1219,6 +1219,39 @@ async def test_config_restore_rejects_external_owner_in_exact_read_modify_write_
     assert writes==['read']
 
 
+@async_test
+@pytest.mark.parametrize('export', ['absent', 'battery_ok', 'pv_only'])
+async def test_actual_filestore_rmw_preserves_cloud_export_field_and_checks_exact_blob(export):
+    transport = _transport_without_key()
+    original = {'default_real_mode': 'self_consumption', 'unrelated': {'keep': True},
+                'site_info': {'backup_reserve_percent': 5}}
+    if export != 'absent':
+        original['site_info']['customer_preferred_export_rule'] = export
+    written = []
+    async def post(payload, din, **kwargs):
+        request = transport_pb2.MessageEnvelope.FromString(payload)
+        reply = transport_pb2.MessageEnvelope()
+        if request.filestore.HasField('read_file_request'):
+            reply.filestore.read_file_response.file.blob = json.dumps(original).encode()
+            reply.filestore.read_file_response.hash = b'fresh-original-hash'
+        else:
+            update = request.filestore.update_file_request
+            assert update.hash == b'fresh-original-hash'
+            written.append(json.loads(update.file.blob))
+            reply.filestore.update_file_response.SetInParent()
+        return transport_mod.TEDAPIResponse(True, reply.SerializeToString())
+    transport.post_v1r = post
+    result = await transport.write_config('gateway', {'default_real_mode': 'autonomous'},
+        validate_config=lambda config: config['site_info'].get('customer_preferred_export_rule')
+            in (None, 'battery_ok'))
+    assert result is (export != 'pv_only')
+    if export == 'pv_only':
+        assert not written
+    else:
+        assert written == [dict(original, default_real_mode='autonomous')]
+        assert written[0]['site_info'] == original['site_info']
+
+
 @pytest.mark.parametrize("watts,seconds", [(float('nan'), 30), (float('inf'), 30), (True, 30), (500, 0), (500, -1), (500, 86401), (500, 1.5), (500, True)])
 @async_test
 async def test_invalid_battery_dispatch_never_reaches_gateway(watts, seconds):

@@ -32,6 +32,14 @@ class NativeMaxTariffNotSubmitted(NativeMaxChargeError):
     """The provider boundary was never entered for this tariff upload."""
 
 
+class NativeMaxExportNotSubmitted(NativeMaxChargeError):
+    """The cloud export-setting boundary was never entered."""
+
+
+class NativeMaxExportRejected(NativeMaxChargeError):
+    """The provider explicitly rejected an export-setting request."""
+
+
 class NativeMaxChargeSession:
     """One restoration owner, protected by the caller's shared site admission.
 
@@ -75,6 +83,7 @@ class NativeMaxChargeSession:
                 "last_error": r.get("last_error"),
                 "direction": r["baseline"].get("direction", "charge"),
                 "startup_kick_w": r.get("startup_kick_w"),
+                "export_rule_source": r["baseline"].get("export_rule_source"),
                 "handoff_phase": r.get("handoff_phase")}
 
     async def load(self):
@@ -109,6 +118,15 @@ class NativeMaxChargeSession:
                         data["baseline"].get("direction", "charge") != "charge"
                         or data["baseline"].get("grid_charge_blocked") is not True):
                     raise NativeMaxChargeError("Grid charge restoration journal is invalid")
+                source = data["baseline"].get("export_rule_source", "local")
+                if (type(data.get("export_conflict", False)) is not bool
+                        or source not in ("local", "cloud")) or data.get("export_intent") not in (
+                        None, "never", "pv_only", "battery_ok"):
+                    raise NativeMaxChargeError("Export permission recovery journal is invalid")
+                if data.get("export_intent") and (source != "cloud"
+                        or data["baseline"].get("direction") != "discharge"
+                        or data["baseline"].get("export_rule") not in ("never", "pv_only", "battery_ok")):
+                    raise NativeMaxChargeError("Export permission restoration baseline is invalid")
                 self.record = deepcopy(data)
             self.loaded = True
 
@@ -200,6 +218,20 @@ class NativeMaxChargeSession:
             if value not in ("forcing", "baseline") or self.record.get("tariff_intent") != value:
                 raise NativeMaxChargeError("Native Max rejected tariff intent changed")
             self.record.pop("tariff_intent")
+        elif kind == "export":
+            if (value not in ("never", "pv_only", "battery_ok")
+                    or self.record["baseline"].get("export_rule_source") != "cloud"
+                    or self.record["baseline"].get("direction") != "discharge"):
+                raise NativeMaxChargeError("Cloud export permission intent is invalid")
+            if self.record.get("export_intent") not in (None, value):
+                raise NativeMaxChargeError("An earlier cloud export write remains uncertain")
+            self.record["export_intent"] = value
+        elif kind in ("export_confirmed", "export_not_submitted", "export_rejected"):
+            self.record.pop("export_intent", None)
+        elif kind == "export_conflict":
+            if type(value) is not bool or self.record["baseline"].get("export_rule_source") != "cloud":
+                raise NativeMaxChargeError("Export conflict recovery state is invalid")
+            self.record["export_conflict"] = value
         else:
             raise NativeMaxChargeError("Unknown Native Max mutation intent")
         await self._save()
@@ -320,11 +352,14 @@ class NativeMaxChargeSession:
             baseline["_cleanup"] = deepcopy(self.record.get("cleanup", {}))
             baseline["_tariff_intent"] = self.record.get("tariff_intent")
             baseline["_grid_charge_intent"] = self.record.get("grid_charge_intent", False)
+            baseline["_export_intent"] = self.record.get("export_intent")
+            baseline["_export_conflict"] = self.record.get("export_conflict", False)
             if await self.adapter.restore(baseline, before_restore,
                     write_intent=self._write_intent) is not True:
                 raise NativeMaxChargeError("Native Max restore was not confirmed")
-            if self.record.get("tariff_intent"):
-                raise NativeMaxChargeError("Native Max tariff submission remains uncertain")
+            if (self.record.get("tariff_intent") or self.record.get("export_intent")
+                    or self.record.get("export_conflict")):
+                raise NativeMaxChargeError("Native Max provider submission remains uncertain")
             self.record["phase"] = "settling"
             await self._save()
         if self.record["phase"] == "settling":

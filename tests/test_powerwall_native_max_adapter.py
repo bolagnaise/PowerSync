@@ -91,6 +91,235 @@ def setup(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_native_export_uses_cloud_when_v1r_omits_original_permission(setup):
+    s = setup
+    s.adapter.direction = 'discharge'
+    s.settings.update(optimization_max_discharge_w=14700)
+    s.state.config['site_info'].pop('customer_preferred_export_rule')
+    reads = []
+    async def cloud_read():
+        reads.append(True)
+        return 'pv_only'
+    s.adapter.read_export_rule = cloud_read
+    assert await s.adapter.guard()
+    baseline = await s.adapter.capture()
+    assert baseline['export_rule'] == 'pv_only'
+    assert baseline['export_rule_source'] == 'cloud'
+    assert reads
+    assert 'customer_preferred_export_rule' not in s.state.config['site_info']
+    assert not s.state.events
+
+
+def cloud_export_fallback(s, rule):
+    """Independent cloud permission; it never changes the local config fake."""
+    s.adapter.direction = 'discharge'
+    s.settings.update(optimization_max_discharge_w=14700)
+    s.state.config['site_info'].pop('customer_preferred_export_rule', None)
+    s.state.cloud_export_rule = rule
+    s.state.cloud_write_ok = True
+    s.state.cloud_reads = 0
+    async def read():
+        s.state.cloud_reads += 1
+        return s.state.cloud_export_rule
+    async def write(target, before_write, *, restoring=False):
+        fence = await before_write()
+        fence()
+        assert s.store.data['baseline']['export_rule'] == rule
+        assert s.store.data['export_intent'] == target
+        s.state.events.append(('cloud_export', target))
+        if s.state.cloud_write_ok:
+            s.state.cloud_export_rule = target
+        return s.state.cloud_write_ok
+    s.adapter.read_export_rule = read
+    s.adapter.write_export_rule = write
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('original_rule', ['battery_ok', 'pv_only', 'never'])
+async def test_cloud_export_baseline_survives_complete_native_start_and_restore(setup, original_rule):
+    s = setup
+    cloud_export_fallback(s, original_rule)
+    original = deepcopy(s.state.config), deepcopy(s.state.tariff)
+    try:
+        assert (await s.session.start(120))['active']
+        assert s.state.cloud_export_rule == 'battery_ok'
+        assert s.store.data['baseline']['export_rule_source'] == 'cloud'
+        assert 'customer_preferred_export_rule' not in s.state.config['site_info']
+        assert await s.session.stop()
+        assert s.state.cloud_export_rule == original_rule
+        assert (s.state.config, s.state.tariff) == original
+        assert not s.session.pending and not s.budget.native_max_claim('site')
+    finally:
+        await s.session._cancel_watch()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('cloud_rule', [None, '', 'invalid', True, {}, []])
+async def test_native_export_missing_on_both_paths_never_starts(setup, cloud_rule):
+    s = setup
+    cloud_export_fallback(s, cloud_rule)
+    assert not await s.adapter.guard()
+    assert not s.state.events and not s.session.pending
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('change', ['identity', 'policy', 'expired'])
+async def test_cloud_export_read_cannot_outlive_native_authority(setup, change):
+    s = setup
+    cloud_export_fallback(s, 'battery_ok')
+    async def delayed():
+        if change == 'identity': s.state.identity = 'other-site'
+        if change == 'policy': s.state.policy = False
+        if change == 'expired': s.state.at += 6
+        return 'battery_ok'
+    s.adapter.read_export_rule = delayed
+    assert not await s.adapter.guard()
+    assert not s.state.events
+
+
+@pytest.mark.asyncio
+async def test_known_local_export_does_not_require_cloud_availability(setup):
+    from unittest.mock import AsyncMock
+    s = setup
+    s.adapter.direction = 'discharge'
+    s.settings.update(optimization_max_discharge_w=14700)
+    s.adapter.read_export_rule = AsyncMock(side_effect=AssertionError('unnecessary cloud read'))
+    assert await s.adapter.guard()
+    s.adapter.read_export_rule.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_unconfirmed_cloud_permission_write_retains_restore_journal(setup):
+    s = setup
+    cloud_export_fallback(s, 'pv_only')
+    s.state.cloud_write_ok = False
+    try:
+        with pytest.raises(s.m.NativeMaxChargeError):
+            await s.session.start(120)
+        assert s.session.pending
+        assert s.store.data['export_intent'] == 'battery_ok'
+        assert s.budget.native_max_claim('site')
+        assert [e for e in s.state.events if e[0] == 'cloud_export'] == [('cloud_export', 'battery_ok')]
+        with pytest.raises(s.m.NativeMaxChargeError):
+            await s.session.stop()
+        assert [e for e in s.state.events if e[0] == 'cloud_export'] == [('cloud_export', 'battery_ok')]
+        # A later read proves the previously uncertain request arrived.
+        s.state.cloud_export_rule = 'battery_ok'
+        s.state.cloud_write_ok = True
+        assert await s.session.stop()
+        assert s.state.cloud_export_rule == 'pv_only'
+        assert not s.session.pending
+    finally:
+        await s.session._cancel_watch()
+
+
+@pytest.mark.asyncio
+async def test_cloud_export_original_and_uncertain_write_survive_restart(setup):
+    from copy import copy
+    s = setup
+    cloud_export_fallback(s, 'never')
+    s.state.cloud_write_ok = False
+    try:
+        with pytest.raises(s.m.NativeMaxChargeError):
+            await s.session.start(120)
+    finally:
+        await s.session._cancel_watch()
+    adapter = copy(s.adapter)
+    adapter._export_observation = None
+    adapter._cloud_export_owned = False
+    recovered = s.session.__class__(adapter, s.store,
+        clock=lambda: s.state.at, monotonic=lambda: s.state.at)
+    await recovered.load()
+    assert recovered.record['baseline']['export_rule'] == 'never'
+    assert recovered.record['baseline']['export_rule_source'] == 'cloud'
+    try:
+        with pytest.raises(s.m.NativeMaxChargeError):
+            await recovered.stop()
+        assert recovered.record['export_intent'] == 'battery_ok'
+        s.state.cloud_export_rule = 'battery_ok'
+        s.state.cloud_write_ok = True
+        assert await recovered.stop()
+        assert s.state.cloud_export_rule == 'never'
+        assert 'customer_preferred_export_rule' not in s.state.config['site_info']
+    finally:
+        await recovered._cancel_watch()
+
+
+@pytest.mark.asyncio
+async def test_cloud_outage_does_not_prevent_native_stop_but_keeps_export_recovery(setup):
+    s = setup
+    cloud_export_fallback(s, 'pv_only')
+    original_config = deepcopy(s.state.config)
+    read = s.adapter.read_export_rule
+    try:
+        await s.session.start(120)
+        async def unavailable(): return None
+        s.adapter.read_export_rule = unavailable
+        with pytest.raises(s.m.NativeMaxChargeError):
+            await s.session.stop()
+        assert s.state.config == original_config
+        assert s.state.tariff == s.original[1]
+        assert s.state.cloud_export_rule == 'battery_ok'
+        assert s.session.pending and s.budget.native_max_claim('site')
+        s.adapter.read_export_rule = read
+        assert await s.session.stop()
+        assert s.state.cloud_export_rule == 'pv_only'
+    finally:
+        await s.session._cancel_watch()
+
+
+@pytest.mark.asyncio
+async def test_uncertain_cloud_restoration_is_not_resubmitted_or_reversed(setup):
+    s = setup
+    cloud_export_fallback(s, 'pv_only')
+    try:
+        await s.session.start(120)
+        s.state.cloud_write_ok = False
+        with pytest.raises(s.m.NativeMaxChargeError):
+            await s.session.stop()
+        assert s.store.data['export_intent'] == 'pv_only'
+        sent = [e for e in s.state.events if e[0] == 'cloud_export']
+        with pytest.raises(s.m.NativeMaxChargeError):
+            await s.session.stop()
+        assert [e for e in s.state.events if e[0] == 'cloud_export'] == sent
+        s.state.cloud_export_rule = 'pv_only'
+        assert await s.session.stop()
+        assert [e for e in s.state.events if e[0] == 'cloud_export'] == sent
+    finally:
+        await s.session._cancel_watch()
+
+
+@pytest.mark.asyncio
+async def test_explicit_export_conflict_cannot_disappear_by_losing_one_source(setup):
+    from copy import copy
+    s = setup
+    cloud_export_fallback(s, 'battery_ok')
+    try:
+        await s.session.start(120)
+        s.state.config['site_info']['customer_preferred_export_rule'] = 'never'
+        assert not await s.adapter.guard()
+        with pytest.raises(s.m.NativeMaxChargeError):
+            await s.session.stop()
+        assert s.store.data['export_conflict'] is True
+    finally:
+        await s.session._cancel_watch()
+    s.state.config['site_info'].pop('customer_preferred_export_rule')
+    adapter = copy(s.adapter)
+    adapter._export_observation = None
+    adapter._export_conflict = False
+    recovered = s.session.__class__(adapter, s.store,
+        clock=lambda: s.state.at, monotonic=lambda: s.state.at)
+    try:
+        with pytest.raises(s.m.NativeMaxChargeError):
+            await recovered.stop()
+        assert recovered.record['export_conflict'] is True
+        s.state.config['site_info']['customer_preferred_export_rule'] = 'battery_ok'
+        assert await recovered.stop()
+    finally:
+        await recovered._cancel_watch()
+
+
+@pytest.mark.asyncio
 async def test_manual_max_uses_native_settings_and_restores_exact_original(setup):
     s=setup
     assert (await s.session.start(120))['active']

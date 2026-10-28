@@ -135,7 +135,7 @@ async def dispatch_powerwall_setting(
     hass, entry, *, site_id: str, updates: dict[str, Any],
     cloud_call: CloudCall, is_current: Callable[[], bool], deadline: float,
     acknowledged=None, before_submit=None, prefer_local=True,
-    guard_write=None, operation_id=None, is_allowed=None, label: str,
+    guard_write=None, operation_id=None, is_allowed=None, allow_stopping=False, label: str,
 ) -> bool:
     """One bounded optional settings transaction, separate from watt control."""
     runtime = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
@@ -155,7 +155,7 @@ async def dispatch_powerwall_setting(
                 and not runtime.get("powerwall_settings_recovering")
                 and (not pending or pending.get("resume_cloud") is not True
                      or runtime.get("powerwall_settings_cloud_handoff") == pending.get("id"))
-                and not runtime.get("powerwall_local_dispatch_stopping") and is_current())
+                and (allow_stopping or not runtime.get("powerwall_local_dispatch_stopping")) and is_current())
     def check_current():
         if not current():
             raise asyncio.CancelledError("Powerwall settings request superseded")

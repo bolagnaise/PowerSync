@@ -32901,19 +32901,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         return result
 
     async def _tesla_force_apply_export_rule(
-        site_configs, rule, *, reason, is_current=None,
+        site_configs, rule, *, reason, is_current=None, prefer_local=True,
+        before_write=None, submission_status=None, restoring=False,
     ) -> bool:
         """Verify export permission without acquiring manual override state."""
         from .powerwall_local.dispatch import dispatch_powerwall_setting
+        from .tesla_export_permissions import tesla_export_rule_from_site_info
         generation = (_command_generation[0], _tesla_charge_kick_generation[0])
         def current():
             return (generation == (_command_generation[0], _tesla_charge_kick_generation[0])
                     and _local_powerwall_generation_current()
-                    and not hass.data[DOMAIN][entry.entry_id].get("powerwall_local_dispatch_stopping")
+                    and (restoring or not hass.data[DOMAIN][entry.entry_id].get("powerwall_local_dispatch_stopping"))
                     and (is_current is None or is_current()))
         def allowed():
             manager = hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get("network_envelope_manager")
-            return rule == "never" or manager is None or manager.snapshot.mode == "off"
+            return rule == "never" or (restoring and rule == "pv_only") or manager is None or manager.snapshot.mode == "off"
         session = async_get_clientsession(hass)
         deadline = time.monotonic() + 30.0
         for site_id, token, provider in site_configs:
@@ -32924,12 +32926,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     raise asyncio.CancelledError("Tesla export request superseded")
                 if not allowed():
                     return False
+                fence = await before_write() if before_write is not None else None
+                if not current() or not allowed():
+                    return False
+                if fence is not None:
+                    fence()
+                if submission_status is not None:
+                    submission_status["submitted"] = True
                 async with session.post(
                     f"{base}/api/1/energy_sites/{site_id}/grid_import_export", headers=headers,
                     json={"customer_preferred_export_rule": rule}, timeout=aiohttp.ClientTimeout(total=5),
                 ) as response:
                     accepted, _reason = await _tesla_grid_export_write_result(response)
                     if response.status != 200 or not accepted:
+                        if submission_status is not None:
+                            rejected = response.status in (400, 401, 403, 404, 409, 422, 429)
+                            if response.status == 200:
+                                body = await response.json()
+                                result = body.get("response") if isinstance(body, dict) else None
+                                rejected = isinstance(result, dict) and result.get("result") is False
+                            submission_status["rejected"] = rejected
                         return False
                 for offset in (0.0, 0.5, 1.5):
                     if offset:
@@ -32949,7 +32965,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         components = info.get("components") or {}
                         if not isinstance(components, dict):
                             return False
-                        observed = components.get("customer_preferred_export_rule", info.get("customer_preferred_export_rule"))
+                        observed = tesla_export_rule_from_site_info(info)
                         if not current():
                             raise asyncio.CancelledError("Tesla export request superseded")
                         if response.status == 200 and observed == rule and allowed():
@@ -32966,7 +32982,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 updates={"site_info.customer_preferred_export_rule": rule},
                 cloud_call=cloud, is_current=current, is_allowed=allowed, deadline=deadline,
                 before_submit=_record_tesla_settings_submission,
-                operation_id=generation, label=reason,
+                operation_id=generation, label=reason, prefer_local=prefer_local,
+                allow_stopping=restoring,
             ):
                 return False
         return bool(site_configs)
@@ -33006,6 +33023,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 rule = info.get("customer_preferred_export_rule")
                 if state is force_discharge_state and rule in ("never", "pv_only", "battery_ok"):
                     baseline["saved_export_rule"] = rule
+                    baseline["saved_export_rule_source"] = "local"
             for key in fields:
                 if baseline.get(key) is None:
                     baseline[key] = state.get(key)
@@ -33666,6 +33684,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         from .powerwall_local.views import ensure_client
         from .powerwall_local.native_max_charge import (
             NativeMaxChargeSession, NativeMaxTariffNotSubmitted, NativeMaxTariffRejected,
+            NativeMaxExportNotSubmitted, NativeMaxExportRejected,
         )
         from .powerwall_local.native_max_adapter import NativeMaxChargeAdapter
         from .native_rate_budget import budget_for, site_identity
@@ -33684,6 +33703,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     or _local_powerwall_runtime.get("powerwall_local_dispatch_stopping")
                     or _local_powerwall_runtime.get("tesla_control_method_changing")
                     or _local_powerwall_runtime.get("powerwall_local_recovery_pending")
+                    or _local_powerwall_runtime.get("powerwall_settings_pending")
                     or _local_powerwall_runtime.get("optimizer_force_restart_restore_pending")
                     or _local_powerwall_runtime.get("pending_tesla_restore")
                     or _local_powerwall_runtime.get("max_backup_end_ts")
@@ -33720,6 +33740,42 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 if not result:
                     raise HomeAssistantError("Native Max tariff readback is empty")
                 return result
+
+        async def read_export_rule():
+            from .tesla_export_permissions import tesla_export_rule_from_site_info
+            configured = site_config()
+            site_id, token, provider = configured
+            base = get_tesla_api_base_url(provider, entry.data.get(CONF_FLEET_API_BASE_URL))
+            session = async_get_clientsession(hass)
+            async with session.get(f"{base}/api/1/energy_sites/{site_id}/site_info",
+                    headers={"Authorization": f"Bearer {token}"},
+                    timeout=aiohttp.ClientTimeout(total=3)) as response:
+                if response.status != 200:
+                    return None
+                payload = await response.json()
+                if site_config() != configured:
+                    return None
+                info = payload.get("response") if isinstance(payload, dict) else None
+                return tesla_export_rule_from_site_info(info)
+
+        async def write_export_rule(rule, before_write, *, restoring=False):
+            configured = site_config()
+            status = {}
+            try:
+                confirmed = await _tesla_force_apply_export_rule(
+                    [configured], rule, reason="native export permission restoration" if restoring
+                    else "native export permission preparation", prefer_local=False,
+                    before_write=before_write, submission_status=status, restoring=restoring,
+                    is_current=lambda: _native_max_identity() == identity)
+            except BaseException:
+                if not status.get("submitted"):
+                    raise NativeMaxExportNotSubmitted("Native export permission was not submitted")
+                raise
+            if confirmed is not True and not status.get("submitted"):
+                raise NativeMaxExportNotSubmitted("Native export permission was not submitted")
+            if confirmed is not True and status.get("rejected"):
+                raise NativeMaxExportRejected("Native export permission was rejected")
+            return confirmed
 
         async def upload(tariff, before_write):
             site_id, token, provider = site_config()
@@ -33774,7 +33830,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             current_identity=_native_max_identity, policy=permitted, config=_local_powerwall_dispatch_config,
             read_tariff=read_tariff, upload=upload, restorable=_select_restorable_tesla_tariff,
             forcing_tariff={}, budget=budget, entry_id=entry.entry_id, site=site,
-            tariff_matches=_tesla_tariff_matches_readback, direction=recovery_direction)
+            tariff_matches=_tesla_tariff_matches_readback, direction=recovery_direction,
+            read_export_rule=read_export_rule, write_export_rule=write_export_rule)
         current = NativeMaxChargeSession(adapter, _native_max_store, changed=changed)
         await current.load()
         if not _local_powerwall_generation_current():
@@ -35768,13 +35825,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                          site_id, site_state["saved_operation_mode"],
                                          site_state["saved_backup_reserve"], api_reserve, pre_idle, startup_reserve)
 
-                            components = site_info.get("components", {})
-                            saved_export_rule = components.get("customer_preferred_export_rule")
-                            if saved_export_rule is None:
-                                saved_export_rule = site_info.get("customer_preferred_export_rule")
-                                if components.get("non_export_configured") is True:
-                                    saved_export_rule = "never"
+                            from .tesla_export_permissions import read_export_rule
+                            export_reading = read_export_rule(site_info)
+                            saved_export_rule = export_reading.value
                             site_state["saved_export_rule"] = saved_export_rule
+                            site_state["saved_export_rule_source"] = "cloud" if saved_export_rule else "unknown"
+                            _LOGGER.info("Tesla cloud export baseline status=%s path=%s",
+                                         export_reading.status, export_reading.path)
                             _LOGGER.info("Site %s: saved export rule: %s", site_id, saved_export_rule)
 
                             saved_grid_charging_enabled = (

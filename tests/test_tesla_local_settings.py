@@ -192,12 +192,15 @@ def test_cloud_grid_parser_rejects_arbitrary_truthiness(value):
 
 
 def settings_context(transport=None, *, paired=True):
+    export_namespace = {}
+    exec((ROOT / "tesla_export_permissions.py").read_text(), export_namespace)
     runtime = {}
     hass = SimpleNamespace(data={"power_sync": {"entry": runtime}})
     entry = SimpleNamespace(entry_id="entry", options={"tesla_control_method": "tariff"},
                             data={"tesla_energy_site_id": "site", "powerwall_local_din": "din",
                                   "powerwall_local_paired": paired})
     ns = dict(asyncio=asyncio, time=time, DOMAIN="power_sync", _LOGGER=logging.getLogger(__name__),
+              tesla_export_rule_from_site_info=export_namespace["tesla_export_rule_from_site_info"],
               _sync_powerwall_settings_issue=Mock(), CONF_TESLA_ENERGY_SITE_ID="tesla_energy_site_id",
               get_local_transport=lambda h, e: transport if e.data["powerwall_local_paired"] else None,
               hass=hass, entry=entry, _local_powerwall_generation_current=lambda: True,
@@ -1168,6 +1171,7 @@ class HttpReply:
 @pytest.mark.parametrize("write_payload,read_payload,expected", [
     ({"response": {"result": False, "reason": "denied"}}, {}, False),
     ({"response": {"result": True}}, {"response": {"components": {"customer_preferred_export_rule": "pv_only"}}}, True),
+    ({"response": {"result": True}}, {"response": {"components": {"customer_preferred_export_rule": None}, "customer_preferred_export_rule": "pv_only"}}, True),
     ({"response": {"result": True}}, {"response": ["pv_only"]}, False),
     ({"response": {"result": True}}, {"response": {"components": ["pv_only"]}}, False),
 ])
@@ -1181,6 +1185,75 @@ async def test_actual_export_helper_composes_http_result_and_readback(write_payl
     load_function(ROOT / "__init__.py", "_tesla_grid_export_write_result", ns)
     fn = load_function(ROOT / "__init__.py", "_tesla_force_apply_export_rule", ns, strip_imports=True)
     assert await fn([("site", "token", "fleet")], "pv_only", reason="restore") is expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stopping,restoring", [(False, False), (True, True)])
+async def test_native_cloud_export_route_is_field_selective_and_fenced(stopping, restoring):
+    transport = SimpleNamespace(write_config=AsyncMock(), read_config=AsyncMock())
+    ns, runtime = settings_context(transport)
+    runtime["powerwall_local_dispatch_stopping"] = stopping
+    sent = []
+    fences = []
+    async def before_write():
+        return lambda: fences.append('checked')
+    def post(*args, **kwargs):
+        assert fences == ['checked']
+        sent.append(kwargs['json'])
+        return HttpReply({'response': {'result': True}})
+    ns.update(_command_generation=[0], _tesla_charge_kick_generation=[0], aiohttp=aiohttp,
+        _record_tesla_settings_submission=AsyncMock(),
+        async_get_clientsession=lambda h: SimpleNamespace(post=post, get=lambda *a, **kw:
+            HttpReply({'response': {'components': {'customer_preferred_export_rule': 'pv_only'}}})),
+        CONF_FLEET_API_BASE_URL='base', get_tesla_api_base_url=lambda *a: 'https://tesla.test')
+    load_function(ROOT / '__init__.py', '_tesla_grid_export_write_result', ns)
+    fn = load_function(ROOT / '__init__.py', '_tesla_force_apply_export_rule', ns, strip_imports=True)
+    status = {}
+    assert await fn([('site', 'token', 'fleet')], 'pv_only', reason='native restore',
+        prefer_local=False, before_write=before_write, submission_status=status, restoring=restoring)
+    assert sent == [{'customer_preferred_export_rule': 'pv_only'}]
+    assert status == {'submitted': True}
+    transport.write_config.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('resume_cloud', [False, True])
+async def test_cloud_export_fallback_respects_existing_settings_recovery_guard(resume_cloud):
+    ns, runtime = settings_context(paired=False)
+    runtime['powerwall_settings_pending'] = {'id': 'prior-write', 'site_id': 'site',
+        'resume_cloud': resume_cloud}
+    if resume_cloud:
+        runtime['powerwall_settings_cloud_handoff'] = 'prior-write'
+    post = Mock(return_value=HttpReply({'response': {'result': True}}))
+    ns.update(_command_generation=[0], _tesla_charge_kick_generation=[0], aiohttp=aiohttp,
+        _record_tesla_settings_submission=AsyncMock(),
+        async_get_clientsession=lambda h: SimpleNamespace(post=post, get=lambda *a, **kw:
+            HttpReply({'response': {'components': {'customer_preferred_export_rule': 'pv_only'}}})),
+        CONF_FLEET_API_BASE_URL='base', get_tesla_api_base_url=lambda *a: 'https://tesla.test')
+    load_function(ROOT / '__init__.py', '_tesla_grid_export_write_result', ns)
+    fn = load_function(ROOT / '__init__.py', '_tesla_force_apply_export_rule', ns, strip_imports=True)
+    assert await fn([('site', 'token', 'fleet')], 'pv_only', reason='native restore',
+        prefer_local=False) is resume_cloud
+    assert post.call_count == int(resume_cloud)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('payload', [{'response': {'result': False}}, {'response': {'result': True}}])
+async def test_cloud_export_submission_status_distinguishes_rejection_from_failed_read(payload):
+    ns, _ = settings_context(paired=False)
+    post = Mock(return_value=HttpReply(payload))
+    ns.update(_command_generation=[0], _tesla_charge_kick_generation=[0], aiohttp=aiohttp,
+        _record_tesla_settings_submission=AsyncMock(),
+        async_get_clientsession=lambda h: SimpleNamespace(post=post, get=lambda *a, **kw: HttpReply({'response': {}})),
+        CONF_FLEET_API_BASE_URL='base', get_tesla_api_base_url=lambda *a: 'https://tesla.test')
+    load_function(ROOT / '__init__.py', '_tesla_grid_export_write_result', ns)
+    fn = load_function(ROOT / '__init__.py', '_tesla_force_apply_export_rule', ns, strip_imports=True)
+    status = {}
+    assert not await fn([('site', 'token', 'fleet')], 'pv_only', reason='native restore',
+        prefer_local=False, submission_status=status)
+    assert post.call_count == 1
+    assert status.get('submitted') is True
+    assert bool(status.get('rejected')) is (payload['response']['result'] is False)
 
 
 @pytest.mark.asyncio
