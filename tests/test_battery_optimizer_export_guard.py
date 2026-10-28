@@ -441,6 +441,94 @@ def test_positive_acquisition_cost_keeps_solar_refill_before_deadline_export(
     assert result.grid_export_w[0] > 1_000
 
 
+@pytest.mark.parametrize(
+    ("solar", "block_solar", "manual_charge", "expects_export"),
+    [
+        ([1.0, 0.0, 0.0, 0.0], False, False, True),
+        ([0.0, 0.0, 1.0, 0.0], False, False, True),
+        ([0.0, 0.0, 0.0, 0.0], False, False, False),
+        ([1.0, 0.0, 0.0, 0.0], True, False, False),
+        ([1.0, 0.0, 0.0, 0.0], False, True, False),
+    ],
+)
+def test_no_grid_priority_export_uses_only_earlier_solved_solar_charge(
+    battery_optimizer_module, solar, block_solar, manual_charge, expects_export,
+):
+    """Ticket #133: today's paid inventory must not price tomorrow's solar."""
+    if not battery_optimizer_module.HIGHS_AVAILABLE:
+        pytest.skip("requires HiGHS LP solver")
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=10_000, max_charge_w=5_000, max_discharge_w=5_000,
+        backup_reserve=0.20, hardware_reserve=0.0, efficiency=0.92,
+        interval_minutes=60, horizon_hours=4, terminal_weight=0.0,
+    )
+    result = optimizer.optimize(
+        import_prices=[0.528] * 4,
+        export_prices=[0.0, 0.10, 0.0, 0.10],
+        solar_forecast=solar, load_forecast=[0.0] * 4, current_soc=0.50,
+        acquisition_cost_kwh=0.1169503,
+        allow_grid_charge=False,
+        allow_battery_export=[False, True, False, True],
+        block_battery_charge=[block_solar, True, False, True],
+        priority_export_slots=[False, True, False, True],
+        priority_export_enabled=True,
+        manual_control={
+            "mode_slots": ["charge", None, None, None],
+            "required_charge_kw": [2.0, 0.0, 0.0, 0.0],
+        } if manual_charge else None,
+    )
+    exported_kwh = sum(result.battery_to_grid_w) / 1000
+    assert result.feasible
+    assert result.solver_used == "highs"
+    assert (exported_kwh > 0.1) is expects_export
+    assert min(a.soc for a in result.schedule.actions) >= 0.20
+    if expects_export:
+        # Paid starting inventory cannot multiply one solar charge across the
+        # two export windows. Future solar cannot fund an earlier export.
+        assert exported_kwh <= sum(solar) * 0.92**2 + 1e-5
+        charged_kwh = sum(a.battery_charge_w for a in result.schedule.actions) / 1000
+        assert exported_kwh <= charged_kwh * 0.92**2 + 1e-5
+        assert max(result.grid_import_w) < 0.1
+        if solar[2]:
+            assert result.battery_to_grid_w[1] < 0.1
+    else:
+        assert exported_kwh == pytest.approx(0.0, abs=1e-5)
+
+
+def test_no_grid_solar_refill_to_full_keeps_tomorrow_super_export(
+    battery_optimizer_module,
+):
+    """Reported variant: 100% at 17:55 must not retain yesterday's energy cost."""
+    if not battery_optimizer_module.HIGHS_AVAILABLE:
+        pytest.skip("requires HiGHS LP solver")
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=49_800, max_charge_w=10_000, max_discharge_w=10_000,
+        backup_reserve=0.20, hardware_reserve=0.0, interval_minutes=5,
+        horizon_hours=48,
+    )
+    start = datetime(2026, 10, 28, 21, 5, tzinfo=timezone(timedelta(hours=11)))
+    timestamps = [start + timedelta(minutes=5 * i) for i in range(576)]
+    export = [18 <= t.hour < 21 for t in timestamps]
+    result = optimizer.optimize(
+        import_prices=[0.0 if 11 <= t.hour < 14 else 0.528 for t in timestamps],
+        export_prices=[0.10 if enabled else 0.0 for enabled in export],
+        solar_forecast=[9.7 if 8 <= t.hour < 18 else 0.0 for t in timestamps],
+        load_forecast=[1.8] * 576, current_soc=0.56,
+        acquisition_cost_kwh=0.1169503, allow_grid_charge=False,
+        grid_charge_allowed=[False] * 576,
+        allow_battery_export=export, block_battery_charge=export,
+        priority_export_slots=export, priority_export_enabled=True,
+        schedule_timestamps=timestamps,
+    )
+    before_export = next(i for i,t in enumerate(timestamps)
+        if t.day == 29 and t.hour == 17 and t.minute == 55)
+    assert result.feasible
+    assert result.solver_used == "highs"
+    assert result.schedule.actions[before_export].soc == pytest.approx(1.0, abs=0.001)
+    assert any(a.action == "export" for a in result.schedule.actions[before_export + 1:])
+    assert sum(result.battery_to_grid_w) / 12000 > 1.0
+
+
 def test_grid_import_limit_still_allows_solar_assisted_full_charge(
     battery_optimizer_module,
 ):

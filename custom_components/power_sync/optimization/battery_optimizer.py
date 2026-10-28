@@ -3595,11 +3595,38 @@ class BatteryOptimizer:
             > self.economic_round_trip_efficiency + 1e-9
         )
         ev_source_tracking_requested = bool(ev_plan)
+        # With grid charging off, newly stored solar can fund later priority
+        # export even when today's inventory costs more than that export pays.
+        # Match the greedy solver's solar-charge allocation, without treating
+        # a forecast surplus (or a manual grid charge) as acquired energy.
+        solar_backed_priority_exports: dict[int, list[int]] = {}
+        if not allow_grid_charge and acquisition_cost_kwh > 0:
+            for t in range(p_n):
+                export_value = p_export[t] + p_export_bonus[t]
+                if (
+                    not _priority_export_slot(t)
+                    or _cost_neutral_export_slot(t)
+                    or p_manual_control[t]
+                    or export_value + 1e-9 >= p_effective_acquisition[t]
+                ):
+                    continue
+                earlier_solar = [
+                    prior for prior in range(t)
+                    if not p_manual_control[prior]
+                    and p_mode[prior] in (None, "self_use")
+                    and not p_block_charge[prior]
+                    and p_solar[prior] > p_load[prior] + 1e-9
+                    and max(0.0, p_export[prior] + p_export_bonus[prior])
+                    < export_value * self.economic_round_trip_efficiency - 0.001
+                ]
+                if earlier_solar:
+                    solar_backed_priority_exports[t] = earlier_solar
         battery_to_grid_active = (
             cost_neutral_active
             or economic_adjustment_active
             or future_reservation_active
             or ev_source_tracking_requested
+            or bool(solar_backed_priority_exports)
         )
         battery_to_grid_offset = next_offset
         if battery_to_grid_active:
@@ -4312,6 +4339,7 @@ class BatteryOptimizer:
             A_ub_rows += 5 * p_n
         if paired_priority_recharge_periods:
             A_ub_rows += len(paired_priority_recharge_periods) + 1
+        A_ub_rows += len(solar_backed_priority_exports)
         if future_reservation_active:
             A_ub_rows += 2 * sum(future_reservation_periods)
         if battery_to_grid_active:
@@ -4443,6 +4471,18 @@ class BatteryOptimizer:
 
         A_ub = _LpMatrix((A_ub_rows, num_vars), dtype=float)
         b_ub: list[float] = []
+
+        for t, earlier_solar in solar_backed_priority_exports.items():
+            # A cumulative output budget prevents one real solar charge from
+            # funding multiple export windows. Only earlier solved charging
+            # counts, after both conversion losses; initial paid inventory and
+            # future solar never relax the acquisition guard.
+            for export_t in solar_backed_priority_exports:
+                if export_t <= t:
+                    A_ub[len(b_ub), battery_to_grid_var(export_t)] = p_dt[export_t]
+            for prior in earlier_solar:
+                A_ub[len(b_ub), charge_var(prior)] = -eff * eff * p_dt[prior]
+            b_ub.append(0.0)
 
         for t in range(p_n):
             # Prevent current-period charge from funding same-period discharge.
@@ -5242,6 +5282,7 @@ class BatteryOptimizer:
             for t in range(p_n)
             if p_allow_export[t]
             and not _cost_neutral_export_slot(t)
+            and t not in solar_backed_priority_exports
             and acquisition_cost_kwh > 0
             and (p_export[t] + p_export_bonus[t])
             < _export_acquisition_threshold(t)
@@ -5448,6 +5489,7 @@ class BatteryOptimizer:
                     not p_allow_export[t]
                     or (
                         not _cost_neutral_export_slot(t)
+                        and t not in solar_backed_priority_exports
                         and acquisition_cost_kwh > 0
                         and (p_export[t] + p_export_bonus[t])
                         < _export_acquisition_threshold(t)
