@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from datetime import datetime, timezone
 from typing import Any
 
 from .const import (
@@ -19,6 +20,40 @@ from .const import (
     TESLA_BLE_SENSOR_CHARGING,
     TESLA_BLE_SENSOR_CHARGING_STATE,
 )
+
+
+def get_tesla_ble_observed_at(hass: Any, state: Any) -> datetime | None:
+    """Read a bridge's receipt time, without renewing a replayed HA value.
+
+    The optional charging-freshness package publishes ``<entity>_received``
+    timestamp values on raw samples, including equal measurements which HA's
+    ESPHome integration suppresses. Its state value is the receipt, not its HA
+    update time. Once present, an invalid receipt must fail closed. Older
+    bridges without these entities retain their existing HA timestamp contract.
+    """
+    if state is None:
+        return None
+    entity_id = getattr(state, "entity_id", "")
+    receipt = hass.states.get(f"{entity_id}_received") if entity_id else None
+    if receipt is not None:
+        try:
+            observed = datetime.fromisoformat(str(receipt.state).replace("Z", "+00:00"))
+            if observed.tzinfo is None or observed.utcoffset() is None:
+                return None
+            observed = observed.astimezone(timezone.utc)
+            return observed if observed <= datetime.now(timezone.utc) else None
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            return None
+    observed = (
+        getattr(state, "last_reported", None)
+        or getattr(state, "last_updated", None)
+        or getattr(state, "last_changed", None)
+    )
+    if not isinstance(observed, datetime):
+        return None
+    if observed.tzinfo is None:
+        return observed.replace(tzinfo=timezone.utc)
+    return observed.astimezone(timezone.utc)
 
 
 def _first_available_state(hass: Any, entity_ids: tuple[str, ...]) -> Any | None:
@@ -48,9 +83,7 @@ def _newest_finite_state(hass: Any, entity_ids: tuple[str, ...]) -> Any | None:
                 continue
         except (TypeError, ValueError):
             continue
-        observed_at = getattr(state, "last_reported", None) or getattr(
-            state, "last_updated", None
-        )
+        observed_at = get_tesla_ble_observed_at(hass, state)
         if (
             selected is None
             or (

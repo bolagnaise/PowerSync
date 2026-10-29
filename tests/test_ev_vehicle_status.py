@@ -3895,3 +3895,56 @@ def test_manual_start_accepts_current_exact_vin_wall_connector_status():
     view = power_sync.EVVehicleCommandView(hass)
     view._get_powersync_config = lambda: {}
     assert asyncio.run(view._is_vehicle_plugged_in(vin)) is True
+
+
+def test_ble_raw_receipts_keep_two_steady_vehicles_fresh_independently():
+    """HA suppresses equal numeric reports; raw receipt values remain authoritative."""
+    power_sync = _power_sync_module()
+    now = datetime.now(timezone.utc)
+    old = now - timedelta(minutes=5)
+    states = []
+    for prefix, age in (("first", 5), ("second", 120)):
+        states.extend([
+            _State(f"binary_sensor.{prefix}_status", "on", last_updated=now),
+            _State(f"sensor.{prefix}_charging_state", "Charging", last_updated=now),
+            _State(f"sensor.{prefix}_charge_power", "7.0", {"unit_of_measurement": "kW"},
+                   last_updated=old, last_reported=now),
+            _State(f"sensor.{prefix}_charge_power_received", (now - timedelta(seconds=age)).isoformat(),
+                   last_updated=now, last_reported=now),
+        ])
+    hass = _Hass(states)
+    entry = SimpleNamespace(entry_id="entry-1", data={}, options={
+        "ev_provider": "tesla_ble", "tesla_ble_entity_prefix": "first,second",
+    })
+    vehicles = {v["vehicle_id"]:v for v in power_sync._get_ev_vehicles_status(hass, entry)}
+    assert vehicles["ble_first"]["power_available"] is True
+    assert vehicles["ble_first"]["ev_power_kw"] == 7.0
+    assert vehicles["ble_first"]["_observed_at"] == now - timedelta(seconds=5)
+    assert vehicles["ble_second"]["power_available"] is False
+    # Replaying a cached receipt into HA must not renew the second vehicle.
+    assert vehicles["ble_second"]["_observed_at"] == now - timedelta(seconds=120)
+    # A new raw equal sample renews only the second bridge.
+    hass.states._states["sensor.second_charge_power_received"].state = now.isoformat()
+    vehicles = {v["vehicle_id"]:v for v in power_sync._get_ev_vehicles_status(hass, entry)}
+    assert vehicles["ble_first"]["_observed_at"] == now - timedelta(seconds=5)
+    assert vehicles["ble_second"]["power_available"] is True
+    assert vehicles["ble_second"]["ev_power_kw"] == 7.0
+
+
+def test_ble_planner_requires_matching_current_raw_power_receipt():
+    _power_sync_module()
+    planner = importlib.import_module("power_sync.automations.ev_charging_planner")
+    now = datetime.now(timezone.utc)
+    for power_value, receipt_value, expected in [
+        ("7.0", (now - timedelta(seconds=5)).isoformat(), 7.0),
+        ("7.0", (now - timedelta(seconds=120)).isoformat(), 0.0),
+        ("7.0", (now + timedelta(seconds=120)).isoformat(), 0.0),
+        ("7.0", "unavailable", 0.0),
+        ("unknown", now.isoformat(), 0.0),
+    ]:
+        hass = _Hass([
+            _State("sensor.car_charge_power", power_value, {"unit_of_measurement": "kW"},
+                   last_updated=now - timedelta(minutes=5), last_reported=now),
+            _State("sensor.car_charge_power_received", receipt_value, last_updated=now),
+        ])
+        assert planner._tesla_ble_charge_power_kw(hass, "car") == expected

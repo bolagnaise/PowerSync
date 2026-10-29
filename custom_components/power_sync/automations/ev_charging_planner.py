@@ -60,6 +60,7 @@ from ..tesla_ble_mapping import (
 from ..tesla_ble import (
     get_tesla_ble_battery_state,
     get_tesla_ble_charge_power_state,
+    get_tesla_ble_observed_at,
     get_tesla_ble_charging_state,
     get_tesla_ble_plug_state,
 )
@@ -566,9 +567,7 @@ def _cached_ble_plug_state(hass: "HomeAssistant", prefix: str) -> bool | None:
 def _tesla_ble_charge_power_kw(hass: "HomeAssistant", prefix: str) -> float:
     power_state = get_tesla_ble_charge_power_state(hass, prefix)
     if not is_current_ev_power_observation(
-        getattr(power_state, "last_reported", None)
-        or getattr(power_state, "last_updated", None)
-        or getattr(power_state, "last_changed", None)
+        get_tesla_ble_observed_at(hass, power_state)
     ):
         return 0.0
     power_w = _state_power_w(power_state)

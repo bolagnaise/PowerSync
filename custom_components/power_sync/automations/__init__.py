@@ -29,6 +29,7 @@ from ..ev_load import is_current_ev_power_observation
 from ..tesla_ble import (
     get_tesla_ble_charge_current_state,
     get_tesla_ble_charge_power_state,
+    get_tesla_ble_observed_at,
 )
 from .triggers import evaluate_trigger, evaluate_conditions, TriggerResult
 from .actions import execute_actions
@@ -1224,11 +1225,7 @@ class AutomationEngine:
                     power_state = get_tesla_ble_charge_power_state(
                         self._hass, candidate_prefix
                     )
-                    observed_at = (
-                        getattr(power_state, "last_reported", None)
-                        or getattr(power_state, "last_updated", None)
-                        or getattr(power_state, "last_changed", None)
-                    )
+                    observed_at = get_tesla_ble_observed_at(self._hass, power_state)
                     if is_current_ev_power_observation(observed_at):
                         try:
                             power_w = float(power_state.state)

@@ -13728,3 +13728,34 @@ def test_solar_surplus_restores_a_downward_ev_ramp_symmetrically():
     assert _t284_surplus(epoch, sampled) == pytest.approx(
         _t284_surplus(epoch, sampled - 2000), abs=0.01
     )
+
+
+@pytest.mark.parametrize("receipt_age,expected", [(5, (7.0, True)), (120, (0.0, False)), (-120, (0.0, False))])
+def test_ble_surplus_power_uses_raw_receipt_not_api_replay(receipt_age, expected):
+    now = datetime.now(timezone.utc)
+    hass = _Hass([
+        _State("sensor.car_charging_state", "Charging", last_updated=now),
+        _State("sensor.car_charge_power", "7.0", {"unit_of_measurement": "kW"},
+               last_updated=now - timedelta(minutes=5), last_reported=now),
+        _State("sensor.car_charge_power_received", (now - timedelta(seconds=receipt_age)).isoformat(),
+               last_updated=now, last_reported=now),
+    ])
+    assert asyncio.run(actions._get_observed_ev_power_reading_kw(
+        hass, "ble_car", {"charger_type": "tesla"},
+    )) == expected
+
+
+@pytest.mark.parametrize("receipt_age,expected", [(5, True), (180, False), (-120, False)])
+def test_ble_command_evidence_requires_actual_power_receipt(receipt_age, expected):
+    now = datetime.now(timezone.utc)
+    hass = _Hass([
+        _State("sensor.car_charging_state", "Charging", last_updated=now - timedelta(minutes=10)),
+        _State("sensor.car_charge_power", "7.0", {"unit_of_measurement": "kW"},
+               last_updated=now - timedelta(minutes=5), last_reported=now),
+        _State("sensor.car_charge_power_received", (now - timedelta(seconds=receipt_age)).isoformat(),
+               last_updated=now, last_reported=now),
+    ])
+    assert actions._ble_command_has_fresh_charging_evidence(hass, "car") is expected
+    assert actions._ble_state_observed_after(
+        hass.states.get("sensor.car_charge_power"), now - timedelta(seconds=120), hass=hass,
+    ) is expected

@@ -1784,15 +1784,14 @@ async def _get_observed_ev_power_reading_kw(
     if charger_type == "tesla" and vehicle_id.startswith("ble_"):
         from ..tesla_ble import (
             get_tesla_ble_charge_power_state,
+            get_tesla_ble_observed_at,
             get_tesla_ble_charging_state,
         )
 
         state = get_tesla_ble_charge_power_state(hass, vehicle_id[4:])
         power_kw, available = _power_state_kw_reading(state)
         available = available and is_current_ev_power_observation(
-            getattr(state, "last_reported", None)
-            or getattr(state, "last_updated", None)
-            or getattr(state, "last_changed", None)
+            get_tesla_ble_observed_at(hass, state)
         )
         if available:
             # The bridge keeps re-reporting an unchanged watt value, so the
@@ -1808,7 +1807,7 @@ async def _get_observed_ev_power_reading_kw(
                     getattr(charging, "last_changed", None)
                     or getattr(charging, "last_updated", None)
                 ),
-                state_reported_at=getattr(charging, "last_reported", None),
+                state_reported_at=get_tesla_ble_observed_at(hass, charging),
                 power_value_updated_at=(
                     getattr(state, "last_changed", None)
                     or getattr(state, "last_updated", None)
@@ -2322,9 +2321,17 @@ _TESLA_BLE_COMMAND_CONFIRMATION_SECONDS = 10
 _TESLA_BLE_WAKE_FRESHNESS_SECONDS = 120
 
 
-def _ble_state_observed_after(state: Any, since: datetime) -> bool:
-    """Require an actual HA observation, not a restored or missing value."""
-    observed = getattr(state, "last_reported", None) or getattr(state, "last_updated", None)
+def _ble_state_observed_after(
+    state: Any, since: datetime, *, hass: HomeAssistant | None = None
+) -> bool:
+    """Require a post-command sample, using raw BLE receipts when available."""
+    from ..tesla_ble import get_tesla_ble_observed_at
+
+    observed = (
+        get_tesla_ble_observed_at(hass, state)
+        if hass is not None
+        else getattr(state, "last_reported", None) or getattr(state, "last_updated", None)
+    )
     if not isinstance(observed, datetime):
         return False
     if observed.tzinfo is None:
@@ -2348,7 +2355,7 @@ async def _wait_for_ble_command_readback(
     while True:
         for candidate in entity_ids:
             state = hass.states.get(candidate)
-            if state is None or not _ble_state_observed_after(state, command_started_at):
+            if state is None or not _ble_state_observed_after(state, command_started_at, hass=hass):
                 continue
             value = str(state.state).strip().lower()
             if isinstance(expected, str):
@@ -2369,7 +2376,7 @@ async def _wait_for_ble_command_readback(
             current = get_tesla_ble_charge_current_state(hass, charging_prefix)
             power = get_tesla_ble_charge_power_state(hass, charging_prefix)
             for measured, minimum in ((current, 0.1), (power, 50.0)):
-                if measured is None or not _ble_state_observed_after(measured, command_started_at):
+                if measured is None or not _ble_state_observed_after(measured, command_started_at, hass=hass):
                     continue
                 try:
                     observed_value = float(measured.state)
@@ -2533,13 +2540,14 @@ def _ble_command_has_fresh_charging_evidence(
     from ..tesla_ble import (
         get_tesla_ble_charge_current_state,
         get_tesla_ble_charge_power_state,
+        get_tesla_ble_observed_at,
     )
 
     current = get_tesla_ble_charge_current_state(hass, ble_prefix)
     power = get_tesla_ble_charge_power_state(hass, ble_prefix)
     for measured, minimum in ((current, 0.1), (power, 50.0)):
         if measured is None or not _ble_state_observed_after(
-            measured, freshness_cutoff
+            measured, freshness_cutoff, hass=hass
         ):
             continue
         try:
@@ -2552,14 +2560,19 @@ def _ble_command_has_fresh_charging_evidence(
             if not math.isfinite(value) or value < minimum:
                 continue
 
-            measured_at = measured.last_updated or measured.last_changed
+            # Value ordering stays in HA's clock domain. A bridge receipt
+            # measures freshness, not when HA observed a state transition.
+            measured_at = (
+                getattr(measured, "last_changed", None)
+                or measured.last_updated
+            )
             # A positive, fresh vehicle measurement is enough for a rate-only
             # adjustment when BLE leaves its unchanged Charging state stale.
             # Do not override a newer explicit state that says charging has
             # stopped, completed, or disconnected.
             if any(
                 str(status.state).strip().lower() in _TESLA_NON_CHARGING_STATES
-                and (status.last_updated or status.last_changed) > measured_at
+                and (getattr(status, "last_changed", None) or status.last_updated) > measured_at
                 for status in charging_statuses
             ):
                 return False

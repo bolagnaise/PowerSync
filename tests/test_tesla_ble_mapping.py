@@ -327,3 +327,57 @@ def test_alias_only_config_migrates_to_explicit_vin():
         config,
         [{"vehicle_id": "ble_bridge_alpha", "priority": 1}],
     ) == [{"vehicle_id": VIN_A, "priority": 1}]
+
+
+@pytest.mark.parametrize("power_suffix", ["charge_power", "charger_power"])
+def test_ble_power_receipt_uses_timestamp_value_not_ha_report_time(power_suffix):
+    from datetime import timedelta, timezone
+    from power_sync.tesla_ble import get_tesla_ble_observed_at
+
+    now = datetime.now(timezone.utc)
+    received = now - timedelta(seconds=5)
+    power = SimpleNamespace(entity_id=f"sensor.car_{power_suffix}", state="7.0",
+                            last_reported=now - timedelta(minutes=5))
+    receipt = SimpleNamespace(state=received.isoformat(), last_reported=now)
+    hass = SimpleNamespace(states=SimpleNamespace(get={
+        power.entity_id: power, power.entity_id + "_received": receipt,
+    }.get))
+    assert get_tesla_ble_observed_at(hass, power) == received
+
+
+@pytest.mark.parametrize("value", ["unknown", "unavailable", "invalid", "2026-10-29T10:00:00"])
+def test_invalid_present_ble_receipt_never_falls_back_to_ha_time(value):
+    from datetime import timezone
+    from power_sync.tesla_ble import get_tesla_ble_observed_at
+
+    power = SimpleNamespace(entity_id="sensor.car_charge_power", state="7.0",
+                            last_reported=datetime.now(timezone.utc))
+    hass = SimpleNamespace(states=SimpleNamespace(get={
+        power.entity_id + "_received": SimpleNamespace(state=value),
+    }.get))
+    assert get_tesla_ble_observed_at(hass, power) is None
+
+
+def test_ble_alias_selection_uses_each_alias_own_receipt():
+    from datetime import timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+    older = SimpleNamespace(entity_id="sensor.car_charge_power", state="7.0", last_reported=now)
+    newer = SimpleNamespace(entity_id="sensor.car_charger_power", state="3.0",
+                            last_reported=now - timedelta(minutes=10))
+    hass = SimpleNamespace(states=SimpleNamespace(get={
+        older.entity_id: older, newer.entity_id: newer,
+        older.entity_id + "_received": SimpleNamespace(state=(now - timedelta(minutes=5)).isoformat()),
+        newer.entity_id + "_received": SimpleNamespace(state=(now - timedelta(seconds=5)).isoformat()),
+    }.get))
+    assert get_tesla_ble_charge_power_state(hass, "car") is newer
+
+
+def test_ble_without_receipt_keeps_legacy_observation_timestamp():
+    from datetime import timezone
+    from power_sync.tesla_ble import get_tesla_ble_observed_at
+
+    now = datetime.now(timezone.utc)
+    power = SimpleNamespace(entity_id="sensor.car_charge_power", state="7.0", last_reported=now)
+    hass = SimpleNamespace(states=SimpleNamespace(get=lambda _: None))
+    assert get_tesla_ble_observed_at(hass, power) == now

@@ -1058,6 +1058,7 @@ from .tesla_ble import (
     get_tesla_ble_battery_state,
     get_tesla_ble_charge_current_state,
     get_tesla_ble_charge_power_state,
+    get_tesla_ble_observed_at,
     get_tesla_ble_charging_state,
     get_tesla_ble_plug_state,
     get_tesla_ble_status_state,
@@ -1831,7 +1832,7 @@ def _get_ev_vehicle_status(hass, entry) -> dict:
         ble_state = get_tesla_ble_charge_power_state(hass, prefix)
         ble_presence_observed_at = _latest_ev_observed_at(
             getattr(ble_charging_state, "last_updated", None),
-            _ev_power_observed_at(ble_state),
+            get_tesla_ble_observed_at(hass, ble_state),
         )
         fleet_presence, fleet_presence_observed_at = fleet_site_presence.get(
             _vehicle_identity_key(paired_ble_prefixes.get(prefix)),
@@ -2439,7 +2440,7 @@ def _get_ev_vehicles_status(hass, entry) -> list:
         if power_state:
             ble_power_observed_at = _latest_ev_observed_at(
                 ble_power_observed_at,
-                _ev_power_observed_at(power_state),
+                get_tesla_ble_observed_at(hass, power_state),
             )
         power_available = power_available and is_current_ev_power_observation(
             ble_power_observed_at
@@ -2469,7 +2470,7 @@ def _get_ev_vehicles_status(hass, entry) -> list:
                 getattr(charge_state, "last_changed", None)
                 or ble_state_observed_at
             ),
-            state_reported_at=_ev_power_observed_at(charge_state),
+            state_reported_at=get_tesla_ble_observed_at(hass, charge_state),
             power_value_updated_at=power_value_updated_at,
         )
         if stale_power_contradicted_by_state:
