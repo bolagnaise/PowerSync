@@ -357,6 +357,20 @@ async def test_tariff_preference_keeps_an_explicit_watt_target_local():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('preference', ['tariff', 'local', 'auto'])
+async def test_all_preferences_keep_numeric_discharge_local_when_export_preference_is_omitted(preference):
+    from test_powerwall_battery_dispatch import load_routing, call
+    ns, local, client, _ = load_routing(tesla_control_method=preference)
+    client.get_snapshot.return_value.raw['config']['site_info'].pop('customer_preferred_export_rule', None)
+    try:
+        result = await ns['_try_local_powerwall_force']('discharge', call(power_w=500), 15, 500)
+        assert result['control_path'] == 'powerwall_local_dispatch'
+        client.dispatch_battery_power.assert_awaited_once()
+    finally:
+        await local.stop()
+
+
+@pytest.mark.asyncio
 async def test_tariff_control_cannot_abandon_uncertain_local_cleanup():
     from test_powerwall_battery_dispatch import load_routing, call
     ns, local, client, _ = load_routing(tesla_control_method='tariff')

@@ -19,7 +19,7 @@ from .battery_dispatch import battery_watts, site_grid_limits_w, validate_dispat
 from .full_rate_charge import native_max_charge_eligibility
 from .native_max_charge import (NativeMaxChargeError, NativeMaxTariffNotSubmitted,
     NativeMaxTariffRejected, NativeMaxExportNotSubmitted, NativeMaxExportRejected)
-from ..tesla_export_permissions import EXPORT_RULES
+from ..tesla_export_permissions import EXPORT_RULES, ExportRuleReading
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -73,6 +73,17 @@ class NativeMaxChargeAdapter:
         self._cloud_export_owned = False
         self._export_cloud_checked = False
         self._export_conflict = False
+        self._export_missing_at = None
+        self._export_untracked_ready = False
+
+    def _can_prepare_untracked_export(self, config):
+        """An omitted preference permits explicit setup, never inferred permission."""
+        info = config.get("site_info") if isinstance(config, dict) else None
+        return (isinstance(info, dict) and info.get("customer_preferred_export_rule") is None
+                and self._export_missing_at is not None and not self._export_conflict
+                and 0 <= self.monotonic() - self._export_missing_at <= 5
+                and self.current_identity() == self.identity and self.client.local_access_enabled
+                and callable(self.write_export_rule))
 
     @staticmethod
     def _local_export_rule(config):
@@ -99,6 +110,7 @@ class NativeMaxChargeAdapter:
 
     async def _observe_export_rule(self, config, *, require_cloud=False):
         self._export_cloud_checked = False
+        self._export_missing_at = None
         local = self._local_export_rule(config)
         if local is not None and not (require_cloud or self._cloud_export_owned):
             self._export_observation = None
@@ -111,12 +123,21 @@ class NativeMaxChargeAdapter:
         started = self.monotonic()
         self._export_cloud_checked = True
         try:
-            rule = await asyncio.wait_for(self.read_export_rule(), timeout=3)
+            reading = await asyncio.wait_for(self.read_export_rule(), timeout=3)
         except Exception:
             return None
-        if (rule not in EXPORT_RULES or self.current_identity() != self.identity
+        if (self.current_identity() != self.identity
                 or not self.client.local_access_enabled
                 or not 0 <= self.monotonic() - started <= 5):
+            return None
+        rule = reading.value if isinstance(reading, ExportRuleReading) else reading
+        if rule not in EXPORT_RULES:
+            # Only a valid direct cloud response which actually omits the
+            # preference can use acknowledgement-only preparation. Transport,
+            # malformed and conflicting replies do not establish omission.
+            if (isinstance(reading, ExportRuleReading) and reading.status in ("absent", "null")
+                    and local is None and raw is None):
+                self._export_missing_at = started
             return None
         if local is not None:
             self._export_conflict = local != rule
@@ -125,7 +146,8 @@ class NativeMaxChargeAdapter:
         self._export_observation = (rule, started)
         return rule
 
-    async def _write_cloud_export(self, rule, before_write, write_intent, *, restoring=False):
+    async def _write_cloud_export(self, rule, before_write, write_intent, *, restoring=False,
+                                  require_readback=True):
         """Keep an uncertain cloud command owned until its effect is observed."""
         if not callable(self.write_export_rule):
             return False
@@ -138,7 +160,13 @@ class NativeMaxChargeAdapter:
             return await before_write()
         async def write():
             try:
-                return await self.write_export_rule(rule, submitted, restoring=restoring)
+                options = {} if require_readback else {"require_readback": False}
+                confirmed = await self.write_export_rule(rule, submitted, restoring=restoring, **options)
+                if confirmed is True:
+                    # Persist a terminal receipt inside the drained provider
+                    # task even when its caller was cancelled during submission.
+                    await write_intent("export_confirmed")
+                return confirmed
             except NativeMaxExportNotSubmitted:
                 if recorded:
                     await write_intent("export_not_submitted")
@@ -148,8 +176,6 @@ class NativeMaxChargeAdapter:
                     await write_intent("export_rejected")
                 return False
         confirmed = await self._mutate(write())
-        if confirmed is True:
-            await write_intent("export_confirmed")
         return confirmed is True
 
     def _matches(self, expected, observed):
@@ -276,7 +302,9 @@ class NativeMaxChargeAdapter:
                             and (exported is None or exported > configured))):
                     return self._deny("native_export_limit_exceeds_software_limit",
                                       native_export_limit_w=exported, software_export_limit_w=configured)
-                if self._export_rule(raw) not in EXPORT_RULES:
+                export = self._export_rule(raw)
+                if ((export not in EXPORT_RULES and not self._can_prepare_untracked_export(raw))
+                        or (self._export_untracked_ready and export in ("never", "pv_only"))):
                     return self._deny("native_export_rule_invalid",
                         local_export_field_present="customer_preferred_export_rule" in info,
                         cloud_read_attempted=self._export_cloud_checked)
@@ -360,6 +388,7 @@ class NativeMaxChargeAdapter:
     async def capture(self):
         self._export_limit_ready = False
         self._cloud_export_owned = False
+        self._export_untracked_ready = False
         if not self.authority():
             raise NativeMaxChargeError("Native Max ownership is unavailable")
         started = self.monotonic()
@@ -389,11 +418,16 @@ class NativeMaxChargeAdapter:
             baseline["grid_charge_blocked"] = True
         if self.direction == "discharge":
             export = self._export_rule(config)
-            if export not in ("battery_ok", "pv_only", "never"):
+            untracked = export is None and self._can_prepare_untracked_export(config)
+            if export not in EXPORT_RULES and not untracked:
                 raise NativeMaxChargeError("Native discharge export baseline is unavailable")
-            source = "local" if self._local_export_rule(config) is not None else "cloud"
+            source = "untracked" if untracked else "local" if self._local_export_rule(config) is not None else "cloud"
             self._cloud_export_owned = source == "cloud"
             baseline["export_rule_source"] = source
+            if untracked:
+                baseline["export_permission_untracked"] = True
+            else:
+                baseline["export_rule"] = export
             _LOGGER.info("Native discharge original export permission source=%s rule=%s", source, export)
             config = dict(self.config())
             def percent(value):
@@ -406,7 +440,7 @@ class NativeMaxChargeAdapter:
             configured_limit = config.get("optimization_max_grid_export_w")
             force_limit = original_limit if configured_limit is None else max(original_limit, -configured_limit / 1000)
             baseline.update(export_limit=original_limit, force_export_limit=force_limit,
-                export_rule=export, settle_discharge_w=max(0, snapshot.battery_w),
+                settle_discharge_w=max(0, snapshot.battery_w),
                 force_reserve=max(reserve, percent(config.get("optimization_backup_reserve", .2)),
                                   percent(config.get("hardware_backup_reserve", 0))))
         return baseline
@@ -463,12 +497,20 @@ class NativeMaxChargeAdapter:
         if result:
             self._export_limit_ready = False
             self._grid_charge_ready = False
+            self._export_untracked_ready = False
             if self.token == token:
                 self.token = None
         return result
 
     async def prepare(self, baseline, before_write, *, write_intent):
         """Enable an owned optimiser setting before any battery or tariff write."""
+        if baseline.get("export_permission_untracked") is True:
+            if not await self._prepare_export_limit(baseline, before_write, write_intent):
+                return False
+            if not await self._write_cloud_export("battery_ok", self._owned_before(baseline, before_write),
+                    write_intent, require_readback=False):
+                return False
+            self._export_untracked_ready = True
         if baseline.get("grid_charge_blocked") is True:
             field = "disallow_charge_from_grid_with_solar_installed"
             checked = None
@@ -507,6 +549,8 @@ class NativeMaxChargeAdapter:
         """Optional one-shot pulse, never a renewable local controller."""
         if not self.startup_kick:
             return
+        if baseline.get("export_permission_untracked") is True and not self._export_untracked_ready:
+            raise NativeMaxChargeError("Native export preparation was not confirmed")
         if await self.guard() is not True:
             raise NativeMaxChargeError("Startup kick policy changed")
         from .hybrid_policy import startup_watts
@@ -550,8 +594,13 @@ class NativeMaxChargeAdapter:
             return (isinstance(info, dict) and config.get("default_real_mode") in
                     ("autonomous", "self_consumption", baseline["mode"])
                     and info.get("backup_reserve_percent") in (reserve, baseline["reserve"])
-                    and (self.direction != "discharge" or self._export_rule(config)
-                         in (baseline["export_rule"], "battery_ok"))
+                    and (self.direction != "discharge"
+                         or (baseline.get("export_permission_untracked") is True
+                             and self._export_untracked_ready
+                             and (self._export_rule(config) == "battery_ok"
+                                  or self._can_prepare_untracked_export(config)))
+                         or (baseline.get("export_permission_untracked") is not True
+                             and self._export_rule(config) in (baseline["export_rule"], "battery_ok")))
                     and self.authority())
         async def record_config_intent(until):
             nonlocal fence
@@ -562,7 +611,7 @@ class NativeMaxChargeAdapter:
             if checked_config is None or not self._forcing_permitted(checked_config):
                 raise NativeMaxChargeError("Native Max policy changed before config submission")
         updates = {"default_real_mode": mode, "site_info.backup_reserve_percent": reserve}
-        if self.direction == "discharge" and baseline.get("export_rule_source") != "cloud":
+        if self.direction == "discharge" and baseline.get("export_rule_source", "local") == "local":
             updates["site_info.customer_preferred_export_rule"] = "battery_ok"
         if not await self._mutate(self.client._transport.write_config(self.client._din,
                 updates,
@@ -570,12 +619,14 @@ class NativeMaxChargeAdapter:
                 before_submit=record_config_intent)):
             return False
         current = await self.client._transport.read_config(self.client._din)
-        if self.direction == "discharge" and baseline.get("export_rule_source") == "cloud":
+        if self.direction == "discharge" and baseline.get("export_rule_source") in ("cloud", "untracked"):
             await self._observe_export_rule(current, require_cloud=True)
         confirmed = (isinstance(current, dict) and current.get("default_real_mode") == mode
                 and isinstance(current.get("site_info"), dict)
                 and current["site_info"].get("backup_reserve_percent") == reserve
-                and (self.direction != "discharge" or self._export_rule(current) == "battery_ok"))
+                and (self.direction != "discharge" or self._export_rule(current) == "battery_ok"
+                     or (baseline.get("export_permission_untracked") is True
+                         and self._export_untracked_ready and self._can_prepare_untracked_export(current))))
         if confirmed:
             await write_intent("local_confirmed")
         return confirmed
@@ -709,6 +760,8 @@ class NativeMaxChargeAdapter:
         return True
 
     async def apply(self, baseline, before_write, *, write_intent):
+        if baseline.get("export_permission_untracked") is True and not self._export_untracked_ready:
+            return False
         if not await self._prepare_export_limit(baseline, before_write, write_intent):
             return False
         before_write = self._owned_before(baseline, before_write)
@@ -827,7 +880,21 @@ class NativeMaxChargeAdapter:
         await release_field("reserve_released", "site_info.backup_reserve_percent",
                             baseline["reserve"], baseline.get("force_reserve", 100))
         if baseline.get("direction", "charge") == "discharge":
-            if cloud_export:
+            if baseline.get("export_permission_untracked") is True:
+                if pending_export:
+                    try:
+                        current = await self.client._transport.read_config(self.client._din)
+                        observed = await self._observe_export_rule(current, require_cloud=True)
+                        if observed == pending_export:
+                            await write_intent("export_confirmed")
+                            pending_export = None
+                    except Exception:
+                        pass
+                if not pending_export:
+                    # No original preference was captured. Keep the accepted
+                    # export selection and restore only settings we owned.
+                    await checkpoint(export_released=True)
+            elif cloud_export:
                 try:
                     current = await self.client._transport.read_config(self.client._din)
                     observed = await self._observe_export_rule(current, require_cloud=True)

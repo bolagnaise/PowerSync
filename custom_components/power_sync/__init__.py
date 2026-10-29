@@ -33841,7 +33841,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 return result
 
         async def read_export_rule():
-            from .tesla_export_permissions import tesla_export_rule_from_site_info
+            from .tesla_export_permissions import read_export_rule as read_export_preference
+            from .tesla_grid_control import tesla_site_info_has_structure, tesla_site_info_reports_components
             configured = site_config()
             site_id, token, provider = configured
             base = get_tesla_api_base_url(provider, entry.data.get(CONF_FLEET_API_BASE_URL))
@@ -33855,9 +33856,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 if site_config() != configured:
                     return None
                 info = payload.get("response") if isinstance(payload, dict) else None
-                return tesla_export_rule_from_site_info(info)
+                if not isinstance(info, dict) or not tesla_site_info_has_structure(info):
+                    return None
+                reading = read_export_preference(info)
+                if reading.status in ("absent", "null") and not tesla_site_info_reports_components(info):
+                    return None
+                return reading
 
-        async def write_export_rule(rule, before_write, *, restoring=False):
+        async def write_export_rule(rule, before_write, *, restoring=False, require_readback=True):
             configured = site_config()
             status = {}
             try:
@@ -33865,6 +33871,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     [configured], rule, reason="native export permission restoration" if restoring
                     else "native export permission preparation", prefer_local=False,
                     before_write=before_write, submission_status=status, restoring=restoring,
+                    require_readback=require_readback,
                     is_current=lambda: _native_max_identity() == identity)
             except BaseException:
                 if not status.get("submitted"):

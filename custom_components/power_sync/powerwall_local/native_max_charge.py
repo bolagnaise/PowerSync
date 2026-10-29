@@ -119,13 +119,20 @@ class NativeMaxChargeSession:
                         or data["baseline"].get("grid_charge_blocked") is not True):
                     raise NativeMaxChargeError("Grid charge restoration journal is invalid")
                 source = data["baseline"].get("export_rule_source", "local")
+                untracked = data["baseline"].get("export_permission_untracked", False)
                 if (type(data.get("export_conflict", False)) is not bool
-                        or source not in ("local", "cloud")) or data.get("export_intent") not in (
+                        or source not in ("local", "cloud", "untracked")) or data.get("export_intent") not in (
                         None, "never", "pv_only", "battery_ok"):
                     raise NativeMaxChargeError("Export permission recovery journal is invalid")
-                if data.get("export_intent") and (source != "cloud"
+                if (type(untracked) is not bool or (source == "untracked") != untracked
+                        or (untracked and (data["baseline"].get("direction") != "discharge"
+                            or "export_rule" in data["baseline"] or data.get("export_conflict")
+                            or data.get("export_intent") not in (None, "battery_ok")))):
+                    raise NativeMaxChargeError("Untracked export permission journal is invalid")
+                if data.get("export_intent") and (source not in ("cloud", "untracked")
                         or data["baseline"].get("direction") != "discharge"
-                        or data["baseline"].get("export_rule") not in ("never", "pv_only", "battery_ok")):
+                        or (not untracked and data["baseline"].get("export_rule")
+                            not in ("never", "pv_only", "battery_ok"))):
                     raise NativeMaxChargeError("Export permission restoration baseline is invalid")
                 self.record = deepcopy(data)
             self.loaded = True
@@ -220,8 +227,10 @@ class NativeMaxChargeSession:
             self.record.pop("tariff_intent")
         elif kind == "export":
             if (value not in ("never", "pv_only", "battery_ok")
-                    or self.record["baseline"].get("export_rule_source") != "cloud"
-                    or self.record["baseline"].get("direction") != "discharge"):
+                    or self.record["baseline"].get("export_rule_source") not in ("cloud", "untracked")
+                    or self.record["baseline"].get("direction") != "discharge"
+                    or (self.record["baseline"].get("export_permission_untracked") is True
+                        and value != "battery_ok")):
                 raise NativeMaxChargeError("Cloud export permission intent is invalid")
             if self.record.get("export_intent") not in (None, value):
                 raise NativeMaxChargeError("An earlier cloud export write remains uncertain")

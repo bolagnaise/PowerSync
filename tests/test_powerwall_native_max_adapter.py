@@ -162,6 +162,312 @@ async def test_native_export_missing_on_both_paths_never_starts(setup, cloud_rul
     assert not s.state.events and not s.session.pending
 
 
+def omitted_export_fallback(s, *, accepted=True, status='absent'):
+    """A valid cloud reply omits the preference; the write has its own receipt."""
+    permissions = importlib.import_module('native_max_adapter_probe.tesla_export_permissions')
+    s.adapter.direction = 'discharge'
+    s.adapter.startup_kick = True
+    s.settings.update(optimization_max_discharge_w=14700,
+                      optimization_max_grid_export_w=10000)
+    s.state.config['site_info'].pop('customer_preferred_export_rule')
+    s.adapter.read_export_rule = lambda: asyncio.sleep(
+        0, result=permissions.ExportRuleReading(None, status))
+
+    async def write(target, before_write, *, restoring=False, require_readback=True):
+        assert not restoring and require_readback is False
+        assert s.store.data['baseline']['export_permission_untracked'] is True
+        assert 'export_rule' not in s.store.data['baseline']
+        fence = await before_write()
+        assert s.store.data['export_intent'] == target == 'battery_ok'
+        assert s.state.config['site_info']['min_site_meter_power_ac'] == -10
+        fence()
+        s.state.events.append(('cloud_export', target))
+        return accepted
+
+    s.adapter.write_export_rule = write
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('status', ['absent', 'null'])
+async def test_native_omitted_export_prepares_before_kick_and_restores_other_settings(setup, status):
+    s = setup
+    omitted_export_fallback(s, status=status)
+    original = deepcopy(s.state.config), deepcopy(s.state.tariff)
+    try:
+        assert (await s.session.start(120))['active']
+        kinds = [kind for kind, _ in s.state.events]
+        assert kinds.index('cloud_export') < kinds.index('kick') < kinds.index('tariff')
+        assert 'export_intent' not in s.store.data
+        assert s.state.config['site_info']['min_site_meter_power_ac'] == -10
+        assert await s.session.stop()
+        assert (s.state.config, s.state.tariff) == original
+        assert [event for event in s.state.events if event[0] == 'cloud_export'] == [
+            ('cloud_export', 'battery_ok')]
+        assert not s.session.pending and not s.budget.native_max_claim('site')
+    finally:
+        await s.session._cancel_watch()
+
+
+@pytest.mark.asyncio
+async def test_native_omitted_export_unacknowledged_write_blocks_forcing_and_retains_owner(setup):
+    s = setup
+    omitted_export_fallback(s, accepted=False)
+    try:
+        with pytest.raises(s.m.NativeMaxChargeError):
+            await s.session.start(120)
+        assert not any(kind in ('kick', 'tariff') for kind, _ in s.state.events)
+        assert s.session.pending
+        assert s.store.data['export_intent'] == 'battery_ok'
+        assert s.budget.native_max_claim('site')
+        # Restart cannot turn an omitted readback into evidence of completion.
+        from copy import copy
+        recovered = s.session.__class__(copy(s.adapter), s.store,
+            clock=lambda: s.state.at, monotonic=lambda: s.state.at)
+        with pytest.raises(s.m.NativeMaxChargeError):
+            await recovered.recover()
+        assert recovered.record['export_intent'] == 'battery_ok'
+    finally:
+        await s.session._cancel_watch()
+
+
+@pytest.mark.asyncio
+async def test_native_omitted_export_cannot_issue_a_startup_command_before_preparation(setup):
+    from unittest.mock import AsyncMock
+    s = setup
+    omitted_export_fallback(s)
+    assert await s.adapter.guard()
+    baseline = await s.adapter.capture()
+    with pytest.raises(s.m.NativeMaxChargeError, match='export preparation'):
+        await s.adapter.kick(baseline, AsyncMock(), deadline=s.state.at + 120, write_intent=AsyncMock())
+    assert not s.state.events
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('malformed', ['unsupported', False, {}, []])
+async def test_native_omitted_cloud_cannot_replace_malformed_local_export(setup, malformed):
+    s = setup
+    omitted_export_fallback(s)
+    s.state.config['site_info']['customer_preferred_export_rule'] = malformed
+    with pytest.raises(s.m.NativeMaxChargeError):
+        await s.session.start(120)
+    assert not s.state.events and not s.session.pending
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('status', ['unavailable', 'invalid', 'conflict'])
+async def test_native_export_requires_an_actual_cloud_omission_before_untracked_setup(setup, status):
+    s = setup
+    omitted_export_fallback(s, status=status)
+    assert not await s.adapter.guard()
+    assert not s.state.events and not s.session.pending
+
+
+@pytest.mark.asyncio
+async def test_cancelled_omitted_export_retains_terminal_receipt_and_restores_cap(setup):
+    s = setup
+    omitted_export_fallback(s)
+    entered, release = asyncio.Event(), asyncio.Event()
+    write = s.adapter.write_export_rule
+    async def delayed(*args, **kwargs):
+        result = await write(*args, **kwargs)
+        entered.set()
+        await release.wait()
+        return result
+    s.adapter.write_export_rule = delayed
+    start = asyncio.create_task(s.session.start(120))
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        start.cancel()
+        await asyncio.sleep(0)
+        assert not start.done()
+        assert s.store.data['export_intent'] == 'battery_ok'
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await start
+        assert not any(kind in ('kick', 'tariff') for kind, _ in s.state.events)
+        assert not s.session.pending and s.store.data is None
+        assert s.state.config['site_info']['min_site_meter_power_ac'] == -14.9
+        assert not s.budget.native_max_claim('site')
+    finally:
+        release.set()
+        await s.session._cancel_watch()
+
+
+@pytest.mark.asyncio
+async def test_uncertain_omitted_export_resolves_only_after_exact_later_readback(setup):
+    s = setup
+    omitted_export_fallback(s, accepted=False)
+    try:
+        with pytest.raises(s.m.NativeMaxChargeError):
+            await s.session.start(120)
+        assert s.session.record['export_intent'] == 'battery_ok'
+        s.adapter.read_export_rule = lambda: asyncio.sleep(0, result='battery_ok')
+        assert await s.session.stop()
+        assert not s.session.pending and not s.budget.native_max_claim('site')
+        assert [event for event in s.state.events if event[0] == 'cloud_export'] == [
+            ('cloud_export', 'battery_ok')]
+    finally:
+        await s.session._cancel_watch()
+
+
+@pytest.mark.asyncio
+async def test_omitted_export_cleanup_preserves_later_external_preference(setup):
+    s = setup
+    omitted_export_fallback(s)
+    try:
+        await s.session.start(120)
+        s.state.config['site_info']['customer_preferred_export_rule'] = 'never'
+        assert not await s.adapter.guard()
+        assert await s.session.stop()
+        assert s.state.config['site_info']['customer_preferred_export_rule'] == 'never'
+        assert s.state.config['site_info']['min_site_meter_power_ac'] == -14.9
+        assert [event for event in s.state.events if event[0] == 'cloud_export'] == [
+            ('cloud_export', 'battery_ok')]
+    finally:
+        await s.session._cancel_watch()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('source', ['optimizer', 'user'])
+async def test_automatic_routes_omitted_export_through_real_native_lifetime(setup, source):
+    from test_powerwall_battery_dispatch import load_routing, call
+    from unittest.mock import AsyncMock
+    from datetime import timedelta
+    s = setup
+    omitted_export_fallback(s)
+    s.settings['powerwall_native_capacity_w'] = 20000
+    ns, local, client, _ = load_routing(tesla_control_method='auto',
+        optimization_max_discharge_w=20000, optimization_max_grid_export_w=10000)
+    # The route uses real selection with a fresh, balanced snapshot: site
+    # export plus the home load exceeds the timed inverter ceiling.
+    client.get_snapshot.return_value.load_w = 2000
+    client.get_snapshot.return_value.solar_w = 0
+    client.get_snapshot.return_value.battery_w = 0
+    client.get_snapshot.return_value.grid_w = 2000
+    now = ns['dt_util'].utcnow()
+    ns['dt_util'].utcnow = lambda: now
+    s.state.at = now.timestamp()
+    ns.update(_native_max_context={}, _get_tesla_site_configs=lambda *_: [('site', 'token', 'provider')],
+              _get_native_max_charge=AsyncMock(return_value=s.session),
+              _create_discharge_tariff=lambda minutes: ({'name': 'Force export', 'code': 'FORCE'}, None),
+              NativeMaxChargeError=s.m.NativeMaxChargeError)
+    try:
+        result = await ns['_try_local_powerwall_force']('discharge', call(source=source, power_w=0), 2, 0)
+        assert result['control_path'] == 'powerwall_native_tariff'
+        assert result['physical_effect_confirmed'] is False
+        assert s.session.record['baseline']['export_permission_untracked'] is True
+        assert s.session.record['expires_at'] == (now + timedelta(minutes=2)).timestamp()
+        client.dispatch_battery_power.assert_not_awaited()
+        assert not local.pending
+        assert await s.session.stop()
+    finally:
+        await s.session._cancel_watch()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('payload,status,expected', [
+    ({'response': {'components': {'battery': True}}}, 200, 'absent'),
+    ({'response': {'components': {'battery': True, 'customer_preferred_export_rule': None}}}, 200, 'null'),
+    ({'response': {'components': {'battery': True, 'customer_preferred_export_rule': 'battery_ok'}}}, 200, 'known'),
+    ({'response': {'components': {'battery': True, 'customer_preferred_export_rule': 'unknown'}}}, 200, 'invalid'),
+    ({'response': {'site_name': 'thin reply'}}, 200, None),
+    ({'response': {}}, 200, None),
+    ({'response': {'components': {'battery': True}}}, 403, None),
+])
+async def test_native_cloud_reader_distinguishes_real_omission_from_failed_or_thin_reply(
+        setup, payload, status, expected):
+    from test_tesla_local_settings import HttpReply
+    s = setup
+    permissions = importlib.import_module('native_max_adapter_probe.tesla_export_permissions')
+    grid = importlib.import_module('native_max_adapter_probe.tesla_grid_control')
+    tree = ast.parse((ROOT / '__init__.py').read_text())
+    factory = next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef)
+                   and n.name == '_get_native_max_charge_locked')
+    read = deepcopy(next(n for n in factory.body if isinstance(n, ast.AsyncFunctionDef)
+                         and n.name == 'read_export_rule'))
+    read.body = [n for n in read.body if not isinstance(n, ast.ImportFrom)]
+    namespace = dict(site_config=lambda: ('site', 'token', 'fleet'),
+        read_export_preference=permissions.read_export_rule,
+        tesla_site_info_has_structure=grid.tesla_site_info_has_structure,
+        tesla_site_info_reports_components=grid.tesla_site_info_reports_components,
+        hass=object(), entry=SimpleNamespace(data={}), CONF_FLEET_API_BASE_URL='fleet_base',
+        get_tesla_api_base_url=lambda *args: 'https://tesla.test',
+        async_get_clientsession=lambda hass: SimpleNamespace(get=lambda *args, **kwargs: HttpReply(payload, status)),
+        aiohttp=__import__('aiohttp'))
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[read], type_ignores=[])),
+                 '<native-export-read>', 'exec'), namespace)
+    result = await namespace['read_export_rule']()
+    assert (result.status if result is not None else None) == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('malformed', [
+    {'direction': 'charge'}, {'export_rule': 'never'},
+    {'export_permission_untracked': 'true'}, {'export_rule_source': 'cloud'},
+])
+async def test_untracked_native_journal_rejects_contradictory_baselines(setup, malformed):
+    from copy import copy
+    s = setup
+    omitted_export_fallback(s)
+    try:
+        await s.session.start(120)
+        await s.session._cancel_watch()
+        journal = deepcopy(s.store.data)
+        journal['baseline'].update(malformed)
+        original_store = s.store
+        fake_store = copy(original_store)
+        fake_store.data = journal
+        recovered = s.session.__class__(copy(s.adapter), fake_store,
+            clock=lambda: s.state.at, monotonic=lambda: s.state.at)
+        with pytest.raises(s.m.NativeMaxChargeError, match='journal'):
+            await recovered.load()
+    finally:
+        await s.session.stop()
+        await s.session._cancel_watch()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('ack,accepted', [
+    ({'response': {'result': True}}, True),
+    ({'response': {'code': 204, 'message': 'Updated'}}, True),
+    ({'response': ''}, True),
+    ({'response': {'result': False}}, False),
+    ({}, False),
+])
+async def test_native_omitted_export_uses_real_http_receipt_without_export_readback(
+        setup, monkeypatch, ack, accepted):
+    from test_tesla_local_settings import export_confirmation_context
+    s = setup
+    omitted_export_fallback(s)
+    real_sleep = asyncio.sleep
+    helper, _ns, _runtime, http = export_confirmation_context(monkeypatch, ack, {})
+    monkeypatch.setattr(asyncio, 'sleep', real_sleep)
+    tree = ast.parse((ROOT / '__init__.py').read_text())
+    factory = next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef)
+                   and n.name == '_get_native_max_charge_locked')
+    write = next(n for n in factory.body if isinstance(n, ast.AsyncFunctionDef)
+                 and n.name == 'write_export_rule')
+    namespace = dict(site_config=lambda: ('site', 'token', 'fleet'),
+        _tesla_force_apply_export_rule=helper, _native_max_identity=lambda: 'paired', identity='paired',
+        NativeMaxExportNotSubmitted=s.m.NativeMaxExportNotSubmitted,
+        NativeMaxExportRejected=s.m.NativeMaxExportRejected)
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[write], type_ignores=[])),
+                 '<native-export-write>', 'exec'), namespace)
+    s.adapter.write_export_rule = namespace['write_export_rule']
+    try:
+        if accepted:
+            assert (await s.session.start(120))['active']
+            assert await s.session.stop()
+        else:
+            with pytest.raises(s.m.NativeMaxChargeError):
+                await s.session.start(120)
+            assert not any(kind in ('kick', 'tariff') for kind, _ in s.state.events)
+        http.post.assert_called_once()
+        http.get.assert_not_called()
+    finally:
+        await s.session._cancel_watch()
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize('change', ['identity', 'policy', 'expired'])
 async def test_cloud_export_read_cannot_outlive_native_authority(setup, change):
