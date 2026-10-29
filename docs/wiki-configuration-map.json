@@ -9,18 +9,18 @@
   },
   "source_state": {
     "components": {
-      "config_flow.py": "280c6bf88da5618178579d942b44e301e4b6f650933c2ab3e42de01105d26c56",
-      "const.py": "f57a70e3593697684dbcf3ae4000862830845b55e3813b8515a91799cecb4647",
+      "config_flow.py": "fbb322862bdfd8658f37f58b99ee33c48d508bb0a9770c9f563c2e339dc35aba",
+      "const.py": "a44efbf072bdc0f656110798e45dc3d8371950d855cca7c708a0f9410d855061",
       "battery_backend/profiles.py": "d308ecc78740d8dfc9cd895e4b9750a02859d46e5f0863dd5c098b8aaab2bcc2",
       "battery_backend/discovery.py": "3a8c88c00d6c57f6101d55056968524d7971d1ac3b8e16365923bca978f9489b",
       "settings_metadata.py": "deea4c452dd3cd334d5e1b9348e0ead03891542128c4061c368ad6e1c012ffd9",
-      "strings.json": "433e9d665c9abdc5cb13c6201f67c5542de70a747a460d592c710a5ffc5d9d8d",
-      "translations/en.json": "f55a7c122e350183295752336154ce7b3fb26153033ecb696eb99b2d6fc87434",
+      "strings.json": "9215521ca0bf3557bacee7b44f4938e306a3e9dd7a980930ff6e02043110aa34",
+      "translations/en.json": "36febd55aa3a5b4f0db2ed3fa292ed485800c1bc2d63a82e393bf9099c18907a",
       "services.yaml": "298832ff55a41519a5b94e51b7d4c2627dd872d2dc4684faadfe841767a91ab5",
       "switch.py": "878970c76ede8803ed9802eaf5bf95c4a483c5c58497010a6cf21a1e74f3be7b",
       "select.py": "831a437aaf549b9a4b83d6dcccd67f9aff89853da2477c1fbda914d5cbf14b9e",
       "number.py": "0c0541d354d2cf2a05d9fc100f6d3883fc6f8aca6af48fb0e71a28c06b02996b",
-      "sensor.py": "e89cd022ee76bd313865b52cf7d57dd55d6f1e5452b0dcc956cf18c5204e7070",
+      "sensor.py": "bc04e7355d972589d8f874f1d9c724069d3092de7e7234a15b091646996b4318",
       "binary_sensor.py": "cad335bcce4d56edb1121bc08a6bbe34d55cad991ce31a34547d150ec4898704",
       "button.py": "69368d0dc0f8a1a9e336fed0da117103676670003db81d3360fc24bc0e6123b0",
       "automations/actions.py": "e8dc37c25a946bbd35a0f0bb7c4cba4ad15b3c18295508f3f33e511c7891f61f",
@@ -397,6 +397,7 @@
       "config.inverter_config_setup.inverter_restore_soc": "Restore SOC threshold (%)",
       "config.inverter_config_setup.inverter_slave_id": "Modbus slave ID",
       "config.inverter_config_setup.inverter_token": "JWT token (manual)",
+      "config.inverter_config_setup.solaredge_ac_power_entities": "SolarEdge AC power sensors (optional)",
       "config.localvolts.localvolts_api_key": "API key",
       "config.localvolts.localvolts_nmi": "NMI",
       "config.localvolts.localvolts_partner_id": "Partner ID",
@@ -865,6 +866,7 @@
       "options.inverter_config.inverter_restore_soc": "Restore SOC threshold (%)",
       "options.inverter_config.inverter_slave_id": "Modbus slave ID",
       "options.inverter_config.inverter_token": "JWT token (manual)",
+      "options.inverter_config.solaredge_ac_power_entities": "SolarEdge AC power sensors (optional)",
       "options.localvolts_options.auto_sync_enabled": "Enable automatic TOU sync",
       "options.localvolts_options.battery_curtailment_enabled": "Stop export below threshold",
       "options.localvolts_options.localvolts_api_key": "API key",
@@ -8756,6 +8758,26 @@
       "source_line": 15658,
       "group": null,
       "rendering": "optional boolean; off by default for existing and new installations"
+    },
+    {
+      "scope": "config",
+      "form": "inverter_config_setup",
+      "field": "solaredge_ac_power_entities",
+      "label": "SolarEdge AC power sensors (optional)",
+      "page": "SolarEdge-AC-Telemetry.md",
+      "source_line": 16070,
+      "group": null,
+      "rendering": "SolarEdge only; optional explicit member sensors"
+    },
+    {
+      "scope": "options",
+      "form": "inverter_config",
+      "field": "solaredge_ac_power_entities",
+      "label": "SolarEdge AC power sensors (optional)",
+      "page": "SolarEdge-AC-Telemetry.md",
+      "source_line": 16070,
+      "group": null,
+      "rendering": "SolarEdge only; optional explicit member sensors"
     }
   ],
   "profiles": [
@@ -12848,6 +12870,14 @@
     },
     "options.weather_options.solar_nowcast_enabled": {
       "page": "Weather-and-Solar-Forecasts",
+      "status": "documented"
+    },
+    "config.inverter_config_setup.solaredge_ac_power_entities": {
+      "page": "SolarEdge-AC-Telemetry",
+      "status": "documented"
+    },
+    "options.inverter_config.solaredge_ac_power_entities": {
+      "page": "SolarEdge-AC-Telemetry",
       "status": "documented"
     }
   }

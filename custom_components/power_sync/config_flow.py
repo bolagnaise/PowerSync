@@ -411,6 +411,7 @@ from .const import (
     CONF_INVERTER_MODEL,
     CONF_INVERTER_HOST,
     CONF_INVERTER_ENTITY_PREFIX,
+    CONF_SOLAREDGE_AC_POWER_ENTITIES,
     CONF_INVERTER_PORT,
     CONF_INVERTER_SLAVE_ID,
     CONF_INVERTER_TOKEN,
@@ -15774,6 +15775,17 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
             inverter_model = user_input.get(CONF_INVERTER_MODEL)
             inverter_rated_power_w = user_input.get(CONF_INVERTER_RATED_POWER_W)
 
+            ac_power_entities = []
+            if inverter_brand == "solaredge":
+                from .inverters.solaredge_ac_telemetry import normalize_ac_power_entities
+
+                try:
+                    ac_power_entities = normalize_ac_power_entities(
+                        user_input.get(CONF_SOLAREDGE_AC_POWER_ENTITIES, [])
+                    )
+                except ValueError:
+                    errors[CONF_SOLAREDGE_AC_POWER_ENTITIES] = "invalid_ac_power_members"
+
             # Validate: if battery is Sungrow and AC inverter is also Sungrow,
             # check for IP/port/slave_id conflicts
             battery_system = self.config_entry.data.get(
@@ -15840,6 +15852,8 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
                     final_data[CONF_AC_INVERTER_CURTAILMENT_ENABLED] = True
                 final_data[CONF_INVERTER_BRAND] = inverter_brand
                 final_data[CONF_INVERTER_MODEL] = inverter_model
+                if inverter_brand == "solaredge":
+                    final_data[CONF_SOLAREDGE_AC_POWER_ENTITIES] = ac_power_entities
                 if inverter_brand in ("goodwe_entity", "enphase_envoy"):
                     final_data[CONF_INVERTER_ENTITY_PREFIX] = inverter_entity_prefix
                     final_data[CONF_INVERTER_HOST] = ""
@@ -16050,6 +16064,17 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
             ] = BooleanSelector()
 
         if brand == "solaredge":
+            schema_dict[
+                vol.Optional(
+                    CONF_SOLAREDGE_AC_POWER_ENTITIES,
+                    default=(user_input or {}).get(
+                        CONF_SOLAREDGE_AC_POWER_ENTITIES,
+                        self._get_option(CONF_SOLAREDGE_AC_POWER_ENTITIES, []),
+                    ),
+                )
+            ] = EntitySelector(EntitySelectorConfig(
+                domain="sensor", device_class="power", multiple=True,
+            ))
             current_rated_power_w = self._get_option(
                 CONF_INVERTER_RATED_POWER_W,
                 DEFAULT_SOLAREDGE_RATED_POWER_W,

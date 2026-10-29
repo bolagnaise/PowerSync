@@ -9804,6 +9804,7 @@ function _curtailmentStatus(e, hasDC, hasAC) {
         const stateObj = states['${acEntity}'];
         const raw = (stateObj?.state ?? 'unknown').toLowerCase();
         const power = stateObj?.attributes?.power_limit_percent;
+        const complete = stateObj?.attributes?.ac_power_complete;
         const powerW = Number(stateObj?.attributes?.power_output_w ?? 0);
         const brand = stateObj?.attributes?.brand;
         const running = (stateObj?.attributes?.running_state ?? '').toLowerCase();
@@ -9811,17 +9812,20 @@ function _curtailmentStatus(e, hasDC, hasAC) {
         const isSleep = isNight && ((powerW < 100) || (running === 'stopped')) && !['offline','error','unavailable','unknown'].includes(raw);
         const state = isSleep ? 'sleep' : raw;
         if (state === 'unavailable' || state === 'unknown') return 'Not configured';
+        const telemetryWarning = complete === false ? ' - Telemetry incomplete' : '';
+        if (state === 'offline') return 'Offline - Cannot reach' + telemetryWarning;
+        if (state === 'error') return 'Error - Check logs' + telemetryWarning;
+        if (complete === false) return (raw === 'curtailed' ? 'CURTAILED - ' : '') + 'Telemetry incomplete';
         if (state === 'curtailed') return 'CURTAILED' + (power ? ' - ' + power + '%' : '');
-        if (state === 'sleep') return 'Sleep' + (powerW > 0 ? ' (PID recovery)' : '');
-        if (state === 'offline') return 'Offline - Cannot reach';
-        if (state === 'error') return 'Error - Check logs';
+        if (state === 'sleep' && complete !== true) return 'Sleep' + (powerW > 0 ? ' (PID recovery)' : '');
         const title = brand ? (brand.charAt(0).toUpperCase() + brand.slice(1)) : 'Online';
-        if (powerW) return title + ' - ' + Math.round(powerW) + 'W';
+        if (powerW || complete === true) return title + ' - ' + Math.round(powerW) + 'W';
         if (power) return title + ' - ' + power + '%';
         return title;
       ]]]`,
       icon: `[[[
         const raw = (states['${acEntity}']?.state ?? 'unknown').toLowerCase();
+        if (states['${acEntity}']?.attributes?.ac_power_complete === false) return 'mdi:alert-circle-outline';
         const powerW = Number(states['${acEntity}']?.attributes?.power_output_w ?? 0);
         const running = (states['${acEntity}']?.attributes?.running_state ?? '').toLowerCase();
         const isNight = states['sun.sun']?.state === 'below_horizon';

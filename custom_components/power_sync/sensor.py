@@ -168,6 +168,7 @@ from .const import (
     CONF_INVERTER_MODEL,
     CONF_INVERTER_HOST,
     CONF_INVERTER_ENTITY_PREFIX,
+    CONF_SOLAREDGE_AC_POWER_ENTITIES,
     CONF_INVERTER_PORT,
     CONF_INVERTER_SLAVE_ID,
     CONF_INVERTER_TOKEN,
@@ -6097,6 +6098,16 @@ class InverterStatusSensor(RestoreEntity, SensorEntity):
             self._cached_attrs["power_output_w"] = state.power_output_w
             self._cached_attrs["brand"] = inverter_brand
             self._cached_attrs["last_poll"] = dt_util.now().isoformat()
+
+            # Explicit AC members replace only dashboard power. The controller,
+            # its raw AC/DC readings and all curtailment targets remain local.
+            ac_members = self._get_config_value(CONF_SOLAREDGE_AC_POWER_ENTITIES, [])
+            if inverter_brand == "solaredge" and ac_members != []:
+                from .inverters.solaredge_ac_telemetry import read_ac_power_members
+
+                self._cached_attrs.update(
+                    read_ac_power_members(self.hass, ac_members, now=dt_util.now())
+                )
 
             # Also update hass.data for consistency with curtailment logic.
             # Keep explicit manual/automatic control modes more specific than

@@ -982,6 +982,7 @@
         "description": "Configure the connection to your {brand} inverter for curtailment control.",
         "data": {
           "inverter_model": "Inverter model",
+          "solaredge_ac_power_entities": "SolarEdge AC power sensors (optional)",
           "inverter_host": "IP address / hostname",
           "inverter_port": "Port",
           "inverter_slave_id": "Modbus slave ID",
@@ -998,6 +999,7 @@
         },
         "data_description": {
           "inverter_host": "Local IP address of your inverter or gateway.",
+          "solaredge_ac_power_entities": "For the combined AC Inverter card, select the local AC power sensor for every leader and follower at this site, including the leader once. Use W or kW sensors reporting at least every 2 minutes. Do not select DC, battery, meter or site-total sensors. Leave empty for the configured inverter only. Telemetry only; controls still target the configured inverter.",
           "inverter_port": "502 for Modbus (Sungrow, Fronius, GoodWe, Huawei), 443 for Enphase.",
           "inverter_slave_id": "Usually 1. GoodWe uses 247 by default.",
           "inverter_token": "Optional if using Enlighten credentials. Manual tokens expire in 12 hours for installer accounts.",
@@ -1318,6 +1320,7 @@
       "storage_unavailable": "PowerSync storage is not available. Reload the integration and try again.",
       "solar_production_control_required": "Select PV production controls or enable and configure a supported separate AC inverter.",
       "invalid_solar_production_entity": "Select available PV production switches or production-limit numbers that support zero.",
+      "invalid_ac_power_members": "Select the local AC power sensors for the inverters at this site, or clear the list for a single inverter.",
       "solar_production_grid_status_required": "Select a sensor that confirms the utility grid is connected before stopping solar.",
       "amber_smartshift_auth": "Amber sign-in failed. Check your email and password. Unsupported sign-in challenges require completing sign-in with Amber.",
       "amber_smartshift_connection": "Unable to connect the Amber battery. Confirm Smart Shift enrollment, matching Amber pricing site, required meters for automatic operation, and that previous PowerSync overrides have finished cleanup."
@@ -2819,6 +2822,7 @@
         "description": "Update your {brand} inverter connection settings. Changes take effect immediately.",
         "data": {
           "inverter_model": "Inverter model",
+          "solaredge_ac_power_entities": "SolarEdge AC power sensors (optional)",
           "inverter_entity_prefix": "Inverter entity prefix",
           "inverter_host": "IP address / hostname",
           "inverter_port": "Port",
@@ -2836,6 +2840,7 @@
         "data_description": {
           "inverter_entity_prefix": "Prefix of the inverter entities. For number.envoy_123_dpel_limit, enter envoy_123; for sensor.goodwe_pv_power, enter goodwe.",
           "inverter_host": "Local IP address of your inverter or gateway.",
+          "solaredge_ac_power_entities": "For the combined AC Inverter card, select the local AC power sensor for every leader and follower at this site, including the leader once. Use W or kW sensors reporting at least every 2 minutes. Do not select DC, battery, meter or site-total sensors. Leave empty for the configured inverter only. Telemetry only; controls still target the configured inverter.",
           "inverter_port": "502 for Modbus (Sungrow, Fronius, GoodWe, Huawei), 443 for Enphase.",
           "inverter_slave_id": "Usually 1. GoodWe uses 247 by default.",
           "inverter_token": "Optional if using Enlighten credentials. Manual tokens expire in 12 hours for installer accounts.",

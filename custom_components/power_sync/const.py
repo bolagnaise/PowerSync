@@ -1735,6 +1735,7 @@ CONF_INVERTER_SLAVE_ID = "inverter_slave_id"
 CONF_INVERTER_TOKEN = "inverter_token"  # JWT token for Enphase IQ Gateway (firmware 7.x+)
 CONF_INVERTER_RATED_POWER_W = "inverter_rated_power_w"
 CONF_INVERTER_ENTITY_PREFIX = "inverter_entity_prefix"
+CONF_SOLAREDGE_AC_POWER_ENTITIES = "solaredge_ac_power_entities"
 CONF_ENPHASE_USERNAME = "enphase_username"  # Enlighten username/email for auto token refresh
 CONF_ENPHASE_PASSWORD = "enphase_password"  # Enlighten password for auto token refresh
 CONF_ENPHASE_SERIAL = "enphase_serial"  # Envoy serial number (optional, auto-detected)
