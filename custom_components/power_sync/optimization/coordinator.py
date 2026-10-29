@@ -5797,7 +5797,30 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if not self._enabled:
                 return
 
+            goodwe_startup_waiting = (
+                self.battery_system == "goodwe"
+                and not self._energy_telemetry_ready()
+            )
             await self._run_optimization()
+            if goodwe_startup_waiting:
+                # Keep one listener in this tracked startup task. GoodWe may
+                # finish loading after the first attempt but before the next
+                # tariff boundary; no new task or hardware path is needed.
+                updated = asyncio.Event()
+                unsub = self.energy_coordinator.async_add_listener(updated.set)
+                try:
+                    while self._enabled and self._current_schedule is None:
+                        updated.clear()
+                        # Recheck after subscribing so recovery between the
+                        # skipped attempt and listener registration is not lost.
+                        if self._energy_telemetry_ready():
+                            await self._run_optimization(
+                                execution_trigger="startup_recovery"
+                            )
+                            break
+                        await updated.wait()
+                finally:
+                    unsub()
         finally:
             if self._initial_opt_task is asyncio.current_task():
                 self._initial_opt_task = None
@@ -7165,6 +7188,16 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return False
 
         if await self._wait_for_restart_force_restore():
+            return False
+
+        if execution_trigger == "startup_recovery" and (
+            not self._enabled
+            or self._current_schedule is not None
+            or not self._energy_telemetry_ready()
+        ):
+            # Restoration can yield to a price/poll solve, disable, or a stale
+            # telemetry update. Only fill the missing first plan; never replace
+            # a plan another trigger has already published while we waited.
             return False
 
         # Skip if another LP solve is already in progress. Three independent
