@@ -586,6 +586,114 @@ def recovery_call(**changes):
                                  "incident_id": "incident", "acknowledge": True, **changes})
 
 
+def resolve_recovery_backend(ns):
+    """Use setup's real brand resolver instead of assuming explicit Tesla."""
+    for node in ast.parse((ROOT / "const.py").read_text()).body:
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    ns[target.id] = node.value.value
+    load_function(ROOT / "__init__.py", "_get_neovolt_entry_ids", ns)
+    resolver = load_function(ROOT / "__init__.py", "_active_battery_system", ns)
+    ns["active_battery_system"] = resolver(ns["entry"], ns["hass"])
+    ns["_local_powerwall_runtime"] = ns["hass"].data["power_sync"]["entry"]
+    load_function(ROOT / "__init__.py", "_local_powerwall_generation_current", ns)
+    # Recreate the decorated handler as setup does with the resolved backend.
+    load_function(ROOT / "__init__.py", "handle_resume_powerwall_settings", ns)
+
+
+@pytest.mark.asyncio
+async def test_legacy_tesla_recovery_routes_exact_entry_and_retains_incident_after_restart():
+    ns, runtime, saved = recovery_context()
+    resolve_recovery_backend(ns)
+    assert ns["active_battery_system"] is None
+    register = load_function(ROOT / "licensing/entry_routing.py", "register_handlers", ns)
+    register(ns["hass"], "entry", {"resume_powerwall_settings": ns["handle_resume_powerwall_settings"]})
+    other = AsyncMock(side_effect=AssertionError("wrong entry"))
+    route = load_function(ROOT / "licensing/entry_routing.py", "routed_handler", ns)(
+        ns["hass"], "other-entry", "resume_powerwall_settings", other)
+    ns["get_local_transport"] = Mock(side_effect=AssertionError("local remains suspended"))
+    original = copy.deepcopy(saved)
+    result = await route(recovery_call())
+    assert result == {"success": True, "route": "cloud", "incident_id": "incident"}
+    other.assert_not_awaited()
+    assert saved["tesla_settings_pending"]["resume_cloud"] is True
+    assert not saved["tesla_settings_pending"].get("terminal")
+    assert saved["tesla_settings_pending"]["restore_basis"]["force_mode_state"] == original["force_mode_state"]
+    assert saved["pending_tesla_restore"] == original["pending_tesla_restore"]
+    ns["get_local_transport"].assert_not_called()  # Recovery itself issues no command.
+    restarted, _, _ = recovery_context(copy.deepcopy(saved))
+    resolve_recovery_backend(restarted)
+    await restarted["handle_resume_powerwall_settings"](recovery_call())
+    restarted["get_local_transport"] = ns["get_local_transport"]
+    cloud = AsyncMock(return_value=True)
+    assert await restarted["dispatch_powerwall_setting"](
+        restarted["hass"], restarted["entry"], site_id="site",
+        updates={"default_real_mode": "backup"}, cloud_call=cloud,
+        is_current=lambda: True, deadline=time.monotonic() + .1, label="after legacy recovery")
+    cloud.assert_awaited_once()
+    ns["get_local_transport"].assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("changes", [{"acknowledge": False}, {"acknowledge": 1},
+    {"acknowledge": None}, {"entry_id": "wrong"}, {"entry_id": None},
+    {"site_id": "other"}, {"incident_id": "stale"}])
+async def test_legacy_recovery_still_requires_exact_identity_and_acknowledgement(changes):
+    ns, runtime, saved = recovery_context()
+    resolve_recovery_backend(ns)
+    before = copy.deepcopy(saved)
+    with pytest.raises(RuntimeError):
+        await ns["handle_resume_powerwall_settings"](recovery_call(**changes))
+    assert saved == before
+    assert not runtime.get("powerwall_settings_cloud_handoff")
+    ns["_cancel_all_force_timers"].assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("data,options", [
+    ({"battery_system": "goodwe"}, {}),
+    ({"goodwe_host": "inverter"}, {}),
+    ({"battery_system": "tesla"}, {"battery_system": "custom"}),
+    ({"battery_system": "unrecognized"}, {}),
+])
+async def test_recovery_rejects_explicit_or_inferred_non_tesla_backend(data, options):
+    ns, runtime, saved = recovery_context()
+    ns["entry"].data.update(data)
+    ns["entry"].options.update(options)
+    resolve_recovery_backend(ns)
+    before = copy.deepcopy(saved)
+    with pytest.raises(RuntimeError):
+        await ns["handle_resume_powerwall_settings"](recovery_call())
+    assert saved == before
+    assert not runtime.get("powerwall_settings_cloud_handoff")
+    ns["_cancel_all_force_timers"].assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("changed", ["runtime", "stopping", "removed", "site", "incident"])
+async def test_legacy_recovery_rejects_stale_runtime_or_incident(changed):
+    ns, runtime, saved = recovery_context()
+    resolve_recovery_backend(ns)
+    if changed == "runtime":
+        # A reload restores the same durable incident in a different runtime.
+        ns["hass"].data["power_sync"]["entry"] = copy.deepcopy(runtime)
+    elif changed == "stopping":
+        runtime["powerwall_local_dispatch_stopping"] = True
+    elif changed == "removed":
+        ns["hass"].config_entries.async_get_entry = lambda _: None
+    elif changed == "site":
+        latest = SimpleNamespace(data={"tesla_energy_site_id": "new-site"})
+        ns["hass"].config_entries.async_get_entry = lambda _: latest
+    else:
+        runtime["powerwall_settings_pending"]["id"] = "new-incident"
+    before = copy.deepcopy(saved)
+    with pytest.raises(RuntimeError):
+        await ns["handle_resume_powerwall_settings"](recovery_call())
+    assert saved == before
+    ns["_cancel_all_force_timers"].assert_not_called()
+
+
 @pytest.mark.asyncio
 async def test_explicit_recovery_admits_cloud_despite_hung_receipt_and_old_mutex():
     ns, runtime, saved = recovery_context()

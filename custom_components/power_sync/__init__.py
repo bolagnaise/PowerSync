@@ -42825,7 +42825,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     async def handle_resume_powerwall_settings(call: ServiceCall) -> dict:
         """Release this incident to cloud control under explicit supervision."""
         runtime = hass.data[DOMAIN][entry.entry_id]
-        if (active_battery_system != BATTERY_SYSTEM_TESLA
+        # Legacy entries without a saved brand use Tesla throughout setup.
+        if (active_battery_system not in (None, BATTERY_SYSTEM_TESLA)
+                or not _local_powerwall_generation_current()
                 or call.data.get("entry_id") != entry.entry_id
                 or call.data.get("acknowledge") is not True):
             raise HomeAssistantError("Select the Tesla entry and explicitly acknowledge the unresolved write risk")
@@ -42837,7 +42839,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 configured_site = entry.data.get(CONF_TESLA_ENERGY_SITE_ID)
                 def current():
                     latest = hass.config_entries.async_get_entry(entry.entry_id)
-                    return (hass.data.get(DOMAIN, {}).get(entry.entry_id) is runtime
+                    return (_local_powerwall_generation_current()
+                            and hass.data.get(DOMAIN, {}).get(entry.entry_id) is runtime
                             and not runtime.get("powerwall_local_dispatch_stopping")
                             and latest is not None
                             and latest.data.get(CONF_TESLA_ENERGY_SITE_ID) == configured_site)
