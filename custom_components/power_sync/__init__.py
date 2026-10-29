@@ -2844,6 +2844,14 @@ async def _get_ev_load_observations(hass, entry, vehicles=None):
             generic_entity = config.get(CONF_GENERIC_CHARGER_POWER_ENTITY)
             physical_key = _meter_physical_key(generic_entity)
             kind = EvMeasurementKind.LOADPOINT_METER
+        elif (
+            vehicle_id == "sigenergy_charger"
+            or str(vehicle.get("charger_type") or "").strip().lower() == "sigenergy"
+        ):
+            # The display loadpoint and native read below observe one charger.
+            # Keep the loadpoint as a fallback, with native readback preferred.
+            physical_key = _meter_physical_key(None, "sigenergy")
+            kind = EvMeasurementKind.VEHICLE
         else:
             physical_key = f"vehicle:{_vehicle_identity_key(vehicle_id)}"
             kind = EvMeasurementKind.VEHICLE
@@ -2865,10 +2873,11 @@ async def _get_ev_load_observations(hass, entry, vehicles=None):
                     or _ev_observed_at(vehicle.get("_observed_at"))
                     or observed_at
                 ),
-                active=bool(vehicle.get("is_charging")) or bool(
+                active=bool(vehicle.get("is_charging") or vehicle.get("is_discharging")) or bool(
                     vehicle.get("_power_activity_unknown")
                 ),
                 measurement_kind=kind,
+                supports_bidirectional_power=physical_key == "sigenergy:evdc",
             )
         )
 

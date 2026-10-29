@@ -11,6 +11,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parent.parent / "custom_components"
 
@@ -2266,6 +2268,122 @@ def test_app_managed_sequential_tesla_id_deduplicates_with_vehicle_vin(monkeypat
     assert snapshot.power_kw == 7.2
     assert len(snapshot.components) == 1
     assert snapshot.components[0].physical_load_key == f"vehicle:{vin.lower()}"
+
+
+def _sigenergy_load_snapshot(
+    monkeypatch, *, charger_type="evac", row_power=6.956,
+    native_power=6.956, native_available=True, row_available=True,
+    row_age=0, auxiliary_power=0.0, extra_vehicles=(), alias=False,
+):
+    power_sync = _power_sync_module()
+    ev_load = importlib.import_module("power_sync.ev_load")
+    planner = importlib.import_module("power_sync.automations.ev_charging_planner")
+    now = datetime(2026, 10, 29, 2, 23, tzinfo=timezone.utc)
+    monkeypatch.setattr(power_sync.dt_util, "utcnow", lambda: now)
+    # Shape emitted by sigenergy_charger_state_to_loadpoint_observation.
+    row = {
+        "vehicle_id": "sigenergy_charger", "charger_id": "sigenergy_charger",
+        "charger_type": "sigenergy", "ev_power_kw": row_power,
+        "is_charging": row_power > 0, "is_discharging": row_power < 0,
+    }
+    row.update(
+        observed_at=now - timedelta(seconds=row_age),
+        power_available=row_available, auxiliary_power_kw=auxiliary_power,
+    )
+    native_state = SimpleNamespace(
+        charger_type=charger_type, power_kw=native_power, is_connected=True,
+        is_charging=native_power > 0, is_discharging=native_power < 0,
+    )
+
+    async def read_state(*_args, **_kwargs):
+        return native_state if native_available else None
+
+    monkeypatch.setattr(power_sync, "_read_sigenergy_charger_state_for_entry", read_state)
+    alias_entity = "sensor.sigenergy_charger_power"
+    settings = {"sigenergy_charger": SimpleNamespace(
+        vehicle_id="sigenergy_charger", charger_type="sigenergy",
+        charger_power_entity=alias_entity,
+    )} if alias else {}
+    monkeypatch.setattr(
+        planner, "get_auto_schedule_executor",
+        lambda: SimpleNamespace(_settings=settings),
+    )
+    hass = _Hass([_State(alias_entity, str(row_power), {"unit_of_measurement": "kW"})])
+    entry = _Entry()
+    const = importlib.import_module("power_sync.const")
+    entry.options = {const.CONF_SIGENERGY_CHARGER_TYPE: charger_type}
+    observations = asyncio.run(power_sync._get_ev_load_observations(
+        hass, entry, [row, *extra_vehicles],
+    ))
+    return ev_load, ev_load.aggregate_ev_load(observations, at=now), now
+
+
+def test_sigenergy_evac_home_load_counts_loadpoint_and_native_meter_once(monkeypatch):
+    """#135: 8.26 kW site load minus 6.956 kW EV must leave 1.304 kW home."""
+    ev_load, snapshot, now = _sigenergy_load_snapshot(monkeypatch, alias=True)
+    assert snapshot.power_kw == pytest.approx(6.956)
+    assert snapshot.quality == ev_load.EvLoadQuality.COMPLETE
+    assert [item.physical_load_key for item in snapshot.components] == ["sigenergy:evac"]
+    raw = {"solar_power": 8.24, "grid_power": 0.02, "battery_power": 0, "load_power": 0}
+    normalized = ev_load.normalize_energy_data(
+        raw, battery_system="sigenergy", ev_load=snapshot, at=now,
+    )
+    assert normalized["raw_home_load_power"] == pytest.approx(8.26)
+    assert normalized["observed_ev_power"] == pytest.approx(6.956)
+    assert normalized["load_power"] == pytest.approx(1.304)
+    assert ev_load.normalize_energy_data(
+        normalized, battery_system="sigenergy", ev_load=snapshot, at=now,
+    )["load_power"] == pytest.approx(1.304)
+
+
+@pytest.mark.parametrize("charger_type,native_power", [("evac", 0.0), ("evdc", 4.0), ("evdc", -3.0)])
+def test_sigenergy_native_readback_supersedes_duplicate_loadpoint(
+    monkeypatch, charger_type, native_power,
+):
+    ev_load, snapshot, _ = _sigenergy_load_snapshot(
+        monkeypatch, charger_type=charger_type, native_power=native_power,
+    )
+    assert snapshot.power_kw == native_power
+    assert snapshot.quality == ev_load.EvLoadQuality.COMPLETE
+    assert len(snapshot.components) == 1
+    assert snapshot.components[0].source_key == f"sigenergy_{charger_type}"
+
+
+@pytest.mark.parametrize("charger_type,row_power,auxiliary", [("evac", 6.956, 0.1), ("evdc", -3.0, 0.0)])
+def test_sigenergy_loadpoint_remains_fallback_when_native_read_unavailable(
+    monkeypatch, charger_type, row_power, auxiliary,
+):
+    ev_load, snapshot, _ = _sigenergy_load_snapshot(
+        monkeypatch, charger_type=charger_type, row_power=row_power,
+        native_available=False, auxiliary_power=auxiliary,
+    )
+    assert snapshot.power_kw == pytest.approx(row_power + auxiliary)
+    assert snapshot.quality == ev_load.EvLoadQuality.COMPLETE
+    assert snapshot.components[0].physical_load_key == f"sigenergy:{charger_type}"
+
+
+@pytest.mark.parametrize("row_available,row_age", [(False, 0), (True, 100)])
+def test_sigenergy_missing_or_stale_active_power_withholds_home_load(
+    monkeypatch, row_available, row_age,
+):
+    ev_load, snapshot, now = _sigenergy_load_snapshot(
+        monkeypatch, native_available=False, row_available=row_available, row_age=row_age,
+    )
+    assert snapshot.quality == ev_load.EvLoadQuality.INCOMPLETE
+    assert snapshot.unavailable_active_keys == ("sigenergy:evac",)
+    assert ev_load.normalize_home_load(
+        8.26, ev_load.HomeLoadBasis.INCLUDES_EV, snapshot, at=now,
+    ).non_ev_home_load_kw is None
+
+
+def test_sigenergy_dedup_preserves_distinct_vehicle_and_generic_auxiliary_load(monkeypatch):
+    ev_load, snapshot, _ = _sigenergy_load_snapshot(monkeypatch, alias=True, extra_vehicles=[
+        {"vehicle_id": "5YJTEST0000000001", "ev_power_kw": 2.0, "is_charging": True},
+        {"vehicle_id": "generic_ev", "ev_power_kw": 0, "auxiliary_power_kw": 0.2},
+    ])
+    assert snapshot.power_kw == pytest.approx(9.156)
+    assert snapshot.quality == ev_load.EvLoadQuality.COMPLETE
+    assert len(snapshot.components) == 3
 
 
 def test_app_managed_tesla_power_is_zeroed_when_vehicle_is_in_named_zone(monkeypatch):
