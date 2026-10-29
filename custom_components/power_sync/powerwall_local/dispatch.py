@@ -136,7 +136,7 @@ async def dispatch_powerwall_setting(
     cloud_call: CloudCall, is_current: Callable[[], bool], deadline: float,
     acknowledged=None, before_submit=None, prefer_local=True,
     guard_write=None, operation_id=None, is_allowed=None, allow_stopping=False, label: str,
-    cloud_observation_confirmed=True,
+    cloud_observation_confirmed=True, skip_matching=False,
 ) -> bool:
     """One bounded optional settings transaction, separate from watt control."""
     runtime = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
@@ -231,6 +231,22 @@ async def dispatch_powerwall_setting(
             try:
                 local_deadline = min(deadline, time.monotonic() + 5.0)
                 async def local():
+                    if skip_matching:
+                        check_current()
+                        if not allowed():
+                            return False
+                        config = await transport.read_config(din)
+                        check_current()
+                        if not allowed() or time.monotonic() >= local_deadline:
+                            return False
+                        for dotted, expected in updates.items():
+                            observed = config
+                            for key in dotted.split("."):
+                                observed = observed.get(key) if isinstance(observed, dict) else None
+                            if type(observed) is not type(expected) or observed != expected:
+                                break
+                        else:
+                            return True
                     return await write_config_confirmed(
                         transport, din, updates, is_current=current, is_allowed=allowed,
                         deadline=local_deadline, acknowledged=acknowledged,

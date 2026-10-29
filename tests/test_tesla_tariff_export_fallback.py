@@ -176,3 +176,131 @@ async def test_obsolete_export_target_cannot_clear_an_uncertain_signed_submissio
     assert saved["force_mode_state"] and runtime["pending_tesla_restore"]
     assert runtime["powerwall_settings_pending"]["id"] == "uncertain"
     ns["_tesla_force_apply_export_rule"].assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [201, 202, 204])
+@pytest.mark.parametrize("strict", [False, True])
+async def test_successful_http_status_with_explicit_export_receipt_is_accepted(monkeypatch, status, strict):
+    fn, ns, runtime, session = export_confirmation_context(
+        monkeypatch, {"response": {"code": 201, "message": "Updated"}},
+        {"customer_preferred_export_rule": "battery_ok"}, status=status)
+    result = {}
+    assert await fn([("site", "token", "fleet")], "battery_ok", reason="force discharge export preparation",
+                    require_readback=strict, submission_status=result)
+    assert result["submitted"] is True and result["http_status"] == status
+    assert session.get.call_count == int(strict)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [400, 401, 403, 429, 500])
+async def test_failed_export_keeps_http_status_and_reason_without_accepting_write(monkeypatch, status):
+    fn, ns, runtime, session = export_confirmation_context(
+        monkeypatch, {"response": {"result": False, "reason": "export permission denied"}}, {}, status=status)
+    result = {}
+    assert not await fn([("site", "token", "fleet")], "battery_ok", reason="force discharge export preparation",
+                        require_readback=False, submission_status=result)
+    assert result["submitted"] is True and result["http_status"] == status
+    assert result["reason"] == "export permission denied"
+    assert session.get.call_count == 0
+
+
+def test_tariff_service_error_preserves_the_export_failure_detail():
+    ns, state, persisted, writes = preparation({"site": {}})
+
+    async def rejected(*args, **kwargs):
+        kwargs["submission_status"].update(submitted=True, http_status=403, reason="export permission denied")
+        return False
+
+    ns["_tesla_force_apply_export_rule"] = rejected
+    with pytest.raises(RuntimeError, match="HTTP 403.*export permission denied"):
+        asyncio.run(ns["prepare"]())
+
+
+@pytest.mark.asyncio
+async def test_tariff_fresh_matching_cloud_permission_needs_no_export_write(monkeypatch):
+    fn, ns, runtime, session = export_confirmation_context(
+        monkeypatch, {"response": {"result": False}}, {"customer_preferred_export_rule": "battery_ok"})
+    assert await fn([("site", "token", "fleet")], "battery_ok", reason="force discharge export preparation",
+                    require_readback=False, skip_matching=True)
+    session.post.assert_not_called()
+    assert session.get.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_tariff_fresh_matching_local_permission_needs_no_export_write(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    transport = SimpleNamespace(read_config=AsyncMock(return_value={"site_info": {"customer_preferred_export_rule": "battery_ok"}}),
+                                write_config=AsyncMock(return_value=True))
+    ns, runtime = settings_context(transport)
+    fn, ns, runtime, session = export_confirmation_context(monkeypatch, {}, {}, context=(ns, runtime))
+    assert await fn([("site", "token", "fleet")], "battery_ok", reason="force discharge export preparation",
+                    require_readback=False, skip_matching=True)
+    transport.write_config.assert_not_awaited()
+    session.post.assert_not_called()
+    session.get.assert_not_called()
+    assert runtime["powerwall_setting_observations"]["grid_export_rule"]["source"] == "local"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("readback", [{}, {"customer_preferred_export_rule": "pv_only"}])
+async def test_tariff_missing_or_different_live_permission_still_requests_export(monkeypatch, readback):
+    fn, ns, runtime, session = export_confirmation_context(monkeypatch, {"response": {"result": True}}, readback)
+    assert await fn([("site", "token", "fleet")], "battery_ok", reason="force discharge export preparation",
+                    require_readback=False, skip_matching=True)
+    assert session.get.call_count == 1 and session.post.call_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["local", "cloud"])
+@pytest.mark.parametrize("change", ["generation", "policy"])
+async def test_matching_permission_cannot_bypass_supersession_or_policy(monkeypatch, source, change):
+    ns, runtime = settings_context()
+    manager = SimpleNamespace(snapshot=SimpleNamespace(mode="off"))
+    runtime["network_envelope_manager"] = manager
+    fn, ns, runtime, session = export_confirmation_context(monkeypatch, {}, {}, context=(ns, runtime))
+
+    async def changed_read(*args, **kwargs):
+        if change == "generation":
+            ns["_command_generation"][0] += 1
+        else:
+            manager.snapshot.mode = "active"
+        return {"site_info": {"customer_preferred_export_rule": "battery_ok"}} if source == "local" else {"response": {"customer_preferred_export_rule": "battery_ok"}}
+
+    if source == "local":
+        transport = SimpleNamespace(read_config=AsyncMock(side_effect=changed_read), write_config=AsyncMock())
+        ns["get_local_transport"] = lambda *args: transport
+    else:
+        session.get.return_value.json = AsyncMock(side_effect=changed_read)
+    call = fn([("site", "token", "fleet")], "battery_ok", reason="force discharge export preparation",
+              require_readback=False, skip_matching=True)
+    if change == "generation":
+        with pytest.raises(asyncio.CancelledError):
+            await call
+    else:
+        assert not await call
+    session.post.assert_not_called()
+    assert runtime["powerwall_setting_observations"]["grid_export_rule"]["source"] == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_unreadable_preflight_does_not_block_the_requested_export_write(monkeypatch):
+    import aiohttp
+    fn, ns, runtime, session = export_confirmation_context(monkeypatch, {"response": {"result": True}}, {})
+    session.get.side_effect = aiohttp.ClientError("read unavailable")
+    assert await fn([("site", "token", "fleet")], "battery_ok", reason="force discharge export preparation",
+                    require_readback=False, skip_matching=True)
+    assert session.post.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_one_matching_gateway_does_not_skip_another_gateways_export_write(monkeypatch):
+    from test_tesla_local_settings import HttpReply
+    fn, ns, runtime, session = export_confirmation_context(monkeypatch, {"response": {"result": False}}, {})
+    session.get.side_effect = [HttpReply({"response": {"customer_preferred_export_rule": "battery_ok"}}),
+                               HttpReply({"response": {"customer_preferred_export_rule": "pv_only"}})]
+    assert not await fn([("site", "token", "fleet"), ("second", "token", "fleet")], "battery_ok",
+                        reason="force discharge export preparation", require_readback=False, skip_matching=True)
+    assert session.post.call_count == 1
+    assert "/second/" in session.post.call_args.args[0]

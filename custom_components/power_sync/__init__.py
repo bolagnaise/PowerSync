@@ -32916,7 +32916,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     async def _tesla_force_apply_export_rule(
         site_configs, rule, *, reason, is_current=None, prefer_local=True,
         before_write=None, submission_status=None, restoring=False,
-        require_readback=True,
+        require_readback=True, skip_matching=False,
     ) -> bool:
         """Apply export permission; only legacy Tariff forcing uses acceptance alone."""
         from .powerwall_local.dispatch import dispatch_powerwall_setting
@@ -32933,6 +32933,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         session = async_get_clientsession(hass)
         deadline = time.monotonic() + 30.0
         for site_id, token, provider in site_configs:
+            if submission_status is not None:
+                submission_status.pop("http_status", None)
+                submission_status.pop("reason", None)
             base = get_tesla_api_base_url(provider, entry.data.get(CONF_FLEET_API_BASE_URL))
             headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
             async def cloud_request():
@@ -32940,6 +32943,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     raise asyncio.CancelledError("Tesla export request superseded")
                 if not allowed():
                     return False
+                if skip_matching:
+                    # A fresh exact permission already satisfies this Tariff
+                    # request; avoid an unnecessary setting write. Missing or
+                    # unreadable state still takes the normal write path.
+                    try:
+                        async with session.get(
+                            f"{base}/api/1/energy_sites/{site_id}/site_info", headers=headers,
+                            timeout=aiohttp.ClientTimeout(total=3),
+                        ) as response:
+                            payload = await response.json()
+                            info = payload.get("response", payload) if isinstance(payload, dict) else {}
+                            matches = response.status == 200 and tesla_export_rule_from_site_info(info) == rule
+                        if not current() or not allowed():
+                            return False
+                        if matches:
+                            _LOGGER.info("Tesla %s export setting already confirmed; no update needed for site %s", reason, site_id)
+                            return True
+                    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+                        pass
                 fence = await before_write() if before_write is not None else None
                 if not current() or not allowed():
                     return False
@@ -32951,11 +32973,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     f"{base}/api/1/energy_sites/{site_id}/grid_import_export", headers=headers,
                     json={"customer_preferred_export_rule": rule}, timeout=aiohttp.ClientTimeout(total=5),
                 ) as response:
-                    accepted, _reason = await _tesla_grid_export_write_result(response)
-                    if response.status != 200 or not accepted:
+                    accepted, rejection_reason = await _tesla_grid_export_write_result(response)
+                    if submission_status is not None:
+                        submission_status["http_status"] = response.status
+                    if response.status not in (200, 201, 202, 204) or not accepted:
+                        rejection_reason = rejection_reason or "unexpected HTTP status"
+                        _LOGGER.warning("Tesla %s export update failed (HTTP %s, provider=%s): %s",
+                                        reason, response.status, provider, rejection_reason[:240])
                         if submission_status is not None:
+                            submission_status["reason"] = rejection_reason[:240]
                             rejected = response.status in (400, 401, 403, 404, 409, 422, 429)
-                            if response.status == 200:
+                            if response.status in (200, 201, 202, 204):
                                 body = await response.json()
                                 result = body.get("response") if isinstance(body, dict) else None
                                 rejected = isinstance(result, dict) and result.get("result") is False
@@ -32994,6 +33022,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 try:
                     return await cloud_request()
                 except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as err:
+                    if submission_status is not None:
+                        submission_status["reason"] = f"{type(err).__name__} contacting Tesla"
                     _LOGGER.warning("Tesla %s export confirmation failed for site %s: %s", reason, site_id, err)
                     return False
             if not await dispatch_powerwall_setting(
@@ -33004,6 +33034,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 operation_id=generation, label=reason, prefer_local=prefer_local,
                 allow_stopping=restoring,
                 cloud_observation_confirmed=require_readback,
+                skip_matching=skip_matching,
             ):
                 return False
         return bool(site_configs)
@@ -35988,11 +36019,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             force_discharge_state["expires_at"] = dt_util.utcnow()
             await persist_force_mode_state()
             tesla_force_discharge_mutated = True
+            export_status = {"submitted": False}
             if not await _tesla_force_apply_export_rule(
                 site_configs, "battery_ok", reason="force discharge export preparation",
                 is_current=_discharge_request_current, require_readback=False,
+                skip_matching=True, submission_status=export_status,
             ):
-                raise HomeAssistantError("Tesla battery export request was not accepted")
+                export_error = export_status.get("reason") or (
+                    "no acknowledgement received" if export_status["submitted"]
+                    else "blocked before a cloud acknowledgement"
+                )
+                if export_status.get("http_status") is not None:
+                    export_error = f"HTTP {export_status['http_status']}: {export_error}"
+                raise HomeAssistantError(f"Tesla battery export request failed ({export_error})")
             grid_result = await _tesla_force_apply_grid_charging(
                 site_configs,
                 False,
