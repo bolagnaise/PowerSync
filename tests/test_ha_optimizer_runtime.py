@@ -76,6 +76,66 @@ class Harness:
         await self.client.initialize()
         await self.client.finish_pairing("A"*43)
 
+
+def test_manual_scope_nests_for_its_task_but_child_tasks_wait():
+    async def run():
+        h = Harness(); await h.activate()
+        manager = h.client
+        entered = asyncio.Event()
+        async def child():
+            async with manager.manual_command_scope('one'):
+                entered.set()
+                await manager.relinquish('one')
+        async with manager.manual_command_scope('one'):
+            async with manager.manual_command_scope('one'):
+                assert manager._manual_command_depth['one'] == 2
+                await manager.relinquish('one')
+            assert manager._manual_command_depth['one'] == 1
+            queued = asyncio.create_task(child())
+            await asyncio.sleep(0)
+            assert not entered.is_set()
+            # Another entry has independent ownership.
+            async with manager.manual_command_scope('two'):
+                await manager.relinquish('two')
+        await asyncio.wait_for(queued, 1)
+        assert entered.is_set()
+        assert manager.entries['one']['generation'] == 2
+        assert not manager._manual_command_owners
+        assert not manager._manual_command_depth
+        assert not manager.control_lock('one').locked()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('cancel_inside', [False, True])
+def test_cancelled_manual_scope_releases_ownership(cancel_inside):
+    async def run():
+        h = Harness(); await h.activate()
+        manager = h.client
+        entered = asyncio.Event()
+        async def command():
+            async with manager.manual_command_scope('one'):
+                entered.set()
+                await asyncio.Event().wait()
+        if cancel_inside:
+            queued = asyncio.create_task(command())
+            await entered.wait()
+        else:
+            await manager.control_lock('one').acquire()
+            queued = asyncio.create_task(command())
+            await asyncio.sleep(0)
+            assert not entered.is_set()
+        queued.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await queued
+        if not cancel_inside:
+            manager.control_lock('one').release()
+        assert not manager._manual_command_owners
+        assert not manager._manual_command_depth
+        async with manager.manual_command_scope('one'):
+            await manager.relinquish('one')
+        assert not manager.control_lock('one').locked()
+    asyncio.run(run())
+
 def test_offline_restart_and_clock_rollback_do_not_extend_permission():
     async def run():
         h=Harness();await h.activate();identity=h.client.installation_id;secret=h.client.credential

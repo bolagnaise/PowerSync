@@ -331,6 +331,116 @@ def route_lock(a):
 
 
 @pytest.mark.asyncio
+async def test_manual_discharge_does_not_deadlock_optimizer_waiting_for_battery_route(admission):
+    from test_ha_optimizer_runtime import Harness, guard
+
+    a = admission
+    harness = Harness()
+    await harness.activate()
+    manager = harness.client
+    a.hass.data['power_sync_license_manager'] = manager
+    owner = SimpleNamespace(hass=a.hass, entry_id=a.entry.entry_id)
+    lock = route_lock(a)
+    optimizer_owns_control = asyncio.Event()
+    manual_started = asyncio.Event()
+    events = []
+    old_epoch = manager.entries.get(a.entry.entry_id, {}).get('generation', 0)
+
+    async def optimizer_handler(call):
+        events.append('optimizer')
+        return True
+
+    async def manual_handler(call):
+        # This is the real manual handler's ownership handoff, after its
+        # validation and inside the production battery-transition guard.
+        await manager.relinquish(a.entry.entry_id)
+        events.append('manual')
+        return True
+
+    optimizer_service = a.m.guard_battery_transition(a.hass, a.entry, optimizer_handler)
+    manual_service = a.m.guard_battery_transition(a.hass, a.entry, manual_handler)
+
+    async def optimizer_request():
+        async def send():
+            optimizer_owns_control.set()
+            await manual_started.wait()
+            # Let the manual route enter (or queue for control ownership)
+            # before the optimizer requests its route lock.
+            await asyncio.sleep(0)
+            return await optimizer_service(SimpleNamespace(data={'source': 'optimizer'}))
+        return await guard.fenced_call(owner, send, 'force_discharge')
+
+    async def manual_request():
+        await optimizer_owns_control.wait()
+        manual_started.set()
+        return await manual_service(SimpleNamespace(data={'source': 'user'}))
+
+    tasks = [asyncio.create_task(optimizer_request()), asyncio.create_task(manual_request())]
+    try:
+        assert await asyncio.wait_for(asyncio.gather(*tasks), 1) == [True, True]
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+    assert events == ['optimizer', 'manual']
+    assert not lock.locked() and not manager.control_lock(a.entry.entry_id).locked()
+    assert a.runtime['native_rate_battery_transitions'] == 0
+    assert not guard.service_allowed(a.hass, {
+        'source': 'optimizer', 'entry_id': a.entry.entry_id,
+        '_licensing_generation': manager.admission.generation,
+        '_licensing_entry_generation': old_epoch,
+    }, 'handle_force_discharge')
+
+
+@pytest.mark.asyncio
+async def test_manual_wait_rechecks_setup_and_cleans_counters(admission):
+    from test_ha_optimizer_runtime import Harness
+    a = admission
+    harness = Harness(); await harness.activate()
+    manager = harness.client
+    a.hass.data['power_sync_license_manager'] = manager
+    lock = route_lock(a)
+    events = []
+    async def hardware(_): events.append('write')
+    handler = a.m.guard_battery_transition(a.hass, a.entry, hardware)
+    async with manager.control_lock(a.entry.entry_id):
+        queued = asyncio.create_task(handler(None))
+        await asyncio.sleep(0)
+        assert not lock.locked()
+        a.hass.data['power_sync'][a.entry.entry_id] = {}
+    with pytest.raises(a.m.SiteImportAdmissionDenied, match='setup changed'):
+        await queued
+    assert not events and a.runtime['native_rate_battery_transitions'] == 0
+    assert not lock.locked() and not manager.control_lock(a.entry.entry_id).locked()
+    assert not manager._manual_command_owners
+
+
+@pytest.mark.asyncio
+async def test_manual_validation_and_nested_cleanup_preserve_ownership(admission):
+    from test_ha_optimizer_runtime import Harness
+    a = admission
+    harness = Harness(); await harness.activate()
+    manager = harness.client
+    # Manual controls remain available without optimizer entitlement.
+    manager.admission.suspend()
+    a.hass.data['power_sync_license_manager'] = manager
+    lock = route_lock(a)
+    async def invalid(_): raise ValueError('invalid duration')
+    with pytest.raises(ValueError, match='invalid duration'):
+        await a.m.guard_battery_transition(a.hass, a.entry, invalid)(None)
+    assert a.entry.entry_id not in manager.entries
+    async def cleanup(_):
+        await manager.relinquish(a.entry.entry_id)
+    nested = a.m.guard_battery_transition(a.hass, a.entry, cleanup)
+    async def manual(_):
+        await nested(None)
+    await asyncio.wait_for(a.m.guard_battery_transition(a.hass, a.entry, manual)(None), 1)
+    assert manager.entries[a.entry.entry_id]['generation'] == 1
+    assert not lock.locked() and not manager.control_lock(a.entry.entry_id).locked()
+    assert not manager._manual_command_owners
+
+
+@pytest.mark.asyncio
 async def test_battery_route_serializes_competitors_but_allows_same_task_cleanup(admission):
     a=admission;lock=route_lock(a);entered=asyncio.Event();release=asyncio.Event();events=[]
     async def cleanup(_):events.append('cleanup')

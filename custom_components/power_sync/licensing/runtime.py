@@ -8,6 +8,7 @@ import hashlib
 import secrets
 import time
 import uuid
+from contextlib import asynccontextmanager
 
 from .admission import OptimizerAdmission
 from .permission import verify_permission, PermissionError
@@ -25,6 +26,8 @@ class LicenseRuntime:
         self._lock = asyncio.Lock()
         self._journal_lock = asyncio.Lock()
         self._control_locks = {}
+        self._manual_command_owners = {}
+        self._manual_command_depth = {}
         self.admission = OptimizerAdmission(enforced=True)
         self.policy = None
         self._policy_token = self._permission_token = None
@@ -105,6 +108,26 @@ class LicenseRuntime:
 
     def control_lock(self, entry_id):
         return self._control_locks.setdefault(entry_id, asyncio.Lock())
+
+    @asynccontextmanager
+    async def manual_command_scope(self, entry_id):
+        """Drain optimizer writes before taking the battery route for a manual call."""
+        task = asyncio.current_task()
+        if self._manual_command_owners.get(entry_id) is task:
+            self._manual_command_depth[entry_id] += 1
+            try:
+                yield
+            finally:
+                self._manual_command_depth[entry_id] -= 1
+            return
+        async with self.control_lock(entry_id):
+            self._manual_command_owners[entry_id] = task
+            self._manual_command_depth[entry_id] = 1
+            try:
+                yield
+            finally:
+                self._manual_command_depth.pop(entry_id, None)
+                self._manual_command_owners.pop(entry_id, None)
 
     async def persist(self):
         observed = self.now()
@@ -208,7 +231,7 @@ class LicenseRuntime:
     async def relinquish(self, entry_id):
         state = self.entries.setdefault(entry_id, {})
         state["generation"] = state.get("generation", 0) + 1
-        async with self.control_lock(entry_id):
+        async def relinquish_owned():
             state["recovery_pending"] = bool(state.get("ev_targets"))
             state.pop("pre_idle_reserve", None)
             state.pop("reserve_config_at_journal", None)
@@ -218,6 +241,11 @@ class LicenseRuntime:
                 # persist() already closes paid admission. A local storage outage must
                 # never prevent the user's own manual hardware command.
                 pass
+        if self._manual_command_owners.get(entry_id) is asyncio.current_task():
+            await relinquish_owned()
+        else:
+            async with self.control_lock(entry_id):
+                await relinquish_owned()
 
     async def resume(self, entry_id):
         if not self.storage_ok or not self.admission.permission or not self.admission.permission.allows_optimization(self.now()):

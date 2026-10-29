@@ -74,11 +74,22 @@ def guard_battery_transition(hass, entry, handler):
                     runtime.pop("battery_route_requested_at", None)
                 else:
                     runtime["battery_route_requested_at"] = previous
-        try:
+        async def take_route():
             if route_lock := runtime.get("powerwall_battery_dispatch_route_lock"):
                 async with route_lock:
                     return await run()
             return await run()
+        try:
+            # Optimizer calls already own the licensing control lock. Manual
+            # handlers relinquish optimizer ownership while holding the route,
+            # so they must drain optimizer writes before taking that route too.
+            manager = hass.data.get("power_sync_license_manager")
+            manual_scope = getattr(manager, "manual_command_scope", None)
+            data = getattr(call, "data", {}) or {}
+            if data.get("source") != "optimizer" and manual_scope is not None:
+                async with manual_scope(entry.entry_id):
+                    return await take_route()
+            return await take_route()
         finally:
             runtime["native_rate_battery_transitions"] -= 1
     return guarded
