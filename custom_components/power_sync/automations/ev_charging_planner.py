@@ -4570,6 +4570,10 @@ class AutoScheduleSettings:
         if isinstance(raw_departure_times, dict):
             # New format: {"0": "07:30", "4": "07:30"} or {0: "07:30"}
             departure_times = {int(k): v for k, v in raw_departure_times.items()}
+            # An explicit modern schedule, including {}, owns the deadline.
+            # Keep the runtime legacy fallback consistent with the API output.
+            legacy_time = next(iter(departure_times.values()), None)
+            legacy_days = sorted(departure_times)
         else:
             # Legacy format: departure_time + departure_days → build departure_times dict
             legacy_time = data.get("departure_time")
@@ -4597,8 +4601,8 @@ class AutoScheduleSettings:
             vehicle_model=data.get("vehicle_model", data.get("model")),
             vehicle_trim=data.get("vehicle_trim", data.get("trim")),
             target_soc=data.get("target_soc", 80),
-            departure_time=data.get("departure_time"),
-            departure_days=data.get("departure_days", [0, 1, 2, 3, 4]),
+            departure_time=legacy_time,
+            departure_days=legacy_days,
             departure_times=departure_times,
             departure_priorities=departure_priorities,
             departure_min_battery_to_start=departure_min_battery_to_start,
@@ -5428,6 +5432,12 @@ class AutoScheduleExecutor:
                     for day, consume_level in value.items():
                         if consume_level > 0:
                             settings.departure_preserve_home_battery[day] = False
+
+        if isinstance(updates.get("departure_times"), dict):
+            # Apply after all fields so stale compatibility aliases cannot
+            # revive a cleared deadline regardless of JSON field order.
+            settings.departure_time = next(iter(settings.departure_times.values()), None)
+            settings.departure_days = sorted(settings.departure_times)
 
         self.resolve_vehicle_capacity(vehicle_id, settings)
         return settings

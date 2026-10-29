@@ -246,6 +246,79 @@ def test_away_vehicle_plans_at_configured_rate_not_the_command_safety_floor():
     assert call["minimum_charging_power_kw"] == pytest.approx(5 * 230 * 1 / 1000)
 
 
+@pytest.mark.parametrize("clear_at_runtime", [False, True])
+def test_cleared_departures_do_not_reach_the_planner_as_a_legacy_deadline(
+    monkeypatch, clear_at_runtime,
+):
+    """An empty displayed schedule must also remove the executable deadline."""
+    monkeypatch.setattr(
+        ev_planner, "_ha_local_now_naive", lambda: datetime(2026, 10, 28, 3, 30)
+    )
+    stored = {
+        "enabled": True,
+        "vehicle_id": HOME_VIN,
+        "target_soc": 60,
+        "priority": "time_critical",
+        "departure_time": "07:30",
+        "departure_days": [0, 1, 2, 3, 4],
+    }
+    if not clear_at_runtime:
+        stored["departure_times"] = {}
+    settings = ev_planner.AutoScheduleSettings.from_dict(stored)
+    planner = _RecordingPlanner()
+    executor = ev_planner.AutoScheduleExecutor(_Hass(), _ConfigEntry(), planner=planner)
+    state = ev_planner.AutoScheduleState(vehicle_id=HOME_VIN)
+    executor._settings[HOME_VIN] = settings
+    executor._state[HOME_VIN] = state
+    if clear_at_runtime:
+        # Modern settings win even if a compatibility client also sends old
+        # fields later in the same update.
+        executor.update_settings(HOME_VIN, {
+            "departure_times": {},
+            "departure_time": "07:30",
+            "departure_days": [0, 1, 2, 3, 4],
+        })
+    assert settings.to_dict()["departure_times"] == {}
+    assert settings.to_dict()["departure_time"] is None
+
+    asyncio.run(executor._regenerate_plan(
+        HOME_VIN, settings, state, current_soc=40,
+        charger_capability=_live_capability(20),
+    ))
+
+    assert len(planner.calls) == 1
+    assert planner.calls[0]["target_time"] is None
+    assert planner.calls[0]["priority"] == ev_planner.ChargingPriority.TIME_CRITICAL
+    assert state.current_plan.target_time is None
+
+
+@pytest.mark.parametrize("modern_departures", [None, {"2": "08:00"}])
+def test_configured_departures_still_reach_the_planner(monkeypatch, modern_departures):
+    monkeypatch.setattr(
+        ev_planner, "_ha_local_now_naive", lambda: datetime(2026, 10, 28, 3, 30)
+    )
+    stored = {
+        "enabled": True, "vehicle_id": HOME_VIN,
+        "departure_time": "07:30", "departure_days": [2],
+    }
+    if modern_departures is not None:
+        stored["departure_times"] = modern_departures
+    settings = ev_planner.AutoScheduleSettings.from_dict(stored)
+    planner = _RecordingPlanner()
+    executor = ev_planner.AutoScheduleExecutor(_Hass(), _ConfigEntry(), planner=planner)
+    state = ev_planner.AutoScheduleState(vehicle_id=HOME_VIN)
+
+    asyncio.run(executor._regenerate_plan(
+        HOME_VIN, settings, state, current_soc=40,
+        charger_capability=_live_capability(20),
+    ))
+
+    expected_hour, expected_minute = (7, 30) if modern_departures is None else (8, 0)
+    assert planner.calls[0]["target_time"] == datetime(
+        2026, 10, 28, expected_hour, expected_minute
+    )
+
+
 def test_away_three_phase_vehicle_does_not_plan_at_the_5a_three_phase_floor():
     """OB-53: 5A x 230V x 3 = 3.45kW is the floor, not a three-phase plan."""
     planner = _RecordingPlanner()
