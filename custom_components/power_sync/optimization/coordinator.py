@@ -75,6 +75,8 @@ from .solar_export import SolarExportHoldController, resolve_solar_export_adapte
 from .ev_coordinator import EVCoordinator, EVConfig, EVChargingMode
 from ..const import (
     DOMAIN,
+    CONF_SOLAR_NOWCAST_ENABLED,
+    DEFAULT_SOLAR_NOWCAST_ENABLED,
     CONF_OPTIMIZATION_BATTERY_CAPACITY_WH,
     CONF_OPTIMIZATION_MAX_CHARGE_W,
     CONF_OPTIMIZATION_MAX_DISCHARGE_W,
@@ -16028,13 +16030,24 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if changed:
             self._schedule_solar_forecast_learning_save()
 
+    @property
+    def solar_nowcast_enabled(self) -> bool:
+        """Require explicit opt-in, including for installs predating the setting."""
+        entry = getattr(self, "_entry", None)
+        if entry is None:
+            return DEFAULT_SOLAR_NOWCAST_ENABLED
+        return entry.options.get(
+            CONF_SOLAR_NOWCAST_ENABLED,
+            entry.data.get(CONF_SOLAR_NOWCAST_ENABLED, DEFAULT_SOLAR_NOWCAST_ENABLED),
+        ) is True
+
     def _apply_solar_nowcast_derate(
         self,
         solar_forecast: list[float],
         soc: float,
         fade_hours: float = 6.0,
     ) -> list[float]:
-        """Reduce near-term solar forecast when live production is under forecast.
+        """Optionally reduce solar forecast when live production is under forecast.
 
         The LP is deterministic: if the solar forecast says energy is coming, it
         will rationally wait for that energy instead of grid-charging earlier.
@@ -16043,6 +16056,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         first forecast slots, derate the next few hours and fade back to the raw
         Solcast forecast.
         """
+        if not self.solar_nowcast_enabled:
+            # Turning the correction off also discards a previous transient so
+            # it cannot affect planning or survive a later explicit re-enable.
+            self._solar_nowcast_derate = 1.0
+            self._last_solar_nowcast_ratio = None
+            self._last_logged_solar_nowcast_derate = None
+            return solar_forecast
         if not solar_forecast:
             return solar_forecast
         runtime = getattr(getattr(self, "hass", None), "data", {}).get(
@@ -20601,6 +20621,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """
         data: dict[str, Any] = {
             "available": self._last_solar_forecast is not None,
+            "solar_nowcast_enabled": getattr(self, "solar_nowcast_enabled", False),
             "solar_nowcast_derate": round(self._solar_nowcast_derate, 3),
         }
         learner = getattr(self, "_solar_forecast_learner", None)

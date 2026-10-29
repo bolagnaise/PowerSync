@@ -168,6 +168,8 @@ def _install_power_sync_stubs() -> None:
     const_module.CONF_OPTIMIZATION_BACKUP_ENERGY_END = "optimization_backup_energy_end"
     const_module.CONF_GENERIC_CHARGER_POWER_ENTITY = "generic_charger_power_entity"
     const_module.DEFAULT_SOLAR_FORECAST_PROVIDER = "solcast"
+    const_module.CONF_SOLAR_NOWCAST_ENABLED = "solar_nowcast_enabled"
+    const_module.DEFAULT_SOLAR_NOWCAST_ENABLED = False
     const_module.DEFAULT_SOLCAST_ESTIMATE_TYPE = "estimate"
     const_module.SOLAR_FORECAST_PROVIDER_OPEN_METEO = "open_meteo"
     const_module.SOLAR_FORECAST_PROVIDER_SOLCAST = "solcast"
@@ -3201,6 +3203,7 @@ def test_flow_power_kwatch_price_source_is_provider_gated():
 
 def test_solar_nowcast_derate_recovers_through_overnight_zero_forecast(opt_module):
     coordinator = object.__new__(opt_module.OptimizationCoordinator)
+    coordinator._entry = SimpleNamespace(data={}, options={"solar_nowcast_enabled": True})
     coordinator._config = opt_module.OptimizationConfig(interval_minutes=5)
     coordinator._solar_nowcast_derate = 0.35
     coordinator._last_solar_nowcast_ratio = None
@@ -3226,6 +3229,7 @@ def test_solar_nowcast_derate_recovers_through_overnight_zero_forecast(opt_modul
 
 def test_solar_nowcast_ignores_explicitly_unavailable_live_telemetry(opt_module):
     coordinator = object.__new__(opt_module.OptimizationCoordinator)
+    coordinator._entry = SimpleNamespace(data={}, options={"solar_nowcast_enabled": True})
     coordinator._config = opt_module.OptimizationConfig(interval_minutes=5)
     coordinator._solar_nowcast_derate = 1.0
     coordinator._last_solar_nowcast_ratio = None
@@ -3337,6 +3341,7 @@ def test_solar_forecast_learning_rejects_constrained_or_invalid_samples(
 
 def test_solar_nowcast_recovers_through_live_ratio_deadband(opt_module):
     coordinator = object.__new__(opt_module.OptimizationCoordinator)
+    coordinator._entry = SimpleNamespace(data={}, options={"solar_nowcast_enabled": True})
     coordinator._config = opt_module.OptimizationConfig(interval_minutes=5)
     coordinator._solar_nowcast_derate = 0.43
     coordinator._last_solar_nowcast_ratio = None
@@ -3362,6 +3367,65 @@ def test_solar_nowcast_recovers_through_live_ratio_deadband(opt_module):
     assert coordinator._solar_nowcast_derate == pytest.approx(
         min(1.0, (7.76 / 8.8) + 0.10)
     )
+
+
+@pytest.mark.parametrize(
+    "data,options",
+    [({}, {}), ({}, {"solar_nowcast_enabled": False}),
+     ({"solar_nowcast_enabled": True}, {"solar_nowcast_enabled": False}),
+     ({}, {"solar_nowcast_enabled": "true"})],
+)
+def test_solar_nowcast_disabled_keeps_provider_forecast_and_clears_old_factor(
+    opt_module, data, options,
+):
+    coordinator = object.__new__(opt_module.OptimizationCoordinator)
+    coordinator._entry = SimpleNamespace(data=data, options=options)
+    coordinator._solar_nowcast_derate = 0.35
+    coordinator._last_solar_nowcast_ratio = 0.25
+    coordinator._last_logged_solar_nowcast_derate = 0.35
+    coordinator._config = opt_module.OptimizationConfig(interval_minutes=5)
+    reads = []
+    coordinator._get_energy_data = lambda: reads.append(True) or {"solar_power": 2.0}
+    forecast = [8.0] * 85
+
+    adjusted = coordinator._apply_solar_nowcast_derate(forecast, soc=0.5)
+
+    assert adjusted == forecast
+    assert coordinator._solar_nowcast_derate == 1.0
+    assert coordinator._last_solar_nowcast_ratio is None
+    assert coordinator._last_logged_solar_nowcast_derate is None
+    assert reads == []
+
+
+@pytest.mark.parametrize("saved_in", ["data", "options"])
+def test_solar_nowcast_opt_in_retains_correction_and_disable_resets_it(opt_module, saved_in):
+    coordinator = object.__new__(opt_module.OptimizationCoordinator)
+    coordinator._entry = SimpleNamespace(data={}, options={})
+    getattr(coordinator._entry, saved_in)["solar_nowcast_enabled"] = True
+    coordinator._solar_nowcast_derate = 1.0
+    coordinator._last_solar_nowcast_ratio = None
+    coordinator._last_logged_solar_nowcast_derate = None
+    coordinator._config = opt_module.OptimizationConfig(interval_minutes=5)
+    coordinator._get_energy_data = lambda: {"solar_power": 2.0}
+    forecast = [8.0] * 85
+
+    adjusted = coordinator._apply_solar_nowcast_derate(forecast, soc=0.5)
+    assert adjusted[0] == pytest.approx(4.62)
+    assert adjusted[36] == pytest.approx(6.31)
+    assert adjusted[72] == forecast[72]
+    assert forecast == [8.0] * 85
+
+    coordinator._entry.options["solar_nowcast_enabled"] = False
+    assert coordinator._apply_solar_nowcast_derate(forecast, soc=0.5) == forecast
+    coordinator._entry.options["solar_nowcast_enabled"] = True
+    assert coordinator._apply_solar_nowcast_derate(forecast, soc=0.5)[0] == pytest.approx(4.62)
+
+
+def test_solar_nowcast_without_entry_defaults_off_even_with_empty_forecast(opt_module):
+    coordinator = object.__new__(opt_module.OptimizationCoordinator)
+    coordinator._solar_nowcast_derate = 0.35
+    assert coordinator._apply_solar_nowcast_derate([], soc=0.5) == []
+    assert coordinator._solar_nowcast_derate == 1.0
 
 
 def _optimizer_with_ev_snapshot(opt_module, snapshot, coordinator_data):

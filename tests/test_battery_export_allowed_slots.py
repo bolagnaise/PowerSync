@@ -138,6 +138,8 @@ def _install_power_sync_stubs() -> None:
 
     const_module = types.ModuleType("power_sync.const")
     const_module.DOMAIN = "power_sync"
+    const_module.CONF_SOLAR_NOWCAST_ENABLED = "solar_nowcast_enabled"
+    const_module.DEFAULT_SOLAR_NOWCAST_ENABLED = False
     const_module.TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS = 30
     const_module.CONF_ELECTRICITY_PROVIDER = "electricity_provider"
     const_module.CONF_DISPLAY_CURRENCY = "display_currency"

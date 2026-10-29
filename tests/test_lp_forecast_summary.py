@@ -104,3 +104,12 @@ def test_summary_handles_fractional_single_hour_and_missing_window():
     assert "Next 1 hour<" in rendered[0]
     assert "Next 1.5 hours<" in rendered[1]
     assert all("Optimizer forecast window" in html for html in rendered[2:])
+
+
+@pytest.mark.parametrize("enabled,factor", [(False, 1.0), (True, 0.7)])
+def test_solar_forecast_sensor_exposes_live_correction_setting_and_factor(enabled, factor):
+    attributes = _extract_function(COMPONENT / "sensor.py", "_lp_solar_forecast_attributes")({
+        "solar_nowcast_enabled": enabled, "solar_nowcast_derate": factor,
+    })
+    assert attributes["solar_nowcast_enabled"] is enabled
+    assert attributes["solar_nowcast_derate"] == factor
