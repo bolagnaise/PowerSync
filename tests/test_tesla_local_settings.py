@@ -242,6 +242,7 @@ def export_confirmation_context(monkeypatch, acknowledgement, readback, *, statu
     {"response": {"code": 204, "message": "Updated"}},
     {"response": {"code": 201, "message": "Updated"}},
     {"response": '{"Message":"Updated","Code":201}\n'},
+    {"response": ""},
 ])
 @pytest.mark.parametrize("restoring", [False, True])
 async def test_energy_export_acknowledgement_requires_exact_readback(
@@ -259,6 +260,7 @@ async def test_energy_export_acknowledgement_requires_exact_readback(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("acknowledgement", [{"response": {"code": 204, "message": "Updated"}}, {"response": ""}])
 @pytest.mark.parametrize("readback", [
     {}, {"components": {"customer_preferred_export_rule": None}},
     {"components": {"customer_preferred_export_rule": "never"}},
@@ -266,10 +268,10 @@ async def test_energy_export_acknowledgement_requires_exact_readback(
      "customer_preferred_export_rule": "pv_only"},
 ])
 async def test_energy_export_update_without_matching_permission_stays_unconfirmed(
-    monkeypatch, readback,
+    monkeypatch, readback, acknowledgement,
 ):
     fn, _, runtime, session = export_confirmation_context(
-        monkeypatch, {"response": {"code": 204, "message": "Updated"}}, readback,
+        monkeypatch, acknowledgement, readback,
     )
     assert not await fn([("site", "token", "fleet")], "battery_ok", reason="tariff export")
     assert session.get.call_count == 3
@@ -282,7 +284,8 @@ async def test_energy_export_update_without_matching_permission_stays_unconfirme
     {"response": {"code": 403, "message": "Updated"}},
     {"response": {"code": 204, "message": "Rejected"}},
     {"response": {"code": "204", "message": "Updated"}},
-    {"response": {}}, {"response": ""}, {"response": "not-json"},
+    {"response": {}}, {"response": None}, {"response": "not-json"},
+    {"response": "", "error": "denied"},
 ])
 async def test_export_rejection_or_unknown_ack_cannot_use_matching_snapshot(
     monkeypatch, acknowledgement,
@@ -296,9 +299,10 @@ async def test_export_rejection_or_unknown_ack_cannot_use_matching_snapshot(
 
 
 @pytest.mark.asyncio
-async def test_energy_export_receipt_cannot_confirm_a_superseded_request(monkeypatch):
+@pytest.mark.parametrize("acknowledgement", [{"response": {"code": 204, "message": "Updated"}}, {"response": ""}])
+async def test_energy_export_receipt_cannot_confirm_a_superseded_request(monkeypatch, acknowledgement):
     fn, ns, runtime, session = export_confirmation_context(
-        monkeypatch, {"response": {"code": 204, "message": "Updated"}}, {},
+        monkeypatch, acknowledgement, {},
     )
     def superseding_read(*args, **kwargs):
         ns["_command_generation"][0] += 1
@@ -320,9 +324,10 @@ async def test_energy_export_receipt_on_failed_http_status_cannot_confirm(monkey
 
 
 @pytest.mark.asyncio
-async def test_energy_export_receipt_requires_each_gateway_to_confirm(monkeypatch):
+@pytest.mark.parametrize("acknowledgement", [{"response": {"code": 204, "message": "Updated"}}, {"response": ""}])
+async def test_energy_export_receipt_requires_each_gateway_to_confirm(monkeypatch, acknowledgement):
     fn, _, _, session = export_confirmation_context(
-        monkeypatch, {"response": {"code": 204, "message": "Updated"}}, {},
+        monkeypatch, acknowledgement, {},
     )
     session.get.side_effect = [
         HttpReply({"response": {"customer_preferred_export_rule": "battery_ok"}}),

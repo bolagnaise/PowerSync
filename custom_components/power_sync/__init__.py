@@ -51,11 +51,11 @@ TESLA_TOU_READBACK_ZERO_NORMALIZED = "tesla_zero_normalized"
 async def _tesla_grid_export_write_result(
     response: Any,
 ) -> tuple[bool, str | None]:
-    """Return whether Tesla explicitly accepted a grid-export write.
+    """Return whether Tesla acknowledged a grid-export submission.
 
     Accept explicit vehicle-style results and energy-style update receipts.
-    This acknowledges submission only; callers must still confirm the exact
-    export rule from independent readback before publishing success.
+    This acknowledges submission only; callers that require a confirmed
+    setting must still obtain the exact export rule from independent readback.
     """
     try:
         payload = await response.json()
@@ -64,6 +64,12 @@ async def _tesla_grid_export_write_result(
 
     if not isinstance(payload, dict):
         return False, "Tesla returned an invalid grid export response"
+    # The energy API also returns HTTP 200 with exactly {"response": ""}.
+    # This is a submission receipt, not setting readback or physical export.
+    # See Teslemetry/hass-teslemetry#18. Do not extend this to arbitrary empty,
+    # malformed or error-bearing envelopes, or to failed HTTP statuses.
+    if payload == {"response": ""} and response.status == 200:
+        return True, None
     result = payload.get("response")
     if isinstance(result, str):
         import json

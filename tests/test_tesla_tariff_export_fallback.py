@@ -67,7 +67,7 @@ def preparation(states, *, local_config=None, export_confirmed=True, grid_confir
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("ack", [{"response": {"result": True}}, {"response": {"code": 204, "message": "Updated"}}])
+@pytest.mark.parametrize("ack", [{"response": {"result": True}}, {"response": {"code": 204, "message": "Updated"}}, {"response": ""}])
 async def test_tariff_accepts_export_receipt_without_claiming_readback(monkeypatch, ack):
     fn, ns, runtime, session = export_confirmation_context(monkeypatch, ack, {})
     assert await fn([("site", "token", "fleet")], "battery_ok", reason="force discharge export preparation", require_readback=False)
@@ -77,11 +77,23 @@ async def test_tariff_accepts_export_receipt_without_claiming_readback(monkeypat
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("ack", [{"response": {"result": False}}, {"response": {"code": 500, "message": "Error"}}, {}])
+@pytest.mark.parametrize("ack", [
+    {"response": {"result": False}}, {"response": {"code": 500, "message": "Error"}}, {},
+    {"response": None}, {"response": "not-json"}, {"response": "", "error": "denied"},
+])
 async def test_tariff_rejected_or_unknown_receipt_still_fails(monkeypatch, ack):
     fn, ns, runtime, session = export_confirmation_context(monkeypatch, ack, {})
     assert not await fn([("site", "token", "fleet")], "battery_ok", reason="force discharge export preparation", require_readback=False)
     assert not session.get.called
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [400, 401, 403, 429, 500])
+async def test_empty_export_envelope_on_failed_http_status_is_not_an_acknowledgement(monkeypatch, status):
+    fn, ns, runtime, session = export_confirmation_context(monkeypatch, {"response": ""}, {}, status=status)
+    assert not await fn([("site", "token", "teslemetry")], "battery_ok",
+                        reason="force discharge export preparation", require_readback=False)
+    session.get.assert_not_called()
 
 
 @pytest.mark.parametrize("original", [None, "never", "pv_only", "battery_ok", "invalid"])
