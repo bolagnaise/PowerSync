@@ -14,7 +14,8 @@ and unchanged deadline safeguards before delivery.
 ## Setting and behavior
 
 **Live solar forecast correction** is in PowerSync's **Weather & solar forecast**
-options and the mobile app's **Solar Forecast** settings. The saved boolean is
+options. The corresponding mobile **Solar Forecast** switch is prepared for a
+separate app update. The saved boolean is
 `solar_nowcast_enabled`; a missing preference means **off**, including after an
 upgrade. There is no migration that enables it for existing users.
 
@@ -59,5 +60,6 @@ Results:
   `test_api_contract_is_schedule_aligned_and_additive`. They were reproduced in
   a separate baseline worktree and are outside this feature's passing test sets.
 
-The implementation is on `codex/solar-nowcast-setting` in the HA, mobile and wiki
-repositories. No release version, store build or installation is included.
+The HA implementation is included in v2.12.1537. The mobile implementation remains
+on `codex/solar-nowcast-setting` for a separate app release. This delivery does not
+include an installation or physical battery verification.

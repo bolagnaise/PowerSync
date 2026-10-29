@@ -9,18 +9,18 @@
   },
   "source_state": {
     "components": {
-      "config_flow.py": "89bcf382495969a37d6a02cd2d5fe5b8987ff0756efac071571e1b14aa5f25d0",
-      "const.py": "99ec56ce473f1b1874c59b1640c187da224547981f006c16efb89cf9ad917666",
+      "config_flow.py": "280c6bf88da5618178579d942b44e301e4b6f650933c2ab3e42de01105d26c56",
+      "const.py": "f57a70e3593697684dbcf3ae4000862830845b55e3813b8515a91799cecb4647",
       "battery_backend/profiles.py": "d308ecc78740d8dfc9cd895e4b9750a02859d46e5f0863dd5c098b8aaab2bcc2",
       "battery_backend/discovery.py": "3a8c88c00d6c57f6101d55056968524d7971d1ac3b8e16365923bca978f9489b",
       "settings_metadata.py": "deea4c452dd3cd334d5e1b9348e0ead03891542128c4061c368ad6e1c012ffd9",
-      "strings.json": "8e36151a6e16a80a6b0a734f6c59b5b4b49923790e8320153036792da4aa0255",
-      "translations/en.json": "3cb0f604a0b406bda943b0a6192bcac443acf9a07342443fe9a495b22f52cbd2",
+      "strings.json": "433e9d665c9abdc5cb13c6201f67c5542de70a747a460d592c710a5ffc5d9d8d",
+      "translations/en.json": "f55a7c122e350183295752336154ce7b3fb26153033ecb696eb99b2d6fc87434",
       "services.yaml": "298832ff55a41519a5b94e51b7d4c2627dd872d2dc4684faadfe841767a91ab5",
       "switch.py": "878970c76ede8803ed9802eaf5bf95c4a483c5c58497010a6cf21a1e74f3be7b",
       "select.py": "831a437aaf549b9a4b83d6dcccd67f9aff89853da2477c1fbda914d5cbf14b9e",
       "number.py": "0c0541d354d2cf2a05d9fc100f6d3883fc6f8aca6af48fb0e71a28c06b02996b",
-      "sensor.py": "febbfd1f61253eedf44f5290c2bc7e87ea07d308b5f6509ea1c43de0dd458578",
+      "sensor.py": "e89cd022ee76bd313865b52cf7d57dd55d6f1e5452b0dcc956cf18c5204e7070",
       "binary_sensor.py": "cad335bcce4d56edb1121bc08a6bbe34d55cad991ce31a34547d150ec4898704",
       "button.py": "69368d0dc0f8a1a9e336fed0da117103676670003db81d3360fc24bc0e6123b0",
       "automations/actions.py": "e8dc37c25a946bbd35a0f0bb7c4cba4ad15b3c18295508f3f33e511c7891f61f",
@@ -1006,6 +1006,7 @@
       "options.weather_options.no_solar_installed": "No solar installed",
       "options.weather_options.openweathermap_api_key": "OpenWeatherMap API key",
       "options.weather_options.solar_forecast_provider": "Solar forecast provider",
+      "options.weather_options.solar_nowcast_enabled": "Live solar forecast correction",
       "options.weather_options.solcast_api_key": "Solcast API key",
       "options.weather_options.solcast_enabled": "Enable Solcast solar forecast",
       "options.weather_options.solcast_estimate_type": "Solcast estimate",
@@ -8745,6 +8746,16 @@
       "source_line": 1754,
       "group": null,
       "rendering": "conditional union; see page availability notes"
+    },
+    {
+      "scope": "options",
+      "form": "weather_options",
+      "field": "solar_nowcast_enabled",
+      "label": "Live solar forecast correction",
+      "page": "Weather-and-Solar-Forecasts.md",
+      "source_line": 15658,
+      "group": null,
+      "rendering": "optional boolean; off by default for existing and new installations"
     }
   ],
   "profiles": [
@@ -12833,6 +12844,10 @@
     },
     "options.init_sungrow.sungrow_ihomemanager_port": {
       "page": "Battery-Sungrow",
+      "status": "documented"
+    },
+    "options.weather_options.solar_nowcast_enabled": {
+      "page": "Weather-and-Solar-Forecasts",
       "status": "documented"
     }
   }
