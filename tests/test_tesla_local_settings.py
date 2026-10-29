@@ -1332,7 +1332,7 @@ async def test_native_cloud_export_route_is_field_selective_and_fenced(stopping,
     assert await fn([('site', 'token', 'fleet')], 'pv_only', reason='native restore',
         prefer_local=False, before_write=before_write, submission_status=status, restoring=restoring)
     assert sent == [{'customer_preferred_export_rule': 'pv_only'}]
-    assert status == {'submitted': True}
+    assert status == {'submitted': True, 'http_status': 200}
     transport.write_config.assert_not_awaited()
 
 
