@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import ast
 import importlib
+import logging
 import sys
 import types
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -130,6 +135,138 @@ def _ac_state_map(prefix: str = "goodwe") -> dict[str, _State]:
         f"number.{prefix}_grid_export_limit": _State(5000, "W"),
         f"switch.{prefix}_grid_export_limit_switch": _State("off"),
     }
+
+
+@pytest.mark.parametrize("initial", ["missing", "unavailable", "partial"])
+@pytest.mark.parametrize("prefix", ["goodwe", "garage"])
+def test_goodwe_ha_setup_recovers_late_telemetry_without_reload(initial, prefix):
+    """Exercise actual setup, refresh and readiness code with late HA entities."""
+    _module, restore_module = _load_goodwe_entity_module()
+    try:
+        init_path = COMPONENT_ROOT / "__init__.py"
+        init_tree = ast.parse(init_path.read_text())
+        setup = next(node for node in init_tree.body if getattr(node, "name", None) == "async_setup_entry")
+        goodwe_branch = next(
+            node for node in ast.walk(setup)
+            if isinstance(node, ast.If) and isinstance(node.test, ast.Name)
+            and node.test.id == "is_goodwe"
+            and any(
+                isinstance(child, ast.Call) and isinstance(child.func, ast.Name)
+                and child.func.id == "GoodWeEnergyCoordinator"
+                for statement in node.body for child in ast.walk(statement)
+            )
+        )
+        refresh = next(
+            node for node in setup.body
+            if isinstance(node, ast.If) and isinstance(node.test, ast.Name)
+            and node.test.id == "goodwe_coordinator"
+        )
+        setup_body = goodwe_branch.body + [refresh, ast.parse("return goodwe_coordinator").body[0]]
+        setup_function = ast.AsyncFunctionDef(
+            name="setup_goodwe", args=ast.arguments(
+                posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[],
+            ), body=[ast.parse("goodwe_coordinator = None").body[0]] + setup_body,
+            decorator_list=[],
+        )
+        helpers = [
+            node for node in init_tree.body
+            if getattr(node, "name", None) in {
+                "_goodwe_ems_prefix_candidates", "_resolve_goodwe_ems_entity_prefix",
+                "_resolve_goodwe_entity_telemetry_prefix",
+                "_is_goodwe_entity_telemetry_startup_failure", "_uses_native_battery_integration",
+            }
+        ]
+        coordinator_tree = ast.parse((COMPONENT_ROOT / "coordinator.py").read_text())
+        classes = [
+            node for node in coordinator_tree.body
+            if isinstance(node, ast.ClassDef) and node.name in {
+                "NativeBatteryIntegrationReadinessMixin", "GoodWeEnergyCoordinator",
+            }
+        ]
+
+        class UpdateFailed(Exception):
+            pass
+
+        class CoordinatorBase:
+            def __init__(self, hass, logger, *, name, update_interval):
+                self.hass, self.data = hass, None
+                self.update_interval = update_interval
+
+            async def async_config_entry_first_refresh(self):
+                self.data = await self._async_update_data()
+
+        class Accumulator:
+            _last_update = True
+
+            def __init__(self, *args):
+                pass
+
+            def as_dict(self):
+                return {}
+
+        states = {}
+        if initial == "unavailable":
+            states = {key: _State("unavailable") for key in _state_map(prefix)}
+        elif initial == "partial":
+            states[f"sensor.{prefix}_battery_soc"] = _State(64)
+        hass = _Hass(states)
+        # Include discovery without a configured prefix for the standard namespace.
+        configured = prefix if prefix != "goodwe" else ""
+        namespace = {
+            "__name__": "power_sync.coordinator", "__package__": "power_sync",
+            "_LOGGER": logging.getLogger(__name__), "asyncio": asyncio,
+            "timedelta": timedelta, "DataUpdateCoordinator": CoordinatorBase,
+            "EnergyAccumulator": Accumulator, "UpdateFailed": UpdateFailed,
+            "dt_util": types.SimpleNamespace(utcnow=lambda: datetime.now(timezone.utc)),
+            "_get_current_prices": lambda *args: (0, 0),
+            "_update_energy_accumulator_with_ev_load": lambda *args: None,
+            "hass": hass,
+            "entry": types.SimpleNamespace(entry_id="ticket-213", options={}, data={
+                "goodwe_host": "test.invalid", "goodwe_port": 502,
+                "goodwe_protocol": "tcp", "goodwe_ems_entity_prefix": configured,
+            }),
+            "battery_connection_profile": types.SimpleNamespace(profile_id="goodwe_ha"),
+            "canonical_source_entities": [], "infer_entity_prefix": lambda _: "",
+            "GOODWE_EMS_CONTROL_ENTITY": "entity",
+            "DEFAULT_GOODWE_PORT_TCP": 502, "DEFAULT_GOODWE_PORT_UDP": 8899,
+        }
+        for node in ast.walk(goodwe_branch):
+            if isinstance(node, ast.Name) and node.id.startswith("CONF_"):
+                namespace[node.id] = node.id.removeprefix("CONF_").lower()
+        extracted = ast.fix_missing_locations(ast.Module(
+            body=classes + helpers + [setup_function], type_ignores=[],
+        ))
+        exec(compile(extracted, str(init_path), "exec"), namespace)
+
+        async def scenario():
+            coordinator = await namespace["setup_goodwe"]()
+            assert coordinator is not None, "late GoodWe entities must not permanently remove the coordinator"
+            assert coordinator._controller is None  # No direct polling or fallback.
+            assert coordinator.update_interval == timedelta(seconds=30)
+            assert coordinator.startup_control_ready() is False
+            assert await coordinator.force_charge(power_w=1000) is False
+            assert await coordinator.restore_normal() is False
+            assert hass.services.calls == []
+
+            # The existing periodic refresh sees the upstream integration become ready.
+            hass.states._states.update(_state_map(prefix))
+            await coordinator.async_config_entry_first_refresh()
+            assert coordinator.data["telemetry_ready"] is True
+            assert coordinator.data["battery_level"] == 64
+            assert coordinator.data["solar_power"] == 5.0
+            # EMS controls arrive separately; telemetry alone must not allow a write.
+            assert coordinator.startup_control_ready() is False
+            hass.states._states.update({
+                f"select.{prefix}_ems_mode": _State("auto"),
+                f"number.{prefix}_ems_power_limit": _State(32768, "W"),
+            })
+            assert coordinator.startup_control_ready() is True
+            assert coordinator._controller is None
+            assert hass.services.calls == []
+
+        asyncio.run(scenario())
+    finally:
+        restore_module()
 
 
 def test_goodwe_entity_controller_reads_prefixed_runtime_data():

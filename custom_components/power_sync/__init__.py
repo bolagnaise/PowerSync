@@ -23024,6 +23024,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
             else None
         )
+        if battery_connection_profile.profile_id == "goodwe_ha":
+            # Keep the HA route selected before its entities finish loading.
+            # Readiness guards will defer commands until telemetry and EMS exist.
+            goodwe_ems_prefix = goodwe_ems_prefix or configured_ems_prefix or "goodwe"
         if not goodwe_ems_prefix and (
             goodwe_protocol == "tcp" or goodwe_port == DEFAULT_GOODWE_PORT_TCP
         ):
@@ -23062,28 +23066,32 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             battery_connection_profile.profile_id == "goodwe_ha"
             and not goodwe_entity_telemetry_prefix
         ):
-            _LOGGER.error(
-                "GoodWe HA profile could not resolve fresh entity telemetry; refusing direct fallback"
+            # A nonempty hint keeps the coordinator in entity-only mode. Its
+            # first-refresh handling and periodic polling retry late HA entities.
+            goodwe_entity_telemetry_prefix = goodwe_ems_prefix
+            _LOGGER.warning(
+                "GoodWe HA telemetry is not ready yet; keeping the entity "
+                "coordinator active so it can retry without direct fallback"
             )
-        else:
-            _LOGGER.info(
+
+        _LOGGER.info(
             "Initializing GoodWe coordinator: %s:%s%s%s",
             goodwe_host, goodwe_port,
             f" (EMS relay via '{goodwe_ems_prefix}' entities)" if goodwe_ems_prefix else "",
             f" (telemetry via '{goodwe_entity_telemetry_prefix}' entities)" if goodwe_entity_telemetry_prefix else "",
         )
-            goodwe_coordinator = GoodWeEnergyCoordinator(
-                hass,
-                goodwe_host,
-                port=goodwe_port,
-                entry_id=entry.entry_id,
-                ems_entity_prefix=goodwe_ems_prefix,
-                entity_telemetry_prefix=goodwe_entity_telemetry_prefix,
-                solar_override_entity=entry.options.get(
-                    CONF_CUSTOM_SOLAR_POWER_ENTITY,
-                    entry.data.get(CONF_CUSTOM_SOLAR_POWER_ENTITY, ""),
-                ),
-            )
+        goodwe_coordinator = GoodWeEnergyCoordinator(
+            hass,
+            goodwe_host,
+            port=goodwe_port,
+            entry_id=entry.entry_id,
+            ems_entity_prefix=goodwe_ems_prefix,
+            entity_telemetry_prefix=goodwe_entity_telemetry_prefix,
+            solar_override_entity=entry.options.get(
+                CONF_CUSTOM_SOLAR_POWER_ENTITY,
+                entry.data.get(CONF_CUSTOM_SOLAR_POWER_ENTITY, ""),
+            ),
+        )
     elif is_alphaess:
         _LOGGER.info("Running in AlphaESS mode - Tesla credentials not required")
 
