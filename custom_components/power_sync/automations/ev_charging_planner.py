@@ -10025,6 +10025,32 @@ def _generic_charger_charge_state(
     return False if stopped else None
 
 
+def _has_current_disconnected_sigenergy_evac(
+    hass: "HomeAssistant",
+    config_entry: "ConfigEntry",
+) -> bool:
+    """Require fresh, explicit EVAC disconnection before releasing a battery hold."""
+    entry_data = hass.data.get(DOMAIN, {}).get(config_entry.entry_id, {})
+    observed = entry_data.get("observed_sigenergy_charger_state")
+    if not is_current_ev_power_observation(
+        entry_data.get("observed_sigenergy_charger_state_at")
+    ):
+        return False
+    try:
+        power_kw = float(getattr(observed, "power_kw", None))
+    except (TypeError, ValueError):
+        return False
+    return (
+        getattr(observed, "charger_type", None) == "evac"
+        and getattr(observed, "status", None) == "a1_a2"
+        and getattr(observed, "is_connected", None) is False
+        and getattr(observed, "is_charging", None) is False
+        and getattr(observed, "is_discharging", None) is False
+        and math.isfinite(power_kw)
+        and abs(power_kw) <= 0.05
+    )
+
+
 def _has_current_non_tesla_charge(
     hass: "HomeAssistant",
     config_entry: "ConfigEntry",
@@ -11250,6 +11276,16 @@ class PriceLevelChargingExecutor:
                 # Unknown/stale telemetry must not release a possibly active hold.
                 preserve_charging = (
                     _generic_charger_charge_state(self.hass, params) is not False
+                )
+            elif (
+                params.get("charger_type") == "sigenergy"
+                and state.last_decision == "unplugged"
+            ):
+                # Keep the logical session armed, but a freshly unplugged EVAC
+                # cannot consume home-battery power. Missing or contradictory
+                # readback must not release a potentially active battery hold.
+                preserve_charging = not _has_current_disconnected_sigenergy_evac(
+                    self.hass, self.config_entry,
                 )
         await self.apply_preserve_home_battery(preserve_charging, reason)
         return decision

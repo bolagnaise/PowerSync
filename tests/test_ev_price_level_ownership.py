@@ -9071,3 +9071,86 @@ def test_generic_price_level_readback_is_conservative(status, power, age, expect
     assert ev_planner._generic_charger_charge_state(hass, {
         "charger_status_entity": "sensor.status", "charger_power_entity": "sensor.power",
     }) is expected
+
+
+@pytest.mark.parametrize("observation,expected_preserve", [
+    ("disconnected", False), ("connected", True), ("charging", True),
+    ("positive_power", True), ("discharging", True),
+    ("missing_power", True), ("invalid_power", True),
+    ("stale", True), ("future", True), ("missing", True), ("unknown", True),
+    ("missing_timestamp", True),
+    ("pending_start", True), ("pending_stop", True), ("evdc", True),
+    ("replugged", True),
+])
+def test_sigenergy_unplugged_price_level_releases_only_confirmed_ev_ac_hold(
+    monkeypatch, fake_actions, observation, expected_preserve,
+):
+    """Ticket #448: unplugging must not preserve an old EVAC battery hold."""
+    hass = _FakeHass(price_settings={
+        "preserve_home_battery": True, "recovery_price_cents": 20,
+        "opportunity_price_cents": 15,
+    })
+    entry = SimpleNamespace(entry_id="entry-1", data={}, options={
+        "sigenergy_charger_enabled": True, "sigenergy_charger_type": "evac",
+    })
+    monkeypatch.setattr(ev_planner, "discover_all_tesla_vehicles", _no_vehicles)
+    monkeypatch.setattr(ev_planner, "get_ev_location", AsyncMock(return_value="home"))
+    monkeypatch.setattr(ev_planner, "_read_sigenergy_charger_plugged_state",
+                        AsyncMock(return_value=observation == "replugged"))
+    monkeypatch.setattr(ev_planner, "get_scheduled_charging_executor", lambda: None)
+    entry_data = hass.data["power_sync"]["entry-1"]
+    if observation != "missing":
+        entry_data["observed_sigenergy_charger_state"] = SimpleNamespace(
+            charger_type="evdc" if observation == "evdc" else "evac",
+            status="unknown" if observation == "unknown" else "a1_a2",
+            is_connected=observation == "connected",
+            is_charging=observation == "charging",
+            is_discharging=observation == "discharging",
+            power_kw=(3.5 if observation == "positive_power" else
+                      None if observation == "missing_power" else
+                      float("nan") if observation == "invalid_power" else 0.0),
+        )
+        entry_data["observed_sigenergy_charger_state_at"] = (
+            datetime.now(timezone.utc) - timedelta(
+                minutes=10 if observation == "stale" else
+                -1 if observation == "future" else 0,
+            )
+        )
+        if observation == "missing_timestamp":
+            entry_data.pop("observed_sigenergy_charger_state_at")
+    executor = ev_planner.PriceLevelChargingExecutor(hass, entry)
+    executor._get_home_battery_soc = AsyncMock(return_value=82)
+    executor._get_ev_soc = AsyncMock(return_value=50)
+    state = executor._get_or_create_vehicle_state("sigenergy_charger")
+    state.is_charging = True
+    state.charging_mode = "price_level_opportunity"
+    state.start_pending = observation == "pending_start"
+    state.stop_pending = observation == "pending_stop"
+    executor._set_preserve_home_battery_intent("Previously charging at cheap price")
+    executor._start_charging = AsyncMock()
+    executor._stop_charging = AsyncMock()
+
+    for _ in range(2):
+        decisions = asyncio.run(executor.evaluate_all_vehicles(
+            5 if observation == "replugged" else 45
+        ))
+        if observation == "replugged":
+            assert decisions["sigenergy_charger"][0] is True
+        else:
+            assert decisions["sigenergy_charger"] == (False, "Vehicle not plugged in", "")
+        assert entry_data["scheduled_ev_preserve_state"]["active"] is expected_preserve
+        assert state.last_decision == ("charging" if observation == "replugged" else "unplugged")
+        assert state.is_charging is True  # Preserve the logical session's ownership.
+        assert state.charging_mode == "price_level_opportunity"
+    executor._start_charging.assert_not_awaited()
+    executor._stop_charging.assert_not_awaited()
+
+    if observation == "disconnected":
+        # Another EV mode's valid hold must survive either shared-state source.
+        monkeypatch.setattr(ev_planner, "get_scheduled_charging_executor", lambda:
+                            SimpleNamespace(_preserve_home_battery_active=True))
+        for source in ("price_level_charging", "scheduled_charging"):
+            entry_data["scheduled_ev_preserve_state"].update(active=True, source=source)
+            asyncio.run(executor.evaluate_all_vehicles(45))
+            assert entry_data["scheduled_ev_preserve_state"]["active"] is True
+            assert entry_data["scheduled_ev_preserve_state"]["source"] == "scheduled_charging"
