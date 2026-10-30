@@ -8356,6 +8356,12 @@ def test_epex_price_forecast_uses_real_optimizer_slots_not_generic_tou(monkeypat
     """A high current EPEX price must not become a synthetic 15c off-peak."""
     now = datetime(2026, 9, 16, 21, 11, tzinfo=timezone.utc)
     monkeypatch.setattr(ev_planner, "_ha_local_now_naive", lambda: now.replace(tzinfo=None))
+    # Slot timestamps go through dt_util.as_local; keep both sides in one zone
+    # whatever HA clock stub another test file installed.
+    monkeypatch.setattr(
+        ev_planner, "_as_ha_local_naive",
+        lambda value: value.astimezone(timezone.utc).replace(tzinfo=None),
+    )
     hass = _FakeHass()
     hass.data["power_sync"]["entry-1"]["optimization_coordinator"] = SimpleNamespace(
         data={

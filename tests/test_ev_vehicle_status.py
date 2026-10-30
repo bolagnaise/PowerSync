@@ -120,6 +120,8 @@ def _install_import_stubs() -> None:
 
     inverters = types.ModuleType("power_sync.inverters")
     inverters.get_inverter_controller = lambda *args, **kwargs: None
+    # Keep it a package: later files import real ``power_sync.inverters.*`` submodules.
+    inverters.__path__ = [str(ROOT / "power_sync" / "inverters")]
     sys.modules["power_sync.inverters"] = inverters
 
     optimization_coordinator = types.ModuleType("power_sync.optimization.coordinator")

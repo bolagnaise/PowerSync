@@ -56,6 +56,20 @@ _install_stubs()
 
 from power_sync.inverters.foxess_entity import FoxESSEntityController  # noqa: E402
 
+_FOXESS_MODULE = sys.modules[FoxESSEntityController.__module__]
+_REGISTRY_FUNCTIONS = {
+    module: {name: getattr(module, name) for name in vars(module) if name.startswith("async_")}
+    for module in (_FOXESS_MODULE.dr, _FOXESS_MODULE.er)
+}
+
+
+@pytest.fixture(autouse=True)
+def _pin_registry_stubs(monkeypatch):
+    """Other files ``setdefault`` the same HA stub objects and overwrite their functions."""
+    for module, functions in _REGISTRY_FUNCTIONS.items():
+        for name, function in functions.items():
+            monkeypatch.setattr(module, name, function)
+
 
 class _FakeState:
     def __init__(

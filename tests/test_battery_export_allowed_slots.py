@@ -13225,6 +13225,10 @@ def test_zerohero_export_price_gate_blocks_without_remaining_bonus(opt_module):
         options={
             "electricity_provider": "globird",
             "globird_plan": "zerohero_jul_2026",
+            # Explicit 1c floor: the 0c default (8a22d151) would let a 0c
+            # export through, and a cached curtailment_config may be bound to
+            # either the real or this file's stub const.
+            "curtailment_export_threshold_cents": 1.0,
         },
         data={},
     )

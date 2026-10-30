@@ -11,6 +11,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parent.parent / "custom_components" / "power_sync"
 
@@ -52,10 +54,6 @@ def _install_ha_stubs() -> None:
     ha_helpers.entity_registry = ha_er
     ha_helpers.device_registry = ha_dr
     ha_helpers.event = ha_event
-    if not hasattr(ha_storage, "Store"):
-        # EV ownership fences persist through HA storage; conftest's
-        # complete_ha_storage_stub supplies the in-memory async_load/async_save.
-        ha_storage.Store = type("Store", (), {"__init__": lambda self, *args, **kwargs: None})
     ha_helpers.storage = ha_storage
     ha_root.helpers = ha_helpers
     ha_util.dt = ha_dt
@@ -75,6 +73,28 @@ sys.modules["power_sync.automations"] = _automations
 _optimization = types.ModuleType("power_sync.optimization")
 _optimization.__path__ = [str(ROOT / "optimization")]
 sys.modules["power_sync.optimization"] = _optimization
+
+class _MemoryStore:
+    """In-memory HA Store: EV ownership fences persist through HA storage."""
+
+    def __init__(self, *args, **kwargs):
+        self._value = None
+
+    async def async_load(self):
+        return self._value
+
+    async def async_save(self, value):
+        self._value = value
+
+
+@pytest.fixture(autouse=True)
+def _own_ha_storage(monkeypatch):
+    # The fence imports Store at call time; another file's stub may be installed.
+    storage = types.ModuleType("homeassistant.helpers.storage")
+    storage.Store = _MemoryStore
+    monkeypatch.setitem(sys.modules, "homeassistant.helpers.storage", storage)
+    monkeypatch.setattr(sys.modules["homeassistant.helpers"], "storage", storage, raising=False)
+
 
 ev_ownership = importlib.import_module("power_sync.automations.ev_ownership")
 ev_coordinator = importlib.import_module("power_sync.optimization.ev_coordinator")
