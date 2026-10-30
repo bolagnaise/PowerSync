@@ -143,15 +143,44 @@ def evidence(repo, target="HEAD"):
     return None, active
 
 
+def cancel_obsolete(repo, target="HEAD"):
+    """Cancel older main verification only when its relevant content differs.
+
+    A release bump while testing must not cancel the matching in-progress run.
+    Never cancel PRs, publication jobs, or a newer concurrently pushed revision.
+    """
+    target = git("rev-parse", target).decode().strip()
+    wanted = fingerprint(target)
+    repository = api(f"repos/{repo}")
+    workflow_id = api(f"repos/{repo}/actions/workflows/regression.yml")["id"]
+    runs = api(f"repos/{repo}/actions/workflows/{workflow_id}/runs?branch=main&per_page=100")["workflow_runs"]
+    for run in runs:
+        if (str(run["id"]) == os.environ.get("GITHUB_RUN_ID")
+                or run.get("status") == "completed"
+                or not trusted_run(run, repository["id"], workflow_id, target)):
+            continue
+        if fingerprint(run["head_sha"]) != wanted:
+            api(f"repos/{repo}/actions/runs/{run['id']}/cancel", data={})
+            print(f"Cancelled obsolete regression run {run['id']}", flush=True)
+    return wanted
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["fingerprint", "find", "ensure"])
+    parser.add_argument("command", choices=["fingerprint", "plan", "find", "ensure"])
     parser.add_argument("--ref", default="HEAD")
     parser.add_argument("--repo", default=os.environ.get("GITHUB_REPOSITORY", "bolagnaise/PowerSync"))
     parser.add_argument("--wait-seconds", type=int, default=3300)
     args = parser.parse_args()
     if args.command == "fingerprint":
         print(fingerprint(args.ref))
+        return
+    if args.command == "plan":
+        value = cancel_obsolete(args.repo, args.ref)
+        if output := os.environ.get("GITHUB_OUTPUT"):
+            with open(output, "a") as stream:
+                stream.write(f"fingerprint={value}\n")
+        print(f"Regression fingerprint: {value}")
         return
     deadline = time.monotonic() + args.wait_seconds
     dispatched = False

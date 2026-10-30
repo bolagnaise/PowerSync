@@ -200,6 +200,28 @@ def test_ensure_waits_for_new_success_and_only_dispatches_if_needed(proof, monke
     assert dispatched == ([{"ref": "main"}] if active is None else [])
 
 
+def test_metadata_push_does_not_cancel_matching_in_progress_work(proof, repository, monkeypatch):
+    proof["runs"][0].update(status="in_progress", conclusion=None)
+    repository({"RELEASE_NOTES.md": "version bump\n"})
+    monkeypatch.setattr(gate, "ancestor", lambda *args: True)
+    gate.cancel_obsolete("owner/repo")
+    assert not any(endpoint.endswith("/cancel") for endpoint, _ in proof["calls"])
+
+
+def test_new_code_cancels_only_obsolete_main_regression(proof, repository, monkeypatch):
+    proof["runs"][0].update(status="in_progress", conclusion=None)
+    repository({"runtime.py": "value = 2\n"})
+    monkeypatch.setattr(gate, "ancestor", lambda *args: True)
+    gate.cancel_obsolete("owner/repo")
+    assert [data for endpoint, data in proof["calls"] if endpoint.endswith("/cancel")] == [{}]
+
+
+def test_older_planning_job_never_cancels_newer_or_foreign_run(proof):
+    proof["runs"][0].update(status="in_progress", conclusion=None, head_sha="f" * 40)
+    gate.cancel_obsolete("owner/repo")
+    assert not any(endpoint.endswith("/cancel") for endpoint, _ in proof["calls"])
+
+
 def test_release_and_recovery_paths_require_gate_before_publication():
     text = (ROOT / ".github/workflows/release.yml").read_text()
     assert "workflow_dispatch:" in text

@@ -2,7 +2,10 @@
 
 `PowerSync Regression` runs the entire serial suite on main/PR changes with
 Python 3.12.12, Ubuntu 24.04 and `requirements-test.txt`. Newer revisions cancel
-obsolete regression runs. PRs always run tests with read-only permissions; their
+obsolete regression runs only when their content differs. A version/docs push
+preserves matching in-progress main work, queues behind it, then reuses success.
+Only the trusted main planning job has Actions cancellation permission. PRs
+always run tests with read-only permissions; their
 results are never release evidence. No paid external service is involved.
 
 Before a tag, release or release notification, `release.yml` requires success

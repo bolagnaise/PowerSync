@@ -11,17 +11,41 @@ permissions:
   contents: read
   actions: read
 
-# A newer main/PR revision replaces obsolete verification. Release publication
-# waits for evidence separately and is never part of this cancellation group.
-concurrency:
-  group: regression-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
-
 jobs:
+  plan:
+    # Only trusted main code gets cancellation permission, never PR code.
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: write
+    outputs:
+      fingerprint: ${{ steps.plan.outputs.fingerprint }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12.12'
+      - name: Preserve matching work and cancel obsolete main runs
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/release/regression_gate.py plan
+
   regression:
+    needs: plan
+    if: always() && !cancelled() && (github.event_name == 'pull_request' || needs.plan.result == 'success')
     name: Full regression suite
     runs-on: ubuntu-24.04
     timeout-minutes: 55
+    # Metadata bumps queue behind identical content, then reuse its success.
+    # New code cancels older content in the trusted plan job above.
+    concurrency:
+      group: regression-${{ github.event.pull_request.number || needs.plan.outputs.fingerprint }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
