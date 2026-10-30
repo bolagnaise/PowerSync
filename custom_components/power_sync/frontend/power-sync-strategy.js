@@ -8891,6 +8891,8 @@ function _batteryControls(hass, forcePowerEntityId = null) {
     if (!modeState || modeState.state !== '${mode}') {
       ${durationEntity ? `const selected = states['${durationEntity}']?.state ?? '${durationFallback}'; return '${label} ' + selected + ' min';` : `return '${label}';`}
     }
+    if (modeState.attributes?.command_status === 'restore_pending') return 'Restoring…';
+    if (modeState.attributes?.command_status === 'pending') return 'Starting ${label.toLowerCase()}…';
     const remaining = Number(modeState.attributes?.remaining_minutes);
     if (Number.isFinite(remaining)) return '${label} ' + Math.max(0, Math.ceil(remaining)) + ' min';
     return '${label} active';
@@ -9160,7 +9162,9 @@ function _batteryControls(hass, forcePowerEntityId = null) {
           },
           {
             type: 'custom:button-card',
-            name: 'Restore',
+            entity: batteryModeEntity,
+            triggers_update: [batteryModeEntity],
+            name: `[[[ return states['${batteryModeEntity}']?.attributes?.command_status === 'restore_pending' ? 'Restoring…' : 'Restore'; ]]]`,
             icon: 'mdi:battery-sync',
             styles: {
               card: [

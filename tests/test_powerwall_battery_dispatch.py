@@ -2173,3 +2173,35 @@ def test_local_charge_handles_false_omission_through_grid_restore(initially_disa
         finally:
             await controller.stop()
     asyncio.run(run())
+
+
+@pytest.mark.parametrize('mode', ['charge', 'discharge'])
+def test_manual_local_request_publishes_pending_before_hardware_acknowledgement(mode):
+    async def run():
+        ns, c, client, saved = load_routing()
+        signals = []
+        ns['async_dispatcher_send'] = lambda *args: signals.append(args)
+        entered, proceed = asyncio.Event(), asyncio.Event()
+        original = client.dispatch_battery_power.side_effect
+        async def blocked(*args, **kwargs):
+            entered.set()
+            await proceed.wait()
+            if original:
+                return await original(*args, **kwargs)
+            return True
+        client.dispatch_battery_power.side_effect = blocked
+        task = asyncio.create_task(ns[f'handle_force_{mode}'](call(source='user', power_w=500, duration=15)))
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=2)
+            assert not task.done()
+            assert ns[f'force_{mode}_state']['command_status'] == 'pending'
+            assert any(args[1] == f'power_sync_force_{mode}_state'
+                       and args[2].get('command_status') == 'pending' for args in signals)
+            proceed.set()
+            await task
+            assert ns[f'force_{mode}_state']['command_status'] == 'accepted'
+        finally:
+            proceed.set()
+            await asyncio.gather(task, return_exceptions=True)
+            await c.stop()
+    asyncio.run(run())

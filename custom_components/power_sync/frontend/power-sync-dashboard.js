@@ -1437,11 +1437,19 @@ class PsNowCard extends PsCardBase {
       modeText = 'The battery follows its own settings';
     }
 
+    const commandStatus = modeState?.attributes?.command_status;
+    const restoring = commandStatus === 'restore_pending';
+    const starting = commandStatus === 'pending';
+    if (restoring) modeText = 'Waiting for restoration to finish';
+    else if (starting) modeText = 'Waiting for command acknowledgement';
+
     // Headline
     const actKey = psActionKey(data?.effective_current_action || data?.current_action);
     const until = data?.current_action_end_time ? ` until ${psWhen(hass, data.current_action_end_time)}` : '';
     let headline;
-    if (mode === 'force_charge') headline = `Charging on your command${Number.isFinite(remaining) ? ` for ${psDuration(remaining)}` : ''}.`;
+    if (restoring) headline = 'Restoring normal operation…';
+    else if (starting) headline = mode === 'force_charge' ? 'Starting charge…' : 'Starting discharge…';
+    else if (mode === 'force_charge') headline = `Charging on your command${Number.isFinite(remaining) ? ` for ${psDuration(remaining)}` : ''}.`;
     else if (mode === 'force_discharge') headline = `Discharging on your command${Number.isFinite(remaining) ? ` for ${psDuration(remaining)}` : ''}.`;
     else if (mode === 'hold_soc') headline = `Holding the battery at ${psFix(soc, 0)}%.`;
     else if (mode === 'self_consumption') headline = 'The battery is powering the home.';
@@ -1571,8 +1579,13 @@ class PsControlsCard extends PsCardBase {
     const monitoring = data ? !!data.monitoring_mode : psState(hass, en.monitoring)?.state === 'on';
     const modeState = psState(hass, en.mode);
     const mode = modeState?.state || 'normal';
-    const active = PS_MODE_TEXT[mode];
-    const remaining = Number(modeState?.attributes?.remaining_minutes);
+    const status = modeState?.attributes?.command_status;
+    const restoring = status === 'restore_pending';
+    const starting = status === 'pending';
+    const active = restoring ? ['Restoring…', 'Restoration is in progress; waiting for confirmation.']
+      : starting ? [mode === 'force_charge' ? 'Starting charge…' : 'Starting discharge…', 'Waiting for command acknowledgement.']
+      : PS_MODE_TEXT[mode];
+    const remaining = restoring || starting ? NaN : Number(modeState?.attributes?.remaining_minutes);
     const power = psState(hass, en.forcePower);
     const powerKw = Number(power?.state);
     const custom = psState(hass, en.customDischarge);
@@ -1580,7 +1593,7 @@ class PsControlsCard extends PsCardBase {
     const btn = (kind, cls) => {
       const k = PS_CONTROL_KINDS[kind];
       const confirming = this._confirm === kind;
-      return `<button type="button" class="btn ${cls}${confirming ? ' confirming' : ''}" data-kind="${kind}">${confirming ? `Confirm ${k.label.toLowerCase()}` : k.label}</button>`;
+      return `<button type="button" class="btn ${cls}${confirming ? ' confirming' : ''}" data-kind="${kind}">${starting && mode === `force_${kind}` ? `Starting ${kind}…` : confirming ? `Confirm ${k.label.toLowerCase()}` : k.label}</button>`;
     };
     this.innerHTML = `
       ${monitoring ? '<div class="callout cyan"><b>Monitoring mode is on.</b><span>The optimizer won\'t act on its plan, but these controls still change the battery.</span></div>' : ''}
@@ -1590,7 +1603,7 @@ class PsControlsCard extends PsCardBase {
       </div>
       <div class="actions">
         ${btn('charge', 'primary')}${btn('discharge', 'amber')}${btn('self', 'quiet')}${btn('hold', 'quiet')}
-        ${active ? `<button type="button" class="btn danger full${this._confirm === 'restore' ? ' confirming' : ''}" data-kind="restore">${this._confirm === 'restore' ? 'Confirm restore normal' : 'Restore normal'}</button>` : ''}
+        ${active ? `<button type="button" class="btn danger full${this._confirm === 'restore' ? ' confirming' : ''}" data-kind="restore">${restoring ? 'Restoring…' : this._confirm === 'restore' ? 'Confirm restore normal' : 'Restore normal'}</button>` : ''}
       </div>
       ${power ? `<div class="row2"><span class="lab">Power limit<small>Max uses the fastest rate allowed</small></span><div class="stepper"><button type="button" data-step="power" data-d="-1" aria-label="Lower power limit">−</button><output class="num">${Number.isFinite(powerKw) && powerKw > 0 ? `${powerKw.toFixed(1)} kW` : 'Max'}</output><button type="button" data-step="power" data-d="1" aria-label="Raise power limit">+</button></div></div>` : ''}
       ${custom && this._customAvailable() ? `<div class="row2"><span class="lab" id="cust-l">Custom discharge time<small>${this._customOn() ? 'Discharges use this instead of Run for' : 'Off: discharges use Run for'}</small></span><span class="chipsel"><button type="button" class="switch" role="switch" aria-checked="${this._customOn()}" aria-labelledby="cust-l" data-custom-toggle></button></span></div>

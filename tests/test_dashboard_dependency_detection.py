@@ -2265,3 +2265,43 @@ def test_tesla_control_method_tile_uses_registered_device_or_user_named_entity()
         """
         subprocess.run(["node", "-e", helper + runtime], check=True, capture_output=True, text=True)
     assert "hass, registry, 'select', 'tesla_control_method'" in source
+
+
+def test_battery_controls_show_restore_progress_until_confirmed_normal():
+    source = STRATEGY_PATH.read_text()
+    start = source.index('function _batteryControls(')
+    end = source.index('\nfunction _teslaEnergySiteControls(', start)
+    script = source[start:end] + r'''
+      const modeEntity = 'sensor.power_sync_battery_mode';
+      const controls = _batteryControls({states: {}});
+      const cards = [];
+      function collect(card) {
+        cards.push(card);
+        for (const child of card.cards || []) collect(child);
+      }
+      collect(controls);
+      const restore = cards.find(c => c.tap_action?.service === 'power_sync.restore_normal');
+      const discharge = cards.find(c => c.tap_action?.service === 'power_sync.force_discharge');
+      const render = (card, state, status) => {
+        const states = {[modeEntity]: {state, attributes: {command_status: status, remaining_minutes: 15}}};
+        return card.name.startsWith('[[[') ? new Function('states', card.name.slice(3, -3))(states) : card.name;
+      };
+      for (const state of ['force_charge', 'force_discharge']) {
+        if (render(restore, state, 'restore_pending') !== 'Restoring…') throw new Error('Restore progress missing');
+        if (restore.entity !== modeEntity || !restore.triggers_update.includes(modeEntity)) throw new Error('Restore does not subscribe to status');
+      }
+      const charge = cards.find(c => c.tap_action?.service === 'power_sync.force_charge');
+      for (const [card, mode, label, starting] of [
+        [charge, 'force_charge', 'Charge', 'Starting charge…'],
+        [discharge, 'force_discharge', 'Discharge', 'Starting discharge…'],
+      ]) {
+        if (render(card, mode, 'pending') !== starting) throw new Error('Pending request shows an active timer');
+        if (render(card, mode, 'accepted') !== label + ' 15 min') throw new Error('Acknowledged request lost timer');
+        if (render(card, mode, 'restore_pending') !== 'Restoring…') throw new Error('Restoration hides progress');
+        if (render(card, 'normal', undefined) !== label) throw new Error('Idle control changed');
+      }
+      if (render(discharge, 'force_discharge', 'restore_pending') !== 'Restoring…') throw new Error('Discharge timer hides restoration');
+      if (render(discharge, 'force_discharge', 'accepted') !== 'Discharge 15 min') throw new Error('Active discharge changed');
+      if (render(restore, 'normal', undefined) !== 'Restore') throw new Error('Restore did not return to idle');
+    '''
+    subprocess.run(['node', '-e', script], check=True)

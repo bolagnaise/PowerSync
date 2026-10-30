@@ -34297,6 +34297,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                          started_at=dt_util.utcnow(), commitment_eligible=False,
                          grid_import_target_w=grid_target,
                          power_target_basis="grid_import" if grid_target is not None else "battery")
+            # Publish the request before waiting for LAN acknowledgement so
+            # the dashboard can distinguish starting from an accepted action.
+            async_dispatcher_send(hass, f"{DOMAIN}_force_{mode}_state", {
+                "active": True, "source": source, "expires_at": expiry.isoformat(),
+                "duration": duration, "command_status": "pending",
+            })
             try:
                 result = await controller.start(mode, target, duration * 60,
                                                 allowed=allowed, guarded_write=local_export_guard if mode == "discharge" else None,
@@ -38468,7 +38474,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _command_generation[0],
             )
             return
-        if await _stop_local_powerwall_dispatch():
+        from .powerwall_local.native_max_charge import NativeMaxRestorePending
+        try:
+            if await _stop_local_powerwall_dispatch():
+                return
+        except NativeMaxRestorePending:
+            # A manual click requests restoration; the session watcher retains
+            # ownership and finishes physical verification in the background.
+            # Internal callers must still distinguish pending from completion.
+            if source not in ("user", "manual") or call.data.get("_confirm_restore"):
+                raise
+            _LOGGER.info(
+                "Restore normal is in progress: Native Max settings restored; "
+                "awaiting physical settling"
+            )
             return
         if (expected_tesla_restore_generation is not None
                 and expected_tesla_restore_generation != _command_generation[0]):

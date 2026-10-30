@@ -365,3 +365,59 @@ async def test_shortened_deadline_save_failure_stops_forcing():
     store.fail_save=False
     assert await s.stop()
     assert store.data is None
+
+
+@pytest.mark.parametrize('restore_ok', [True, False])
+@pytest.mark.parametrize('source,confirm,expected_pending', [
+    ('user', False, False), ('manual', False, False),
+    ('optimizer', False, True), ('user', True, True),
+])
+def test_restore_service_reports_manual_settling_without_releasing_owner(source, confirm, expected_pending, restore_ok):
+    """The HA service accepts a manual restore in progress; internal proof stays strict."""
+    import ast
+    import logging
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    tree = ast.parse((Path(__file__).parents[1] / 'custom_components/power_sync/__init__.py').read_text())
+    setup = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == 'async_setup_entry')
+    handler = next(n for n in setup.body if isinstance(n, ast.AsyncFunctionDef) and n.name == 'handle_restore_normal')
+    class StripImports(ast.NodeTransformer):
+        def visit_ImportFrom(self, node):
+            return ast.copy_location(ast.Pass(), node)
+    handler = StripImports().visit(handler)
+    handler.decorator_list = []
+    async def run():
+        store = Store()
+        adapter = Adapter(store)
+        session = m.NativeMaxChargeSession(adapter, store)
+        await session.start(10)
+        adapter.settled = AsyncMock(return_value=False)
+        adapter.restore_ok = restore_ok
+        stop = AsyncMock(side_effect=session.stop)
+        ns = dict(ServiceCall=object, _control_call_source=lambda call: source,
+                  _command_generation=[0], _stop_local_powerwall_dispatch=stop,
+                  NativeMaxRestorePending=m.NativeMaxRestorePending,
+                  _LOGGER=logging.getLogger(__name__))
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[handler], type_ignores=[])), '<restore_service>', 'exec'), ns)
+        call = SimpleNamespace(context=SimpleNamespace(user_id=None, parent_id=None), data={'_confirm_restore': confirm})
+        try:
+            if not restore_ok:
+                with pytest.raises(m.NativeMaxChargeError, match="restore was not confirmed"):
+                    await ns['handle_restore_normal'](call)
+            elif expected_pending:
+                with pytest.raises(m.NativeMaxRestorePending):
+                    await ns['handle_restore_normal'](call)
+            else:
+                await ns['handle_restore_normal'](call)
+            assert session.pending
+            assert session.record['phase'] == ('settling' if restore_ok else 'restoring')
+            assert adapter.barrier == session.record['id']
+            assert 'release' not in adapter.events
+            adapter.settled.return_value = True
+            adapter.restore_ok = True
+            await session.stop()
+            assert not session.pending
+            assert adapter.barrier is None
+        finally:
+            await session._cancel_watch()
+    asyncio.run(run())

@@ -159,7 +159,7 @@ def _board_script(body: str) -> str:
         + r"""
   vm.createContext(context);
   const src = fs.readFileSync(process.argv[1], 'utf8').replace(/^export \{[^}]*\};?\s*$/m, '');
-  vm.runInContext(src + '\n;globalThis.__t = { PowerSyncBoard, PsTodayCard, PsControlsCard, psSchedule, psWindows, psActionKey, PS_LAYOUT_KEY, PS_DEFAULT_LAYOUT, psChartValue, psChart, psBars, PsPricesCard, PsEnergyCard, PsLoadForecastCard, PsSolarLoadCard, PsBatteryPlanCard, psApiCache };', context);
+  vm.runInContext(src + '\n;globalThis.__t = { PowerSyncBoard, PsTodayCard, PsNowCard, PsControlsCard, psSchedule, psWindows, psActionKey, PS_LAYOUT_KEY, PS_DEFAULT_LAYOUT, psChartValue, psChart, psBars, PsPricesCard, PsEnergyCard, PsLoadForecastCard, PsSolarLoadCard, PsBatteryPlanCard, psApiCache };', context);
   const T = context.__t;
 """
         + body
@@ -383,3 +383,56 @@ def test_every_small_chart_has_working_pointer_and_keyboard_tooltips():
     assert out.pop('empty') is True
     for card, checks in out.items():
         assert all(checks.values()), (card, checks)
+
+
+def test_controls_distinguish_starting_restoring_and_acknowledged_requests():
+    out = _run_board(r"""
+  const card = new T.PsControlsCard();
+  card.config = {entities: {mode: 'sensor.mode'}};
+  card._api = () => null;
+  const samples = [];
+  for (const mode of ['force_charge', 'force_discharge']) {
+    for (const status of ['pending', 'accepted', 'restore_pending']) {
+      card._hass = {states: {'sensor.mode': {state: mode, attributes: {command_status: status, remaining_minutes: 15}}}};
+      card._render();
+      samples.push({mode, status, html: card.innerHTML});
+    }
+  }
+  console.log(JSON.stringify({samples}));
+""")
+    for sample in out['samples']:
+        html, status = sample['html'], sample['status']
+        if status == 'pending':
+            direction = 'charge' if sample['mode'] == 'force_charge' else 'discharge'
+            assert f'Starting {direction}…' in html
+            assert '15 min left.' not in html
+        elif status == 'restore_pending':
+            assert 'Restoring…' in html
+            assert '15 min left.' not in html
+        else:
+            assert '15 min left.' in html
+
+
+def test_now_card_shows_pending_command_status_instead_of_active_countdown():
+    out = _run_board(r"""
+  const card = new T.PsNowCard();
+  card._config = {entities: {mode: 'sensor.mode'}};
+  card._api = () => null;
+  const samples = [];
+  for (const mode of ['force_charge', 'force_discharge']) {
+    for (const status of ['pending', 'restore_pending']) {
+      card._hass = {states: {'sensor.mode': {state: mode, attributes: {command_status: status, remaining_minutes: 15}}}, locale: {}, config: {}};
+      card._render();
+      samples.push({mode, status, html: card.innerHTML});
+    }
+  }
+  console.log(JSON.stringify({samples}));
+""")
+    for sample in out['samples']:
+        html = sample['html']
+        assert 'Returns to normal in' not in html
+        if sample['status'] == 'restore_pending':
+            assert 'Restoring normal operation…' in html
+        else:
+            direction = 'charge' if sample['mode'] == 'force_charge' else 'discharge'
+            assert f'Starting {direction}…' in html
