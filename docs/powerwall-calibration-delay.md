@@ -22,6 +22,8 @@ A typed acknowledgement is shown separately from gateway status. Acknowledgement
 
 ## Evidence and firmware limits
 
+When Tesla reports a local `BatteryCalibration` alert, PowerSync marks **Calibration Active** and pauses automatic battery charge/export control. Missing alert data does not confirm that calibration has ended: the pause remains until three consecutive valid alert readings no longer contain `BatteryCalibration`. A gap in the alert data restarts that confirmation count. This does not add a new calibration-detection signal or infer calibration from an SOC jump.
+
 The native requests are TEG fields 75/77, with typed responses 76/78. Delay is positive integer hours; status reports seconds. Interface details were checked against [Teslemetry aiopowerwall PR 28](https://github.com/Teslemetry/aiopowerwall/pull/28).
 
 [Brett's hardware results in PR 29](https://github.com/Teslemetry/aiopowerwall/pull/29) report that a one-hour delay was acknowledged on PW3 firmware 26.26.4, but its effect could not be verified because the status getter returned `UNIMPLEMENTED`. The owner's read-only test also returned gateway status code 12 (`UNIMPLEMENTED`), so PowerSync disables the delay action on that gateway. No calibration-delay write was sent during PowerSync verification. No physical deferral or allowance reset behavior has been proven.

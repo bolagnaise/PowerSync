@@ -564,6 +564,48 @@ def test_local_battery_calibration_alert_sets_and_stably_clears_guard():
     assert notifications == [True, False]
 
 
+@pytest.mark.parametrize("clear_polls_before_gap", [0, 1, 2])
+@pytest.mark.parametrize("alert_data", [None, {}, {"active": None}, {"active": "BatteryCalibration"}])
+def test_missing_alert_payload_preserves_calibration_and_requires_fresh_clear_sequence(
+    clear_polls_before_gap, alert_data,
+):
+    entry_data = {}
+    coord = coordinator_mod.PowerwallLocalCoordinator.__new__(
+        coordinator_mod.PowerwallLocalCoordinator
+    )
+    coord.hass = SimpleNamespace(data={"power_sync": {"entry-1": entry_data}})
+    coord._entry_id = "entry-1"
+    notifications = []
+    coord._schedule_calibration_transition_notification = (
+        lambda *, started: notifications.append(started)
+    )
+
+    asyncio.run(coord._sync_calibration_alert(_calibration_snapshot(True)))
+    detected_at = entry_data["calibration_detected_at"]
+    for _ in range(clear_polls_before_gap):
+        asyncio.run(coord._sync_calibration_alert(_calibration_snapshot(False)))
+
+    # A successful snapshot can still omit the alert field. It is not an
+    # authoritative all-clear, even when other local telemetry is available.
+    missing = client_mod._snapshot_from_dcq({"control": {"alerts": alert_data}}, None)
+    assert missing.alerts is None
+    for _ in range(3):
+        asyncio.run(coord._sync_calibration_alert(missing))
+        assert entry_data["calibration_suspected"] is True
+        assert entry_data["calibration_sources"] == ["local_alert"]
+        assert entry_data["calibration_detected_at"] == detected_at
+        assert entry_data["_calibration_alert_clear_polls"] == 0
+        assert notifications == [True]
+
+    # Pre-gap clear readings must not shorten the new confirmation window.
+    for _ in range(2):
+        asyncio.run(coord._sync_calibration_alert(_calibration_snapshot(False)))
+        assert entry_data["calibration_suspected"] is True
+    asyncio.run(coord._sync_calibration_alert(_calibration_snapshot(False)))
+    assert entry_data["calibration_suspected"] is False
+    assert notifications == [True, False]
+
+
 def test_explicit_calibration_alert_supersedes_mode_stick_recovery():
     cancelled: list[bool] = []
     entry_data = {

@@ -243,6 +243,13 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
         if not isinstance(entry_data, dict):
             return
 
+        if snap.alerts is None:
+            # A successful telemetry poll can still omit its alert payload.
+            # Only explicit alert readbacks may confirm calibration ended;
+            # an unknown poll also breaks the consecutive-clear sequence.
+            entry_data["_calibration_alert_clear_polls"] = 0
+            return
+
         alert_active = powerwall_calibration_alert_active(snap.alerts)
         source_was_active = (
             CALIBRATION_SOURCE_LOCAL_ALERT in calibration_sources(entry_data)
