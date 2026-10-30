@@ -144,7 +144,7 @@ https://github.com/bolagnaise/PowerSync/blob/main/blueprints/battery_health_from
 | **Original capacity (Wh)** | Manufacturer spec total capacity | `13500` (1x Powerwall), `27000` (2x) |
 | **Battery count** | Number of batteries (reporting only) | `1` |
 
-## Battery command progress (v2.12.1562)
+## Battery command progress (v2.12.1563)
 
 The battery controls and status summary show **Starting charge…** or **Starting discharge…** while a request awaits acknowledgement, then show the active duration. During cleanup they show **Restoring…** instead of the previous force-action countdown. Local V1R publishes pending requests before waiting for the gateway.
 
