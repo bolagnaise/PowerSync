@@ -236,3 +236,33 @@ def test_energy_flow_grid_status_requires_known_state():
       }
     """
     subprocess.run(["node", "-e", f"{helper.group(0)}\n{checks}"], check=True)
+
+
+def test_energy_flow_glows_without_filters():
+    """The refreshed overlay glows with static strokes and gradients, never
+    SVG filters (which caused repaint stutter on wall tablets)."""
+    source = ENERGY_FLOW_PATH.read_text()
+
+    for line_id in (
+        "line-solar-load", "line-grid-load", "line-battery-load",
+        "line-junction-home-load", "line-wallbox-ev", "line-wallbox-ev2",
+        "line-solar-grid", "line-solar-battery", "line-grid-battery",
+    ):
+        assert f'<path id="{line_id}-halo" class="flow-halo"' in source, line_id
+    assert source.count('<ellipse class="flow-node-halo"') == 6
+    assert 'id="flow-node-halo-grad"' in source
+    # Halos are re-measured only when a label or the scene changes.
+    assert "this._nodeHaloSignature === textSignature" in source
+    assert "filter:" not in source
+
+
+def test_energy_flow_colours_streaks_by_source():
+    source = ENERGY_FLOW_PATH.read_text()
+
+    # Solar exported to the grid is solar energy, so it takes solar's colour.
+    assert "{ id: 'line-solar-grid', cls: 'flow-solar', watt: solarExport" in source
+    # The grid reading turns red while exporting.
+    assert "classList.toggle('exporting', Number.isFinite(gridPower) && gridPower < -gridMin)" in source
+    assert ".flow-node.exporting #flow-grid-power" in source
+    # Streak speed and width follow power, quantised to avoid restarts.
+    assert "_syncFlowLineRate(el, classes.length ? watt : 0)" in source

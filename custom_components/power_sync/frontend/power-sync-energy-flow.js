@@ -1410,9 +1410,9 @@ import {
           ? 'flow-solar'
           : 'flow-green';
       const defaults = {
-        'flow-solar': { seg: 64, gap: 80 },
-        'flow-green': { seg: 62, gap: 82 },
-        'flow-broken': { seg: 40, gap: 96 },
+        'flow-solar': { seg: 20, gap: 28 },
+        'flow-green': { seg: 20, gap: 28 },
+        'flow-broken': { seg: 20, gap: 28 },
       }[flowClass];
       if (!defaults || typeof el.getTotalLength !== 'function') return;
 
@@ -1432,6 +1432,58 @@ import {
       el.style.setProperty('--flow-seg', seg.toFixed(1));
       el.style.setProperty('--flow-gap', gap.toFixed(1));
       el.dataset.flowMetrics = signature;
+    }
+
+    // More power: faster, thicker streaks. Quantised so small changes in
+    // power do not restart the animation on every update.
+    _syncFlowLineRate(el, watt) {
+      const kw = Math.max(0, Number(watt) || 0) / 1000;
+      if (kw <= 0) {
+        if (el.dataset.flowRate) {
+          el.style.removeProperty('--flow-rate');
+          el.style.removeProperty('--flow-width');
+          delete el.dataset.flowRate;
+        }
+        return;
+      }
+      const rate = Math.max(0.5, 2.0 - Math.round(kw * 2) / 2 * 0.12).toFixed(2);
+      const width = (2.8 + Math.min(2.4, Math.round(kw) / 4)).toFixed(2);
+      const signature = `${rate}|${width}`;
+      if (el.dataset.flowRate === signature) return;
+      el.style.setProperty('--flow-rate', `${rate}s`);
+      el.style.setProperty('--flow-width', width);
+      el.dataset.flowRate = signature;
+      this.shadowRoot.querySelector(`#${el.id}-halo`)?.style.setProperty('--flow-width', width);
+    }
+
+    _syncNodeHalos() {
+      // Measuring text forces layout; only do it when a label or the scene changed.
+      const texts = Array.from(this.shadowRoot.querySelectorAll('.flow-node text'));
+      const groups = Array.from(this.shadowRoot.querySelectorAll('.flow-node'));
+      const textSignature = `${this._lastAppliedSceneFlowComponentProfile}|${groups.map(g => g.getAttribute('class')).join(',')}|${texts.map(t => `${t.textContent}@${t.getAttribute('x')},${t.getAttribute('y')}@${t.style.display}`).join(';')}`;
+      if (this._nodeHaloSignature === textSignature) return;
+      this._nodeHaloSignature = textSignature;
+      this.shadowRoot.querySelectorAll('.flow-node').forEach((group) => {
+        const halo = group.querySelector('.flow-node-halo');
+        if (!halo) return;
+        let box = null;
+        group.querySelectorAll('text').forEach((text) => {
+          if (!text.textContent || getComputedStyle(text).display === 'none') return;
+          let b;
+          try { b = text.getBBox(); } catch (_err) { return; }
+          if (!b || (!b.width && !b.height)) return;
+          box = box
+            ? { x1: Math.min(box.x1, b.x), y1: Math.min(box.y1, b.y), x2: Math.max(box.x2, b.x + b.width), y2: Math.max(box.y2, b.y + b.height) }
+            : { x1: b.x, y1: b.y, x2: b.x + b.width, y2: b.y + b.height };
+        });
+        const geometry = box
+          ? [(box.x1 + box.x2) / 2, (box.y1 + box.y2) / 2, (box.x2 - box.x1) / 2 + 22, (box.y2 - box.y1) / 2 + 14].map(v => v.toFixed(1))
+          : ['0', '0', '0', '0'];
+        const signature = geometry.join(',');
+        if (halo.dataset.geometry === signature) return;
+        ['cx', 'cy', 'rx', 'ry'].forEach((attr, i) => halo.setAttribute(attr, geometry[i]));
+        halo.dataset.geometry = signature;
+      });
     }
 
     _clearFlowLineMetrics(el) {
@@ -1454,18 +1506,20 @@ import {
       if (watt <= 0) return;
       if (watt < minW) return;
       if (this._pendingFlowStates) {
-        const next = this._pendingFlowStates.get(id) || { classes: new Set(), reverse: false };
+        const next = this._pendingFlowStates.get(id) || { classes: new Set(), reverse: false, watt: 0 };
         next.classes.add(cls);
         next.reverse = next.reverse || !!reverse;
+        next.watt = Math.max(next.watt, watt);
         this._pendingFlowStates.set(id, next);
         return;
       }
-      this._setFlowLineState(id, cls ? [cls] : [], !!reverse);
+      this._setFlowLineState(id, cls ? [cls] : [], !!reverse, watt);
     }
 
-    _setFlowLineState(id, classes, reverse = false) {
+    _setFlowLineState(id, classes, reverse = false, watt = 0) {
       const el = this.shadowRoot.querySelector(`#${id}`);
       if (!el) return;
+      this._syncFlowLineRate(el, classes.length ? watt : 0);
       const desiredClasses = Array.from(new Set(classes.filter(Boolean))).sort();
       const signature = desiredClasses.length
         ? `${desiredClasses.join('|')}|${reverse ? 'reverse' : 'forward'}`
@@ -1487,6 +1541,13 @@ import {
         el.classList.add('active');
       }
       el.dataset.flowState = signature;
+      const halo = this.shadowRoot.querySelector(`#${id}-halo`);
+      if (halo) {
+        ['flow-solar', 'flow-green', 'flow-broken'].forEach((flowClass) => {
+          halo.classList.toggle(flowClass, desiredClasses.includes(flowClass));
+        });
+        halo.classList.toggle('active', desiredClasses.length > 0);
+      }
     }
 
     _beginFlowUpdate() {
@@ -1498,7 +1559,7 @@ import {
       this.shadowRoot.querySelectorAll('.flow-line').forEach((line) => {
         const id = line.id;
         const state = desired.get(id);
-        this._setFlowLineState(id, state ? Array.from(state.classes) : [], !!state?.reverse);
+        this._setFlowLineState(id, state ? Array.from(state.classes) : [], !!state?.reverse, state?.watt || 0);
       });
       this._pendingFlowStates = null;
     }
@@ -1802,6 +1863,8 @@ import {
         if (path.getAttribute('d') !== d) {
           path.setAttribute('d', d);
         }
+        const halo = this.shadowRoot.querySelector(`#${pathId}-halo`);
+        if (halo && halo.getAttribute('d') !== d) halo.setAttribute('d', d);
         applied = true;
       });
       if (applied && marker) this._lastAppliedSceneFlowProfile = marker;
@@ -1926,39 +1989,64 @@ import {
           .flow-node-bg.active {
             fill: rgba(255,255,255,0.72);
           }
+          /* Readings sit straight on the scene in the dashboard's type. A
+             static radial glow behind each node (no SVG filters, which
+             caused repaint stutter) keeps them legible on bright skies and
+             snow without drawing a box. */
+          .flow-node-halo {
+            fill: url(#flow-node-halo-grad);
+            pointer-events: none;
+          }
+          .flow-node.inactive .flow-node-halo {
+            opacity: 0.85;
+          }
+          /* The battery and grid anchors sit at the bottom edge of every
+             scene; lift them so the larger readings are not clipped. */
+          #battery-node-group {
+            transform: translateY(-18px);
+          }
+          #grid-node-group {
+            transform: translateY(-12px);
+          }
+          /* The battery stacks three lines; open them up at the larger size. */
+          #flow-battery-pct { transform: translateY(-7px); }
+          #flow-battery-power { transform: translateY(5px); }
           .flow-node-guide {
-            stroke: rgba(255, 255, 255, 0.78);
-            stroke-width: 1.15;
-            stroke-linecap: round;
-            opacity: 0.95;
+            display: none;
           }
           .flow-label,
           .flow-power,
           .flow-pct,
           .flow-status {
-            fill: #f8fafc;
-            text-shadow: 0 1px 2px rgba(2, 6, 23, 0.55);
+            fill: #e3e8f3;
             text-anchor: start;
-            font-family: sans-serif;
+            font-family: "DM Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
             paint-order: stroke fill;
-            stroke: rgba(2, 6, 23, 0.82);
-            stroke-width: 2.25px;
+            stroke: rgba(2, 6, 23, 0.55);
+            stroke-width: 1px;
             stroke-linejoin: round;
           }
           .flow-label {
-            font-size: calc(11px * var(--flow-font-scale));
-            font-weight: 600;
-            letter-spacing: 0.05em;
-            text-transform: uppercase;
+            font-size: calc(16px * var(--flow-font-scale));
+            font-weight: 500;
           }
-          .flow-power {
-            font-size: calc(12px * var(--flow-font-scale));
-            font-weight: 700;
-          }
+          .flow-power,
           .flow-pct {
-            font-size: calc(11px * var(--flow-font-scale));
-            font-weight: 700;
+            font-family: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+            font-size: calc(22px * var(--flow-font-scale));
+            font-weight: 600;
+            letter-spacing: -0.01em;
           }
+          #flow-solar-power { fill: #fbbf24; }
+          #flow-load-power { fill: #a78bfa; }
+          #flow-grid-power { fill: #00d4ff; }
+          .flow-node.exporting #flow-grid-power { fill: #ff4d6a; }
+          #flow-battery-power,
+          #flow-battery-pct { fill: #00e68a; }
+          #flow-ev-power,
+          #flow-ev-pct,
+          #flow-ev2-power,
+          #flow-ev2-pct { fill: #60a5fa; }
           .flow-status {
             font-size: calc(7.5px * var(--flow-font-scale));
             font-weight: 600;
@@ -2003,13 +2091,13 @@ import {
             letter-spacing: 0.03em;
           }
           .flow-node.inactive .flow-label,
-          .flow-node.inactive .flow-power,
-          .flow-node.inactive .flow-pct,
           .flow-node.inactive .flow-status {
-            fill: rgba(148, 163, 184, 0.72) !important;
-            opacity: 0.45;
-            text-shadow: none;
-            stroke: none;
+            opacity: 0.8;
+          }
+          .flow-node.inactive .flow-power,
+          .flow-node.inactive .flow-pct {
+            fill: #aab3c7 !important;
+            opacity: 0.85;
           }
           .flow-node.inactive .flow-node-guide {
             opacity: 0;
@@ -2025,13 +2113,8 @@ import {
             opacity: 0.22;
           }
           .flow-node.inactive #flow-battery-pct {
-            fill: #f8fafc !important;
+            fill: #00e68a !important;
             opacity: 0.95;
-            text-shadow: 0 1px 2px rgba(2, 6, 23, 0.55);
-            paint-order: stroke fill;
-            stroke: rgba(2, 6, 23, 0.82);
-            stroke-width: 2.25px;
-            stroke-linejoin: round;
           }
           .ev-hidden {
             display: none;
@@ -2044,43 +2127,59 @@ import {
           }
           .flow-line {
             fill: none;
-            stroke: rgba(191, 219, 254, 0.22);
-            stroke-width: 1.95;
-            opacity: 0;
+            stroke: rgba(255, 255, 255, 0.16);
+            stroke-width: 1.4;
+            opacity: 1;
             stroke-linecap: round;
             stroke-linejoin: round;
             transition: opacity 0.18s ease, stroke-width 0.18s ease;
           }
           .flow-line.active {
             opacity: 1;
-            stroke-width: 2.35;
-            stroke-dasharray: var(--flow-seg, 62) var(--flow-gap, 82);
-            animation: flowStream var(--flow-speed, 1.9s) linear infinite;
+            stroke-width: var(--flow-width, 2.6);
+            stroke-dasharray: var(--flow-seg, 20) var(--flow-gap, 28);
+            animation: flowStream var(--flow-rate, var(--flow-speed, 1.9s)) linear infinite;
           }
+          /* Static glow under an active wire; only the streak above it moves. */
+          .flow-halo {
+            fill: none;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+            stroke-width: calc(var(--flow-width, 2.6) * 3.4);
+            opacity: 0;
+            transition: opacity 0.18s ease;
+          }
+          .flow-halo.active { opacity: 0.3; }
+          .flow-halo.flow-solar { stroke: #fbbf24; }
+          .flow-halo.flow-green { stroke: #00e68a; }
+          .flow-halo.flow-broken { stroke: #00d4ff; }
           .flow-line.active.flow-reverse {
-            animation: flowStreamReverse var(--flow-speed, 1.9s) linear infinite;
+            animation-name: flowStreamReverse;
+          }
+          @media (prefers-reduced-motion: reduce) {
+            .flow-line.active { animation: none; stroke-dasharray: none; }
           }
           .flow-line.active.flow-solar {
-            stroke: #ffe066;
-            --flow-glow: rgba(255, 224, 102, 0.72);
-            --flow-seg: 64;
-            --flow-gap: 80;
+            stroke: #fbbf24;
+            --flow-glow: rgba(251, 191, 36, 0.65);
+            --flow-seg: 20;
+            --flow-gap: 28;
             --flow-speed: 1.75s;
             --flow-fade: 1.35s;
           }
           .flow-line.active.flow-green {
-            stroke: #4ade80;
-            --flow-glow: rgba(74, 222, 128, 0.7);
-            --flow-seg: 62;
-            --flow-gap: 82;
+            stroke: #00e68a;
+            --flow-glow: rgba(0, 230, 138, 0.6);
+            --flow-seg: 20;
+            --flow-gap: 28;
             --flow-speed: 1.9s;
             --flow-fade: 1.45s;
           }
           .flow-line.active.flow-broken {
-            stroke: #ff5d73;
-            --flow-glow: rgba(255, 93, 115, 0.7);
-            --flow-seg: 40;
-            --flow-gap: 96;
+            stroke: #00d4ff;
+            --flow-glow: rgba(0, 212, 255, 0.6);
+            --flow-seg: 20;
+            --flow-gap: 28;
             --flow-speed: 1.35s;
             --flow-fade: 1.15s;
           }
@@ -2103,19 +2202,36 @@ import {
             <div class="scene">
               <div class="scene-frame" id="flow-scene-frame">
                 <svg viewBox="${sceneViewBox}">
+                  <defs>
+                    <radialGradient id="flow-node-halo-grad">
+                      <stop offset="0" stop-color="#020617" stop-opacity="0.7"></stop>
+                      <stop offset="0.55" stop-color="#020617" stop-opacity="0.4"></stop>
+                      <stop offset="1" stop-color="#020617" stop-opacity="0"></stop>
+                    </radialGradient>
+                  </defs>
                   <rect class="flow-scene-dim" x="0" y="0" width="600" height="460"></rect>
 
+                  <path id="line-solar-load-halo" class="flow-halo" d="${pathD('line-solar-load', 'line_solar_load')}"></path>
                   <path id="line-solar-load" class="flow-line" d="${pathD('line-solar-load', 'line_solar_load')}"></path>
+                  <path id="line-grid-load-halo" class="flow-halo" d="${pathD('line-grid-load', 'line_grid_load')}"></path>
                   <path id="line-grid-load" class="flow-line" d="${pathD('line-grid-load', 'line_grid_load')}"></path>
+                  <path id="line-battery-load-halo" class="flow-halo" d="${pathD('line-battery-load', 'line_battery_load')}"></path>
                   <path id="line-battery-load" class="flow-line" d="${pathD('line-battery-load', 'line_battery_load')}"></path>
+                  <path id="line-junction-home-load-halo" class="flow-halo" d="${pathD('line-junction-home-load', 'line_junction_home_load')}"></path>
                   <path id="line-junction-home-load" class="flow-line" d="${pathD('line-junction-home-load', 'line_junction_home_load')}"></path>
+                  <path id="line-wallbox-ev-halo" class="flow-halo" d="${pathD('line-wallbox-ev', 'line_wallbox_ev')}"></path>
                   <path id="line-wallbox-ev" class="flow-line" d="${pathD('line-wallbox-ev', 'line_wallbox_ev')}"></path>
+                  <path id="line-wallbox-ev2-halo" class="flow-halo" d="${pathD('line-wallbox-ev2', 'line_wallbox_ev2')}"></path>
                   <path id="line-wallbox-ev2" class="flow-line" d="${pathD('line-wallbox-ev2', 'line_wallbox_ev2')}"></path>
+                  <path id="line-solar-grid-halo" class="flow-halo" d="${pathD('line-solar-grid', 'line_solar_grid')}"></path>
                   <path id="line-solar-grid" class="flow-line" d="${pathD('line-solar-grid', 'line_solar_grid')}"></path>
+                  <path id="line-solar-battery-halo" class="flow-halo" d="${pathD('line-solar-battery', 'line_solar_battery')}"></path>
                   <path id="line-solar-battery" class="flow-line" d="${pathD('line-solar-battery', 'line_solar_battery')}"></path>
+                  <path id="line-grid-battery-halo" class="flow-halo" d="${pathD('line-grid-battery', 'line_grid_battery')}"></path>
                   <path id="line-grid-battery" class="flow-line" d="${pathD('line-grid-battery', 'line_grid_battery')}"></path>
 
                   <g class="flow-node">
+                  <ellipse class="flow-node-halo" cx="0" cy="0" rx="0" ry="0"></ellipse>
                   <circle class="flow-node-bg" id="node-solar-bg" cx="286" cy="155" r="5"></circle>
                   <line class="flow-node-guide" id="flow-solar-guide" x1="320" y1="94" x2="320" y2="166"></line>
                   <text class="flow-label" id="flow-solar-label" x="329" y="60">${this._t('card.node.solar', 'Solare')}</text>
@@ -2137,7 +2253,8 @@ import {
                   <text class="roof-meta roof-meta-value" id="flow-roof-b-current" x="334" y="248">0 A</text>
                 </g>
 
-                <g class="flow-node">
+                <g class="flow-node" id="grid-node-group">
+                  <ellipse class="flow-node-halo" cx="0" cy="0" rx="0" ry="0"></ellipse>
                   <circle class="flow-node-bg" id="node-grid-bg" cx="448" cy="336" r="5"></circle>
                   <line class="flow-node-guide" id="flow-grid-guide" x1="418" y1="392" x2="418" y2="350"></line>
                   <text class="flow-label" id="flow-grid-label" x="425" y="420">${this._t('card.node.grid', 'Rete')}</text>
@@ -2146,6 +2263,7 @@ import {
                 </g>
 
                 <g class="flow-node">
+                  <ellipse class="flow-node-halo" cx="0" cy="0" rx="0" ry="0"></ellipse>
                   <circle class="flow-node-bg" id="node-load-bg" cx="465" cy="247" r="5"></circle>
                   <line class="flow-node-guide" id="flow-load-guide" x1="406" y1="242" x2="406" y2="314"></line>
                   <text class="flow-label" id="flow-load-label" x="394" y="216">${this._t('card.node.home', 'Casa')}</text>
@@ -2154,6 +2272,7 @@ import {
                 </g>
 
                 <g class="flow-node" id="battery-node-group">
+                  <ellipse class="flow-node-halo" cx="0" cy="0" rx="0" ry="0"></ellipse>
                   <circle class="flow-node-bg" id="node-battery-bg" cx="314" cy="330" r="5"></circle>
                   <line class="flow-node-guide" id="flow-battery-guide" x1="270" y1="446" x2="270" y2="388"></line>
                   <text class="flow-label" id="flow-battery-label" x="279" y="430">${this._t('card.node.battery', 'Batteria')}</text>
@@ -2164,6 +2283,7 @@ import {
                 </g>
 
                 <g class="flow-node" id="ev-node-group">
+                  <ellipse class="flow-node-halo" cx="0" cy="0" rx="0" ry="0"></ellipse>
                   <circle class="flow-node-bg" id="node-ev-bg" cx="184" cy="332" r="5"></circle>
                   <line class="flow-node-guide" id="flow-ev-guide" x1="162" y1="232" x2="162" y2="302"></line>
                   <text class="flow-label" id="flow-ev-label" x="162" y="177">${this._t('card.node.ev', 'EV')}</text>
@@ -2173,6 +2293,7 @@ import {
                 </g>
 
                 <g class="flow-node ev-hidden" id="ev2-node-group">
+                  <ellipse class="flow-node-halo" cx="0" cy="0" rx="0" ry="0"></ellipse>
                   <circle class="flow-node-bg" id="node-ev2-bg" cx="106" cy="316" r="5"></circle>
                   <line class="flow-node-guide" id="flow-ev2-guide" x1="106" y1="298" x2="106" y2="328"></line>
                   <text class="flow-label" id="flow-ev2-label" x="106" y="290">EV 2</text>
@@ -2294,23 +2415,12 @@ import {
       this._setText('#flow-ev2-power', ev2.powerKnown ? this._formatKW(ev2.power) : '--');
       this._setText('#flow-ev2-pct', ev2.batteryText || '--%');
 
+      // The streak along the battery wire shows direction, so the old
+      // arrow stays hidden; the element remains for scene layout data.
       const batteryArrowEl = this.shadowRoot.querySelector('#flow-battery-direction');
-      if (batteryArrowEl) {
-        if (!batteryConfigured || !Number.isFinite(batteryPower) || Math.abs(batteryPower) <= batteryMin) {
-          batteryArrowEl.textContent = '';
-          batteryArrowEl.style.display = 'none';
-        } else if (batteryPower > batteryMin) {
-          batteryArrowEl.textContent = '▲';
-          batteryArrowEl.style.fill = '#4ade80';
-          batteryArrowEl.style.display = 'inline';
-        } else if (batteryPower < -batteryMin) {
-          batteryArrowEl.textContent = '▼';
-          batteryArrowEl.style.fill = '#ff5d73';
-          batteryArrowEl.style.display = 'inline';
-        } else {
-          batteryArrowEl.textContent = '';
-          batteryArrowEl.style.display = 'none';
-        }
+      if (batteryArrowEl && batteryArrowEl.style.display !== 'none') {
+        batteryArrowEl.textContent = '';
+        batteryArrowEl.style.display = 'none';
       }
 
       const batteryStatusEl = this.shadowRoot.querySelector('#flow-battery-status');
@@ -2352,6 +2462,8 @@ import {
 
       this._toggleNode('#node-solar-bg', Number.isFinite(solarPower) && solarPower > solarMin);
       this._toggleNode('#node-grid-bg', Number.isFinite(gridPower) && Math.abs(gridPower) > gridMin);
+      this.shadowRoot.querySelector('#flow-grid-power')?.closest('.flow-node')
+        ?.classList.toggle('exporting', Number.isFinite(gridPower) && gridPower < -gridMin);
       this._toggleNode('#node-load-bg', loadPowerKnown && loadPower > homeMin);
       this._toggleNode('#node-battery-bg', batteryConfigured && Number.isFinite(batteryPower) && Math.abs(batteryPower) > batteryMin);
       this._toggleNode('#node-ev-bg', Math.abs(ev1.power || 0) > 0 || ev1.switchOn || ev1.present);
@@ -2364,6 +2476,7 @@ import {
       // arrows using synthetic zero values for any missing core measurement.
       if (!coreTelemetryKnown) {
         this._commitFlowUpdate();
+        this._syncNodeHalos();
         return;
       }
 
@@ -2452,7 +2565,7 @@ import {
       );
 
       const exportCandidates = [
-        { id: 'line-solar-grid', cls: 'flow-green', watt: solarExport, min: gridMin, reverse: false },
+        { id: 'line-solar-grid', cls: 'flow-solar', watt: solarExport, min: gridMin, reverse: false },
         { id: 'line-grid-load', cls: 'flow-green', watt: batteryToGrid + evToGrid, min: Math.max(1, Math.min(gridMin, batteryMin)), reverse: true },
       ];
       const gridExportFlow = exportCandidates.reduce(
@@ -2488,6 +2601,7 @@ import {
       this._activatePath('line-wallbox-ev', 'flow-green', evSupplyTotal * ev1SupplyShare, 1, true);
       this._activatePath('line-wallbox-ev2', 'flow-green', evSupplyTotal * ev2SupplyShare, 1, true);
       this._commitFlowUpdate();
+      this._syncNodeHalos();
     }
 
     _render() {
