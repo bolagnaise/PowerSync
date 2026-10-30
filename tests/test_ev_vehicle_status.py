@@ -3798,9 +3798,14 @@ def test_a_powerwall_never_supplies_an_ev_battery_level():
     assert soc is None
 
 
-def test_manual_start_uses_healthy_suffixed_provider_for_same_vehicle():
+def test_manual_start_uses_healthy_suffixed_provider_for_same_vehicle(monkeypatch):
     """TESSY: unknown Fleet entities must not mask Teslemetry's plugged car."""
     power_sync = _power_sync_module()
+    # The lazily imported command helper may already hold another file's
+    # registry stubs. Bind it to this probe's registries for this test only.
+    actions = importlib.import_module("power_sync.automations.actions")
+    monkeypatch.setattr(actions, "dr", power_sync.dr)
+    monkeypatch.setattr(actions, "er", power_sync.er)
     vin, other_vin = "5YJTEST0000000001", "5YJTEST0000000002"
     devices = {
         name: SimpleNamespace(id=name, name=name, identifiers={(provider, identity)})
