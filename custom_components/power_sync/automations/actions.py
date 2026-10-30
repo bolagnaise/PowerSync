@@ -5122,7 +5122,7 @@ async def _start_zaptec_charging(
 
     if charger_mode == "charging":
         if target_amps is not None:
-            await _set_zaptec_charging_amps(hass, config_entry, target_amps)
+            return await _set_zaptec_charging_amps(hass, config_entry, target_amps)
         _LOGGER.info("Zaptec charger is already charging")
         return True
 
@@ -5144,7 +5144,8 @@ async def _start_zaptec_charging(
 
     try:
         if target_amps is not None and zaptec.get("installation_id"):
-            await _set_zaptec_charging_amps(hass, config_entry, target_amps)
+            if not await _set_zaptec_charging_amps(hass, config_entry, target_amps):
+                return False
         await zaptec["client"].resume_charging(zaptec["charger_id"])
         _LOGGER.info("Zaptec charger resumed via Cloud API")
         return True

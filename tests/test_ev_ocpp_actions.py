@@ -10729,6 +10729,86 @@ def test_zaptec_already_charging_updates_current_without_resume():
     assert client.calls == [("set_installation_current", "installation-1", 12)]
 
 
+@pytest.mark.parametrize("charger_mode", ["charging", "charging_paused"])
+@pytest.mark.parametrize("amps", [6, 16])
+def test_zaptec_rejected_current_is_not_a_successful_start(monkeypatch, charger_mode, amps):
+    hass, client = _zaptec_hass({"charger_operation_mode": charger_mode, "cable_locked": True})
+    monkeypatch.setattr(
+        client, "set_installation_current",
+        AsyncMock(side_effect=RuntimeError("installation current update rejected")),
+    )
+
+    assert asyncio.run(actions._set_vehicle_amps(
+        hass, _zaptec_entry("installation-1"), "zaptec_standalone", amps,
+        {"charger_type": "zaptec"},
+    )) is False
+    client.set_installation_current.assert_awaited_once_with("installation-1", amps)
+    assert client.calls == []  # Failed rate assignment must not resume a paused charger.
+
+
+def test_zaptec_dynamic_rate_rejection_keeps_acknowledged_current_and_retries(monkeypatch):
+    """A three-phase rate drop must recover after the installation cooldown."""
+    zaptec_api = importlib.import_module("power_sync.zaptec_api")
+    clock = [10000.0]
+    monkeypatch.setattr(zaptec_api, "time", SimpleNamespace(time=lambda: clock[0]))
+    client = zaptec_api.ZaptecCloudClient("user@example.com", "password")
+    client._request = AsyncMock(return_value={})
+    hass, _ = _zaptec_hass({"charger_operation_mode": "charging"})
+    hass.data["power_sync"]["entry-1"]["zaptec_client"] = client
+    entry = _zaptec_entry("installation-1")
+    live_status = {
+        "battery_power": -10700,
+        "grid_power": 14100,
+        "solar_power": 5400,
+        "home_load": 1200,
+        "battery_soc": 96,
+    }
+    monkeypatch.setattr(actions, "_get_tesla_live_status", AsyncMock(return_value=live_status))
+    monkeypatch.setattr(actions, "_clear_ble_dynamic_session_if_unplugged", AsyncMock(return_value=False))
+    state = {
+        "active": True,
+        "current_amps": 11,
+        "target_amps": 11,
+        "params": {
+            "dynamic_mode": "battery_target",
+            "charger_type": "zaptec",
+            "target_battery_charge_kw": 15,
+            "max_grid_import_kw": 15,
+            "min_charge_amps": 6,
+            "max_charge_amps": 16,
+            "voltage": 230,
+            "phases": 3,
+        },
+    }
+    actions._dynamic_ev_state["entry-1"] = {"zaptec_standalone": state}
+
+    async def replay():
+        await client.set_installation_current("installation-1", 11)
+        client._request.reset_mock()
+        for grid_w in (14100, 14300, 6100):
+            clock[0] += 30
+            live_status["grid_power"] = grid_w
+            await actions._dynamic_ev_update(hass, entry, "entry-1", "zaptec_standalone")
+            assert state["current_amps"] == 11
+            assert state["target_amps"] == 11
+            client._request.assert_not_awaited()
+
+        clock[0] = 10900.0
+        await actions._dynamic_ev_update(hass, entry, "entry-1", "zaptec_standalone")
+        assert state["current_amps"] == 16
+        assert state["target_amps"] == 16
+        client._request.assert_awaited_once_with(
+            "POST", "/api/installation/installation-1/update",
+            json_data={
+                "AvailableCurrentPhase1": 16,
+                "AvailableCurrentPhase2": 16,
+                "AvailableCurrentPhase3": 16,
+            },
+        )
+
+    asyncio.run(replay())
+
+
 def test_zaptec_idle_stop_is_passive_success():
     hass, client = _zaptec_hass({"charger_operation_mode": "connected_waiting"})
 
