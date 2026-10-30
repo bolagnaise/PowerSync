@@ -386,10 +386,19 @@ class LocalBatteryDispatch:
             await self.persist()
             return await self._write()
 
-    @staticmethod
-    def _grid_value(config):
+    def _grid_value(self, config):
+        reader = getattr(self.client, "native_grid_charging_reading", None)
+        if callable(reader):
+            value = reader(config).disallowed
+            return value if type(value) is bool else None
         info = config.get("site_info") if isinstance(config, dict) else None
-        return info.get("disallow_charge_from_grid_with_solar_installed") if isinstance(info, dict) else None
+        value = info.get("disallow_charge_from_grid_with_solar_installed") if isinstance(info, dict) else None
+        return value if type(value) is bool else None
+
+    async def _refresh_grid_permission(self):
+        refresh = getattr(self.client, "refresh_native_grid_charging_firmware", None)
+        if callable(refresh):
+            await refresh()
 
     async def _grid_mutation(self, command):
         # Cancellation cannot prove the signed request did not reach Tesla.
@@ -409,6 +418,7 @@ class LocalBatteryDispatch:
             raise
 
     async def _write_grid_setting(self, target):
+        await self._refresh_grid_permission()
         record = self._grid_charge_restore
         generation = self._generation
         checked = None
@@ -495,6 +505,7 @@ class LocalBatteryDispatch:
         if record["acceptance_until"] > time.time():
             raise ValueError("Local grid charging signed write may still arrive; recovery retained")
         try:
+            await self._refresh_grid_permission()
             config = await self.client._transport.read_config(self.client._din)
         except Exception:
             if restore_via_cloud is None:

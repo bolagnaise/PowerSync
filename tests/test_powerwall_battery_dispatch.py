@@ -2129,3 +2129,48 @@ def test_other_local_charge_failures_do_not_claim_grid_permission_refusal(failur
         finally:
             await c.stop()
     asyncio.run(run())
+
+
+@pytest.mark.parametrize('initially_disabled', [False, True])
+def test_local_charge_handles_attested_false_omission_through_grid_restore(initially_disabled):
+    from copy import deepcopy
+    from test_powerwall_grid_permission_encoding import normalization, system_info
+    async def run():
+        ns, controller, client, saved = load_routing(optimization_allow_grid_charge=True)
+        snap, events = install_grid_permission(client, disabled=initially_disabled)
+        field = 'disallow_charge_from_grid_with_solar_installed'
+        snap.raw['config'].update(default_real_mode='self_consumption',battery_blocks=[{}],meters=[{}],strategy={})
+        snap.raw['config']['site_info'].update(backup_reserve_percent=20,customer_preferred_export_rule='battery_ok')
+        if not initially_disabled: snap.raw['config']['site_info'].pop(field)
+        original = deepcopy(snap.raw['config'])
+        client.native_grid_charging_reading = lambda config: normalization.native_grid_charging_reading(config,system_info(),'gateway')
+        client.refresh_native_grid_charging_firmware = AsyncMock()
+        async def snapshot_read():
+            reading = client.native_grid_charging_reading(snap.raw['config'])
+            snap.grid_charging_enabled = not reading.disallowed if type(reading.disallowed) is bool else None
+            return snap
+        client.get_snapshot.side_effect = snapshot_read
+        async def sparse_write(_, updates, *, before_write, validate_config, before_submit):
+            if not validate_config(deepcopy(snap.raw['config'])): return False
+            await before_submit(__import__('time').time()-1)
+            before_write()
+            events.append(('grid',updates.copy()))
+            value = updates['site_info.'+field]
+            if value: snap.raw['config']['site_info'][field] = True
+            else: snap.raw['config']['site_info'].pop(field,None)
+            return True
+        client._transport.write_config.side_effect = sparse_write
+        async def dispatch(*_):
+            assert client.native_grid_charging_reading(snap.raw['config']).disallowed is False
+            events.append(('watts',None)); return True
+        client.dispatch_battery_power.side_effect = dispatch
+        try:
+            result = await ns['handle_force_charge'](call(source='optimizer' if initially_disabled else 'user',power_w=1000,duration=1))
+            assert result['success']
+            await controller.stop()
+            assert snap.raw['config'] == original
+            assert not controller.pending and saved['force_mode_state'] is None
+            assert [kind for kind,_ in events] == (['grid','watts','resume','grid'] if initially_disabled else ['watts','resume'])
+        finally:
+            await controller.stop()
+    asyncio.run(run())

@@ -32,6 +32,7 @@ from .fleet_api_bms import (
 )
 from ..powerwall_host import normalize_powerwall_gateway_host
 from .normalization import (
+    native_grid_charging_reading,
     normalize_local_soc_percent,
 )
 from .pairing import _authorization_command_payload
@@ -135,6 +136,7 @@ class PowerwallSnapshot:
     alerts: list[dict[str, Any]] | None = None
     # Request start of this exact returned DCQ attempt; never persisted/rebased.
     observed_monotonic: float | None = None
+    grid_charging_permission_source: str = "unknown"
 
 
 class PowerwallLocalClient:
@@ -263,6 +265,25 @@ class PowerwallLocalClient:
         """Read live DCQ/config together with one bounded incomplete-read retry."""
         return await self._read_snapshot()
 
+    async def refresh_native_grid_charging_firmware(self) -> None:
+        """Refresh one short-lived, same-DIN native encoding attestation."""
+        self._grid_permission_attestation = None
+        started = time.monotonic()
+        try:
+            info = await self._transport.get_system_info(self._din)
+        except Exception:
+            return
+        self._grid_permission_attestation = (self._din, started, info)
+
+    def native_grid_charging_reading(self, config):
+        """Explicit values need no exception; omitted values need fresh proof."""
+        attestation = getattr(self, "_grid_permission_attestation", None)
+        info = None
+        if (attestation is not None and attestation[0] == self._din
+                and 0 <= time.monotonic() - attestation[1] <= 5):
+            info = attestation[2]
+        return native_grid_charging_reading(config, info, self._din)
+
     async def get_control_snapshot(self, native_config: dict) -> PowerwallSnapshot:
         """Refresh only DCQ after a writer has read its hash-checked config.
 
@@ -304,6 +325,13 @@ class PowerwallLocalClient:
 
             if dcq:
                 snapshot = _snapshot_from_dcq(dcq, cfg if isinstance(cfg, dict) else None)
+                info = cfg.get("site_info") if isinstance(cfg, dict) else None
+                if isinstance(info, dict) and "disallow_charge_from_grid_with_solar_installed" not in info:
+                    await self.refresh_native_grid_charging_firmware()
+                    reading = self.native_grid_charging_reading(cfg)
+                    snapshot.grid_charging_enabled = (not reading.disallowed
+                        if type(reading.disallowed) is bool else None)
+                    snapshot.grid_charging_permission_source = reading.source
                 snapshot.observed_monotonic = started
                 required = (snapshot.soc, snapshot.battery_w, snapshot.grid_w,
                             snapshot.load_w, snapshot.solar_w)
@@ -1047,11 +1075,8 @@ def _snapshot_from_dcq(
     # authoritative conversion in this response; don't publish a guessed target.
     # The raw value remains in snapshot.raw["config"] for diagnostics.
     backup_reserve_percent = None
-    disallow_grid_charging = (
-        site_info.get("disallow_charge_from_grid_with_solar_installed")
-        if isinstance(site_info, dict)
-        else None
-    )
+    permission = native_grid_charging_reading(cfg)
+    disallow_grid_charging = permission.disallowed
     grid_charging_enabled = (
         not disallow_grid_charging
         if isinstance(disallow_grid_charging, bool)
@@ -1102,6 +1127,7 @@ def _snapshot_from_dcq(
         backup_reserve_percent=backup_reserve_percent,
         raw={"dcq": dcq, "config": cfg},
         grid_charging_enabled=grid_charging_enabled,
+        grid_charging_permission_source=permission.source,
         grid_export_rule=grid_export_rule,
         system_island_state=system_island_state,
         pw_count=pw_count,

@@ -2235,3 +2235,77 @@ async def test_real_hash_checked_writer_refreshes_dcq_after_slow_config_read(set
     assert await s.adapter._write_config('autonomous',100,
         s.adapter._owned_before(baseline, authorize),baseline,store)
     assert len(posts) == 1 and posts[0]['site_info']['backup_reserve_percent'] == 100
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('planning', [False, True], ids=['manual_max', 'optimizer'])
+@pytest.mark.parametrize('initially_disabled', [False, True])
+async def test_attested_native_omission_admits_and_restores_owned_grid_setting(setup, planning, initially_disabled):
+    from test_powerwall_grid_permission_encoding import normalization, system_info
+    s = setup
+    field = 'disallow_charge_from_grid_with_solar_installed'
+    s.state.config.update(battery_blocks=[{}], meters=[{}], strategy={})
+    if initially_disabled:
+        s.state.config['site_info'][field] = True
+    else:
+        s.state.config['site_info'].pop(field)
+    original = deepcopy(s.state.config), deepcopy(s.state.tariff)
+    client = s.adapter.client
+    client.native_grid_charging_reading = lambda config: normalization.native_grid_charging_reading(config,system_info(),'gateway')
+    async def refresh(): pass
+    client.refresh_native_grid_charging_firmware = refresh
+    write = client._transport.write_config
+    async def sparse_write(din, updates, **kwargs):
+        result = await write(din, updates, **kwargs)
+        if result and s.state.config['site_info'].get(field) is False:
+            s.state.config['site_info'].pop(field)
+        return result
+    client._transport.write_config = sparse_write
+    s.adapter.planning_request = planning
+    s.settings['powerwall_native_capacity_w'] = 14700
+    try:
+        if initially_disabled and not planning:
+            with pytest.raises(s.m.NativeMaxChargeError):
+                await s.session.start(120)
+            assert s.state.events == []
+        else:
+            assert (await s.session.start(120))['active']
+            assert field not in s.state.config['site_info']
+            assert await s.session.stop()
+            assert (s.state.config,s.state.tariff) == original
+            assert not s.session.pending and s.store.data is None
+    finally:
+        await s.session.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('planning',[False,True])
+@pytest.mark.parametrize('boundary',['tariff','local'])
+async def test_native_omission_cannot_outlive_build_attestation_before_write(setup,planning,boundary):
+    from test_powerwall_grid_permission_encoding import normalization, system_info
+    s = setup
+    s.state.config.update(battery_blocks=[{}],meters=[{}],strategy={})
+    s.state.config['site_info'].pop('disallow_charge_from_grid_with_solar_installed')
+    original = deepcopy(s.state.config), deepcopy(s.state.tariff)
+    firmware = system_info()
+    s.adapter.client.native_grid_charging_reading = lambda config: normalization.native_grid_charging_reading(config,firmware,'gateway')
+    s.adapter.planning_request = planning
+    s.settings['powerwall_native_capacity_w'] = 14700
+    assert await s.adapter.guard()
+    if boundary == 'local':
+        # Tariff admission happens first; revoke evidence before local forcing.
+        s.state.before_validate = lambda: firmware.update(firmware_githash='f'*40)
+    else:
+        upload = s.adapter.upload
+        async def changed_build(tariff,before_write):
+            if tariff.get('code') == 'UNIQUE_FORCE':
+                firmware['firmware_githash'] = 'f'*40
+            return await upload(tariff,before_write)
+        s.adapter.upload = changed_build
+    with pytest.raises(s.m.NativeMaxChargeError):
+        await s.session.start(120)
+    assert not any(kind in ('config','kick') for kind,_ in s.state.events)
+    if boundary == 'tariff':
+        assert not any(kind == 'tariff' and value.get('code') == 'UNIQUE_FORCE' for kind,value in s.state.events)
+    assert (s.state.config,s.state.tariff) == original
+    assert not s.session.pending and s.store.data is None
