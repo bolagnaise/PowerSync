@@ -222,6 +222,7 @@ svg.dayline text.lbl-now { fill: var(--fg); font-weight: 600; font-family: var(-
 .win { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 4px 14px; align-items: center; padding: 10px 12px; border-radius: var(--r); background: var(--bg-2); border: 1px solid var(--border-subtle); }
 .win .tag { font-size: 12px; font-weight: 600; color: var(--green); background: var(--tint-green); border: 1px solid #00e68a33; padding: 3px 9px; border-radius: 7px; }
 .win .tag.export { color: var(--red); background: var(--tint-red); border-color: #ff4d6a44; }
+.win .tag.solar { color: var(--yellow); background: var(--tint-amber); border-color: #fbbf2444; }
 .win b { font-weight: 600; font-family: var(--mono); font-variant-numeric: tabular-nums; }
 .win .d { font-size: 12.5px; color: var(--fg-2); }
 .win .c { text-align: right; font-family: var(--mono); font-size: 13px; }
@@ -703,6 +704,8 @@ function psSchedule(data) {
   const soc = arr('soc'), charge = arr('charge_w'), discharge = arr('discharge_w');
   const consume = arr('battery_consume_w'), exportW = arr('battery_export_w'), ev = arr('ev_charging_w');
   const imp = arr('import_price'), exp = arr('export_price'), gridImport = arr('grid_import_w');
+  const exportValue = arr('export_value_price');
+  const numeric = v => v !== null && v !== undefined && v !== '' && Number.isFinite(Number(v)) ? Number(v) : NaN;
   const detailed = consume.length === ts.length && exportW.length === ts.length;
   const rows = [];
   for (let i = 0; i < ts.length; i++) {
@@ -712,8 +715,12 @@ function psSchedule(data) {
     const d = Math.max(0, Number(discharge[i]) || 0);
     const ex = detailed ? Math.max(0, Number(exportW[i]) || 0) : 0;
     const co = detailed ? Math.max(0, Number(consume[i]) || 0) : d;
+    // Site import bounds the grid-backed part of battery charging. Missing
+    // source data must keep the generic label rather than imply free solar.
+    const gi = numeric(gridImport[i]);
+    const gridChargeKw = Number.isFinite(gi) ? Math.min(c, Math.max(0, gi)) / 1000 : NaN;
     let act = 'hold';
-    if (c > 50) act = 'charge';
+    if (c > 50) act = gridChargeKw <= 1e-9 ? 'solar' : 'charge';
     else if (ex > 50) act = 'export';
     else if (co > 50 || d > 50) act = 'self';
     rows.push({
@@ -721,9 +728,11 @@ function psSchedule(data) {
       soc: psPercent(soc[i]),
       chargeKw: c / 1000, dischargeKw: d / 1000, exportKw: ex / 1000,
       evKw: Math.max(0, Number(ev[i]) || 0) / 1000,
-      gridImportKw: Math.max(0, Number(gridImport[i]) || 0) / 1000,
+      gridImportKw: Number.isFinite(gi) ? Math.max(0, gi) / 1000 : NaN,
+      gridChargeKw,
       imp: Number.isFinite(Number(imp[i])) && imp[i] !== null ? Number(imp[i]) * 100 : NaN,
       exp: Number.isFinite(Number(exp[i])) && exp[i] !== null ? Number(exp[i]) * 100 : NaN,
+      exportValuePrice: (Number.isFinite(numeric(exportValue[i])) ? numeric(exportValue[i]) : numeric(exp[i])) * 100,
     });
   }
   const interval = rows.length > 1 ? Math.max(1, Math.round((rows[1].t - rows[0].t) / 60_000)) : 30;
@@ -731,6 +740,7 @@ function psSchedule(data) {
 }
 const PS_ACT = {
   charge: ['Charge', '--green'],
+  solar: ['Solar charge', '--yellow'],
   self: ['Power the home', '--purple'],
   hold: ['Hold', '--hold'],
   export: ['Export', '--red'],
@@ -770,7 +780,7 @@ function psNextChange(data, actKey, now) {
   return key && key !== actKey && Number.isFinite(t) ? { key, t } : null;
 }
 
-// Contiguous runs of one action, merging gaps of one interval or less.
+// Contiguous runs of one action; a different action always starts a new run.
 function psWindows(rows, interval, act, fromT) {
   const out = [];
   let cur = null;
@@ -783,7 +793,7 @@ function psWindows(rows, interval, act, fromT) {
         cur = { start: Math.max(r.t, fromT), end: r.t + interval * 60_000, rows: [r] };
         out.push(cur);
       }
-    }
+    } else cur = null;
   }
   return out;
 }
@@ -2034,40 +2044,51 @@ class PsPlanCard extends PsCardBase {
     const nextChange = psNextChange(data, curKey, now);
     const nowRunEnd = psPlannedRunEnd(m.plan, m.interval, curKey, now);
     const floor = psPercent(data.reserve_visibility?.active_software_floor_percent);
+    const zerohero = data.daily_cost_breakdown?.zerohero;
+    const bonusCap = zerohero?.status === 'enabled' && zerohero.bonus_export_cap_kwh != null
+      ? Number(zerohero.bonus_export_cap_kwh) : NaN;
+    const hasBonusCap = Number.isFinite(bonusCap) && bonusCap >= 0;
     const actChip = key => (key === 'charge' ? 'gr' : key === 'export' ? 'rd' : key === 'self' ? 'pu' : '');
     const chips = [
       `<span class="chip ${data.monitoring_mode ? 'cy' : data.enabled ? 'gr' : ''}"><span>Mode</span><b>${data.monitoring_mode ? 'Monitoring' : data.enabled ? 'Optimizing' : 'Off'}</b></span>`,
       curKey ? `<span class="chip ${actChip(curKey)}"><span>Now</span><b>${psEsc(PS_ACT[curKey][0])}${nowRunEnd ? ` until ${psEsc(psWhen(hass, nowRunEnd))}` : ''}</b></span>` : '',
-      nextChange ? `<span class="chip ${actChip(nextChange.key)}"><span>Next</span><b>${psEsc(PS_ACT[nextChange.key][0])} ${psEsc(psWhen(hass, nextChange.t))}</b></span>` : '',
+      nextChange ? `<span class="chip ${actChip(nextChange.key)}"><span>Next control</span><b>${psEsc(PS_ACT[nextChange.key][0])} ${psEsc(psWhen(hass, nextChange.t))}</b></span>` : '',
       data.last_optimization ? `<span class="chip"><span>Optimized</span><b class="num">${psEsc(psTime(hass, data.last_optimization))}</b></span>` : '',
       Number.isFinite(floor) && floor > 0 ? `<span class="chip"><span>Export floor</span><b class="num">${Math.round(floor)}%</b></span>` : '',
+      hasBonusCap ? `<span class="chip"><span>Super Export bonus cap</span><b class="num">${psFix(bonusCap)} kWh/day</b></span>` : '',
       Number.isFinite(Number(data.predicted_cost)) ? `<span class="chip"><span>Cost today</span><b class="num">${psEsc(psMoney(hass, data.predicted_cost))}</b></span>` : '',
       Number.isFinite(Number(data.predicted_savings)) && Number(data.predicted_savings) > 0 ? `<span class="chip gr"><span>Saved today</span><b class="num">${psEsc(psMoney(hass, data.predicted_savings))}</b></span>` : '',
       data.is_stale || data.optimization_status === 'stale' ? '<span class="chip am"><span>Plan</span><b>Out of date</b></span>' : '',
     ].join('');
 
     // Upcoming charge and export windows.
-    const intervalH = m.interval / 60;
     const wins = [
       ...psWindows(m.plan, m.interval, 'charge', now).map(w => ({ ...w, kind: 'charge' })),
+      ...psWindows(m.plan, m.interval, 'solar', now).map(w => ({ ...w, kind: 'solar' })),
       ...psWindows(m.plan, m.interval, 'export', now).map(w => ({ ...w, kind: 'export' })),
     ].filter(w => w.start < now + 36 * 3_600_000).sort((a, b) => a.start - b.start).slice(0, 4);
     const winHtml = wins.map(w => {
-      const kw = w.rows.map(r => (w.kind === 'charge' ? r.chargeKw : r.exportKw));
-      const kwh = kw.reduce((a, b) => a + b * intervalH, 0);
-      const prices = w.rows.map(r => (w.kind === 'charge' ? r.imp : r.exp)).filter(Number.isFinite);
-      const avg = prices.length ? prices.reduce((a, b) => a + b, 0) / prices.length : NaN;
+      const charging = w.kind !== 'export';
+      const kw = w.rows.map(r => (charging ? r.chargeKw : r.exportKw));
+      const hours = r => Math.max(0, Math.min(r.t + m.interval * 60_000, w.end) - Math.max(r.t, w.start)) / 3_600_000;
+      const kwh = w.rows.reduce((a, r, i) => a + kw[i] * hours(r), 0);
+      const gridKnown = w.rows.every(r => Number.isFinite(r.gridChargeKw));
+      const gridKwh = charging ? w.rows.reduce((a, r) => a + (Number.isFinite(r.gridChargeKw) ? r.gridChargeKw : r.chargeKw) * hours(r), 0) : 0;
       const money = w.rows.reduce((a, r) => {
-        const p = w.kind === 'charge' ? r.imp : r.exp;
-        const e = (w.kind === 'charge' ? r.chargeKw : r.exportKw) * intervalH;
+        const p = charging ? r.imp : r.exportValuePrice;
+        const e = (charging ? (Number.isFinite(r.gridChargeKw) ? r.gridChargeKw : r.chargeKw) : r.exportKw) * hours(r);
         return Number.isFinite(p) ? a + e * p / 100 : a;
       }, 0);
+      const pricedKwh = charging ? gridKwh : kwh;
+      const hasPrice = w.rows.some(r => Number.isFinite(charging ? r.imp : r.exportValuePrice));
+      const avg = hasPrice && pricedKwh > 0 ? money / pricedKwh * 100 : NaN;
       const soc0 = w.rows[0]?.soc, soc1 = w.rows[w.rows.length - 1]?.soc;
       const socText = Number.isFinite(soc0) && Number.isFinite(soc1)
         ? (Math.abs(soc1 - soc0) < 1 ? `holds ${Math.round(soc0)}%` : `${Math.round(soc0)}% to ${Math.round(soc1)}%`) : '';
       const peak = Math.max(0, ...kw);
-      const desc = [psDuration((w.end - w.start) / 60_000), socText, peak ? psKwText(peak) : '', `${psFix(kwh, kwh < 1 ? 2 : 1)} kWh`].filter(Boolean).join(', ');
-      return `<div class="win"><span class="tag ${w.kind === 'export' ? 'export' : ''}">${w.kind === 'export' ? 'Export' : 'Charge'}</span><div><b>${psEsc(psWhen(hass, w.start))}–${psEsc(psTime(hass, w.end))}</b><div class="d">${psEsc(desc)}</div></div><div class="c">${psEsc(psMoney(hass, money))}${Number.isFinite(avg) ? `<small>${avg.toFixed(1)} ${unit} avg</small>` : ''}</div></div>`;
+      const gridText = charging && gridKnown && gridKwh > 0 && gridKwh < kwh - 0.01 ? `${psFix(gridKwh)} kWh from grid` : '';
+      const desc = [psDuration((w.end - w.start) / 60_000), socText, peak ? psKwText(peak) : '', `${psFix(kwh, kwh < 1 ? 2 : 1)} kWh`, gridText].filter(Boolean).join(', ');
+      return `<div class="win"><span class="tag ${w.kind}">${PS_ACT[w.kind][0]}</span><div><b>${psEsc(psWhen(hass, w.start))}–${psEsc(psTime(hass, w.end))}</b><div class="d">${psEsc(desc)}</div></div><div class="c">${psEsc(psMoney(hass, hasPrice || gridKnown && gridKwh === 0 ? money : NaN))}${Number.isFinite(avg) ? `<small>${avg.toFixed(1)} ${unit} avg</small>` : ''}</div></div>`;
     }).join('') || '<p class="empty">No charge or export windows planned in the next day and a half.</p>';
 
     const rv = data.reserve_visibility || {};
@@ -2085,6 +2106,7 @@ class PsPlanCard extends PsCardBase {
       '<span><i class="dash" style="--c:var(--red)"></i>Export price</span>',
       '<span><i class="line" style="--c:var(--green)"></i>Charge level</span>',
       '<span><i style="--c:var(--green)"></i>Charge</span>',
+      '<span><i style="--c:var(--yellow)"></i>Solar charge</span>',
       '<span><i style="--c:var(--purple)"></i>Power the home</span>',
       '<span><i style="--c:var(--hold)"></i>Hold</span>',
       '<span><i style="--c:var(--red)"></i>Export</span>',
@@ -2104,7 +2126,7 @@ class PsPlanCard extends PsCardBase {
       <svg class="dayline" role="img" tabindex="0" aria-label="Import and export prices with the battery's measured and planned charge level. Use the left and right arrow keys to step through the hours."></svg>
       <div class="legend" aria-hidden="true">${legend}</div>
       <div class="plan-foot">
-        <div class="windows">${winHtml}</div>
+        <div class="windows">${winHtml}${hasBonusCap ? `<p class="hint">The daily cap limits premium-rate energy, not total export. ${zerohero.bonus_export_kwh_remaining != null && Number.isFinite(Number(zerohero.bonus_export_kwh_remaining)) ? `${psFix(zerohero.bonus_export_kwh_remaining)} kWh remaining today. ` : ''}Export earnings include the allowance shared with solar export.</p>` : ''}</div>
         ${resRows.length ? `<details class="res"><summary>Reserve details</summary><dl class="kv">${resRows.map(([k, v]) => `<dt>${psEsc(k)}</dt><dd>${psEsc(v)}</dd>`).join('')}</dl></details>` : ''}
       </div>`;
     const svg = this.querySelector('svg.dayline');

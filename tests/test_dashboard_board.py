@@ -184,7 +184,7 @@ def _board_script(body: str) -> str:
         + r"""
   vm.createContext(context);
   const src = fs.readFileSync(process.argv[1], 'utf8').replace(/^export \{[^}]*\};?\s*$/m, '');
-  vm.runInContext(src + '\n;globalThis.__t = { PowerSyncBoard, PsSettingsDialog, PS_SETTING_EDITORS, PsSettingsCard, PsTodayCard, PsNowCard, PsControlsCard, psSchedule, psWindows, psActionKey, PS_LAYOUT_KEY, PS_DEFAULT_LAYOUT, psChartValue, psChart, psBars, PsPricesCard, PsEnergyCard, PsLoadForecastCard, PsSolarLoadCard, PsBatteryPlanCard, psApiCache, psPlannedRunEnd };', context);
+  vm.runInContext(src + '\n;globalThis.__t = { PowerSyncBoard, PsSettingsDialog, PS_SETTING_EDITORS, PsSettingsCard, PsTodayCard, PsNowCard, PsPlanCard, PsControlsCard, psSchedule, psWindows, psActionKey, PS_LAYOUT_KEY, PS_DEFAULT_LAYOUT, psChartValue, psChart, psBars, PsPricesCard, PsEnergyCard, PsLoadForecastCard, PsSolarLoadCard, PsBatteryPlanCard, psApiCache, psPlannedRunEnd };', context);
   const T = context.__t;
 """
         + body
@@ -259,6 +259,115 @@ def test_schedule_actions_and_windows():
     assert out["ev"] == 7
     assert out["charge"] == [[True, 60]]
     assert out["keys"] == ["charge", "self", "hold", "self", "export", ""]
+
+
+def test_plan_separates_solar_charge_from_paid_grid_share_and_capped_export_value():
+    """Ticket 133: natural solar at 8am must not become paid grid charging.
+
+    Premium export quota affects earnings, while the energy row retains the
+    full planned export. Exercise the actual plan renderer as well as its rows.
+    """
+    out = _run_board(r"""
+  const start = Math.ceil(Date.now() / 3600000) * 3600000;
+  const ts = Array.from({ length: 6 }, (_, i) => new Date(start + i * 1800000).toISOString());
+  const data = {
+    enabled: true, current_action: 'self_consumption',
+    next_actions: [{ action: 'charge', timestamp: ts[2] }],
+    daily_cost_breakdown: { zerohero: {
+      status: 'enabled', bonus_export_cap_kwh: 15,
+      bonus_export_kwh_remaining: 5, bonus_export_kwh_used: 10,
+    } },
+    schedule: {
+      timestamps: ts, soc: [0.4, 0.45, 0.5, 0.55, 0.6, 0.5],
+      charge_w: [4000, 4000, 6000, 6000, 0, 0],
+      discharge_w: [0, 0, 0, 0, 10000, 10000],
+      battery_consume_w: [0, 0, 0, 0, 0, 0],
+      battery_export_w: [0, 0, 0, 0, 10000, 10000],
+      grid_import_w: [0, 0, 2000, 2000, 0, 0],
+      import_price: Array(6).fill(0.4), export_price: Array(6).fill(0.1),
+      export_value_price: [0.1, 0.1, 0.1, 0.1, 0.1, 0.02],
+    },
+  };
+  const card = new T.PsPlanCard();
+  card._hass = { states: {}, locale: { time_format: '24' }, config: { currency: 'AUD' } };
+  card._config = { entities: {} };
+  card._api = () => data;
+  card._loadHistory = () => {};
+  card.querySelector = () => ({ addEventListener() {} });
+  card._render();
+  const { rows, interval } = T.psSchedule(data);
+  console.log(JSON.stringify({
+    acts: rows.map(r => r.act), html: card.innerHTML,
+    firstBand: card._model.act(card._model.plan[0].h + 0.01),
+    solar: T.psWindows(rows, interval, 'solar', start).map(w => (w.end - w.start) / 60000),
+  }));
+""")
+    assert out["acts"] == ["solar", "solar", "charge", "charge", "export", "export"]
+    assert out["solar"] == [60]
+    assert out["firstBand"] == "solar"
+    windows = out["html"].split('<div class="win">')[1:]
+    assert len(windows) == 3
+    assert "Solar charge" in windows[0] and "4.0 kWh" in windows[0]
+    assert "A$0.00" in windows[0] and "40.0 c avg" not in windows[0]
+    assert "6.0 kWh" in windows[1] and "2.0 kWh from grid" in windows[1]
+    assert "A$0.80" in windows[1]
+    assert "10.0 kWh" in windows[2] and "A$0.60" in windows[2]
+    assert "6.0 c avg" in windows[2]
+    assert "Super Export bonus cap" in out["html"] and "15.0 kWh/day" in out["html"]
+    assert "5.0 kWh remaining today" in out["html"]
+    assert "not total export" in out["html"]
+
+
+def test_plan_missing_source_and_value_arrays_keep_legacy_meaning():
+    out = _run_board(r"""
+  const t = Date.now();
+  const base = { timestamps: [new Date(t).toISOString()], charge_w: [4000], export_price: [0.1] };
+  const cases = [undefined, [null], [''], ['bad'], [0], [2000], [25]];
+  const rows = cases.map(grid_import_w => T.psSchedule({ schedule: { ...base, grid_import_w } }).rows[0]);
+  console.log(JSON.stringify({ acts: rows.map(r => r.act), values: rows.map(r => r.exportValuePrice) }));
+""")
+    assert out["acts"] == ["charge", "charge", "charge", "charge", "solar", "charge", "charge"]
+    assert out["values"] == [10] * 7
+
+
+def test_solar_windows_do_not_merge_across_grid_charging():
+    out = _run_board(r"""
+  const rows = [0, 1, 2].map(i => ({ t: i * 1800000, act: i === 1 ? 'charge' : 'solar' }));
+  console.log(JSON.stringify({ windows: T.psWindows(rows, 30, 'solar', 0).map(w => [w.start, w.end]) }));
+""")
+    assert out["windows"] == [[0, 1800000], [3600000, 5400000]]
+
+
+def test_plan_exhausted_bonus_and_partial_interval_keep_total_export():
+    out = _run_board(r"""
+  const fixed = Date.parse('2026-10-31T18:15:00Z');
+  context.Date = class extends Date {
+    constructor(...args) { super(...(args.length ? args : [fixed])); }
+    static now() { return fixed; }
+  };
+  const data = {
+    daily_cost_breakdown: { zerohero: { status: 'enabled', bonus_export_cap_kwh: 15, bonus_export_kwh_remaining: 0 } },
+    schedule: {
+      timestamps: ['2026-10-31T18:00:00Z', '2026-10-31T18:30:00Z'],
+      charge_w: [0, 0], discharge_w: [10000, 0], battery_consume_w: [0, 0], battery_export_w: [10000, 0],
+      export_price: [0.02, 0.02], export_value_price: [0.02, null],
+    },
+  };
+  const card = new T.PsPlanCard();
+  card._hass = { states: {}, locale: { time_format: '24' }, config: { currency: 'AUD' } };
+  card._config = { entities: {} }; card._api = () => data; card._loadHistory = () => {};
+  card.querySelector = () => ({ addEventListener() {} });
+  card._render(); const enabled = card.innerHTML;
+  data.daily_cost_breakdown.zerohero.status = 'disabled';
+  card._render(); const disabled = card.innerHTML;
+  data.daily_cost_breakdown.zerohero = { status: 'enabled', bonus_export_cap_kwh: 0, bonus_export_kwh_remaining: 0 };
+  card._render();
+  console.log(JSON.stringify({ enabled, disabled, zero: card.innerHTML }));
+""")
+    assert "2.5 kWh" in out["enabled"] and "A$0.05" in out["enabled"]
+    assert "0.0 kWh remaining today" in out["enabled"]
+    assert "Super Export bonus cap" not in out["disabled"]
+    assert "Super Export bonus cap" in out["zero"] and "0.0 kWh/day" in out["zero"]
 
 
 def test_cached_api_payload_does_not_re_render_forever():
