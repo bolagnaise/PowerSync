@@ -22,6 +22,10 @@ The strategy dynamically includes sections based on your configuration:
 
 Only sections with existing entities appear — no more unavailable cards!
 
+## Redesign Preview
+
+`preview/power-sync-ha-dashboard.html` is the approved design for the next dashboard: the cloud app's theme on every card, with the same move, hide, show hidden and reset layout tools. It is a standalone page built from a snapshot of a real system, so open it in any browser to review it. The matching wiki page draft is `docs/wiki/Dashboard-Setup.md`.
+
 ## Requirements
 
 ### Required HACS Integrations
