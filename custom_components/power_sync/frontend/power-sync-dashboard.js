@@ -280,6 +280,12 @@ details.res .kv { margin-top: 10px; font-size: 13px; }
 .phead { font-size: 12px; color: var(--muted); padding-block: 0; }
 .phead span:nth-child(n+3) { text-align: right; }
 
+.chart-interaction { position: relative; min-width: 0; }
+.graph-tooltip { position: absolute; top: 8px; z-index: 5; pointer-events: none; max-width: 100%; box-sizing: border-box; padding: 9px 12px; border: 1px solid var(--border-hi); border-radius: 8px; background: var(--card-up); color: var(--fg); box-shadow: 0 4px 16px #0005; font-size: 12px; }
+.graph-tooltip[hidden] { display: none; }
+.graph-tooltip > b { display: block; margin-bottom: 5px; }
+.graph-tooltip > div { display: flex; justify-content: space-between; gap: 16px; }
+.graph-tooltip strong { font-family: var(--mono); white-space: nowrap; }
 .toast { position: fixed; left: 50%; bottom: 20px; transform: translate(-50%, 20px); background: var(--card-up); color: var(--fg); border: 1px solid var(--border-hi); padding: 10px 16px; border-radius: var(--r); font-size: 14px; opacity: 0; pointer-events: none; transition: opacity .2s, transform .2s; box-shadow: 0 10px 30px #0006; max-width: calc(100% - 32px); z-index: 60; }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
 
@@ -507,6 +513,70 @@ function psSvg(tag, attrs, parent) {
   return e;
 }
 
+// Match the plotted step or line, without inventing values outside its data.
+function psChartValue(series, at) {
+  const pts = (series.pts || []).filter(p => Number.isFinite(p[0]) && Number.isFinite(p[1]));
+  if (!pts.length || at < pts[0][0] || at > pts[pts.length - 1][0]) return NaN;
+  for (let i = 1; i < pts.length; i++) {
+    if (pts[i][0] > at) {
+      const [x0, y0] = pts[i - 1], [x1, y1] = pts[i];
+      return series.step ? y0 : y0 + (y1 - y0) * (at - x0) / (x1 - x0);
+    }
+  }
+  return pts[pts.length - 1][1];
+}
+
+// One interaction surface for every small chart. Property handlers replace
+// themselves on resize, so redraws cannot accumulate stale model listeners.
+function psChartTooltip(svg, o, sample) {
+  let wrap = svg.parentElement;
+  if (!wrap.classList.contains('chart-interaction')) {
+    wrap = document.createElement('div');
+    wrap.className = 'chart-interaction';
+    svg.parentElement.insertBefore(wrap, svg);
+    wrap.appendChild(svg);
+  }
+  let tip = wrap.querySelector('.graph-tooltip');
+  if (!tip) {
+    tip = document.createElement('div');
+    tip.className = 'graph-tooltip';
+    tip.setAttribute('role', 'status');
+    wrap.appendChild(tip);
+  }
+  tip.hidden = true;
+  const hide = () => { tip.hidden = true; svg._chartAt = null; };
+  const show = at => {
+    at = Math.max(o.x0, Math.min(o.x1, at));
+    const rows = sample(at).filter(row => Number.isFinite(row.value));
+    if (!rows.length) { hide(); return; }
+    svg._chartAt = at;
+    const time = o.tooltipTime ? o.tooltipTime(at) : o.xFmt ? o.xFmt(at) : at;
+    tip.innerHTML = `<b>${psEsc(time)}</b>${rows.map(row => `<div><span>${psEsc(row.name)}</span><strong>${psEsc(psFix(row.value, 2))} ${psEsc(o.unit || 'kW')}</strong></div>`).join('')}`;
+    tip.hidden = false;
+    const w = svg.clientWidth;
+    const px = 34 + (at - o.x0) / (o.x1 - o.x0) * (w - 44);
+    tip.style.left = `${Math.max(0, Math.min(w - tip.offsetWidth, px - tip.offsetWidth / 2))}px`;
+  };
+  svg.setAttribute('tabindex', '0');
+  const move = e => {
+    const r = svg.getBoundingClientRect();
+    const px = (e.clientX - r.left) * svg.clientWidth / r.width;
+    if (px < 34 || px > svg.clientWidth - 10) { hide(); return; }
+    show(o.x0 + (px - 34) / (svg.clientWidth - 44) * (o.x1 - o.x0));
+  };
+  svg.onpointermove = move;
+  svg.onpointerdown = move;
+  svg.onpointerleave = hide;
+  svg.onpointercancel = hide;
+  svg.onblur = hide;
+  svg.onkeydown = e => {
+    if (e.key === 'Escape') { hide(); return; }
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+    e.preventDefault();
+    show((svg._chartAt ?? o.x0) + (e.key === 'ArrowRight' ? 1 : -1) * (o.tooltipStep || (o.x1 - o.x0) / 96));
+  };
+}
+
 // Line/step chart in the design's style. Series points are [x, y].
 function psChart(svg, o) {
   const W = svg.clientWidth, H = svg.clientHeight;
@@ -547,6 +617,7 @@ function psChart(svg, o) {
   if (o.now != null) {
     psSvg('line', { x1: x(o.now), x2: x(o.now), y1: T, y2: H - B, stroke: css('--fg'), 'stroke-width': 1, opacity: 0.7 }, svg);
   }
+  psChartTooltip(svg, o, at => o.series.map(s => ({ name: s.name, value: psChartValue(s, at) })));
 }
 
 // Bar chart with positive and negative colours.
@@ -572,6 +643,10 @@ function psBars(svg, o) {
   });
   (o.labels || []).forEach(([i, txt, anchor]) => {
     psSvg('text', { x: L + i * bw, y: H - 4, 'text-anchor': anchor || 'middle' }, svg).textContent = txt;
+  });
+  psChartTooltip(svg, { x0: 0, x1: n, tooltipStep: 1, tooltipTime: at => o.times?.[Math.min(n - 1, Math.floor(at))] || '' }, at => {
+    const value = o.vals[Math.min(n - 1, Math.floor(at))];
+    return [{ name: value >= 0 ? 'Charging' : 'Discharging', value: Math.abs(value) }];
   });
 }
 
@@ -2093,11 +2168,13 @@ class PsPricesCard extends PsCardBase {
     const y0 = Math.min(0, ...vals.filter(Number.isFinite));
     const u = psMinorUnit(hass);
     psChart(svg, {
+      unit: `${u}/kWh`,
       x0: 0, x1: 24, y0: y0 < 0 ? y0 * 1.1 : -y1 * 0.03, y1, yTicks: psTicks(Math.min(0, y0), y1, 3), yFmt: v => `${v}${u}`,
+      tooltipTime: h => psWhen(hass, new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, h * 60)),
       xFmt: h => String(h).padStart(2, '0'), now: psHoursFromMidnight(now, now),
       series: [
-        { pts: ip, c: '--cyan', step: true, fill: '--cyan', fillOp: 0.12 },
-        { pts: ep, c: '--red', step: true, dash: '4 3', w: 1.25 },
+        { name: 'Import', pts: ip, c: '--cyan', step: true, fill: '--cyan', fillOp: 0.12 },
+        { name: 'Export', pts: ep, c: '--red', step: true, dash: '4 3', w: 1.25 },
       ],
     });
   }
@@ -2192,15 +2269,16 @@ class PsEnergyCard extends PsCardBase {
       return out;
     };
     const series = [
-      en.solar ? { pts: pts(en.solar), c: '--yellow', w: 1.25 } : null,
-      en.grid ? { pts: pts(en.grid), c: '--cyan' } : null,
-      en.battery ? { pts: pts(en.battery, -1), c: '--green', fill: '--green', fillOp: 0.1 } : null,
-      en.home ? { pts: pts(en.home), c: '--purple' } : null,
+      en.solar ? { name: 'Solar', pts: pts(en.solar), c: '--yellow', w: 1.25 } : null,
+      en.grid ? { name: 'Grid', pts: pts(en.grid), c: '--cyan' } : null,
+      en.battery ? { name: 'Battery (charging +)', pts: pts(en.battery, -1), c: '--green', fill: '--green', fillOp: 0.1 } : null,
+      en.home ? { name: 'Home', pts: pts(en.home), c: '--purple' } : null,
     ].filter(Boolean);
     const vals = series.flatMap(s => s.pts.map(p => p[1])).filter(Number.isFinite);
     const y1 = psNiceMax(vals, 2), y0 = -psNiceMax(vals.filter(v => v < 0).map(v => -v), 1);
     psChart(svg, {
       x0: 0, x1: 24, y0, y1, yTicks: psTicks(y0, y1, 4),
+      tooltipTime: h => psWhen(hass, new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, h * 60)),
       xFmt: h => String(h).padStart(2, '0'), now: psHoursFromMidnight(now, now), series,
     });
   }
@@ -2253,7 +2331,8 @@ class PsLoadForecastCard extends PsCardBase {
     const y1 = psNiceMax(pts.map(p => p[1]), 2);
     psChart(svg, {
       x0: nowH, x1: nowH + 48, y0: 0, y1, yTicks: psTicks(0, y1, 3), xFmt: h => psFmtHour(this._hass, h, now),
-      series: [{ pts, c: '--purple', step: true, fill: '--purple', fillOp: 0.15 }],
+      tooltipTime: h => psWhen(this._hass, new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, h * 60)),
+      series: [{ name: 'Home load', pts, c: '--purple', step: true, fill: '--purple', fillOp: 0.15 }],
     });
   }
 }
@@ -2288,7 +2367,7 @@ class PsBatteryPlanCard extends PsCardBase {
       if (i === 0) labels.push([0, psTime(this._hass, d), 'start']);
       else if (d.getHours() === 0 && d.getMinutes() === 0) labels.push([i, psWhen(this._hass, d)]);
     });
-    psBars(svg, { vals, y0, y1, yTicks: psTicks(y0, y1, 3), pos: '--green', neg: '--purple', labels });
+    psBars(svg, { times: shown.map(r => psWhen(this._hass, r.t)), vals, y0, y1, yTicks: psTicks(y0, y1, 3), pos: '--green', neg: '--purple', labels });
   }
 }
 
@@ -2322,7 +2401,8 @@ class PsSolarLoadCard extends PsCardBase {
     const y1 = psNiceMax([...solar, ...load].map(p => p[1]), 2);
     psChart(svg, {
       x0: nowH, x1: nowH + 48, y0: 0, y1, yTicks: psTicks(0, y1, 3), xFmt: h => psFmtHour(this._hass, h, now),
-      series: [{ pts: solar, c: '--yellow', w: 2, fill: '--yellow', fillOp: 0.12 }, { pts: load, c: '--purple', step: true }],
+      tooltipTime: h => psWhen(this._hass, new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, h * 60)),
+      series: [{ name: 'Solar', pts: solar, c: '--yellow', w: 2, fill: '--yellow', fillOp: 0.12 }, { name: 'Home load', pts: load, c: '--purple', step: true }],
     });
   }
 }

@@ -50,6 +50,8 @@ Two full-width cards sit at the top:
 
 The other cards sit in one to three columns, depending on screen width.
 
+Hover over or tap the **Prices today**, **Energy since midnight**, **Load forecast**, **Planned battery power**, and **Solar and load forecast** graphs to see the time and values. You can also focus a graph and use the left and right arrow keys; press Escape to dismiss the tooltip. Power values use kW, prices use your tariff’s minor currency unit per kWh, and battery power above zero means charging.
+
 ### Cards
 
 Cards appear only when the matching feature or entities exist.

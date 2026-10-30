@@ -159,7 +159,7 @@ def _board_script(body: str) -> str:
         + r"""
   vm.createContext(context);
   const src = fs.readFileSync(process.argv[1], 'utf8').replace(/^export \{[^}]*\};?\s*$/m, '');
-  vm.runInContext(src + '\n;globalThis.__t = { PowerSyncBoard, PsTodayCard, PsControlsCard, psSchedule, psWindows, psActionKey, PS_LAYOUT_KEY, PS_DEFAULT_LAYOUT };', context);
+  vm.runInContext(src + '\n;globalThis.__t = { PowerSyncBoard, PsTodayCard, PsControlsCard, psSchedule, psWindows, psActionKey, PS_LAYOUT_KEY, PS_DEFAULT_LAYOUT, psChartValue, psChart, psBars, PsPricesCard, PsEnergyCard, PsLoadForecastCard, PsSolarLoadCard, PsBatteryPlanCard, psApiCache };', context);
   const T = context.__t;
 """
         + body
@@ -302,3 +302,84 @@ def test_discharge_uses_custom_time_only_when_select_is_custom():
         ["force_discharge", {"duration": "90"}],
         ["force_charge", {"duration": "30"}],
     ]
+
+
+
+def test_chart_sampling_respects_steps_gaps_and_negative_values():
+    out = _run_board(r"""
+  const pts = [[1, -2], [2, 0], [3, 4], [4, NaN]];
+  const sample = (step, at) => T.psChartValue({ pts, step }, at);
+  console.log(JSON.stringify({
+    before: sample(true, 0), after: sample(false, 4),
+    step: sample(true, 1.5), line: sample(false, 1.5),
+    boundary: sample(true, 2), last: sample(true, 3),
+    empty: T.psChartValue({ pts: [] }, 0),
+  }));
+""")
+    assert out == dict(before=None, after=None, step=-2, line=-1,
+                       boundary=0, last=4, empty=None)
+
+
+def test_every_small_chart_has_working_pointer_and_keyboard_tooltips():
+    out = _run_board(r"""
+  class El {
+    constructor() {
+      this.children = []; this.style = {}; this.attrs = {};
+      this.clientWidth = 320; this.clientHeight = 180; this.offsetWidth = 180;
+      this.classList = { contains: name => this.className === name };
+    }
+    appendChild(el) { this.children.push(el); el.parentElement = this; }
+    insertBefore(el) { this.appendChild(el); }
+    setAttribute(k, v) { this.attrs[k] = v; }
+    querySelector(sel) { return this.children.find(e => '.' + e.className === sel); }
+    getBoundingClientRect() { return { left: 100, width: 640 }; }
+  }
+  context.document.createElement = () => new El();
+  context.document.createElementNS = () => new El();
+  const now = new Date();
+  const ts = Array.from({length: 97}, (_, i) => new Date(now.getTime() + i * 1800000).toISOString());
+  T.psApiCache.set('power_sync/optimization', { data: {
+    last_optimization: 'test', schedule: { timestamps: ts, charge_w: [3000, 0, 0], discharge_w: [0, 2000, 0] },
+    forecast_series: { timestamps: ts, load_forecast_values_kw: ts.map(() => 2), planned_forecast_values_kw: ts.map(() => 0) },
+  }});
+  const results = {};
+  for (const name of ['PsPricesCard', 'PsEnergyCard', 'PsLoadForecastCard', 'PsSolarLoadCard', 'PsBatteryPlanCard']) {
+    const card = new T[name]();
+    card._hass = { states: { 'sensor.x': { state: '1', attributes: { unit_of_measurement: 'kW' } } } };
+    card._config = { entities: { importPrice: 'sensor.x', exportPrice: 'sensor.x', home: 'sensor.x', battery: 'sensor.x' } };
+    card._hist = { 'sensor.x': [[new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime(), 1], [now.getTime(), 2]] };
+    const svg = new El(), parent = new El(); parent.appendChild(svg);
+    card.querySelector = () => svg;
+    card._draw();
+    const tip = svg.parentElement.querySelector('.graph-tooltip');
+    const move = svg.onpointermove;
+    // A scaled viewport must use the same chart coordinate as the plot.
+    move({ clientX: 100 + 2 * 172 });
+    const pointer = !tip.hidden && /kW|kWh/.test(tip.innerHTML) && !/undefined|NaN/.test(tip.innerHTML);
+    svg.onpointerleave(); const leave = tip.hidden;
+    svg.onkeydown({ key: 'ArrowRight', preventDefault() {} });
+    const keyboard = !tip.hidden;
+    svg.onkeydown({ key: 'Escape' }); const escape = tip.hidden;
+    svg.onpointerdown({ clientX: 100 + 2 * 172 }); const tap = !tip.hidden;
+    svg.onblur(); const blur = tip.hidden;
+    // Repeated resize redraws retain one wrapper/tooltip and replace handlers.
+    card._draw(); card._draw();
+    const oneTip = svg.parentElement.children.filter(e => e.className === 'graph-tooltip').length === 1;
+    svg.onpointermove({ clientX: 100 }); const outside = tip.hidden;
+    results[name] = { pointer, leave, keyboard, escape, tap, blur, oneTip, outside, focusable: svg.attrs.tabindex === '0' };
+  }
+  // Negative and zero bars keep direction and real magnitude; empty data hides.
+  const svg = new El(), parent = new El(); parent.appendChild(svg);
+  T.psBars(svg, { vals: [-2, 0], y0: -3, y1: 3, times: ['first', 'second'] });
+  svg.onpointerdown({ clientX: 100 + 2 * 60 });
+  const tip = svg.parentElement.querySelector('.graph-tooltip');
+  results.negativeBar = /Discharging/.test(tip.innerHTML) && /2.00 kW/.test(tip.innerHTML);
+  T.psBars(svg, { vals: [], y0: -3, y1: 3 });
+  svg.onpointerdown({ clientX: 100 + 2 * 60 });
+  results.empty = tip.hidden;
+  console.log(JSON.stringify(results));
+""")
+    assert out.pop('negativeBar') is True
+    assert out.pop('empty') is True
+    for card, checks in out.items():
+        assert all(checks.values()), (card, checks)
