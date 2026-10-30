@@ -5,15 +5,46 @@ on:
     branches: [main]
     paths:
       - 'custom_components/power_sync/manifest.json'
+  # Recovery uses this same gate; never create a tag/release by hand.
+  workflow_dispatch:
 
 permissions:
   contents: write
+  actions: write
+
+concurrency:
+  group: powersync-publication
+  cancel-in-progress: false
 
 jobs:
-  release:
-    runs-on: ubuntu-latest
+  regression-gate:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: write # Dispatch missing full-suite evidence, never publish.
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12.12'
+      - name: Require trusted full regression evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/release/regression_gate.py ensure
+
+  release:
+    needs: regression-gate
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
 
@@ -127,6 +158,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           VERSION="${{ steps.version.outputs.version }}"
+          # Never publish an older prepared snapshot after main advanced.
+          CURRENT_MAIN=$(git ls-remote origin refs/heads/main | cut -f1)
+          test "$CURRENT_MAIN" = "$GITHUB_SHA" || { echo "Main advanced; retry the release on current main" >&2; exit 1; }
           git tag "v$VERSION"
           git push origin "v$VERSION"
           gh release create "v$VERSION" \
