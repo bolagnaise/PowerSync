@@ -3,11 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import ast
 import importlib
+import logging
+import math
 import sys
+import time
 import types
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parent.parent / "custom_components" / "power_sync"
@@ -673,6 +681,84 @@ def test_override_policy_keeps_only_provisional_stop_settling_lease():
         observed_at=observed_at + timedelta(seconds=1),
     )
     assert ev_ownership.get_ev_ownership(hass, _Entry(), vehicle_id) == (None, None)
+
+
+@pytest.mark.parametrize(
+    "mode,power,poll_offset,provisional,expected_clear",
+    [
+        ("connected_finished", 0, 1, True, True),
+        ("connected_waiting", "0", 1, True, True),
+        ("disconnected", 0, 1, True, True),
+        ("connected_finished", 0, -1, True, False),
+        ("connected_finished", 0, 0, True, False),
+        ("connected_finished", 1000, 1, True, False),
+        ("connected_finished", None, 1, True, False),
+        ("connected_finished", "invalid", 1, True, False),
+        ("connected_finished", float("nan"), 1, True, False),
+        ("connected_finished", float("inf"), 1, True, False),
+        ("connected_finished", -100, 1, True, False),
+        ("unknown", 0, 1, True, False),
+        ("charging", 0, 1, True, False),
+        ("connected_finished", 0, 1, False, False),
+    ],
+)
+def test_zaptec_poll_reconciles_shared_stop_lease(
+    mode, power, poll_offset, provisional, expected_clear,
+):
+    """A post-stop poll releases the shared guard, never genuine external control."""
+    hass = _Hass()
+    entry = _Entry()
+    vehicle_id = "zaptec_standalone"
+    _set_external_policy(hass, vehicle_id, "yield" if not provisional else "override")
+    command = ev_ownership.record_ev_command(
+        hass, entry, vehicle_id, command="stop_smart_schedule", success=True,
+    )
+    command_time = datetime.fromisoformat(command["at"])
+    assert ev_ownership.ensure_external_ev_ownership(
+        hass, entry, vehicle_id, observed_at=command_time + timedelta(seconds=1),
+    )
+    lease = ev_ownership.get_ev_ownership(hass, entry, vehicle_id)[1]
+    if not provisional:
+        lease.pop("stop_settling")
+
+    # Execute the real nested poll, including the real ownership helper. A poll
+    # may finish after the command even though it began before the command.
+    source = (ROOT / "__init__.py").read_text()
+    node = next(
+        node for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "_poll_zaptec_state"
+    )
+    parsed = {"charger_operation_mode": mode, "total_charge_power_w": power}
+    client = SimpleNamespace(
+        get_charger_state=AsyncMock(return_value={513: power}),
+        parse_charger_state=lambda raw: parsed,
+    )
+    namespace = {
+        "__package__": "power_sync",
+        "hass": hass, "entry": entry, "zaptec_client": client,
+        "all_opts": {"zaptec_charger_id": "charger-1"},
+        "CONF_ZAPTEC_CHARGER_ID": "zaptec_charger_id", "DOMAIN": "power_sync",
+        "time": time, "math": math, "timezone": timezone,
+        "datetime": SimpleNamespace(
+            now=lambda tz: command_time + timedelta(seconds=poll_offset),
+        ),
+        "_LOGGER": logging.getLogger(__name__),
+    }
+    exec(compile(ast.Module(body=[node], type_ignores=[]), str(ROOT / "__init__.py"), "exec"), namespace)
+    asyncio.run(namespace["_poll_zaptec_state"]())
+
+    client.get_charger_state.assert_awaited_once_with("charger-1")
+    assert hass.data["power_sync"][entry.entry_id]["zaptec_cached_state"] == parsed
+    remaining = ev_ownership.get_ev_ownership(hass, entry, vehicle_id)[1]
+    assert (remaining is None) is expected_clear
+    if expected_clear:
+        assert ev_ownership.can_claim_ev_ownership(
+            hass, entry, vehicle_id, owner_mode="price_level",
+        )[0] is True
+    else:
+        assert remaining is lease
+    for task in hass.created_tasks:
+        task.close()
 
 
 def test_external_start_after_confirmed_powersync_stop_is_sticky():

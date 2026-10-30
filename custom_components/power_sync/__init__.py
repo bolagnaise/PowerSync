@@ -43845,6 +43845,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 return
             try:
                 poll_started_at = time.monotonic()
+                poll_observed_at = datetime.now(timezone.utc)
                 raw_state = await zaptec_client.get_charger_state(charger_id)
                 parsed = zaptec_client.parse_charger_state(raw_state)
                 entry_data = hass.data[DOMAIN][entry.entry_id]
@@ -43864,6 +43865,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     parsed.get('phase_c_current', 0),
                     parsed.get('cable_locked'),
                 )
+                # Reconcile the shared stop guard as well as the executors'
+                # local state. Use poll start time so an in-flight old response
+                # cannot confirm a later stop. Missing/malformed power is not 0 W.
+                try:
+                    stop_power_w = float(raw_state.get(513, raw_state.get("513")))
+                except (TypeError, ValueError):
+                    stop_power_w = math.nan
+                if (
+                    parsed.get("charger_operation_mode")
+                    in ("connected_waiting", "connected_finished", "disconnected")
+                    and math.isfinite(stop_power_w)
+                    and 0 <= stop_power_w <= 50
+                ):
+                    from .automations.ev_ownership import confirm_powersync_ev_stop
+
+                    confirm_powersync_ev_stop(
+                        hass, entry, "zaptec_standalone", observed_at=poll_observed_at,
+                    )
                 # Update charging session if actively charging
                 if parsed.get('charger_operation_mode') == 'charging':
                     try:
