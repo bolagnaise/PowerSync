@@ -46,3 +46,19 @@ ability to alter workflows or publish directly. Main is protected; changing
 repository protection/administrator permissions is outside this installation.
 The lookup examines the newest 100 regression runs. If older proof falls outside
 that window, it runs the suite again rather than weakening validation.
+
+## Operational copies
+
+The MacBook checkout is `/Users/benboller/Developer/power-sync`; use an isolated
+current-main worktree when it contains unrelated work. Tower's clean operational
+checkout is `/root/codex-workspaces/power-sync-release-gate`, with pinned test
+dependencies in `/root/codex-workspaces/power-sync-test-venv`. Fetch and
+fast-forward before preparing a release. Tower's older
+`/mnt/user/developer/power-sync` is a symlink to `PowerSync` and may contain
+unrelated work; its local agent/release guidance routes release operations to
+the clean checkout rather than overwriting that work.
+
+Tracked workflows, gate scripts, dependency pins and tests are shared through
+Git. Host release skills retain their local routing and support policies while
+pointing to the same tracked procedure. Local `PROCEDURE.md` and preflight-script
+copies must match the tracked files; do not maintain competing gate policies.
