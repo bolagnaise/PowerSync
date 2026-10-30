@@ -768,7 +768,7 @@ def test_a_stored_departure_time_still_reaches_the_solver(
     holder["executor"] = _ev_executor(target_time)
 
     plans = method(
-        types.SimpleNamespace(config_entry=_ENTRY), _solve_timestamps()
+        types.SimpleNamespace(config_entry=_ENTRY, _ev_integration_enabled=True), _solve_timestamps()
     )
 
     assert plans is not None, warnings
@@ -784,7 +784,7 @@ def test_a_naive_deadline_bounds_the_window_like_an_aware_one(
     build_ev_charge_plan,
 ):
     method, holder, _ = build_ev_charge_plan
-    coordinator = types.SimpleNamespace(config_entry=_ENTRY)
+    coordinator = types.SimpleNamespace(config_entry=_ENTRY, _ev_integration_enabled=True)
     timestamps = _solve_timestamps()
 
     holder["executor"] = _ev_executor("2026-08-20T15:00:00")
@@ -802,7 +802,7 @@ def test_a_deadline_already_past_is_still_skipped(build_ev_charge_plan):
     holder["executor"] = _ev_executor("2026-08-20T05:00:00")
 
     assert (
-        method(types.SimpleNamespace(config_entry=_ENTRY), _solve_timestamps())
+        method(types.SimpleNamespace(config_entry=_ENTRY, _ev_integration_enabled=True), _solve_timestamps())
         == []
     )
 
@@ -853,7 +853,7 @@ def test_optimizer_plan_uses_smart_schedule_windows_and_policy(
         _settings={"veh-1": settings},
     )
 
-    coordinator = types.SimpleNamespace(config_entry=_ENTRY)
+    coordinator = types.SimpleNamespace(config_entry=_ENTRY, _ev_integration_enabled=True)
     plan = method(coordinator, _solve_timestamps())[0]
 
     assert warnings == []
@@ -941,7 +941,7 @@ def test_optimizer_rejects_a_stale_grid_window_above_current_price_cap(
         _settings={"veh-1": settings},
     )
 
-    coordinator = types.SimpleNamespace(config_entry=_ENTRY)
+    coordinator = types.SimpleNamespace(config_entry=_ENTRY, _ev_integration_enabled=True)
     plans = method(coordinator, _solve_timestamps())
 
     assert plans == []
@@ -992,7 +992,7 @@ def test_unavailable_vehicle_keeps_future_demand_but_zeros_current_slot(
     )
 
     plan = method(
-        types.SimpleNamespace(config_entry=_ENTRY), _solve_timestamps()
+        types.SimpleNamespace(config_entry=_ENTRY, _ev_integration_enabled=True), _solve_timestamps()
     )[0]
 
     assert warnings == []
@@ -1560,3 +1560,23 @@ def test_native_zero_import_limit_is_not_user_zero_as_unset(optimizer_module,sol
     assert all(a.battery_charge_w==0 for a in result.schedule.actions)
     optimizer.update_config(max_grid_import_w=0)
     assert optimizer.max_grid_import_w is None
+
+
+def test_disabling_ev_integration_excludes_cached_smart_schedule_demand(
+    build_ev_charge_plan,
+):
+    method, holder, warnings = build_ev_charge_plan
+    holder["executor"] = _ev_executor("2026-08-20T15:00:00")
+    coordinator = types.SimpleNamespace(
+        config_entry=_ENTRY, _ev_integration_enabled=True,
+    )
+    timestamps = _solve_timestamps()
+
+    assert len(method(coordinator, timestamps)) == 1
+    coordinator._ev_integration_enabled = False
+    assert method(coordinator, timestamps) is None
+    # Turning battery-plan inclusion off must leave the EV's own plan intact.
+    assert holder["executor"]._state["veh-1"].current_plan.energy_needed_kwh == 13.75
+    coordinator._ev_integration_enabled = True
+    assert len(method(coordinator, timestamps)) == 1
+    assert warnings == []

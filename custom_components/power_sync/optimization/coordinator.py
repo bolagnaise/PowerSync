@@ -9101,6 +9101,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         against prices and the site import limit instead of the battery plan
         assuming an import envelope the car will take anyway.
         """
+        # This setting controls Smart Schedule demand in the battery plan as
+        # well as its fixed overlay. Cached vehicle plans can outlive a toggle.
+        if not getattr(self, "_ev_integration_enabled", False):
+            return None
         if not schedule_timestamps:
             return None
         try:
