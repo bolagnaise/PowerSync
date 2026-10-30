@@ -6,7 +6,7 @@ PowerSync includes an **auto-generated Lovelace dashboard** that adapts to your 
 
 PowerSync bundles the dashboard strategy, price charts, and animated energy-flow card. Install these via HACS > Frontend only where noted:
 
-- `button-card` — Required for compact control and status tiles
+- `button-card` — Needed only by the Solar curtailment, AC inverter and Amber battery control cards. Every other card is built into PowerSync.
 - `power-flow-card-plus` — Optional fallback/additional power-flow card for custom dashboards
 
 ### Optional: Tesla-Style Energy Flow (v2.6.5+)
@@ -29,8 +29,8 @@ The dashboard is auto-created when PowerSync loads. It appears in your sidebar a
 **No manual YAML configuration is required.** All cards are built dynamically based on your configured entities.
 
 If you don't see it:
-1. Ensure `button-card` is installed
-2. Restart Home Assistant
+1. Restart Home Assistant
+2. Refresh your browser
 3. Check Settings > Dashboards — "PowerSync" should appear
 
 ## Built-In PowerSync Panel
@@ -46,7 +46,7 @@ The dashboard uses the same look as the PowerSync cloud app: dark navy cards, DM
 Two full-width cards sit at the top:
 
 - **Right now** says in a sentence what the battery is doing and why, with charge level, export floor, backup time, and live solar, home, battery and grid power.
-- **Optimizer plan** shows the last 12 hours as measured and the next 24 hours as planned: import and export prices, the battery's charge level, what the battery will do each interval, and planned car charging. Hover over the chart, or focus it and use the arrow keys, to read any interval. Below the chart are the planned charge and discharge windows and the reserve details.
+- **Optimizer plan** shows the last 12 hours as measured and the next 24 hours as planned: import and export prices, the battery's charge level, what the battery will do each interval, and planned car charging. Hover over the chart, or focus it and use the arrow keys, to read any interval. Below the chart are the upcoming charge and export windows and the reserve details. The refresh button fetches the latest plan.
 
 The other cards sit in one to three columns, depending on screen width.
 
@@ -60,32 +60,33 @@ Cards appear only when the matching feature or entities exist.
 | Optimizer plan | Smart Optimization enabled |
 | Battery controls | Battery system configured |
 | Energy flow | Core power sensors |
-| Plan explanation | AI plan summaries configured |
+| Plan explanation | Smart Optimization available |
 | Tariff today | TOU tariff synced |
 | Prices today | Price sensors exist |
 | Today so far | Daily energy and cost sensors |
 | Car charging | EV smart charging configured |
-| Powerwall settings / battery settings | Battery system configured |
-| Powerwalls | Tesla with per-pack data |
+| Powerwall settings | Tesla Powerwall |
+| Powerwalls | Powerwall local pairing configured |
 | Optimizer settings | Smart Optimization available |
 | Energy since midnight | Core power sensors |
-| Load forecast | Load forecast available |
+| Load forecast | Load forecast or Smart Optimization available |
 | Planned battery power | Smart Optimization active |
 | Solar and load forecast | Forecast sensors exist |
 | Battery health | Health sensor available |
 | Powerwall status | Tesla Powerwall |
 | Lifetime energy | Lifetime energy sensors |
 | Powerwall local control | Powerwall local pairing configured |
-| Amber prices | Amber configured |
 | Solar curtailment | Curtailment configured |
 | AC inverter | AC inverter configured |
 | Solar strings | PV string sensors exist |
 | Demand charge | Demand tracking enabled |
 | AEMO spike monitor | Spike detection configured |
 | Flow Power pricing | Flow Power configured |
-| GloBird ZeroHero | GloBird ZeroHero configured |
-| CovaU SolarMax | CovaU configured |
+| GloBird | GloBird account connected |
+| CovaU | CovaU account connected |
 | Grid export limit | Flexible export limits configured |
+| System details | Your battery integration reports extra sensors (one card per group) |
+| Missing frontend cards | A frontend card that some cards need is not installed |
 
 ### Customizing the Layout
 
@@ -98,9 +99,11 @@ Select **Customize layout** at the top of the dashboard to rearrange it.
 
 Select **Done** when you're finished. Your layout is saved in your browser, separately for one, two and three columns, so a phone and a desktop can each have their own order.
 
-## Duration Selectors
+## Battery Controls
 
-The Force Charge and Force Discharge duration selectors are created automatically by the integration. No manual helper setup is required.
+Choose how long to run for, then select **Charge**, **Discharge**, **Power the home** or **Hold charge**. Each button asks you to tap it a second time to confirm, so a stray tap never changes the battery. **Restore normal** appears while a manual mode is running. **Power limit** sets the charge or discharge rate (Max uses the fastest rate allowed), and **Custom discharge time** overrides the duration for discharges when it is set.
+
+The duration selectors these controls use are created automatically by the integration. No manual helper setup is required.
 
 ## Battery Health
 

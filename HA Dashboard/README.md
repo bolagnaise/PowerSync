@@ -4,27 +4,16 @@ A dynamic Lovelace dashboard that automatically shows only the cards relevant to
 
 ## Features
 
-The strategy dynamically includes sections based on your configuration:
-- **Price Gauges** - Import price, export price, and battery level (if price sensors exist)
-- **Battery Control** - Force charge, force discharge, and restore buttons with duration selectors
-- **Optimizer Status** - Current action + next action with color-coded state and power display
-- **Power Flow Card** - Real-time energy flow visualization
-- **Price Charts** - Amber/Octopus prices and TOU schedule sent to battery
-- **LP Forecast Charts** - 48-hour solar, load, and price forecasts from the built-in optimizer
-- **Solar Curtailment Status** - DC curtailment (Tesla) and AC inverter status cards
-- **AC Inverter Controls** - Load following, shutdown, and restore buttons
-- **PV String Details** - PV1/PV2 power, voltage, and current, plus supported inverter extras
-- **Battery Health** - Overall and individual battery health gauges (up to 4 batteries)
-- **Energy Charts** - Solar, Battery, Grid, and Home load graphs
-- **Demand Charge** - Period status, peak demand, and cost tracking
-- **AEMO Spike Monitor** - AEMO price and spike detection status
-- **Flow Power** - Import/export prices, TWAP average, and network tariff
+The dashboard uses the PowerSync cloud app's look in your Home Assistant light or dark theme. Two full-width cards sit at the top:
 
-Only sections with existing entities appear — no more unavailable cards!
+- **Right now** - What the battery is doing and why, charge level, export floor, backup time, and live solar, home, battery and grid power
+- **Optimizer plan** - The last 12 hours measured and the next 24 hours planned, with prices, charge level, battery actions, car charging, upcoming windows and reserve details
 
-## Redesign Preview
+Below them, one to three columns of cards appear only for features you use: battery controls, energy flow, plan explanation, tariff, prices, today's costs and energy, car charging, Powerwall and optimizer settings, forecasts, battery health, Powerwall status, lifetime energy, curtailment, AC inverter, solar strings, demand charge, AEMO spikes, Flow Power, GloBird, CovaU, export limits and extra battery integration details.
 
-`preview/power-sync-ha-dashboard.html` is the approved design for the next dashboard: the cloud app's theme on every card, with the same move, hide, show hidden and reset layout tools. It is a standalone page built from a snapshot of a real system, so open it in any browser to review it. The matching wiki page draft is `docs/wiki/Dashboard-Setup.md`.
+Select **Customize layout** to move or hide cards. The layout is saved in your browser, separately for one, two and three columns. **Reset layout** restores the default.
+
+The design it implements is kept in `preview/power-sync-ha-dashboard.html`, a standalone page with sample data.
 
 ## Requirements
 
@@ -32,10 +21,9 @@ Only sections with existing entities appear — no more unavailable cards!
 
 Install these from HACS (Frontend) before setting up the dashboard:
 
-1. **[button-card](https://github.com/custom-cards/button-card)** - For control chips and status cards
-2. **[card-mod](https://github.com/thomasloven/lovelace-card-mod)** - For compact gauge styling
-3. **[power-flow-card-plus](https://github.com/flixlix/power-flow-card-plus)** - For real-time energy flow visualization
-4. **[apexcharts-card](https://github.com/RomRider/apexcharts-card)** - For all price and energy charts
+1. **[button-card](https://github.com/custom-cards/button-card)** - Only for the Solar curtailment, AC inverter and Amber battery control cards
+
+Everything else, including charts and the energy flow scene, is built into PowerSync.
 
 ## Installation
 
@@ -85,10 +73,7 @@ The strategy auto-detects whether your entities use the `power_sync_` prefix (mo
 
 ### Cards showing "Custom element doesn't exist"
 
-A required HACS card isn't installed. Install the missing integration from HACS:
-- `custom:button-card` > Install button-card
-- `custom:apexcharts-card` > Install apexcharts-card
-- `custom:power-flow-card-plus` > Install power-flow-card-plus
+A card that needs `button-card` is showing before it is installed. Install **button-card** from HACS Frontend, then refresh your browser. The dashboard's **Missing frontend cards** card lists anything still missing.
 
 ### Dashboard is blank
 
@@ -100,7 +85,13 @@ A required HACS card isn't installed. Install the missing integration from HACS:
 
 Clear browser cache and hard refresh (Ctrl+Shift+R / Cmd+Shift+R).
 
+### Dashboard shows the old layout
+
+The new layout loads `power-sync-dashboard.js` from the same folder as the strategy. If it cannot load, the dashboard falls back to the previous layout and logs a warning in the browser console. Hard refresh the page, and check that the file exists in `custom_components/power_sync/frontend/`.
+
 ### Battery control buttons not working
+
+Each control needs a second tap to confirm. If nothing happens after confirming:
 
 1. Ensure the PowerSync integration is installed and configured
 2. Verify select entities exist: `select.power_sync_force_charge_duration` and `select.power_sync_force_discharge_duration`
