@@ -172,3 +172,58 @@ def real_tesla_ble_helpers():
     exec(compile(tree, str(path), "exec"), namespace)
     return {node.name: namespace[node.name] for node in tree.body
             if isinstance(node, ast.FunctionDef)}
+
+
+def load_real_power_sync_const(name="_power_sync_real_const"):
+    """Exec the real ``const.py`` without the HA-stubbed ``power_sync`` package.
+
+    ``const.py`` is no longer standalone: it imports ``.registry_compat``
+    (stdlib-only). Load it inside a throwaway package rooted at the component
+    so the relative import resolves to the real file, then drop the package.
+    """
+    import importlib.util
+    import pathlib
+    import types
+
+    component = pathlib.Path(__file__).resolve().parents[1] / "custom_components/power_sync"
+    package = types.ModuleType(name)
+    package.__path__ = [str(component)]
+    previous = {key: sys.modules.get(key, _MISSING) for key in (name, f"{name}.const", f"{name}.registry_compat")}
+    sys.modules[name] = package
+    try:
+        spec = importlib.util.spec_from_file_location(f"{name}.const", component / "const.py")
+        const = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = const
+        spec.loader.exec_module(const)
+        return const
+    finally:
+        for key, value in previous.items():
+            if value is _MISSING:
+                sys.modules.pop(key, None)
+            else:
+                sys.modules[key] = value
+
+
+def load_power_sync_submodule(relative, package="_power_sync_isolated"):
+    """Import a real ``power_sync`` submodule inside a throwaway package.
+
+    ``relative`` is a dotted path such as ``"optimization.solar_export"``.
+    The synthetic packages stay registered so lazy relative imports inside the
+    module (``from ..licensing.guard import fenced_call``) resolve to the real
+    files at call time instead of failing with "no known parent package".
+    """
+    import importlib
+    import pathlib
+    import types
+
+    component = pathlib.Path(__file__).resolve().parents[1] / "custom_components/power_sync"
+    # Parent packages are synthetic so their HA-importing ``__init__`` never runs;
+    # sibling packages reached by relative import (``..licensing``) load for real.
+    parts = relative.split(".")[:-1]
+    for depth in range(len(parts) + 1):
+        name = ".".join([package, *parts[:depth]])
+        if name not in sys.modules:
+            module = types.ModuleType(name)
+            module.__path__ = [str(component.joinpath(*parts[:depth]))]
+            sys.modules[name] = module
+    return importlib.import_module(f"{package}.{relative}")

@@ -14,6 +14,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+from conftest import load_real_power_sync_const
+
 
 ROOT = Path(__file__).resolve().parent.parent
 COMPONENT_ROOT = ROOT / "custom_components" / "power_sync"
@@ -182,12 +184,7 @@ def test_cost_tracking_uses_flow_marginal_contract_prices():
 
 
 def test_flow_nem_region_labels_do_not_claim_a_plan_rate():
-    spec = importlib.util.spec_from_file_location(
-        "power_sync_flow_nem_regions", COMPONENT_ROOT / "const.py"
-    )
-    assert spec and spec.loader
-    const = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(const)
+    const = load_real_power_sync_const("power_sync_flow_nem_regions")
 
     assert const.FLOW_POWER_STATES == {
         "NSW1": "New South Wales",
@@ -200,12 +197,7 @@ def test_flow_nem_region_labels_do_not_claim_a_plan_rate():
 
 def test_flow_power_default_happy_hour_excludes_2130():
     """Regression: the legacy 19:30 default excludes the 21:30 slot."""
-    spec = importlib.util.spec_from_file_location(
-        "power_sync_ticket353_const_legacy", COMPONENT_ROOT / "const.py"
-    )
-    assert spec and spec.loader
-    const = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(const)
+    const = load_real_power_sync_const("power_sync_ticket353_const_legacy")
     periods = const.flow_power_happy_hour_periods()
     assert "PERIOD_19_00" in periods
     assert "PERIOD_19_30" not in periods
@@ -214,12 +206,7 @@ def test_flow_power_default_happy_hour_excludes_2130():
 
 def test_flow_power_2130_plan_resolves_extended_periods():
     """A selected 21:30 plan includes 19:30-21:00 slots, not the endpoint."""
-    spec = importlib.util.spec_from_file_location(
-        "power_sync_ticket353_const", COMPONENT_ROOT / "const.py"
-    )
-    assert spec and spec.loader
-    const = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(const)
+    const = load_real_power_sync_const("power_sync_ticket353_const")
 
     assert const.resolve_flow_power_happy_hour_end(None) == "19:30"
     assert const.resolve_flow_power_happy_hour_end("invalid") == "19:30"

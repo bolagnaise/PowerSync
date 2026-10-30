@@ -35,6 +35,9 @@ def _install_ha_stubs() -> None:
     ha_event = sys.modules.setdefault(
         "homeassistant.helpers.event", types.ModuleType("homeassistant.helpers.event")
     )
+    ha_storage = sys.modules.setdefault(
+        "homeassistant.helpers.storage", types.ModuleType("homeassistant.helpers.storage")
+    )
     ha_util = sys.modules.setdefault("homeassistant.util", types.ModuleType("homeassistant.util"))
     ha_dt = sys.modules.setdefault("homeassistant.util.dt", types.ModuleType("homeassistant.util.dt"))
 
@@ -49,6 +52,11 @@ def _install_ha_stubs() -> None:
     ha_helpers.entity_registry = ha_er
     ha_helpers.device_registry = ha_dr
     ha_helpers.event = ha_event
+    if not hasattr(ha_storage, "Store"):
+        # EV ownership fences persist through HA storage; conftest's
+        # complete_ha_storage_stub supplies the in-memory async_load/async_save.
+        ha_storage.Store = type("Store", (), {"__init__": lambda self, *args, **kwargs: None})
+    ha_helpers.storage = ha_storage
     ha_root.helpers = ha_helpers
     ha_util.dt = ha_dt
     ha_root.util = ha_util

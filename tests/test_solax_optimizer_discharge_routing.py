@@ -17,6 +17,13 @@ COORDINATOR = (
 INIT = ROOT / "custom_components" / "power_sync" / "__init__.py"
 
 
+# Tesla-only native-tariff power rewrites; identity for every other system.
+_NON_TESLA_POWERWALL_ROUTING = {
+    "_powerwall_service_power": lambda _direction, requested_w: requested_w,
+    "_native_powerwall_safety_power_w": lambda configured_w, direction="discharge": configured_w,
+}
+
+
 def _load_guard_method():
     tree = ast.parse(COORDINATOR.read_text())
     class_node = next(
@@ -32,7 +39,11 @@ def _load_guard_method():
     )
     module = ast.Module(body=[method], type_ignores=[])
     ast.fix_missing_locations(module)
-    namespace = {"Any": Any, "_LOGGER": logging.getLogger(__name__)}
+    async def fenced_call(_owner, factory, _operation=None):
+        # Models an admitted optimizer; access fencing has its own runtime suite.
+        return await factory()
+
+    namespace = {"Any": Any, "_LOGGER": logging.getLogger(__name__), "fenced_call": fenced_call}
     exec(compile(module, str(COORDINATOR), "exec"), namespace)
     return namespace[method.name]
 
@@ -101,6 +112,7 @@ def test_optimizer_routes_total_discharge_for_adapter_contracts_that_need_it():
     ):
         battery = _Battery()
         coordinator = SimpleNamespace(
+            **_NON_TESLA_POWERWALL_ROUTING,
             battery_system=battery_system,
             _network_export_guard=lambda: None,
             _sigenergy_zero_export_curtailment_active=lambda: False,
@@ -127,6 +139,7 @@ def test_sigenergy_optimizer_uses_solved_pcc_ceiling_not_battery_export_value():
     method = _load_coordinator_method("_solved_grid_export_power_w")
     action = SimpleNamespace(timestamp="slot-0", power_w=2478.8)
     coordinator = SimpleNamespace(
+        **_NON_TESLA_POWERWALL_ROUTING,
         _last_optimizer_result=SimpleNamespace(
             schedule=SimpleNamespace(actions=[action]),
             grid_export_w=[9999.98],
@@ -151,6 +164,7 @@ def test_foxess_optimizer_export_uses_solved_whole_site_grid_target():
         (615.3, 615.3),       # no solar: grid target equals battery export
     ):
         coordinator = SimpleNamespace(
+            **_NON_TESLA_POWERWALL_ROUTING,
             battery_system="foxess",
             _config=SimpleNamespace(
                 max_discharge_w=24_000,
@@ -175,6 +189,7 @@ def test_foxess_optimizer_export_uses_solved_whole_site_grid_target():
 def test_sigenergy_pv_only_export_requests_hardware_refresh_for_battery_target():
     method = _load_coordinator_method("_force_discharge_hardware_needs_refresh")
     coordinator = SimpleNamespace(
+        **_NON_TESLA_POWERWALL_ROUTING,
         battery_system="sigenergy",
         _get_energy_data=lambda: {
             "work_mode_name": "discharge_pv",
@@ -200,6 +215,7 @@ def test_sigenergy_small_export_refresh_respects_the_requested_battery_power():
         (500.0, False),
     ):
         coordinator = SimpleNamespace(
+            **_NON_TESLA_POWERWALL_ROUTING,
             battery_system="sigenergy",
             _get_energy_data=lambda: {
                 "battery_power": battery_w / 1000,
@@ -220,6 +236,7 @@ def test_sigenergy_larger_export_still_refreshes_on_low_battery_output():
         (15000.0, 3000.0, False),
     ):
         coordinator = SimpleNamespace(
+            **_NON_TESLA_POWERWALL_ROUTING,
             battery_system="sigenergy",
             _get_energy_data=lambda: {
                 "battery_power": battery_w / 1000,
@@ -232,6 +249,7 @@ def test_sigenergy_larger_export_still_refreshes_on_low_battery_output():
 def test_small_export_refresh_keeps_other_inverter_thresholds():
     method = _load_coordinator_method("_force_discharge_hardware_needs_refresh")
     coordinator = SimpleNamespace(
+        **_NON_TESLA_POWERWALL_ROUTING,
         battery_system="sungrow",
         _get_energy_data=lambda: {"battery_power": 0.19, "grid_power": 0.0},
     )
@@ -248,6 +266,7 @@ def test_solax_total_tracks_a_network_clamped_export_target():
             return await writer(500)
 
     coordinator = SimpleNamespace(
+        **_NON_TESLA_POWERWALL_ROUTING,
         battery_system="solax",
         _network_export_guard=lambda: _Guard(),
         _sigenergy_zero_export_curtailment_active=lambda: False,
@@ -325,6 +344,7 @@ def test_repeated_solax_dispatch_keeps_total_nonzero():
     method = _load_guard_method()
     battery = _Battery()
     coordinator = SimpleNamespace(
+        **_NON_TESLA_POWERWALL_ROUTING,
         battery_system="solax",
         _network_export_guard=lambda: None,
         _sigenergy_zero_export_curtailment_active=lambda: False,

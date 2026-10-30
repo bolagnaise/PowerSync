@@ -755,6 +755,11 @@ def test_auth_shutdown_failure_still_cleans_hardware_and_allows_ha_reload(fixtur
     client.async_get_clientsession = lambda hass: None
     fixture.monkeypatch.setitem(sys.modules, "homeassistant.helpers.storage", storage)
     fixture.monkeypatch.setitem(sys.modules, "homeassistant.helpers.aiohttp_client", client)
+    native_rate = ModuleType("_powersync_chatgpt_view_test.power_sync.tesla_native_rate")
+    async def stop_native_rate(hass, entry):
+        calls.append("native-rate")
+    native_rate.async_stop = stop_native_rate
+    fixture.monkeypatch.setitem(sys.modules, native_rate.__name__, native_rate)
     fixture.entry_data.clear()
     fixture.entry_data.update(_optimization_chatgpt_auth=manager, tesla_coordinator=Tesla(),
                               aemo_dispatch_trigger_coordinator=Trigger(), optimization_coordinator=Optimizer())
@@ -768,7 +773,7 @@ def test_auth_shutdown_failure_still_cleans_hardware_and_allows_ha_reload(fixtur
     fixture.hass.config_entries.async_reload = ha_reload
     with caplog.at_level(logging.WARNING):
         asyncio.run(fixture.hass.config_entries.async_reload(fixture.entry.entry_id))
-    assert {"auth", "tesla", "aemo", "optimizer", "platforms", "setup"}.issubset(calls)
+    assert {"native-rate", "auth", "tesla", "aemo", "optimizer", "platforms", "setup"}.issubset(calls)
     assert fixture.hass.data["power_sync"][fixture.entry.entry_id]["_optimization_chatgpt_auth"] is manager
     assert "SECRET" not in caplog.text
 

@@ -186,6 +186,8 @@ def _coordinator(battery_curtailed: bool, force_active: bool = False):
         _network_export_guard=lambda: None,
         _sigenergy_zero_export_curtailment_active=lambda: battery_curtailed,
         _optimizer_force_state={"active": force_active, "type": "discharge"},
+        # Tesla-only native-tariff rewrite; identity for every other system.
+        _powerwall_service_power=lambda _direction, requested_w: requested_w,
     )
 
 

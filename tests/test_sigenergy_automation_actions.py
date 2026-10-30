@@ -60,7 +60,8 @@ def test_sigenergy_restore_normal_action_routes_through_context_service():
     assert "controller.restore_normal" not in function_source
     assert "_get_sigenergy_controller" not in function_source
     assert "SERVICE_RESTORE_NORMAL" in function_source
-    assert '{"source": "automation"}' in function_source
+    # Amber SmartShift entries additionally carry their entry_id; the source is unchanged.
+    assert '{"source": "automation", **(' in function_source
 
 
 def test_disable_optimizer_requests_sigenergy_native_handoff():

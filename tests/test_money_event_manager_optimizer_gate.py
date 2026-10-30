@@ -194,6 +194,7 @@ def _base_namespace(**overrides) -> dict:
         is_neovolt=False,
         is_solaredge=False,
         is_anker_solix=False,
+        is_amber_smartshift=False,
         entry=SimpleNamespace(
             options={CONF_AEMO_REGION: "NSW1", CONF_AEMO_SPIKE_THRESHOLD: 3000.0},
             data={CONF_TESLA_ENERGY_SITE_ID: "site-1"},

@@ -109,4 +109,6 @@ def test_api_contract_is_schedule_aligned_and_additive():
     assert "== n_sched" in api_source
     assert 'api_response["plan_snapshot_id"] = plan_snapshot_id' in api_source
     assert 'data["forecast_evidence"]' in api_source
-    assert '"plan_snapshot_id": plan_snapshot_id' in api_source
+    # Stamped once every EV series is in the canonical snapshot (e3e10740).
+    assert '"plan_snapshot_id": None' in api_source
+    assert 'data["forecast_evidence"]["plan_snapshot_id"] = plan_snapshot_id' in api_source

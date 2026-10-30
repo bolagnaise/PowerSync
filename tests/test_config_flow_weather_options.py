@@ -2054,9 +2054,19 @@ def test_powerwall_smart_optimization_hides_spread_options():
     assert "is_tesla = battery_system == BATTERY_SYSTEM_TESLA" in initial_source
     assert "is_tesla = battery_system == BATTERY_SYSTEM_TESLA" in options_source
 
-    for method_source in (initial_source, options_source):
-        assert "False\n                    if is_tesla" in method_source
-        spread_block_start = method_source.index("if not is_tesla:")
+    # Options expose spread to Tesla only once local battery dispatch is
+    # paired (781bfbc3); initial setup has no paired gateway yet.
+    assert "False\n                    if is_tesla" in initial_source
+    assert (
+        "supports_spread = not is_tesla or local_battery_dispatch_configured("
+        in options_source
+    )
+    assert "False\n                    if not supports_spread" in options_source
+    for method_source, gate in (
+        (initial_source, "if not is_tesla:"),
+        (options_source, "if supports_spread:"),
+    ):
+        spread_block_start = method_source.index(gate)
         profit_block_start = method_source.index(
             "CONF_PROFIT_MAX_ENABLED",
             spread_block_start,

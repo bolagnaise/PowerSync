@@ -699,13 +699,22 @@ def test_tesla_force_charge_and_delayed_kick_honor_demand_race_guards():
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name)
         and node.func.id == "_tesla_force_apply_grid_charging"
-        and any(keyword.arg == "is_current" for keyword in node.keywords)
+        and any(keyword.arg == "is_allowed" for keyword in node.keywords)
     )
+    # Demand protection is its own write permission, separate from generation
+    # currency, and the helper must enforce it on the cloud and local paths.
     grid_guard = next(
         keyword.value
         for keyword in grid_apply.keywords
-        if keyword.arg == "is_current"
+        if keyword.arg == "is_allowed"
     )
+    apply_helper = next(
+        node for node in ast.walk(module)
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "_tesla_force_apply_grid_charging"
+    )
+    apply_source = ast.get_source_segment(_SOURCE, apply_helper)
+    assert "_grid_request_current() and (is_allowed is None or is_allowed())" in apply_source
+    assert "is_allowed=is_allowed" in apply_source
     assert isinstance(grid_guard, ast.Lambda)
     assert any(
         isinstance(node, ast.Call)

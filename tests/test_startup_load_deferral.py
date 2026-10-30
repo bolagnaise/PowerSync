@@ -264,7 +264,15 @@ def test_native_energy_coordinators_propagate_startup_telemetry_readiness():
         update_source = ast.get_source_segment(source, update)
         assert update_source is not None
         assert "telemetry_ready" in update_source, class_name
-        assert "if telemetry_ready:" in update_source, class_name
+        # Match the condition, not the line, so an added clause can't retire the guard.
+        assert any(
+            isinstance(node, ast.If)
+            and "telemetry_ready" in {
+                n.id for n in ast.walk(node.test) if isinstance(n, ast.Name)
+            }
+            and not isinstance(node.test, ast.UnaryOp)
+            for node in ast.walk(update)
+        ), class_name
 
 
 def test_fronius_native_readiness_requires_loaded_upstream_entry():

@@ -479,6 +479,8 @@ def test_named_zone_does_not_suppress_unpaired_ble_outside_both_mode():
     """A stale Fleet tracker cannot claim an unrelated BLE-only vehicle."""
     power_sync = _power_sync_module()
     vin = "5YJTEST0000000001"
+    # BLE power is only usable while fresh (ev_load.EV_POWER_MAX_AGE).
+    now = datetime.now(timezone.utc)
     hass = _tesla_hass([
         _State(
             "sensor.primary_ev_charger_power",
@@ -496,6 +498,7 @@ def test_named_zone_does_not_suppress_unpaired_ble_outside_both_mode():
             "sensor.remote_ble_charge_power",
             "3.0",
             {"unit_of_measurement": "kW"},
+            last_updated=now,
         ),
         _State("sensor.remote_ble_charge_level", "64"),
     ])
@@ -1001,13 +1004,16 @@ def test_both_provider_ble_bridge_coalesces_without_hiding_fleet_only_vehicle():
     assert vehicles[1]["ev_power_kw"] == 2.4
 
 
-def test_overlapping_ble_prefixes_keep_both_vehicle_observations():
+def test_overlapping_ble_prefixes_keep_both_vehicle_observations(monkeypatch):
     """A longer BLE prefix must not be hidden by a shorter substring prefix."""
     power_sync = _power_sync_module()
+    ev_load = importlib.import_module("power_sync.ev_load")
     tessy_vin = "5YJTEST0000000001"
     w3_vin = "5YJTEST0000000002"
     stale = datetime(2026, 8, 20, 3, 28, tzinfo=timezone.utc)
     fresh = stale + timedelta(seconds=30)
+    # Freshness is judged against ev_load's wall clock; pin it to the fixture.
+    monkeypatch.setattr(ev_load, "utc_now", lambda: fresh + timedelta(seconds=1))
     short_prefix = "teslable"
     long_prefix = "tesla_ble_second_car"
     states = [

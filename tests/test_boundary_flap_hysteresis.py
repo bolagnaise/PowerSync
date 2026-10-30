@@ -788,9 +788,15 @@ def test_brand_curtailment_handlers_use_hysteresis_not_raw_boundary():
     # in should_curtail_for_price (it has no separate export_uneconomic local).
     write_var_overrides = {"handle_ac_inverter_curtailment_only": "should_curtail_for_price"}
 
+    # Serialized handlers delegate their decision to a locked body.
+    locked_bodies = {"handle_goodwe_curtailment": "_handle_goodwe_curtailment_locked"}
+
     seen_keys = set()
     for name, key in handler_keys.items():
         source = _nested_function_source(name)
+        if name in locked_bodies:
+            assert f"await {locked_bodies[name]}(" in source, f"{name} no longer delegates"
+            source = _nested_function_source(locked_bodies[name])
         write_var = write_var_overrides.get(name, "export_uneconomic")
         assert "export_earnings < 1" not in source, f"{name} still has the raw boundary comparison"
         assert f'entry_data.get("{key}", False)' in source, f"{name} missing hysteresis read for {key}"

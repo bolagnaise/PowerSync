@@ -106,6 +106,8 @@ class _FakeHass:
         self.data = data or {}
         self.session = object()
         self.states = _FakeStates(states or [])
+        # The energy accumulator resolves the entry's plan for daily cost tracking.
+        self.config_entries = SimpleNamespace(async_get_entry=lambda _entry_id: None)
 
 
 class _FakeStates:

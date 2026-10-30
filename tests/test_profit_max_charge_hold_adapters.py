@@ -7,6 +7,8 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+from conftest import load_power_sync_submodule
+
 _PATH = (
     Path(__file__).resolve().parent.parent
     / "custom_components"
@@ -14,11 +16,8 @@ _PATH = (
     / "optimization"
     / "solar_export.py"
 )
-_SPEC = importlib.util.spec_from_file_location("solar_export_adapters", _PATH)
-assert _SPEC and _SPEC.loader
-_MODULE = importlib.util.module_from_spec(_SPEC)
-sys.modules[_SPEC.name] = _MODULE
-_SPEC.loader.exec_module(_MODULE)
+# Real package context: hold writes lazily import ``..licensing.guard``.
+_MODULE = load_power_sync_submodule("optimization.solar_export", "_power_sync_solar_export_adapters")
 resolve_solar_export_adapter = _MODULE.resolve_solar_export_adapter
 SolarExportHoldController = _MODULE.SolarExportHoldController
 

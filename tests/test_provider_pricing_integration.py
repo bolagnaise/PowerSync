@@ -9,6 +9,8 @@ import sys
 from types import SimpleNamespace
 import types
 
+from conftest import load_power_sync_submodule
+
 
 ROOT = Path(__file__).resolve().parent.parent
 COMPONENT_ROOT = ROOT / "custom_components" / "power_sync"
@@ -62,6 +64,7 @@ def _load_flow_power_cleanup(entity_registry, device_registry):
         ),
         "er": SimpleNamespace(async_get=lambda _hass: entity_registry),
         "dr": SimpleNamespace(async_get=lambda _hass: device_registry),
+        "iter_device_entries": load_power_sync_submodule("registry_compat").iter_device_entries,
     }
     module = ast.Module(body=[function], type_ignores=[])
     ast.fix_missing_locations(module)

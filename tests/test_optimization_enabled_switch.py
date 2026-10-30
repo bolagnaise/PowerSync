@@ -68,8 +68,10 @@ def test_spread_export_switch_is_registered_and_capability_gated():
     assert 'SWITCH_TYPE_OPTIMIZATION_SPREAD_IMPORT = "optimization_spread_import"' in const_source
     assert "TARGET_EXPORT_POWER_BATTERY_SYSTEMS = {" in const_source
     assert "TARGET_CHARGE_POWER_BATTERY_SYSTEMS = {" in const_source
-    assert "if battery_system in TARGET_EXPORT_POWER_BATTERY_SYSTEMS:" in switch_source
-    assert "if battery_system in TARGET_CHARGE_POWER_BATTERY_SYSTEMS:" in switch_source
+    # Tesla gains power-target switches once local battery dispatch is paired.
+    assert 'local_power_targets = battery_system == "tesla" and local_battery_dispatch_configured(' in switch_source
+    assert "if battery_system in TARGET_EXPORT_POWER_BATTERY_SYSTEMS or local_power_targets:" in switch_source
+    assert "if battery_system in TARGET_CHARGE_POWER_BATTERY_SYSTEMS or local_power_targets:" in switch_source
     assert "class SpreadExportSwitch(SwitchEntity):" in switch_source
     assert "class SpreadImportSwitch(SwitchEntity):" in switch_source
     assert "_attr_entity_category = EntityCategory.CONFIG" in switch_source
@@ -115,7 +117,9 @@ def test_spread_export_setting_is_exposed_through_api_and_coordinator():
     assert '"spread_import_enabled": opt_coordinator._config.spread_import_enabled' in init_source
     assert 'new_options[CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED] = bool(settings["spread_export_enabled"])' in init_source
     assert 'new_options[CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED] = bool(settings["spread_import_enabled"])' in init_source
-    assert '"spread_export_enabled": self._config.spread_export_enabled' in coordinator_source
+    # Reported as the effective value: config AND the energy coordinator's capability.
+    assert '"spread_export_enabled": self.spread_export_enabled' in coordinator_source
+    assert 'getattr(getattr(self, "energy_coordinator", None), "supports_spread_export", True)' in coordinator_source
     assert '"spread_import_enabled": self._config.spread_import_enabled' in coordinator_source
     assert "def set_spread_export_enabled(self, enabled: bool) -> bool:" in coordinator_source
     assert "def set_spread_import_enabled(self, enabled: bool) -> bool:" in coordinator_source
@@ -356,7 +360,7 @@ def test_max_grid_import_setting_is_exposed_through_api_and_coordinator():
     assert metadata_source.count('"section": "grid_site_constraints"') >= 2
     assert '"max_grid_charge_price": {' in metadata_source
     assert '"grid_charge_soc_cap": {' in metadata_source
-    assert '"settings_schema": optimizer_settings_schema()' in init_source
+    assert '"settings_schema": optimizer_settings_schema(local_power_control=local_power_control)' in init_source
     assert '"settings_schema": optimizer_settings_schema()' in coordinator_source
     assert "CONF_OPTIMIZATION_MAX_GRID_IMPORT_W" in init_source
     assert "CONF_OPTIMIZATION_MAX_GRID_EXPORT_W" in init_source
