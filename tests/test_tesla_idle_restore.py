@@ -23,13 +23,15 @@ def restore_probe():
     tree = ast.parse((component / "__init__.py").read_text())
     names = {
         "_iter_tariff_strings", "_is_powersync_force_tariff",
-        "_select_restorable_tesla_tariff", "handle_restore_normal",
+        "_select_restorable_tesla_tariff", "_track_tesla_settings_control",
+        "_local_powerwall_generation_current", "handle_restore_normal",
     }
     functions = [node for node in ast.walk(tree)
                  if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
                  and node.name in names]
+    functions.sort(key=lambda node: node.lineno)
     ns = {
-        "copy": copy, "_LOGGER": logging.getLogger(__name__),
+        "asyncio": asyncio, "copy": copy, "_LOGGER": logging.getLogger(__name__),
         "_FORCE_TARIFF_TEXT_MARKERS": ("force charge", "force discharge"),
         "_FORCE_TARIFF_CODE_PREFIXES": ("charge_", "discharge_"),
         "_MANAGER_OWN_TARIFF_CODES": ("aemo-spike", "octopus-saving-session"),
@@ -44,10 +46,6 @@ def restore_probe():
             for target in node.targets:
                 if isinstance(target, ast.Name):
                     ns[target.id] = value
-    module = ast.Module(body=[ast.ImportFrom(
-        module="__future__", names=[ast.alias(name="annotations")], level=0,
-    ), *functions], type_ignores=[])
-    exec(compile(ast.fix_missing_locations(module), "<tesla-restore>", "exec"), ns)
     cached = {"code": "POWER_SYNC:OCTOPUS", "name": "Octopus Energy (PowerSync)"}
     custom = {"code": "EDF_CUSTOM", "name": "EDF Custom"}
     entry = NS(entry_id="test", data={"battery_system": "tesla"},
@@ -66,8 +64,9 @@ def restore_probe():
     async def no_local_dispatch():
         return False
 
+    hass = NS(data={"power_sync": {"test": {"tesla_coordinator": True}}})
     ns.update(
-        entry=entry, hass=NS(data={"power_sync": {"test": {"tesla_coordinator": True}}}),
+        entry=entry, hass=hass,
         force_charge_state={"active": False}, force_discharge_state={"active": False},
         hold_soc_state={"active": False}, self_consumption_state={"active": False},
         _command_generation=[0], _tesla_reserve_generation=[0],
@@ -86,7 +85,15 @@ def restore_probe():
         send_tariff_to_tesla=sender,
         _tesla_force_apply_operation_mode=confirmed_mode,
         _tesla_force_result_all_confirmed=lambda *args: True,
+        persist_force_mode_state=confirmed_mode,
+        _local_powerwall_runtime=hass.data["power_sync"]["test"],
+        active_battery_system=ns["BATTERY_SYSTEM_TESLA"],
     )
+    # The real decorator binds hass/entry at decoration time, so exec after seeding.
+    module = ast.Module(body=[ast.ImportFrom(
+        module="__future__", names=[ast.alias(name="annotations")], level=0,
+    ), *functions], type_ignores=[])
+    exec(compile(ast.fix_missing_locations(module), "<tesla-restore>", "exec"), ns)
 
     def run(**data):
         call = NS(data={"source": "user", **data}, context=NS(user_id=None, parent_id=None))

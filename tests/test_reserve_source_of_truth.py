@@ -31,6 +31,7 @@ callers that don't expose ``read_backup_reserve`` at all):
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import sys
 import textwrap
@@ -728,6 +729,7 @@ def test_persist_optimizer_reserve_settings_changed_sets_skip_reload(opt_module)
 
 
 def _handle_set_backup_reserve_persist_source() -> str:
+    """Return handle_set_backup_reserve's persistence tail, located by AST."""
     init_path = (
         Path(__file__).resolve().parent.parent
         / "custom_components"
@@ -735,11 +737,16 @@ def _handle_set_backup_reserve_persist_source() -> str:
         / "__init__.py"
     )
     source = init_path.read_text()
+    handler = next(
+        node for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "handle_set_backup_reserve"
+    )
     marker = source.index("# Persist the user's chosen backup reserve")
-    start = source.rfind("\n", 0, marker) + 1
-    next_handler = source.index("async def handle_set_operation_mode", marker)
-    end = source.rfind("\n", 0, next_handler) + 1
-    return source[start:end]
+    marker_line = source.count("\n", 0, marker) + 1
+    assert handler.lineno < marker_line < handler.end_lineno
+    first = next(stmt for stmt in handler.body if stmt.lineno > marker_line)
+    lines = source.splitlines(keepends=True)
+    return "".join(lines[first.lineno - 1:handler.end_lineno])
 
 
 def _run_persist_backup_reserve(*, hass, entry, percent, call, response=None):

@@ -12,8 +12,10 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 import aiohttp
-import jwt
 import pytest
+
+# PyJWT ships with Home Assistant core; skip cleanly in bare test envs without it.
+jwt = pytest.importorskip("jwt")
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "custom_components/power_sync/optimization/chatgpt_auth.py"

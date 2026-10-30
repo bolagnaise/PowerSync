@@ -305,7 +305,7 @@ def test_restore_retry_waits_out_its_site_cooldown(limited_site, expected_delay)
         "restore_was_force_charging": True,
         "force_charge_state": {"active": True},
         "force_discharge_state": {"active": False},
-        "_command_generation": [7],
+        "_command_generation": [7], "_restore_generation": 7,
         "site_configs": [("site-a", "token", "teslemetry")],
         "entry": SimpleNamespace(data={}),
         "CONF_FLEET_API_BASE_URL": "fleet_base_url",

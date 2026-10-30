@@ -137,16 +137,19 @@ async def _run_cloud(
     async def _notify_api_error(_hass, title: str, _message: str) -> None:
         notifications.append(title)
 
-    hass = SimpleNamespace()
+    hass = SimpleNamespace(data={"power_sync": {"entry-1": {}}})
     tasks = []
 
     def _create_task(coro):
         tasks.append(asyncio.create_task(coro))
 
     hass.async_create_task = _create_task
-    entry = SimpleNamespace(data={})
+    entry = SimpleNamespace(data={}, entry_id="entry-1")
     namespace = {
         "CONF_FLEET_API_BASE_URL": "fleet_api_base_url",
+        "DOMAIN": "power_sync",
+        # handle_set_operation_mode's generation guard; this request stays current.
+        "current": lambda: True,
         "_LOGGER": _Logger(),
         "_get_tesla_site_configs": lambda *_args: [
             ("site-1", "token", "fleet")
@@ -157,6 +160,7 @@ async def _run_cloud(
         "asyncio": SimpleNamespace(
             sleep=_sleep,
             TimeoutError=asyncio.TimeoutError,
+            CancelledError=asyncio.CancelledError,
         ),
         "entry": entry,
         "get_tesla_api_base_url": lambda *_args: "https://fleet.example",

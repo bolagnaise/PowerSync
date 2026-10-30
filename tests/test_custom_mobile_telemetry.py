@@ -30,7 +30,7 @@ class _DataUpdateCoordinator:
 
 
 class _EnergyAccumulator:
-    def __init__(self, _hass: Any, _store_key: str) -> None:
+    def __init__(self, _hass: Any, _store_key: str, _entry_id: str = "") -> None:
         self._last_update = None
         self.updated_with: tuple[Any, ...] | None = None
 

@@ -11,6 +11,8 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any, Dict, Optional
 
+from conftest import real_tesla_ble_helpers
+
 
 ROOT = Path(__file__).resolve().parent.parent
 AUTOMATIONS_PATH = ROOT / "custom_components" / "power_sync" / "automations" / "__init__.py"
@@ -21,28 +23,8 @@ def _load_engine_method(name: str, namespace: dict[str, Any]):
     namespace.setdefault("DOMAIN", "power_sync")
     namespace.setdefault("CONF_ZAPTEC_STANDALONE_ENABLED", "zaptec_standalone_enabled")
     namespace.setdefault("CONF_ZAPTEC_USERNAME", "zaptec_username")
-    namespace.setdefault(
-        "get_tesla_ble_charge_power_state",
-        lambda hass, prefix: next(
-            (
-                hass.states.get(f"sensor.{prefix}{suffix}")
-                for suffix in ("_charge_power", "_charger_power")
-                if hass.states.get(f"sensor.{prefix}{suffix}") is not None
-            ),
-            None,
-        ),
-    )
-    namespace.setdefault(
-        "get_tesla_ble_charge_current_state",
-        lambda hass, prefix: next(
-            (
-                hass.states.get(f"sensor.{prefix}{suffix}")
-                for suffix in ("_charge_current", "_charger_current")
-                if hass.states.get(f"sensor.{prefix}{suffix}") is not None
-            ),
-            None,
-        ),
-    )
+    for helper_name, helper in real_tesla_ble_helpers().items():
+        namespace.setdefault(helper_name, helper)
     namespace.setdefault(
         "is_current_ev_power_observation",
         lambda observed_at: observed_at is not None,
@@ -623,7 +605,7 @@ def test_automation_ev_state_prefers_fresh_power_only_second_ble_vehicle():
                     entity_id="sensor.tesla_yf88_charger_power",
                     state="7.2",
                     attributes={"unit_of_measurement": "kW"},
-                    last_updated=object(),
+                    last_updated=datetime.now(timezone.utc),
                 ),
                 "binary_sensor.tesla_yf88_ble_status": SimpleNamespace(
                     entity_id="binary_sensor.tesla_yf88_ble_status",
@@ -723,7 +705,7 @@ def test_automation_ev_state_prefers_fresh_current_only_second_ble_vehicle():
                 "sensor.tesla_yf88_charge_current": SimpleNamespace(
                     entity_id="sensor.tesla_yf88_charge_current",
                     state="16",
-                    last_updated=object(),
+                    last_updated=datetime.now(timezone.utc),
                 ),
                 "binary_sensor.tesla_yf88_ble_status": SimpleNamespace(
                     entity_id="binary_sensor.tesla_yf88_ble_status",

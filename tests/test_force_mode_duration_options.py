@@ -12,6 +12,8 @@ from typing import Any
 
 import pytest
 
+from conftest import load_power_sync_function
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -123,6 +125,7 @@ def _service_runtime():
         "async_dispatcher_send": lambda *args: events.append(("status", args[-1])),
         "async_track_point_in_utc_time": timer, "SERVICE_RESTORE_NORMAL": "restore_normal",
     })
+    load_power_sync_function("_track_tesla_settings_control", namespace)
     exec(compile(ast.fix_missing_locations(ast.Module(body=[handler], type_ignores=[])), str(path), "exec"), namespace)
     return namespace, now, events, timers, snapshots
 

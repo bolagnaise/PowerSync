@@ -32,6 +32,7 @@ import asyncio
 import textwrap
 from pathlib import Path
 
+from conftest import load_power_sync_function
 
 ROOT = Path(__file__).resolve().parent.parent
 INIT_PATH = ROOT / "custom_components" / "power_sync" / "__init__.py"
@@ -51,19 +52,23 @@ def _function_source(name: str) -> str:
 
 
 def _grid_export_post_write_branch() -> str:
-    """Isolate the 'if success:' branch of handle_set_grid_export (everything
-    that runs after the Tesla write already succeeded) and wrap it as a
-    standalone async function taking its free variables as args."""
+    """Isolate everything in handle_set_grid_export's Tesla try-block that
+    runs after the export write was accepted, and wrap it as a standalone
+    async function taking its free variables as args."""
     handler = _function_source("handle_set_grid_export")
-    start = handler.index("if success:", handler.index("dispatch_powerwall_write("))
-    end = handler.index("except Exception as e:")
-    branch = handler[start:end]
+    node = ast.parse(textwrap.dedent(handler)).body[0]
+    block = next(stmt for stmt in node.body if isinstance(stmt, ast.Try))
+    accepted = next(
+        i for i, stmt in enumerate(block.body)
+        if isinstance(stmt, ast.If) and ast.unparse(stmt.test) == "not success"
+    )
+    branch = "\n".join(ast.unparse(stmt) for stmt in block.body[accepted + 1:])
     wrapped = (
         "async def _post_write(hass, entry, DOMAIN, rule, update_cached_export_rule,\n"
         "                       refresh_powerwall_local_after_settings_write,\n"
         "                       CONF_BATTERY_CURTAILMENT_ENABLED, _LOGGER):\n"
         "    success = True\n"
-    ) + textwrap.indent(textwrap.dedent(branch), "    ")
+    ) + textwrap.indent(branch, "    ")
     return wrapped
 
 
@@ -125,7 +130,9 @@ def _make_hass_entry(entry_id="entry1", extra_entry_data=None):
 
 
 def _exec_grid_export_branch():
-    namespace: dict = {}
+    # The Tesla write generation stays current for the whole publication.
+    namespace: dict = {"asyncio": asyncio, "current": lambda: True}
+    load_power_sync_function("_update_powerwall_store", namespace)
     exec(compile(_grid_export_post_write_branch(), "<grid_export_branch>", "exec"), namespace)
     return namespace["_post_write"]
 
@@ -143,7 +150,7 @@ def test_pw9_override_flags_survive_store_exception():
     post_write = _exec_grid_export_branch()
     hass, entry, DOMAIN, entry_data = _make_hass_entry()
 
-    async def _raising_update_cached_export_rule(new_rule):
+    async def _raising_update_cached_export_rule(new_rule, **_kwargs):
         raise RuntimeError("simulated storage failure")
 
     async def _refresh(label):
@@ -179,11 +186,12 @@ def test_pw10_override_flag_visible_before_store_await():
 
     observed = {}
 
-    async def _observing_update_cached_export_rule(new_rule):
+    async def _observing_update_cached_export_rule(new_rule, **_kwargs):
         # Simulate a concurrent curtailment-cycle read landing here, in the
         # middle of the await chain.
         observed["manual_export_override"] = entry_data.get("manual_export_override", False)
         entry_data["cached_export_rule"] = new_rule
+        return True
 
     async def _refresh(label):
         pass

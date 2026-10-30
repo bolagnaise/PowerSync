@@ -110,3 +110,65 @@ def complete_ha_storage_stub(monkeypatch):
 
     monkeypatch.setattr(store_type, "async_load", load, raising=False)
     monkeypatch.setattr(store_type, "async_save", save, raising=False)
+
+
+def load_power_sync_function(name, namespace, path=None):
+    """Exec one real ``__init__.py`` function (by AST) into ``namespace``."""
+    import ast
+    import pathlib
+
+    path = path or pathlib.Path(__file__).resolve().parents[1] / "custom_components/power_sync/__init__.py"
+    source = path.read_text()
+    node = next(n for n in ast.walk(ast.parse(source))
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == name)
+    module = ast.Module(body=[node], type_ignores=[])
+    exec(compile(ast.fix_missing_locations(module), str(path), "exec",
+                 flags=__import__("__future__").annotations.compiler_flag), namespace)
+    return namespace[name]
+
+
+def seed_powerwall_store_closures(namespace, *, hass, entry, domain="power_sync"):
+    """Seed the setup-scope names Powerwall persistence closures resolve at call time.
+
+    Since v2.12.15xx Tesla store writes go through ``_update_powerwall_store``
+    guarded by ``_command_generation`` and ``_local_powerwall_generation_current``.
+    Missing names are swallowed by handler ``except Exception`` blocks, so seed
+    the real helpers rather than letting a probe silently no-op.
+    """
+    import asyncio
+
+    namespace.setdefault("asyncio", asyncio)
+    namespace.setdefault("DOMAIN", domain)
+    namespace.setdefault("_command_generation", [0])
+    namespace.setdefault("_tesla_reserve_generation", [0])
+    namespace.setdefault("_local_powerwall_runtime", hass.data.get(domain, {}).get(entry.entry_id))
+    if "_update_powerwall_store" not in namespace:
+        load_power_sync_function("_update_powerwall_store", namespace)
+    if "_local_powerwall_generation_current" not in namespace:
+        load_power_sync_function("_local_powerwall_generation_current", namespace)
+    return namespace
+
+
+def real_tesla_ble_helpers():
+    """Return the real ``tesla_ble`` helpers, bound to the real ``const`` values.
+
+    ``tesla_ble.py`` only needs stdlib plus literal ``TESLA_BLE_*`` constants,
+    so exec-namespace tests should seed these instead of hand-written stubs.
+    """
+    import ast
+    import pathlib
+
+    component = pathlib.Path(__file__).resolve().parents[1] / "custom_components/power_sync"
+    namespace = {}
+    for node in ast.parse((component / "const.py").read_text()).body:
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id.startswith("TESLA_BLE_")):
+            namespace[node.targets[0].id] = ast.literal_eval(node.value)
+    path = component / "tesla_ble.py"
+    tree = ast.parse(path.read_text())
+    tree.body = [node for node in tree.body
+                 if not (isinstance(node, ast.ImportFrom) and node.level)]
+    exec(compile(tree, str(path), "exec"), namespace)
+    return {node.name: namespace[node.name] for node in tree.body
+            if isinstance(node, ast.FunctionDef)}

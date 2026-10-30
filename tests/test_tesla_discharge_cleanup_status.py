@@ -13,6 +13,8 @@ from types import SimpleNamespace as NS
 
 import pytest
 
+from conftest import seed_powerwall_store_closures
+
 ROOT = Path(__file__).resolve().parents[1] / "custom_components/power_sync"
 
 
@@ -72,6 +74,7 @@ def test_failed_tariff_cleanup_reports_pending_restore(restore_raises, monkeypat
             raise RuntimeError("provider unavailable")
 
     namespace = dict(force_discharge_state=state, source="optimizer", call=NS(context=None),
+                     _restore_gen=0,
                      hass=NS(data={}, services=NS(async_call=restore)),
                      entry=NS(entry_id="entry"), DOMAIN="power_sync",
                      SERVICE_RESTORE_NORMAL="restore_normal", dt_util=NS(utcnow=lambda: now),
@@ -80,6 +83,7 @@ def test_failed_tariff_cleanup_reports_pending_restore(restore_raises, monkeypat
                      _tesla_force_retry_expiry=lambda _state, expiry, **_kw: expiry,
                      async_dispatcher_send=lambda *args: events.append(args),
                      _LOGGER=logging.getLogger(__name__))
+    seed_powerwall_store_closures(namespace, hass=namespace["hass"], entry=namespace["entry"])
     compile_nodes([function("__init__.py", "_cleanup_failed_tesla_force_discharge")], namespace)
     asyncio.run(namespace["_cleanup_failed_tesla_force_discharge"]("tariff upload failed"))
     assert state["active"] is True  # Required ownership for safe restore retries.
@@ -124,6 +128,7 @@ def test_cleanup_status_survives_storage_and_reload():
                      datetime=datetime, hass=NS(data={}), DOMAIN="power_sync",
                      entry=NS(entry_id="entry"), tesla_grid_charging_preferences={},
                      _LOGGER=logging.getLogger(__name__))
+    seed_powerwall_store_closures(namespace, hass=namespace["hass"], entry=namespace["entry"])
     node = function("__init__.py", "persist_force_mode_state")
     compile_nodes([node], namespace)
     asyncio.run(namespace[node.name]())
@@ -156,10 +161,21 @@ def test_cleanup_status_clears_only_after_verified_restore(restore_failed):
     async def persist(*_args, **_kwargs):
         pass
 
-    namespace = dict(force_discharge_state=state, tesla_restore_failed=restore_failed,
+    async def load():
+        return {}
+
+    async def save(_value):
+        pass
+
+    namespace = dict(force_discharge_state=state, force_charge_state={"active": False},
+                     tesla_restore_failed=restore_failed,
                      confirm_restore=True, skip_backup_reserve_restore=False,
                      persist_pending_tesla_restore=persist, persist_force_mode_state=persist,
-                     _schedule_tesla_restore_retry=lambda _reason: True)
+                     _schedule_tesla_restore_retry=lambda _reason: True,
+                     store=NS(async_load=load, async_save=save), _restore_generation=0,
+                     _restore_current=lambda: True, _restore_superseded=lambda _stage: False,
+                     hass=NS(data={"power_sync": {"entry": {}}}), entry=NS(entry_id="entry"))
+    seed_powerwall_store_closures(namespace, hass=namespace["hass"], entry=namespace["entry"])
     compile_nodes([node], namespace)
     asyncio.run(namespace["finish"]())
     assert state["active"] is restore_failed

@@ -26,6 +26,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
+from conftest import seed_powerwall_store_closures
+
 
 ROOT = Path(__file__).resolve().parent.parent
 INIT_PATH = ROOT / "custom_components" / "power_sync" / "__init__.py"
@@ -69,7 +73,7 @@ def test_persist_force_mode_state_has_hold_soc_branch_with_expires_at():
     # longer falls through to state_to_save staying None (which would
     # clobber any persisted state with None).
     hold_branch_index = source.index('elif hold_soc_state["active"]:')
-    write_index = source.index('stored_data["force_mode_state"] = state_to_save')
+    write_index = source.index('{"force_mode_state": state_to_save,')
     assert hold_branch_index < write_index
 
 
@@ -102,7 +106,10 @@ def test_persist_force_mode_state_hold_soc_round_trip_writes_expected_blob():
             "saved_backup_reserve": 15,
             "brand": "tesla",
         },
+        "hass": SimpleNamespace(data={"power_sync": {"entry-1": {}}}),
+        "entry": SimpleNamespace(entry_id="entry-1"),
     }
+    seed_powerwall_store_closures(namespace, hass=namespace["hass"], entry=namespace["entry"])
     exec(source, namespace)
     asyncio.run(namespace["persist_force_mode_state"]())
 
@@ -147,7 +154,10 @@ def test_restore_force_mode_from_persistence_handles_hold_soc_mode():
     assert "if now >= expires_at:" in hold_section
     assert '{"source": "hold_soc_cleanup", "_force_restore": True}' in hold_section
     assert 'if not hold_soc_state.get("active"):' in hold_section
-    assert 'stored_data["force_mode_state"] = None' in hold_section
+    # Tesla's verified restore clears the journal itself (with the pending
+    # marker); other brands clear it here once the hold is released.
+    assert "if active_battery_system != BATTERY_SYSTEM_TESLA:" in hold_section
+    assert "_update_powerwall_store(store, {'force_mode_state': None})" in hold_section
 
     # Must return before falling into the charge/discharge-only logic below
     # (which assumes mode is "charge" or "discharge" and would misroute a
@@ -228,7 +238,8 @@ def test_restore_force_mode_from_persistence_hold_soc_future_expiry_rearms_timer
     assert payload["locked_soc"] == 55.0
 
 
-def test_restore_force_mode_from_persistence_hold_soc_expired_restores_normal():
+@pytest.mark.parametrize("battery_system", ["tesla", "sigenergy"])
+def test_restore_force_mode_from_persistence_hold_soc_expired_restores_normal(battery_system):
     """Behavioral: an expired persisted hold calls restore_normal(source=user)
     and clears the persisted blob, without reimplementing brand-specific
     restore logic (that's handle_restore_normal's job)."""
@@ -269,8 +280,9 @@ def test_restore_force_mode_from_persistence_hold_soc_expired_restores_normal():
     fake_store = _FakeStore()
 
     namespace = {
-        "active_battery_system": "tesla",
+        "active_battery_system": battery_system,
         "BATTERY_SYSTEM_SOLAREDGE": "solaredge",
+        "BATTERY_SYSTEM_TESLA": "tesla",
         "persisted_force_state": {
             "mode": "hold_soc",
             "expires_at": expires_at.isoformat(),
@@ -300,6 +312,7 @@ def test_restore_force_mode_from_persistence_hold_soc_expired_restores_normal():
             error=lambda msg, *a, **k: errors.append(msg),
         ),
     }
+    seed_powerwall_store_closures(namespace, hass=namespace["hass"], entry=namespace["entry"])
     exec(source, namespace)
     asyncio.run(namespace["restore_force_mode_from_persistence"]())
 
@@ -316,7 +329,10 @@ def test_restore_force_mode_from_persistence_hold_soc_expired_restores_normal():
     assert service == "restore_normal"
     assert data == {"source": "hold_soc_cleanup", "_force_restore": True}
 
-    assert fake_store.saved == {"force_mode_state": None}
+    # Tesla's handle_restore_normal clears the journal atomically with the
+    # pending-restore marker once verified; other brands clear it here.
+    expected = None if battery_system == "tesla" else {"force_mode_state": None}
+    assert fake_store.saved == expected
 
 
 # ---------------------------------------------------------------------------

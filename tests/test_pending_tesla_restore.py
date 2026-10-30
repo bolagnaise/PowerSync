@@ -26,6 +26,8 @@ from types import SimpleNamespace
 import logging
 import pytest
 
+from conftest import seed_powerwall_store_closures
+
 
 ROOT = Path(__file__).resolve().parent.parent
 INIT_PATH = ROOT / "custom_components" / "power_sync" / "__init__.py"
@@ -76,6 +78,7 @@ def _build_persist_helper(store: _Store, entry_data: dict):
             debug=lambda *a, **k: None,
         ),
     }
+    seed_powerwall_store_closures(namespace, hass=namespace["hass"], entry=namespace["entry"])
     exec(textwrap.dedent(_function_source("persist_pending_tesla_restore")), namespace)
     return namespace["persist_pending_tesla_restore"]
 
@@ -140,18 +143,19 @@ def test_completed_restore_clears_the_marker():
 
     # The Tesla success line carries no brand prefix, unlike the per-brand
     # paths above it (Sigenergy, FoxESS, ...) which never set this marker.
+    # The clear is one generation-guarded store write with force_mode_state.
     tesla_success = '_LOGGER.info("NORMAL OPERATION RESTORED")'
-    assert "await persist_pending_tesla_restore(None)" in source
-    assert source.index("await persist_pending_tesla_restore(None)") < source.index(
-        tesla_success
-    )
+    clear = '{"force_mode_state": None, "pending_tesla_restore": None}'
+    assert clear in source
+    assert source.index(clear) < source.index(tesla_success)
 
 
 def test_only_the_tesla_path_owns_the_marker():
     """Per-brand restores never set the marker, so they must not clear it."""
     source = _function_source("handle_restore_normal")
 
-    assert source.count("persist_pending_tesla_restore") == 2  # one set, one clear
+    assert source.count("persist_pending_tesla_restore") == 1  # the set
+    assert source.count('"pending_tesla_restore": None') == 1  # the clear
 
 
 def test_startup_finishes_an_unfinished_restore_without_force_state():
@@ -190,11 +194,11 @@ def test_dynamic_restore_retains_cleanup_until_tariff_upload_verifies(verified):
     # successful readbacks in this fixture and cannot hide a failed tariff.
     terminal = next(n for n in ast.walk(handler) if isinstance(n, ast.Try)
                     and failure in n.body)
+    # Success clears the marker with force_mode_state in one guarded store
+    # write, then releases the in-memory force state.
     end = next(i for i, n in enumerate(terminal.body)
-               if isinstance(n, ast.Expr) and isinstance(n.value, ast.Await)
-               and isinstance(n.value.value, ast.Call)
-               and isinstance(n.value.value.func, ast.Name)
-               and n.value.value.func.id == "persist_pending_tesla_restore")
+               if isinstance(n, ast.Assign)
+               and ast.unparse(n.targets[0]) == "force_discharge_state['active']")
     body = [dynamic] + terminal.body[terminal.body.index(failure):end + 1]
     node = ast.AsyncFunctionDef(name="run", args=ast.arguments(
         posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]),
@@ -214,7 +218,9 @@ def test_dynamic_restore_retains_cleanup_until_tariff_upload_verifies(verified):
         _restore_superseded=lambda _: False, _LOGGER=logging.getLogger(__name__),
         persist_pending_tesla_restore=_build_persist_helper(store, data),
         _schedule_tesla_restore_retry=lambda reason: retries.append(reason) or True,
+        store=store, _restore_generation=0, _restore_current=lambda: True,
     )
+    seed_powerwall_store_closures(env, hass=env["hass"], entry=env["entry"])
     async def sync(**kwargs):
         return verified
     async def service(*args, **kwargs):
@@ -329,28 +335,31 @@ def test_only_current_verified_completion_releases_restart_gate(superseded):
     terminal = next(n for n in ast.walk(handler) if isinstance(n, ast.Try)
                     and any(isinstance(s, ast.If) and isinstance(s.test, ast.Name)
                             and s.test.id == "tesla_restore_failed" for s in n.body))
+    # Completion = the guarded store clear through the restart-gate release.
     start = next(i for i, n in enumerate(terminal.body)
-                 if isinstance(n, ast.Expr) and isinstance(n.value, ast.Await)
-                 and isinstance(n.value.value, ast.Call)
-                 and isinstance(n.value.value.func, ast.Name)
-                 and n.value.value.func.id == "persist_pending_tesla_restore")
+                 if isinstance(n, ast.If) and "_update_powerwall_store" in ast.unparse(n.test)
+                 and "'pending_tesla_restore': None" in ast.unparse(n.test))
     end = next(i for i, n in enumerate(terminal.body[start:], start)
-               if isinstance(n, ast.Expr) and isinstance(n.value, ast.Call)
-               and isinstance(n.value.func, ast.Attribute) and n.value.func.attr == "info")
+               if isinstance(n, ast.Assign) and ast.unparse(n.targets[0]) == "signature")
     node = ast.AsyncFunctionDef(name="run", args=ast.arguments(
         posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]),
         body=terminal.body[start:end], decorator_list=[])
     generation = [1]
-    persist = _build_persist_helper(_Store(), data)
-    async def persist_during_handoff(marker):
-        await persist(marker)
+    store = _Store()
+    save = store.async_save
+    async def save_during_handoff(value):
+        await save(value)
         await asyncio.sleep(0)
         if superseded:
             generation[0] += 1  # New force command while storage yielded.
+    store.async_save = save_during_handoff
     env = dict(hass=SimpleNamespace(data={"power_sync": {"entry-1": data}}),
                entry=SimpleNamespace(entry_id="entry-1"), DOMAIN="power_sync",
-               _restore_superseded=lambda _: generation[0] != 1,
-               persist_pending_tesla_restore=persist_during_handoff)
+               store=store, _restore_current=lambda: True,
+               force_discharge_state={"active": True}, force_charge_state={"active": False},
+               restore_was_hold_soc=False, _clear_hold_soc_state=lambda: None,
+               _restore_superseded=lambda _: generation[0] != 1)
+    seed_powerwall_store_closures(env, hass=env["hass"], entry=env["entry"])
     exec(compile(ast.fix_missing_locations(ast.Module(body=[node], type_ignores=[])),
                  "<verified-restore-completion>", "exec"), env)
     asyncio.run(env["run"]())
@@ -407,7 +416,7 @@ def test_pending_only_restore_retry_runs_without_force_state():
             "pending_tesla_restore": {"reason": "interrupted restore"},
         }}}, services=SimpleNamespace(async_call=service)),
         entry=SimpleNamespace(entry_id="entry-1"), DOMAIN="power_sync",
-        _command_generation=[2], skip_backup_reserve_restore=False,
+        _command_generation=[2], _restore_generation=2, skip_backup_reserve_restore=False,
         SERVICE_RESTORE_NORMAL="restore_normal", call=None,
         dt_util=SimpleNamespace(utcnow=lambda: datetime(2026, 10, 21, tzinfo=timezone.utc)),
         timedelta=timedelta, async_track_point_in_utc_time=track,

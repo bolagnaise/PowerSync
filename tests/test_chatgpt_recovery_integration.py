@@ -8,6 +8,9 @@ import time
 from urllib.parse import parse_qs, urlsplit
 
 import aiohttp
+import pytest
+
+pytest.importorskip("jwt")  # via test_chatgpt_auth; PyJWT ships with HA core
 
 from test_chatgpt_auth import Response, Session, Store, callback, token
 from test_chatgpt_frontend import _run_component_runtime
