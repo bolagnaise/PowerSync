@@ -9,13 +9,13 @@
   },
   "source_state": {
     "components": {
-      "config_flow.py": "fbb322862bdfd8658f37f58b99ee33c48d508bb0a9770c9f563c2e339dc35aba",
-      "const.py": "a44efbf072bdc0f656110798e45dc3d8371950d855cca7c708a0f9410d855061",
+      "config_flow.py": "06fceec0b8bb61770f6364e87d9a4ba8c1a0a64c613524767559f42be27ebac6",
+      "const.py": "315e28a7838b93339b7c8b8916f5497496994809f582edaa5b82483b69839756",
       "battery_backend/profiles.py": "d308ecc78740d8dfc9cd895e4b9750a02859d46e5f0863dd5c098b8aaab2bcc2",
       "battery_backend/discovery.py": "3a8c88c00d6c57f6101d55056968524d7971d1ac3b8e16365923bca978f9489b",
       "settings_metadata.py": "deea4c452dd3cd334d5e1b9348e0ead03891542128c4061c368ad6e1c012ffd9",
-      "strings.json": "9215521ca0bf3557bacee7b44f4938e306a3e9dd7a980930ff6e02043110aa34",
-      "translations/en.json": "36febd55aa3a5b4f0db2ed3fa292ed485800c1bc2d63a82e393bf9099c18907a",
+      "strings.json": "38872fc9911f2a7509390ba74451cedb0888bca395e07dbff2e25cc2cd514a83",
+      "translations/en.json": "7d0abb85bbca48003b4b6ab29aa6ef1552c85dd2b2dd2fc13ac21a7479320e03",
       "services.yaml": "298832ff55a41519a5b94e51b7d4c2627dd872d2dc4684faadfe841767a91ab5",
       "switch.py": "878970c76ede8803ed9802eaf5bf95c4a483c5c58497010a6cf21a1e74f3be7b",
       "select.py": "831a437aaf549b9a4b83d6dcccd67f9aff89853da2477c1fbda914d5cbf14b9e",
@@ -919,6 +919,7 @@
       "options.optimization.neovolt_surplus_balancer_mode": "Independent stack surplus balancing",
       "options.optimization.optimization_ai_summary_api_key": "Provider API key",
       "options.optimization.optimization_ai_summary_auto_refresh": "Automatically refresh explanations",
+      "options.optimization.optimization_ai_summary_auto_refresh_interval": "Minimum automatic explanation interval (minutes)",
       "options.optimization.optimization_ai_summary_clear_api_key": "Clear saved provider key",
       "options.optimization.optimization_ai_summary_local_endpoint": "Local OpenAI-compatible URL",
       "options.optimization.optimization_ai_summary_local_model": "Local model identifier",
@@ -5846,6 +5847,16 @@
       "label": "Automatically refresh explanations",
       "page": "Optimization-Settings.md",
       "source_line": 13102,
+      "group": "AI Plan Explanation",
+      "rendering": "conditional union; see page availability notes"
+    },
+    {
+      "scope": "options",
+      "form": "optimization",
+      "field": "optimization_ai_summary_auto_refresh_interval",
+      "label": "Minimum automatic explanation interval (minutes)",
+      "page": "Smart-Optimization.md",
+      "source_line": 13262,
       "group": "AI Plan Explanation",
       "rendering": "conditional union; see page availability notes"
     },
@@ -12878,6 +12889,10 @@
     },
     "options.inverter_config.solaredge_ac_power_entities": {
       "page": "SolarEdge-AC-Telemetry",
+      "status": "documented"
+    },
+    "options.optimization.optimization_ai_summary_auto_refresh_interval": {
+      "page": "Smart-Optimization",
       "status": "documented"
     }
   }
