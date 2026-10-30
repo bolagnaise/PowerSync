@@ -1942,7 +1942,8 @@
               "optimization_ai_summary_local_timeout": "Local AI timeout (seconds)",
               "optimization_ai_summary_openrouter_model": "OpenRouter model identifier",
               "optimization_ai_summary_openai_model": "OpenAI / ChatGPT model identifier",
-              "optimization_ai_summary_auto_refresh": "Automatically refresh explanations"
+              "optimization_ai_summary_auto_refresh": "Automatically refresh explanations",
+              "optimization_ai_summary_auto_refresh_interval": "Minimum automatic explanation interval (minutes)"
             },
             "data_description": {
               "optimization_ai_summary_provider": "Choose ChatGPT subscription login, OpenAI with an API key, Gemini, Grok, OpenRouter, or a local OpenAI-compatible server. Sign in to ChatGPT from the dashboard AI explanation card. OpenRouter shares context with the selected upstream model provider. Changing providers without a replacement key clears the previous provider's key.",
@@ -1953,7 +1954,8 @@
               "optimization_ai_summary_local_timeout": "Wait 30–600 seconds for a local AI explanation. Default: 120 seconds, shared across compatibility attempts.",
               "optimization_ai_summary_openrouter_model": "For OpenRouter, enter the required model identifier. The selected model and its upstream provider receive the compact verified plan context.",
               "optimization_ai_summary_openai_model": "For OpenAI or ChatGPT, choose a model available to your API account or subscription. The default is gpt-6.1-sol.",
-              "optimization_ai_summary_auto_refresh": "Off by default. When enabled, PowerSync may generate after a materially changed committed plan, with debounce and cooldown. It runs in the background and can use local CPU/GPU, memory, power, and network resources."
+              "optimization_ai_summary_auto_refresh": "Off by default. When enabled, PowerSync may generate after a materially changed committed plan, with debounce and cooldown. It runs in the background and can use local CPU/GPU, memory, power, and network resources.",
+              "optimization_ai_summary_auto_refresh_interval": "Wait at least this many minutes between automatic explanation requests (5–1440; default 5). Choose 30 to reduce requests from five-minute price updates. The newest changed plan is explained when the interval ends. Manual refresh remains immediate; restarting Home Assistant resets the interval timer."
             }
           }
         },

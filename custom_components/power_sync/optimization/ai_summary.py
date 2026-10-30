@@ -26,6 +26,7 @@ import aiohttp
 from ..const import (
     CONF_OPTIMIZATION_AI_SUMMARY_API_KEY,
     CONF_OPTIMIZATION_AI_SUMMARY_AUTO_REFRESH,
+    CONF_OPTIMIZATION_AI_SUMMARY_AUTO_REFRESH_INTERVAL,
     CONF_OPTIMIZATION_AI_SUMMARY_LOCAL_ENDPOINT,
     CONF_OPTIMIZATION_AI_SUMMARY_LOCAL_MODEL,
     CONF_OPTIMIZATION_AI_SUMMARY_LOCAL_TIMEOUT,
@@ -71,6 +72,8 @@ MAX_RESPONSES_OUTPUT_CHARS = 64 * 1024
 MAX_RESPONSES_EVENTS = 4096
 AUTO_REFRESH_DEBOUNCE_SECONDS = 15
 AUTO_REFRESH_COOLDOWN_SECONDS = 300
+MIN_AUTO_REFRESH_INTERVAL_MINUTES = 5
+MAX_AUTO_REFRESH_INTERVAL_MINUTES = 1440
 
 MODEL_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -377,6 +380,7 @@ def ai_summary_settings(entry: Any | None, *, chatgpt_status: Mapping[str, Any] 
         "ai_summary_openrouter_model": str(openrouter_model or "").strip(),
         "ai_summary_openai_model": openai_model,
         "ai_summary_auto_refresh": bool(options.get(CONF_OPTIMIZATION_AI_SUMMARY_AUTO_REFRESH, data.get(CONF_OPTIMIZATION_AI_SUMMARY_AUTO_REFRESH, False))),
+        "ai_summary_auto_refresh_interval": configured_auto_refresh_interval(entry),
     }
 
 
@@ -412,6 +416,20 @@ def configured_local_timeout(entry: Any | None) -> int:
     if type(value) is int and MIN_LOCAL_AI_TIMEOUT_SECONDS <= value <= MAX_LOCAL_AI_TIMEOUT_SECONDS:
         return value
     return DEFAULT_LOCAL_AI_TIMEOUT_SECONDS
+
+
+def configured_auto_refresh_interval(entry: Any | None) -> int:
+    """Read minutes with a compatible default for legacy or invalid saved values."""
+    data = getattr(entry, "data", {}) or {}
+    options = getattr(entry, "options", {}) or {}
+    value = options.get(CONF_OPTIMIZATION_AI_SUMMARY_AUTO_REFRESH_INTERVAL, data.get(CONF_OPTIMIZATION_AI_SUMMARY_AUTO_REFRESH_INTERVAL))
+    return _bounded_auto_refresh_interval(value)
+
+
+def _bounded_auto_refresh_interval(value: Any) -> int:
+    if type(value) is int and MIN_AUTO_REFRESH_INTERVAL_MINUTES <= value <= MAX_AUTO_REFRESH_INTERVAL_MINUTES:
+        return value
+    return MIN_AUTO_REFRESH_INTERVAL_MINUTES
 
 
 def configured_local_model(entry: Any | None) -> str:
@@ -486,6 +504,10 @@ def apply_ai_summary_settings(
             http_status=400,
         )
     raw_endpoint = payload.get("ai_summary_local_endpoint")
+    if "ai_summary_auto_refresh_interval" in payload:
+        interval = payload["ai_summary_auto_refresh_interval"]
+        if type(interval) is not int or not MIN_AUTO_REFRESH_INTERVAL_MINUTES <= interval <= MAX_AUTO_REFRESH_INTERVAL_MINUTES:
+            raise AISummaryError("invalid_ai_refresh_interval", "Automatic explanation interval must be a whole number from 5 to 1440 minutes.", http_status=400)
     raw_model = payload.get("ai_summary_local_model")
     if "ai_summary_local_timeout" in payload:
         timeout = payload["ai_summary_local_timeout"]
@@ -526,6 +548,9 @@ def apply_ai_summary_settings(
     if requested_provider in {"openai", "chatgpt"}:
         provider_model(requested_provider, openai_model=openai_model)
     changes: list[str] = []
+    if "ai_summary_auto_refresh_interval" in payload and options.get(CONF_OPTIMIZATION_AI_SUMMARY_AUTO_REFRESH_INTERVAL) != interval:
+        options[CONF_OPTIMIZATION_AI_SUMMARY_AUTO_REFRESH_INTERVAL] = interval
+        changes.append("updated automatic AI explanation interval")
     if "ai_summary_local_timeout" in payload and options.get(CONF_OPTIMIZATION_AI_SUMMARY_LOCAL_TIMEOUT) != timeout:
         options[CONF_OPTIMIZATION_AI_SUMMARY_LOCAL_TIMEOUT] = timeout
         changes.append("updated local AI timeout")
@@ -2016,9 +2041,9 @@ class AISummaryService:
         self._last_explained_context: dict[str, Any] | None = None
         self._request_lock = asyncio.Lock()
         self._auto_task: asyncio.Task[None] | None = None
-        self._auto_pending: tuple[str, str, str, str, str, str, str, int] | None = None
+        self._auto_pending: tuple[str, str, str, str, str, str, str, int, float] | None = None
         self._auto_last_material_fingerprint: str | None = None
-        self._auto_last_request_at = 0.0
+        self._auto_last_request_at: float | None = None
         self._generation = 0
 
     def _chatgpt_connected(self) -> bool:
@@ -2057,8 +2082,10 @@ class AISummaryService:
         self._last_explained_context = None
         self._generation += 1
         self._auto_pending = None
+        self._auto_last_material_fingerprint = None
         if self._auto_task is not None and not self._auto_task.done():
             self._auto_task.cancel()
+        self._auto_task = None
 
     def _require_generation(self, generation: int) -> None:
         if generation != self._generation:
@@ -2083,6 +2110,7 @@ class AISummaryService:
         local_timeout: int = DEFAULT_LOCAL_AI_TIMEOUT_SECONDS,
         openrouter_model: str = "",
         openai_model: str = "",
+        auto_refresh_interval_minutes: int | None = None,
     ) -> None:
         """Coalesce detached refreshes after a committed optimizer plan.
 
@@ -2101,7 +2129,10 @@ class AISummaryService:
         if material == self._auto_last_material_fingerprint:
             return
         self._auto_last_material_fingerprint = material
-        self._auto_pending = (material, provider, "" if provider == "chatgpt" else api_key, endpoint, local_model, openrouter_model, openai_model, local_timeout)
+        interval_seconds = AUTO_REFRESH_COOLDOWN_SECONDS
+        if auto_refresh_interval_minutes is not None:
+            interval_seconds = _bounded_auto_refresh_interval(auto_refresh_interval_minutes) * 60
+        self._auto_pending = (material, provider, "" if provider == "chatgpt" else api_key, endpoint, local_model, openrouter_model, openai_model, local_timeout, interval_seconds)
         if self._auto_task is None or self._auto_task.done():
             generation = self._generation
             self._auto_task = asyncio.create_task(self._run_auto_refresh(generation))
@@ -2109,10 +2140,10 @@ class AISummaryService:
     async def _run_auto_refresh(self, generation: int) -> None:
         try:
             while self._auto_pending is not None and generation == self._generation:
-                _material, provider, api_key, endpoint, local_model, openrouter_model, openai_model, local_timeout = self._auto_pending
+                _material, provider, api_key, endpoint, local_model, openrouter_model, openai_model, local_timeout, interval_seconds = self._auto_pending
                 self._auto_pending = None
                 await asyncio.sleep(AUTO_REFRESH_DEBOUNCE_SECONDS)
-                remaining = AUTO_REFRESH_COOLDOWN_SECONDS - (asyncio.get_running_loop().time() - self._auto_last_request_at)
+                remaining = 0 if self._auto_last_request_at is None else interval_seconds - (asyncio.get_running_loop().time() - self._auto_last_request_at)
                 if remaining > 0:
                     await asyncio.sleep(remaining)
                 # A later plan supersedes this one before any provider work.

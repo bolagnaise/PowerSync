@@ -38,6 +38,7 @@ def _load_module():
         const = ModuleType("custom_components.power_sync.const")
         const.CONF_OPTIMIZATION_AI_SUMMARY_API_KEY = "optimization_ai_summary_api_key"
         const.CONF_OPTIMIZATION_AI_SUMMARY_AUTO_REFRESH = "optimization_ai_summary_auto_refresh"
+        const.CONF_OPTIMIZATION_AI_SUMMARY_AUTO_REFRESH_INTERVAL = "optimization_ai_summary_auto_refresh_interval"
         const.CONF_OPTIMIZATION_AI_SUMMARY_LOCAL_ENDPOINT = "optimization_ai_summary_local_endpoint"
         const.CONF_OPTIMIZATION_AI_SUMMARY_LOCAL_TIMEOUT = "optimization_ai_summary_local_timeout"
         const.CONF_OPTIMIZATION_AI_SUMMARY_LOCAL_MODEL = "optimization_ai_summary_local_model"
@@ -544,6 +545,7 @@ def test_write_only_settings_replace_preserve_clear_and_isolate_provider_key():
         "ai_summary_openrouter_model": "",
         "ai_summary_openai_model": "gpt-6.1-sol",
         "ai_summary_auto_refresh": False,
+        "ai_summary_auto_refresh_interval": 5,
     }
     assert "grok-secret" not in json.dumps(public)
 
@@ -1100,6 +1102,137 @@ def test_auto_refresh_is_material_debounced_coalesced_and_cancelled():
         assert adapter.calls == 2
         await service.async_shutdown()
         assert service._auto_task is None
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("value", [None, True, "30", 4, 1441, 30.5])
+def test_auto_interval_rejects_invalid_writes_and_defaults_legacy_values(value):
+    module = _load_module()
+    key = module.CONF_OPTIMIZATION_AI_SUMMARY_AUTO_REFRESH_INTERVAL
+    entry = SimpleNamespace(data={key: value}, options={})
+    assert module.configured_auto_refresh_interval(entry) == 5
+    with pytest.raises(module.AISummaryError) as caught:
+        module.apply_ai_summary_settings({}, {"ai_summary_auto_refresh_interval": value})
+    assert caught.value.code == "invalid_ai_refresh_interval"
+
+
+def test_auto_interval_settings_persist_and_honor_options_over_data():
+    module = _load_module()
+    key = module.CONF_OPTIMIZATION_AI_SUMMARY_AUTO_REFRESH_INTERVAL
+    options, changes = module.apply_ai_summary_settings({}, {"ai_summary_auto_refresh_interval": 30})
+    assert changes
+    entry = SimpleNamespace(data={key: 15}, options=options)
+    assert module.configured_auto_refresh_interval(entry) == 30
+    assert module.ai_summary_settings(entry)["ai_summary_auto_refresh_interval"] == 30
+    unchanged, changes = module.apply_ai_summary_settings(options, {"ai_summary_auto_refresh": True})
+    assert unchanged[key] == 30
+    assert module.configured_auto_refresh_interval(None) == 5
+
+
+def test_auto_interval_config_flow_saves_migrates_and_preserves_hidden_values():
+    import textwrap
+    module = _load_module()
+    source = (ROOT / "custom_components/power_sync/config_flow.py").read_text()
+    start = source.index("            for ai_key in (")
+    end = source.index("            new_data[CONF_OPTIMIZATION_PROVIDER]", start)
+    block = textwrap.dedent(source[start:end])
+    function = "async def save(self, user_input):\n    new_data = dict(self.config_entry.data)\n    new_options = dict(self.config_entry.options)\n"
+    function += textwrap.indent(block, "    ") + "    return new_data, new_options\n"
+    namespace = dict(vars(module))
+    namespace["CONF_OPTIMIZATION_AI_SUMMARY_CLEAR_API_KEY"] = "optimization_ai_summary_clear_api_key"
+    exec(function, namespace)
+    key = module.CONF_OPTIMIZATION_AI_SUMMARY_AUTO_REFRESH_INTERVAL
+    entry = SimpleNamespace(data={key: 15}, options={})
+    flow = SimpleNamespace(config_entry=entry)
+    data, options = asyncio.run(namespace["save"](flow, {key: 30}))
+    assert key not in data and options[key] == 30
+    entry.data, entry.options = data, options
+    data, options = asyncio.run(namespace["save"](flow, {}))
+    assert key not in data and options[key] == 30
+    for name in ("strings.json", "translations/en.json"):
+        translated = json.loads((ROOT / "custom_components/power_sync" / name).read_text())
+        section = translated["options"]["step"]["optimization"]["sections"]["ai_explanations"]
+        assert key in section["data"] and "30" in section["data_description"][key]
+
+
+def test_auto_interval_throttles_new_plans_but_manual_refresh_and_latest_plan_work(monkeypatch):
+    """Advance a fake monotonic clock: five-minute plans share a 30-minute budget."""
+    module = _load_module()
+    snapshot = _snapshot()
+    clock = [0.0]  # Even a first request near boot must run without an interval wait.
+    sleepers = []
+    calls = []
+    real_sleep = asyncio.sleep
+
+    async def sleep(delay):
+        if delay <= 0:
+            await real_sleep(0)
+            return
+        future = asyncio.get_running_loop().create_future()
+        sleepers.append((clock[0] + delay, future))
+        await future
+
+    proxy = SimpleNamespace(**{name: getattr(asyncio, name) for name in dir(asyncio)})
+    proxy.sleep = sleep
+    proxy.get_running_loop = lambda: SimpleNamespace(time=lambda: clock[0])
+    monkeypatch.setattr(module, "asyncio", proxy)
+    monkeypatch.setattr(module, "AUTO_REFRESH_DEBOUNCE_SECONDS", 0)
+
+    class Adapter:
+        async def generate(self, **kwargs):
+            calls.append((clock[0], snapshot["next_actions"][0]["power_w"]))
+            return _model_output()
+
+    module.PROVIDER_ADAPTERS["gemini"] = Adapter()
+    service = module.AISummaryService(object(), lambda: snapshot)
+
+    async def drain():
+        for _ in range(20):
+            await real_sleep(0)
+
+    async def advance(seconds):
+        clock[0] += seconds
+        for deadline, future in list(sleepers):
+            if deadline <= clock[0] and not future.done():
+                future.set_result(None)
+        await drain()
+
+    def schedule():
+        service.schedule_auto_refresh(provider="gemini", api_key="key", auto_refresh_interval_minutes=30)
+
+    async def exercise():
+        schedule()
+        await drain()
+        assert calls == [(0, 5000)]
+        for power in (4000, 3000, 2000):
+            await advance(300)
+            snapshot["next_actions"][0]["power_w"] = power
+            schedule()
+            await drain()
+        assert calls == [(0, 5000)]
+        # The existing manual path bypasses automatic throttling.
+        await service.generate(provider="gemini", api_key="key", refresh=True)
+        assert calls == [(0, 5000), (900, 2000)]
+        snapshot["next_actions"][0]["power_w"] = 1000
+        schedule()
+        await advance(899)
+        assert len(calls) == 2
+        await advance(1)
+        assert calls == [(0, 5000), (900, 2000), (1800, 1000)]
+        schedule()  # Identical committed plan remains deduplicated.
+        await drain()
+        assert len(calls) == 3
+        snapshot["next_actions"][0]["power_w"] = 6000
+        schedule()
+        await drain()
+        service.invalidate()  # Changing settings cancels the waiting request.
+        await advance(1800)
+        assert len(calls) == 3
+        schedule()  # Same plan with new settings is eligible again.
+        await drain()
+        assert calls[-1] == (3600, 6000)
+        await service.async_shutdown()
 
     asyncio.run(exercise())
 

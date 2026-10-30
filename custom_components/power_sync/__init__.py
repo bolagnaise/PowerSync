@@ -47140,6 +47140,7 @@ def _optimization_ai_service(
                 endpoint=configured_local_endpoint(entry),
                 local_model=configured_local_model(entry),
                 local_timeout=settings["ai_summary_local_timeout"],
+                auto_refresh_interval_minutes=settings["ai_summary_auto_refresh_interval"],
                 openrouter_model=configured_openrouter_model(entry),
                 openai_model=configured_openai_model(entry),
             )
@@ -47927,6 +47928,7 @@ class OptimizationSettingsView(HomeAssistantView):
                 "ai_summary_local_endpoint",
                 "ai_summary_local_model",
                 "ai_summary_local_timeout",
+                "ai_summary_auto_refresh_interval",
                 "ai_summary_openrouter_model",
                 "ai_summary_openai_model",                "ai_summary_auto_refresh",
             }
@@ -48705,6 +48707,7 @@ class OptimizationChatGPTView(HomeAssistantView):
                     "ai_summary_api_key", "clear_ai_summary_api_key",
                     "ai_summary_local_endpoint", "ai_summary_local_model", "ai_summary_local_timeout",
                     "ai_summary_openrouter_model", "ai_summary_auto_refresh",
+                    "ai_summary_auto_refresh_interval",
                 },
             }
             action = payload.get("action") if isinstance(payload, dict) else None

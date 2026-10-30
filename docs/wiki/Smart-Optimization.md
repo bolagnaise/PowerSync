@@ -533,3 +533,9 @@ Existing installations that had Profit Max enabled before the Charge By Time
 split are migrated with Charge By Time enabled, preserving the previous fill-by
 behavior. Existing target time and target SOC values are copied to the new
 Charge By Time settings.
+
+### Minimum automatic explanation interval
+
+In **Settings → Devices & services → PowerSync → Configure → Smart Optimization → AI Plan Explanation**, enable **Automatically refresh explanations** and set **Minimum automatic explanation interval (minutes)**. The interval accepts **5–1440 minutes** and defaults to **5** for existing and new installations; choose **30** to reduce requests when prices change every five minutes.
+
+Automatic requests explain the newest materially changed committed plan after the interval, with a short debounce. Optimizer refreshes and battery controls continue independently. Manual **Refresh Explanation** remains immediate, and an older explanation stays marked stale when the plan changes. Changing AI settings cancels queued automatic work; restarting Home Assistant resets the timer.

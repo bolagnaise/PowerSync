@@ -2139,6 +2139,7 @@ CONF_OPTIMIZATION_AI_SUMMARY_LOCAL_TIMEOUT = "optimization_ai_summary_local_time
 CONF_OPTIMIZATION_AI_SUMMARY_OPENROUTER_MODEL = "optimization_ai_summary_openrouter_model"
 CONF_OPTIMIZATION_AI_SUMMARY_OPENAI_MODEL = "optimization_ai_summary_openai_model"
 CONF_OPTIMIZATION_AI_SUMMARY_AUTO_REFRESH = "optimization_ai_summary_auto_refresh"
+CONF_OPTIMIZATION_AI_SUMMARY_AUTO_REFRESH_INTERVAL = "optimization_ai_summary_auto_refresh_interval"
 CONF_OPTIMIZATION_BACKUP_ENERGY_WH = "optimization_backup_energy_wh"
 CONF_OPTIMIZATION_BACKUP_ENERGY_MAX_POWER_W = (
     "optimization_backup_energy_max_power_w"

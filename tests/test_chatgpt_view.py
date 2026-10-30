@@ -554,6 +554,7 @@ def test_helper_service_factory_injects_same_auth_and_selected_model(fixture):
     fixture.monkeypatch.setattr(fixture.ai, "AISummaryService", Service)
     fixture.entry.options.update({fixture.const.CONF_OPTIMIZATION_AI_SUMMARY_PROVIDER: "chatgpt",
                                   fixture.const.CONF_OPTIMIZATION_AI_SUMMARY_OPENAI_MODEL: "gpt-extra",
+                                  fixture.const.CONF_OPTIMIZATION_AI_SUMMARY_AUTO_REFRESH_INTERVAL: 30,
                                   fixture.const.CONF_OPTIMIZATION_AI_SUMMARY_AUTO_REFRESH: True})
     fixture.manager.connected = True
     callbacks = []
@@ -564,6 +565,7 @@ def test_helper_service_factory_injects_same_auth_and_selected_model(fixture):
     assert service.args[0] == "test-session" and fixture.entry_data["_optimization_ai_summary_auto_unsub"] == "unsub"
     callbacks[0]()
     assert service.scheduled[0]["provider"] == "chatgpt" and service.scheduled[0]["openai_model"] == "gpt-extra"
+    assert service.scheduled[0]["auto_refresh_interval_minutes"] == 30
     assert factory(fixture.hass, fixture.entry.entry_id, coordinator) is service and len(callbacks) == 1
     assert factory(fixture.hass, "missing-entry", coordinator) is None
 
@@ -584,6 +586,18 @@ def test_unchanged_settings_invalidate_without_suppressing_next_real_reload(fixt
     response = post(fixture, {"action": "settings", "ai_summary_provider": "gemini"})
     assert response.status == 200 and fixture.service.invalidations == 1
     assert not fixture.updates and not fixture.entry_data.get("_skip_reload")
+
+
+@pytest.mark.parametrize("endpoint", ["chatgpt", "optimization_settings"])
+def test_interval_only_settings_are_saved_and_invalidate_queued_auto_work(fixture, endpoint):
+    view = fixture.view if endpoint == "chatgpt" else fixture.namespace["OptimizationSettingsView"](fixture.hass)
+    payload = {"ai_summary_auto_refresh_interval": 30}
+    if endpoint == "chatgpt":
+        payload["action"] = "settings"
+    response = asyncio.run(view.post(Request(payload, fixture.admin)))
+    assert response.status == 200
+    assert fixture.entry.options[fixture.const.CONF_OPTIMIZATION_AI_SUMMARY_AUTO_REFRESH_INTERVAL] == 30
+    assert fixture.service.invalidations == 1
 
 
 def test_missing_coordinator_does_not_create_summary_service(fixture):
@@ -614,7 +628,8 @@ def test_same_inherited_provider_preserves_its_key(fixture):
 
 @pytest.mark.parametrize("user", [None, SimpleNamespace(id="ordinary-user", is_admin=False)])
 @pytest.mark.parametrize("field,value", [("ai_summary_provider", "chatgpt"), ("ai_summary_api_key", "SECRET"),
-                                        ("ai_summary_openai_model", "gpt-extra"), ("ai_summary_auto_refresh", True)])
+                                        ("ai_summary_openai_model", "gpt-extra"), ("ai_summary_auto_refresh", True),
+                                        ("ai_summary_auto_refresh_interval", 30)])
 def test_generic_settings_cannot_bypass_ai_administrator_boundary(fixture, user, field, value):
     view = fixture.namespace["OptimizationSettingsView"](fixture.hass)
     before = copy.deepcopy(fixture.entry.options)

@@ -70,7 +70,7 @@ from .flow_power import (
     has_custom_export_tiers,
     validate_flow_power_plan_selection,
 )
-from .optimization.ai_summary import AISummaryError, apply_ai_summary_settings, configured_openai_model, configured_local_timeout
+from .optimization.ai_summary import AISummaryError, apply_ai_summary_settings, configured_openai_model, configured_local_timeout, configured_auto_refresh_interval
 from .optimization.chatgpt_auth import get_chatgpt_auth
 from .amber_smartshift.flow import AmberSetupMixin, AmberOptionsMixin
 from .const import (
@@ -599,6 +599,7 @@ from .const import (
     CONF_OPTIMIZATION_AI_SUMMARY_OPENROUTER_MODEL,
     CONF_OPTIMIZATION_AI_SUMMARY_OPENAI_MODEL,
     CONF_OPTIMIZATION_AI_SUMMARY_AUTO_REFRESH,
+    CONF_OPTIMIZATION_AI_SUMMARY_AUTO_REFRESH_INTERVAL,
     CONF_OPTIMIZATION_BACKUP_ENERGY_WH,
     CONF_OPTIMIZATION_BACKUP_ENERGY_MAX_POWER_W,
     CONF_OPTIMIZATION_BACKUP_ENERGY_START,
@@ -12169,6 +12170,7 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
                 CONF_OPTIMIZATION_AI_SUMMARY_OPENROUTER_MODEL,
                 CONF_OPTIMIZATION_AI_SUMMARY_OPENAI_MODEL,
                 CONF_OPTIMIZATION_AI_SUMMARY_AUTO_REFRESH,
+                CONF_OPTIMIZATION_AI_SUMMARY_AUTO_REFRESH_INTERVAL,
             ):
                 if ai_key not in new_options and ai_key in new_data:
                     new_options[ai_key] = new_data[ai_key]
@@ -12201,6 +12203,9 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
                         "ai_summary_openai_model": user_input.get(
                             CONF_OPTIMIZATION_AI_SUMMARY_OPENAI_MODEL, configured_openai_model(self.config_entry)
                         ),
+                        "ai_summary_auto_refresh_interval": int(user_input.get(
+                            CONF_OPTIMIZATION_AI_SUMMARY_AUTO_REFRESH_INTERVAL, configured_auto_refresh_interval(self.config_entry)
+                        )),
                         "ai_summary_auto_refresh": user_input.get(
                             CONF_OPTIMIZATION_AI_SUMMARY_AUTO_REFRESH, False
                         ),
@@ -12214,6 +12219,7 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
                 new_data.pop(CONF_OPTIMIZATION_AI_SUMMARY_OPENROUTER_MODEL, None)
                 new_data.pop(CONF_OPTIMIZATION_AI_SUMMARY_OPENAI_MODEL, None)
                 new_data.pop(CONF_OPTIMIZATION_AI_SUMMARY_AUTO_REFRESH, None)
+                new_data.pop(CONF_OPTIMIZATION_AI_SUMMARY_AUTO_REFRESH_INTERVAL, None)
             except AISummaryError:
                 return await self._async_step_optimization(
                     None,
@@ -13137,6 +13143,7 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
             CONF_OPTIMIZATION_AI_SUMMARY_OPENROUTER_MODEL: current_ai_openrouter_model,
             CONF_OPTIMIZATION_AI_SUMMARY_OPENAI_MODEL: current_ai_openai_model,
             CONF_OPTIMIZATION_AI_SUMMARY_AUTO_REFRESH: current_ai_auto_refresh,
+            CONF_OPTIMIZATION_AI_SUMMARY_AUTO_REFRESH_INTERVAL: configured_auto_refresh_interval(self.config_entry),
         }
         if current_load_entity:
             current_form_values[CONF_OPTIMIZATION_LOAD_ENTITY] = current_load_entity
@@ -13251,6 +13258,10 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
                 CONF_OPTIMIZATION_AI_SUMMARY_AUTO_REFRESH,
                 default=current_ai_auto_refresh,
             ): BooleanSelector(),
+            vol.Optional(
+                CONF_OPTIMIZATION_AI_SUMMARY_AUTO_REFRESH_INTERVAL,
+                default=configured_auto_refresh_interval(self.config_entry),
+            ): NumberSelector(NumberSelectorConfig(min=5, max=1440, step=1, mode=NumberSelectorMode.BOX, unit_of_measurement="min")),
             vol.Required(
                 CONF_OPTIMIZATION_AI_SUMMARY_CLEAR_API_KEY,
                 default=False,
@@ -13502,6 +13513,7 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
                 CONF_OPTIMIZATION_AI_SUMMARY_OPENROUTER_MODEL,
                 CONF_OPTIMIZATION_AI_SUMMARY_OPENAI_MODEL,
                 CONF_OPTIMIZATION_AI_SUMMARY_AUTO_REFRESH,
+                CONF_OPTIMIZATION_AI_SUMMARY_AUTO_REFRESH_INTERVAL,
             },
         }
         grouped_schema: dict[Any, Any] = {}
