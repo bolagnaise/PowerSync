@@ -715,6 +715,33 @@ function psActionKey(action) {
   if (a.includes('self') || a.includes('consum') || a.includes('discharge') || a.includes('home')) return 'self';
   return a ? 'self' : '';
 }
+// When the plan stops doing `act`, following the run that contains `now`.
+// The optimizer's current_action_end_time is only the end of its current
+// step (often 5 minutes away), which read as "the battery runs out then".
+function psPlannedRunEnd(rows, interval, act, now) {
+  const step = interval * 60_000;
+  const i = rows.findIndex(r => r.t <= now && now < r.t + step);
+  if (i < 0 || !act || rows[i].act !== act) return null;
+  let j = i;
+  while (j + 1 < rows.length && rows[j + 1].act === act && rows[j + 1].t - rows[j].t <= step) j += 1;
+  return rows[j].t + step;
+}
+
+// The next planned change of action. next_action is often the current action
+// again (the optimizer re-checking), so prefer the first run in next_actions
+// that actually differs.
+function psNextChange(data, actKey, now) {
+  const runs = Array.isArray(data?.next_actions) ? data.next_actions : [];
+  for (const run of runs) {
+    const key = psActionKey(run?.action);
+    const t = Date.parse(run?.timestamp);
+    if (key && key !== actKey && Number.isFinite(t) && t > now - 60_000) return { key, t };
+  }
+  const key = psActionKey(data?.next_action);
+  const t = Date.parse(data?.next_action_time);
+  return key && key !== actKey && Number.isFinite(t) ? { key, t } : null;
+}
+
 // Contiguous runs of one action, merging gaps of one interval or less.
 function psWindows(rows, interval, act, fromT) {
   const out = [];
@@ -1445,7 +1472,8 @@ class PsNowCard extends PsCardBase {
 
     // Headline
     const actKey = psActionKey(data?.effective_current_action || data?.current_action);
-    const until = data?.current_action_end_time ? ` until ${psWhen(hass, data.current_action_end_time)}` : '';
+    const { interval } = psSchedule(data);
+    const runEnd = psPlannedRunEnd(rows, interval, actKey, now);
     let headline;
     if (restoring) headline = 'Restoring normal operation…';
     else if (starting) headline = mode === 'force_charge' ? 'Starting charge…' : 'Starting discharge…';
@@ -1453,19 +1481,23 @@ class PsNowCard extends PsCardBase {
     else if (mode === 'force_discharge') headline = `Discharging on your command${Number.isFinite(remaining) ? ` for ${psDuration(remaining)}` : ''}.`;
     else if (mode === 'hold_soc') headline = `Holding the battery at ${psFix(soc, 0)}%.`;
     else if (mode === 'self_consumption') headline = 'The battery is powering the home.';
-    else if (actKey === 'charge') headline = `Charging${imp <= 0.05 ? ' on free power' : solar > Math.max(0.2, -battery) ? ' from solar' : ''}${until}.`;
-    else if (actKey === 'export') headline = `Exporting to the grid${until}.`;
-    else if (actKey === 'hold') headline = `Holding the battery at ${psFix(soc, 0)}%${until}.`;
-    else if (actKey === 'self') headline = `The battery is powering the home${until}.`;
+    else if (actKey === 'charge') headline = `Charging${imp <= 0.05 ? ' on free power' : solar > Math.max(0.2, -battery) ? ' from solar' : ''}.`;
+    else if (actKey === 'export') headline = 'Exporting to the grid.';
+    else if (actKey === 'hold') headline = `Holding the battery at ${psFix(soc, 0)}%.`;
+    else if (actKey === 'self') headline = 'The battery is powering the home.';
     else if (Number.isFinite(battery) && battery < -0.1) headline = 'The battery is charging.';
     else if (Number.isFinite(battery) && battery > 0.1) headline = 'The battery is powering the home.';
     else headline = 'The battery is idle.';
 
     // Lead: next step and the plan's low point in the next 24 hours.
     const parts = [];
-    if (data?.next_action && data?.next_action_time) {
-      const nk = psActionKey(data.next_action);
-      parts.push(`Next it will ${(PS_ACT[nk]?.[0] || data.next_action).toLowerCase()} at <span class="num">${psEsc(psWhen(hass, data.next_action_time))}</span>.`);
+    const planDriven = !restoring && !starting && !PS_MODE_TEXT[mode];
+    if (planDriven && runEnd && runEnd - now >= 20 * 60_000) {
+      parts.push(`The plan keeps this going until <span class="num">${psEsc(psWhen(hass, runEnd))}</span>.`);
+    }
+    const nextChange = psNextChange(data, actKey, now);
+    if (nextChange) {
+      parts.push(`Next it will ${PS_ACT[nextChange.key][0].toLowerCase()} at <span class="num">${psEsc(psWhen(hass, nextChange.t))}</span>.`);
     }
     const day = rows.filter(r => r.t >= now && r.t <= now + 24 * 3_600_000 && Number.isFinite(r.soc));
     let low = null;
@@ -1795,13 +1827,14 @@ class PsPlanCard extends PsCardBase {
     const now = Date.now();
     const unit = psMinorUnit(hass);
     const curKey = psActionKey(data.effective_current_action || data.current_action);
-    const nextKey = psActionKey(data.next_action);
+    const nextChange = psNextChange(data, curKey, now);
+    const nowRunEnd = psPlannedRunEnd(m.plan, m.interval, curKey, now);
     const floor = psPercent(data.reserve_visibility?.active_software_floor_percent);
     const actChip = key => (key === 'charge' ? 'gr' : key === 'export' ? 'rd' : key === 'self' ? 'pu' : '');
     const chips = [
       `<span class="chip ${data.monitoring_mode ? 'cy' : data.enabled ? 'gr' : ''}"><span>Mode</span><b>${data.monitoring_mode ? 'Monitoring' : data.enabled ? 'Optimizing' : 'Off'}</b></span>`,
-      curKey ? `<span class="chip ${actChip(curKey)}"><span>Now</span><b>${psEsc(PS_ACT[curKey][0])}${data.current_action_end_time ? ` until ${psEsc(psWhen(hass, data.current_action_end_time))}` : ''}</b></span>` : '',
-      nextKey && data.next_action_time ? `<span class="chip ${actChip(nextKey)}"><span>Next</span><b>${psEsc(PS_ACT[nextKey][0])} ${psEsc(psWhen(hass, data.next_action_time))}</b></span>` : '',
+      curKey ? `<span class="chip ${actChip(curKey)}"><span>Now</span><b>${psEsc(PS_ACT[curKey][0])}${nowRunEnd ? ` until ${psEsc(psWhen(hass, nowRunEnd))}` : ''}</b></span>` : '',
+      nextChange ? `<span class="chip ${actChip(nextChange.key)}"><span>Next</span><b>${psEsc(PS_ACT[nextChange.key][0])} ${psEsc(psWhen(hass, nextChange.t))}</b></span>` : '',
       data.last_optimization ? `<span class="chip"><span>Optimized</span><b class="num">${psEsc(psTime(hass, data.last_optimization))}</b></span>` : '',
       Number.isFinite(floor) && floor > 0 ? `<span class="chip"><span>Export floor</span><b class="num">${Math.round(floor)}%</b></span>` : '',
       Number.isFinite(Number(data.predicted_cost)) ? `<span class="chip"><span>Cost today</span><b class="num">${psEsc(psMoney(hass, data.predicted_cost))}</b></span>` : '',
