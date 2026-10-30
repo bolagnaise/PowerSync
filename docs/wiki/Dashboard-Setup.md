@@ -143,3 +143,9 @@ https://github.com/bolagnaise/PowerSync/blob/main/blueprints/battery_health_from
 | **Capacity sensor unit** | Whether the sensor reports in kWh or Wh | `kwh` |
 | **Original capacity (Wh)** | Manufacturer spec total capacity | `13500` (1x Powerwall), `27000` (2x) |
 | **Battery count** | Number of batteries (reporting only) | `1` |
+
+## Battery command progress (v2.12.1562)
+
+The battery controls and status summary show **Starting charge…** or **Starting discharge…** while a request awaits acknowledgement, then show the active duration. During cleanup they show **Restoring…** instead of the previous force-action countdown. Local V1R publishes pending requests before waiting for the gateway.
+
+A manual Restore no longer reports failure solely because Native Max settings were restored while physical settling is still being checked. Control ownership and recovery remain held until verification finishes; settings and readback failures still report an error. Check measured Battery Power and Grid Power to confirm physical behaviour.
