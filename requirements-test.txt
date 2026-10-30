@@ -24,4 +24,5 @@ pytest==9.0.3
 pytest-asyncio==1.4.1
 pytest-xdist==3.8.0
 typing_extensions==4.15.0
+tzdata==2026.6
 yarl==1.23.0

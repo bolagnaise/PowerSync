@@ -62,6 +62,11 @@ environment and run:
 python scripts/release/run_regression.py --workers 4
 ```
 
+Install every pinned dependency, including `tzdata`: Tower's standalone Python
+does not supply the complete OS timezone database. The package supplies IANA
+zones for `zoneinfo` on such hosts; tariff/timezone tests must retain their real
+expected values, never skip or substitute UTC to make a run green.
+
 Use `--workers 2` for lower memory use, or `--workers 1` for a fully audited serial
 diagnostic fallback. The runner always selects all of `tests/`; it rejects
 `PYTEST_ADDOPTS`, `PYTEST_PLUGINS` and disabled plugin autoload so environment
