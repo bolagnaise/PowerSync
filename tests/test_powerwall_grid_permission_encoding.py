@@ -1,4 +1,4 @@
-"""The attested 26.34.2 native config omits false grid-charge permission."""
+"""Native config omits its false grid-charge disallow value on every firmware."""
 import importlib
 from pathlib import Path
 import sys
@@ -24,11 +24,6 @@ def native_config():
                 'customer_preferred_export_rule': 'battery_ok'}}
 
 
-def system_info():
-    return {'din': 'gateway', 'firmware_version': '26.34.2 56d7ba06',
-            'firmware_githash': '56d7ba064772ad6d740825723c7e9c8524cd31b1'}
-
-
 def dcq():
     return {'control': {'meterAggregates': [
         {'location': name, 'realPowerW': value} for name, value in
@@ -44,83 +39,61 @@ def bare_client(config=None, firmware=None):
     client._local_access_enabled = True
     client._fetch_dcq_local = AsyncMock(return_value=dcq())
     client._transport = SimpleNamespace(read_config=AsyncMock(return_value=native_config() if config is None else config),
-        get_system_info=AsyncMock(return_value=system_info() if firmware is None else firmware))
+        get_system_info=AsyncMock(return_value={} if firmware is None else firmware))
     return client
 
 
 @pytest.mark.asyncio
-async def test_fresh_native_snapshot_recognizes_attested_omitted_false():
-    client = bare_client()
+@pytest.mark.parametrize('firmware',[{}, {'firmware_version':'26.34.0'}, {'firmware_version':'26.34.2 56d7ba06'}, {'firmware_version':'future'}])
+async def test_native_false_default_does_not_depend_on_firmware(firmware):
+    client = bare_client(firmware=firmware)
+    client._transport.get_system_info.side_effect = AssertionError('permission parsing must not query firmware')
     snapshot = await client.get_snapshot()
     assert snapshot.grid_charging_enabled is True
-    assert snapshot.grid_charging_permission_source == 'attested_omitted'
+    assert snapshot.grid_charging_permission_source == 'native_default'
     assert 'disallow_charge_from_grid_with_solar_installed' not in snapshot.raw['config']['site_info']
-    client._transport.get_system_info.assert_awaited_once_with('gateway')
+    client._transport.get_system_info.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('field', [False, True, None, 'false', 0, [], {}])
-async def test_explicit_permission_never_uses_omission_exception(field):
+@pytest.mark.parametrize('field',[False,True,None,'false',0,[],{}])
+async def test_explicit_permission_is_strictly_boolean(field):
     config = native_config()
     config['site_info']['disallow_charge_from_grid_with_solar_installed'] = field
     snapshot = await bare_client(config).get_snapshot()
     assert snapshot.grid_charging_enabled is (not field if type(field) is bool else None)
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize('change', ['version', 'hash', 'din', 'missing', 'failure'])
-async def test_unattested_omission_stays_unknown(change):
-    firmware = system_info()
-    if change == 'version': firmware['firmware_version'] = '26.34.3 56d7ba06'
-    if change == 'hash': firmware['firmware_githash'] = '0'*40
-    if change == 'din': firmware['din'] = 'other-gateway'
-    if change == 'missing': firmware = {}
-    client = bare_client(firmware=firmware)
-    if change == 'failure': client._transport.get_system_info.side_effect = TimeoutError
-    snapshot = await client.get_snapshot()
-    assert snapshot.grid_charging_enabled is None
+@pytest.mark.parametrize('config',[{'site_info':{}},native_config()])
+def test_native_false_default_needs_no_unrelated_mode_meter_or_reserve_fields(config):
+    reading = normalization.native_grid_charging_reading(config)
+    assert reading.disallowed is False and reading.source == 'native_default'
 
 
-@pytest.mark.parametrize('missing', ['default_real_mode','battery_blocks','meters','strategy',
-    'site_info', 'backup_reserve_percent','max_site_meter_power_ac','min_site_meter_power_ac',
-    'customer_preferred_export_rule'])
-def test_partial_native_config_does_not_inherit_a_false_default(missing):
-    config = native_config()
-    (config if missing in config else config['site_info']).pop(missing)
-    reading = normalization.native_grid_charging_reading(config, system_info(), 'gateway')
+@pytest.mark.parametrize('config',[None,{}, {'site_info':None},{'site_info':[]}, {'components':{}}])
+def test_unavailable_native_configuration_is_unknown(config):
+    reading = normalization.native_grid_charging_reading(config)
     assert reading.disallowed is None and reading.source == 'unknown'
 
 
-@pytest.mark.parametrize('key,value', [('backup_reserve_percent',None),('backup_reserve_percent',101),
-    ('max_site_meter_power_ac',float('nan')),('max_site_meter_power_ac',True),
-    ('min_site_meter_power_ac',1),('customer_preferred_export_rule','unknown')])
-def test_malformed_native_envelope_does_not_inherit_a_false_default(key,value):
-    config = native_config()
-    config['site_info'][key] = value
-    assert normalization.native_grid_charging_reading(config,system_info(),'gateway').disallowed is None
+@pytest.mark.asyncio
+async def test_failed_native_read_does_not_become_permission():
+    client = bare_client()
+    client._transport.read_config.side_effect = TimeoutError
+    snapshot = await client.get_snapshot()
+    assert snapshot.grid_charging_enabled is None
+    client._transport.get_system_info.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_attestation_expires_and_is_not_reused_after_failed_refresh(monkeypatch):
-    clock = [100.]
-    monkeypatch.setattr(client_mod.time,'monotonic',lambda:clock[0])
+async def test_grid_toggle_false_default_true_false_default_is_not_cached():
     client = bare_client()
-    await client.refresh_native_grid_charging_firmware()
-    assert client.native_grid_charging_reading(native_config()).disallowed is False
-    clock[0] = 106
-    assert client.native_grid_charging_reading(native_config()).disallowed is None
-    clock[0] = 100
-    client._din = 'other-gateway'
-    assert client.native_grid_charging_reading(native_config()).disallowed is None
-    client._din = 'gateway'
-    client._transport.get_system_info.side_effect = TimeoutError
-    await client.refresh_native_grid_charging_firmware()
-    assert client.native_grid_charging_reading(native_config()).disallowed is None
-
-
-@pytest.mark.asyncio
-async def test_new_firmware_read_invalidates_previous_build_attestation():
-    client = bare_client()
+    field = 'disallow_charge_from_grid_with_solar_installed'
     assert (await client.get_snapshot()).grid_charging_enabled is True
-    client._transport.get_system_info.return_value = {**system_info(),'firmware_githash':'f'*40}
+    client._transport.read_config.return_value['site_info'][field] = True
+    assert (await client.get_snapshot()).grid_charging_enabled is False
+    client._transport.read_config.return_value['site_info'].pop(field)
+    assert (await client.get_snapshot()).grid_charging_enabled is True
+    client._transport.read_config.side_effect = TimeoutError
     assert (await client.get_snapshot()).grid_charging_enabled is None
+    client._transport.get_system_info.assert_not_awaited()

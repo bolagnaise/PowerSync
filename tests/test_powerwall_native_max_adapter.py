@@ -720,16 +720,13 @@ async def test_current_policy_denial_prevents_every_forcing_write(setup,denial):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('planning', [False, True], ids=['manual_max', 'optimizer'])
-@pytest.mark.parametrize('permission', ['missing', None, 'false', 0, 1, [], {}])
+@pytest.mark.parametrize('permission', [None, 'false', 0, 1, [], {}])
 async def test_unknown_grid_permission_never_admits_native_charge(setup, planning, permission):
     s = setup
     s.adapter.planning_request = planning
     s.settings['powerwall_native_capacity_w'] = 14700
     field = 'disallow_charge_from_grid_with_solar_installed'
-    if permission == 'missing':
-        del s.state.config['site_info'][field]
-    else:
-        s.state.config['site_info'][field] = permission
+    s.state.config['site_info'][field] = permission
     assert not await s.adapter.guard()
     assert s.adapter.guard_denial_reason == 'grid_charging_permission_unknown'
     with pytest.raises(s.m.NativeMaxChargeError, match='policy denied'):
@@ -741,12 +738,12 @@ async def test_unknown_grid_permission_never_admits_native_charge(setup, plannin
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('planning', [False, True], ids=['manual_max', 'optimizer'])
-async def test_native_charge_does_not_accept_permission_disappearing_before_write(setup, planning):
+async def test_native_charge_does_not_accept_explicit_unknown_permission_before_write(setup, planning):
     s = setup
     s.adapter.planning_request = planning
     s.settings['powerwall_native_capacity_w'] = 14700
     assert await s.adapter.guard()
-    del s.state.config['site_info']['disallow_charge_from_grid_with_solar_installed']
+    s.state.config['site_info']['disallow_charge_from_grid_with_solar_installed'] = None
     assert not s.adapter._forcing_permitted(s.state.config)
     assert s.adapter.guard_denial_reason == 'grid_charging_permission_unknown'
     assert not s.state.events
@@ -2240,8 +2237,8 @@ async def test_real_hash_checked_writer_refreshes_dcq_after_slow_config_read(set
 @pytest.mark.asyncio
 @pytest.mark.parametrize('planning', [False, True], ids=['manual_max', 'optimizer'])
 @pytest.mark.parametrize('initially_disabled', [False, True])
-async def test_attested_native_omission_admits_and_restores_owned_grid_setting(setup, planning, initially_disabled):
-    from test_powerwall_grid_permission_encoding import normalization, system_info
+async def test_native_omission_admits_and_restores_owned_grid_setting(setup, planning, initially_disabled):
+    from test_powerwall_grid_permission_encoding import normalization
     s = setup
     field = 'disallow_charge_from_grid_with_solar_installed'
     s.state.config.update(battery_blocks=[{}], meters=[{}], strategy={})
@@ -2251,9 +2248,7 @@ async def test_attested_native_omission_admits_and_restores_owned_grid_setting(s
         s.state.config['site_info'].pop(field)
     original = deepcopy(s.state.config), deepcopy(s.state.tariff)
     client = s.adapter.client
-    client.native_grid_charging_reading = lambda config: normalization.native_grid_charging_reading(config,system_info(),'gateway')
-    async def refresh(): pass
-    client.refresh_native_grid_charging_firmware = refresh
+    client.native_grid_charging_reading = lambda config: normalization.native_grid_charging_reading(config)
     write = client._transport.write_config
     async def sparse_write(din, updates, **kwargs):
         result = await write(din, updates, **kwargs)
@@ -2281,31 +2276,33 @@ async def test_attested_native_omission_admits_and_restores_owned_grid_setting(s
 @pytest.mark.asyncio
 @pytest.mark.parametrize('planning',[False,True])
 @pytest.mark.parametrize('boundary',['tariff','local'])
-async def test_native_omission_cannot_outlive_build_attestation_before_write(setup,planning,boundary):
-    from test_powerwall_grid_permission_encoding import normalization, system_info
+async def test_native_omission_does_not_hide_explicit_unknown_permission_before_write(setup,planning,boundary):
+    from test_powerwall_grid_permission_encoding import normalization
     s = setup
     s.state.config.update(battery_blocks=[{}],meters=[{}],strategy={})
     s.state.config['site_info'].pop('disallow_charge_from_grid_with_solar_installed')
     original = deepcopy(s.state.config), deepcopy(s.state.tariff)
-    firmware = system_info()
-    s.adapter.client.native_grid_charging_reading = lambda config: normalization.native_grid_charging_reading(config,firmware,'gateway')
+    field = 'disallow_charge_from_grid_with_solar_installed'
+    s.adapter.client.native_grid_charging_reading = lambda config: normalization.native_grid_charging_reading(config)
     s.adapter.planning_request = planning
     s.settings['powerwall_native_capacity_w'] = 14700
     assert await s.adapter.guard()
     if boundary == 'local':
-        # Tariff admission happens first; revoke evidence before local forcing.
-        s.state.before_validate = lambda: firmware.update(firmware_githash='f'*40)
+        # Tariff admission happens first; make permission invalid before local forcing.
+        s.state.before_validate = lambda: s.state.config['site_info'].update({field:None})
     else:
         upload = s.adapter.upload
-        async def changed_build(tariff,before_write):
+        async def changed_permission(tariff,before_write):
             if tariff.get('code') == 'UNIQUE_FORCE':
-                firmware['firmware_githash'] = 'f'*40
+                s.state.config['site_info'][field] = None
             return await upload(tariff,before_write)
-        s.adapter.upload = changed_build
+        s.adapter.upload = changed_permission
     with pytest.raises(s.m.NativeMaxChargeError):
         await s.session.start(120)
     assert not any(kind in ('config','kick') for kind,_ in s.state.events)
     if boundary == 'tariff':
         assert not any(kind == 'tariff' and value.get('code') == 'UNIQUE_FORCE' for kind,value in s.state.events)
+    assert s.state.config['site_info'][field] is None
+    s.state.config['site_info'].pop(field)  # The external invalid value is preserved.
     assert (s.state.config,s.state.tariff) == original
     assert not s.session.pending and s.store.data is None

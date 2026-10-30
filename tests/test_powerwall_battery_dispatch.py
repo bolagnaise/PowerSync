@@ -2132,9 +2132,9 @@ def test_other_local_charge_failures_do_not_claim_grid_permission_refusal(failur
 
 
 @pytest.mark.parametrize('initially_disabled', [False, True])
-def test_local_charge_handles_attested_false_omission_through_grid_restore(initially_disabled):
+def test_local_charge_handles_false_omission_through_grid_restore(initially_disabled):
     from copy import deepcopy
-    from test_powerwall_grid_permission_encoding import normalization, system_info
+    from test_powerwall_grid_permission_encoding import normalization
     async def run():
         ns, controller, client, saved = load_routing(optimization_allow_grid_charge=True)
         snap, events = install_grid_permission(client, disabled=initially_disabled)
@@ -2143,8 +2143,7 @@ def test_local_charge_handles_attested_false_omission_through_grid_restore(initi
         snap.raw['config']['site_info'].update(backup_reserve_percent=20,customer_preferred_export_rule='battery_ok')
         if not initially_disabled: snap.raw['config']['site_info'].pop(field)
         original = deepcopy(snap.raw['config'])
-        client.native_grid_charging_reading = lambda config: normalization.native_grid_charging_reading(config,system_info(),'gateway')
-        client.refresh_native_grid_charging_firmware = AsyncMock()
+        client.native_grid_charging_reading = lambda config: normalization.native_grid_charging_reading(config)
         async def snapshot_read():
             reading = client.native_grid_charging_reading(snap.raw['config'])
             snap.grid_charging_enabled = not reading.disallowed if type(reading.disallowed) is bool else None

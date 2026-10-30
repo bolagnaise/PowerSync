@@ -130,7 +130,7 @@ async def test_tariff_change_recovers_unknown_local_permission_through_confirmed
         return confirmed
     ns['async_restore_tesla_grid_charging_confirmed'] = AsyncMock(side_effect=cloud)
     ns['async_get_clientsession'] = lambda _: object()
-    client._transport.read_config.side_effect = lambda _: {'site_info': {}}
+    client._transport.read_config.side_effect = lambda _: None
     try:
         with pytest.raises(RuntimeError):
             await ns['handle_force_charge'](call(source='optimizer', power_w=1000, duration=1))

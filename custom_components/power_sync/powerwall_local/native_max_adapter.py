@@ -510,13 +510,8 @@ class NativeMaxChargeAdapter:
             value = reader(config).disallowed
         else:
             info = config.get("site_info") if isinstance(config, dict) else None
-            value = info.get("disallow_charge_from_grid_with_solar_installed") if isinstance(info, dict) else None
+            value = info.get("disallow_charge_from_grid_with_solar_installed", False) if isinstance(info, dict) else None
         return value if type(value) is bool else None
-
-    async def _refresh_grid_permission(self):
-        refresh = getattr(self.client, "refresh_native_grid_charging_firmware", None)
-        if callable(refresh):
-            await refresh()
 
     async def prepare(self, baseline, before_write, *, write_intent):
         """Enable an owned optimiser setting before any battery or tariff write."""
@@ -555,7 +550,6 @@ class NativeMaxChargeAdapter:
                     before_submit=record_grid_intent)):
                 return False
             current = await self.client._transport.read_config(self.client._din)
-            await self._refresh_grid_permission()
             if not isinstance(current, dict) or self._grid_value(current) is not False:
                 return False
             await write_intent("local_confirmed")
@@ -834,8 +828,6 @@ class NativeMaxChargeAdapter:
             return (observed is expected if type(expected) is bool else observed == expected)
 
         async def write_field(field, target, expected):
-            if field == "site_info.disallow_charge_from_grid_with_solar_installed":
-                await self._refresh_grid_permission()
             expected_export = None
             preserved_export = None
             if cloud_export:
@@ -875,8 +867,6 @@ class NativeMaxChargeAdapter:
                 return
             try:
                 current = await self.client._transport.read_config(self.client._din)
-                if field == "site_info.disallow_charge_from_grid_with_solar_installed":
-                    await self._refresh_grid_permission()
             except Exception:
                 return
             if not isinstance(current, dict):

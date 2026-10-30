@@ -265,24 +265,10 @@ class PowerwallLocalClient:
         """Read live DCQ/config together with one bounded incomplete-read retry."""
         return await self._read_snapshot()
 
-    async def refresh_native_grid_charging_firmware(self) -> None:
-        """Refresh one short-lived, same-DIN native encoding attestation."""
-        self._grid_permission_attestation = None
-        started = time.monotonic()
-        try:
-            info = await self._transport.get_system_info(self._din)
-        except Exception:
-            return
-        self._grid_permission_attestation = (self._din, started, info)
-
-    def native_grid_charging_reading(self, config):
-        """Explicit values need no exception; omitted values need fresh proof."""
-        attestation = getattr(self, "_grid_permission_attestation", None)
-        info = None
-        if (attestation is not None and attestation[0] == self._din
-                and 0 <= time.monotonic() - attestation[1] <= 5):
-            info = attestation[2]
-        return native_grid_charging_reading(config, info, self._din)
+    @staticmethod
+    def native_grid_charging_reading(config):
+        """Use native boolean defaults without a firmware query or cache."""
+        return native_grid_charging_reading(config)
 
     async def get_control_snapshot(self, native_config: dict) -> PowerwallSnapshot:
         """Refresh only DCQ after a writer has read its hash-checked config.
@@ -325,13 +311,6 @@ class PowerwallLocalClient:
 
             if dcq:
                 snapshot = _snapshot_from_dcq(dcq, cfg if isinstance(cfg, dict) else None)
-                info = cfg.get("site_info") if isinstance(cfg, dict) else None
-                if isinstance(info, dict) and "disallow_charge_from_grid_with_solar_installed" not in info:
-                    await self.refresh_native_grid_charging_firmware()
-                    reading = self.native_grid_charging_reading(cfg)
-                    snapshot.grid_charging_enabled = (not reading.disallowed
-                        if type(reading.disallowed) is bool else None)
-                    snapshot.grid_charging_permission_source = reading.source
                 snapshot.observed_monotonic = started
                 required = (snapshot.soc, snapshot.battery_w, snapshot.grid_w,
                             snapshot.load_w, snapshot.solar_w)
