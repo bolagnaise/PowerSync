@@ -13,6 +13,8 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 import aiohttp
 
+from conftest import load_source_node
+
 ROOT = Path(__file__).parents[1] / "custom_components/power_sync"
 
 
@@ -87,8 +89,7 @@ async def test_settings_startup_publishes_recovery_state_without_preexisting_run
 
 
 def load_function(path, name, namespace, *, strip_imports=False):
-    node = next(n for n in ast.walk(ast.parse(path.read_text()))
-                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and n.name == name)
+    node = load_source_node(path, name)
     if strip_imports:
         class StripImports(ast.NodeTransformer):
             def visit_ImportFrom(self, node):

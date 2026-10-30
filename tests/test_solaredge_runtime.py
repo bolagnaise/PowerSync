@@ -61,11 +61,9 @@ def test_solaredge_runtime_wires_energy_coordinator():
 
 
 def _setup_node(name):
-    module = ast.parse(INIT_PATH.read_text())
-    setup = next(
-        n for n in module.body if getattr(n, "name", None) == "async_setup_entry"
-    )
-    return next(n for n in setup.body if getattr(n, "name", None) == name)
+    from conftest import load_source_node
+
+    return load_source_node(INIT_PATH, name, parent="async_setup_entry")
 
 
 def _load_node(node, namespace):

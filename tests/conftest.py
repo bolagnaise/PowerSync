@@ -3,12 +3,45 @@
 from __future__ import annotations
 
 import contextlib
+import ast
+import copy
+from functools import lru_cache
+from pathlib import Path
 import sys
 
 import pytest
 
 
 _MISSING = object()
+
+
+@lru_cache(maxsize=16)
+def _source_node_index(path, source):
+    """Index each source version once; cached nodes must remain private."""
+    nodes = {}
+    for node in ast.walk(ast.parse(source, filename=path)):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            nodes.setdefault(node.name, node)
+    return nodes
+
+
+def load_source_node(path, name, *, parent=None):
+    """Return an independent real-source AST node without reparsing its file.
+
+    Read on every call and key the bounded cache by exact content, so edits
+    (even same-size edits with unchanged timestamps) cannot return stale code.
+    Copy only the selected subtree: tests may strip imports, decorators or
+    annotations without changing another test's view of the product source.
+    ``parent`` restricts selection to a named function/class's direct body.
+    """
+    path = Path(path).resolve()
+    nodes = _source_node_index(str(path), path.read_text())
+    if parent is None:
+        node = nodes[name]
+    else:
+        node = next(node for node in nodes[parent].body
+                    if getattr(node, "name", None) == name)
+    return copy.deepcopy(node)
 
 
 @contextlib.contextmanager
@@ -118,9 +151,7 @@ def load_power_sync_function(name, namespace, path=None):
     import pathlib
 
     path = path or pathlib.Path(__file__).resolve().parents[1] / "custom_components/power_sync/__init__.py"
-    source = path.read_text()
-    node = next(n for n in ast.walk(ast.parse(source))
-                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == name)
+    node = load_source_node(path, name)
     module = ast.Module(body=[node], type_ignores=[])
     exec(compile(ast.fix_missing_locations(module), str(path), "exec",
                  flags=__import__("__future__").annotations.compiler_flag), namespace)
