@@ -21,6 +21,46 @@ def _load_module():
 ALERTS = _load_module()
 
 
+def test_waiting_evse_does_not_raise_powerwall_problem_and_retains_details():
+    raw = [
+        {"name": "SystemConnectedToGrid"},
+        {"name": "FWUpdateSucceeded"},
+        {"name": "EVSENotChargingWhenAllowed"},
+    ]
+
+    actionable, informational = ALERTS.split_powerwall_alerts(raw)
+    attributes = ALERTS.powerwall_alert_attributes(raw)
+
+    assert actionable == []
+    assert informational == raw
+    assert attributes["alerts"] == []
+    assert attributes["informational_alert_details"] == raw
+    assert attributes["all_alert_details"] == raw
+
+
+def test_explicit_fault_severity_overrides_known_status_name():
+    for name in ("EVSENotChargingWhenAllowed", "FWUpdateSucceeded"):
+        for key in ("severity", "alert_severity"):
+            for severity in ("warning", "performance", "critical", "future_severity"):
+                raw = [{"name": name, key: severity}]
+                actionable, informational = ALERTS.split_powerwall_alerts(raw)
+                attributes = ALERTS.powerwall_alert_attributes(raw)
+                assert actionable == raw
+                assert informational == []
+                assert attributes["alert_details"] == raw
+                assert attributes["severities"] == {name: severity}
+
+
+def test_waiting_evse_does_not_hide_other_evse_or_battery_faults():
+    status = {"name": "EVSENotChargingWhenAllowed"}
+    faults = [{"name": "EVSEGroundFault"}, {"name": "BatteryFault"}]
+
+    actionable, informational = ALERTS.split_powerwall_alerts([status, *faults])
+
+    assert actionable == faults
+    assert informational == [status]
+
+
 def test_standard_powerwall_status_records_are_not_actionable():
     raw = [
         {"name": "SystemConnectedToGrid"},

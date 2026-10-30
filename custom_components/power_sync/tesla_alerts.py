@@ -19,6 +19,10 @@ from typing import Any
 _EXPECTED_INFORMATIONAL_ALERT_NAMES = frozenset(
     {
         "batterycalibration",
+        # Charging permission is not a demand to charge: the vehicle may be
+        # waiting on its own schedule or deliberately stopped. This EVSE
+        # status alone does not establish a Powerwall fault.
+        "evsenotchargingwhenallowed",
         "fwupdatesucceeded",
         "gridcodeswrite",
         "podcommissiontime",
@@ -59,8 +63,11 @@ def powerwall_alert_is_informational(alert: Any) -> bool:
     """Return True only when an alert is explicitly known to be non-error."""
     if isinstance(alert, dict):
         severity = alert.get("severity") or alert.get("alert_severity")
-        if _normalized_alert_value(severity) in _NON_ERROR_SEVERITIES:
-            return True
+        normalized_severity = _normalized_alert_value(severity)
+        if normalized_severity:
+            # Explicit warning/fault (or unknown) severity takes precedence
+            # over a normally informational name.
+            return normalized_severity in _NON_ERROR_SEVERITIES
     return (
         _normalized_alert_value(powerwall_alert_name(alert))
         in _EXPECTED_INFORMATIONAL_ALERT_NAMES
