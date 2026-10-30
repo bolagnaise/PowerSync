@@ -13,8 +13,23 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parent.parent / "custom_components" / "power_sync"
+
+
+@pytest.fixture(autouse=True)
+def restore_sensor_stub_modules():
+    """Do not export this file's fresh HA/package trees to later test files."""
+    prefixes = ("homeassistant", "power_sync")
+    saved = {name: module for name, module in sys.modules.items()
+             if name.split(".", 1)[0] in prefixes}
+    yield
+    for name in list(sys.modules):
+        if name.split(".", 1)[0] in prefixes and name not in saved:
+            sys.modules.pop(name, None)
+    sys.modules.update(saved)
 
 
 def _install_sensor_stubs() -> None:

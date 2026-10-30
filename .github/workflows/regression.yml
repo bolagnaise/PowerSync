@@ -66,8 +66,8 @@ jobs:
       - name: Install regression dependencies
         if: steps.evidence.outputs.reuse != 'true'
         run: python -m pip install -r requirements-test.txt
-      - name: Run full regression suite
+      - name: Run complete parallel regression suite
         if: steps.evidence.outputs.reuse != 'true'
         run: |
-          python -m pytest tests/ -q -p no:cacheprovider --durations=30 --junitxml=regression-results.xml
-          python scripts/release/check_regression_results.py regression-results.xml
+          python scripts/release/run_regression.py --workers 2 --output-dir "$RUNNER_TEMP/powersync-regression"
+          python scripts/release/check_regression_results.py "$RUNNER_TEMP/powersync-regression/results.xml"

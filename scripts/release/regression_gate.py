@@ -17,7 +17,7 @@ import time
 
 WORKFLOW = ".github/workflows/regression.yml"
 JOB = "Full regression suite"
-TEST_STEP = "Run full regression suite"
+TEST_STEP = "Run complete parallel regression suite"
 MANIFEST = "custom_components/power_sync/manifest.json"
 METADATA = {"README.md", "CHANGELOG.md", "RELEASE_NOTES.md",
             ".github/discord-release-last-posted.txt"}

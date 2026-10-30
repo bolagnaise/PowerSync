@@ -8,6 +8,10 @@ import types
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import pytest
+
+from conftest import pinned_sys_modules
+
 
 ROOT = Path(__file__).resolve().parent.parent / "custom_components" / "power_sync"
 VIN = "5YJTEST0000000001"
@@ -19,6 +23,13 @@ sys.modules["power_sync"] = _ps
 _automations = types.ModuleType("power_sync.automations")
 _automations.__path__ = [str(ROOT / "automations")]
 sys.modules["power_sync.automations"] = _automations
+
+
+@pytest.fixture(autouse=True)
+def own_package_for_lazy_tariff_imports():
+    """The raw-price fixture must not inherit another file's period resolver."""
+    with pinned_sys_modules({"power_sync": _ps, "power_sync.automations": _automations}):
+        yield
 
 from power_sync.automations.observed_tesla_sessions import (  # noqa: E402
     OBSERVED_SESSION_MODE,

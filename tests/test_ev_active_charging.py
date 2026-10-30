@@ -11,6 +11,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from conftest import pinned_sys_modules
+
 
 ROOT = Path(__file__).resolve().parent.parent / "custom_components" / "power_sync"
 
@@ -105,6 +107,22 @@ class _Hass:
 def _install_registry_stubs() -> None:
     _ha_er.async_get = lambda hass: hass.entity_registry
     _ha_dr.async_get = lambda hass: hass.device_registry
+
+
+@pytest.fixture(autouse=True)
+def own_registry_bindings(monkeypatch):
+    """Lazy registry imports must resolve this file's fakes in every worker."""
+    monkeypatch.setattr(_ha_root, "helpers", _ha_helpers, raising=False)
+    monkeypatch.setattr(_ha_helpers, "entity_registry", _ha_er, raising=False)
+    monkeypatch.setattr(_ha_helpers, "device_registry", _ha_dr, raising=False)
+    monkeypatch.setattr(_ha_er, "async_get", lambda hass: hass.entity_registry)
+    monkeypatch.setattr(_ha_dr, "async_get", lambda hass: hass.device_registry)
+    with pinned_sys_modules({
+        "homeassistant": _ha_root, "homeassistant.helpers": _ha_helpers,
+        "homeassistant.helpers.entity_registry": _ha_er,
+        "homeassistant.helpers.device_registry": _ha_dr,
+    }):
+        yield
 
 
 def test_active_charging_inferred_from_teslemetry_bt_power():

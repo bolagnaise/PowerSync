@@ -33,6 +33,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from conftest import pinned_sys_modules
+
 
 ROOT = Path(__file__).resolve().parent.parent / "custom_components" / "power_sync"
 
@@ -121,6 +123,24 @@ if not hasattr(sys.modules.get("power_sync.const"), "TESLA_INTEGRATIONS"):
     sys.modules.pop("power_sync.const", None)
 
 ev_planner = importlib.import_module("power_sync.automations.ev_charging_planner")
+
+
+@pytest.fixture(autouse=True)
+def own_registry_and_event_bindings(monkeypatch):
+    """Keep lazy HA lookups independent of earlier files assigned to a worker."""
+    monkeypatch.setattr(_ha_root, "helpers", _ha_helpers, raising=False)
+    monkeypatch.setattr(_ha_helpers, "entity_registry", _ha_er, raising=False)
+    monkeypatch.setattr(_ha_helpers, "device_registry", _ha_dr, raising=False)
+    monkeypatch.setattr(_ha_er, "async_get", lambda hass: getattr(hass, "entity_registry", SimpleNamespace(entities={})))
+    monkeypatch.setattr(_ha_dr, "async_get", lambda hass: getattr(hass, "device_registry", SimpleNamespace(devices={})))
+    monkeypatch.setattr(_ha_event, "async_track_point_in_time", lambda *a, **k: (lambda: None), raising=False)
+    with pinned_sys_modules({
+        "homeassistant": _ha_root, "homeassistant.helpers": _ha_helpers,
+        "homeassistant.helpers.entity_registry": _ha_er,
+        "homeassistant.helpers.device_registry": _ha_dr,
+        "homeassistant.helpers.event": _ha_event,
+    }):
+        yield
 
 
 @pytest.mark.parametrize(
