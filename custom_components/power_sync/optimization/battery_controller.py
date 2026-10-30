@@ -422,8 +422,14 @@ class BatteryControllerWrapper:
             _LOGGER.debug(f"get_tesla_operation_mode failed: {e}")
             return None
 
+    async def restore_backup_reserve_for_monitoring(self, percent: int) -> bool:
+        """Carry the explicit handoff restore through the service monitoring gate."""
+        return await self.set_backup_reserve(percent, _monitoring_restore=True)
+
     @optimizer_command
-    async def set_backup_reserve(self, percent: int) -> bool:
+    async def set_backup_reserve(
+        self, percent: int, *, _monitoring_restore: bool = False
+    ) -> bool:
         """
         Set battery backup reserve percentage.
 
@@ -439,6 +445,8 @@ class BatteryControllerWrapper:
         """
         try:
             service_data = {"percent": percent, "source": "optimizer"}
+            if _monitoring_restore:
+                service_data["_monitoring_reserve_restore"] = True
             if self.battery_system == "tesla":
                 response = await self.hass.services.async_call(
                     "power_sync",

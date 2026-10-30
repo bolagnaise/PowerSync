@@ -441,6 +441,8 @@ def test_monitoring_mode_blocks_automation_but_allows_manual_controls():
         )
         assert function_source is not None
         guard = "if _monitoring_mode_should_block_control(call):"
+        if function_name == "handle_set_backup_reserve":
+            guard = "if _monitoring_mode_should_block_control(call) and not monitoring_reserve_restore:"
         assert guard in function_source
         assert function_source.index(guard) < function_source.index(later_marker)
 

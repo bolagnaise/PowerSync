@@ -7,6 +7,10 @@ forecast, household load forecast, battery limits, and configured reserve floors
 Solar forecasting via Solcast or Open-Meteo Solar Forecast should be configured
 for accurate schedules.
 
+## Enabling Monitoring Mode
+
+When Monitoring Mode is switched on, PowerSync first releases its active battery control and restores any backup reserve temporarily raised for an IDLE or EV preservation hold. The switch stays off if that cleanup cannot be confirmed, retaining the saved reserve for retry. Successful cleanup enables monitoring and blocks subsequent automatic battery commands; it does not confirm that an EV has stopped charging or restore exhausted provider credits.
+
 ## Planning after a restart
 
 Smart Optimization waits for startup battery restoration before solving. If that restoration is cancelled by a newer control operation, a later optimization cycle retries it automatically. Cancelling a plan refresh does not cancel the shared restoration; unresolved force cleanup still blocks new control.

@@ -41551,7 +41551,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.error(f"Invalid backup reserve percent: {percent}")
             return {"success": False, "error": "invalid backup reserve percent"}
 
-        if _monitoring_mode_should_block_control(call):
+        # The explicit off-to-on handoff blocks new optimizer commands while
+        # releasing its existing reserve hold. Authorize only that saved target;
+        # keep the optimizer source so cleanup cannot change user provenance.
+        monitoring_reserve_restore = False
+        if call.data.get("_monitoring_reserve_restore") is True:
+            reserve_runtime = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+            reserve_optimizer = reserve_runtime.get("optimization_coordinator")
+            monitoring_reserve_restore = bool(
+                _control_call_source(call) == "optimizer"
+                and not battery_connection_profile.monitoring_only
+                and reserve_runtime.get("_monitoring_handoff_active")
+                and not entry.options.get(
+                    CONF_MONITORING_MODE, entry.data.get(CONF_MONITORING_MODE, False)
+                )
+                and percent == getattr(reserve_optimizer, "_pre_idle_backup_reserve", None)
+            )
+        if _monitoring_mode_should_block_control(call) and not monitoring_reserve_restore:
             _LOGGER.info(
                 "[MONITORING] Would set backup reserve to %d%% — blocked by monitoring mode",
                 percent,

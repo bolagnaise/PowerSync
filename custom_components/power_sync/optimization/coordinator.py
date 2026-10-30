@@ -1029,7 +1029,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             return False
         try:
-            result = await fenced_call(self, lambda: battery.set_backup_reserve(self._pre_idle_backup_reserve), 'set_backup_reserve')
+            restore_reserve = battery.set_backup_reserve
+            if bypass_monitoring:
+                restore_reserve = getattr(
+                    battery, "restore_backup_reserve_for_monitoring", restore_reserve
+                )
+            result = await fenced_call(self, lambda: restore_reserve(self._pre_idle_backup_reserve), 'set_backup_reserve')
             if result is False:
                 _LOGGER.warning(
                     "Failed to restore backup reserve to %d%%: command returned False "

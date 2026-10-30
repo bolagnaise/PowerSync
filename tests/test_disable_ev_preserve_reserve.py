@@ -29,9 +29,11 @@ from __future__ import annotations
 import ast
 import asyncio
 import importlib
+import logging
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -50,6 +52,132 @@ COORDINATOR_PATH = (
     ROOT / "custom_components" / "power_sync" / "optimization" / "coordinator.py"
 )
 MONITORING_PATH = ROOT / "custom_components" / "power_sync" / "monitoring.py"
+
+
+def _tesla_handoff_runtime(opt_module, *, confirmed=True):
+    """Join the real coordinator, wrapper, monitoring gate and reserve handler."""
+    from conftest import load_power_sync_function
+    from power_sync.optimization.battery_controller import BatteryControllerWrapper
+
+    entry = SimpleNamespace(entry_id="entry-1", data={}, options={})
+    runtime = {}
+    hass = SimpleNamespace(data={"power_sync": {entry.entry_id: runtime}})
+    coordinator = object.__new__(opt_module.OptimizationCoordinator)
+    coordinator.hass = hass
+    coordinator.entry_id = entry.entry_id
+    coordinator.battery_system = "tesla"
+    coordinator._entry = entry
+    coordinator._execute_lock = asyncio.Lock()
+    coordinator._pre_idle_backup_reserve = 30
+    coordinator._idle_hold_reserve = 78
+    coordinator._startup_backup_reserve = 30
+    coordinator._idle_reserve_adjustment = False
+    coordinator.battery_controller = BatteryControllerWrapper(hass, "tesla")
+    coordinator.battery_controller.entry_id = entry.entry_id
+    runtime["optimization_coordinator"] = coordinator
+    provider = AsyncMock(return_value={"confirmed": confirmed})
+    if confirmed == "exception":
+        provider.side_effect = OSError("provider unavailable")
+    namespace = dict(
+        hass=hass, entry=entry, DOMAIN="power_sync",
+        _LOGGER=logging.getLogger(__name__),
+        battery_connection_profile=SimpleNamespace(monitoring_only=False),
+        alphaess_coordinator=None,
+        hold_soc_state={}, _tesla_reserve_generation=[0],
+        _tesla_charge_kick_generation=[0], _command_generation=[0],
+        _supersede_tesla_charge_kick=lambda reason: 0,
+        _stop_native_max_charge=AsyncMock(),
+        _get_neovolt_entry_ids=lambda *args: [],
+        _get_tesla_site_configs=lambda *args: [("site-1", "test", "fleet")],
+        _tesla_force_apply_backup_reserve=provider,
+        _tesla_force_result_all_confirmed=lambda result, sites: result["confirmed"],
+        refresh_powerwall_local_after_settings_write=AsyncMock(),
+    )
+    # Use the actual constants even though this test's HA module tree is stubbed.
+    constants = {}
+    for node in ast.parse((ROOT / "custom_components/power_sync/const.py").read_text()).body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            try:
+                constants[node.targets[0].id] = ast.literal_eval(node.value)
+            except (ValueError, TypeError):
+                pass
+    namespace.update({key: value for key, value in constants.items()
+                      if key.startswith(("CONF_", "BATTERY_SYSTEM_", "SUNGROW_CONNECTION_"))})
+    for name in ("_is_monitoring_mode", "_control_call_source",
+                 "_monitoring_mode_should_block_control", "handle_set_backup_reserve"):
+        load_power_sync_function(name, namespace)
+    calls = []
+
+    async def async_call(domain, service, data, **kwargs):
+        calls.append((service, dict(data)))
+        if service == "restore_normal":
+            return None
+        assert service == "set_backup_reserve"
+        call = SimpleNamespace(data=data, context=SimpleNamespace(user_id=None))
+        return await namespace["handle_set_backup_reserve"](call)
+
+    hass.services = SimpleNamespace(async_call=async_call)
+    sys.modules["power_sync.const"].SERVICE_RESTORE_NORMAL = "restore_normal"
+    monitoring = importlib.import_module("power_sync.monitoring")
+    return coordinator, entry, runtime, provider, calls, namespace, monitoring
+
+
+@pytest.mark.parametrize("confirmed", [True, False, "exception"])
+def test_monitoring_handoff_restores_through_real_tesla_service_gate(opt_module, confirmed):
+    """An available provider must be reached; failed readback keeps cleanup pending."""
+    async def run():
+        c, entry, runtime, provider, calls, env, monitoring = _tesla_handoff_runtime(
+            opt_module, confirmed=confirmed
+        )
+        try:
+            if confirmed is True:
+                await monitoring.async_prepare_monitoring_handoff(c.hass, entry)
+                assert c._pre_idle_backup_reserve is None
+                assert c._idle_hold_reserve is None
+            else:
+                with pytest.raises(RuntimeError, match="pre-IDLE backup reserve restore failed"):
+                    await monitoring.async_prepare_monitoring_handoff(c.hass, entry)
+                assert c._pre_idle_backup_reserve == 30
+                assert c._idle_hold_reserve == 78
+            provider.assert_awaited_once_with(
+                [("site-1", "test", "fleet")], 30, reason="set backup reserve"
+            )
+            assert calls[-1][1]["source"] == "optimizer"
+            assert c._startup_backup_reserve == 30
+            assert entry.options == {}
+            assert not c._execute_lock.locked()
+        finally:
+            monitoring.finish_monitoring_handoff(c.hass, entry)
+        assert "_monitoring_handoff_active" not in runtime
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("handoff,monitoring,marker,target,monitoring_only", [
+    (True, False, False, 30, False),  # Ordinary optimizer write during cleanup.
+    (True, False, True, 40, False),   # A different reserve is not restoration.
+    (False, True, True, 30, False),   # A marker cannot bypass persisted monitoring.
+    (True, True, True, 30, False),
+    (True, False, True, 30, True),    # A telemetry-only connection cannot write.
+])
+def test_monitoring_reserve_restore_does_not_authorize_other_writes(
+    opt_module, handoff, monitoring, marker, target, monitoring_only
+):
+    async def run():
+        c, entry, runtime, provider, calls, env, _ = _tesla_handoff_runtime(opt_module)
+        runtime["_monitoring_handoff_active"] = handoff
+        entry.options["monitoring_mode"] = monitoring
+        env["battery_connection_profile"].monitoring_only = monitoring_only
+        call = SimpleNamespace(data={
+            "percent": target, "source": "optimizer",
+            "_monitoring_reserve_restore": marker,
+        }, context=SimpleNamespace(user_id=None))
+        result = await env["handle_set_backup_reserve"](call)
+        assert result["success"] is False
+        provider.assert_not_awaited()
+        assert c._pre_idle_backup_reserve == 30
+
+    asyncio.run(run())
 
 
 @pytest.fixture()
