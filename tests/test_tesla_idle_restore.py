@@ -10,6 +10,8 @@ from types import SimpleNamespace as NS
 
 import pytest
 
+from conftest import load_power_sync_submodule
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -30,7 +32,10 @@ def restore_probe():
                  if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
                  and node.name in names]
     functions.sort(key=lambda node: node.lineno)
+    # Give lazy relative imports the same real module boundary as production.
+    load_power_sync_submodule("powerwall_local.native_max_charge", "_idle_restore_probe")
     ns = {
+        "__name__": "_idle_restore_probe", "__package__": "_idle_restore_probe",
         "asyncio": asyncio, "copy": copy, "_LOGGER": logging.getLogger(__name__),
         "_FORCE_TARIFF_TEXT_MARKERS": ("force charge", "force discharge"),
         "_FORCE_TARIFF_CODE_PREFIXES": ("charge_", "discharge_"),

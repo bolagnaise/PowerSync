@@ -3499,6 +3499,7 @@ def test_smart_optimization_sections_have_local_labels_and_descriptions():
             "optimization_ai_summary_openrouter_model",
             "optimization_ai_summary_openai_model",
             "optimization_ai_summary_auto_refresh",
+            "optimization_ai_summary_auto_refresh_interval",
         }
         assert "write-only" in ai_section["data_description"][
             "optimization_ai_summary_api_key"

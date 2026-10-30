@@ -336,7 +336,13 @@ def test_every_small_chart_has_working_pointer_and_keyboard_tooltips():
   }
   context.document.createElement = () => new El();
   context.document.createElementNS = () => new El();
-  const now = new Date();
+  // Use local evening in every timezone: the noon pointer must have history.
+  class ChartDate extends Date {
+    constructor(...args) { super(...(args.length ? args : [2026, 9, 30, 18, 0])); }
+    static now() { return new ChartDate().getTime(); }
+  }
+  context.Date = ChartDate;
+  const now = new ChartDate();
   const ts = Array.from({length: 97}, (_, i) => new Date(now.getTime() + i * 1800000).toISOString());
   T.psApiCache.set('power_sync/optimization', { data: {
     last_optimization: 'test', schedule: { timestamps: ts, charge_w: [3000, 0, 0], discharge_w: [0, 2000, 0] },
