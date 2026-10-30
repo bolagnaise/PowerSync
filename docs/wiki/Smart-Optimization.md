@@ -13,6 +13,12 @@ Smart Optimization waits for startup battery restoration before solving. If that
 
 ## Price interval boundaries
 
+## FoxESS EV battery preservation
+
+After manual Force Charge ends, an active EV home-battery-preservation request is applied again on the next eligible optimiser execution. PowerSync clears the earlier `no_discharge` acknowledgement when normal operation is restored, and reports it again only after the new hold succeeds.
+
+## Price interval boundaries
+
 Timestamped tariff rates apply only where their validity period overlaps the current planning horizon. Rates beyond that horizon are ignored until their period enters the plan; they do not replace the current import or export price. A period crossing the end of the horizon is included only for the part that overlaps.
 
 ## Stored-energy acquisition cost

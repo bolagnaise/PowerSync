@@ -39079,6 +39079,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 if _restore_superseded("FoxESS restore"):
                     return
 
+                # A successful restore has replaced any earlier EV Backup
+                # hold. Require a fresh acknowledgement on the next eligible
+                # optimizer execution instead of reusing its cached success.
+                if opt_coordinator is not None:
+                    opt_coordinator._scheduled_ev_no_discharge_active = False
+                    if getattr(
+                        opt_coordinator, "_last_executed_action", None
+                    ) == "no_discharge":
+                        opt_coordinator._last_executed_action = None
+                        opt_coordinator._last_executed_planned_action = None
+
                 force_charge_state["active"] = False
                 force_discharge_state["active"] = False
                 force_charge_state["expires_at"] = None

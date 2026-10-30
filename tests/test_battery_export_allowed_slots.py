@@ -14192,3 +14192,138 @@ def test_confirmed_no_solar_site_suppresses_missing_forecast_warning(opt_module)
     coordinator._solar_forecaster.last_forecast_source = None
     coordinator._record_solar_forecast_availability([0.0, 0.0])
     assert [warning["type"] for warning in coordinator._get_warnings()] == ["no_solar_forecast"]
+
+
+def _foxess_preserve_restore_handler(coordinator, energy, force_state, *, superseded=False):
+    """Run the real FoxESS restore branch against the execution coordinator."""
+    path = COMPONENT_ROOT / "__init__.py"
+    tree = ast.parse(path.read_text())
+    handler = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "handle_restore_normal"
+    )
+    branch = next(
+        node for node in handler.body
+        if isinstance(node, ast.If)
+        and isinstance(node.test, ast.Name) and node.test.id == "is_foxess"
+    )
+    wrapper = ast.parse("async def restore():\n    pass\n")
+    wrapper.body[0].body = branch.body
+    ast.fix_missing_locations(wrapper)
+    entry_data = coordinator.hass.data["power_sync"][coordinator.entry_id]
+    entry_data.update(foxess_coordinator=energy, optimization_coordinator=coordinator)
+    namespace = {
+        "hass": coordinator.hass,
+        "entry": SimpleNamespace(entry_id=coordinator.entry_id),
+        "DOMAIN": "power_sync",
+        "opt_coordinator": coordinator,
+        "force_charge_state": force_state,
+        "force_discharge_state": {"active": False, "expires_at": None},
+        "_restore_superseded": lambda _stage: superseded,
+        "suppress_notification": True,
+        "async_dispatcher_send": lambda *_args: None,
+        "persist_force_mode_state": lambda: asyncio.sleep(0),
+        "HomeAssistantError": RuntimeError,
+        "_LOGGER": logging.getLogger(__name__),
+    }
+    exec(compile(wrapper, str(path), "exec"), namespace)
+    return namespace["restore"]
+
+
+class _FoxessPreserveEnergy(_FakeEnergyCoordinator):
+    def __init__(self):
+        super().__init__()
+        self.work_mode = "Self Use"
+        self.hold_result = True
+        self.restore_result = True
+
+    async def set_no_discharge_mode(self):
+        self.no_discharge_calls += 1
+        if isinstance(self.hold_result, Exception):
+            raise self.hold_result
+        if self.hold_result:
+            self.work_mode = "Backup"
+        return self.hold_result
+
+    async def restore_normal(self):
+        if self.restore_result:
+            self.work_mode = "Self Use"
+        return self.restore_result
+
+
+@pytest.mark.parametrize("hold_failure", [None, False, TimeoutError("hold timed out")])
+def test_foxess_ev_preserve_reapplied_after_manual_force_restore(opt_module, hold_failure):
+    """A pre-force Backup acknowledgement cannot survive a Self Use restore."""
+    async def run():
+        battery = _FakeBattery()
+        coordinator = _execution_coordinator(opt_module, battery, soc=0.83)
+        coordinator.battery_system = "foxess"
+        energy = _FoxessPreserveEnergy()
+        coordinator.energy_coordinator = energy
+        _enable_scheduled_ev_preserve(coordinator)
+        action = SimpleNamespace(action="self_consumption", power_w=0)
+        force_state = {"active": False, "source": "user", "type": "charge"}
+        coordinator._force_state_getter = lambda: force_state
+        restore = _foxess_preserve_restore_handler(coordinator, energy, force_state)
+
+        await coordinator._execute_optimizer_action(action)
+        assert energy.work_mode == "Backup"
+        assert coordinator._last_executed_action == "no_discharge"
+
+        # Manual charge owns hardware until its expiry/restore, even though
+        # preservation remains requested throughout the charging session.
+        force_state["active"] = True
+        energy.work_mode = "Force Charge"
+        await coordinator._execute_optimizer_action(action)
+        assert energy.no_discharge_calls == 1
+        assert energy.work_mode == "Force Charge"
+
+        await restore()
+        assert force_state["active"] is False
+        assert energy.work_mode == "Self Use"
+        assert coordinator._scheduled_ev_no_discharge_active is False
+        assert coordinator._last_executed_action != "no_discharge"
+
+        if hold_failure is not None:
+            energy.hold_result = hold_failure
+            await coordinator._execute_optimizer_action(action)
+            assert energy.work_mode == "Self Use"
+            assert coordinator._scheduled_ev_no_discharge_active is False
+            assert coordinator._last_executed_action != "no_discharge"
+
+        energy.hold_result = True
+        await coordinator._execute_optimizer_action(action)
+        assert energy.no_discharge_calls == (2 if hold_failure is None else 3)
+        assert energy.work_mode == "Backup"
+        assert coordinator._scheduled_ev_no_discharge_active is True
+        assert coordinator._last_executed_action == "no_discharge"
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("superseded", [False, True])
+def test_foxess_ev_preserve_restore_failure_or_supersession_keeps_state(opt_module, superseded):
+    async def run():
+        coordinator = _execution_coordinator(opt_module, _FakeBattery(), soc=0.83)
+        coordinator.battery_system = "foxess"
+        energy = _FoxessPreserveEnergy()
+        coordinator.energy_coordinator = energy
+        _enable_scheduled_ev_preserve(coordinator)
+        await coordinator._execute_optimizer_action(
+            SimpleNamespace(action="self_consumption", power_w=0)
+        )
+        force_state = {"active": True, "source": "user", "type": "charge"}
+        restore = _foxess_preserve_restore_handler(
+            coordinator, energy, force_state, superseded=superseded
+        )
+        energy.restore_result = superseded
+        if superseded:
+            await restore()
+        else:
+            with pytest.raises(RuntimeError, match="did not confirm"):
+                await restore()
+        assert force_state["active"] is True
+        assert coordinator._scheduled_ev_no_discharge_active is True
+        assert coordinator._last_executed_action == "no_discharge"
+
+    asyncio.run(run())
