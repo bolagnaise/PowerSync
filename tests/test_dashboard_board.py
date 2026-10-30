@@ -108,6 +108,7 @@ def _strategy_script(board_missing: bool) -> str:
       natives: [...new Set(cards.map(c => c.native).filter(Boolean))],
       missingRender: cards.filter(c => !c.native && !c.card).map(c => c.key),
       optRows: (cards.find(c => c.key === 'optset')?.config.rows || []).map(r => r.entity),
+      evSettings: cards.find(c => c.key === 'evset') || null,
       pwRows: (cards.find(c => c.key === 'pwset')?.config.rows || []).map(r => r.entity),
       controls: cards.find(c => c.key === 'controls')?.config.entities || null,
       tariffMeta: cards.find(c => c.key === 'tariff')?.meta || null,
@@ -144,12 +145,36 @@ def test_generate_falls_back_to_classic_layout_without_board():
     assert out["type"] == "custom:power-sync-layout"
 
 
-def _run_strategy(board_missing: bool) -> dict:
+def _run_strategy(
+    board_missing: bool, *, solar_entity: str | None = None, optimizer: bool = True
+) -> dict:
+    script = _strategy_script(board_missing)
+    setup = ""
+    if solar_entity:
+        setup += f"states[{json.dumps(solar_entity)}] = s('off');"
+    if not optimizer:
+        setup += "delete states['sensor.power_sync_optimization_status'];"
+    script = script.replace("  const hass = {", setup + "  const hass = {")
+    # Renamed entities retain their registry unique ID.
+    if solar_entity:
+        script = script.replace(
+            "unique_id: `entry_${entity_id.split('.power_sync_')[1]}`",
+            f"unique_id: entity_id === {json.dumps(solar_entity)} ? 'entry_solar_surplus_ev_charging' : `entry_${{entity_id.split('.power_sync_')[1]}}`",
+        )
     result = subprocess.run(
-        ["node", "-e", _strategy_script(board_missing), str(STRATEGY_PATH)],
+        ["node", "-e", script, str(STRATEGY_PATH)],
         check=True, capture_output=True, text=True,
     )
     return json.loads(result.stdout.strip().splitlines()[-1])
+
+
+def test_solar_surplus_has_no_duplicate_dashboard_toggle():
+    for optimizer in (True, False):
+        entity = "switch.power_sync_solar_surplus_ev_charging"
+        out = _run_strategy(False, solar_entity=entity, optimizer=optimizer)
+        assert out["evSettings"] is None
+        assert entity not in out["optRows"]
+        assert "ev" in out["keys"]
 
 
 def _board_script(body: str) -> str:
@@ -159,7 +184,7 @@ def _board_script(body: str) -> str:
         + r"""
   vm.createContext(context);
   const src = fs.readFileSync(process.argv[1], 'utf8').replace(/^export \{[^}]*\};?\s*$/m, '');
-  vm.runInContext(src + '\n;globalThis.__t = { PowerSyncBoard, PsTodayCard, PsNowCard, PsControlsCard, psSchedule, psWindows, psActionKey, PS_LAYOUT_KEY, PS_DEFAULT_LAYOUT, psChartValue, psChart, psBars, PsPricesCard, PsEnergyCard, PsLoadForecastCard, PsSolarLoadCard, PsBatteryPlanCard, psApiCache, psPlannedRunEnd };', context);
+  vm.runInContext(src + '\n;globalThis.__t = { PowerSyncBoard, PsSettingsDialog, PS_SETTING_EDITORS, PsSettingsCard, PsTodayCard, PsNowCard, PsControlsCard, psSchedule, psWindows, psActionKey, PS_LAYOUT_KEY, PS_DEFAULT_LAYOUT, psChartValue, psChart, psBars, PsPricesCard, PsEnergyCard, PsLoadForecastCard, PsSolarLoadCard, PsBatteryPlanCard, psApiCache, psPlannedRunEnd };', context);
   const T = context.__t;
 """
         + body
@@ -496,3 +521,120 @@ def test_right_now_does_not_read_step_end_as_battery_running_out():
     # first real change from next_actions is.
     assert "Next it will power the home" not in html
     assert "Next it will charge at" in html
+
+
+def test_settings_editor_patch_preserves_other_values_and_encodes_one_percent():
+    out = _run_board(r"""
+  const dialog = new T.PsSettingsDialog();
+  dialog._fields = ['charge_by_time_target_soc', 'charge_by_time_target_time'];
+  dialog._values = { charge_by_time_target_soc: 80, charge_by_time_target_time: '17:00', enabled: true };
+  const inputs = { charge_by_time_target_soc: { value: '1' }, charge_by_time_target_time: { value: '17:00' } };
+  dialog.querySelector = sel => inputs[sel.match(/name="(.*?)"/)[1]];
+  const charge = dialog._changes();
+  dialog._fields = ['max_grid_export_w', 'allow_grid_charge'];
+  dialog._values = { max_grid_export_w: 5000, allow_grid_charge: true };
+  inputs.max_grid_export_w = { value: '' };
+  inputs.allow_grid_charge = { checked: false };
+  console.log(JSON.stringify({ charge, grid: dialog._changes() }));
+""")
+    assert out["charge"] == {
+        "patch": {"charge_by_time_target_soc": 0.01},
+        "expected": {"charge_by_time_target_soc": 1},
+    }
+    assert out["grid"]["patch"] == {"max_grid_export_w": None, "allow_grid_charge": False}
+
+
+def test_settings_save_requires_successful_write_and_matching_readback():
+    out = _run_board(r"""
+  (async () => {
+    const results = {};
+    for (const mode of ['success', 'rejected', 'stale', 'offline']) {
+      const dialog = new T.PsSettingsDialog();
+      const calls = [], busy = [], errors = [];
+      let closed = false;
+      dialog._editor = T.PS_SETTING_EDITORS.charge_by_time;
+      dialog.isConnected = true;
+      dialog._dialog = { close: () => { closed = true; } };
+      dialog.querySelector = sel => sel === 'form' ? { reportValidity: () => true } : {};
+      dialog._changes = () => ({ patch: { charge_by_time_target_soc: 0.01 }, expected: { charge_by_time_target_soc: 1 } });
+      dialog._busy = value => { dialog._saving = value; busy.push(value); };
+      dialog._error = message => errors.push(message);
+      dialog._hass = { callApi: async (method, path, data) => {
+        calls.push({ method, path, data });
+        if (mode === 'offline') throw Error('Connection lost');
+        if (method === 'POST') return mode === 'rejected' ? { success: false, error: 'Access denied' } : { success: true };
+        return { success: true, config: { charge_by_time_target_soc: mode === 'stale' ? 80 : 1 } };
+      } };
+      await dialog._save();
+      results[mode] = { calls, busy, errors, closed };
+    }
+    console.log(JSON.stringify(results));
+  })().catch(err => { console.error(err); process.exit(1); });
+""")
+    assert out["success"]["closed"] is True
+    assert out["success"]["errors"] == []
+    assert [c["method"] for c in out["success"]["calls"]] == ["POST", "GET"]
+    assert out["success"]["calls"][0]["data"] == {"charge_by_time_target_soc": 0.01}
+    for mode in ("rejected", "stale", "offline"):
+        assert out[mode]["closed"] is False
+        assert out[mode]["errors"]
+        assert out[mode]["busy"] == [True, False]
+    assert len(out["rejected"]["calls"]) == 1
+
+
+def test_settings_toggle_keeps_entity_index_when_an_earlier_row_is_missing():
+    out = _run_board(r"""
+  const card = new T.PsSettingsCard();
+  card._config = { rows: [
+    { kind: 'switch', entity: 'switch.missing', label: 'Missing' },
+    { kind: 'switch', entity: 'switch.charge', label: 'Charge by time', editor: 'charge_by_time' },
+  ] };
+  card._hass = { states: { 'switch.charge': { state: 'on' } } };
+  card._render();
+  const calls = [];
+  card._call = (...args) => calls.push(args);
+  const btn = { dataset: { i: '1' }, getAttribute: () => 'true', setAttribute() {} };
+  card._onClick({ target: { closest: sel => sel === 'button[data-i]' ? btn : null } });
+  console.log(JSON.stringify({ html: card.innerHTML, calls }));
+""")
+    assert 'data-editor="1"' in out["html"]
+    assert 'aria-haspopup="dialog"' in out["html"]
+    assert out["calls"] == [["homeassistant", "turn_off", {"entity_id": "switch.charge"}]]
+
+
+def test_solar_configuration_stays_in_existing_ev_mode_without_changing_session_policy():
+    script = (
+        "const fs = require('fs'); const vm = require('vm');"
+        + BROWSER_STUBS
+        + "vm.createContext(context);"
+        + f"vm.runInContext(fs.readFileSync({json.dumps(str(STRATEGY_PATH))}, 'utf8'), context);"
+        + r"""
+  const Panel = vm.runInContext('PowerSyncEVPanel', context);
+  const panel = new Panel();
+  panel.getRootNode = () => ({ host: { localName: 'power-sync-board' } });
+  panel._data = { solarConfig: { enabled: false }, priceSettings: {}, scheduledSettings: {}, autoStatus: { settings: {} } };
+  const dashboard = panel._modeSectionsHtml();
+  let event;
+  panel.dispatchEvent = value => { event = value; };
+  const opener = {};
+  panel._openSolarSettings(opener);
+  const calls = [];
+  panel._selectedLoadpoint = () => ({ loadpoint_id: 'car' });
+  panel._runCommand = (...args) => calls.push(args);
+  panel._startPolicy();
+  panel.getRootNode = () => ({ host: { localName: 'classic-layout' } });
+  const classic = panel._modeSectionsHtml();
+  console.log(JSON.stringify({ dashboard, classic, event, calls }));
+"""
+    )
+    out = _run(script)
+    assert 'data-action="configure-solar"' in out["dashboard"]
+    assert 'data-setting="solar:enabled"' in out["dashboard"]
+    assert 'data-setting="solar:household_buffer_kw"' not in out["dashboard"]
+    assert 'data-setting="solar:household_buffer_kw"' in out["classic"]
+    assert out["event"]["type"] == "ps-settings-open"
+    assert out["event"]["detail"]["row"]["editor"] == "solar"
+    assert out["event"]["composed"] is True
+    assert len(out["calls"]) == 1
+    assert out["calls"][0][2]["command"] == "start_policy_charging"
+    assert out["calls"][0][2]["policy"] == "solar_only"

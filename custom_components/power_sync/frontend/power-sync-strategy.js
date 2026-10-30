@@ -6421,15 +6421,27 @@ class PowerSyncEVPanel extends HTMLElement {
         </div>
         ${description ? `<div class="notice">${this._escHtml(description)}</div>` : ''}
         <div class="mode-fields">
-          ${fields.map((field) => this._fieldHtml(kind, settings || {}, field)).join('')}
+          ${fields.filter(field => kind !== 'solar' || !this._dashboardSettingsAvailable() || field.key === 'enabled').map((field) => this._fieldHtml(kind, settings || {}, field)).join('')}
         </div>
         <div class="mode-actions">
+          ${kind === 'solar' && this._dashboardSettingsAvailable() ? '<button class="command" data-action="configure-solar" aria-haspopup="dialog"><ha-icon icon="mdi:cog"></ha-icon><span>Configure solar charging</span></button>' : ''}
           <button class="command" data-save-mode="${kind}" ${saving || this._savingKey ? 'disabled' : ''}>
             <ha-icon icon="mdi:content-save"></ha-icon><span>${saving ? 'Saving' : 'Save'}</span>
           </button>
         </div>
       </div>
     `;
+  }
+
+  _dashboardSettingsAvailable() {
+    return this.getRootNode?.()?.host?.localName === 'power-sync-board';
+  }
+
+  _openSolarSettings(opener) {
+    this.dispatchEvent(new CustomEvent('ps-settings-open', {
+      bubbles: true, composed: true,
+      detail: { row: { editor: 'solar', label: 'Automatic solar charging', help: 'Thresholds and delays for the Solar Surplus automatic mode. Solar Only in the session controls selects the source when you press Start.' }, opener },
+    }));
   }
 
   _fieldHtml(kind, settings, field) {
@@ -6537,6 +6549,7 @@ class PowerSyncEVPanel extends HTMLElement {
         this._scheduleRender();
       });
     });
+    this.shadowRoot.querySelector('[data-action="configure-solar"]')?.addEventListener('click', event => this._openSolarSettings(event.currentTarget));
     this.shadowRoot.querySelector('[data-action="start"]')?.addEventListener('click', () => this._startPolicy());
     this.shadowRoot.querySelector('[data-action="stop"]')?.addEventListener('click', () => this._stopLoadpoint());
     this.shadowRoot.querySelector('[data-action="boost"]')?.addEventListener('click', () => this._boostLoadpoint());
@@ -6559,6 +6572,8 @@ class PowerSyncEVPanel extends HTMLElement {
       button.addEventListener('click', () => this._saveDepartureTimes(button.dataset.departureClear, true));
     });
   }
+
+  refresh() { this._refresh(); }
 
   _refresh() {
     this._notice = null;
@@ -8549,19 +8564,18 @@ function _boardCards(ctx) {
     add({
       key: 'optset', title: 'Optimizer settings', native: 'ps-settings-card',
       config: { rows: [
-        { kind: 'switch', entity: reg('switch', 'optimization_enabled'), label: 'Smart Optimization', help: 'Plans the battery around prices and forecasts' },
+        { kind: 'switch', entity: reg('switch', 'optimization_enabled'), label: 'Smart Optimization', editor: 'optimizer', help: 'Plans the battery around prices and forecasts' },
         { kind: 'switch', entity: reg('switch', 'monitoring_mode'), label: 'Monitoring mode', help: 'Plans and reports only, without sending commands' },
-        { kind: 'switch', entity: reg('switch', 'optimization_auto_apply_reserve'), label: 'Apply recommended reserve', help: 'Sets the export floor from the forecast' },
-        { kind: 'switch', entity: reg('switch', 'cost_neutral'), label: 'Cost neutral', help: 'Aims to cover the daily bill with exports' },
+        { kind: 'switch', entity: reg('switch', 'optimization_auto_apply_reserve'), label: 'Apply recommended reserve', editor: 'reserve', help: 'Sets the export floor from the forecast' },
+        { kind: 'switch', entity: reg('switch', 'cost_neutral'), label: 'Cost neutral', editor: 'cost_neutral', help: 'Aims to cover the daily bill with exports' },
         { kind: 'switch', entity: reg('switch', 'profit_max_mode'), label: 'Profit max', help: 'Exports whenever it earns more than it costs' },
-        { kind: 'switch', entity: reg('switch', 'charge_by_time'), label: 'Charge by time', help: 'Reaches a target charge by a set time' },
+        { kind: 'switch', entity: reg('switch', 'charge_by_time'), label: 'Charge by time', editor: 'charge_by_time', help: 'Reaches a target charge by a set time' },
         { kind: 'switch', entity: reg('switch', 'optimization_disable_idle'), label: 'Disable idle', help: 'Uses the battery instead of holding it' },
         { kind: 'switch', entity: reg('switch', 'optimization_spread_export'), label: 'Spread export', help: 'Exports across more intervals at lower power' },
         { kind: 'switch', entity: reg('switch', 'optimization_spread_import'), label: 'Spread import', help: 'Charges across more intervals at lower power' },
         { kind: 'switch', entity: reg('switch', 'amber_forecast_confidence'), label: 'Amber forecast confidence', help: 'Plans around Amber price uncertainty' },
         { kind: 'switch', entity: reg('switch', 'away_mode'), label: 'Away mode', help: 'Plans for a lower home load while you are away' },
-        { kind: 'switch', entity: reg('switch', 'solar_surplus_ev_charging'), label: 'Solar surplus car charging', help: 'Charges the car only from spare solar' },
-        { kind: 'switch', entity: reg('switch', 'auto_update'), label: 'Auto update', help: 'Installs PowerSync updates automatically' },
+        { kind: 'switch', entity: reg('switch', 'auto_update'), label: 'Auto update', editor: 'auto_update', help: 'Installs PowerSync updates automatically' },
       ].filter(r => r.entity) },
     });
   }

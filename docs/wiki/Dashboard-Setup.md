@@ -90,6 +90,21 @@ Cards appear only when the matching feature or entities exist.
 | System details | Your battery integration reports extra sensors (one card per group) |
 | Missing frontend cards | A frontend card that some cards need is not installed |
 
+**Solar Only** selects the source for a charging session started with **Start**. Automatic **Solar Surplus** charging is enabled separately under **Car charging → Modes → Solar Surplus**. Its controls appear only in the EV panel, rather than a duplicate switch in Optimizer settings.
+
+### Configuring dashboard settings
+
+Settings with a chevron open a configuration popup when you select their name or description. The toggle beside each setting still turns the feature on or off directly. The popup uses the dashboard's colours, fonts, borders and controls in both light and dark themes.
+
+- **Smart Optimization** opens battery planning inputs, import/export limits, grid charging and EV-plan preferences supported by your installation.
+- **Apply recommended reserve** opens the manual export floor used when automatic reserve is off.
+- **Cost neutral** opens the daily supply charge.
+- **Charge by time** opens the target charge level and local deadline.
+- **Configure solar charging**, under **Car charging → Modes → Solar Surplus**, opens battery and price thresholds, buffer, delays and multiple-car preferences. The existing mode control remains the place to enable automatic charging.
+- **Auto update** opens the scheduled local update time. An administrator must save schedule changes. Changing the time keeps the enabled state and other settings intact; it does not reload the integration.
+
+Only the options you change are saved. Cancel or Escape discards your draft. Failed saves remain open with an error so you can retry. Controls that have no additional options remain simple toggles.
+
 ### Customizing the Layout
 
 Select **Customize layout** at the top of the dashboard to rearrange it.

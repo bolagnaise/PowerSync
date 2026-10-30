@@ -265,6 +265,34 @@ details.res .kv { margin-top: 10px; font-size: 13px; }
 .switch:disabled { opacity: .45; cursor: not-allowed; }
 .switch-list { display: flex; flex-direction: column; gap: 12px; }
 
+
+/* The native dialog stays inside the board shadow root and shares its tokens. */
+.settings-open { display: block; text-align: left; border: 0; padding: 0; flex: 1; background: transparent; color: var(--fg); font-family: inherit; cursor: pointer; }
+.settings-open:hover { color: var(--cyan); }
+.settings-open:focus-visible { outline: 2px solid var(--cyan); outline-offset: 5px; border-radius: 4px; }
+.settings-chevron { color: var(--muted); margin-left: 8px; }
+.settings-dialog { box-sizing: border-box; width: min(560px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); overflow-y: auto; padding: 24px; border: 1px solid var(--border-hi); border-radius: var(--r-lg); background: var(--card); color: var(--fg); font: 14px/1.5 var(--sans); box-shadow: var(--shadow); color-scheme: inherit; }
+.settings-dialog[open] { display: flex; flex-direction: column; }
+.settings-dialog [data-body] { overflow-y: auto; min-height: 0; padding: 4px; margin: -4px; }
+.settings-dialog header, .settings-dialog footer, .settings-dialog > .hint { flex-shrink: 0; }
+.settings-dialog::backdrop { background: #060a14b8; backdrop-filter: blur(5px); }
+.settings-dialog header { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.settings-dialog h2 { margin: 0; color: var(--fg); font-size: 20px; font-weight: 600; }
+.settings-dialog header .btn { font-size: 22px; line-height: 1; padding: 8px 12px; }
+.settings-dialog .hint, .settings-dialog small { color: var(--muted); }
+.settings-dialog small { display: block; font-size: 12.5px; }
+.settings-fields { display: flex; flex-direction: column; gap: 20px; margin-top: 20px; }
+.settings-dialog .pick { box-sizing: border-box; width: 100%; max-width: 100%; padding: 10px 12px; font-family: var(--mono); }
+.settings-dialog footer { display: flex; justify-content: flex-end; gap: 10px; margin-top: 24px; }
+.settings-dialog .settings-error { color: var(--red); background: var(--tint-red); padding: 10px 12px; border-radius: var(--r); }
+.settings-checkbox { appearance: none; position: relative; width: 44px; height: 26px; margin: 0; border: 0; border-radius: 13px; background: var(--hold); cursor: pointer; flex: none; }
+.settings-checkbox::after { content: ""; position: absolute; top: 3px; left: 3px; width: 20px; height: 20px; border-radius: 50%; background: #fff; }
+.settings-checkbox:checked { background: var(--green); }
+.settings-checkbox:checked::after { transform: translateX(18px); }
+.settings-dialog :focus-visible { outline: 2px solid var(--cyan); outline-offset: 3px; }
+.settings-dialog :disabled { opacity: .45; cursor: wait; }
+@media (max-width: 480px) { .settings-dialog { padding: 18px; } .settings-dialog footer .btn { flex: 1; } }
+
 /* Tariff */
 .tou-ribbon { display: flex; height: 22px; border-radius: 6px; overflow: hidden; position: relative; }
 .tou-ribbon span { background: var(--c); }
@@ -946,6 +974,13 @@ class PowerSyncBoard extends HTMLElement {
     this._buildCards();
     this._observe();
     root.addEventListener('ps-toast', e => this._toast(e.detail));
+    root.addEventListener('ps-settings-open', e => {
+      const { row, opener } = e.detail || {};
+      if (PS_SETTING_EDITORS[row?.editor] && opener) psOpenSettings(root, this._hass, row, opener);
+    });
+    root.addEventListener('ps-settings-saved', e => {
+      if (e.detail === 'power_sync/ev/solar_surplus_config') this._bodies.ev?.refresh?.();
+    });
   }
 
   _observe() {
@@ -1331,12 +1366,167 @@ class PsKvCard extends PsCardBase {
   }
 }
 
+// Editors use the existing partial-update APIs. Only changed fields are sent;
+// toggles on the card remain independent of an open settings draft.
+const PS_SETTING_FIELDS = {
+  auto_update_time: { label: 'Scheduled update time', type: 'time', help: 'Home Assistant local time. PowerSync may restart Home Assistant after installing an update.' },
+  backup_reserve: { label: 'Manual export floor', unit: '%', min: 0, max: 100, ratio: true, help: 'Used when the recommended reserve is not applied.' },
+  daily_supply_charge: { label: 'Daily supply charge', min: 0, step: '0.01', help: 'Daily fixed charge in your tariff currency, rather than cents.' },
+  charge_by_time_target_soc: { label: 'Target charge level', unit: '%', min: 0, max: 100, ratio: true },
+  charge_by_time_target_time: { label: 'Target time', type: 'time', help: 'Home Assistant local time.' },
+  battery_capacity_wh: { label: 'Usable battery capacity', unit: 'Wh', min: 1 },
+  max_charge_w: { label: 'Maximum battery charge power', unit: 'W', min: 1 },
+  max_discharge_w: { label: 'Maximum battery discharge power', unit: 'W', min: 1 },
+  max_grid_import_w: { label: 'Maximum grid import', unit: 'W', min: 0, help: 'Zero uses the system default.' },
+  max_grid_export_w: { label: 'Maximum grid export', unit: 'W', min: 0, nullable: true, help: 'Leave blank to use the system limit. Zero prevents planned export.' },
+  allow_grid_charge: { label: 'Allow grid charging', type: 'checkbox' },
+  grid_charge_soc_cap: { label: 'Grid charge ceiling', unit: '%', min: 0, max: 100, ratio: true },
+  ev_integration: { label: 'Include PowerSync EV plans', type: 'checkbox', help: 'Include planned car demand in battery planning.' },
+  battery_efficiency_learning_enabled: { label: 'Learn battery efficiency', type: 'checkbox' },
+  household_buffer_kw: { label: 'Household buffer', unit: 'kW', min: 0, step: '0.1' },
+  max_export_price_cents: { label: 'Maximum export price for car charging', unit: 'c/kWh', min: 0, max: 200, step: '0.1' },
+  home_battery_minimum: { label: 'Minimum home battery before car charging', unit: '%', min: 0, max: 100 },
+  sustained_surplus_minutes: { label: 'Start delay', unit: 'minutes', min: 1 },
+  stop_delay_minutes: { label: 'Stop delay', unit: 'minutes', min: 1 },
+  allow_parallel_charging: { label: 'Charge the car and home battery together', type: 'checkbox' },
+  max_battery_charge_rate_kw: { label: 'Maximum home battery charge rate', unit: 'kW', min: 0.1, step: '0.1' },
+  dual_vehicle_strategy: { label: 'Multiple car strategy', type: 'select', options: [['priority_first', 'Priority first'], ['even', 'Even split'], ['priority_only', 'Primary car only']] },
+};
+const PS_SETTING_EDITORS = {
+  auto_update: { path: 'power_sync/auto_update/settings', entityScoped: true, fields: ['auto_update_time'] },
+  optimizer: { path: 'power_sync/optimization/settings', fields: ['backup_reserve', 'battery_capacity_wh', 'max_charge_w', 'max_discharge_w', 'max_grid_import_w', 'max_grid_export_w', 'allow_grid_charge', 'grid_charge_soc_cap', 'ev_integration', 'battery_efficiency_learning_enabled'] },
+  reserve: { path: 'power_sync/optimization/settings', fields: ['backup_reserve'] },
+  cost_neutral: { path: 'power_sync/optimization/settings', fields: ['daily_supply_charge'] },
+  charge_by_time: { path: 'power_sync/optimization/settings', fields: ['charge_by_time_target_soc', 'charge_by_time_target_time'] },
+  solar: { path: 'power_sync/ev/solar_surplus_config', fields: ['home_battery_minimum', 'household_buffer_kw', 'max_export_price_cents', 'sustained_surplus_minutes', 'stop_delay_minutes', 'allow_parallel_charging', 'max_battery_charge_rate_kw', 'dual_vehicle_strategy'] },
+};
+
+class PsSettingsDialog extends HTMLElement {
+  async open(hass, row, opener) {
+    this._hass = hass;
+    const editor = PS_SETTING_EDITORS[row.editor];
+    this._editor = { ...editor, path: editor.path + (editor.entityScoped ? `?entity_id=${encodeURIComponent(row.entity)}` : '') };
+    this._opener = opener;
+    this._owner = opener.closest('ps-settings-card') || opener.getRootNode().host;
+    this.innerHTML = `<dialog class="settings-dialog" aria-labelledby="settings-title"><header><h2 id="settings-title">${psEsc(row.label)}</h2><button type="button" class="btn quiet" data-close aria-label="Close settings">×</button></header><p class="hint">${psEsc(row.help || '')}</p><div data-body role="status">Loading settings…</div><p class="settings-error" role="alert" hidden></p><footer><button type="button" class="btn quiet" data-close>Cancel</button><button type="submit" form="ps-settings-form" class="btn primary" data-save disabled>Save changes</button></footer></dialog>`;
+    const dialog = this.querySelector('dialog');
+    this._dialog = dialog;
+    dialog.addEventListener('cancel', e => { if (this._saving) e.preventDefault(); });
+    dialog.addEventListener('keydown', e => {
+      if (e.key !== 'Tab') return;
+      const controls = [...dialog.querySelectorAll('button:not(:disabled), input:not(:disabled), select:not(:disabled)')];
+      const active = dialog.getRootNode().activeElement;
+      if (!controls.length) { e.preventDefault(); return; }
+      if (e.shiftKey && active === controls[0]) { e.preventDefault(); controls.at(-1).focus(); }
+      else if (!e.shiftKey && active === controls.at(-1)) { e.preventDefault(); controls[0].focus(); }
+    });
+    dialog.addEventListener('close', () => {
+      const focusTarget = this._opener?.isConnected ? this._opener : (opener.dataset.editor != null ? this._owner?.querySelector(`[data-editor="${opener.dataset.editor}"]`) : this._owner?.shadowRoot?.querySelector('[data-action="configure-solar"]'));
+      this.remove();
+      focusTarget?.focus();
+    });
+    this.querySelectorAll('[data-close]').forEach(btn => btn.addEventListener('click', () => dialog.close()));
+    dialog.showModal();
+    try {
+      const data = await this._load();
+      if (!this.isConnected) return;
+      this._values = { ...data, ...(data.config || {}) };
+      const schema = data.settings_schema?.fields;
+      this._fields = this._editor.fields.filter(key => key in this._values && (!schema || key in schema));
+      this.querySelector('[data-body]').innerHTML = this._fields.length
+        ? `<form id="ps-settings-form" class="settings-fields">${this._fields.map(key => this._fieldHtml(key)).join('')}</form>`
+        : '<p class="hint">No configurable options are available for this system.</p>';
+      this.querySelector('[data-body]').removeAttribute('role');
+      this.querySelector('form')?.addEventListener('submit', e => { e.preventDefault(); this._save(); });
+      this.querySelector('[data-save]').disabled = !this._fields.length;
+    } catch (err) { this.querySelector('[data-body]').textContent = ''; this._error(`Could not load settings: ${err?.body?.error || err?.body?.message || err.message || err}`); }
+  }
+
+  async _load() {
+    const data = await this._hass.callApi('GET', this._editor.path);
+    if (!data || data.success === false) throw new Error(data?.error || 'Settings are unavailable.');
+    return data;
+  }
+
+  _fieldHtml(key) {
+    const f = PS_SETTING_FIELDS[key], value = this._values[key];
+    const label = psEsc(f.label + (f.unit ? ` (${f.unit})` : ''));
+    const help = f.help ? `<small>${psEsc(f.help)}</small>` : '';
+    const attrs = `name="${key}" id="setting-${key}"`;
+    if (f.type === 'checkbox') {
+      return `<label class="row2 settings-check" for="setting-${key}"><span class="lab">${label}${help}</span><input class="settings-checkbox" type="checkbox" ${attrs} ${value ? 'checked' : ''}></label>`;
+    }
+    const input = f.type === 'select'
+      ? `<select class="pick" ${attrs}>${f.options.map(([v, text]) => `<option value="${psEsc(v)}" ${v === value ? 'selected' : ''}>${psEsc(text)}</option>`).join('')}</select>`
+      : `<input class="pick" type="${f.type || 'number'}" ${attrs} value="${psEsc(value ?? '')}" ${f.nullable ? '' : 'required'} ${f.min == null ? '' : `min="${f.min}"`} ${f.max == null ? '' : `max="${f.max}"`} step="${f.step || (f.type === 'time' ? 60 : 1)}">`;
+    return `<label class="field" for="setting-${key}"><span class="lab">${label}${help}</span>${input}</label>`;
+  }
+
+  _changes() {
+    const patch = {}, expected = {};
+    for (const key of this._fields) {
+      const f = PS_SETTING_FIELDS[key], input = this.querySelector(`[name="${key}"]`);
+      const value = f.type === 'checkbox' ? input.checked : input.value === '' && f.nullable ? null : !f.type ? Number(input.value) : input.value;
+      if (value === this._values[key]) continue;
+      if (!f.type && value !== null && !Number.isFinite(value)) throw new Error(`${f.label} must be a number.`);
+      patch[key] = f.ratio && value !== null ? value / 100 : value;
+      expected[key] = value;
+    }
+    return { patch, expected };
+  }
+
+  _error(message) {
+    const el = this.querySelector('[role="alert"]');
+    el.textContent = message;
+    el.hidden = false;
+  }
+
+  _busy(saving) {
+    this._saving = saving;
+    this.querySelectorAll('button, input, select').forEach(el => { el.disabled = saving; });
+    this.querySelector('[data-save]').textContent = saving ? 'Saving…' : 'Save changes';
+  }
+
+  async _save() {
+    if (this._saving || !this.querySelector('form').reportValidity()) return;
+    this.querySelector('[role="alert"]').hidden = true;
+    try {
+      const { patch, expected } = this._changes();
+      if (!Object.keys(patch).length) { this._dialog.close(); return; }
+      this._busy(true);
+      const result = await this._hass.callApi('POST', this._editor.path, patch);
+      if (!result || result.success === false) throw new Error(result?.error || 'The settings update was rejected.');
+      const data = await this._load();
+      const saved = { ...data, ...(data.config || {}) };
+      if (Object.keys(expected).some(key => saved[key] !== expected[key])) {
+        throw new Error('The saved values could not be confirmed. Check the settings before saving again.');
+      }
+      // Other cards must not keep the pre-save optimizer payload.
+      psApiCache.clear();
+      this.dispatchEvent(new CustomEvent('ps-settings-saved', { detail: this._editor.path, bubbles: true, composed: true }));
+      this.dispatchEvent(new CustomEvent('ps-toast', { detail: 'Settings saved', bubbles: true, composed: true }));
+      this._dialog.close();
+    } catch (err) { this._error(err?.body?.error || err?.body?.message || err?.message || String(err)); }
+    finally { if (this.isConnected) this._busy(false); }
+  }
+}
+
+function psOpenSettings(root, hass, row, opener) {
+  if (root.querySelector('ps-settings-dialog')) return;
+  const dialog = document.createElement('ps-settings-dialog');
+  // Keep the modal outside movable cards so responsive reflow preserves it.
+  root.appendChild(dialog);
+  dialog.open(hass, row, opener);
+}
+
 // Switch, select and number rows bound to entities. Config: { rows: [{ kind:
 // 'switch'|'select'|'number', entity, label, help?, labels?: {option: text},
 // zeroLabel?, unit? }] }.
+let psSettingsCardId = 0;
 class PsSettingsCard extends PsCardBase {
   constructor() {
     super();
+    this._settingsId = ++psSettingsCardId;
     this.addEventListener('click', e => this._onClick(e));
     this.addEventListener('change', e => this._onChange(e));
   }
@@ -1355,35 +1545,48 @@ class PsSettingsCard extends PsCardBase {
       this.innerHTML = '<p class="empty">None of these settings are available right now.</p>';
       return;
     }
-    const html = rows.map((r, i) => {
+    const html = rows.map(r => {
+      const i = this._config.rows.indexOf(r);
       const s = psState(hass, r.entity);
       const unavailable = s.state === 'unavailable';
       const help = r.help ? `<small>${psEsc(r.help)}</small>` : '';
       const label = psEsc(r.label || psFriendly(hass, r.entity));
+      const labelHtml = r.editor && PS_SETTING_EDITORS[r.editor]
+        ? `<button type="button" class="lab settings-open" id="set-${this._settingsId}-${i}" data-editor="${i}" aria-haspopup="dialog">${label}<span class="settings-chevron" aria-hidden="true">›</span>${help}</button>`
+        : `<span class="lab" id="set-${this._settingsId}-${i}">${label}${help}</span>`;
       if (r.kind === 'switch') {
-        return `<div class="row2"><span class="lab" id="set-${i}">${label}${help}</span><button type="button" class="switch" role="switch" aria-checked="${s.state === 'on'}" aria-labelledby="set-${i}" data-i="${i}" ${unavailable ? 'disabled' : ''}></button></div>`;
+        return `<div class="row2">${labelHtml}<button type="button" class="switch" role="switch" aria-checked="${s.state === 'on'}" aria-labelledby="set-${this._settingsId}-${i}" data-i="${i}" ${unavailable ? 'disabled' : ''}></button></div>`;
       }
       if (r.kind === 'select') {
         const options = Array.isArray(s.attributes?.options) ? s.attributes.options : [];
         const text = o => psEsc(r.labels?.[o] || o);
         if (options.length && options.length <= 3) {
-          return `<div class="field"><span class="lab" id="set-${i}">${label}</span><div class="seg" style="--n:${options.length}" role="group" aria-labelledby="set-${i}">${options.map(o => `<button type="button" data-i="${i}" data-opt="${psEsc(o)}" aria-pressed="${o === s.state}" ${unavailable ? 'disabled' : ''}>${text(o)}</button>`).join('')}</div></div>`;
+          return `<div class="field"><span class="lab" id="set-${this._settingsId}-${i}">${label}</span><div class="seg" style="--n:${options.length}" role="group" aria-labelledby="set-${this._settingsId}-${i}">${options.map(o => `<button type="button" data-i="${i}" data-opt="${psEsc(o)}" aria-pressed="${o === s.state}" ${unavailable ? 'disabled' : ''}>${text(o)}</button>`).join('')}</div></div>`;
         }
-        return `<div class="row2"><span class="lab" id="set-${i}">${label}${help}</span><select class="pick" data-i="${i}" aria-labelledby="set-${i}" ${unavailable ? 'disabled' : ''}>${options.map(o => `<option value="${psEsc(o)}" ${o === s.state ? 'selected' : ''}>${text(o)}</option>`).join('')}</select></div>`;
+        return `<div class="row2"><span class="lab" id="set-${this._settingsId}-${i}">${label}${help}</span><select class="pick" data-i="${i}" aria-labelledby="set-${this._settingsId}-${i}" ${unavailable ? 'disabled' : ''}>${options.map(o => `<option value="${psEsc(o)}" ${o === s.state ? 'selected' : ''}>${text(o)}</option>`).join('')}</select></div>`;
       }
       if (r.kind === 'number') {
         const v = Number(s.state);
         const min = Number(s.attributes?.min ?? 0), max = Number(s.attributes?.max ?? 100);
         const unit = r.unit ?? s.attributes?.unit_of_measurement ?? '';
         const shown = !Number.isFinite(v) ? '—' : (v === 0 && r.zeroLabel) ? r.zeroLabel : `${+v.toFixed(2)}${unit === '%' ? '%' : unit ? ` ${unit}` : ''}`;
-        return `<div class="row2"><span class="lab" id="set-${i}">${label}${help}</span><div class="stepper" role="group" aria-labelledby="set-${i}"><button type="button" data-i="${i}" data-d="-1" aria-label="Lower ${label}" ${unavailable || v <= min ? 'disabled' : ''}>−</button><output class="num">${psEsc(shown)}</output><button type="button" data-i="${i}" data-d="1" aria-label="Raise ${label}" ${unavailable || v >= max ? 'disabled' : ''}>+</button></div></div>`;
+        return `<div class="row2"><span class="lab" id="set-${this._settingsId}-${i}">${label}${help}</span><div class="stepper" role="group" aria-labelledby="set-${this._settingsId}-${i}"><button type="button" data-i="${i}" data-d="-1" aria-label="Lower ${label}" ${unavailable || v <= min ? 'disabled' : ''}>−</button><output class="num">${psEsc(shown)}</output><button type="button" data-i="${i}" data-d="1" aria-label="Raise ${label}" ${unavailable || v >= max ? 'disabled' : ''}>+</button></div></div>`;
       }
       return '';
     }).join('');
-    this.innerHTML = `<div class="switch-list">${html}</div>`;
+    const list = this.querySelector('.switch-list');
+    if (list) list.innerHTML = html;
+    else this.innerHTML = `<div class="switch-list">${html}</div>`;
   }
 
   _onClick(e) {
+    // Dialog events belong to its draft, never to the underlying card.
+    if (e.target.closest('ps-settings-dialog')) return;
+    const opener = e.target.closest('button[data-editor]');
+    if (opener) {
+      psOpenSettings(this.getRootNode(), this._hass, this._config.rows[Number(opener.dataset.editor)], opener);
+      return;
+    }
     const btn = e.target.closest('button[data-i]');
     if (!btn || btn.disabled) return;
     const r = this._config.rows[Number(btn.dataset.i)];
@@ -1404,6 +1607,7 @@ class PsSettingsCard extends PsCardBase {
   }
 
   _onChange(e) {
+    if (e.target.closest('ps-settings-dialog')) return;
     const sel = e.target.closest('select[data-i]');
     if (!sel) return;
     const r = this._config.rows[Number(sel.dataset.i)];
@@ -2459,6 +2663,7 @@ const PS_ELEMENTS = {
   'power-sync-board': PowerSyncBoard,
   'ps-kv-card': PsKvCard,
   'ps-settings-card': PsSettingsCard,
+  'ps-settings-dialog': PsSettingsDialog,
   'ps-missing-cards': PsMissingCards,
   'ps-now-card': PsNowCard,
   'ps-controls-card': PsControlsCard,

@@ -24779,6 +24779,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
 
     from .auto_update import async_setup_auto_update
+    from .auto_update_settings import AutoUpdateSettingsView
+    hass.http.register_view(AutoUpdateSettingsView(hass))
     hass.data[DOMAIN][entry.entry_id]["auto_update_cancel"] = await async_setup_auto_update(
         hass,
         entry,
