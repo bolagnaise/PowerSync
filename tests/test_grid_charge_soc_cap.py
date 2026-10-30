@@ -352,9 +352,11 @@ def _powerwall_permission_coordinator(opt_module, *, method='local', permission=
     ('local', None, 0, False), ('auto', None, 0, False),
     ('tariff', None, 0, True), ('local', True, 0, True),
     ('local', False, 0, True), ('auto', False, 0, True), ('auto', True, 0, True),
-    ('local', None, 91, True),
+    ('local', None, 91, False), ('auto', None, 91, False),
+    ('local', True, 91, False), ('auto', False, 91, False),
+    ('tariff', None, 91, True),
 ])
-def test_grid_charge_plan_respects_fresh_native_permission(opt_module, method, permission, age, expected):
+def test_grid_charge_plan_requires_current_readable_native_permission(opt_module, method, permission, age, expected):
     coordinator, gateway = _powerwall_permission_coordinator(
         opt_module, method=method, permission=permission, age=age)
     configured = coordinator._config.allow_grid_charge
@@ -362,7 +364,22 @@ def test_grid_charge_plan_respects_fresh_native_permission(opt_module, method, p
     assert coordinator._config.allow_grid_charge is configured
     if not expected:
         gateway.data.grid_charging_enabled = False
+        gateway.last_success_monotonic = time.monotonic()
         assert coordinator._grid_charge_allowed_slots([0.0] * 6, [], [], .2) == [True] * 6
+
+
+@pytest.mark.parametrize('missing', ['coordinator', 'snapshot', 'timestamp', 'future_timestamp'])
+def test_missing_native_readback_never_reenables_grid_refills(opt_module, missing):
+    coordinator, gateway = _powerwall_permission_coordinator(opt_module, permission=True)
+    if missing == 'coordinator':
+        coordinator.hass.data['power_sync']['one']['powerwall_local'].clear()
+    elif missing == 'snapshot':
+        gateway.data = None
+    elif missing == 'timestamp':
+        gateway.last_success_monotonic = None
+    else:
+        gateway.last_success_monotonic = time.monotonic() + 20
+    assert coordinator._grid_charge_allowed_slots([0.0] * 6, [], [], .2) == [False] * 6
 
 
 @pytest.mark.parametrize('solver', ['highs', 'unavailable', 'exception'])

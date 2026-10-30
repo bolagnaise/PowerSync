@@ -3256,7 +3256,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return bool(getattr(self, "_powerwall_plan_native_tariff", False))
 
     def _powerwall_grid_charging_unavailable(self) -> bool:
-        """Fresh unreadable native permission blocks Local and Automatic refills.
+        """Local and Automatic refills need current readable native permission.
 
         Both local watts and Automatic's native tariff session require a
         readable restoration baseline. Explicit cloud Tariff control has its
@@ -3272,9 +3272,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         coordinator = (runtime.get("powerwall_local") or {}).get("coordinator")
         snapshot = getattr(coordinator, "data", None)
         observed = getattr(coordinator, "last_success_monotonic", None)
-        return (snapshot is not None and type(observed) in (int, float)
+        return not (snapshot is not None and type(observed) in (int, float)
                 and 0 <= time.monotonic() - observed <= 90
-                and not isinstance(getattr(snapshot, "grid_charging_enabled", None), bool))
+                and isinstance(getattr(snapshot, "grid_charging_enabled", None), bool))
 
     def _local_powerwall_plan_limits(self) -> dict[str, float]:
         """Actuator feedback limits the solve without rewriting user settings."""

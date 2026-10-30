@@ -276,7 +276,7 @@ class NativeMaxChargeAdapter:
                 return self._deny("native_site_limits_invalid", site_info_present=isinstance(info, dict),
                                   native_import_limit_kw=limits.get("max_site_meter_power_ac"),
                                   native_export_limit_kw=limits.get("min_site_meter_power_ac"))
-            permission = info.get("disallow_charge_from_grid_with_solar_installed", False) if isinstance(info, dict) else None
+            permission = info.get("disallow_charge_from_grid_with_solar_installed") if isinstance(info, dict) else None
             if self.direction == "discharge":
                 if not isinstance(info, dict) or "min_site_meter_power_ac" not in info:
                     return self._deny("native_export_limit_missing")
@@ -325,6 +325,8 @@ class NativeMaxChargeAdapter:
                                       hardware_reserve=config.get("hardware_backup_reserve", 0),
                                       load_w=snapshot.load_w, solar_w=snapshot.solar_w)
                 return True
+            if type(permission) is not bool:
+                return self._deny("grid_charging_permission_unknown")
             eligibility = native_max_charge_eligibility(
                 source="native_manual_max", requested_power_w=0, grid_import_target_w=None,
                 planning_charge_max_w=config.get("optimization_max_charge_w", 5000),

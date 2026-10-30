@@ -24,7 +24,8 @@ def setup(monkeypatch):
     state = SimpleNamespace(config={'default_real_mode':'self_consumption', 'site_info':{
         'backup_reserve_percent':5, 'max_site_meter_power_ac':14.9,
         'min_site_meter_power_ac':-14.9,
-        'customer_preferred_export_rule':'pv_only'}}, tariff={'name':'real tariff','code':'REAL'},
+        'customer_preferred_export_rule':'pv_only',
+        'disallow_charge_from_grid_with_solar_installed':False}}, tariff={'name':'real tariff','code':'REAL'},
         identity='paired', policy=True, grid='SystemGridConnected', soc=50,
         events=[], at=1000., upload_ok=True, local_ok=True,
         before_validate=None,before_send=None, battery_w=0, load_w=1000, solar_w=0,
@@ -633,7 +634,7 @@ async def test_manual_max_uses_native_settings_and_restores_exact_original(setup
     assert s.state.config['site_info']['backup_reserve_percent']==100
     assert s.state.events[0][0]=='resume'
     assert s.state.config['site_info']['customer_preferred_export_rule']=='pv_only'
-    assert 'disallow_charge_from_grid_with_solar_installed' not in s.state.config['site_info']
+    assert s.state.config['site_info']['disallow_charge_from_grid_with_solar_installed'] is False
     assert s.settings['optimization_max_charge_w']==14700
     assert await s.session.stop()
     assert (s.state.config,s.state.tariff)==s.original
@@ -715,6 +716,40 @@ async def test_current_policy_denial_prevents_every_forcing_write(setup,denial):
     with pytest.raises(Exception,match='policy denied'):
         await s.session.start(120)
     assert not s.state.events and not s.session.pending
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('planning', [False, True], ids=['manual_max', 'optimizer'])
+@pytest.mark.parametrize('permission', ['missing', None, 'false', 0, 1, [], {}])
+async def test_unknown_grid_permission_never_admits_native_charge(setup, planning, permission):
+    s = setup
+    s.adapter.planning_request = planning
+    s.settings['powerwall_native_capacity_w'] = 14700
+    field = 'disallow_charge_from_grid_with_solar_installed'
+    if permission == 'missing':
+        del s.state.config['site_info'][field]
+    else:
+        s.state.config['site_info'][field] = permission
+    assert not await s.adapter.guard()
+    assert s.adapter.guard_denial_reason == 'grid_charging_permission_unknown'
+    with pytest.raises(s.m.NativeMaxChargeError, match='policy denied'):
+        await s.session.start(120)
+    assert s.state.events == []
+    assert s.store.data is None and not s.session.pending
+    assert not s.budget.native_max_claim('site')
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('planning', [False, True], ids=['manual_max', 'optimizer'])
+async def test_native_charge_does_not_accept_permission_disappearing_before_write(setup, planning):
+    s = setup
+    s.adapter.planning_request = planning
+    s.settings['powerwall_native_capacity_w'] = 14700
+    assert await s.adapter.guard()
+    del s.state.config['site_info']['disallow_charge_from_grid_with_solar_installed']
+    assert not s.adapter._forcing_permitted(s.state.config)
+    assert s.adapter.guard_denial_reason == 'grid_charging_permission_unknown'
+    assert not s.state.events
 
 
 @pytest.mark.asyncio
