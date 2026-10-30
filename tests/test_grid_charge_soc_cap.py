@@ -13,6 +13,7 @@ import asyncio
 import importlib
 import importlib.util
 import sys
+import time
 import types
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -334,6 +335,72 @@ def _coordinator(opt_module, provider: str = "flow_power", **options):
     coordinator._optimizer = None
     coordinator.energy_coordinator = None
     return coordinator
+
+
+def _powerwall_permission_coordinator(opt_module, *, method='local', permission=None, age=0):
+    coordinator = _coordinator(opt_module, tesla_control_method=method)
+    coordinator.battery_system = 'tesla'
+    coordinator.entry_id = 'one'
+    gateway = SimpleNamespace(data=SimpleNamespace(grid_charging_enabled=permission),
+                              last_success_monotonic=time.monotonic() - age)
+    coordinator.hass = SimpleNamespace(data={'power_sync': {'one': {
+        'powerwall_local': {'coordinator': gateway}}}})
+    return coordinator, gateway
+
+
+@pytest.mark.parametrize('method,permission,age,expected', [
+    ('local', None, 0, False), ('auto', None, 0, False),
+    ('tariff', None, 0, True), ('local', True, 0, True),
+    ('local', False, 0, True), ('auto', False, 0, True), ('auto', True, 0, True),
+    ('local', None, 91, True),
+])
+def test_grid_charge_plan_respects_fresh_native_permission(opt_module, method, permission, age, expected):
+    coordinator, gateway = _powerwall_permission_coordinator(
+        opt_module, method=method, permission=permission, age=age)
+    configured = coordinator._config.allow_grid_charge
+    assert coordinator._grid_charge_allowed_slots([0.0] * 6, [], [], .2) == [expected] * 6
+    assert coordinator._config.allow_grid_charge is configured
+    if not expected:
+        gateway.data.grid_charging_enabled = False
+        assert coordinator._grid_charge_allowed_slots([0.0] * 6, [], [], .2) == [True] * 6
+
+
+@pytest.mark.parametrize('solver', ['highs', 'unavailable', 'exception'])
+def test_unreadable_permission_removes_grid_refills_but_preserves_solar(opt_module, monkeypatch, solver):
+    # This file normally stubs the solver for source-mask tests. Load the real
+    # solver and schedule types for this energy/dispatch regression.
+    for name in ('power_sync.optimization.schedule_reader',
+                 'power_sync.optimization.battery_optimizer'):
+        monkeypatch.delitem(sys.modules, name, raising=False)
+    battery_module = importlib.import_module('power_sync.optimization.battery_optimizer')
+    if solver == 'unavailable':
+        monkeypatch.setattr(battery_module, 'HIGHS_AVAILABLE', False)
+    elif solver == 'exception':
+        monkeypatch.setattr(battery_module, 'HIGHS_AVAILABLE', True)
+        monkeypatch.setattr(battery_module, '_solve_lp_highs',
+                            lambda *a, **kw: (_ for _ in ()).throw(RuntimeError('solver unavailable')))
+    coordinator, gateway = _powerwall_permission_coordinator(opt_module)
+    imports, exports = [0.0] * 6 + [1.0] * 6, [0.0] * 6 + [.8] * 6
+
+    def solve(permission, solar=0.0):
+        gateway.data.grid_charging_enabled = permission
+        optimizer = battery_module.BatteryOptimizer(
+            capacity_wh=10000, max_charge_w=5000, max_discharge_w=5000,
+            backup_reserve=.05, interval_minutes=5, horizon_hours=1, terminal_weight=0.0)
+        return optimizer.optimize(
+            import_prices=imports, export_prices=exports,
+            solar_forecast=[solar] * 6 + [0.0] * 6, load_forecast=[0.0] * 12,
+            current_soc=.1, allow_grid_charge=True, allow_battery_export=True,
+            grid_charge_allowed=coordinator._grid_charge_allowed_slots(imports, [], [], .1))
+
+    available, blocked, solar = solve(True), solve(None), solve(None, solar=5.0)
+    assert available.feasible and blocked.feasible and solar.feasible
+    assert max(available.grid_import_w[:6]) > 1000
+    assert max(blocked.grid_import_w[:6]) < 1
+    assert max(a.soc for a in blocked.schedule.actions[:6]) <= .1001
+    assert sum(blocked.grid_export_w[6:]) < sum(available.grid_export_w[6:])
+    assert max(a.soc for a in solar.schedule.actions[:6]) > .2
+    assert max(solar.grid_import_w[:6]) < 1
 
 
 def test_grid_charge_soc_cap_does_not_prune_future_cheaper_slots(opt_module):

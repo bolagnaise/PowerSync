@@ -38250,6 +38250,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
                 # Persist state to survive HA restarts
                 await persist_force_mode_state()
+                # Tariff control can recover from a previous local refusal.
+                # Clear that alert only after all tariff readbacks and the
+                # final reserve pulse succeeded for the current command.
+                if (all_success and _command_generation[0] == _restore_gen
+                        and _tesla_reserve_generation[0] == _reserve_gen):
+                    from .powerwall_local.native_max_notifications import update_native_charge_alert
+                    update_native_charge_alert(hass, entry.entry_id, None)
                 return {"success": True, "error": None}
             else:
                 _LOGGER.error("Failed to upload charge tariff to one or more gateways")

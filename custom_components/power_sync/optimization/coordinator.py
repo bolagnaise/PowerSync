@@ -3255,6 +3255,27 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return routes.get(direction) == "tariff"
         return bool(getattr(self, "_powerwall_plan_native_tariff", False))
 
+    def _powerwall_grid_charging_unavailable(self) -> bool:
+        """Fresh unreadable native permission blocks Local and Automatic refills.
+
+        Both local watts and Automatic's native tariff session require a
+        readable restoration baseline. Explicit cloud Tariff control has its
+        own command/readback compatibility checks and remains independent.
+        """
+        if getattr(self, "battery_system", None) != "tesla":
+            return False
+        from ..powerwall_local.control_method import control_method
+        entry = getattr(self, "_entry", None)
+        if control_method({**getattr(entry, "data", {}), **getattr(entry, "options", {})}) == "tariff":
+            return False
+        runtime = getattr(getattr(self, "hass", None), "data", {}).get(DOMAIN, {}).get(getattr(self, "entry_id", None), {})
+        coordinator = (runtime.get("powerwall_local") or {}).get("coordinator")
+        snapshot = getattr(coordinator, "data", None)
+        observed = getattr(coordinator, "last_success_monotonic", None)
+        return (snapshot is not None and type(observed) in (int, float)
+                and 0 <= time.monotonic() - observed <= 90
+                and not isinstance(getattr(snapshot, "grid_charging_enabled", None), bool))
+
     def _local_powerwall_plan_limits(self) -> dict[str, float]:
         """Actuator feedback limits the solve without rewriting user settings."""
         if getattr(self, "battery_system", None) != "tesla":
@@ -20443,6 +20464,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         current_soc: float,
     ) -> list[bool]:
         """Return per-slot permission for forced grid battery charging."""
+        if self._powerwall_grid_charging_unavailable():
+            return [False] * len(import_prices)
         allowed = [
             not protected
             for protected in self._amber_spike_protected_slots(len(import_prices))

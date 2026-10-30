@@ -5,12 +5,97 @@ import importlib
 import logging
 from pathlib import Path
 import sys
+from datetime import datetime, timedelta, timezone
 from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 
 ROOT = Path(__file__).parents[1] / 'custom_components/power_sync'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('source,failure', [('user', None), *[
+    ('optimizer', failure) for failure in (
+        None, 'mode', 'grid', 'reserve', 'tariff', 'unconfirmed_tariff', 'pulse',
+        'command_replaced', 'reserve_replaced')]])
+async def test_cloud_tariff_recovery_clears_old_local_refusal_only_after_confirmation(
+        notification_probe, source, failure):
+    p = notification_probe
+    p.charge('grid_charging_permission_unknown')
+    state = {'active': True, 'saved_operation_mode': 'self_consumption',
+             'cancel_expiry_timer': None}
+    now = datetime(2026, 10, 30, tzinfo=timezone.utc)
+    mode = AsyncMock(return_value=failure != 'mode')
+    grid = AsyncMock(return_value='denied' if failure == 'grid' else 'field_absent')
+    reserve = AsyncMock(return_value=failure != 'reserve')
+    pulse = AsyncMock(return_value=failure != 'pulse')
+
+    async def upload(*args, **kwargs):
+        # The compatibility warning is emitted before this boundary. It must
+        # not dismiss the earlier refusal when later prerequisites can fail.
+        assert p.persistent.async_dismiss.call_count == 0
+        if failure != 'tariff':
+            kwargs['accepted_status']['accepted'] = True
+        return failure not in ('tariff', 'unconfirmed_tariff')
+
+    module_ast = ast.parse((ROOT / '__init__.py').read_text())
+    handler = next(n for n in ast.walk(module_ast) if isinstance(n, ast.AsyncFunctionDef)
+                   and n.name == 'handle_force_charge')
+    start = next(i for i, n in enumerate(handler.body) if isinstance(n, ast.Assign)
+                 and any(isinstance(t, ast.Name) and t.id == 'tesla_force_charge_mutated'
+                         for t in n.targets))
+    # Exercise the actual Tesla preparation/upload/final-pulse result flow,
+    # using an existing saved baseline to avoid unrelated HTTP capture fakes.
+    wrapper = ast.AsyncFunctionDef(name='run_tariff', args=ast.arguments(
+        posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]),
+        body=handler.body[start:], decorator_list=[])
+    call = SimpleNamespace(data={}, context=None)
+
+    async def persist():
+        if state.get('command_status') == 'accepted':
+            if failure == 'command_replaced':
+                scope['_command_generation'][0] += 1
+            elif failure == 'reserve_replaced':
+                scope['_tesla_reserve_generation'][0] += 1
+
+    scope = dict(__package__=p.package, _LOGGER=logging.getLogger(__name__), asyncio=asyncio,
+        datetime=datetime, timedelta=timedelta, dt_util=SimpleNamespace(UTC=timezone.utc, utcnow=lambda: now),
+        hass=p.hass, entry=SimpleNamespace(entry_id='one', data={}), source=source,
+        call=call, duration=15, tesla_requested_expiry=now + timedelta(minutes=15),
+        force_charge_state=state, force_discharge_state={'active': False},
+        was_already_force_charging=True, _command_generation=[7], _restore_gen=7,
+        _tesla_reserve_generation=[2], _reserve_gen=2,
+        _get_tesla_site_configs=lambda *_: [('site', 'token', 'provider')],
+        async_get_clientsession=lambda *_: object(),
+        _tesla_force_apply_operation_mode=mode, _tesla_force_apply_grid_charging=grid,
+        _tesla_force_apply_backup_reserve=reserve, _tesla_force_pulse_backup_reserve=pulse,
+        _tesla_force_result_all_confirmed=lambda result, _: result is True,
+        _tesla_force_result_all_grid_field_absent_safe=lambda result, _: result == 'field_absent',
+        _monitoring_mode_should_block_control=lambda _: False,
+        _demand_grid_charging_protection_active=lambda: False,
+        persist_force_mode_state=persist, handle_restore_normal=AsyncMock(),
+        _create_charge_tariff=lambda _: ({}, now + timedelta(minutes=30)),
+        send_tariff_to_tesla=upload, _tesla_force_retry_expiry=lambda _, expiry, **kw: expiry,
+        _schedule_tesla_charge_kick=Mock(), async_dispatcher_send=Mock(),
+        async_track_point_in_utc_time=Mock(), _notify_api_error=AsyncMock(),
+        ServiceCall=lambda *args, **kw: call, HomeAssistantError=RuntimeError,
+        DOMAIN='power_sync', SERVICE_RESTORE_NORMAL='restore_normal',
+        CONF_FLEET_API_BASE_URL='fleet_api_base_url')
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[wrapper], type_ignores=[])),
+                 str(ROOT / '__init__.py'), 'exec'), scope)
+    result = await scope['run_tariff']()
+    if failure is None:
+        assert result['success'] is True
+        p.persistent.async_dismiss.assert_called_once_with(
+            p.hass, 'power_sync_one_native_charge_blocked')
+        await p.queued[0]
+        p.push.assert_not_awaited()
+    else:
+        if failure not in ('unconfirmed_tariff', 'command_replaced', 'reserve_replaced'):
+            assert result['success'] is False
+        p.persistent.async_dismiss.assert_not_called()
+        assert 'one' in p.hass.data['power_sync']['_native_charge_alerts']
 
 
 @pytest.mark.asyncio
@@ -90,7 +175,7 @@ def notification_probe(monkeypatch):
     queued = []
     hass = SimpleNamespace(data={'power_sync': {'push_tokens': {'device': {}}}},
                            async_create_task=queued.append)
-    yield SimpleNamespace(hass=hass, update=lambda reason, entry='one':
+    yield SimpleNamespace(hass=hass, package=package, update=lambda reason, entry='one':
                           module.update_native_discharge_alert(hass, entry, reason),
                           charge=lambda reason, entry='one':
                           module.update_native_charge_alert(hass, entry, reason),
