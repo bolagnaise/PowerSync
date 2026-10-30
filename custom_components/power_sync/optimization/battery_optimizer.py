@@ -984,6 +984,7 @@ class BatteryOptimizer:
         ev_plan: EVChargePlan | None = None,
         price_valid_slots: list[bool] | None = None,
         acquisition_cost_known_zero: bool = False,
+        initial_solar_energy_kwh: float = 0.0,
     ) -> OptimizerResult:
         """
         Run the LP optimization.
@@ -1042,6 +1043,9 @@ class BatteryOptimizer:
             acquisition_cost_known_zero: The stored inventory's zero cost is
                 proven by solar or measured free-grid provenance. A default
                 zero remains unknown and keeps the conservative fallback guard.
+            initial_solar_energy_kwh: Measured remaining solar-origin inventory
+                for the active priority export run with grid charging disabled.
+                Forecast charging and unknown carry-over must not be included.
 
         Returns:
             OptimizerResult with schedule and metadata
@@ -1049,6 +1053,16 @@ class BatteryOptimizer:
         start_time = time.monotonic()
         self._acquisition_cost_known_zero = bool(
             acquisition_cost_known_zero and acquisition_cost_kwh <= 0
+        )
+        # This is measured opening inventory, never a forecast or a previous
+        # plan's promised charge. Reset it on every solve, including fallbacks.
+        try:
+            initial_solar = float(initial_solar_energy_kwh)
+        except (TypeError, ValueError):
+            initial_solar = 0.0
+        self._initial_solar_energy_kwh = (
+            min(max(0.0, initial_solar), max(0.0, current_soc) * self.capacity_kwh)
+            if math.isfinite(initial_solar) else 0.0
         )
 
         # Align all arrays to the same length
@@ -1936,6 +1950,36 @@ class BatteryOptimizer:
             reservations[t] = required_stored_kwh
 
         return reservations
+
+    def _initial_solar_export_budget(
+        self,
+        eligible: list[bool],
+        home_kwh: list[float],
+        *,
+        allow_grid_charge: bool,
+        has_ev_plan: bool,
+    ) -> tuple[set[int], float]:
+        """Conservatively fund the active export run from measured solar.
+
+        Restrict opening inventory to the leading uninterrupted priority run:
+        it cannot survive an intervening charge/override and be spent again.
+        Reserve its household demand first, and apply both conversion losses
+        to the measured charge-origin ledger as for in-horizon solar charging.
+        EV source allocation retains its existing policy.
+        """
+        if allow_grid_charge or has_ev_plan:
+            return set(), 0.0
+        slots: set[int] = set()
+        for t, allowed in enumerate(eligible):
+            if not allowed:
+                break
+            slots.add(t)
+        output_kwh = max(
+            0.0,
+            getattr(self, "_initial_solar_energy_kwh", 0.0) * self.efficiency**2
+            - sum(home_kwh[t] for t in slots),
+        )
+        return (slots, output_kwh) if output_kwh > 1e-9 else (set(), 0.0)
 
     @staticmethod
     def _effective_export_acquisition_costs(
@@ -3600,6 +3644,18 @@ class BatteryOptimizer:
         # Match the greedy solver's solar-charge allocation, without treating
         # a forecast surplus (or a manual grid charge) as acquired energy.
         solar_backed_priority_exports: dict[int, list[int]] = {}
+        initial_solar_slots, initial_solar_output_kwh = self._initial_solar_export_budget(
+            [
+                _priority_export_slot(t)
+                and not _cost_neutral_export_slot(t)
+                and not p_manual_control[t]
+                and p_mode[t] in (None, "self_use", "export")
+                for t in range(p_n)
+            ],
+            [max(0.0, p_load[t] - p_solar[t]) * p_dt[t] for t in range(p_n)],
+            allow_grid_charge=allow_grid_charge,
+            has_ev_plan=bool(ev_plan),
+        )
         if not allow_grid_charge and acquisition_cost_kwh > 0:
             for t in range(p_n):
                 export_value = p_export[t] + p_export_bonus[t]
@@ -3619,7 +3675,7 @@ class BatteryOptimizer:
                     and max(0.0, p_export[prior] + p_export_bonus[prior])
                     < export_value * self.economic_round_trip_efficiency - 0.001
                 ]
-                if earlier_solar:
+                if earlier_solar or t in initial_solar_slots:
                     solar_backed_priority_exports[t] = earlier_solar
         battery_to_grid_active = (
             cost_neutral_active
@@ -4474,15 +4530,17 @@ class BatteryOptimizer:
 
         for t, earlier_solar in solar_backed_priority_exports.items():
             # A cumulative output budget prevents one real solar charge from
-            # funding multiple export windows. Only earlier solved charging
-            # counts, after both conversion losses; initial paid inventory and
-            # future solar never relax the acquisition guard.
+            # funding multiple export windows. Opening measured solar funds
+            # only the active run; later exports spend earlier solved charge.
+            # Paid inventory and future solar never relax the guard.
             for export_t in solar_backed_priority_exports:
-                if export_t <= t:
+                if export_t <= t and (
+                    (export_t in initial_solar_slots) == (t in initial_solar_slots)
+                ):
                     A_ub[len(b_ub), battery_to_grid_var(export_t)] = p_dt[export_t]
             for prior in earlier_solar:
                 A_ub[len(b_ub), charge_var(prior)] = -eff * eff * p_dt[prior]
-            b_ub.append(0.0)
+            b_ub.append(initial_solar_output_kwh if t in initial_solar_slots else 0.0)
 
         for t in range(p_n):
             # Prevent current-period charge from funding same-period discharge.
@@ -7007,6 +7065,17 @@ class BatteryOptimizer:
             )
 
         # Pass 1: assign discharge/export to highest-spread periods.
+        initial_solar_slots, initial_solar_remaining_kwh = self._initial_solar_export_budget(
+            [
+                _priority_export_slot(t)
+                and not _cost_neutral_export_slot(t)
+                and manual_control_slots[t] is None
+                for t in range(n)
+            ],
+            [max(0.0, load[t] - solar[t]) * dt for t in range(n)],
+            allow_grid_charge=allow_grid_charge,
+            has_ev_plan=bool(ev_plan),
+        )
         # Track the remaining capped bonus-export bucket (e.g. GloBird ZeroHero
         # Super Export). Intentional battery export beyond this bucket earns
         # only the base FiT (often ~0c) and would have to be re-bought at import
@@ -7034,6 +7103,13 @@ class BatteryOptimizer:
             cost_neutral_export_slot = (
                 battery_export_allowed and _cost_neutral_export_slot(t)
             )
+            initial_solar_export_slot = (
+                t in initial_solar_slots
+                and battery_export_allowed
+                and acquisition_cost_kwh > 0
+                and effective_export_prices[t] < effective_acquisition_costs[t]
+                and initial_solar_remaining_kwh > 1e-9
+            )
             self_consumption_value_slot = (
                 not battery_export_allowed
                 and import_prices[t] > export_prices[t]
@@ -7047,14 +7123,20 @@ class BatteryOptimizer:
                     export_profitable_slot
                 )
                 or cost_neutral_export_slot
+                or initial_solar_export_slot
                 or self_consumption_value_slot
             ):
-                forced_export_slot = cost_neutral_export_slot or (
+                forced_export_slot = initial_solar_export_slot or cost_neutral_export_slot or (
                     export_profitable_slot
                 )
                 # Profitable to discharge; cap to home load when battery export
                 # is not explicitly permitted or export is below acquisition cost.
                 discharge_limit = self.max_discharge_kw
+                if initial_solar_export_slot:
+                    discharge_limit = min(
+                        discharge_limit,
+                        max(0.0, net_load) + initial_solar_remaining_kwh / dt,
+                    )
                 if forced_export_slot and self.max_battery_export_kw is not None:
                     discharge_limit = min(
                         discharge_limit,
@@ -7110,6 +7192,12 @@ class BatteryOptimizer:
                 if discharge_kw > 0.01:
                     actions[t] = (0.0, discharge_kw)
                     soc_tracker -= discharge_kw * dt / (eff * cap)
+                    if initial_solar_export_slot:
+                        initial_solar_remaining_kwh = max(
+                            0.0,
+                            initial_solar_remaining_kwh
+                            - max(0.0, discharge_kw - max(0.0, net_load)) * dt,
+                        )
                     if bonus_only_profitable:
                         intentional_export_kw = max(0.0, discharge_kw - max(0.0, net_load))
                         _consume_for(

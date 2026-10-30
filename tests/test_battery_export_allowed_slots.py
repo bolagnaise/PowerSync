@@ -4729,6 +4729,97 @@ def test_persistent_all_solar_inventory_preserves_known_zero_for_fallback(
     assert coordinator._last_acquisition_cost_diagnostics["known_zero_cost"] is True
 
 
+@pytest.mark.parametrize("fallback", [False, True])
+def test_mixed_solar_inventory_keeps_active_export_after_rolling_replan(
+    opt_module, monkeypatch, fallback,
+):
+    """Ticket #133 recurrence: measured solar leaves the forecast, not storage."""
+    coordinator = _provenance_coordinator(opt_module)
+    coordinator._battery_provenance_available = True
+    coordinator._battery_provenance_unknown_kwh = 5.0
+    coordinator._record_battery_provenance_interval(
+        solar_charge_kwh=1.0, grid_charge_kwh=0.0, grid_charge_cost=0.0,
+        discharge_kwh=0.0, current_soc=0.592, capacity_wh=10_000,
+        telemetry_gap=False,
+    )
+    initial_solar = coordinator._battery_provenance_solar_kwh
+    monkeypatch.delitem(sys.modules, "power_sync.optimization.battery_optimizer")
+    monkeypatch.delitem(sys.modules, "power_sync.optimization.schedule_reader", raising=False)
+    module = importlib.import_module("power_sync.optimization.battery_optimizer")
+    monkeypatch.setattr(module, "HIGHS_AVAILABLE", not fallback)
+    optimizer = module.BatteryOptimizer(
+        capacity_wh=10_000, max_charge_w=5_000, max_discharge_w=5_000,
+        backup_reserve=0.2, hardware_reserve=0.0, efficiency=0.92,
+        interval_minutes=60, horizon_hours=2, terminal_weight=0.0,
+    )
+    soc = 0.592
+    executed_kwh = 0.0
+    for cycle in range(12):
+        cost = coordinator._acquisition_cost_for_run(
+            import_prices=[0.528], current_soc=soc, capacity_wh=10_000,
+        )
+        assert cost > 0.10  # The mixed scalar must keep guarding paid inventory.
+        result = optimizer.optimize(
+            import_prices=[0.528] * 2, export_prices=[0.10] * 2,
+            solar_forecast=[0.0] * 2, load_forecast=[0.0] * 2,
+            current_soc=soc, acquisition_cost_kwh=cost,
+            allow_grid_charge=False, allow_battery_export=True,
+            priority_export_slots=True, priority_export_enabled=True,
+            initial_solar_energy_kwh=coordinator._battery_provenance_solar_kwh,
+        )
+        assert result.feasible
+        assert max(result.grid_import_w) < 0.1
+        exported = result.battery_to_grid_w[0] / 1000
+        if cycle == 0:
+            assert exported > 0.8
+        executed_kwh += exported
+        soc -= exported / (0.92 * 10.0)
+        # Only execute the current slot. Future planned exports are not usage.
+        coordinator._record_battery_provenance_interval(
+            solar_charge_kwh=0.0, grid_charge_kwh=0.0, grid_charge_cost=0.0,
+            discharge_kwh=exported, battery_export_kwh=exported,
+            current_soc=soc, capacity_wh=10_000, telemetry_gap=False,
+        )
+    assert 0.8 < executed_kwh <= initial_solar + 1e-6
+    assert soc >= 0.2
+    assert result.battery_to_grid_w[0] < 0.1
+
+
+def test_measured_battery_export_spends_solar_before_replanning(opt_module):
+    coordinator = _provenance_coordinator(opt_module)
+    coordinator._battery_provenance_available = True
+    coordinator._battery_provenance_solar_kwh = 1.0
+    coordinator._battery_provenance_grid_kwh = 4.0
+    coordinator._battery_provenance_grid_cost = 2.0
+    coordinator._battery_provenance_unknown_kwh = 5.0
+    coordinator._record_battery_provenance_interval(
+        solar_charge_kwh=0.0, grid_charge_kwh=0.0, grid_charge_cost=0.0,
+        discharge_kwh=1.0, battery_export_kwh=1.0,
+        current_soc=0.9, capacity_wh=10_000, telemetry_gap=False,
+    )
+    assert coordinator._battery_provenance_solar_kwh == 0.0
+    assert coordinator._battery_provenance_grid_kwh == 4.0
+    assert coordinator._battery_provenance_grid_cost == 2.0
+    assert coordinator._battery_provenance_unknown_kwh == 5.0
+    assert coordinator._battery_provenance_data_to_save()["solar_kwh"] == 0.0
+
+
+def test_export_during_telemetry_gap_cannot_regrant_solar_credit(opt_module):
+    coordinator = _provenance_coordinator(opt_module)
+    coordinator._battery_provenance_available = True
+    coordinator._battery_provenance_solar_kwh = 1.0
+    coordinator._battery_provenance_unknown_kwh = 5.0
+    coordinator._record_battery_provenance_interval(
+        solar_charge_kwh=1.0, grid_charge_kwh=0.0, grid_charge_cost=0.0,
+        discharge_kwh=1.0, battery_export_kwh=1.0,
+        current_soc=0.6, capacity_wh=10_000, telemetry_gap=True,
+    )
+    # Equal opening/closing SOC does not prove a replacement's source.
+    assert coordinator._battery_provenance_solar_kwh == 0.0
+    assert coordinator._battery_provenance_unknown_kwh == 6.0
+    assert coordinator._battery_provenance_data_to_save()["solar_kwh"] == 0.0
+
+
 def test_persistent_zero_cost_grid_inventory_preserves_known_zero_for_fallback(
     opt_module,
 ):

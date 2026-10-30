@@ -6534,6 +6534,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         current_soc: float,
         capacity_wh: float,
         telemetry_gap: bool,
+        battery_export_kwh: float = 0.0,
     ) -> None:
         """Add one measured interval and apportion discharge across origins."""
         if not self._battery_provenance_is_usable():
@@ -6546,6 +6547,17 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._battery_provenance_available = True
             self._schedule_battery_provenance_save()
             return
+        discharge = _nonnegative_finite_number(discharge_kwh) or 0.0
+        # A solar-backed export must spend its measured source, rather than
+        # retaining a proportional solar credit to promise again next solve.
+        # Spend it even across a gap; any replacement SOC is then unknown.
+        solar_export = min(
+            self._battery_provenance_solar_kwh,
+            discharge,
+            _nonnegative_finite_number(battery_export_kwh) or 0.0,
+        )
+        self._battery_provenance_solar_kwh -= solar_export
+        discharge -= solar_export
         if telemetry_gap:
             self._reconcile_battery_provenance(
                 current_soc, capacity_wh, reason="telemetry_gap"
@@ -6556,11 +6568,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         solar_charge = _nonnegative_finite_number(solar_charge_kwh) or 0.0
         grid_charge = _nonnegative_finite_number(grid_charge_kwh) or 0.0
         grid_cost = _nonnegative_finite_number(grid_charge_cost) or 0.0
-        discharge = _nonnegative_finite_number(discharge_kwh) or 0.0
         self._battery_provenance_solar_kwh += solar_charge
         self._battery_provenance_grid_kwh += grid_charge
         self._battery_provenance_grid_cost += grid_cost
-
         total = self._battery_provenance_total_kwh()
         if discharge > 1e-9 and total > 1e-9:
             ratio = max(0.0, min(1.0, (total - discharge) / total))
@@ -7989,6 +7999,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 "_last_acquisition_cost_known_zero",
                                 False,
                             )
+                        ),
+                        (
+                            self._battery_provenance_solar_kwh
+                            if self._battery_provenance_is_usable()
+                            else 0.0
                         ),
                     )
                 finally:
@@ -19603,6 +19618,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 current_soc=min(1.0, battery_level / 100.0),
                 capacity_wh=self._config.battery_capacity_wh,
                 telemetry_gap=elapsed_seconds > 10.0 * 60.0,
+                # Conservative upper bound: coincident PV export may also
+                # spend credit, but cannot renew or overstate solar inventory.
+                battery_export_kwh=min(battery_discharge_kw, grid_export_kw) * dt_hours,
             )
         else:
             self._battery_provenance_reconciliation = "missing_soc_telemetry"

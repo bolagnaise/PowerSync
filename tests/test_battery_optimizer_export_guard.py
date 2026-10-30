@@ -529,6 +529,75 @@ def test_no_grid_solar_refill_to_full_keeps_tomorrow_super_export(
     assert sum(result.battery_to_grid_w) / 12000 > 1.0
 
 
+@pytest.mark.parametrize("fallback", [False, True])
+@pytest.mark.parametrize(
+    ("initial_solar", "priority", "site_limit", "home", "expects_export"),
+    [
+        (1.0, True, 5000, 0.0, True),
+        (1.0, True, 200, 0.0, True),
+        (1.0, True, 0, 0.0, False),
+        (1.0, True, 5000, 0.2, True),
+        (1.0, True, 5000, 1.0, False),
+        (1.0, False, 5000, 0.0, False),
+        (0.0, True, 5000, 0.0, False),
+        (float("nan"), True, 5000, 0.0, False),
+    ],
+)
+def test_active_priority_export_uses_bounded_measured_solar_inventory(
+    battery_optimizer_module, monkeypatch, fallback,
+    initial_solar, priority, site_limit, home, expects_export,
+):
+    module = battery_optimizer_module
+    monkeypatch.setattr(module, "HIGHS_AVAILABLE", not fallback)
+    optimizer = module.BatteryOptimizer(
+        capacity_wh=10_000, max_charge_w=5000, max_discharge_w=5000,
+        backup_reserve=0.2, hardware_reserve=0.0, efficiency=0.92,
+        interval_minutes=60, horizon_hours=2, terminal_weight=0.0,
+        max_grid_export_w=site_limit,
+    )
+    result = optimizer.optimize(
+        import_prices=[0.528] * 2, export_prices=[0.10] * 2,
+        solar_forecast=[0.0] * 2, load_forecast=[home] * 2, current_soc=0.592,
+        acquisition_cost_kwh=0.44, allow_grid_charge=False,
+        allow_battery_export=True, priority_export_slots=priority,
+        priority_export_enabled=priority, initial_solar_energy_kwh=initial_solar,
+    )
+    exported = sum(result.battery_to_grid_w) / 1000
+    assert result.feasible
+    assert (exported > 0.1) is expects_export
+    if expects_export:
+        assert exported <= max(0.0, initial_solar * 0.92**2 - 2 * home) + 1e-6
+    assert max(result.grid_export_w) <= site_limit + 0.1
+    assert min(a.soc for a in result.schedule.actions) >= 0.2
+    assert max(result.grid_import_w) < 0.1
+
+
+@pytest.mark.parametrize("fallback", [False, True])
+def test_initial_solar_credit_does_not_cross_a_recharge_or_manual_override(
+    battery_optimizer_module, monkeypatch, fallback,
+):
+    module = battery_optimizer_module
+    monkeypatch.setattr(module, "HIGHS_AVAILABLE", not fallback)
+    optimizer = module.BatteryOptimizer(
+        capacity_wh=10_000, max_charge_w=5000, max_discharge_w=5000,
+        backup_reserve=0.2, hardware_reserve=0.0, efficiency=0.92,
+        interval_minutes=60, horizon_hours=4, terminal_weight=0.0,
+    )
+    result = optimizer.optimize(
+        import_prices=[0.528] * 4, export_prices=[0.10, 0.0, 0.0, 0.10],
+        solar_forecast=[0.0] * 4, load_forecast=[0.0] * 4, current_soc=0.592,
+        acquisition_cost_kwh=0.44, allow_grid_charge=False,
+        allow_battery_export=[True, False, False, True],
+        priority_export_slots=[True, False, False, True], priority_export_enabled=True,
+        initial_solar_energy_kwh=1.0,
+        manual_control={"mode_slots": [None, "charge", None, None],
+                        "required_charge_kw": [0.0, 1.0, 0.0, 0.0]},
+    )
+    assert result.feasible
+    assert result.battery_to_grid_w[0] > 100
+    assert result.battery_to_grid_w[3] < 0.1
+
+
 def test_grid_import_limit_still_allows_solar_assisted_full_charge(
     battery_optimizer_module,
 ):
