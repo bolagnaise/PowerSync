@@ -455,7 +455,17 @@ def test_sync_and_restore_uploads_pass_their_own_generation(handler_name, genera
                   and node.func.id == "send_tariff_to_tesla")
     predicate = next(keyword.value for keyword in upload.keywords if keyword.arg == "is_current")
     generation = [7]
-    namespace = {"_command_generation": generation, generation_name: 7}
+    runtime = {}
+    entry = SimpleNamespace(data={"tesla_energy_site_id": "site"})
+    namespace = {"_command_generation": generation, generation_name: 7,
+                 "sync_runtime": runtime, "sync_site_id": "site", "entry": entry,
+                 "CONF_TESLA_ENERGY_SITE_ID": "tesla_energy_site_id",
+                 "_aemo_dispatch_entry_data": lambda: runtime,
+                 "_is_monitoring_mode": lambda: False, "_monitoring_sync_override": False}
+    if isinstance(predicate, ast.Name):
+        helper = next(n for n in handler.body if isinstance(n, ast.FunctionDef)
+                      and n.name == predicate.id)
+        exec(compile(ast.Module(body=[helper], type_ignores=[]), "<upload guard>", "exec"), namespace)
     is_current = eval(compile(ast.Expression(body=predicate), "<upload-authority>", "eval"), namespace)
     assert is_current() is True
     generation[0] += 1

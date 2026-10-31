@@ -605,6 +605,14 @@ def test_fetch_with_retry_reauths_when_powersync_bearer_is_invalid():
 
 @pytest.mark.parametrize("revoked_tesla_auth", [False, True])
 def test_tesla_auth_expiry_sends_one_actionable_mobile_alert(monkeypatch, revoked_tesla_auth):
+    # Other coordinator fixtures replace HA's shared-session provider during
+    # collection. Pin the live provider used by the controlled-session helper,
+    # so this test exercises its own rejected response in any file order.
+    monkeypatch.setattr(
+        sys.modules["homeassistant.helpers.aiohttp_client"],
+        "async_get_clientsession",
+        lambda hass: hass.session,
+    )
     hass = _FakeHass()
     if revoked_tesla_auth:
         hass.session = _FakeSession(

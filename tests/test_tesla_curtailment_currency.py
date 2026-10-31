@@ -16,15 +16,17 @@ def final_guard(handler_name, *, restore, namespace):
     setup = next(n for n in ast.parse(SOURCE.read_text()).body
                  if isinstance(n, ast.AsyncFunctionDef) and n.name == 'async_setup_entry')
     handler = next(n for n in setup.body if isinstance(n, ast.AsyncFunctionDef) and n.name == handler_name)
+    entry_data = next(n for n in handler.body if isinstance(n, ast.Assign)
+                      and any(isinstance(t, ast.Name) and t.id == 'entry_data' for t in n.targets))
     start = next(i for i, n in enumerate(handler.body) if isinstance(n, ast.Assign)
-                 and any(isinstance(t, ast.Name) and t.id == 'entry_data' for t in n.targets))
+                 and any(isinstance(t, ast.Subscript) and 'tesla_curtailment_epoch' in ast.unparse(t) for t in n.targets))
     stop = next(i for i, n in enumerate(handler.body) if isinstance(n, ast.FunctionDef)
                 and n.name == 'curtailment_restore_current')
     calls = [n for n in ast.walk(handler) if isinstance(n, ast.Call)
              and isinstance(n.func, ast.Attribute) and n.func.attr == 'post']
     call = next(n for n in calls if ('restore_rule' in ast.unparse(n)) == restore)
     guard = next(k.value for k in call.keywords if k.arg == '_power_sync_is_current')
-    tree = ast.Module(body=handler.body[start:stop + 1] + [ast.Assign(
+    tree = ast.Module(body=[entry_data] + handler.body[start:stop + 1] + [ast.Assign(
         targets=[ast.Name(id='guard', ctx=ast.Store())], value=guard)], type_ignores=[])
     exec(compile(ast.fix_missing_locations(tree), '<actual curtailment final guard>', 'exec'), namespace)
     return namespace['guard']

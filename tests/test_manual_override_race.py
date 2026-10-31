@@ -31,6 +31,7 @@ import ast
 import asyncio
 import textwrap
 from pathlib import Path
+from types import SimpleNamespace
 
 from conftest import load_power_sync_function
 
@@ -131,7 +132,11 @@ def _make_hass_entry(entry_id="entry1", extra_entry_data=None):
 
 def _exec_grid_export_branch():
     # The Tesla write generation stays current for the whole publication.
-    namespace: dict = {"asyncio": asyncio, "current": lambda: True}
+    namespace: dict = {
+        "asyncio": asyncio,
+        "current": lambda: True,
+        "call": SimpleNamespace(data={"rule": "never"}),
+    }
     load_power_sync_function("_update_powerwall_store", namespace)
     exec(compile(_grid_export_post_write_branch(), "<grid_export_branch>", "exec"), namespace)
     return namespace["_post_write"]

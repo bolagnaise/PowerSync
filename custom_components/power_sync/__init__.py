@@ -30384,28 +30384,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         # Skip if EV charging has overridden curtailment to allow full solar production
         entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
-        entry_data["tesla_curtailment_epoch"] = entry_data.get("tesla_curtailment_epoch", 0) + 1
-        curtailment_epoch = entry_data["tesla_curtailment_epoch"]
-        curtailment_generation = _command_generation[0]
-        curtailment_site_id = str(entry.data.get(CONF_TESLA_ENERGY_SITE_ID))
-        def curtailment_current():
-            latest_enabled = _effective_solar_curtailment_enabled()
-            return (
-                hass.data.get(DOMAIN, {}).get(entry.entry_id) is entry_data
-                and entry_data.get("tesla_curtailment_epoch") == curtailment_epoch
-                and _command_generation[0] == curtailment_generation
-                and str(entry.data.get(CONF_TESLA_ENERGY_SITE_ID)) == curtailment_site_id
-                and latest_enabled
-                and _monitoring_mode_allows_curtailment(latest_enabled)
-                and not _ac_only_solar_curtailment_enabled()
-                and not entry_data.get("ev_curtailment_override")
-            )
-        def curtailment_restore_current(rule):
-            preferred = ((entry_data.get("manual_export_rule") or "battery_ok")
-                         if entry_data.get("manual_export_override") else "battery_ok")
-            manager = entry_data.get("network_envelope_manager")
-            return (curtailment_current() and preferred == rule
-                    and (rule == "never" or manager is None or manager.snapshot.mode == "off"))
         if entry_data.get("ev_curtailment_override"):
             _LOGGER.info("☀️ Solar curtailment skipped - EV charging using solar surplus")
             return
@@ -30463,6 +30441,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "Solar curtailment skipped - no Tesla API token getter available for this battery system"
             )
             return
+
+        entry_data["tesla_curtailment_epoch"] = entry_data.get("tesla_curtailment_epoch", 0) + 1
+        curtailment_epoch = entry_data["tesla_curtailment_epoch"]
+        curtailment_generation = _command_generation[0]
+        curtailment_site_id = str(entry.data.get(CONF_TESLA_ENERGY_SITE_ID))
+        def curtailment_current():
+            latest_enabled = _effective_solar_curtailment_enabled()
+            return (
+                hass.data.get(DOMAIN, {}).get(entry.entry_id) is entry_data
+                and entry_data.get("tesla_curtailment_epoch") == curtailment_epoch
+                and _command_generation[0] == curtailment_generation
+                and str(entry.data.get(CONF_TESLA_ENERGY_SITE_ID)) == curtailment_site_id
+                and latest_enabled
+                and _monitoring_mode_allows_curtailment(latest_enabled)
+                and not _ac_only_solar_curtailment_enabled()
+                and not entry_data.get("ev_curtailment_override")
+            )
+        def curtailment_restore_current(rule):
+            preferred = ((entry_data.get("manual_export_rule") or "battery_ok")
+                         if entry_data.get("manual_export_override") else "battery_ok")
+            manager = entry_data.get("network_envelope_manager")
+            return (curtailment_current() and preferred == rule
+                    and (rule == "never" or manager is None or manager.snapshot.mode == "off"))
 
         _LOGGER.info("=== Starting solar curtailment check ===")
 
@@ -30794,28 +30795,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         # Skip if EV charging has overridden curtailment to allow full solar production
         entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
-        entry_data["tesla_curtailment_epoch"] = entry_data.get("tesla_curtailment_epoch", 0) + 1
-        curtailment_epoch = entry_data["tesla_curtailment_epoch"]
-        curtailment_generation = _command_generation[0]
-        curtailment_site_id = str(entry.data.get(CONF_TESLA_ENERGY_SITE_ID))
-        def curtailment_current():
-            latest_enabled = _effective_solar_curtailment_enabled()
-            return (
-                hass.data.get(DOMAIN, {}).get(entry.entry_id) is entry_data
-                and entry_data.get("tesla_curtailment_epoch") == curtailment_epoch
-                and _command_generation[0] == curtailment_generation
-                and str(entry.data.get(CONF_TESLA_ENERGY_SITE_ID)) == curtailment_site_id
-                and latest_enabled
-                and _monitoring_mode_allows_curtailment(latest_enabled)
-                and not _ac_only_solar_curtailment_enabled()
-                and not entry_data.get("ev_curtailment_override")
-            )
-        def curtailment_restore_current(rule):
-            preferred = ((entry_data.get("manual_export_rule") or "battery_ok")
-                         if entry_data.get("manual_export_override") else "battery_ok")
-            manager = entry_data.get("network_envelope_manager")
-            return (curtailment_current() and preferred == rule
-                    and (rule == "never" or manager is None or manager.snapshot.mode == "off"))
         if entry_data.get("ev_curtailment_override"):
             _LOGGER.info("☀️ Solar curtailment skipped - EV charging using solar surplus")
             return
@@ -30899,6 +30878,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "Solar curtailment skipped - no Tesla API token getter available for this battery system"
             )
             return
+
+        entry_data["tesla_curtailment_epoch"] = entry_data.get("tesla_curtailment_epoch", 0) + 1
+        curtailment_epoch = entry_data["tesla_curtailment_epoch"]
+        curtailment_generation = _command_generation[0]
+        curtailment_site_id = str(entry.data.get(CONF_TESLA_ENERGY_SITE_ID))
+        def curtailment_current():
+            latest_enabled = _effective_solar_curtailment_enabled()
+            return (
+                hass.data.get(DOMAIN, {}).get(entry.entry_id) is entry_data
+                and entry_data.get("tesla_curtailment_epoch") == curtailment_epoch
+                and _command_generation[0] == curtailment_generation
+                and str(entry.data.get(CONF_TESLA_ENERGY_SITE_ID)) == curtailment_site_id
+                and latest_enabled
+                and _monitoring_mode_allows_curtailment(latest_enabled)
+                and not _ac_only_solar_curtailment_enabled()
+                and not entry_data.get("ev_curtailment_override")
+            )
+        def curtailment_restore_current(rule):
+            preferred = ((entry_data.get("manual_export_rule") or "battery_ok")
+                         if entry_data.get("manual_export_override") else "battery_ok")
+            manager = entry_data.get("network_envelope_manager")
+            return (curtailment_current() and preferred == rule
+                    and (rule == "never" or manager is None or manager.snapshot.mode == "off"))
 
         _LOGGER.info("=== Starting solar curtailment check (WebSocket event-driven) ===")
 

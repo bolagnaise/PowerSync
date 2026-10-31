@@ -387,6 +387,13 @@ def test_sync_reports_all_site_upload_results_to_restore(site_results, periodic,
                send_tariff_to_tesla=upload, _command_generation=[1], sync_command_generation=1,
                TESLA_TOU_READBACK_ZERO_NORMALIZED="normalized", _LOGGER=logging.getLogger(__name__),
                periodic=periodic, TOU_PERIODIC_SYNC_MAX_RETRY_AFTER_SECONDS=60.0)
+    runtime = {}
+    env.update(sync_runtime=runtime, sync_site_id="None",
+               CONF_TESLA_ENERGY_SITE_ID="tesla_energy_site_id",
+               _aemo_dispatch_entry_data=lambda: runtime,
+               _is_monitoring_mode=lambda: False, _monitoring_sync_override=False)
+    guard = next(n for n in sync.body if isinstance(n, ast.FunctionDef) and n.name == "sync_current")
+    exec(compile(ast.Module(body=[guard], type_ignores=[]), "<actual sync guard>", "exec"), env)
     exec(compile(ast.fix_missing_locations(ast.Module(body=[node], type_ignores=[])),
                  "<sync-upload-result>", "exec"), env)
     assert asyncio.run(env["run"]()) is all(site_results)
