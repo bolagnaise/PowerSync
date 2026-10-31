@@ -2,15 +2,21 @@
 
 This checklist covers the Home Assistant integration. It inventories Tesla
 battery mutations, their admission and restoration obligations, focused
-software coverage, and the local Home Assistant scenarios still requiring
-verification. A route decision, submitted callback, API acknowledgement,
+software coverage, and the local Home Assistant results and remaining verification limits. A route decision, submitted callback, API acknowledgement,
 settings readback and measured battery response are separate evidence.
 
 **Reviewed 31 October 2026.** All 46 rows have software evidence and an explicit
 local-site assessment in [the validation report](tesla-control-validation-2026-10-31.md).
-The audited final source run passed **9,408 tests, zero skipped**. The local site
-runs unpublished candidate `2.12.1573.dev3` from source `ac766794`; archive and
-installation proof are recorded in the report. Live receipts distinguish
+The audited final FULL12 run passed **9,714 tests, zero skipped** on frozen
+source `759c67bf`, with successful independent matrix reconciliation. The
+published baseline is `origin/main` `90461410...`, version `v2.12.1574`.
+Feature source `fd29787fab232030eda3ec72681294ac8997c5db` includes that
+baseline but is not merged into it. Candidate7 is `2.12.1575.dev7`, source
+`759c67bf`, SHA-256
+`0510149dea96cc525bf4e1d9c808b069178c3c92320afb9fad526bb8e8ab909a`,
+43,749,943 bytes / 264 files. Candidate7 was installed at 04:58:14 with all
+264 archive hashes matching and healthy Core check/startup. Dev6 live evidence
+and installation are recorded in the report. Live receipts distinguish
 acknowledgement, settings readback and measured power. Unavailable hardware,
 unsupported capabilities and unsafe fault variants remain identified; the
 matrix does not claim universal physical verification.
@@ -64,7 +70,7 @@ exercises both its current predicate and returned write fence across this wait.
 | Entry or owner | Mutation or downstream sink | Required common gate and existing proof |
 | --- | --- | --- |
 | `handle_force_charge`, `handle_force_discharge`, `handle_restore_normal` | Native Max adapter, local dispatch, or cloud forcing settings/tariff | Site coordinator plus original route, settings and restore fences; durable root baseline and original deadline |
-| `handle_hold_battery_soc`, `handle_set_self_consumption`, their expiry/restore callbacks | Reserve/mode helpers and canonical restore service | Same site gate; saved reserve provenance, override generation and exact previous mode; repeated idle-off cannot upload a historical tariff |
+| `handle_hold_battery_soc`, `handle_set_self_consumption`, their expiry/restore callbacks | Reserve/mode helpers and canonical restore service | Same site gate; saved reserve provenance, override generation and the workflow-specific mode policy; repeated idle-off cannot upload a historical tariff |
 | `_send_tariff_to_tesla` | `time_of_use_settings` POST, including retry | Controlled HTTP session; tariff reservation, per-attempt before-write fence and direct tariff readback |
 | `_tesla_force_set_operation_mode.post` | `operation` POST | Controlled HTTP session; current command generation, settings ownership and confirmed mode |
 | `_tesla_force_apply_export_rule.cloud_request` | `grid_import_export` POST | Controlled HTTP session; export-only dispatch, submission status and required preference readback |
@@ -75,6 +81,7 @@ exercises both its current predicate and returned write fence across this wait.
 | `TeslaEnergyCoordinator._tesla_api_call` and `async_set_storm_watch`, `async_set_off_grid_ev_reserve`, `async_set_vpp_enrollment` | Generic `session.request("POST", ...)` to storm mode, off-grid vehicle reserve and programs | Controlled session must intercept generic `request`, not just `.post`; GET capability/status probes remain read-only |
 | `handle_set_autonomous`, `handle_set_operation_mode._cloud._post_mode` | `operation` POST | Controlled HTTP session plus entry selection, local-settings quarantine and manual command fences |
 | `handle_set_backup_reserve`, `handle_set_grid_charging`, `handle_set_grid_export` | Canonical local/settings or cloud helpers | Entry-scoped service, field-specific setting dispatch, existing journal and direct readback |
+| `handle_recover_max_backup` / `power_sync.recover_max_backup` | Cleanup-only recovery of a retained Max Backup record | Exact `entry_id`, `site_id`, `record_id`, acknowledgement, and legacy-site attestation; bind immutable original record before cleanup; never schedule a new backup or rebind an explicit site |
 | `handle_set_grid_export_auto` | Clear manual export preference ownership | Entry-scoped state/persistence update; no invented battery actuator write or unrelated EV lease release |
 | `_tesla_charge_kick._mode_bounce` | Two `operation` POSTs | Controlled HTTP session plus original kick/command generation; failed bounce restores without repeating stale forcing |
 | `_handle_sync_tou_internal` | Autonomous mode bounce and tariff sync | Controlled HTTP session; existing force/idle/monitoring/ownership deferrals |
@@ -102,6 +109,26 @@ login establish access rather than changing battery dispatch or site settings.
 They retain their existing authenticated workflows. An unknown signed envelope
 must not inherit these read exemptions.
 
+### Max Backup supervised recovery contract
+
+`power_sync.recover_max_backup` is a cleanup-only service for a retained Max
+Backup record. The caller must provide the selected `entry_id`, the original
+`site_id`, the exact diagnostic `record_id`, `acknowledge: true`, and
+`attest_original_site: true` only when the legacy record has no saved site.
+The handler binds the immutable original record and digest before cleanup;
+malformed, stale, changed-entry, changed-site, or explicit wrong-site evidence
+is refused without a reserve or native actuator write. An explicit site cannot
+be rebound by attestation.
+
+A fresh typed-empty native state permits cancellation to be skipped immediately
+for a new start. An uncertain cleanup uses a conservative 60-second drain
+before fresh absence can retire it; unknown or present native state still
+requires acknowledgement. A
+native record with saved reserve `None` is valid native cleanup and does not
+write reserve. Original end time, restore basis, identity metadata, and
+pending ownership survive restart or persistence failure. The service never
+starts another backup window or uses a blind reserve fallback.
+
 ## Software scenario matrix
 
 `test_tesla_control_path_matrix.py` executes the actual typed targets, route
@@ -116,14 +143,14 @@ lifecycle and provider fault coverage; run them together after integration.
 | T01–T03 | Cloud-only Tariff charge/discharge reach cloud without a LAN poll; restore retains the original tariff/settings and ownership until confirmed | `test_powerwall_control_method.py`: `test_tariff_control_reaches_cloud_without_reading_unreachable_gateway`, `test_tariff_waits_for_durable_native_ownership_before_falling_through`; `test_tesla_idle_restore.py`; `test_pending_tesla_restore.py` |
 | T04–T06 | Every preference preserves explicit numeric battery/export/site-import semantics; spread charging accounts for site load, solar and outstanding EV capacity | New target/entry-path matrix; `test_powerwall_battery_dispatch.py`: `test_export_target_accounts_for_home_and_solar`, `test_native_ev_reservation_reduces_grid_following_battery_without_rewriting_limits`; `test_powerwall_full_rate_charge.py` |
 | T07–T09 | Local Max never enables tariff fallback; Auto selects by complete inverter envelope, fails conservatively and retains a running native episode | New Auto envelope matrix; `test_powerwall_control_method.py`: `test_local_preference_never_enables_a_tariff_fallback`, `test_auto_keeps_a_native_episode_stable_until_it_finishes`; `test_powerwall_native_max_adapter.py` |
-| T10–T12 | Hold SOC/self-consumption retain correct reserve/mode provenance; expiry restores only owned settings; auto export clears only the manual preference | `test_tesla_idle_restore.py`; `test_tesla_reserve_provenance.py`; `test_tesla_grid_export_service.py`; `test_tesla_local_settings.py` |
-| M01–M06 | Mode, reserve, grid charging/export, on-grid solar and Max Backup use the selected entry and existing readback; restoring one field cannot overwrite another owner's settings | `test_tesla_local_settings.py`; `test_tesla_settings_supersession.py`; `test_tesla_grid_export_service.py`; `test_powerwall_on_grid_solar_service.py`; `test_tesla_grid_mode_switches.py`; `test_schedule_max_backup_reserve.py` |
+| T10–T12 | Hold SOC/self-consumption retain correct reserve/mode provenance; expiry restores only owned settings; auto export clears only the manual preference | `test_tesla_idle_restore.py`; `test_tesla_reserve_provenance.py`; `test_solar_export_hold.py`; `test_tesla_grid_export_service.py`; `test_tesla_local_settings.py` |
+| M01–M06 | Mode, reserve, grid charging/export, on-grid solar and Max Backup use the selected entry and existing readback; restoring one field cannot overwrite another owner's settings | `test_tesla_local_settings.py`; `test_tesla_settings_supersession.py`; `test_tesla_grid_export_service.py`; `test_powerwall_on_grid_solar_service.py`; `test_tesla_grid_mode_switches.py`; `test_schedule_max_backup_reserve.py`; `test_tesla_max_backup_recovery.py` |
 | M07–M11 | Cloud storm/off-grid EV reserve/VPP generic requests use the gate; island/reconnect and calibration-delay mutations retain their own admission and signed deadlines | New generic HTTP request/production delegate matrix; `test_tesla_grid_mode_switches.py`; `test_powerwall_calibration_delay_services.py`; `test_powerwall_calibration_delay_views.py` |
 | E01–E03 | Two VIN leases share one original export rule; only final release restores it; restart, failed storage, cancellation and acknowledgement loss retain recovery | `test_ev_powerwall_curtailment_recovery.py`: `test_two_vehicle_leases_release_only_the_last_owner`, `test_restarted_vehicle_reacquires_while_other_recovered_lease_releases`, `test_restart_recovers_original_and_restores_without_vehicle_configuration`, persistence/cancellation cases |
 | B01–B04 | TOU sync, spike/session transitions, curtail/resume and charge kicks share the site gate and retain their earlier admission/restore behavior | Production inventory assertions; `test_static_tesla_tariff_sync.py`; `test_tesla_spike_session_tariff_baseline.py`; `test_curtailment_restore_manual_override.py`; `test_tesla_charge_kick_runtime.py` |
 | S01–S05 | Preference cannot override monitoring, demand/network protection, permissions, stale/invalid/off-grid/SOC evidence or shared EV/site capacity | New native-admission/invalid-physics matrix; `test_powerwall_control_method.py`; `test_powerwall_grid_permission_encoding.py`; `test_powerwall_native_max_adapter.py`; `test_powerwall_battery_dispatch.py` |
 | S06 | Numeric/string site IDs and different providers/entries serialize one physical site's mutations; different sites remain independent | `test_powerwall_control_coordinator.py`; controlled HTTP/session tests; source factory/session assertions |
-| R01–R03 | Uncertain local writes remain quarantined; supervised cloud resumption leaves local suspended; startup restores rather than replaying a force request | New native-admission matrix; `test_tesla_local_settings.py`: lost-response, cloud-handoff and interrupted-preparation cases; `test_powerwall_native_max_charge.py`: restart/restore cases; `test_pending_tesla_restore.py` |
+| R01–R03 | Uncertain local writes remain quarantined; supervised cloud resumption leaves local suspended; startup restores rather than replaying a force request | New native-admission matrix; `test_tesla_local_settings.py`: lost-response, cloud-handoff and interrupted-preparation cases; `test_powerwall_native_max_charge.py`: restart/restore cases; `test_tesla_max_backup_recovery.py`; `test_pending_tesla_restore.py` |
 | R04–R07 | Queued cancellation, unload, deadline expiry and identity/generation changes cannot later submit a stale write or clear newer ownership | `test_powerwall_control_coordinator.py`; `test_tesla_local_settings.py`: queued cancellation, queue deadline, unload drain and supersession cases; `test_powerwall_native_max_charge.py`: expiry/shortening/cancel cases |
 | R08 | A submitted response may remain pending while status reads advance; an unrelated successful operation cannot clear its uncertain effect or durable journal | `test_powerwall_control_coordinator.py`: cancelled direct I/O, unknown receipt, response-error and status responsiveness cases |
 | D01–D02 | Every mutation owner uses a shared gate; only actionable persistent native blockers notify; normal SOC/EV/monitoring/restore deferrals remain quiet | New source inventory; `test_powerwall_native_max_notifications.py`; `test_powerwall_native_max_adapter.py`: precise structured policy and final-authority propagation |
@@ -136,6 +163,17 @@ entry-path matrix validates its callers and physical-target contracts.
 `test_tesla_background_control_currency.py` covers event queue revocation,
 force/native/recovery ownership, session replacement, retained startup cleanup,
 and restrictive restoration while stopped or under an active network guard.
+`test_tesla_max_backup_recovery.py` covers exact-entry/site/record recovery,
+immutable restore basis, typed-empty native cleanup, acknowledgement loss,
+identity fencing, persistence failure, and the native `None` reserve case.
+`test_tesla_hold_cleanup_admission.py` exercises all four timer/retry cleanup
+payloads and the shielded exact-reserve child through the actual mutation gate.
+It covers monitoring-safe cleanup, site/runtime/store/coordinator replacement,
+foreign ownership, original deadlines, cancellation and bounded retries.
+`test_powerwall_manual_backup_transport.py` covers fresh typed-empty starts,
+acknowledgement requirements, original deadlines and cleanup readback.
+The Hold description was checked on the installed HA entity; a sensor label or
+service response is not physical-lock evidence.
 
 ## Required local Home Assistant verification
 
@@ -237,6 +275,13 @@ replace them with this static inventory.
   tests/test_ev_powerwall_curtailment_recovery.py \
   tests/test_tesla_charge_kick_runtime.py \
   tests/test_tesla_idle_restore.py \
+  tests/test_tesla_hold_cleanup_admission.py \
+  tests/test_powerwall_manual_backup_transport.py \
+  tests/test_tesla_max_backup_overlap.py \
+  tests/test_tesla_max_backup_recovery.py \
+  tests/test_tesla_auxiliary_entry_routing.py \
+  tests/test_tesla_auxiliary_site_controls.py \
+  tests/test_service_calls.py \
   tests/test_tesla_spike_session_tariff_baseline.py \
   tests/test_tesla_background_control_currency.py \
   tests/test_static_tesla_tariff_sync.py \
