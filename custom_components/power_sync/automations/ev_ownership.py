@@ -488,11 +488,12 @@ def _runtime_snapshot(hass: Any, config_entry: Any) -> dict[str, Any]:
     if isinstance(entry.get("ev_boost_sessions"), dict):
         for vehicle_id in entry["ev_boost_sessions"]:
             reconcile_boost_supersession(hass, config_entry, vehicle_id)
-    transport_recovery = entry.get("ev_transport_recovery")
+    missing_transport_recovery = object()
+    transport_recovery = entry.get("ev_transport_recovery", missing_transport_recovery)
     # The recovery journal's empty schema was introduced after runtime state
     # persistence.  Migrate absent/empty legacy footprints while preserving
     # any nonempty malformed record for the recovery layer to reject safely.
-    if transport_recovery is None or transport_recovery == {}:
+    if transport_recovery is missing_transport_recovery or transport_recovery == {}:
         transport_recovery = {"vehicles": {}}
     return {
         "active_ownership": dict(get_ev_ownerships(hass, config_entry)),

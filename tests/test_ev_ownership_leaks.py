@@ -1542,11 +1542,11 @@ def test_restore_empty_transport_recovery_migrates_before_real_admission(
     ] == "pending"
 
 
-def test_restore_nonempty_malformed_transport_recovery_stays_fail_closed():
-    """Migration never erases a nonempty malformed journal footprint."""
+@pytest.mark.parametrize("malformed", [None, {"legacy": {"unexpected": "payload"}}])
+def test_restore_malformed_transport_recovery_stays_fail_closed(malformed):
+    """Migration never erases an explicitly malformed journal footprint."""
     from power_sync import tesla_ev_recovery as recovery
 
-    malformed = {"legacy": {"unexpected": "payload"}}
     hass = _Hass([_State("switch.car_charger", "off")])
     _register_ble_command(hass, "car", "start")
     entry = _Entry()
@@ -1555,6 +1555,7 @@ def test_restore_nonempty_malformed_transport_recovery_stays_fail_closed():
 
     ev_ownership.restore_ev_runtime_state(hass, entry, store)
     assert hass.data["power_sync"][entry.entry_id]["ev_transport_recovery"] == malformed
+    assert ev_ownership._runtime_snapshot(hass, entry)["transport_recovery"] == malformed
     assert asyncio.run(
         recovery.async_begin_attempt(
             hass,
