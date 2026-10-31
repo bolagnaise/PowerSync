@@ -15874,10 +15874,44 @@ class EVVehiclesView(HomeAssistantView):
         _LOGGER.debug(f"EV BYD: Found {len(vehicles)} BYD vehicle(s)")
         return vehicles
 
+    @staticmethod
+    def _fleet_charger_power_candidate(entity_id, state, *, at):
+        """Rank a current Fleet power measurement and normalize it to kW."""
+        from .ev_load import is_current_ev_power_observation, normalize_power_kw
+
+        entity_id = entity_id.lower()
+        direct_power = any(
+            name in entity_id
+            for name in ("charger_power", "charging_power", "charge_power")
+        )
+        if not entity_id.startswith("sensor.") or (
+            not direct_power and "charge_rate" not in entity_id
+        ):
+            return None
+        observed_at = _ev_power_observed_at(state)
+        if not is_current_ev_power_observation(observed_at, at=at):
+            return None
+        unit = str(state.attributes.get("unit_of_measurement") or "").strip().lower()
+        value = state.state
+        if unit in ("mw", "megawatt", "megawatts"):
+            try:
+                value = float(value) * 1000
+            except (ValueError, TypeError):
+                return None
+            unit = "kw"
+        power_kw = normalize_power_kw(value, unit)
+        if power_kw is None:
+            return None
+        # Prefer explicit power sensors to legacy charge_rate sensors, then
+        # the newest own-power report. Entity ID breaks ties independently
+        # of registry insertion order, including merged provider devices.
+        return (int(direct_power), observed_at, entity_id), power_kw
+
     async def get(self, request: web.Request) -> web.Response:
         """Handle GET request for vehicle list."""
         try:
             vehicles = []
+            power_observed_now = dt_util.utcnow()
 
             # Get PowerSync config for EV provider setting
             config = self._get_powersync_config()
@@ -15938,6 +15972,7 @@ class EVVehiclesView(HomeAssistantView):
                     charge_limit = None
                     is_plugged_in = False
                     charger_power = None
+                    charger_power_rank = None
                     provider_battery_capacity_kwh = None
                     latest_entity_update = None
 
@@ -16015,14 +16050,14 @@ class EVVehiclesView(HomeAssistantView):
                             if state.state in ("on", "true", "connected"):
                                 is_plugged_in = True
 
-                        if ("charger_power" in entity_id_lower or
-                            "charge_rate" in entity_id_lower or
-                            "charging_power" in entity_id_lower):
-                            if state.state not in ("unknown", "unavailable"):
-                                try:
-                                    charger_power = float(state.state)
-                                except (ValueError, TypeError):
-                                    pass
+                        power_candidate = self._fleet_charger_power_candidate(
+                            entity.entity_id, state, at=power_observed_now
+                        )
+                        if power_candidate is not None:
+                            rank, power_kw = power_candidate
+                            if charger_power_rank is None or rank > charger_power_rank:
+                                charger_power_rank = rank
+                                charger_power = power_kw
 
                         # Track most recent entity update for data freshness
                         if hasattr(state, 'last_updated') and state.last_updated:
