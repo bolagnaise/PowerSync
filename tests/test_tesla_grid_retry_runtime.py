@@ -234,10 +234,12 @@ def test_discharge_cannot_change_mode_after_admission_changes_during_grid_wait(c
 
 
 @pytest.mark.parametrize("superseded", [False, True])
-def test_cancelled_discharge_retains_cleanup_unless_a_newer_command_owns_it(superseded):
+@pytest.mark.parametrize("mutated", [False, True])
+@pytest.mark.parametrize("direction", ["charge", "discharge"])
+def test_cancelled_force_retains_cleanup_only_for_its_own_mutated_settings(superseded, mutated, direction):
     tree = ast.parse((ROOT / "__init__.py").read_text())
     handler = next(n for n in ast.walk(tree)
-                   if isinstance(n, ast.AsyncFunctionDef) and n.name == "handle_force_discharge")
+                   if isinstance(n, ast.AsyncFunctionDef) and n.name == f"handle_force_{direction}")
     cancelled = next(n for n in ast.walk(handler) if isinstance(n, ast.ExceptHandler)
                      and n.type is not None and ast.unparse(n.type) == "asyncio.CancelledError")
     body = ast.parse("raise asyncio.CancelledError()").body
@@ -254,15 +256,15 @@ def test_cancelled_discharge_retains_cleanup_unless_a_newer_command_owns_it(supe
         cleanups.append(reason)
 
     namespace = {
-        "asyncio": asyncio, "tesla_force_discharge_mutated": True,
+        "asyncio": asyncio, f"tesla_force_{direction}_mutated": mutated,
         "_command_generation": [2 if superseded else 1], "_restore_gen": 1,
-        "_cleanup_failed_tesla_force_discharge": cleanup,
+        f"_cleanup_failed_tesla_force_{direction}": cleanup,
     }
     module = ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[]))
     exec(compile(module, str(ROOT / "__init__.py"), "exec"), namespace)
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(namespace["cancel"]())
-    assert bool(cleanups) is not superseded
+    assert bool(cleanups) is (mutated and not superseded)
 
 
 def test_preparation_journal_preserves_each_sites_original_settings():
