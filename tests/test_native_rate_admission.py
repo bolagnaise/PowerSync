@@ -561,3 +561,38 @@ async def test_cancelled_waiting_battery_command_does_not_take_or_poison_route(a
     assert not events and a.runtime['native_rate_battery_transitions']==0
     await handler(None)
     assert events==['control'] and not lock.locked()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('with_budget', [True, False])
+@pytest.mark.parametrize('deadline', [NOW, None, True, float('inf'), 'later'])
+async def test_boost_start_deadline_blocks_expired_or_invalid_provider_admission(admission, with_budget, deadline):
+    a = admission
+    a.m._EV_SUBMISSION_CONTEXT.get()['params']['_boost_start_deadline'] = deadline
+    if not with_budget:
+        a.hass.data.pop(a.b.RUNTIME_KEY)
+    with pytest.raises(a.m.SiteImportAdmissionDenied, match='deadline'):
+        await a.m.prepare_ev_submission(a.hass, 'switch.car_charge', operation='start')
+    assert not a.budget.managed
+
+
+@pytest.mark.asyncio
+async def test_boost_deadline_crossed_during_durable_admission_rolls_back_unsent_demand(admission, monkeypatch):
+    a = admission
+    assert await a.m.prepare_ev_submission(a.hass, a.state.entity_id, operation='rate', amps=10)
+    original = deepcopy(a.budget.managed[VIN])
+    a.m._EV_SUBMISSION_CONTEXT.get()['params']['_boost_start_deadline'] = NOW + 5
+    a.store.hook = lambda: monkeypatch.setattr(a.m.time, 'time', lambda: NOW + 10)
+    with pytest.raises(a.m.SiteImportAdmissionDenied, match='deadline'):
+        await a.m.prepare_ev_submission(a.hass, a.state.entity_id, operation='rate', amps=20)
+    assert a.budget.managed[VIN] == original
+    assert a.store.data['managed'][VIN] == original
+
+
+@pytest.mark.asyncio
+async def test_boost_expiry_keeps_zero_current_cleanup_available(admission):
+    a = admission
+    a.m._EV_SUBMISSION_CONTEXT.get()['params']['_boost_start_deadline'] = NOW - 1
+    assert await a.m.prepare_ev_submission(a.hass, a.state.entity_id, operation='rate', amps=0)
+    a.hass.data.pop(a.b.RUNTIME_KEY)
+    assert await a.m.prepare_ev_submission(a.hass, 'switch.car_charge', operation='stop')

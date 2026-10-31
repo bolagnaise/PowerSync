@@ -337,15 +337,36 @@ async def refresh_managed_records(hass, budget):
 
 async def prepare_ev_submission(hass, entity_id, *, operation, amps=None):
     ticket = []
+    context = _EV_SUBMISSION_CONTEXT.get()
+    params = context.get("params", {}) if context is not None else {}
+    deadline = params.get("_boost_start_deadline")
+    finite_start = (
+        "_boost_start_deadline" in params
+        and operation in ("start", "rate")
+        and not (operation == "rate" and type(amps) in (int, float) and amps <= 0)
+    )
+
+    def check_deadline():
+        if finite_start and (
+            type(deadline) not in (int, float) or not math.isfinite(deadline)
+            or time.time() >= deadline
+        ):
+            raise SiteImportAdmissionDenied("Boost start deadline has elapsed")
+
     try:
-        context = _EV_SUBMISSION_CONTEXT.get()
+        check_deadline()
         budget = hass.data.get(RUNTIME_KEY)
         if context is not None and budget is not None:
             async with budget.admission_lock(site_identity(context["entry"])):
-                return await _prepare_ev_submission(hass, entity_id, operation=operation, amps=amps,
-                                                    committed=ticket)
-        return await _prepare_ev_submission(hass, entity_id, operation=operation, amps=amps,
-                                            committed=ticket)
+                result = await _prepare_ev_submission(hass, entity_id, operation=operation, amps=amps,
+                                                      committed=ticket)
+        else:
+            result = await _prepare_ev_submission(hass, entity_id, operation=operation, amps=amps,
+                                                  committed=ticket)
+        # The gate, journal or physical battery-yield checks may have waited.
+        # No expired start/rate request may reach the provider after that wait.
+        check_deadline()
+        return result
     except BaseException:
         if ticket:
             await hass.data[RUNTIME_KEY].abort_managed(ticket[0])
