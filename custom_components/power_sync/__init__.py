@@ -19321,6 +19321,27 @@ class ChargingBoostView(HomeAssistantView):
             "tesla_energy_site_id", "powerwall_local_energy_site_id",
         )})
 
+    def _is_valid_boost_vehicle_id(self, vehicle_id: object) -> bool:
+        """Accept a canonical VIN or a configured standalone BLE identity."""
+        if not isinstance(vehicle_id, str):
+            return False
+        if (len(vehicle_id) == 17 and vehicle_id.isalnum()
+                and not vehicle_id.isdigit()):
+            return True
+
+        config = {**self._config_entry.data, **self._config_entry.options}
+        if config.get(CONF_EV_PROVIDER) != EV_PROVIDER_TESLA_BLE:
+            return False
+        if not vehicle_id.startswith("ble_"):
+            return False
+        prefix = vehicle_id[4:]
+        if (not prefix or prefix == "_default"
+                or re.fullmatch(r"[a-z0-9_]+", prefix) is None):
+            return False
+        from .tesla_ble_mapping import configured_ble_prefixes
+
+        return prefix in configured_ble_prefixes(config)
+
     def _boost_observation(self, vehicle_id: str, after: str | None = None) -> str | None:
         from .ev_load import is_current_ev_power_observation
 
@@ -19588,8 +19609,8 @@ class ChargingBoostView(HomeAssistantView):
                 deadline = datetime.fromisoformat(record["expires_at"])
                 valid = (record["entry_id"] == self._config_entry.entry_id
                          and record["vehicle_id"] == vehicle_id
-                         and len(vehicle_id) == 17 and vehicle_id.isalnum()
-                         and not vehicle_id.isdigit() and deadline.tzinfo is not None
+                         and self._is_valid_boost_vehicle_id(vehicle_id)
+                         and deadline.tzinfo is not None
                          and isinstance(record.get("generation"), str) and bool(record["generation"])
                          and type(record.get("duration_minutes")) is int
                          and 1 <= record["duration_minutes"] <= 1440
@@ -19901,10 +19922,9 @@ class ChargingBoostView(HomeAssistantView):
                     boost_vehicle_id = candidates.pop()
                 boost_vehicle_id = ev_actions._canonical_dynamic_tesla_vehicle_id(
                     self._hass, self._config_entry, boost_vehicle_id)
-                if (not isinstance(boost_vehicle_id, str) or len(boost_vehicle_id) != 17
-                        or not boost_vehicle_id.isalnum() or boost_vehicle_id.isdigit()):
+                if not self._is_valid_boost_vehicle_id(boost_vehicle_id):
                     return web.json_response({"success": False,
-                        "error": "Finite Boost requires an exact canonical VIN"}, status=400)
+                        "error": "Finite Boost requires an exact configured vehicle ID"}, status=400)
                 action_params["vehicle_vin"] = boost_vehicle_id
 
             # The absolute request deadline also fences time spent waiting for

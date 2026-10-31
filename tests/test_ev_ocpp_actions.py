@@ -13625,6 +13625,66 @@ def test_start_action_scopes_ble_backoff_bypass_to_explicit_commands(
     assert recorded == [expected_allow_backoff]
 
 
+@pytest.mark.parametrize(
+    ("vehicle_id", "expected_prefix"),
+    [("ble_car_a", "car_a"), ("ble_car_b", "car_b")],
+)
+@pytest.mark.parametrize("ble_result", [True, False])
+def test_tesla_ble_alias_start_stop_routes_exact_prefix_without_fallback(
+    monkeypatch, vehicle_id, expected_prefix, ble_result
+):
+    """Standalone BLE aliases stay on their requested local bridge."""
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={
+            "ev_provider": actions.EV_PROVIDER_TESLA_BLE,
+            "tesla_ble_entity_prefix": "car_a,car_b",
+        },
+    )
+    start_prefixes: list[str] = []
+    stop_prefixes: list[str] = []
+
+    async def fake_start(_hass, prefix, *, allow_backoff=True):
+        start_prefixes.append(prefix)
+        return ble_result
+
+    async def fake_stop(_hass, prefix, *, allow_backoff=True):
+        stop_prefixes.append(prefix)
+        return ble_result
+
+    async def no_charging_entity(*_args, **_kwargs):
+        return None
+
+    async def unexpected_async(*_args, **_kwargs):
+        raise AssertionError("BLE-only routing must not invoke a cloud fallback")
+
+    def unexpected_sync(*_args, **_kwargs):
+        raise AssertionError("BLE-only routing must not invoke a cloud fallback")
+
+    monkeypatch.setattr(actions, "_is_ble_available", lambda *_args: True)
+    monkeypatch.setattr(actions, "_start_ev_charging_ble", fake_start)
+    monkeypatch.setattr(actions, "_stop_ev_charging_ble", fake_stop)
+    monkeypatch.setattr(actions, "_get_tesla_ev_entity", no_charging_entity)
+    monkeypatch.setattr(actions, "_start_ev_charging_teslemetry_bt", unexpected_async)
+    monkeypatch.setattr(actions, "_stop_ev_charging_teslemetry_bt", unexpected_async)
+    monkeypatch.setattr(actions, "_resolve_teslemetry_bt_prefix", unexpected_sync)
+    monkeypatch.setattr(actions, "_is_teslemetry_bt_available", unexpected_sync)
+    monkeypatch.setattr(actions, "_wake_tesla_ev_for_command", unexpected_async)
+    monkeypatch.setattr(actions, "_is_api_credit_available", unexpected_sync)
+
+    hass = _Hass([])
+    params = {"vehicle_vin": vehicle_id, "_user_initiated": True}
+    start_result = asyncio.run(actions._action_start_ev_charging(hass, entry, dict(params)))
+    stop_result = asyncio.run(actions._action_stop_ev_charging(hass, entry, dict(params)))
+
+    assert start_result is ble_result
+    assert stop_result is ble_result
+    assert start_prefixes == [expected_prefix]
+    assert stop_prefixes == [expected_prefix]
+    assert hass.services.calls == []
+
+
 @pytest.mark.parametrize("kind", ["amps", "limit"])
 def test_explicit_ble_boost_prerequisite_writes_bypass_backoff(monkeypatch, kind):
     recorded: list[bool] = []

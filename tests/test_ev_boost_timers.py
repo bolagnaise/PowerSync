@@ -12,6 +12,7 @@ from functools import wraps
 from inspect import signature
 import logging
 from pathlib import Path
+import re
 from types import MethodType, SimpleNamespace
 from uuid import uuid4
 
@@ -24,6 +25,8 @@ ROOT = Path(__file__).resolve().parents[1] / "custom_components/power_sync"
 INIT = ROOT / "__init__.py"
 VIN_A = "5YJ3E1EA0KF000001"
 VIN_B = "5YJ3E1EA0KF000002"
+BLE_A = "ble_car_a"
+BLE_B = "ble_car_b"
 own = load_power_sync_submodule(
     "automations.ev_ownership", package="boost_timer_actual"
 )
@@ -143,6 +146,10 @@ class BoostHarness:
             "datetime": datetime,
             "uuid4": uuid4,
             "deepcopy": deepcopy,
+            "re": re,
+            "CONF_EV_PROVIDER": mapping.CONF_EV_PROVIDER,
+            "EV_PROVIDER_TESLA_BLE": mapping.EV_PROVIDER_TESLA_BLE,
+            "configured_ble_prefixes": mapping.configured_ble_prefixes,
             "persist_ev_runtime_state": own.persist_ev_runtime_state,
             "is_current_ev_power_observation": ev_load.is_current_ev_power_observation,
             "_get_ev_vehicles_status": lambda *_args, **_kwargs: self.observations(),
@@ -161,13 +168,21 @@ class BoostHarness:
             StripImports().visit(source_node(INIT, "post", parent="ChargingBoostView")),
             namespace,
         )
-        for name in ("_boost_pairing_identity", "_boost_observation", "_save_boost_state",
+        for name in ("_boost_pairing_identity", "_is_valid_boost_vehicle_id",
+                     "_boost_observation", "_save_boost_state",
                      "_arm_boost_stop", "restore_boost_sessions", "_start_finite_boost"):
             method = compile_node(
                 StripImports().visit(source_node(INIT, name, parent="ChargingBoostView")),
                 namespace,
             )
             setattr(self.view, name, MethodType(method, self.view))
+
+    def configure_ble(self, *prefixes, provider=None):
+        """Configure the harness with the requested Tesla BLE identities."""
+        self.entry.options = {
+            mapping.CONF_EV_PROVIDER: provider or mapping.EV_PROVIDER_TESLA_BLE,
+            mapping.CONF_TESLA_BLE_ENTITY_PREFIX: ",".join(prefixes),
+        }
 
     def observations(self):
         return [{"vehicle_id": vin, "is_charging": charging,
@@ -457,6 +472,124 @@ async def test_ble_alias_and_physical_vin_share_one_boost_timer():
     await h.due()
     assert h.stops() == [VIN_A]
     assert h.calls[-1][2]["vehicle_vin"] == VIN_A
+
+
+@pytest.mark.asyncio
+async def test_ble_only_configured_ids_keep_independent_deadlines_and_exact_stop_targets():
+    h = BoostHarness()
+    h.configure_ble("car_a", "car_b")
+    first = await h.start(BLE_A, 1)
+    h.now += timedelta(seconds=20)
+    second = await h.start(BLE_B, 3)
+    assert first["success"] and second["success"]
+    assert set(h.runtime["ev_boost_timers"]) == {BLE_A, BLE_B}
+    assert datetime.fromisoformat(first["stops_at"]) == h.timers[0].deadline
+    assert datetime.fromisoformat(second["stops_at"]) == h.timers[1].deadline
+
+    h.now = h.timers[0].deadline
+    await h.due()
+    assert h.stops() == [BLE_A]
+    assert h.calls[-1][2]["vehicle_vin"] == BLE_A
+    assert BLE_B in h.runtime["ev_boost_timers"]
+
+    h.now = h.timers[1].deadline
+    await h.due()
+    assert h.stops() == [BLE_A, BLE_B]
+    assert h.calls[-1][2]["vehicle_vin"] == BLE_B
+
+
+@pytest.mark.asyncio
+async def test_ble_only_reload_keeps_original_deadline_with_fresh_exact_observation():
+    h = BoostHarness()
+    h.configure_ble("car_a")
+    response = await h.start(BLE_A, 2)
+    original_deadline = response["stops_at"]
+
+    restored = await h.reload(at=h.now + timedelta(seconds=20))
+    assert restored.calls == []
+    assert restored.owner(BLE_A)["owner_mode"] == "boost"
+    assert restored.runtime["ev_boost_sessions"][BLE_A]["expires_at"] == original_deadline
+    assert restored.runtime["ev_boost_timers"][BLE_A]["stops_at"].isoformat() == original_deadline
+
+    restored.now = datetime.fromisoformat(original_deadline)
+    await restored.due()
+    assert restored.stops() == [BLE_A]
+    assert restored.calls[-1][2]["vehicle_vin"] == BLE_A
+
+
+@pytest.mark.asyncio
+async def test_ble_only_invalid_or_unconfigured_ids_fail_without_actions():
+    h = BoostHarness()
+    h.configure_ble("car_a")
+    for vehicle_id in ("ble_car_b", "ble_bad-prefix", "ble_", "alias", "_default", 12345):
+        response = await h.start(vehicle_id)
+        assert response["success"] is False
+    assert h.calls == []
+    assert h.runtime.get("ev_boost_timers", {}) == {}
+    assert h.runtime.get("ev_boost_sessions", {}) == {}
+
+
+@pytest.mark.asyncio
+async def test_both_mode_unmapped_ble_alias_stays_rejected_without_actions():
+    h = BoostHarness()
+    h.configure_ble("car_a", provider=mapping.EV_PROVIDER_BOTH)
+    response = await h.start(BLE_A)
+    assert response["success"] is False
+    assert h.calls == []
+    assert h.runtime.get("ev_boost_timers", {}) == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["provider", "prefix"])
+async def test_ble_recovery_pairing_provider_or_prefix_change_blocks_stop(change):
+    h = BoostHarness()
+    h.configure_ble("car_a")
+    await h.start(BLE_A)
+    if change == "provider":
+        h.entry.options[mapping.CONF_EV_PROVIDER] = mapping.EV_PROVIDER_BOTH
+    else:
+        h.entry.options[mapping.CONF_TESLA_BLE_ENTITY_PREFIX] = "car_b"
+    h.now = h.timers[0].deadline
+    await h.timers[0].callback(h.now)
+    assert h.stops() == []
+    assert h.runtime["ev_boost_sessions"][BLE_A]["status"] == "blocked_pairing_changed"
+
+
+@pytest.mark.asyncio
+async def test_ble_restore_rejects_unconfigured_identity_without_actions():
+    h = BoostHarness()
+    h.configure_ble("car_a")
+    await h.start(BLE_A)
+    invalid = deepcopy(h.runtime["ev_boost_sessions"][BLE_A])
+    invalid["vehicle_id"] = BLE_B
+    invalid["stop_params"]["vehicle_vin"] = BLE_B
+    h.unload_timers()
+    h.runtime["ev_boost_sessions"] = {}
+    h.calls.clear()
+    await h.view.restore_boost_sessions({BLE_B: invalid})
+    assert h.calls == []
+    assert h.runtime["ev_boost_recovery_status"] == "blocked_invalid_identity_or_deadline"
+    assert h.runtime.get("ev_boost_timers", {}) == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["provider", "prefix"])
+async def test_ble_restore_rejects_provider_or_prefix_change_without_actions(change):
+    h = BoostHarness()
+    h.configure_ble("car_a")
+    await h.start(BLE_A)
+    record = deepcopy(h.runtime["ev_boost_sessions"][BLE_A])
+    h.unload_timers()
+    h.runtime["ev_boost_sessions"] = {}
+    h.calls.clear()
+    if change == "provider":
+        h.entry.options[mapping.CONF_EV_PROVIDER] = mapping.EV_PROVIDER_BOTH
+    else:
+        h.entry.options[mapping.CONF_TESLA_BLE_ENTITY_PREFIX] = "car_b"
+    await h.view.restore_boost_sessions({BLE_A: record})
+    assert h.calls == []
+    assert h.runtime["ev_boost_recovery_status"] == "blocked_invalid_identity_or_deadline"
+    assert h.runtime.get("ev_boost_timers", {}) == {}
 
 
 @pytest.mark.asyncio
