@@ -34836,12 +34836,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         return runtime_route(_local_powerwall_runtime, _local_powerwall_dispatch_config(), direction) == "tariff"
 
     def _cloud_tariff_control_requested(call):
-        """Tariff Max/plans use the cloud; explicit watt targets remain local."""
+        """Honor Tariff or an acknowledged Auto cloud handoff for Max/plans."""
         from .powerwall_local.control_method import control_method
         power = call.data.get("power_w", 0)
+        method = control_method({**entry.data, **entry.options})
+        pending = _local_powerwall_runtime.get("powerwall_settings_pending")
+        configured_site = entry.data.get(CONF_TESLA_ENERGY_SITE_ID)
+        # Supervised recovery explicitly resumes cloud control without changing
+        # the saved preference. It never reauthorizes native/local writes.
+        cloud_handoff = (
+            method == "auto"
+            and hass.data.get(DOMAIN, {}).get(entry.entry_id) is _local_powerwall_runtime
+            and isinstance(pending, dict)
+            and isinstance(pending.get("id"), str) and bool(pending["id"])
+            and pending.get("resume_cloud") is True
+            and _local_powerwall_runtime.get("powerwall_settings_cloud_handoff") == pending["id"]
+            and configured_site is not None and bool(str(configured_site).strip())
+            and str(pending.get("site_id")) == str(configured_site)
+        )
         return (
             active_battery_system == BATTERY_SYSTEM_TESLA
-            and control_method({**entry.data, **entry.options}) == "tariff"
+            and (method == "tariff" or cloud_handoff)
             and type(power) in (int, float) and power == 0
             and call.data.get("grid_import_target_w") is None
         )

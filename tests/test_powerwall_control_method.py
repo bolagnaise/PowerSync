@@ -483,6 +483,43 @@ async def test_legacy_resumed_tariff_control_keeps_cloud_route_and_incident(dire
     assert not local.pending
 
 
+@pytest.mark.parametrize('changes,expected', [
+    ({}, True),
+    ({'method': 'local'}, False),
+    ({'power': 500}, False),
+    ({'power': False}, False),
+    ({'grid_target': 1000}, False),
+    ({'pending_patch': {'resume_cloud': False}}, False),
+    ({'pending_patch': {'resume_cloud': 1}}, False),
+    ({'pending_patch': {'id': ''}}, False),
+    ({'pending_patch': {'site_id': 'other'}}, False),
+    ({'handoff': None}, False),
+    ({'handoff': 'other'}, False),
+    ({'site': None}, False),
+    ({'stale_runtime': True}, False),
+])
+def test_auto_cloud_handoff_requires_current_exact_incident_and_targetless_request(changes, expected):
+    from test_powerwall_battery_dispatch import load_routing, call
+    ns, _, client, _ = load_routing(tesla_control_method=changes.get('method', 'auto'))
+    runtime = ns['_local_powerwall_runtime']
+    ns['entry'].data['tesla_energy_site_id'] = changes.get('site', 'site')
+    pending = {'id': 'incident', 'site_id': 'site', 'resume_cloud': True,
+               'restore_basis': {'saved_operation_mode': 'backup'}}
+    pending.update(changes.get('pending_patch', {}))
+    runtime['powerwall_settings_pending'] = pending
+    runtime['powerwall_settings_cloud_handoff'] = changes.get('handoff', 'incident')
+    before = {**pending, 'restore_basis': dict(pending['restore_basis'])}
+    if changes.get('stale_runtime'):
+        ns['hass'].data['power_sync']['entry'] = {}
+    request = call(power_w=changes.get('power', 0))
+    if 'grid_target' in changes:
+        request.data['grid_import_target_w'] = changes['grid_target']
+    assert ns['_cloud_tariff_control_requested'](request) is expected
+    assert pending == before
+    client.get_snapshot.assert_not_awaited()
+    client.dispatch_battery_power.assert_not_awaited()
+
+
 @pytest.mark.asyncio
 async def test_legacy_tesla_can_change_control_method_after_cleanup():
     from test_powerwall_battery_dispatch import load_routing
