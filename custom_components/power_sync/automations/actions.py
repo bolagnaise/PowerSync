@@ -5665,10 +5665,17 @@ async def _action_stop_ev_charging(
     vehicle_vin = params.get("vehicle_vin")
     ble_prefix = _resolve_ble_prefix_for_vehicle(hass, config_entry, vehicle_vin)
 
+    user_initiated = bool(
+        params.get("_user_initiated")
+        or params.get("manual_stop")
+        or params.get("quick_control")
+    )
     charging_entity = await _get_tesla_ev_entity(
         hass, r"sensor\..*_charging(?:_\d+)?$", vehicle_vin
     )
-    if charging_entity and not force_tesla_stop_request:
+    # A cached noncharging state cannot acknowledge an explicit user stop.
+    # Dispatch it and let the actuator result determine success instead.
+    if charging_entity and not force_tesla_stop_request and not user_initiated:
         charging_state = hass.states.get(charging_entity)
         if charging_state and charging_state.state not in ("unavailable", "unknown"):
             state_lower = charging_state.state.lower()
@@ -5693,11 +5700,6 @@ async def _action_stop_ev_charging(
             # An explicit user stop must always attempt the wake: the shared
             # failed-bridge backoff is armed by the automatic surplus loop and
             # would otherwise discard the command before dispatch.
-            user_initiated = bool(
-                params.get("_user_initiated")
-                or params.get("manual_stop")
-                or params.get("quick_control")
-            )
             result = await _stop_ev_charging_ble(
                 hass, ble_prefix, allow_backoff=not user_initiated
             )
@@ -12899,11 +12901,7 @@ async def _action_start_ev_charging_dynamic_locked(
                 params.get("voltage"),
                 240,
             ) or 240,
-            configured_phases=(
-                params.get("phases")
-                if params.get("phases") in (1, 3)
-                else 1
-            ),
+            configured_phases=_get_phases_from_config(hass, config_entry, params),
         )
         params = {
             **params,
