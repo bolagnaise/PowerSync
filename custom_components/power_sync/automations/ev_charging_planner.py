@@ -9,6 +9,7 @@ Plans optimal charging windows based on:
 - Historical load patterns
 """
 
+import asyncio
 import logging
 import math
 import statistics
@@ -4649,6 +4650,7 @@ class AutoScheduleState:
     # Curtailment override management - track original export rule to restore after charging
     original_export_rule: Optional[str] = None
     curtailment_override_active: bool = False
+    curtailment_restore_blocked: Optional[str] = None
 
     # Cached SoC - used when vehicle is asleep and can't report live SoC
     last_known_soc: Optional[int] = None
@@ -4741,6 +4743,7 @@ class AutoScheduleState:
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "original_export_rule": self.original_export_rule,
             "curtailment_override_active": self.curtailment_override_active,
+            "curtailment_restore_blocked": self.curtailment_restore_blocked,
             "last_known_soc": self.last_known_soc,
             "last_soc_update": self.last_soc_update.isoformat() if self.last_soc_update else None,
             "plan_presentation": self.plan_presentation_snapshot(),
@@ -4792,6 +4795,9 @@ class AutoScheduleExecutor:
         self.hass = hass
         self.config_entry = config_entry
         self.planner = planner
+        self._curtailment_runtime = self.hass.data.setdefault(DOMAIN, {}).setdefault(
+            self.config_entry.entry_id, {}
+        )
 
         # Settings per vehicle (loaded from storage)
         self._settings: Dict[str, AutoScheduleSettings] = {}
@@ -5324,6 +5330,7 @@ class AutoScheduleExecutor:
             if needs_save:
                 await self.save_settings(store)
 
+            self._load_curtailment_recovery()
             _LOGGER.debug(f"Loaded auto-schedule settings for {len(self._settings)} vehicles")
         except Exception as e:
             _LOGGER.error(f"Failed to load auto-schedule settings: {e}")
@@ -5933,6 +5940,7 @@ class AutoScheduleExecutor:
             live_status: Current Powerwall/system status with battery_soc, solar_power, etc.
             current_price_cents: Current import price (from Amber/tariff)
         """
+        self._load_curtailment_recovery()
         for vehicle_id, settings in self._settings.items():
             if not self._is_effective_shared_loadpoint_profile(vehicle_id):
                 # Do not call a stop path here: an unselected profile must
@@ -5969,6 +5977,7 @@ class AutoScheduleExecutor:
             except Exception as e:
                 _LOGGER.error(f"Auto-schedule evaluation failed for {vehicle_id}: {e}")
 
+        await self._retry_curtailment_restoration()
         self._sync_inactive_smart_schedule_preserve_intent()
 
         # Periodically save cached SoC values to storage
@@ -7571,49 +7580,25 @@ class AutoScheduleExecutor:
             return False
 
     async def _set_tesla_backup_reserve(self, percent: int) -> bool:
-        """Set backup reserve on Tesla Powerwall via Fleet API."""
+        """Request a verified temporary reserve through the canonical service."""
         try:
-            from ..const import (
-                CONF_FLEET_API_BASE_URL,
-                CONF_TESLA_ENERGY_SITE_ID,
-                get_tesla_api_base_url,
-            )
-            from .. import get_tesla_api_token
-
-            current_token, provider = get_tesla_api_token(self.hass, self.config_entry)
-            site_id = self.config_entry.data.get(CONF_TESLA_ENERGY_SITE_ID)
-
-            if not site_id or not current_token:
-                _LOGGER.warning("No Tesla site ID or token for setting backup reserve")
+            if not self._curtailment_runtime_current():
                 return False
-
-            from homeassistant.helpers.aiohttp_client import async_get_clientsession
-
-            session = async_get_clientsession(self.hass)
-            headers = {
-                "Authorization": f"Bearer {current_token}",
-                "Content-Type": "application/json",
-            }
-            api_base = get_tesla_api_base_url(
-                provider, self.config_entry.data.get(CONF_FLEET_API_BASE_URL)
+            result = await self.hass.services.async_call(
+                DOMAIN,
+                "set_backup_reserve",
+                {
+                    "percent": percent,
+                    "entry_id": self.config_entry.entry_id,
+                    "source": "automation_preserve_charge",
+                },
+                blocking=True,
+                return_response=True,
             )
-
-            async with session.post(
-                f"{api_base}/api/1/energy_sites/{site_id}/backup",
-                headers=headers,
-                json={"backup_reserve_percent": percent},
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as response:
-                if response.status == 200:
-                    _LOGGER.info(f"✅ EV Charging: Set Tesla backup reserve to {percent}%")
-                    return True
-                else:
-                    text = await response.text()
-                    _LOGGER.error(f"Failed to set Tesla backup reserve: {response.status} - {text}")
-                    return False
-
-        except Exception as e:
-            _LOGGER.error(f"Error setting Tesla backup reserve: {e}")
+            return (self._curtailment_runtime_current()
+                    and isinstance(result, dict) and result.get("success") is True)
+        except Exception as err:
+            _LOGGER.warning("EV backup reserve %s was not confirmed: %s", percent, err)
             return False
 
     async def _get_current_export_rule(self) -> Optional[str]:
@@ -7658,14 +7643,10 @@ class AutoScheduleExecutor:
             ) as response:
                 if response.status == 200:
                     data = await response.json()
-                    site_info = data.get("response", {})
-                    components = site_info.get("components", {})
-                    # Map Tesla API values to our rules
-                    disallow_export = components.get("disallow_charge_from_grid_with_solar_installed", False)
-                    customer_preferred = components.get("customer_preferred_export_rule")
-                    if customer_preferred:
-                        return customer_preferred
-                    return "never" if disallow_export else "pv_only"
+                    site_info = data.get("response", data) if isinstance(data, dict) else {}
+                    from ..tesla_export_permissions import tesla_export_rule_from_site_info
+
+                    return tesla_export_rule_from_site_info(site_info)
                 return None
 
         except Exception as e:
@@ -7673,148 +7654,303 @@ class AutoScheduleExecutor:
             return None
 
     async def _set_export_rule(self, rule: str) -> bool:
-        """Set the grid export rule.
-
-        Args:
-            rule: "never", "pv_only", or "battery_ok"
-
-        Returns:
-            True if successful
-        """
-        # Only Tesla Powerwall supports export rule control
-        if self._is_sigenergy_system():
-            _LOGGER.debug("SigEnergy does not support export rule control")
+        """Apply an export-only intent through the verified site setting service."""
+        if self._is_sigenergy_system() or rule not in ("never", "pv_only", "battery_ok"):
+            return False
+        try:
+            if not self._curtailment_runtime_current():
+                return False
+            # The canonical service owns admission, transport acknowledgement and
+            # setting readback. EV intent must not become a manual export override.
+            result = await self.hass.services.async_call(
+                DOMAIN,
+                "set_grid_export",
+                {
+                    "rule": rule,
+                    "entry_id": self.config_entry.entry_id,
+                    "_ev_curtailment": True,
+                },
+                blocking=True,
+                return_response=True,
+            )
+            if (not self._curtailment_runtime_current()
+                    or not isinstance(result, dict) or result.get("success") is not True):
+                return False
+            # Do not infer export permission from the independent grid-charge
+            # permission, or accept a requested/cached value as restoration proof.
+            observed = await self._get_current_export_rule()
+            return self._curtailment_runtime_current() and observed == rule
+        except Exception as err:
+            _LOGGER.warning("EV export rule %s was not confirmed: %s", rule, err)
             return False
 
-        if rule not in ("never", "pv_only", "battery_ok"):
-            _LOGGER.warning(f"Invalid export rule: {rule}")
-            return False
+    def _curtailment_entry_data(self) -> dict:
+        """Return the entry-scoped shared lease and serialization context."""
+        if not hasattr(self, "_curtailment_runtime"):
+            self._curtailment_runtime = self.hass.data.setdefault(DOMAIN, {}).setdefault(
+                self.config_entry.entry_id, {}
+            )
+        return self._curtailment_runtime
+
+    def _curtailment_runtime_current(self) -> bool:
+        """A reloaded executor cannot submit or retire another executor's lease."""
+        runtime = self._curtailment_entry_data()
+        return (self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id) is runtime
+                and runtime.get("auto_schedule_executor", self) is self
+                and not runtime.get("powerwall_local_dispatch_stopping"))
+
+    def _curtailment_site_id(self) -> Optional[str]:
+        """Use the same physical site identity as the shared control boundary."""
+        from ..powerwall_control import canonical_site_id
+
+        config = {**self.config_entry.data, **self.config_entry.options}
+        try:
+            return canonical_site_id(
+                config.get("tesla_energy_site_id") or config.get("powerwall_local_energy_site_id")
+            )
+        except (TypeError, ValueError):
+            return None
+
+    def _curtailment_recovery_allowed(self, record: dict) -> bool:
+        """Retain another/unknown site's journal without applying it here."""
+        from ..powerwall_control import canonical_site_id
 
         try:
-            from ..const import (
-                CONF_FLEET_API_BASE_URL,
-                CONF_TESLA_ENERGY_SITE_ID,
-                get_tesla_api_base_url,
-            )
-            from .. import get_tesla_api_token
+            saved_site = canonical_site_id(record.get("site_id"))
+        except (TypeError, ValueError):
+            saved_site = None
+        current_site = self._curtailment_site_id()
+        reason = ("site_identity_missing" if saved_site is None or current_site is None
+                  else "site_identity_changed" if saved_site != current_site else None)
+        entry_data = self._curtailment_entry_data()
+        if reason:
+            entry_data["ev_curtailment_recovery_blocked"] = {"reason": reason, "site_id": saved_site}
+            entry_data.pop("ev_curtailment_override", None)
+        else:
+            entry_data.pop("ev_curtailment_recovery_blocked", None)
+        for vehicle_id in record.get("leases", {}):
+            state = self._state.get(vehicle_id)
+            if state is not None:
+                state.curtailment_restore_blocked = reason
+        return reason is None
 
-            current_token, provider = get_tesla_api_token(self.hass, self.config_entry)
-            site_id = self.config_entry.data.get(CONF_TESLA_ENERGY_SITE_ID)
+    def _load_curtailment_recovery(self) -> Optional[dict]:
+        """Recover saved obligations without claiming an EV session survived."""
+        if not self._curtailment_runtime_current():
+            return None
+        if hasattr(self, "_curtailment_recovery"):
+            if self._curtailment_recovery is not None:
+                self._curtailment_recovery_allowed(self._curtailment_recovery)
+            return self._curtailment_recovery
+        entry_data = self._curtailment_entry_data()
+        store = entry_data.get("automation_store")
+        if store is None:
+            return None  # Setup may still be registering the automation store.
+        stored = getattr(store, "_data", {}).get("ev_curtailment_recovery", {})
+        record = stored.get(self.config_entry.entry_id) if isinstance(stored, dict) else None
+        self._curtailment_recovery = None
+        if not isinstance(record, dict) or record.get("original_export_rule") not in (
+            "never", "pv_only", "battery_ok"
+        ) or not isinstance(record.get("leases"), dict):
+            return None
+        record = {
+            **record,
+            "leases": {
+                vehicle_id: {**lease, "release_pending": True}
+                for vehicle_id, lease in record["leases"].items()
+                if isinstance(vehicle_id, str) and isinstance(lease, dict)
+            },
+        }
+        if not record["leases"]:
+            return None
+        self._curtailment_recovery = record
+        # Let every vehicle renew its lease before a disabled first profile
+        # can restore settings on behalf of another recovered vehicle.
+        self._curtailment_recovery_defer_restore = True
+        for vehicle_id in record["leases"]:
+            state = self._state.setdefault(vehicle_id, AutoScheduleState(vehicle_id=vehicle_id))
+            state.original_export_rule = record["original_export_rule"]
+            state.curtailment_override_active = True
+        if self._curtailment_recovery_allowed(record):
+            entry_data["ev_curtailment_override"] = True
+        return record
 
-            if not site_id or not current_token:
-                _LOGGER.warning("No Tesla site ID or token for setting export rule")
-                return False
-
-            from homeassistant.helpers.aiohttp_client import async_get_clientsession
-
-            session = async_get_clientsession(self.hass)
-            headers = {
-                "Authorization": f"Bearer {current_token}",
-                "Content-Type": "application/json",
+    async def _persist_curtailment_recovery(self, record: Optional[dict]) -> bool:
+        """Persist the restore obligation before changing or releasing settings."""
+        if not self._curtailment_runtime_current():
+            return False
+        obligation = record if record is not None else getattr(self, "_curtailment_recovery", None)
+        if obligation is not None and not self._curtailment_recovery_allowed(obligation):
+            return False
+        store = self._curtailment_entry_data().get("automation_store")
+        if store is None or not hasattr(store, "async_save"):
+            _LOGGER.warning("EV export override requires durable automation storage")
+            return False
+        records = store._data.setdefault("ev_curtailment_recovery", {})
+        entry_id = self.config_entry.entry_id
+        previous = records.get(entry_id)
+        if record is None:
+            records.pop(entry_id, None)
+        else:
+            records[entry_id] = {
+                **record, "leases": {vin: dict(lease) for vin, lease in record["leases"].items()}
             }
-            api_base = get_tesla_api_base_url(
-                provider, self.config_entry.data.get(CONF_FLEET_API_BASE_URL)
-            )
-
-            # Map our rule names to Tesla API
-            disallow_export = rule == "never"
-
-            async with session.post(
-                f"{api_base}/api/1/energy_sites/{site_id}/grid_import_export",
-                headers=headers,
-                json={
-                    "disallow_charge_from_grid_with_solar_installed": disallow_export,
-                    "customer_preferred_export_rule": rule,
-                },
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as response:
-                if response.status == 200:
-                    _LOGGER.info(f"✅ EV Charging: Set grid export rule to '{rule}'")
-                    return True
+        submitted = records.get(entry_id)
+        try:
+            await store.async_save()
+            return (self._curtailment_runtime_current()
+                    and (obligation is None or self._curtailment_recovery_allowed(obligation)))
+        except Exception as err:
+            # A newer executor may have replaced this entry while the save was
+            # awaiting I/O. Never roll its leases back to our old snapshot.
+            if self._curtailment_runtime_current() and records.get(entry_id) is submitted:
+                if previous is None:
+                    records.pop(entry_id, None)
                 else:
-                    text = await response.text()
-                    _LOGGER.error(f"Failed to set export rule: {response.status} - {text}")
-                    return False
-
-        except Exception as e:
-            _LOGGER.error(f"Error setting export rule: {e}")
+                    records[entry_id] = previous
+            _LOGGER.warning("Could not persist EV export restoration: %s", err)
             return False
 
     async def _disable_curtailment_for_ev(self, state: AutoScheduleState) -> bool:
-        """Disable curtailment to allow full solar production for EV charging.
-
-        When solar surplus EV charging starts, we want to use all available solar
-        rather than curtailing it. This sets export rule to 'pv_only' and marks
-        that we've overridden the curtailment system.
-
-        Args:
-            state: The vehicle's auto-schedule state
-
-        Returns:
-            True if curtailment was disabled (or already disabled)
-        """
-        if state.curtailment_override_active:
-            return True  # Already overridden
-
-        # Get current export rule
-        current_rule = await self._get_current_export_rule()
-        if current_rule is None:
-            _LOGGER.debug("Could not get current export rule, skipping curtailment override")
+        """Acquire this vehicle's share of the temporary solar export override."""
+        entry_data = self._curtailment_entry_data()
+        lock = entry_data.setdefault("ev_curtailment_lock", asyncio.Lock())
+        async with lock:
+            if not self._curtailment_runtime_current():
+                return False
+            record = self._load_curtailment_recovery()
+            if record is not None and not self._curtailment_recovery_allowed(record):
+                return False
+            if record is None:
+                site_id = self._curtailment_site_id()
+                if site_id is None:
+                    return False
+                current_rule = await self._get_current_export_rule()
+                if current_rule is None:
+                    return False
+                if current_rule != "never":
+                    return True
+                record = {
+                    "site_id": site_id,
+                    "original_export_rule": current_rule,
+                    "override_rule": "pv_only",
+                    "source": "smart_schedule",
+                    "leases": {},
+                }
+            lease = record["leases"].get(state.vehicle_id, {})
+            if lease and not lease.get("release_pending"):
+                state.original_export_rule = record["original_export_rule"]
+                state.curtailment_override_active = True
+                return True
+            record["leases"][state.vehicle_id] = {
+                **lease,
+                "source": "smart_schedule",
+                "acquired_at": lease.get("acquired_at", datetime.now(timezone.utc).isoformat()),
+                "release_pending": False,
+            }
+            self._curtailment_recovery = record
+            state.original_export_rule = record["original_export_rule"]
+            state.curtailment_override_active = True
+            # Persist before the request, including an uncertain/lost outcome.
+            if not await self._persist_curtailment_recovery(record):
+                record["leases"][state.vehicle_id]["release_pending"] = True
+                return False
+            entry_data["ev_curtailment_override"] = True
+            try:
+                confirmed = await self._set_export_rule("pv_only")
+            except asyncio.CancelledError:
+                record["leases"][state.vehicle_id]["release_pending"] = True
+                await asyncio.shield(self._persist_curtailment_recovery(record))
+                raise
+            if confirmed:
+                entry_data["cached_export_rule"] = "pv_only"
+                return True
+            record["leases"][state.vehicle_id]["release_pending"] = True
+            await self._persist_curtailment_recovery(record)
             return False
 
-        # Only override if currently curtailed (export = never)
-        if current_rule != "never":
-            _LOGGER.debug(f"Export rule is '{current_rule}', no curtailment override needed")
-            return True
-
-        # Save original rule and set to pv_only to allow full solar production
-        state.original_export_rule = current_rule
-        if await self._set_export_rule("pv_only"):
-            state.curtailment_override_active = True
-            _LOGGER.info(
-                f"☀️ EV Charging: Disabled curtailment for solar surplus charging "
-                f"(export rule: never → pv_only)"
-            )
-
-            # Mark this as EV override so curtailment scheduler doesn't immediately revert it
-            from ..const import DOMAIN
-            entry_data = self.hass.data.setdefault(DOMAIN, {}).setdefault(self.config_entry.entry_id, {})
-            entry_data["ev_curtailment_override"] = True
-            entry_data["cached_export_rule"] = "pv_only"
-
-            return True
-        return False
-
     async def _restore_curtailment(self, state: AutoScheduleState) -> None:
-        """Restore curtailment after EV charging stops.
-
-        Args:
-            state: The vehicle's auto-schedule state
-        """
+        """Release one lease; retain the last one until restoration is confirmed."""
         if not state.curtailment_override_active:
             return
-
-        # Clear the EV override flag first
-        from ..const import DOMAIN
-        entry_data = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id, {})
-        if entry_data:
+        entry_data = self._curtailment_entry_data()
+        lock = entry_data.setdefault("ev_curtailment_lock", asyncio.Lock())
+        async with lock:
+            if not self._curtailment_runtime_current():
+                return
+            record = self._load_curtailment_recovery()
+            if record is None:
+                # Preserve obligations created by older, in-memory executors.
+                if state.original_export_rule not in ("never", "pv_only", "battery_ok"):
+                    return
+                record = {
+                    "site_id": None,
+                    "original_export_rule": state.original_export_rule,
+                    "override_rule": "pv_only",
+                    "source": "smart_schedule",
+                    "leases": {state.vehicle_id: {"source": "smart_schedule"}},
+                }
+                self._curtailment_recovery = record
+            if not self._curtailment_recovery_allowed(record):
+                return
+            lease = record["leases"].get(state.vehicle_id)
+            if lease is None:
+                state.curtailment_override_active = False
+                state.original_export_rule = None
+                return
+            lease["release_pending"] = True
+            entry_data["ev_curtailment_override"] = True
+            if not await self._persist_curtailment_recovery(record):
+                return
+            if any(not item.get("release_pending") for item in record["leases"].values()):
+                # Other vehicles still own the override. Release only this VIN.
+                released = record["leases"].pop(state.vehicle_id)
+                if not await self._persist_curtailment_recovery(record):
+                    record["leases"][state.vehicle_id] = released
+                    return
+                state.curtailment_override_active = False
+                state.original_export_rule = None
+                return
+            if getattr(self, "_curtailment_recovery_defer_restore", False):
+                return
+            if time.monotonic() < getattr(self, "_curtailment_restore_after", 0.0):
+                return
+            rule = record["original_export_rule"]
+            if not await self._set_export_rule(rule):
+                failures = getattr(self, "_curtailment_restore_failures", 0) + 1
+                self._curtailment_restore_failures = failures
+                self._curtailment_restore_after = time.monotonic() + min(300, 30 * 2 ** min(failures - 1, 4))
+                _LOGGER.warning("EV export restoration remains pending for %s", state.vehicle_id)
+                return
+            # Hardware may now be restored, but keep retry state if durable
+            # completion fails so a restart cannot discard the saved baseline.
+            if not await self._persist_curtailment_recovery(None):
+                return
+            entry_data["cached_export_rule"] = rule
             entry_data.pop("ev_curtailment_override", None)
+            self._curtailment_recovery = None
+            self._curtailment_restore_after = 0.0
+            self._curtailment_restore_failures = 0
+            for vehicle_id in record["leases"]:
+                restored_state = self._state.get(vehicle_id)
+                if restored_state is not None:
+                    restored_state.curtailment_override_active = False
+                    restored_state.original_export_rule = None
+                    restored_state.curtailment_restore_blocked = None
+            state.curtailment_override_active = False
+            state.original_export_rule = None
 
-        # Restore original export rule if we saved one
-        if state.original_export_rule:
-            if await self._set_export_rule(state.original_export_rule):
-                _LOGGER.info(
-                    f"☀️ EV Charging: Restored curtailment after charging stopped "
-                    f"(export rule: pv_only → {state.original_export_rule})"
-                )
-                # Update cached rule
-                if entry_data:
-                    entry_data["cached_export_rule"] = state.original_export_rule
-            else:
-                _LOGGER.warning("Failed to restore export rule after EV charging")
-
-        state.curtailment_override_active = False
-        state.original_export_rule = None
+    async def _retry_curtailment_restoration(self) -> None:
+        """Retry recovered/failed releases once per bounded evaluation interval."""
+        record = self._load_curtailment_recovery()
+        if record is None or not self._curtailment_recovery_allowed(record):
+            return
+        self._curtailment_recovery_defer_restore = False
+        for vehicle_id, lease in list(record["leases"].items()):
+            if lease.get("release_pending"):
+                state = self._state.get(vehicle_id)
+                if state is not None:
+                    await self._restore_curtailment(state)
 
     def _clear_start_failure(self, vehicle_id: str) -> None:
         """Clear any pending failed-start cooldown for one vehicle."""

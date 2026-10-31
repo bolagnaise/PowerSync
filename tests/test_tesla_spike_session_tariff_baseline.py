@@ -17,8 +17,9 @@ from __future__ import annotations
 import ast
 import asyncio
 import copy
+import sys
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -172,7 +173,10 @@ class _FakeSession:
             return _FakeCtx(self._site_info_response)
         raise AssertionError(f"unexpected GET {url}")
 
-    def post(self, url, headers=None, json=None, timeout=None):
+    def post(self, url, headers=None, json=None, timeout=None, **markers):
+        current = markers.get("_power_sync_is_current")
+        if current is not None and not current():
+            raise RuntimeError("event control superseded")
         self.post_calls.append((url, json))
         if self.events is not None:
             self.events.append(("post", url, json))
@@ -192,7 +196,9 @@ class _FakeSession:
 
 
 def _build_namespace(session, upload_calls, send_result=True, send_results=None):
-    async def _fake_send_tariff_to_tesla(hass, site_id, tariff, token, provider, fleet_base_url=None):
+    async def _fake_send_tariff_to_tesla(hass, site_id, tariff, token, provider, fleet_base_url=None, is_current=None):
+        if is_current is not None and not is_current():
+            return False
         upload_calls.append(tariff)
         if send_results is not None:
             return send_results.pop(0)
@@ -218,7 +224,13 @@ def _build_namespace(session, upload_calls, send_result=True, send_results=None)
 
         Lock = asyncio.Lock
 
+    package = "tesla_event_manager_probe"
+    if package not in sys.modules:
+        module = ModuleType(package)
+        module.__path__ = [str(ROOT / "custom_components/power_sync")]
+        sys.modules[package] = module
     namespace = {
+        "__package__": package,
         "HomeAssistant": object,
         "ConfigEntry": object,
         "Any": object,
@@ -312,7 +324,7 @@ def _make_aemo_manager(namespace, saved_tariff):
     manager = object.__new__(manager_cls)
     manager.hass = SimpleNamespace(data={"power_sync": {"entry-1": {}}})
     manager.entry = SimpleNamespace(
-        data={},
+        data={"tesla_energy_site_id": "site-1"},
         options={"aemo_spike_enabled": True, "monitoring_mode": False},
         entry_id="entry-1",
     )
@@ -333,6 +345,7 @@ def _make_aemo_manager(namespace, saved_tariff):
     manager._recovery_unreadable = False
     manager._spike_control_lock = None
     manager._operation_lock = None
+    manager.hass.data["power_sync"]["entry-1"]["aemo_spike_manager"] = manager
     return manager
 
 
@@ -828,7 +841,7 @@ def _make_session_manager(namespace, saved_tariff):
     manager_cls = _load_class("SavingSessionTariffManager", namespace)
     manager = object.__new__(manager_cls)
     manager.hass = SimpleNamespace(data={"power_sync": {"entry-1": {}}})
-    manager.entry = SimpleNamespace(data={}, entry_id="entry-1")
+    manager.entry = SimpleNamespace(data={"tesla_energy_site_id": "site-1"}, options={}, entry_id="entry-1")
     manager._session_coordinator = None
     manager.site_id = "site-1"
     manager._api_token = "token-123"
@@ -840,6 +853,7 @@ def _make_session_manager(namespace, saved_tariff):
     manager._saved_tariff = saved_tariff
     manager._saved_operation_mode = None
     manager._active_session_code = None
+    manager.hass.data["power_sync"]["entry-1"]["saving_session_tariff_manager"] = manager
     return manager
 
 
@@ -869,6 +883,10 @@ def test_saving_session_manager_preserves_genuine_baseline_on_reentry():
         octopoints_per_kwh=10,
     )
 
+    active_session.joined = True
+    active_session.session_type = "saving"
+    active_session.is_active = lambda: True
+    manager._session_coordinator = SimpleNamespace(data={"sessions": [active_session]})
     asyncio.run(manager._enter_session_mode(active_session))
 
     assert manager._saved_tariff == GENUINE_TARIFF, (
@@ -960,6 +978,10 @@ def test_saving_session_manager_preserves_operation_mode_on_reentry():
         octopoints_per_kwh=10,
     )
 
+    active_session.joined = True
+    active_session.session_type = "saving"
+    active_session.is_active = lambda: True
+    manager._session_coordinator = SimpleNamespace(data={"sessions": [active_session]})
     asyncio.run(manager._enter_session_mode(active_session))
 
     assert manager._saved_operation_mode == "self_consumption", (
@@ -990,6 +1012,10 @@ def test_saving_session_manager_captures_operation_mode_on_first_entry():
         octopoints_per_kwh=10,
     )
 
+    active_session.joined = True
+    active_session.session_type = "saving"
+    active_session.is_active = lambda: True
+    manager._session_coordinator = SimpleNamespace(data={"sessions": [active_session]})
     asyncio.run(manager._enter_session_mode(active_session))
 
     assert manager._saved_operation_mode == "self_consumption"

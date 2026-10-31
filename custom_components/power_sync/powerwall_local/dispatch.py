@@ -139,7 +139,25 @@ async def dispatch_powerwall_setting(
     cloud_observation_confirmed=True, skip_matching=False,
 ) -> bool:
     """One bounded optional settings transaction, separate from watt control."""
+    # Invalid or absent preferences have the same Tariff default as route
+    # selection. Numeric dispatch owns its separate local permission lifecycle.
+    if {**entry.data, **getattr(entry, "options", {})}.get("tesla_control_method") not in ("local", "auto"):
+        prefer_local = False
     runtime = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+    site_control = runtime.get("powerwall_site_control")
+    configured_site_at_request = entry.data.get("tesla_energy_site_id")
+    canonical = str
+    if site_control is not None:
+        from ..powerwall_control import canonical_site_id, coordinator_for, ControlWriteRejected
+        canonical = canonical_site_id
+    request_fence = site_control.current_fence(required=False) if site_control is not None else None
+
+    def same_site(left, right):
+        try:
+            return canonical(left) == canonical(right)
+        except (TypeError, ValueError):
+            return False
+
     lock = runtime.setdefault("powerwall_settings_lock", asyncio.Lock())
     tasks = runtime.setdefault("powerwall_settings_tasks", set())
     submissions = runtime.setdefault("powerwall_settings_submissions", set())
@@ -160,6 +178,15 @@ async def dispatch_powerwall_setting(
     def check_current():
         if not current():
             raise asyncio.CancelledError("Powerwall settings request superseded")
+    def local_current():
+        if not current():
+            return False
+        if request_fence is not None:
+            try:
+                request_fence()
+            except ControlWriteRejected as exc:
+                raise _SettingsPolicyDenied from exc
+        return True
     def allowed():
         return is_allowed is None or is_allowed()
     def remaining():
@@ -175,7 +202,7 @@ async def dispatch_powerwall_setting(
             check_current()
             active = tuple(t for t in submissions if not t.done())
             pending = runtime.get("powerwall_settings_pending")
-            affected = not pending or pending.get("site_id") == str(site_id)
+            affected = not pending or same_site(pending.get("site_id"), site_id)
             if active and affected and not (pending and pending.get("resume_cloud") is True):
                 await asyncio.wait_for(asyncio.gather(
                     *(asyncio.shield(t) for t in active), return_exceptions=True), remaining())
@@ -183,7 +210,7 @@ async def dispatch_powerwall_setting(
             return False
         check_current()
         pending = runtime.get("powerwall_settings_pending")
-        if pending and pending.get("site_id") == str(site_id) and pending.get("resume_cloud") is not True:
+        if pending and same_site(pending.get("site_id"), site_id) and pending.get("resume_cloud") is not True:
             # Expiry is an acceptance deadline, not a FileStore completion
             # guarantee. No contrary/new transaction can retire this record.
             _LOGGER.warning("%s blocked: previous signed settings update remains unresolved", label)
@@ -193,7 +220,7 @@ async def dispatch_powerwall_setting(
         din = entry.data.get("powerwall_local_din")
         transport = (get_local_transport(hass, entry)
                      if not pending and prefer_local and site_id is not None
-                     and str(site_id) == str(entry.data.get("tesla_energy_site_id"))
+                     and same_site(site_id, entry.data.get("tesla_energy_site_id"))
                      and (operation_id is None or runtime.get("powerwall_settings_local_failed") != operation_id) else None)
         record = None
         async def staged(expires_at):
@@ -224,7 +251,7 @@ async def dispatch_powerwall_setting(
                     _LOGGER.warning("%s signed update outcome unresolved; recovery retained", label)
 
         confirmed = False
-        primary_site = str(site_id) == str(entry.data.get("tesla_energy_site_id"))
+        primary_site = same_site(site_id, entry.data.get("tesla_energy_site_id"))
         if primary_site:
             _record_setting_observation(runtime, updates, "unknown")
         if transport is not None and din:
@@ -233,6 +260,7 @@ async def dispatch_powerwall_setting(
                 async def local():
                     if skip_matching:
                         check_current()
+                        local_current()
                         if not allowed():
                             return False
                         config = await transport.read_config(din)
@@ -248,7 +276,7 @@ async def dispatch_powerwall_setting(
                         else:
                             return True
                     return await write_config_confirmed(
-                        transport, din, updates, is_current=current, is_allowed=allowed,
+                        transport, din, updates, is_current=local_current, is_allowed=allowed,
                         deadline=local_deadline, acknowledged=acknowledged,
                         before_submit=staged, completed=completed, submissions=submissions,
                     )
@@ -270,7 +298,25 @@ async def dispatch_powerwall_setting(
             # The same owner may use its same-target cloud fallback. Any
             # ambiguous local RPC remains a separate recovery obligation.
             try:
-                confirmed = bool(await asyncio.wait_for(cloud_call(), remaining()))
+                # Stay in this task so an enclosing physical-site request is
+                # retained. A child from wait_for would shed its final fences.
+                async with asyncio.timeout(remaining()):
+                    if site_control is not None:
+                        target_control = coordinator_for(hass, site_id=site_id)
+                        def cloud_identity():
+                            return (site_id if same_site(entry.data.get("tesla_energy_site_id"), configured_site_at_request)
+                                    else None)
+                        try:
+                            async with target_control.operation(
+                                label=f"{label} settings", deadline=deadline,
+                                is_current=lambda: current() and allowed(), identity=cloud_identity,
+                            ):
+                                confirmed = bool(await cloud_call())
+                        except ControlWriteRejected:
+                            check_current()
+                            confirmed = False
+                    else:
+                        confirmed = bool(await cloud_call())
             except asyncio.TimeoutError:
                 confirmed = False
             check_current()

@@ -12,6 +12,14 @@ _DISCHARGE_MESSAGE = (
     "confirm the Powerwall's Grid Export setting. Check the PowerSync logs "
     "and contact support if this continues."
 )
+_POLICY_REASONS = {
+    'native_max_settings_unresolved': 'a previous local Powerwall settings write has an unresolved outcome',
+    'native_max_local_settings_suspended': 'local Powerwall settings remain suspended after the supervised cloud handoff',
+    'native_max_local_control_unconfigured': 'the required paired local Powerwall connection is not configured',
+}
+_SETTINGS_INCIDENT_REASONS = {
+    'native_max_settings_unresolved', 'native_max_local_settings_suspended',
+}
 _CHARGE_REASONS = {
     'configured_charge_disabled': 'the configured battery charging limit is disabled',
     'grid_charging_not_permitted': 'the gateway does not currently permit grid charging',
@@ -27,24 +35,40 @@ _CHARGE_REASONS = {
     'native_snapshot_unavailable': 'current gateway readings are unavailable',
     'native_max_local_access_disabled': 'the required local gateway access is disabled',
     'native_max_dispatch_config_invalid': 'the charging configuration is invalid',
-    'native_max_policy_denied': 'the native charging checks did not pass',
+    **_POLICY_REASONS,
 }
 
 
 def update_native_discharge_alert(hass, entry_id: str, reason: str | None) -> None:
     if reason is None or reason == 'native_export_rule_invalid':
         _update_native_alert(hass, entry_id, 'discharge', _DISCHARGE_MESSAGE, reason)
+    elif reason in _POLICY_REASONS:
+        _update_native_alert(hass, entry_id, 'discharge',
+                            _policy_message('discharge', reason), reason)
+
+
+def _policy_message(direction, reason):
+    action = (
+        'Review the current Powerwall settings Repairs notice and contact support if needed.'
+        if reason in _SETTINGS_INCIDENT_REASONS else
+        'Check the PowerSync settings and logs; contact support if this continues.'
+    )
+    return f'Scheduled battery {direction} did not start: {_POLICY_REASONS[reason]}. {action}'
 
 
 def update_native_charge_alert(hass, entry_id: str, reason: str | None) -> None:
     """Report actionable refusals, leaving SOC/EV/ownership deferrals quiet."""
     if reason is not None and reason not in _CHARGE_REASONS:
         return
-    message = (
-        f'Scheduled battery charging did not start: {_CHARGE_REASONS[reason]}. '
-        'Check the PowerSync logs and charging settings; contact support if this continues.'
-        if reason is not None else ''
-    )
+    if reason in _POLICY_REASONS:
+        message = _policy_message('charging', reason)
+    elif reason is not None:
+        message = (
+            f'Scheduled battery charging did not start: {_CHARGE_REASONS[reason]}. '
+            'Check the PowerSync logs and charging settings; contact support if this continues.'
+        )
+    else:
+        message = ''
     _update_native_alert(hass, entry_id, 'charge', message, reason)
 
 

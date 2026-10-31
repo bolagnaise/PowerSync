@@ -68,7 +68,57 @@ def guard_battery_transition(hass, entry, handler):
             try:
                 if runtime.get("native_max_startup_pending"):
                     raise SiteImportAdmissionDenied("Waiting for native Max startup restoration")
-                return await handler(call)
+                site_control = runtime.get("powerwall_site_control")
+                if site_control is None:
+                    return await handler(call)
+                from .powerwall_control import (
+                    NativeMaxTarget, BatteryPowerTarget, GridExportTarget, SiteImportTarget,
+                )
+                name = handler.__name__
+                data = getattr(call, "data", {}) or {}
+                restoring = "restore_normal" in name
+                direction = "charge" if "force_charge" in name else "discharge" if "force_discharge" in name else None
+                target = None
+                deadline = None
+                if direction:
+                    power = data.get("power_w", 0)
+                    imported = data.get("grid_import_target_w")
+                    if type(imported) in (int, float) and math.isfinite(imported) and imported > 0:
+                        target = SiteImportTarget(imported)
+                    elif type(power) in (int, float) and math.isfinite(power) and power > 0:
+                        target = BatteryPowerTarget(-power) if direction == "charge" else GridExportTarget(power)
+                    elif type(power) in (int, float) and power == 0:
+                        target = NativeMaxTarget(direction)
+                    # Optimizer durations are already validated by the service
+                    # contract; waiting for ownership cannot extend the window.
+                    duration = data.get("duration")
+                    if data.get("source") == "optimizer" and type(duration) is int and 1 <= duration <= 1440:
+                        deadline = time.monotonic() + max(0, requested_at + duration * 60 - time.time())
+                def request_allowed():
+                    admission = runtime.get("powerwall_control_admission")
+                    return admission is None or admission(call, restoring=restoring) is True
+                def summary():
+                    pending = runtime.get("powerwall_settings_pending") or {}
+                    native = runtime.get("powerwall_native_max_charge")
+                    return {
+                        "local_settings_unresolved": bool(pending),
+                        "cloud_resumed_local_suspended": pending.get("resume_cloud") is True,
+                        "settings_incident_id": pending.get("id"),
+                        "legacy_restore_pending": bool(runtime.get("pending_tesla_restore")),
+                        "restart_restore_pending": bool(runtime.get("optimizer_force_restart_restore_pending")),
+                        "native_restore_pending": bool(native and native.pending),
+                    }
+                site_control.set_obligations(entry.entry_id, summary())
+                try:
+                    async with site_control.operation(
+                            label=name, target=target,
+                            deadline=deadline, restoring=restoring,
+                            is_current=lambda: hass.data.get("power_sync", {}).get(entry.entry_id) is runtime,
+                            apply_guard=request_allowed,
+                            identity=lambda: site_identity(entry)):
+                        return await handler(call)
+                finally:
+                    site_control.set_obligations(entry.entry_id, summary())
             finally:
                 if previous is None:
                     runtime.pop("battery_route_requested_at", None)

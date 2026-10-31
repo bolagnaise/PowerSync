@@ -72,6 +72,102 @@ def test_auto_keeps_a_native_episode_stable_until_it_finishes():
     assert policy.runtime_route(runtime,config(),"discharge")=="local"
 
 
+def admission(runtime=None, **changes):
+    checks = dict(call_present=True, optimizer_call=False, targetless=True,
+        generation_current=True, monitoring_blocked=False, demand_charge_protected=False,
+        local_configured=True, license_allowed=True, direction='charge')
+    checks.update(changes)
+    return policy.native_control_policy({} if runtime is None else runtime, **checks)
+
+
+@pytest.mark.parametrize('key,reason', [
+    ('native_max_startup_pending', 'native_max_startup_pending'),
+    ('powerwall_local_dispatch_stopping', 'native_max_dispatch_stopping'),
+    ('tesla_control_method_changing', 'native_max_control_method_changing'),
+    ('powerwall_local_recovery_pending', 'native_max_local_recovery_pending'),
+    ('powerwall_settings_pending', 'native_max_settings_unresolved'),
+    ('tesla_settings_pending', 'native_max_settings_unresolved'),
+    ('optimizer_force_restart_restore_pending', 'native_max_restart_restore_pending'),
+    ('pending_tesla_restore', 'native_max_restore_pending'),
+    ('max_backup_end_ts', 'native_max_max_backup_active'),
+])
+def test_native_policy_retains_every_runtime_blocker_with_precise_reason(key, reason):
+    result = admission({key: True})
+    assert result.allowed is False and result.reason == reason
+    assert not result
+
+
+@pytest.mark.parametrize('changes,reason', [
+    ({'call_present': False}, 'native_max_call_unavailable'),
+    ({'optimizer_call': True, 'targetless': False}, 'native_max_explicit_target_requires_local_control'),
+    ({'generation_current': False}, 'native_max_runtime_stale'),
+    ({'monitoring_blocked': True}, 'native_max_monitoring_mode'),
+    ({'demand_charge_protected': True}, 'native_max_demand_charge_protection'),
+    ({'local_configured': False}, 'native_max_local_control_unconfigured'),
+    ({'license_allowed': False}, 'native_max_license_denied'),
+])
+def test_native_policy_retains_current_external_admission_checks(changes, reason):
+    result = admission(**changes)
+    assert result.allowed is False and result.reason == reason
+
+
+def test_cloud_handoff_does_not_authorize_native_local_signed_writes():
+    incident = {'id': 'incident', 'resume_cloud': True}
+    result = admission({'powerwall_settings_pending': incident,
+                        'powerwall_settings_cloud_handoff': 'incident'})
+    assert result.allowed is False
+    assert result.reason == 'native_max_local_settings_suspended'
+
+
+def test_native_policy_only_applies_directional_protections_to_their_direction():
+    assert admission(direction='discharge', demand_charge_protected=True).allowed is True
+    guard = SimpleNamespace(manager=SimpleNamespace(snapshot=SimpleNamespace(mode='active')))
+    assert admission({'network_export_guard': guard}).allowed is True
+    result = admission({'network_export_guard': guard}, direction='discharge')
+    assert result.allowed is False and result.reason == 'native_max_network_export_guard_active'
+    guard.manager.snapshot.mode = 'off'
+    assert admission({'network_export_guard': guard}, direction='discharge').allowed is True
+
+
+@pytest.mark.parametrize('key', ['call_present', 'optimizer_call', 'targetless',
+    'generation_current', 'monitoring_blocked', 'demand_charge_protected',
+    'local_configured', 'license_allowed'])
+@pytest.mark.parametrize('unknown', [None, 1, 'true', {}])
+def test_native_policy_unknown_check_results_fail_closed(key, unknown):
+    result = admission(**{key: unknown})
+    assert result.allowed is False and result.reason == 'native_max_policy_evidence_unavailable'
+
+
+def test_native_policy_unknown_runtime_direction_or_guard_fail_closed():
+    assert policy.native_control_policy(None, call_present=True, optimizer_call=False,
+        targetless=True, generation_current=True, monitoring_blocked=False,
+        demand_charge_protected=False, local_configured=True, license_allowed=True,
+        direction='charge').reason == 'native_max_policy_evidence_unavailable'
+    assert admission(direction='unknown').allowed is False
+    assert admission({'network_export_guard': object()}, direction='discharge').allowed is False
+    assert admission().allowed is True
+
+
+@pytest.mark.parametrize('kind', list(policy.ControlTargetKind))
+def test_typed_route_preserves_target_kind_and_precise_watt_semantics(kind):
+    plan = policy.plan_route(config(tesla_control_method='tariff'), 'discharge',
+                             target_kind=kind)
+    assert plan.target_kind is kind
+    assert plan.route == ('tariff' if kind is policy.ControlTargetKind.NATIVE_MAX else 'local')
+    runtime_plan = policy.runtime_route_plan({}, config(tesla_control_method='tariff'),
+                                            'discharge', target_kind=kind)
+    assert runtime_plan == plan
+
+
+def test_typed_native_route_matches_legacy_selection_and_rejects_unknown_kind():
+    settings, state = config(), snapshot()
+    assert policy.plan_route(settings, 'discharge', state, local_available=True).route == (
+        policy.select_route(settings, 'discharge', state, local_available=True))
+    for invalid in ('native_max', None, True, 'unknown'):
+        with pytest.raises(ValueError, match='target kind'):
+            policy.plan_route(settings, 'discharge', target_kind=invalid)
+
+
 @pytest.mark.asyncio
 async def test_preference_change_stops_local_action_before_persistence_and_does_not_replay():
     from test_powerwall_battery_dispatch import load_routing

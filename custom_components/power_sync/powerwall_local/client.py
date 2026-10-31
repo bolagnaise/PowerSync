@@ -840,6 +840,9 @@ class PowerwallLocalClient:
 
         try:
             async with aiohttp.ClientSession() as sess:
+                control_session = getattr(self, "_control_session", None)
+                if control_session is not None:
+                    sess = control_session(sess, before_send=lambda: self._transport.check_signed_expiry(signed_bytes))
                 async with sess.post(
                     url,
                     json=payload,

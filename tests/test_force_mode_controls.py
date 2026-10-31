@@ -71,6 +71,8 @@ def _assert_optional_routed_service(tree, service, action, handler):
     routed = registered.args[2]
     assert isinstance(routed, ast.Call) and isinstance(routed.func, ast.Name)
     assert routed.func.id == "routed_handler"
+    assert isinstance(routed.args[1], ast.Attribute) and routed.args[1].attr == "entry_id"
+    assert isinstance(routed.args[1].value, ast.Name) and routed.args[1].value.id == "entry"
     assert ast.literal_eval(routed.args[2]) == action
     assert isinstance(routed.args[3], ast.Name) and routed.args[3].id == handler
     assert any(kw.arg == "supports_response" and isinstance(kw.value, ast.Attribute)
@@ -1068,10 +1070,8 @@ def test_tesla_grid_charging_service_requires_confirmed_response_for_automation(
     actions_source = AUTOMATION_ACTIONS_PATH.read_text()
 
     assert handler_source is not None
-    assert (
-        "SERVICE_SET_GRID_CHARGING,\n        handle_set_grid_charging,\n"
-        "        supports_response=SupportsResponse.OPTIONAL"
-    ) in source
+    _assert_optional_routed_service(tree, "SERVICE_SET_GRID_CHARGING",
+                                   "set_grid_charging", "handle_set_grid_charging")
     assert "await _tesla_force_apply_grid_charging(" in handler_source
     assert "raise HomeAssistantError(" in handler_source
     assert 'return {"success": True, "error": None}' in handler_source
@@ -5014,12 +5014,12 @@ def test_unclampable_tesla_export_paths_are_denied_by_network_envelope():
         source, _find_function(tree, "handle_force_discharge")
     )
     spike_entry = ast.get_source_segment(
-        source, _find_class_method(tree, "AEMOSpikeManager", "_enter_spike_mode")
+        source, _find_class_method(tree, "AEMOSpikeManager", "_enter_spike_mode_locked")
     )
     session_entry = ast.get_source_segment(
         source,
         _find_class_method(
-            tree, "SavingSessionTariffManager", "_enter_session_mode"
+            tree, "SavingSessionTariffManager", "_enter_session_mode_locked"
         ),
     )
 

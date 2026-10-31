@@ -539,7 +539,7 @@ from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse, cal
 from homeassistant.exceptions import ConfigEntryNotReady, HomeAssistantError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from .powerwall_control_http import async_get_clientsession
 from homeassistant.helpers.event import async_track_utc_time_change, async_track_point_in_utc_time
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.dispatcher import async_dispatcher_send, async_dispatcher_connect
@@ -3964,6 +3964,59 @@ class AEMOSpikeManager:
             and not self._monitoring()
         )
 
+    def _event_route_lock(self):
+        """Event lock precedes the shared route lock; writes take its final gate."""
+        from .powerwall_control import coordinator_for
+        return coordinator_for(self.hass, site_id=self.site_id).route_lock
+
+    def _event_guard(self, *, restoring=False, exporting=False):
+        """Bind a single event step to its setup, site and captured baseline."""
+        runtime = self.hass.data.get(DOMAIN, {}).get(self.entry.entry_id)
+        site_id = str(self.site_id)
+        baseline = (copy.deepcopy(self._saved_tariff), self._saved_operation_mode)
+
+        def current():
+            if (not isinstance(runtime, dict)
+                    or self.hass.data.get(DOMAIN, {}).get(self.entry.entry_id) is not runtime
+                    or runtime.get("aemo_spike_manager") is not self
+                    or str(self.site_id) != site_id
+                    or str(self.entry.data.get("tesla_energy_site_id")) != site_id
+                    or self._monitoring()
+                    or baseline != (self._saved_tariff, self._saved_operation_mode)
+                    or runtime.get("powerwall_settings_recovering")):
+                return False
+            pending = runtime.get("powerwall_settings_pending")
+            if pending and (not isinstance(pending, dict)
+                    or pending.get("resume_cloud") is not True
+                    or runtime.get("powerwall_settings_cloud_handoff") != pending.get("id")):
+                return False
+            if any(runtime.get(key) for key in (
+                    "native_max_startup_pending", "native_max_recovery_unavailable",
+                    "powerwall_local_recovery_pending", "pending_tesla_restore",
+                    "optimizer_force_restart_restore_pending", "max_backup_end_ts")):
+                return False
+            if any((runtime.get(key) or {}).get("active") for key in (
+                    "force_charge_state", "force_discharge_state", "hold_soc_state", "self_consumption_state")):
+                return False
+            if any(getattr(runtime.get(key), "pending", False) for key in (
+                    "powerwall_native_max_charge", "powerwall_battery_dispatch")):
+                return False
+            peer = runtime.get("saving_session_tariff_manager")
+            if peer is not None and getattr(peer, "_in_session_mode", False):
+                return False
+            budget = self.hass.data.get("power_sync_native_rate_budget")
+            if budget is not None and budget.native_max_claim(site_id):
+                return False
+            if not restoring and (not self._spike_commands_allowed()
+                    or runtime.get("powerwall_local_dispatch_stopping")
+                    or runtime.get("ev_curtailment_override")
+                    or getattr(runtime.get("optimization_coordinator"), "_enabled", False)):
+                return False
+            guard = runtime.get("network_export_guard")
+            return (not exporting or guard is None
+                    or getattr(getattr(getattr(guard, "manager", None), "snapshot", None), "mode", None) == "off")
+        return current
+
     async def stop(self) -> None:
         """Retire in-flight checks before restoring any event we own."""
         self._stopped = True
@@ -4018,6 +4071,10 @@ class AEMOSpikeManager:
             )
 
     async def _enter_spike_mode(self, current_price: float) -> None:
+        async with self._event_route_lock():
+            await self._enter_spike_mode_locked(current_price)
+
+    async def _enter_spike_mode_locked(self, current_price: float) -> None:
         """Enter spike mode: save tariff, switch to autonomous, upload spike tariff."""
 
         if not self._spike_commands_allowed():
@@ -4143,6 +4200,9 @@ class AEMOSpikeManager:
             ):
                 _LOGGER.warning("Cannot enter AEMO spike mode without a restorable tariff and operation mode")
                 return
+            current = self._event_guard(exporting=True)
+            if not current():
+                return
             self._in_spike_mode = True
             self._restore_pending = True
             await self._persist_event_state()
@@ -4157,6 +4217,7 @@ class AEMOSpikeManager:
                     headers=headers,
                     json={"default_real_mode": "autonomous"},
                     timeout=aiohttp.ClientTimeout(total=30),
+                    _power_sync_is_current=current,
                 ) as response:
                     if response.status == 200:
                         _LOGGER.info("Switched to autonomous mode")
@@ -4176,6 +4237,7 @@ class AEMOSpikeManager:
                 current_token,
                 current_provider,
                 fleet_base_url=self.entry.data.get(CONF_FLEET_API_BASE_URL),
+                is_current=current,
             )
 
             if success:
@@ -4197,9 +4259,14 @@ class AEMOSpikeManager:
                 await self._exit_spike_mode(0.0)
 
     async def _exit_spike_mode(self, current_price: float) -> None:
+        async with self._event_route_lock():
+            await self._exit_spike_mode_locked(current_price)
+
+    async def _exit_spike_mode_locked(self, current_price: float) -> None:
         """Exit spike mode: restore saved tariff and operation mode."""
         self._restore_pending = True
-        if self._monitoring():
+        current = self._event_guard(restoring=True)
+        if not current():
             # Keep the persisted obligation for a later authorised restore.
             return
         _LOGGER.info(
@@ -4228,6 +4295,7 @@ class AEMOSpikeManager:
                 headers=headers,
                 json={"default_real_mode": "self_consumption"},
                 timeout=aiohttp.ClientTimeout(total=30),
+                _power_sync_is_current=current,
             ) as response:
                 if response.status == 200:
                     _LOGGER.info("Switched to self_consumption mode")
@@ -4244,6 +4312,7 @@ class AEMOSpikeManager:
                     current_token,
                     current_provider,
                     fleet_base_url=self.entry.data.get(CONF_FLEET_API_BASE_URL),
+                    is_current=current,
                 )
                 restore_ok = success
                 if success:
@@ -4263,12 +4332,14 @@ class AEMOSpikeManager:
             if restore_ok:
                 await asyncio.sleep(5)
                 restore_mode = self._saved_operation_mode or "autonomous"
+                restore_current = self._event_guard(restoring=True, exporting=restore_mode == "autonomous")
                 _LOGGER.info("Restoring operation mode to: %s", restore_mode)
                 async with session.post(
                     f"{api_base}/api/1/energy_sites/{self.site_id}/operation",
                     headers=headers,
                     json={"default_real_mode": restore_mode},
                     timeout=aiohttp.ClientTimeout(total=30),
+                    _power_sync_is_current=restore_current,
                 ) as response:
                     restore_ok = response.status == 200
                     if restore_ok:
@@ -4747,6 +4818,68 @@ class SavingSessionTariffManager:
         """Return whether currently in session mode."""
         return self._in_session_mode
 
+    def _control_lock(self):
+        if getattr(self, "_session_control_lock", None) is None:
+            self._session_control_lock = asyncio.Lock()
+        return self._session_control_lock
+
+    def _event_route_lock(self):
+        from .powerwall_control import coordinator_for
+        return coordinator_for(self.hass, site_id=self.site_id).route_lock
+
+    def _event_guard(self, *, restoring=False, exporting=False):
+        runtime = self.hass.data.get(DOMAIN, {}).get(self.entry.entry_id)
+        site_id = str(self.site_id)
+        baseline = (copy.deepcopy(self._saved_tariff), self._saved_operation_mode, self._active_session_code)
+
+        def current():
+            if (not isinstance(runtime, dict)
+                    or self.hass.data.get(DOMAIN, {}).get(self.entry.entry_id) is not runtime
+                    or runtime.get("saving_session_tariff_manager") is not self
+                    or str(self.site_id) != site_id
+                    or str(self.entry.data.get("tesla_energy_site_id")) != site_id
+                    or bool(self.entry.options.get("monitoring_mode", self.entry.data.get("monitoring_mode", False)))
+                    or baseline != (self._saved_tariff, self._saved_operation_mode, self._active_session_code)
+                    or runtime.get("powerwall_settings_recovering")):
+                return False
+            pending = runtime.get("powerwall_settings_pending")
+            if pending and (not isinstance(pending, dict)
+                    or pending.get("resume_cloud") is not True
+                    or runtime.get("powerwall_settings_cloud_handoff") != pending.get("id")):
+                return False
+            if any(runtime.get(key) for key in (
+                    "native_max_startup_pending", "native_max_recovery_unavailable",
+                    "powerwall_local_recovery_pending", "pending_tesla_restore",
+                    "optimizer_force_restart_restore_pending", "max_backup_end_ts")):
+                return False
+            if any((runtime.get(key) or {}).get("active") for key in (
+                    "force_charge_state", "force_discharge_state", "hold_soc_state", "self_consumption_state")):
+                return False
+            if any(getattr(runtime.get(key), "pending", False) for key in (
+                    "powerwall_native_max_charge", "powerwall_battery_dispatch")):
+                return False
+            peer = runtime.get("aemo_spike_manager")
+            if peer is not None and getattr(peer, "_in_spike_mode", False):
+                return False
+            budget = self.hass.data.get("power_sync_native_rate_budget")
+            if budget is not None and budget.native_max_claim(site_id):
+                return False
+            if not restoring and (getattr(self, "_stopped", False)
+                    or runtime.get("powerwall_local_dispatch_stopping")
+                    or runtime.get("ev_curtailment_override")
+                    or getattr(runtime.get("optimization_coordinator"), "_enabled", False)):
+                return False
+            guard = runtime.get("network_export_guard")
+            return (not exporting or guard is None
+                    or getattr(getattr(getattr(guard, "manager", None), "snapshot", None), "mode", None) == "off")
+        return current
+
+    async def stop(self):
+        self._stopped = True
+        async with self._control_lock():
+            if self._in_session_mode:
+                await self._exit_session_mode()
+
     async def _persist_event_state(self) -> None:
         """OB-41: persist session-mode state so a reload mid-event doesn't
         forget it owes a restore. ``getattr`` guards a missing ``_store``
@@ -4791,10 +4924,18 @@ class SavingSessionTariffManager:
         self._saved_operation_mode = stored.get("saved_operation_mode")
         self._active_session_code = stored.get("active_session_code")
         self._in_session_mode = True
+        self._restore_pending = True
         await self._exit_session_mode()
 
     async def check_and_handle_sessions(self) -> None:
         """Check if a saving session is active and manage tariff."""
+        async with self._control_lock():
+            await self._check_and_handle_sessions()
+
+    async def _check_and_handle_sessions(self) -> None:
+        if getattr(self, "_restore_pending", False):
+            await self._exit_session_mode()
+            return
         if not self._session_coordinator or not self._session_coordinator.data:
             return
 
@@ -4810,6 +4951,10 @@ class SavingSessionTariffManager:
             await self._exit_session_mode()
 
     async def _enter_session_mode(self, session) -> None:
+        async with self._event_route_lock():
+            await self._enter_session_mode_locked(session)
+
+    async def _enter_session_mode_locked(self, session) -> None:
         """Save tariff, create session tariff, upload to Tesla."""
 
         entry_runtime = (
@@ -4910,6 +5055,23 @@ class SavingSessionTariffManager:
                                 _tariff_display_name(site_tariff),
                             )
 
+            base_current = self._event_guard(exporting=True)
+            code = session.code
+            def current():
+                coordinator = self._session_coordinator
+                sessions = coordinator.data.get("sessions", []) if coordinator and coordinator.data else []
+                return base_current() and any(
+                    candidate.code == code and candidate.joined
+                    and candidate.session_type == "saving" and candidate.is_active()
+                    for candidate in sessions)
+            if (not current() or not self._saved_tariff
+                    or self._saved_operation_mode not in ("autonomous", "self_consumption", "backup")):
+                return
+            # Own and persist the restore obligation before the first mutation.
+            self._in_session_mode = True
+            self._restore_pending = True
+            await self._persist_event_state()
+
             # Step 3: Switch to autonomous mode
             if self._saved_operation_mode != "autonomous":
                 _LOGGER.info("Switching to autonomous mode for session export...")
@@ -4918,6 +5080,7 @@ class SavingSessionTariffManager:
                     headers=headers,
                     json={"default_real_mode": "autonomous"},
                     timeout=aiohttp.ClientTimeout(total=30),
+                    _power_sync_is_current=current,
                 ) as response:
                     if response.status == 200:
                         _LOGGER.info("Switched to autonomous mode")
@@ -4931,12 +5094,14 @@ class SavingSessionTariffManager:
                 current_token,
                 current_provider,
                 fleet_base_url=self.entry.data.get(CONF_FLEET_API_BASE_URL),
+                is_current=current,
             )
 
             if success:
                 self._in_session_mode = True
                 self._session_start_time = dt_util.utcnow()
                 self._active_session_code = session.code
+                self._restore_pending = False
                 await self._persist_event_state()
                 _LOGGER.warning(
                     "SESSION MODE ACTIVE: Tariff uploaded for %d octopoints/kWh export",
@@ -5005,7 +5170,15 @@ class SavingSessionTariffManager:
         return tariff
 
     async def _exit_session_mode(self) -> None:
+        async with self._event_route_lock():
+            await self._exit_session_mode_locked()
+
+    async def _exit_session_mode_locked(self) -> None:
         """Restore saved tariff and operation mode after session ends."""
+        self._restore_pending = True
+        current = self._event_guard(restoring=True)
+        if not current():
+            return
         _LOGGER.info("Saving session ended - restoring normal operation")
 
         try:
@@ -5027,12 +5200,13 @@ class SavingSessionTariffManager:
                 headers=headers,
                 json={"default_real_mode": "self_consumption"},
                 timeout=aiohttp.ClientTimeout(total=30),
+                _power_sync_is_current=current,
             ) as response:
                 if response.status == 200:
                     _LOGGER.info("Switched to self_consumption mode")
 
             # Step 2: Restore saved tariff
-            restore_ok = True
+            restore_ok = False
             restore_tariff = _select_restorable_tesla_tariff(self._saved_tariff)
             if restore_tariff:
                 _LOGGER.info("Restoring saved tariff...")
@@ -5043,6 +5217,7 @@ class SavingSessionTariffManager:
                     current_token,
                     current_provider,
                     fleet_base_url=self.entry.data.get(CONF_FLEET_API_BASE_URL),
+                    is_current=current,
                 )
                 restore_ok = success
                 if success:
@@ -5055,18 +5230,25 @@ class SavingSessionTariffManager:
                     _tariff_display_name(self._saved_tariff),
                 )
 
+            if not restore_ok:
+                await self._persist_event_state()
+                return
+
             # Step 3: Wait for Tesla to process
             await asyncio.sleep(5)
 
             # Step 4: Restore original operation mode
             restore_mode = self._saved_operation_mode or "autonomous"
+            restore_current = self._event_guard(restoring=True, exporting=restore_mode == "autonomous")
             _LOGGER.info("Restoring operation mode to: %s", restore_mode)
             async with session_http.post(
                 f"{api_base}/api/1/energy_sites/{self.site_id}/operation",
                 headers=headers,
                 json={"default_real_mode": restore_mode},
                 timeout=aiohttp.ClientTimeout(total=30),
+                _power_sync_is_current=restore_current,
             ) as response:
+                restore_ok = response.status == 200
                 if response.status == 200:
                     _LOGGER.info("Restored operation mode to %s", restore_mode)
 
@@ -5081,6 +5263,7 @@ class SavingSessionTariffManager:
 
             # Clear session state
             self._in_session_mode = False
+            self._restore_pending = False
             self._session_start_time = None
             self._active_session_code = None
             # OB-41: also clear the saved baseline. Otherwise a genuine
@@ -6064,6 +6247,7 @@ async def _send_tariff_to_tesla(
 
             if accepted_status is not None and attempt == 0:
                 accepted_status["not_submitted"] = True
+            write_fence = None
             if before_write is not None:
                 write_fence = await before_write()
                 write_fence()
@@ -6076,6 +6260,12 @@ async def _send_tariff_to_tesla(
                 headers=headers,
                 json=payload,
                 timeout=aiohttp.ClientTimeout(total=timeout_seconds),
+                _power_sync_is_current=lambda: is_current is None or is_current(),
+                _power_sync_before_send=write_fence,
+                _power_sync_on_rejected=(
+                    lambda: accepted_status.__setitem__("not_submitted", True)
+                    if accepted_status is not None and attempt == 0 else None
+                ),
             ) as response:
                 if response.status == 200:
                     result = await response.json()
@@ -8309,6 +8499,8 @@ class PowerwallSettingsView(HomeAssistantView):
                 "grid_charging_state_known": grid_charging_state_known,
                 "solar_curtailment_enabled": solar_curtailment_enabled,
                 "manual_export_override": manual_export_override,
+                "control_status": (entry_data["powerwall_site_control"].snapshot()
+                                   if entry_data and entry_data.get("powerwall_site_control") else None),
                 "capabilities": {
                     "storm_mode": bool(tesla_capabilities.get("storm_mode", False)),
                     "off_grid_vehicle_charging_reserve": bool(
@@ -22071,6 +22263,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 if _aemo_dispatch_entry_data() is not current_entry_data:
                     return False, latest_protection_active
                 site_id = str(getattr(ts_coordinator, "site_id", ""))
+                attempt_runtime = current_entry_data
+
+                def policy_current():
+                    runtime = _aemo_dispatch_entry_data()
+                    return (runtime is attempt_runtime
+                            and runtime.get("tesla_coordinator", ts_coordinator) is ts_coordinator
+                            and str(getattr(ts_coordinator, "site_id", "")) == site_id
+                            and _demand_grid_charging_protection_active(entry_data=runtime)
+                            == protection_active)
+
                 restore_state = current_entry_data.get(
                     "_demand_grid_charging_restore"
                 )
@@ -22110,6 +22312,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             err,
                         )
                         return False, protection_active
+                    if _aemo_dispatch_entry_data() is not attempt_runtime:
+                        return False, protection_active
+                    if not policy_current():
+                        latest_protection_active = _demand_grid_charging_protection_active(
+                            entry_data=attempt_runtime,
+                        )
+                        continue
                     observed_enabled = (
                         tesla_grid_charging_enabled_from_site_info(site_info)
                         if isinstance(site_info, dict)
@@ -22148,17 +22357,32 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     "set_grid_charging_enabled_outcome",
                     None,
                 )
-                if callable(outcome_writer):
-                    write_outcome = await outcome_writer(not protection_active)
-                    success = bool(getattr(write_outcome, "applied", False))
-                else:
+                async def write_target():
+                    if callable(outcome_writer):
+                        outcome = await outcome_writer(not protection_active)
+                        return outcome, bool(getattr(outcome, "applied", False))
                     # Keep lightweight/test coordinators and downstream
                     # integrations compatible with the original bool API.
-                    success = await ts_coordinator.set_grid_charging_enabled(
+                    return None, await ts_coordinator.set_grid_charging_enabled(
                         not protection_active
                     )
+
+                if site_id:
+                    from .powerwall_control import ControlWriteRejected, coordinator_for
+
+                    site_control = coordinator_for(hass, site_id=site_id)
+                    try:
+                        async with site_control.operation(
+                            label="demand grid charging", is_current=policy_current,
+                            identity=lambda: getattr(ts_coordinator, "site_id", None),
+                        ):
+                            write_outcome, success = await write_target()
+                    except ControlWriteRejected:
+                        success = False
+                else:
+                    write_outcome, success = await write_target()
                 current_entry_data = _aemo_dispatch_entry_data()
-                if current_entry_data is None:
+                if current_entry_data is not attempt_runtime:
                     return False, latest_protection_active
                 latest_protection_active = _demand_grid_charging_protection_active(
                     entry_data=current_entry_data,
@@ -25194,6 +25418,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     headers=headers,
                     json={"default_real_mode": "self_consumption"},
                     timeout=aiohttp.ClientTimeout(total=30),
+                    _power_sync_is_current=_charge_kick_is_current,
                 ) as resp:
                     if resp.status == 200:
                         _LOGGER.info("Charge kick (%s): switched to self_consumption", reason)
@@ -25221,6 +25446,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             headers=headers,
                             json={"default_real_mode": "autonomous"},
                             timeout=aiohttp.ClientTimeout(total=30),
+                            _power_sync_is_current=_charge_kick_mode_owner_is_current,
                         ) as resp:
                             if resp.status != 200:
                                 text = await resp.text()
@@ -26266,7 +26492,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.debug("No Amber API token for NEM region auto-detection")
                 return None
 
-            from homeassistant.helpers.aiohttp_client import async_get_clientsession
+            from .powerwall_control_http import async_get_clientsession
             session = async_get_clientsession(hass)
             headers = {"Authorization": f"Bearer {amber_token}"}
 
@@ -27045,6 +27271,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # Snapshot before price acquisition, which can also yield to a newer
         # force/restore command. That command owns the tariff from then on.
         sync_command_generation = _command_generation[0]
+        sync_runtime = _aemo_dispatch_entry_data()
+        sync_site_id = str(entry.data.get(CONF_TESLA_ENERGY_SITE_ID))
+        def sync_current():
+            return (
+                sync_runtime is not None
+                and _aemo_dispatch_entry_data() is sync_runtime
+                and _command_generation[0] == sync_command_generation
+                and str(entry.data.get(CONF_TESLA_ENERGY_SITE_ID)) == sync_site_id
+                and (not _is_monitoring_mode() or _monitoring_sync_override)
+            )
+
+        def mode_restore_current():
+            # Monitoring cleanup may upload a baseline tariff, but must not
+            # enter a new autonomous-mode bounce.
+            return sync_current() and not _is_monitoring_mode()
+
+        def calibration_restore_current():
+            return (
+                mode_restore_current()
+                and CALIBRATION_SOURCE_LOCAL_ALERT not in calibration_sources(sync_runtime)
+            )
 
         # Determine battery system type for routing
         battery_system = entry.data.get(CONF_BATTERY_SYSTEM, "tesla")
@@ -28120,7 +28367,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 s_provider,
                 fleet_base_url=entry.data.get(CONF_FLEET_API_BASE_URL),
                 readback_status=site_readback_status,
-                is_current=lambda: _command_generation[0] == sync_command_generation,
+                is_current=sync_current,
                 max_retry_after_seconds=(
                     TOU_PERIODIC_SYNC_MAX_RETRY_AFTER_SECONDS if periodic else None
                 ),
@@ -28316,6 +28563,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                     headers=headers,
                                     json={"default_real_mode": "self_consumption"},
                                     timeout=aiohttp.ClientTimeout(total=30),
+                                    _power_sync_is_current=lambda: (
+                                        mode_restore_current()
+                                        and bool(entry.options.get(CONF_FORCE_TARIFF_MODE_TOGGLE,
+                                                                   entry.data.get(CONF_FORCE_TARIFF_MODE_TOGGLE, False)))
+                                        and not sync_runtime.get("calibration_suspected")
+                                    ),
                                 ) as response:
                                     if response.status == 200:
                                         _LOGGER.debug("Switched to self_consumption mode")
@@ -28332,6 +28585,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                         headers=headers,
                                         json={"default_real_mode": "autonomous"},
                                         timeout=aiohttp.ClientTimeout(total=30),
+                                        _power_sync_is_current=mode_restore_current,
                                     ) as response:
                                         if response.status != 200:
                                             resp_text = await response.text()
@@ -28429,6 +28683,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                                 headers=_cal_headers,
                                                 json={"default_real_mode": "autonomous"},
                                                 timeout=aiohttp.ClientTimeout(total=30),
+                                                _power_sync_is_current=lambda: (
+                                                    calibration_restore_current()
+                                                    and bool(sync_runtime.get("calibration_suspected"))
+                                                ),
                                             ) as _cal_resp:
                                                 if _cal_resp.status != 200:
                                                     _LOGGER.debug("Calibration recovery check: API returned %s", _cal_resp.status)
@@ -28532,6 +28790,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                                 headers=headers,
                                                 json={"default_real_mode": "autonomous"},
                                                 timeout=aiohttp.ClientTimeout(total=30),
+                                                _power_sync_is_current=calibration_restore_current,
                                             ) as resp:
                                                 if resp.status == 200:
                                                     await asyncio.sleep(3)
@@ -30125,6 +30384,28 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         # Skip if EV charging has overridden curtailment to allow full solar production
         entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+        entry_data["tesla_curtailment_epoch"] = entry_data.get("tesla_curtailment_epoch", 0) + 1
+        curtailment_epoch = entry_data["tesla_curtailment_epoch"]
+        curtailment_generation = _command_generation[0]
+        curtailment_site_id = str(entry.data.get(CONF_TESLA_ENERGY_SITE_ID))
+        def curtailment_current():
+            latest_enabled = _effective_solar_curtailment_enabled()
+            return (
+                hass.data.get(DOMAIN, {}).get(entry.entry_id) is entry_data
+                and entry_data.get("tesla_curtailment_epoch") == curtailment_epoch
+                and _command_generation[0] == curtailment_generation
+                and str(entry.data.get(CONF_TESLA_ENERGY_SITE_ID)) == curtailment_site_id
+                and latest_enabled
+                and _monitoring_mode_allows_curtailment(latest_enabled)
+                and not _ac_only_solar_curtailment_enabled()
+                and not entry_data.get("ev_curtailment_override")
+            )
+        def curtailment_restore_current(rule):
+            preferred = ((entry_data.get("manual_export_rule") or "battery_ok")
+                         if entry_data.get("manual_export_override") else "battery_ok")
+            manager = entry_data.get("network_envelope_manager")
+            return (curtailment_current() and preferred == rule
+                    and (rule == "never" or manager is None or manager.snapshot.mode == "off"))
         if entry_data.get("ev_curtailment_override"):
             _LOGGER.info("☀️ Solar curtailment skipped - EV charging using solar surplus")
             return
@@ -30340,6 +30621,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             headers=headers,
                             json={"customer_preferred_export_rule": "never"},
                             timeout=aiohttp.ClientTimeout(total=30),
+                            _power_sync_is_current=curtailment_current,
                         ) as response:
                             if response.status != 200:
                                 error_text = await response.text()
@@ -30418,6 +30700,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             headers=headers,
                             json={"customer_preferred_export_rule": restore_rule},
                             timeout=aiohttp.ClientTimeout(total=30),
+                            _power_sync_is_current=lambda: curtailment_restore_current(restore_rule),
                         ) as response:
                             if response.status != 200:
                                 error_text = await response.text()
@@ -30511,6 +30794,28 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         # Skip if EV charging has overridden curtailment to allow full solar production
         entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+        entry_data["tesla_curtailment_epoch"] = entry_data.get("tesla_curtailment_epoch", 0) + 1
+        curtailment_epoch = entry_data["tesla_curtailment_epoch"]
+        curtailment_generation = _command_generation[0]
+        curtailment_site_id = str(entry.data.get(CONF_TESLA_ENERGY_SITE_ID))
+        def curtailment_current():
+            latest_enabled = _effective_solar_curtailment_enabled()
+            return (
+                hass.data.get(DOMAIN, {}).get(entry.entry_id) is entry_data
+                and entry_data.get("tesla_curtailment_epoch") == curtailment_epoch
+                and _command_generation[0] == curtailment_generation
+                and str(entry.data.get(CONF_TESLA_ENERGY_SITE_ID)) == curtailment_site_id
+                and latest_enabled
+                and _monitoring_mode_allows_curtailment(latest_enabled)
+                and not _ac_only_solar_curtailment_enabled()
+                and not entry_data.get("ev_curtailment_override")
+            )
+        def curtailment_restore_current(rule):
+            preferred = ((entry_data.get("manual_export_rule") or "battery_ok")
+                         if entry_data.get("manual_export_override") else "battery_ok")
+            manager = entry_data.get("network_envelope_manager")
+            return (curtailment_current() and preferred == rule
+                    and (rule == "never" or manager is None or manager.snapshot.mode == "off"))
         if entry_data.get("ev_curtailment_override"):
             _LOGGER.info("☀️ Solar curtailment skipped - EV charging using solar surplus")
             return
@@ -30745,6 +31050,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             headers=headers,
                             json={"customer_preferred_export_rule": "never"},
                             timeout=aiohttp.ClientTimeout(total=30),
+                            _power_sync_is_current=curtailment_current,
                         ) as response:
                             if response.status != 200:
                                 error_text = await response.text()
@@ -30822,6 +31128,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             headers=headers,
                             json={"customer_preferred_export_rule": restore_rule},
                             timeout=aiohttp.ClientTimeout(total=30),
+                            _power_sync_is_current=lambda: curtailment_restore_current(restore_rule),
                         ) as response:
                             if response.status != 200:
                                 error_text = await response.text()
@@ -32700,6 +33007,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 async with session.post(
                     f"{api_base}/api/1/energy_sites/{site_id}/operation", headers=headers,
                     json={"default_real_mode": mode}, timeout=aiohttp.ClientTimeout(total=30),
+                    _power_sync_is_current=lambda: is_current is None or is_current(),
                 ) as response:
                     status = response.status
                     retry_delay = _parse_retry_after(response)
@@ -33013,11 +33321,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     return False
                 if fence is not None:
                     fence()
+                previously_submitted = bool(submission_status and submission_status.get("submitted"))
                 if submission_status is not None:
                     submission_status["submitted"] = True
                 async with session.post(
                     f"{base}/api/1/energy_sites/{site_id}/grid_import_export", headers=headers,
                     json={"customer_preferred_export_rule": rule}, timeout=aiohttp.ClientTimeout(total=5),
+                    _power_sync_is_current=lambda: current() and allowed(),
+                    _power_sync_before_send=fence,
+                    _power_sync_on_rejected=(
+                        lambda: submission_status.__setitem__("submitted", previously_submitted)
+                        if submission_status is not None else None
+                    ),
+                    _power_sync_deadline=deadline,
                 ) as response:
                     accepted, rejection_reason = await _tesla_grid_export_write_result(response)
                     if submission_status is not None:
@@ -33089,7 +33405,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         """Use a bounded local config read when available; never require LAN."""
         from .powerwall_local.dispatch import get_local_transport
         from .tesla_export_permissions import read_export_rule
-        transport = get_local_transport(hass, entry)
+        method = {**entry.data, **getattr(entry, "options", {})}.get("tesla_control_method")
+        transport = get_local_transport(hass, entry) if method in ("local", "auto") else None
         local = None
         if transport is not None and entry.data.get("powerwall_local_din"):
             try:
@@ -33167,6 +33484,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     headers=headers,
                     json={"backup_reserve_percent": percent},
                     timeout=aiohttp.ClientTimeout(total=30),
+                    _power_sync_is_current=lambda: is_current is None or is_current(),
                 ) as response:
                     if response.status == 200:
                         if await _tesla_force_confirm_backup_reserve(
@@ -33588,12 +33906,28 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # while renewable hardware leases are managed independently of tariffs.
     _local_powerwall_runtime = hass.data[DOMAIN][entry.entry_id]
     from .powerwall_local.route_lock import BatteryRouteLock
-    _local_powerwall_route_lock = BatteryRouteLock()
+    from .powerwall_control import coordinator_for
+    _control_site_id = (entry.data.get("tesla_energy_site_id")
+                        or entry.data.get("powerwall_local_energy_site_id"))
+    _site_control = (coordinator_for(hass, entry, _control_site_id)
+                     if active_battery_system == BATTERY_SYSTEM_TESLA and _control_site_id else None)
+    _local_powerwall_route_lock = _site_control.route_lock if _site_control else BatteryRouteLock()
+    if _site_control is not None:
+        _local_powerwall_runtime["powerwall_site_control"] = _site_control
     _local_powerwall_runtime["powerwall_battery_dispatch_route_lock"] = _local_powerwall_route_lock
     hass.data[DOMAIN][entry.entry_id]["powerwall_local_dispatch_stopping"] = False
 
     def _local_powerwall_generation_current():
         return hass.data.get(DOMAIN, {}).get(entry.entry_id) is _local_powerwall_runtime
+
+    def _site_control_admission(call, *, restoring=False):
+        return (
+            _local_powerwall_generation_current()
+            and (not _local_powerwall_runtime.get("powerwall_local_dispatch_stopping") or restoring)
+            and (not _monitoring_mode_should_block_control(call)
+                 or (restoring and call.data.get("_allow_monitoring_restore") is True))
+        )
+    _local_powerwall_runtime["powerwall_control_admission"] = _site_control_admission
 
     async def _clear_local_powerwall_dispatch() -> None:
         if not _local_powerwall_generation_current():
@@ -33811,30 +34145,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         budget = await budget_for(hass)
 
         def permitted():
+            from .powerwall_local.control_method import native_control_policy
+            from .powerwall_host import local_battery_dispatch_configured
             call = _native_max_context["call"]
             direction = _native_max_context.get("direction", "charge")
-            if (call is None or (_control_call_source(call) == "optimizer" and not _native_max_context.get("targetless"))
-                    or not _local_powerwall_generation_current()
-                    or _local_powerwall_runtime.get("powerwall_local_dispatch_stopping")
-                    or _local_powerwall_runtime.get("tesla_control_method_changing")
-                    or _local_powerwall_runtime.get("powerwall_local_recovery_pending")
-                    or _local_powerwall_runtime.get("powerwall_settings_pending")
-                    or _local_powerwall_runtime.get("optimizer_force_restart_restore_pending")
-                    or _local_powerwall_runtime.get("pending_tesla_restore")
-                    or _local_powerwall_runtime.get("max_backup_end_ts")
-                    or _monitoring_mode_should_block_control(call)
-                    or (direction == "charge" and _demand_grid_charging_protection_active())):
-                return False
-            guard = _local_powerwall_runtime.get("network_export_guard")
-            if direction == "discharge" and guard is not None and guard.manager.snapshot.mode != "off":
-                return False
-            from .powerwall_host import local_battery_dispatch_configured
-            if not local_battery_dispatch_configured(entry.data):
-                return False
-            if hass.data.get("power_sync_license_manager") is not None:
+            license_allowed = True
+            if call is not None and hass.data.get("power_sync_license_manager") is not None:
                 from .licensing.guard import service_allowed
-                return service_allowed(hass, call.data, f"handle_force_{direction}") is True
-            return True
+                license_allowed = service_allowed(hass, call.data, f"handle_force_{direction}") is True
+            return native_control_policy(
+                _local_powerwall_runtime,
+                call_present=call is not None,
+                optimizer_call=bool(call is not None and _control_call_source(call) == "optimizer"),
+                targetless=bool(_native_max_context.get("targetless")),
+                generation_current=_local_powerwall_generation_current(),
+                monitoring_blocked=bool(call is not None and _monitoring_mode_should_block_control(call)),
+                demand_charge_protected=bool(direction == "charge" and _demand_grid_charging_protection_active()),
+                local_configured=local_battery_dispatch_configured(entry.data),
+                license_allowed=license_allowed,
+                direction=direction,
+            )
 
         def site_config():
             configured = _get_tesla_site_configs(hass, entry)
@@ -34140,8 +34470,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         notify = update_native_charge_alert if direction == "charge" else update_native_discharge_alert
                         notify(hass, entry.entry_id, reason)
                     raise HomeAssistantError(
-                        "Native Powerwall tariff cannot enforce current software or EV limits; "
-                        f"Max was not started ({reason})")
+                        "Native Powerwall control did not start: "
+                        f"{reason}")
                 return None  # Preserve software, EV and connection limits.
             from .powerwall_local.native_max_notifications import update_native_charge_alert, update_native_discharge_alert
             notify = update_native_charge_alert if direction == "charge" else update_native_discharge_alert
@@ -41504,6 +41834,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             return
 
         await _stop_local_powerwall_dispatch()
+        autonomous_generation = (_command_generation[0], _tesla_operation_generation[0])
+        autonomous_site_id = str(entry.data.get(CONF_TESLA_ENERGY_SITE_ID))
+        def autonomous_current():
+            guard = hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get("network_export_guard")
+            return (
+                _local_powerwall_generation_current()
+                and not _local_powerwall_runtime.get("powerwall_local_dispatch_stopping")
+                and autonomous_generation == (_command_generation[0], _tesla_operation_generation[0])
+                and str(entry.data.get(CONF_TESLA_ENERGY_SITE_ID)) == autonomous_site_id
+                and not _monitoring_mode_should_block_control(call)
+                and (guard is None or guard.manager.snapshot.mode == "off")
+            )
 
         _autonomous_guard = (
             hass.data.get(DOMAIN, {})
@@ -41581,6 +41923,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     headers=headers,
                     json={"default_real_mode": "autonomous"},
                     timeout=aiohttp.ClientTimeout(total=30),
+                    _power_sync_is_current=autonomous_current,
                 ) as response:
                     if response.status == 200:
                         _LOGGER.info("Tesla site %s set to autonomous (TOU) mode", site_id)
@@ -42097,6 +42440,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         headers=headers,
                         json={"default_real_mode": requested_mode},
                         timeout=aiohttp.ClientTimeout(total=30),
+                        _power_sync_is_current=current,
                     ) as response:
                         text = await response.text()
                         return response.status == 200, response.status, text
@@ -42369,7 +42713,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             raise
 
     @_track_tesla_settings_control
-    async def handle_set_grid_export(call: ServiceCall) -> None:
+    async def handle_set_grid_export(call: ServiceCall) -> dict[str, Any] | None:
         """Set the grid export rule."""
         rule = call.data.get("rule")
         if rule not in ("never", "pv_only", "battery_ok"):
@@ -42460,6 +42804,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             success = await _tesla_force_apply_export_rule(
                 _get_tesla_site_configs(hass, entry), rule,
                 reason="set grid export", is_current=current,
+                require_readback=True,
             )
             if not success:
                 raise HomeAssistantError(
@@ -42481,13 +42826,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
             if not current():
                 raise asyncio.CancelledError("Tesla export publication superseded")
-            if solar_curtailment_enabled:
+            if solar_curtailment_enabled and not call.data.get("_ev_curtailment", False):
                 entry_data["manual_export_override"] = True
                 entry_data["manual_export_rule"] = rule
                 _LOGGER.info("Manual export override enabled: %s", rule)
             if not await update_cached_export_rule(rule, is_current=current):
                 raise asyncio.CancelledError("Tesla export publication superseded")
-            if solar_curtailment_enabled:
+            if solar_curtailment_enabled and not call.data.get("_ev_curtailment", False):
                 # Persist so the override survives HA restarts / config reloads
                 try:
                     _store = entry_data.get("store")
@@ -42502,6 +42847,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if not current():
                 raise asyncio.CancelledError("Tesla export publication superseded")
             hass.async_create_task(refresh_powerwall_local_after_settings_write("set_grid_export"))
+            return {
+                "success": True,
+                "settings_confirmed": True,
+                "physical_effect_confirmed": False,
+            }
 
         except HomeAssistantError:
             raise
@@ -43057,6 +43407,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         finally:
             _local_powerwall_runtime.pop("native_max_startup_pending", None)
 
+    # Money-event recovery was intentionally deferred until this setup's
+    # runtime, signed-settings quarantine and native restart state existed.
+    # Retry before publishing new battery handlers, outside the route lock.
+    for event_manager in (aemo_spike_manager, saving_session_tariff_manager):
+        if event_manager is not None:
+            try:
+                await event_manager.restore_or_exit()
+            except Exception:
+                _LOGGER.exception("Tesla tariff event restart cleanup remains pending")
+
     # Serialize the entire discharge route, including native tariff baseline
     # acquisition after releasing a timed local command.
     _unserialized_force_discharge = handle_force_discharge
@@ -43095,6 +43455,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         handle_set_backup_reserve = guard_battery_transition(hass, entry, handle_set_backup_reserve)
         handle_set_operation_mode = guard_battery_transition(hass, entry, handle_set_operation_mode)
         handle_set_grid_charging = guard_battery_transition(hass, entry, handle_set_grid_charging)
+        handle_set_grid_export = guard_battery_transition(hass, entry, handle_set_grid_export)
     else:
         _local_powerwall_runtime.pop("native_max_startup_pending", None)
     register_handlers(hass, entry.entry_id, {
@@ -43107,6 +43468,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         'set_backup_reserve': handle_set_backup_reserve,
         'hold_battery_soc': handle_hold_battery_soc,
         'resume_powerwall_settings': handle_resume_powerwall_settings,
+        'set_operation_mode': handle_set_operation_mode,
+        'set_grid_charging': handle_set_grid_charging,
+        'set_grid_export': handle_set_grid_export,
     })
     hass.services.async_register(
         DOMAIN, "resume_powerwall_settings",
@@ -43157,12 +43521,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         routed_handler(hass, entry.entry_id, 'set_backup_reserve', handle_set_backup_reserve),
         supports_response=SupportsResponse.OPTIONAL,
     )
-    hass.services.async_register(DOMAIN, SERVICE_SET_OPERATION_MODE, handle_set_operation_mode)
-    hass.services.async_register(DOMAIN, SERVICE_SET_GRID_EXPORT, handle_set_grid_export)
+    hass.services.async_register(DOMAIN, SERVICE_SET_OPERATION_MODE, routed_handler(hass, entry.entry_id, "set_operation_mode", handle_set_operation_mode))
+    hass.services.async_register(
+        DOMAIN, SERVICE_SET_GRID_EXPORT,
+        routed_handler(hass, entry.entry_id, "set_grid_export", handle_set_grid_export),
+        supports_response=SupportsResponse.OPTIONAL,
+    )
     hass.services.async_register(
         DOMAIN,
         SERVICE_SET_GRID_CHARGING,
-        handle_set_grid_charging,
+        routed_handler(hass, entry.entry_id, "set_grid_charging", handle_set_grid_charging),
         supports_response=SupportsResponse.OPTIONAL,
     )
     hass.services.async_register(DOMAIN, "set_grid_export_auto", handle_set_grid_export_auto)
@@ -46903,7 +47271,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             await _restore_vpp_aemo_spike()
                             return
                         from .aemo_api import AEMOAPIClient
-                        from homeassistant.helpers.aiohttp_client import async_get_clientsession
+                        from .powerwall_control_http import async_get_clientsession
 
                         session = async_get_clientsession(hass)
                         client = AEMOAPIClient(session)
@@ -48988,14 +49356,14 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Retire spike checks before the first await. A timer cancellation alone
     # cannot fence a callback already waiting for AEMO or Tesla.
     spike_managers = [
-        manager for key in ("aemo_spike_manager", "generic_aemo_spike_manager")
+        manager for key in ("aemo_spike_manager", "generic_aemo_spike_manager", "saving_session_tariff_manager")
         if (manager := entry_data.get(key)) is not None
     ]
     for manager in spike_managers:
         manager._stopped = True
     if vpp_state := entry_data.get("vpp_spike_state"):
         vpp_state["stopped"] = True
-    for key in ("aemo_spike_cancel", "generic_aemo_spike_cancel", "vpp_aemo_cancel"):
+    for key in ("aemo_spike_cancel", "generic_aemo_spike_cancel", "vpp_aemo_cancel", "saving_session_cancel"):
         if cancel := entry_data.pop(key, None):
             cancel()
     if production := entry_data.get("solar_production_runtime"):
@@ -49012,7 +49380,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         try:
             await manager.stop()
         except Exception as err:
-            _LOGGER.warning("AEMO spike cleanup on unload failed: %s", err)
+            _LOGGER.warning("Tesla tariff event cleanup on unload failed: %s", err)
     if vpp_restore := entry_data.get("vpp_aemo_restore"):
         try:
             async with entry_data["vpp_aemo_control_lock"]:

@@ -1538,13 +1538,16 @@ async def test_large_site_max_denial_never_silently_submits_capped_local_command
     runtime=ns['_local_powerwall_runtime']
     runtime['tesla_coordinator']=SimpleNamespace(_site_info_cache={'nameplate_power':21040},
         _site_info_last_fetch=__import__('time').monotonic())
-    native=SimpleNamespace(pending=False,adapter=SimpleNamespace(guard=AsyncMock(return_value=False)),start=AsyncMock())
+    reason='native_max_local_settings_suspended'
+    native=SimpleNamespace(pending=False,adapter=SimpleNamespace(
+        guard=AsyncMock(return_value=False),guard_denial_reason=reason),start=AsyncMock())
     ns['entry'].options={'tesla_control_method':'auto'}
     ns['_powerwall_prefers_native_tariff'] = lambda direction='discharge': True
     ns.update(_native_max_context={},_get_native_max_charge=AsyncMock(return_value=native),
         _get_tesla_site_configs=lambda *_:[('site','token','provider')])
-    with pytest.raises(RuntimeError,match='Max was not started'):
+    with pytest.raises(RuntimeError,match=f'Native Powerwall control did not start: {reason}'):
         await ns['_try_local_powerwall_force'](direction,call(source=source,power_w=0),15,21000)
+    assert native.adapter.guard_denial_reason == reason
     native.start.assert_not_called()
     client.dispatch_battery_power.assert_not_called()
 

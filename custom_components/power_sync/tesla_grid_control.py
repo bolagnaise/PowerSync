@@ -307,6 +307,14 @@ async def async_set_tesla_grid_charging_confirmed(
                 headers=headers,
                 json=payload,
                 timeout=aiohttp.ClientTimeout(total=min(5.0, remaining)),
+                _power_sync_is_current=lambda: (
+                    (is_current is None or is_current())
+                    and (operation_deadline is None or monotonic() < operation_deadline)
+                ),
+                # Translate the injectable confirmation clock to the shared
+                # mutation queue's native monotonic clock.
+                _power_sync_deadline=(time.monotonic() + max(0.0, operation_deadline - monotonic())
+                                      if operation_deadline is not None else None),
             ) as response:
                 last_status = response.status
                 response_payload = await _response_json(response)
@@ -469,6 +477,10 @@ async def async_set_tesla_grid_charging_confirmed(
                             timeout=aiohttp.ClientTimeout(
                                 total=min(5.0, deadline_at - monotonic())
                             ),
+                            _power_sync_is_current=lambda: (
+                                (is_current is None or is_current()) and monotonic() < deadline_at
+                            ),
+                            _power_sync_deadline=time.monotonic() + max(0.0, deadline_at - monotonic()),
                         ) as retry_response:
                             last_status = retry_response.status
                             retry_payload = await _response_json(retry_response)

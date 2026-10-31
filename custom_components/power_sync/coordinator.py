@@ -16,7 +16,7 @@ import aiohttp
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from .powerwall_control_http import async_get_clientsession
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
@@ -4198,6 +4198,22 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         url = f"{self.api_base_url}{path}"
         last_status = 0
         retry_after_delay: float | None = None
+        mutation = method.upper() not in ("GET", "HEAD", "OPTIONS")
+        runtime = self.hass.data.get(DOMAIN, {}).get(self._entry_id) if mutation else None
+        entry = self.hass.config_entries.async_get_entry(self._entry_id) if mutation else None
+        site_id = str(self.site_id)
+        entry_site_id = str(entry.data.get("tesla_energy_site_id")) if entry else None
+        session = self.session
+
+        def current():
+            return (runtime is not None and entry is not None
+                    and self.hass.data.get(DOMAIN, {}).get(self._entry_id) is runtime
+                    and runtime.get("tesla_coordinator") is self
+                    and not runtime.get("powerwall_local_dispatch_stopping")
+                    and self.hass.config_entries.async_get_entry(self._entry_id) is entry
+                    and str(self.site_id) == site_id == entry_site_id
+                    and str(entry.data.get("tesla_energy_site_id")) == entry_site_id
+                    and self.session is session)
 
         for attempt in range(max_retries):
             try:
@@ -4206,13 +4222,16 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
                     retry_after_delay = None
                     await asyncio.sleep(wait_time)
 
+                if mutation and not current():
+                    return 0, None
                 headers = self._tesla_headers()
-                request = self.session.request(
+                request = session.request(
                     method,
                     url,
                     headers=headers,
                     json=json_body if method.upper() != "GET" else None,
                     timeout=aiohttp.ClientTimeout(total=timeout_seconds),
+                    **({"_power_sync_is_current": current} if mutation else {}),
                 )
                 async with request as response:
                     last_status = response.status

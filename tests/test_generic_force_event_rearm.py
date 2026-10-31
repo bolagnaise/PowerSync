@@ -199,6 +199,11 @@ def _vpp_spike_namespace(monkeypatch, *, enabled=True, monitoring=False, disable
     monkeypatch.setitem(sys.modules, "homeassistant.helpers.aiohttp_client", SimpleNamespace(
         async_get_clientsession=lambda hass: None,
     ))
+    # Pin the callback's actual lazy factory dependency. A different test's
+    # power_sync stub must not decide whether the fake price fetch can start.
+    monkeypatch.setitem(sys.modules, "power_sync.powerwall_control_http", SimpleNamespace(
+        async_get_clientsession=lambda hass: None,
+    ))
     for name in ("_vpp_aemo_commands_allowed", "_restore_vpp_aemo_spike",
                  "_check_aemo_spike_for_vpp", "check_aemo_spike_for_vpp"):
         node = next(n for n in ast.walk(tree)
