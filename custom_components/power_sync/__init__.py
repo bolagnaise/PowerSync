@@ -39479,9 +39479,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         context = call.context
         source = _control_call_source(call)
         confirm_restore = bool(call.data.get("_confirm_restore"))
+        # HA's public response request does not make the restore synchronous:
+        # only the private confirmation flag requires completed restoration.
+        response_requested = bool(getattr(call, "return_response", False))
 
         def _restore_not_completed(reason: str) -> dict[str, Any] | None:
-            return {"success": False, "error": reason} if confirm_restore else None
+            return {"success": False, "error": reason} if confirm_restore or response_requested else None
 
         expected_tesla_restore_generation = call.data.get(
             "_tesla_restore_generation"
@@ -39514,7 +39517,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     return _restore_not_completed("restoration superseded")
                 # The owning stop workflow completed; this response does not
                 # assert independent physical telemetry confirmation.
-                return {"success": True, "error": None} if confirm_restore else None
+                return {"success": True, "error": None} if confirm_restore or response_requested else None
         except NativeMaxRestorePending:
             # A manual click requests restoration; the session watcher retains
             # ownership and finishes physical verification in the background.
@@ -39525,6 +39528,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "Restore normal is in progress: Native Max settings restored; "
                 "awaiting physical settling"
             )
+            if response_requested:
+                return {"success": True, "error": None, "pending": True,
+                        "physical_effect_confirmed": False}
             return
         if _restore_request_superseded():
             return _restore_not_completed("restoration superseded")
@@ -40736,6 +40742,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.info("Restore normal: no force mode active and no saved state — nothing to restore")
             if confirm_restore:
                 return {"success": False, "error": "nothing to restore"}
+            if response_requested:
+                return {"success": True, "error": None, "noop": True}
             return
 
         try:
@@ -40853,14 +40861,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     "Tesla Hold SoC cleanup verified at %d%%",
                     normalized_saved_reserve,
                 )
-                return {"success": True, "error": None} if confirm_restore else None
+                return {"success": True, "error": None} if confirm_restore or response_requested else None
 
             # Get Tesla gateway config
             if not site_configs:
                 _LOGGER.error("Missing Tesla site ID or token for restore normal")
-                if confirm_restore:
-                    return {"success": False, "error": "Tesla site configuration unavailable"}
-                return
+                return _restore_not_completed("Tesla site configuration unavailable")
 
             session = async_get_clientsession(hass)
 
@@ -41330,12 +41336,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     return _restore_not_completed("restoration superseded")
                 if _schedule_tesla_restore_retry("one or more Tesla restore writes failed"):
                     await persist_force_mode_state()
-                if confirm_restore:
-                    return {
-                        "success": False,
-                        "error": "one or more Tesla restore writes failed",
-                    }
-                return
+                return _restore_not_completed("one or more Tesla restore writes failed")
 
             if not await _update_powerwall_store(
                 store, {"force_mode_state": None, "pending_tesla_restore": None},
@@ -41419,12 +41420,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             })
 
 
-            if confirm_restore:
+            if confirm_restore or response_requested:
                 return {"success": True, "error": None}
 
         except Exception as e:
             _LOGGER.error(f"Error in restore normal: {e}", exc_info=True)
-            if confirm_restore:
+            if confirm_restore or response_requested:
                 return {"success": False, "error": str(e)}
 
     # Per-brand capability matrix for Hold SoC. "supported=True" means the

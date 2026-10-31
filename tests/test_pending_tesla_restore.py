@@ -214,7 +214,8 @@ def test_dynamic_restore_retains_cleanup_until_tariff_upload_verifies(verified):
         entry=SimpleNamespace(entry_id="entry-1"), DOMAIN="power_sync",
         SERVICE_SYNC_TOU="sync_tou", force_discharge_state=discharge,
         force_charge_state={"active": False}, tesla_restore_failed=False,
-        skip_backup_reserve_restore=False, confirm_restore=False, restore_was_hold_soc=False,
+        skip_backup_reserve_restore=False, confirm_restore=False, response_requested=False,
+        restore_was_hold_soc=False,
         _restore_superseded=lambda _: False, _LOGGER=logging.getLogger(__name__),
         persist_pending_tesla_restore=_build_persist_helper(store, data),
         _schedule_tesla_restore_retry=lambda reason: retries.append(reason) or True,
@@ -233,7 +234,8 @@ def test_dynamic_restore_retains_cleanup_until_tariff_upload_verifies(verified):
     env.update(handle_sync_rest_api_check=sync, persist_force_mode_state=persist_force,
                _mark_tesla_restore_failed=mark_failed)
     env["hass"].services = SimpleNamespace(async_call=service)
-    exec(compile(ast.fix_missing_locations(ast.Module(body=[node], type_ignores=[])),
+    not_completed = _find_function(handler, "_restore_not_completed")
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[not_completed, node], type_ignores=[])),
                  "<dynamic-restore-completion>", "exec"), env)
     asyncio.run(env["run"]())
     assert discharge["active"] is (not verified)
@@ -358,7 +360,7 @@ def test_only_current_verified_completion_releases_restart_gate(superseded):
                store=store, _restore_current=lambda: True,
                force_discharge_state={"active": True}, force_charge_state={"active": False},
                restore_was_hold_soc=False, _clear_hold_soc_state=lambda: None,
-               confirm_restore=False,
+               confirm_restore=False, response_requested=False,
                _restore_superseded=lambda _: generation[0] != 1)
     seed_powerwall_store_closures(env, hass=env["hass"], entry=env["entry"])
     not_completed = _find_function(handler, "_restore_not_completed")

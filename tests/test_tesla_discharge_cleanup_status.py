@@ -168,14 +168,16 @@ def test_cleanup_status_clears_only_after_verified_restore(restore_failed):
 
     namespace = dict(force_discharge_state=state, force_charge_state={"active": False},
                      tesla_restore_failed=restore_failed,
-                     confirm_restore=True, skip_backup_reserve_restore=False,
+                     confirm_restore=True, response_requested=False, skip_backup_reserve_restore=False,
                      persist_pending_tesla_restore=persist, persist_force_mode_state=persist,
                      _schedule_tesla_restore_retry=lambda _reason: True,
                      store=NS(async_load=load, async_save=save), _restore_generation=0,
                      _restore_current=lambda: True, _restore_superseded=lambda _stage: False,
                      hass=NS(data={"power_sync": {"entry": {}}}), entry=NS(entry_id="entry"))
     seed_powerwall_store_closures(namespace, hass=namespace["hass"], entry=namespace["entry"])
-    compile_nodes([node], namespace)
+    not_completed = next(n for n in handler.body
+                         if isinstance(n, ast.FunctionDef) and n.name == "_restore_not_completed")
+    compile_nodes([not_completed, node], namespace)
     asyncio.run(namespace["finish"]())
     assert state["active"] is restore_failed
     assert state.get("command_status") == ("restore_pending" if restore_failed else None)
