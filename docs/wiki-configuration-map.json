@@ -18,7 +18,7 @@
       "translations/en.json": "7d0abb85bbca48003b4b6ab29aa6ef1552c85dd2b2dd2fc13ac21a7479320e03",
       "services.yaml": "298832ff55a41519a5b94e51b7d4c2627dd872d2dc4684faadfe841767a91ab5",
       "switch.py": "878970c76ede8803ed9802eaf5bf95c4a483c5c58497010a6cf21a1e74f3be7b",
-      "select.py": "831a437aaf549b9a4b83d6dcccd67f9aff89853da2477c1fbda914d5cbf14b9e",
+      "select.py": "8d5d7dbd06e0919d3ba84b52660f342dde1583bf9d8d57c2bb5bcbd2ca655d99",
       "number.py": "0c0541d354d2cf2a05d9fc100f6d3883fc6f8aca6af48fb0e71a28c06b02996b",
       "sensor.py": "bc04e7355d972589d8f874f1d9c724069d3092de7e7234a15b091646996b4318",
       "binary_sensor.py": "cad335bcce4d56edb1121bc08a6bbe34d55cad991ce31a34547d150ec4898704",
