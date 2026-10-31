@@ -2049,6 +2049,70 @@ def test_tesla_stop_accepts_numbered_teslemetry_charge_switch(monkeypatch):
     ]
 
 
+@pytest.mark.parametrize("cached_state", ["Stopped", "Complete"])
+@pytest.mark.parametrize(
+    "user_params",
+    [{"_user_initiated": True}, {"manual_stop": True}, {"quick_control": True}, {}],
+)
+@pytest.mark.parametrize("command_fails", [False, True])
+def test_explicit_tesla_stop_dispatches_despite_cached_noncharging_state(
+    monkeypatch, cached_state, user_params, command_fails
+):
+    """Ticket 141: cached status must not acknowledge a stop never dispatched."""
+    vin = "5YJTEST00000000A1"
+    states = [
+        _State(
+            "sensor.car_a_charging", cached_state,
+            last_updated=datetime.now(timezone.utc) - timedelta(minutes=10),
+        ),
+        _State("switch.car_a_charge", "on"),
+        _State("switch.car_b_charge", "on"),
+    ]
+    hass = _Hass(
+        states,
+        registry_entities={
+            state.entity_id: SimpleNamespace(
+                entity_id=state.entity_id,
+                device_id="car-a" if "car_a" in state.entity_id else "car-b",
+                platform="tesla_fleet",
+            )
+            for state in states
+        },
+        registry_devices={
+            "car-a": SimpleNamespace(
+                id="car-a", name="Car A", identifiers={("tesla_fleet", vin)},
+            ),
+            "car-b": SimpleNamespace(
+                id="car-b", name="Car B",
+                identifiers={("tesla_fleet", "5YJTEST00000000B2")},
+            ),
+        },
+    )
+    monkeypatch.setattr(
+        actions, "_get_ev_config",
+        lambda _entry: {"ev_provider": actions.EV_PROVIDER_FLEET_API},
+    )
+    calls = []
+
+    async def command(domain, service, data, **_kwargs):
+        calls.append((domain, service, data))
+        if command_fails:
+            raise RuntimeError("Vehicle command rejected")
+
+    hass.services.async_call = command
+    result = asyncio.run(actions._action_stop_ev_charging(
+        hass, _tesla_entry(),
+        {"charger_type": "tesla", "vehicle_vin": vin, **user_params},
+    ))
+
+    if user_params:
+        assert calls == [("switch", "turn_off", {"entity_id": "switch.car_a_charge"})]
+        assert result is (not command_fails)
+    else:
+        assert calls == []
+        assert result is True
+
+
 def test_tesla_reconciliation_stop_bypasses_stale_stopped_and_away_guards(
     monkeypatch,
 ):
@@ -6005,6 +6069,66 @@ def test_dynamic_start_claims_business_owner_mode():
         hass.data["power_sync"]["entry-1"]["ev_ownership"]["ocpp_evse_1"]["last_command"]["command"]
         == "start_price_level_recovery"
     )
+
+
+@pytest.mark.parametrize(
+    "home_phase_type, explicit_phases, live_phases, expected_phases, expected_amps",
+    [
+        ("three", None, None, 3, 11),
+        ("single", None, None, 1, 16),
+        ("three", 1, None, 1, 16),
+        ("three", None, 1, 1, 16),
+    ],
+)
+def test_manual_solar_only_preserves_configured_phase_fallback(
+    monkeypatch, home_phase_type, explicit_phases, live_phases,
+    expected_phases, expected_amps,
+):
+    """Ticket 141: 8.1 kW must target 11 A on configured three-phase AC."""
+    vin = "5YJTEST00000000A1"
+    states = [
+        _State("number.car_charging_amps", "16", {"min": 1, "max": 16}),
+        _State("binary_sensor.car_charge_cable", "on"),
+    ]
+    if live_phases is not None:
+        states.append(_State("sensor.car_charger_phases", str(live_phases)))
+    hass = _Hass(
+        states,
+        registry_entities={
+            state.entity_id: SimpleNamespace(
+                entity_id=state.entity_id, device_id="car", platform="tesla_fleet",
+            )
+            for state in states
+        },
+        registry_devices={
+            "car": SimpleNamespace(id="car", identifiers={("tesla_fleet", vin)}),
+        },
+    )
+    hass.data["power_sync"]["entry-1"]["automation_store"] = SimpleNamespace(
+        _data={"home_power_settings": {"phase_type": home_phase_type}}
+    )
+    commands = _install_solar_surplus_runtime_stubs(monkeypatch, {
+        "battery_soc": 95, "grid_power": -(8600 - 8 * 240 * expected_phases),
+        "solar_power": 10000,
+        "battery_power": 0, "load_power": 1400,
+    })
+    params = {
+        "charger_type": "tesla", "vehicle_vin": vin,
+        "dynamic_mode": "solar_surplus", "owner_mode": "manual_solar_surplus",
+    }
+    if explicit_phases is not None:
+        params["phases"] = explicit_phases
+
+    assert asyncio.run(actions._action_start_ev_charging_dynamic(
+        hass, _tesla_entry(), params,
+    )) is True
+    state = actions._dynamic_ev_state["entry-1"][vin]
+    assert state["params"]["phases"] == expected_phases
+    state.update(current_amps=8, charging_started=True, entity_max_rechecked=True)
+    asyncio.run(actions._dynamic_ev_update_surplus(hass, _tesla_entry(), "entry-1", vin))
+    assert commands == [expected_amps]
+    assert state["target_amps"] == expected_amps
+    assert state["allocated_surplus_kw"] == pytest.approx(8.1)
 
 
 def test_solar_surplus_dynamic_start_uses_home_power_max_over_idle_tesla_cap(monkeypatch):
