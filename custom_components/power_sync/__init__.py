@@ -35358,15 +35358,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         """Force discharge mode - switches to autonomous with high export tariff."""
         # Validate manual input before relinquishing ownership or mutating timers.
         if _control_call_source(call) != "optimizer":
-            from .force_discharge_duration import selected_discharge_duration, validate_native_discharge_duration
+            from .force_discharge_duration import resolve_manual_force_duration, validate_native_discharge_duration
             try:
-                manual_duration = selected_discharge_duration(
-                    call.data.get("duration", DEFAULT_DISCHARGE_DURATION), entry.options,
+                manual_duration = resolve_manual_force_duration(
+                    call.data, entry.options, getattr(getattr(hass, "config", None), "time_zone", None),
+                    now=dt_util.utcnow(),
                 )
-                if manual_duration not in DISCHARGE_DURATIONS:
-                    validate_native_discharge_duration(
-                        hass, hass.data.get(DOMAIN, {}).get(entry.entry_id, {}), manual_duration,
-                    )
+                validate_native_discharge_duration(
+                    hass, hass.data.get(DOMAIN, {}).get(entry.entry_id, {}), manual_duration,
+                )
             except ValueError as err:
                 raise HomeAssistantError(str(err)) from err
         if getattr(hass, "data", {}).get("power_sync_license_manager") is not None:
@@ -37495,6 +37495,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     async def handle_force_charge(call: ServiceCall) -> dict[str, Any] | None:
         """Force charge mode - switches to autonomous with free import tariff."""
         requested_at = _local_powerwall_runtime.get("battery_route_requested_at") or time.time()
+        # Validate manual timing before relinquishing ownership or changing state.
+        if _control_call_source(call) != "optimizer":
+            from .force_discharge_duration import resolve_manual_force_duration, validate_native_charge_duration
+            try:
+                manual_duration = resolve_manual_force_duration(
+                    call.data, entry.options, getattr(getattr(hass, "config", None), "time_zone", None),
+                    now=dt_util.utcnow(),
+                )
+                validate_native_charge_duration(
+                    hass, hass.data.get(DOMAIN, {}).get(entry.entry_id, {}), manual_duration,
+                )
+            except ValueError as err:
+                raise HomeAssistantError(str(err)) from err
         if getattr(hass, "data", {}).get("power_sync_license_manager") is not None:
             from .licensing.guard import service_allowed
             if not service_allowed(hass, call.data, 'handle_force_charge'):
@@ -37521,23 +37534,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             call.data.get("power_w", 0),
         )
 
-        # Convert to int if string (from HA service selector or button-card)
-        try:
-            duration = int(raw_duration)
-        except (ValueError, TypeError):
-            _LOGGER.warning(f"Could not convert duration {raw_duration!r} to int, using default {DEFAULT_DISCHARGE_DURATION}")
-            duration = DEFAULT_DISCHARGE_DURATION
+        # Keep optimizer coercion unchanged; manual values were validated above.
         if source == "optimizer":
-            if not (1 <= duration <= 1440):
-                _LOGGER.warning(
-                    "Optimizer force charge duration %s out of range, using default %d",
-                    duration,
-                    DEFAULT_DISCHARGE_DURATION,
-                )
+            try:
+                duration = int(raw_duration)
+            except (ValueError, TypeError):
                 duration = DEFAULT_DISCHARGE_DURATION
-        elif duration not in DISCHARGE_DURATIONS:
-            _LOGGER.warning(f"Duration {duration} not in allowed values {DISCHARGE_DURATIONS}, using default {DEFAULT_DISCHARGE_DURATION}")
-            duration = DEFAULT_DISCHARGE_DURATION
+            if not (1 <= duration <= 1440):
+                duration = DEFAULT_DISCHARGE_DURATION
+        else:
+            duration = manual_duration
 
         if _monitoring_mode_should_block_control(call):
             _LOGGER.info(

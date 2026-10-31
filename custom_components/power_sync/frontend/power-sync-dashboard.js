@@ -258,6 +258,11 @@ details.res .kv { margin-top: 10px; font-size: 13px; }
 .stepper { display: inline-flex; align-items: center; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; flex: none; }
 .stepper button { width: 30px; height: 30px; border: 0; background: var(--bg-2); cursor: pointer; font-size: 16px; }
 .stepper button:disabled { opacity: .35; cursor: default; }
+.timing-input { width: 4.5em; min-width: 0; padding: 7px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-2); color: var(--fg); font: inherit; text-align: center; }
+.timing-input.clock { width: 7em; }
+.timing-editor { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.timing-label { font-size: 12px; color: var(--muted); }
+.timing-summary { color: var(--fg-2); font-size: 13px; }
 .stepper output { min-width: 64px; text-align: center; font-family: var(--mono); font-size: 14px; }
 .switch { position: relative; width: 44px; height: 26px; border-radius: 13px; border: 0; background: var(--hold); cursor: pointer; flex: none; transition: background .2s; }
 .switch::after { content: ""; position: absolute; top: 3px; left: 3px; width: 20px; height: 20px; border-radius: 50%; background: #fff; transition: transform .2s; }
@@ -1823,17 +1828,43 @@ const PS_MODE_TEXT = {
   hold_soc: ['Holding charge', 'Holding the battery at its current charge.'],
 };
 
+function psUntilPreview(value, timeZone, now = Date.now()) {
+  if (!/^(?:[01][0-9]|2[0-3]):[0-5][0-9]$/.test(value)) return { error: 'Enter a finish time in HH:mm format.' };
+  if (!timeZone) return { error: 'Home Assistant timezone is unavailable.' };
+  try {
+    const clock = new Intl.DateTimeFormat('en-GB', { timeZone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+    const day = new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' });
+    for (let at = (Math.floor(now / 60000) + 1) * 60000; at <= now + 48 * 3600000; at += 60000) {
+      if (clock.format(at) !== value) continue;
+      const minutes = Math.ceil((at - now) / 60000);
+      if (minutes > 1440) return { error: 'The next occurrence exceeds the 24-hour maximum. Choose a shorter window.' };
+      const tomorrow = day.format(at) !== day.format(now);
+      return { minutes, label: `until ${value}${tomorrow ? ' tomorrow' : ' today'} (${timeZone}; about ${psDuration(minutes)})` };
+    }
+  } catch (_) { return { error: 'Home Assistant timezone is unavailable.' }; }
+  return { error: 'No upcoming finish time is available.' };
+}
+
 class PsControlsCard extends PsCardBase {
   constructor() {
     super();
     this._duration = null;
+    this._customEnabled = null;
+    this._hours = null;
+    this._minutes = null;
+    this._timingMode = 'duration';
+    this._until = '';
+    this._confirmToken = null;
+    this._saveTimer = null;
+    this.addEventListener('input', e => this._onTimingInput(e));
+    this.addEventListener('change', e => { if (e.target.dataset?.timingInput) this._saveCustomDuration(); });
     this._confirm = null;
     this._confirmTimer = null;
     this.addEventListener('click', e => this._onClick(e));
   }
 
   _signature() {
-    return `${super._signature()}#${this._duration}|${this._confirm}|${psApiPeek('power_sync/optimization')?.monitoring_mode}`;
+    return `${super._signature()}#${this._duration}|${this._customEnabled}|${this._hours}|${this._minutes}|${this._timingMode}|${this._until}|${this._confirm}|${this._hass?.config?.time_zone}|${Math.floor(Date.now() / 60000)}|${psApiPeek('power_sync/optimization')?.monitoring_mode}`;
   }
 
   _defaultDuration() {
@@ -1843,6 +1874,9 @@ class PsControlsCard extends PsCardBase {
 
   _render() {
     const hass = this._hass, en = this.ents;
+    this._initTiming();
+    const focused = this.querySelector('[data-timing-input]:focus');
+    const focus = focused ? { key: focused.dataset.timingInput, start: focused.selectionStart, end: focused.selectionEnd } : null;
     if (this._duration == null) this._duration = this._defaultDuration();
     const data = this._api('power_sync/optimization');
     const monitoring = data ? !!data.monitoring_mode : psState(hass, en.monitoring)?.state === 'on';
@@ -1858,8 +1892,8 @@ class PsControlsCard extends PsCardBase {
     const remaining = restoring || starting ? NaN : Number(modeState?.attributes?.remaining_minutes);
     const power = psState(hass, en.forcePower);
     const powerKw = Number(power?.state);
-    const custom = psState(hass, en.customDischarge);
-    const customMin = Number(custom?.state);
+    if (this._confirm && (this._confirmPower !== power?.state || this._confirmTimezone !== hass?.config?.time_zone)) this._clearConfirm();
+    const timing = this._timingRequest();
     const btn = (kind, cls) => {
       const k = PS_CONTROL_KINDS[kind];
       const confirming = this._confirm === kind;
@@ -1871,27 +1905,100 @@ class PsControlsCard extends PsCardBase {
       <div class="field"><span class="lab" id="dur-l">Run for</span>
         <div class="chipsel" role="group" aria-labelledby="dur-l">${this._durations().map(m => `<button type="button" data-min="${m}" aria-pressed="${m === this._duration}">${m < 60 ? `${m}m` : `${m / 60}h`}</button>`).join('')}</div>
       </div>
+      <div class="row2"><span class="lab" id="cust-l">Custom charge/discharge time<small>Applies to Charge and Discharge</small></span><button type="button" class="switch" role="switch" aria-checked="${this._customOn()}" aria-labelledby="cust-l" data-custom-toggle></button></div>
+      ${this._customOn() ? `<div class="chipsel" role="group" aria-label="Custom timing mode"><button type="button" data-timing-mode="duration" aria-pressed="${this._timingMode === 'duration'}">Run for</button><button type="button" data-timing-mode="until" aria-pressed="${this._timingMode === 'until'}">Until</button></div>
+      ${this._timingMode === 'duration' ? `<div class="timing-editor"><button type="button" class="tbtn" data-step="custom" data-d="-1" aria-label="Shorten custom duration by one minute">−</button><label><span class="timing-label">Hours</span> <input class="timing-input" type="text" inputmode="numeric" data-timing-input="hours" value="${psEsc(this._hours)}" aria-label="Custom duration hours"></label><label><span class="timing-label">Minutes</span> <input class="timing-input" type="text" inputmode="numeric" data-timing-input="minutes" value="${psEsc(this._minutes)}" aria-label="Custom duration minutes"></label><button type="button" class="tbtn" data-step="custom" data-d="1" aria-label="Lengthen custom duration by one minute">+</button></div>` : `<label class="row2"><span class="lab">Finish at<small>${psEsc(hass?.config?.time_zone || 'Home Assistant timezone unavailable')}</small></span><input class="timing-input clock" type="text" placeholder="HH:mm" maxlength="5" data-timing-input="until" value="${psEsc(this._until)}" aria-label="Finish time HH:mm"></label>`}` : ''}
+      <p class="timing-summary" role="status">${psEsc(timing.error || `Charge / Discharge: ${timing.label}`)}</p>
       <div class="actions">
         ${btn('charge', 'primary')}${btn('discharge', 'amber')}${btn('self', 'quiet')}${btn('hold', 'quiet')}
         ${active ? `<button type="button" class="btn danger full${this._confirm === 'restore' ? ' confirming' : ''}" data-kind="restore">${restoring ? 'Restoring…' : this._confirm === 'restore' ? 'Confirm restore normal' : 'Restore normal'}</button>` : ''}
       </div>
       ${power ? `<div class="row2"><span class="lab">Power limit<small>Max uses the fastest rate allowed</small></span><div class="stepper"><button type="button" data-step="power" data-d="-1" aria-label="Lower power limit">−</button><output class="num">${Number.isFinite(powerKw) && powerKw > 0 ? `${powerKw.toFixed(1)} kW` : 'Max'}</output><button type="button" data-step="power" data-d="1" aria-label="Raise power limit">+</button></div></div>` : ''}
-      ${custom && this._customAvailable() ? `<div class="row2"><span class="lab" id="cust-l">Custom discharge time<small>${this._customOn() ? 'Discharges use this instead of Run for' : 'Off: discharges use Run for'}</small></span><span class="chipsel"><button type="button" class="switch" role="switch" aria-checked="${this._customOn()}" aria-labelledby="cust-l" data-custom-toggle></button></span></div>
-      ${this._customOn() ? `<div class="row2"><span class="lab">Discharge for</span><div class="stepper"><button type="button" data-step="custom" data-d="-1" aria-label="Shorter custom discharge">−</button><output class="num">${Number.isFinite(customMin) ? psDuration(customMin) : '—'}</output><button type="button" data-step="custom" data-d="1" aria-label="Longer custom discharge">+</button></div></div>` : ''}` : ''}
-      <p class="hint">Tap a button twice to confirm.</p>`;
+      <p class="hint">Tap a button twice to confirm. Hold charge and Power the home use the Run for preset.</p>`;
+    if (focus) {
+      const input = this.querySelector(`[data-timing-input="${focus.key}"]`);
+      input?.focus({ preventScroll: true });
+      if (input && focus.start != null) input.setSelectionRange(focus.start, focus.end);
+    }
   }
 
-  // The custom discharge time applies only while the discharge duration
-  // select is set to "Custom", matching the integration's own rule.
-  _customAvailable() {
-    const opts = psState(this._hass, this.ents.dischargeDuration)?.attributes?.options;
-    return Array.isArray(opts) && opts.includes('Custom');
+  _initTiming() {
+    if (this._duration == null) this._duration = this._defaultDuration();
+    if (this._customEnabled == null) {
+      this._customEnabled = psState(this._hass, this.ents.dischargeDuration)?.state === 'Custom';
+      const saved = Number(psState(this._hass, this.ents.customDischarge)?.state);
+      this._setCustomMinutes(Number.isInteger(saved) && saved >= 1 && saved <= 1440 ? saved : this._duration);
+    }
   }
 
   _customOn() {
-    return this._customAvailable()
-      && psState(this._hass, this.ents.dischargeDuration)?.state === 'Custom'
-      && !!psState(this._hass, this.ents.customDischarge);
+    this._initTiming();
+    return this._customEnabled;
+  }
+
+  _setCustomMinutes(minutes) {
+    this._hours = String(Math.floor(minutes / 60));
+    this._minutes = String(minutes % 60);
+  }
+
+  _customMinutes() {
+    if (!/^[0-9]+$/.test(this._hours) || !/^[0-9]+$/.test(this._minutes)) return NaN;
+    const hours = Number(this._hours), minutes = Number(this._minutes);
+    const total = hours * 60 + minutes;
+    return minutes <= 59 && total >= 1 && total <= 1440 ? total : NaN;
+  }
+
+  _timingRequest() {
+    this._initTiming();
+    if (!this._customOn()) return { data: { duration: String(this._duration) }, label: `for ${psDuration(this._duration)}` };
+    if (this._timingMode === 'until') {
+      const preview = psUntilPreview(this._until, this._hass?.config?.time_zone);
+      return preview.error ? preview : { ...preview, data: { until: this._until } };
+    }
+    const minutes = this._customMinutes();
+    return Number.isFinite(minutes)
+      ? { data: { duration: String(minutes) }, label: `for ${psDuration(minutes)}` }
+      : { error: 'Enter a duration from 1 minute to 24 hours (minutes 0–59).' };
+  }
+
+  _clearConfirm() {
+    clearTimeout(this._confirmTimer);
+    this._confirm = null;
+    this._confirmToken = null;
+  }
+
+  disconnectedCallback() {
+    super.disconnectedCallback();
+    this._clearConfirm();
+    clearTimeout(this._saveTimer);
+  }
+
+  _setCustomEnabled(enabled, preset = this._duration) {
+    this._customEnabled = enabled;
+    const entity_id = this.ents.dischargeDuration;
+    const state = psState(this._hass, entity_id);
+    const option = enabled ? 'Custom' : String(preset);
+    if (entity_id && state?.attributes?.options?.includes(option) && state.state !== option) {
+      this._call('select', 'select_option', { entity_id, option });
+    }
+  }
+
+  _onTimingInput(e) {
+    const key = e.target.dataset?.timingInput;
+    if (!['hours', 'minutes', 'until'].includes(key)) return;
+    this[`_${key}`] = e.target.value;
+    this._clearConfirm();
+    clearTimeout(this._saveTimer);
+    this._saveTimer = setTimeout(() => this._saveCustomDuration(), 400);
+    this._invalidate();
+  }
+
+  _saveCustomDuration() {
+    if (this._timingMode !== 'duration') return;
+    const value = this._customMinutes(), id = this.ents.customDischarge;
+    if (id && Number.isFinite(value) && Number(psState(this._hass, id)?.state) !== value) {
+      this._call('number', 'set_value', { entity_id: id, value });
+    }
   }
 
   _durations() {
@@ -1901,8 +2008,11 @@ class PsControlsCard extends PsCardBase {
     return list.length ? list : PS_DURATIONS;
   }
 
-  _armConfirm(kind) {
+  _armConfirm(kind, token) {
     this._confirm = kind;
+    this._confirmToken = token;
+    this._confirmPower = psState(this._hass, this.ents.forcePower)?.state;
+    this._confirmTimezone = this._hass?.config?.time_zone;
     clearTimeout(this._confirmTimer);
     this._confirmTimer = setTimeout(() => { this._confirm = null; this._invalidate(); }, PS_CONFIRM_MS);
     this._invalidate();
@@ -1910,47 +2020,58 @@ class PsControlsCard extends PsCardBase {
 
   _onClick(e) {
     const hass = this._hass, en = this.ents;
+    this._initTiming();
     const chip = e.target.closest('button[data-min]');
-    if (chip) { this._duration = Number(chip.dataset.min); this._invalidate(); return; }
+    if (chip) { this._duration = Number(chip.dataset.min); this._setCustomEnabled(false); this._clearConfirm(); this._invalidate(); return; }
+    const timingMode = e.target.closest('[data-timing-mode]');
+    if (timingMode) { this._timingMode = timingMode.dataset.timingMode; this._clearConfirm(); this._invalidate(); return; }
     if (e.target.closest('[data-custom-toggle]')) {
-      const option = this._customOn()
-        ? (psState(hass, en.dischargeDuration)?.attributes?.options || []).find(o => Number(o) === this._duration) || '30'
-        : 'Custom';
-      this._call('select', 'select_option', { entity_id: en.dischargeDuration, option });
+      this._setCustomEnabled(!this._customOn());
+      this._clearConfirm();
+      this._invalidate();
       return;
     }
     const step = e.target.closest('button[data-step]');
     if (step) {
-      const id = step.dataset.step === 'power' ? en.forcePower : en.customDischarge;
-      const s = psState(hass, id);
-      if (!s) return;
-      const stepSize = Number(s.attributes?.step) || 1;
-      const inc = step.dataset.step === 'custom' ? Math.max(stepSize, 15) : stepSize;
-      const min = Number(s.attributes?.min ?? 0), max = Number(s.attributes?.max ?? 100);
-      const next = Math.max(min, Math.min(max, (Number(s.state) || 0) + inc * Number(step.dataset.d)));
-      this._call('number', 'set_value', { entity_id: id, value: Math.round(next * 100) / 100 });
+      this._clearConfirm();
+      if (step.dataset.step === 'custom') {
+        const value = this._customMinutes();
+        if (!Number.isFinite(value)) return;
+        this._setCustomMinutes(Math.max(1, Math.min(1440, value + Number(step.dataset.d))));
+        this._saveCustomDuration();
+      } else {
+        const id = en.forcePower, state = psState(hass, id);
+        if (!state) return;
+        const inc = Number(state.attributes?.step) || 1;
+        const min = Number(state.attributes?.min ?? 0), max = Number(state.attributes?.max ?? 100);
+        const next = Math.max(min, Math.min(max, (Number(state.state) || 0) + inc * Number(step.dataset.d)));
+        this._call('number', 'set_value', { entity_id: id, value: Math.round(next * 100) / 100 });
+      }
+      this._invalidate();
       return;
     }
     const b = e.target.closest('button[data-kind]');
     if (!b) return;
     const kind = b.dataset.kind;
-    if (this._confirm !== kind) { this._armConfirm(kind); return; }
-    clearTimeout(this._confirmTimer);
-    this._confirm = null;
+    const customKind = kind === 'charge' || kind === 'discharge';
+    const timing = customKind ? this._timingRequest() : { data: { duration: String(this._duration) }, label: `for ${psDuration(this._duration)}` };
+    if (kind !== 'restore' && timing.error) { this._clearConfirm(); this._toast(timing.error); this._invalidate(); return; }
+    const kw = Number(psState(hass, en.forcePower)?.state);
+    const data = { ...timing.data };
+    if (customKind && Number.isFinite(kw) && kw > 0) data.power_w = Math.round(kw * 1000);
+    const token = JSON.stringify([kind, data, timing.label]);
+    if (this._confirm !== kind || this._confirmToken !== token) { this._armConfirm(kind, token); return; }
+    this._clearConfirm();
     if (kind === 'restore') {
       this._call('power_sync', 'restore_normal').then(ok => ok && this._toast('Restoring normal operation'));
       this._invalidate();
       return;
     }
     const k = PS_CONTROL_KINDS[kind];
-    const customMin = Number(psState(hass, en.customDischarge)?.state);
-    const minutes = kind === 'discharge' && this._customOn() && Number.isFinite(customMin) && customMin > 0 ? customMin : this._duration;
-    const data = { duration: String(Math.round(minutes)) };
-    const kw = Number(psState(hass, en.forcePower)?.state);
-    if ((kind === 'charge' || kind === 'discharge') && Number.isFinite(kw) && kw > 0) data.power_w = Math.round(kw * 1000);
-    this._call('power_sync', k.service, data).then(ok => ok && this._toast(`${k.done} for ${psDuration(minutes)}`));
+    this._call('power_sync', k.service, data).then(ok => ok && this._toast(`${k.label} requested ${timing.label}`));
     this._invalidate();
   }
+
 }
 
 // ─── Optimizer plan ──────────────────────────────────────────────

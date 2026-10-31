@@ -1,5 +1,8 @@
-"""Validation for manual discharge windows, independent of hardware control."""
+"""Validation for manual charge/discharge windows, independent of hardware control."""
 from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import math
 import re
@@ -19,7 +22,7 @@ def validate_discharge_duration(value: Any) -> int:
         minutes = math.nan
     if (isinstance(value, bool) or not math.isfinite(minutes)
             or not minutes.is_integer() or not 1 <= minutes <= MAX_FORCE_DISCHARGE_MINUTES):
-        raise ValueError("Force Discharge duration must be a whole number from 1 to 1440 minutes (24 hours)")
+        raise ValueError("Charge/discharge duration must be a whole number from 1 to 1440 minutes (24 hours)")
     return int(minutes)
 
 
@@ -43,7 +46,7 @@ def _number_accepts_duration(hass: Any, controller: Any, key: str, value: int, l
     except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
         valid = False
     if not valid:
-        raise ValueError(f"{label} cannot confirm support for this discharge duration; check the native duration control's range and step")
+        raise ValueError(f"{label} cannot confirm support for this duration; check the native duration control's range and step")
 
 
 def validate_native_discharge_duration(hass: Any, entry_data: dict, minutes: int) -> None:
@@ -68,6 +71,61 @@ def validate_native_discharge_duration(hass: Any, entry_data: dict, minutes: int
             _number_accepts_duration(hass, solax, "remotecontrol_autorepeat_duration", minutes * 60, "SolaX")
         elif profile != "manual":
             raise ValueError("SolaX discharge duration support is not ready; wait for native control discovery")
+    neovolt = getattr(entry_data.get("neovolt_coordinator"), "_controller", None)
+    if neovolt is not None:
+        for controller in getattr(neovolt, "_controllers", [neovolt]):
+            _number_accepts_duration(hass, controller, "dispatch_duration", minutes, "Neovolt")
+
+
+def resolve_manual_force_duration(data: Any, options: dict, time_zone: str, *, now: datetime | None = None) -> int:
+    """Resolve explicit minutes or the next real HA-local HH:mm occurrence.
+
+    UTC round-tripping excludes nonexistent spring-forward times; checking both
+    folds picks the next occurrence during a repeated autumn hour. Native force
+    lifecycles accept whole minutes, so finish-at requests round up by <60 s.
+    """
+    if "until" not in data:
+        return selected_discharge_duration(data.get("duration", 30), options)
+    if "duration" in data:
+        raise ValueError("Choose duration or until, not both")
+    value = data["until"]
+    if not isinstance(value, str) or not re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", value):
+        raise ValueError("Until must be a clock time in HH:mm format")
+    try:
+        zone = ZoneInfo(time_zone)
+    except (ZoneInfoNotFoundError, TypeError, ValueError) as err:
+        raise ValueError("Home Assistant timezone is unavailable") from err
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    hour, minute = map(int, value.split(":"))
+    local_date = now.astimezone(zone).date()
+    candidates = []
+    for offset in range(3):
+        day = local_date + timedelta(days=offset)
+        for fold in (0, 1):
+            local = datetime(day.year, day.month, day.day, hour, minute, tzinfo=zone, fold=fold)
+            utc = local.astimezone(timezone.utc)
+            back = utc.astimezone(zone)
+            if back.replace(tzinfo=None) == local.replace(tzinfo=None) and utc > now:
+                candidates.append(utc)
+    if not candidates:
+        raise ValueError("Until has no upcoming valid occurrence")
+    return validate_discharge_duration(math.ceil((min(candidates) - now).total_seconds() / 60))
+
+
+def validate_native_charge_duration(hass: Any, entry_data: dict, minutes: int) -> None:
+    """Reject unsupported manual charge windows before ownership or writes."""
+    if entry_data.get("foxess_coordinator") is not None and minutes > 1092:
+        raise ValueError("FoxESS charge supports at most 1092 minutes (16-bit timeout)")
+    solax = getattr(entry_data.get("solax_coordinator"), "_controller", None)
+    if solax is not None:
+        profile = getattr(solax, "_control_profile", None)
+        if profile == "remote_control":
+            _number_accepts_duration(hass, solax, "remotecontrol_autorepeat_duration", minutes * 60, "SolaX")
+        elif profile == "force_time":
+            if minutes >= 1440:
+                raise ValueError("SolaX native charge schedules support less than 24 hours")
+        elif profile != "manual":
+            raise ValueError("SolaX charge duration support is not ready; wait for native control discovery")
     neovolt = getattr(entry_data.get("neovolt_coordinator"), "_controller", None)
     if neovolt is not None:
         for controller in getattr(neovolt, "_controllers", [neovolt]):
