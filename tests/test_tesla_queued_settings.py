@@ -288,6 +288,7 @@ async def test_demand_protection_flip_blocks_queued_initial_or_resend_and_conver
                  "coordinator_grid", "exec", flags=__import__("__future__").annotations.compiler_flag), ns)
     obj.set_grid_charging_enabled_outcome = ns["set_grid_charging_enabled_outcome"].__get__(obj)
     ns = dict(__package__=controls.site.__package__, hass=obj.hass, time=time,
+              entry=obj.hass.config_entries.async_get_entry(obj._entry_id),
               demand_grid_charging_control_lock=asyncio.Lock(),
               _aemo_dispatch_entry_data=lambda: obj.hass.data["power_sync"].get("entry"),
               _demand_grid_charging_protection_active=lambda **kwargs: state["active"],
