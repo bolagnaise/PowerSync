@@ -360,6 +360,40 @@ async def test_two_vins_keep_original_distinct_deadlines_and_both_expire():
 
 
 @pytest.mark.asyncio
+async def test_recovering_boost_keeps_deadline_and_does_not_report_physical_start():
+    h = BoostHarness()
+    healthy = await h.start(VIN_B, 3)
+    healthy_state, healthy_owner = h.states["entry"][VIN_B], h.owner(VIN_B)
+    healthy_timer = h.runtime["ev_boost_timers"][VIN_B]
+    h.start_hook = lambda vin, _params: h.states["entry"].setdefault(vin, {}).update(
+        transport_recovery_pending=True, charging_started=False)
+
+    pending = await h.start(VIN_A, 1)
+
+    assert pending["success"] is True
+    assert pending["charging_confirmed"] is False
+    assert pending["recovery_pending"] is True
+    assert "waiting for charging recovery" in pending["message"]
+    record = h.runtime["ev_boost_sessions"][VIN_A]
+    assert record["status"] == "recovering"
+    assert record["unknown_start_outcome"] is True
+    assert record["expires_at"] == pending["stops_at"]
+    assert h.owner(VIN_A)["last_command"]["success"] is False
+    h.now = datetime.fromisoformat(pending["stops_at"])
+    await h.due()
+    assert h.stops() == [VIN_A]
+    assert h.states["entry"][VIN_B] is healthy_state
+    assert h.owner(VIN_B) is healthy_owner
+    assert h.runtime["ev_boost_timers"][VIN_B] is healthy_timer
+    assert record["expires_at"] < healthy["stops_at"]
+
+    h.now += timedelta(minutes=3)
+    await h.due()
+    assert h.stops() == [VIN_A, VIN_B]
+    assert h.states["entry"] == {} and h.runtime["ev_boost_timers"] == {}
+
+
+@pytest.mark.asyncio
 async def test_stopped_vin_expiry_leaves_other_vehicle_timer_and_owner():
     h = BoostHarness()
     await h.start(VIN_A)

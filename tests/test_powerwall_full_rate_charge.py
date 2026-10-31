@@ -59,3 +59,8 @@ def test_native_max_cannot_erase_current_permissions_or_site_limits(changes,reas
 def test_explicit_unlimited_import_and_configured_zero_setting():
     assert eligible(native_import_max_w=None,software_import_max_w=None).eligible
     assert eligible(native_import_max_w=None,software_import_max_w=0).eligible
+
+
+def test_verified_native_site_controller_can_coexist_with_ev_demand():
+    result = eligible(pending_ev_w=4600, native_ev_active=True, ev_coexistence=True)
+    assert result.eligible

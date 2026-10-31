@@ -51,7 +51,8 @@ class NativeMaxChargeAdapter:
                  read_tariff, upload, restorable, forcing_tariff,
                  budget, entry_id, site, tariff_matches=None, monotonic=time.monotonic,
                  settle_interval=5, direction="charge", clock=time.time,
-                 read_export_rule=None, write_export_rule=None):
+                 read_export_rule=None, write_export_rule=None,
+                 reconcile_managed=None, reconcile_timeout=20):
         self.client, self.identity = client, identity
         self.current_identity, self.policy, self.config = current_identity, policy, config
         self.read_tariff, self.upload, self.restorable = read_tariff, upload, restorable
@@ -71,12 +72,16 @@ class NativeMaxChargeAdapter:
         self._export_limit_ready = False
         self.guard_denial_reason = None
         self.read_export_rule, self.write_export_rule = read_export_rule, write_export_rule
+        self.reconcile_managed = reconcile_managed
+        self.reconcile_timeout = reconcile_timeout
         self._export_observation = None
         self._cloud_export_owned = False
         self._export_cloud_checked = False
         self._export_conflict = False
         self._export_missing_at = None
         self._export_untracked_ready = False
+        self.ev_coexistence = False
+        self._ev_coexistence_verified = False
 
     def _can_prepare_untracked_export(self, config):
         """An omitted preference permits explicit setup, never inferred permission."""
@@ -253,6 +258,27 @@ class NativeMaxChargeAdapter:
         except (ValueError, TypeError):
             return self._deny("native_max_dispatch_config_invalid")
 
+    def _site_ev_coexistence(self, config, info, native_limit):
+        """Grant coexistence only from fresh finite native/software site caps."""
+        if not isinstance(info, dict) or type(native_limit) not in (int, float):
+            return False
+        if not math.isfinite(native_limit) or native_limit <= 0:
+            return False
+        # A current DCQ sample can carry an old signed config. Only the
+        # config coordinator's provenance can authorize site-controller
+        # coexistence; a missing stamp remains fail-closed.
+        config_observed = getattr(self._snapshot, "config_observed_monotonic", None)
+        if (type(config_observed) not in (int, float) or not math.isfinite(config_observed)
+                or not 0 <= self.monotonic() - config_observed <= 5):
+            return False
+        key = ("optimization_max_grid_import_w" if self.direction == "charge"
+               else "optimization_max_grid_export_w")
+        software = config.get(key)
+        if software in (None, 0):
+            return True
+        return (type(software) in (int, float) and math.isfinite(software)
+                and software > 0 and native_limit <= software)
+
     def _forcing_permitted(self, native_config=None, *, require_export_limit=False):
         snapshot = self._snapshot
         if snapshot is None or self._observed_at is None:
@@ -262,8 +288,10 @@ class NativeMaxChargeAdapter:
         maximum = self.budget.native_max_claim(self.site)
         if maximum and maximum.get("token") != self.token:
             return self._deny("native_max_site_already_owned")
-        if any(r.get("site") == self.site for r in self.budget.managed.values()):
-            return self._deny("managed_ev_ownership_present")
+        if (maximum and maximum.get("direction", "charge") != self.direction):
+            return self._deny("native_max_direction_changed")
+        self.ev_coexistence = False
+        self._ev_coexistence_verified = False
         try:
             config = dict(self.config())
             if self.planning_request:
@@ -280,6 +308,18 @@ class NativeMaxChargeAdapter:
                                   native_import_limit_kw=limits.get("max_site_meter_power_ac"),
                                   native_export_limit_kw=limits.get("min_site_meter_power_ac"))
             permission = self._grid_value(raw)
+            coexistence_limit = imported
+            if self.direction == "discharge":
+                try:
+                    _, coexistence_limit = site_grid_limits_w(
+                        type("NativeBounds", (), {"raw": {"config": raw}})())
+                except (ValueError, TypeError, KeyError):
+                    coexistence_limit = None
+            self._ev_coexistence_verified = self._site_ev_coexistence(
+                config, info, coexistence_limit)
+            if (any(r.get("site") == self.site for r in self.budget.managed.values())
+                    and not self._ev_coexistence_verified):
+                return self._deny("managed_ev_ownership_present")
             if self.direction == "discharge":
                 if not isinstance(info, dict) or "min_site_meter_power_ac" not in info:
                     return self._deny("native_export_limit_missing")
@@ -327,6 +367,7 @@ class NativeMaxChargeAdapter:
                                       software_reserve=config.get("optimization_backup_reserve", .2),
                                       hardware_reserve=config.get("hardware_backup_reserve", 0),
                                       load_w=snapshot.load_w, solar_w=snapshot.solar_w)
+                self.ev_coexistence = self._ev_coexistence_verified
                 return True
             if type(permission) is not bool:
                 return self._deny("grid_charging_permission_unknown")
@@ -337,6 +378,7 @@ class NativeMaxChargeAdapter:
                 native_import_max_w=imported, native_import_known=isinstance(info, dict),
                 pending_ev_w=self.budget.unobserved_w(self.site),
                 native_ev_active=self.budget.site_armed(self.site),
+                ev_coexistence=self._ev_coexistence_verified,
                 grid_charging_allowed=(permission is False or (
                     permission is True and self.planning_request
                     and not self._grid_charge_ready
@@ -355,6 +397,8 @@ class NativeMaxChargeAdapter:
                                   soc_percent=snapshot.soc,
                                   soc_cap_fraction=config.get("optimization_grid_charge_soc_cap", 1),
                                   evidence_age_s=self.monotonic()-self._observed_at)
+            if eligibility.eligible:
+                self.ev_coexistence = self._ev_coexistence_verified
             return eligibility.eligible
         except (ValueError, TypeError, KeyError):
             return self._deny("native_limit_or_config_invalid")
@@ -369,6 +413,7 @@ class NativeMaxChargeAdapter:
         if not self.authority():
             return False
         await self.budget.load()
+        reconcile = getattr(self, "reconcile_managed", None)
         try:
             started = self.monotonic()
             refresh = getattr(self.client, "get_control_snapshot", None)
@@ -388,6 +433,17 @@ class NativeMaxChargeAdapter:
                 self._observed_at = self._sample_started(self._snapshot, started)
             self.guard_denial_reason = "native_max_policy_denied"
             permitted = self._forcing_permitted()
+            if (not permitted and self.direction == "charge" and callable(reconcile)
+                    and self.guard_denial_reason == "managed_ev_ownership_present"
+                    and any(record.get("site") == self.site
+                            for record in self.budget.managed.values())):
+                try:
+                    await asyncio.wait_for(reconcile(self.site), timeout=self.reconcile_timeout)
+                except Exception:
+                    _LOGGER.warning("Native Powerwall managed EV reconciliation unavailable")
+                if not self.authority():
+                    return False
+                permitted = self._forcing_permitted()
             if permitted:
                 self.guard_denial_reason = None
             return permitted
@@ -499,7 +555,9 @@ class NativeMaxChargeAdapter:
 
     async def claim(self, token, deadline):
         self.token = token
-        return await self.budget.claim_native_max(self.entry_id, self.site, token, deadline)
+        return await self.budget.claim_native_max(
+            self.entry_id, self.site, token, deadline, direction=self.direction,
+            ev_coexistence=self.ev_coexistence)
 
     async def release(self, token):
         result = await self.budget.release_native_max(self.entry_id, self.site, token)

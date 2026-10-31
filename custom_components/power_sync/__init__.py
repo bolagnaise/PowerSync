@@ -19745,6 +19745,7 @@ class ChargingBoostView(HomeAssistantView):
                 return {"success": False, "message": "Failed to start boost charge",
                         "stops_at": original_deadline, "recovery_pending": True}
             state = ev_actions._dynamic_ev_state.get(self._config_entry.entry_id, {}).get(vehicle_id)
+            recovering = bool((state or {}).get("transport_recovery_pending"))
             _, lease = get_ev_ownership(self._hass, self._config_entry, vehicle_id)
             if (lease is not None and lease.get("owner_mode") != "boost"):
                 return {"success": False, "error": "Boost was superseded"}
@@ -19753,12 +19754,17 @@ class ChargingBoostView(HomeAssistantView):
             records[vehicle_id] = record
             ownership = claim_ev_ownership(
                 self._hass, self._config_entry, vehicle_id, owner_mode="boost",
-                command="start_boost", reason=f"Boost charge for {duration_minutes} minutes",
+                command="start_boost",
+                reason=("Boost plan waiting for charging recovery" if recovering
+                        else f"Boost charge for {duration_minutes} minutes"),
+                success=not recovering,
                 extra={"duration_minutes": duration_minutes, "expires_at": original_deadline,
-                       "target_soc": target_soc})
+                       "target_soc": target_soc, "recovery_pending": recovering})
             if state is not None:
                 state["ownership"] = ownership
-            record.update(status="active", session_id=(state or {}).get("session_id"),
+            record.update(status="recovering" if recovering else "active",
+                          unknown_start_outcome=recovering,
+                          session_id=(state or {}).get("session_id"),
                           ownership_generation=ownership["ownership_generation"])
             saved = await self._save_boost_state(record)
             if not current():
@@ -19784,7 +19790,10 @@ class ChargingBoostView(HomeAssistantView):
             applied_amps = int((state or {}).get("current_amps", 32) or 0)
             if applied_amps < 32:
                 warnings.append(f"Boost limited to {applied_amps}A by per-phase load management")
-            return {"success": True, "message": "Boost charge started",
+            return {"success": True,
+                    "message": ("Boost plan accepted; waiting for charging recovery"
+                                if recovering else "Boost charge started"),
+                    "charging_confirmed": not recovering, "recovery_pending": recovering,
                     "duration_minutes": duration_minutes, "target_soc": target_soc,
                     "stops_at": original_deadline, "warnings": warnings}
         except asyncio.CancelledError:
@@ -34875,12 +34884,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         journal = await _native_max_store.async_load()
         recovery_direction = (journal or {}).get("baseline", {}).get("direction", "charge")
+
+        async def reconcile_managed(reconcile_site):
+            if reconcile_site != site:
+                return False
+            from .native_rate_admission import reconcile_managed_for_native_max
+            return await reconcile_managed_for_native_max(hass, budget, site)
+
         adapter = NativeMaxChargeAdapter(client=client, identity=identity,
             current_identity=_native_max_identity, policy=permitted, config=_local_powerwall_dispatch_config,
             read_tariff=read_tariff, upload=upload, restorable=_select_restorable_tesla_tariff,
             forcing_tariff={}, budget=budget, entry_id=entry.entry_id, site=site,
             tariff_matches=_tesla_tariff_matches_readback, direction=recovery_direction,
-            read_export_rule=read_export_rule, write_export_rule=write_export_rule)
+            read_export_rule=read_export_rule, write_export_rule=write_export_rule,
+            reconcile_managed=reconcile_managed)
         current = NativeMaxChargeSession(adapter, _native_max_store, changed=changed)
         await current.load()
         if not _local_powerwall_generation_current():

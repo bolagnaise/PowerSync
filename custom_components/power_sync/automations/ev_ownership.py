@@ -500,6 +500,9 @@ def _runtime_snapshot(hass: Any, config_entry: Any) -> dict[str, Any]:
         # Stop obligations outlive the live lease/controller after a failed
         # stop, and must not disappear when restart clears active ownership.
         "boost_sessions": deepcopy(entry.get("ev_boost_sessions", {})),
+        # Provider uncertainty survives a session/lease replacement. Reload
+        # restores evidence for observation and cleanup, never Start authority.
+        "transport_recovery": deepcopy(entry.get("ev_transport_recovery", {})),
         "saved_at": _now_iso(),
     }
 
@@ -565,6 +568,7 @@ def restore_ev_runtime_state(
         runtime_state.get("capability_refresh_records") or {}
     )
     stored_boost_sessions = runtime_state.get("boost_sessions", {})
+    entry["ev_transport_recovery"] = deepcopy(runtime_state.get("transport_recovery", {}))
     # Retain malformed records for diagnosis, without treating them as control
     # authority. The Boost restore path validates identity and the deadline.
     entry["ev_boost_sessions"] = deepcopy(stored_boost_sessions)

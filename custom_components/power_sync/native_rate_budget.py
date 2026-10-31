@@ -31,6 +31,11 @@ def managed_devices(record):
     return {provider_device(value) for value in record.get("identities", [record["identity"]])}
 
 
+def native_max_ev_coexistence(maximum):
+    """Return only an explicit, persisted site-controller coexistence grant."""
+    return isinstance(maximum, dict) and maximum.get("ev_coexistence") is True
+
+
 class SharedRateBudget:
     def __init__(self, store, *, clock=time.time):
         self.store, self.clock = store, clock
@@ -89,31 +94,40 @@ class SharedRateBudget:
         return next((entry["native_max"] for entry in self.entries.values()
                      if entry.get("site") == site and entry.get("native_max")), None)
 
-    async def claim_native_max(self, entry_id, site, token, deadline):
-        """Atomically exclude prospective EV demand before native forcing."""
+    async def claim_native_max(self, entry_id, site, token, deadline, direction="charge",
+                               ev_coexistence=False):
+        """Atomically claim a direction-specific native Max site owner."""
         await self.load()
-        task = asyncio.create_task(self._claim_native_max(entry_id, site, token, deadline))
+        task = asyncio.create_task(self._claim_native_max(
+            entry_id, site, token, deadline, direction, ev_coexistence))
         self.storage_tasks.add(task)
         task.add_done_callback(self.storage_tasks.discard)
         return await asyncio.shield(task)
 
-    async def _claim_native_max(self, entry_id, site, token, deadline):
+    async def _claim_native_max(self, entry_id, site, token, deadline, direction, ev_coexistence):
         if (not isinstance(entry_id, str) or not entry_id or not isinstance(site, str) or not site
                 or not isinstance(token, str) or not token or isinstance(deadline, bool)
-                or not isinstance(deadline, (int, float)) or not math.isfinite(deadline)):
+                or not isinstance(deadline, (int, float)) or not math.isfinite(deadline)
+                or direction not in ("charge", "discharge") or type(ev_coexistence) is not bool):
             raise ValueError("Invalid native Max site claim")
         async with self.lock:
             key = f"native_max:{entry_id}"
             old = self.entries.get(key)
             if old:
                 return (old.get("site") == site and old.get("native_max", {}).get("token") == token
-                        and old["native_max"].get("expires_at") == deadline)
-            if (self.clock() >= deadline or self.native_max_claim(site) or self.site_armed(site)
-                    or any(record.get("site") == site for record in self.managed.values())):
+                        and old["native_max"].get("expires_at") == deadline
+                        and old["native_max"].get("direction", "charge") == direction
+                        and native_max_ev_coexistence(old.get("native_max")) == ev_coexistence)
+            maximum = self.native_max_claim(site)
+            if (self.clock() >= deadline or maximum
+                    or (not ev_coexistence and (
+                        self.site_armed(site)
+                        or any(record.get("site") == site for record in self.managed.values())))):
                 return False
             entries = deepcopy(self.entries)
             entries[key] = {"site": site, "sessions": {}, "native_max": {
-                "entry_id": entry_id, "token": token, "expires_at": deadline}}
+                "entry_id": entry_id, "token": token, "expires_at": deadline,
+                "direction": direction, "ev_coexistence": ev_coexistence}}
             self._validate(entries)
             await self.store.async_save({"entries": entries, "managed": self.managed})
             self.entries = entries
@@ -147,6 +161,7 @@ class SharedRateBudget:
     def _validate(entries):
         vins, identities = set(), set()
         max_sites = set()
+        max_by_site = {}
         for key, entry in entries.items():
             maximum = entry.get("native_max") if isinstance(entry, dict) else None
             if maximum is not None:
@@ -156,13 +171,17 @@ class SharedRateBudget:
                         or not isinstance(maximum.get("token"), str) or not maximum["token"]
                         or isinstance(maximum.get("expires_at"), bool)
                         or not isinstance(maximum.get("expires_at"), (int, float))
-                        or not math.isfinite(maximum["expires_at"]) or entry.get("sessions")
+                        or not math.isfinite(maximum["expires_at"])
+                        or maximum.get("direction", "charge") not in ("charge", "discharge")
+                        or type(maximum.get("ev_coexistence", False)) is not bool
                         or entry["site"] in max_sites):
                     raise ValueError("Native Max reservation journal is invalid")
                 max_sites.add(entry["site"])
+                max_by_site[entry["site"]] = maximum
         for entry in entries.values():
             if (isinstance(entry, dict) and entry.get("site") in max_sites
-                    and entry.get("sessions")):
+                    and entry.get("sessions")
+                    and not native_max_ev_coexistence(max_by_site[entry["site"]])):
                 raise ValueError("Native Max conflicts with native EV cleanup")
             if not isinstance(entry, dict) or not isinstance(entry.get("sessions", {}), dict):
                 raise ValueError("Native rate reservation journal is invalid")
@@ -196,7 +215,8 @@ class SharedRateBudget:
             if str(entry_id).startswith("native_max:") or data.get("native_max") is not None:
                 raise ValueError("Native Max uses its own site admission")
             previous = self.entries.get(entry_id, {})
-            if data.get("sessions") and self.native_max_claim(site):
+            if (data.get("sessions") and self.native_max_claim(site)
+                    and not native_max_ev_coexistence(self.native_max_claim(site))):
                 raise ValueError("Native Max owns this site's charging headroom")
             if previous.get("sessions") and previous.get("site") != site:
                 raise ValueError("Native rate cleanup belongs to another site")
@@ -291,11 +311,21 @@ class SharedRateBudget:
             maximum = self.native_max_claim(record["site"])
             if maximum:
                 current, target = evidence.get("current_amps"), record.get("target_amps")
-                if (evidence.get("rate_reduction") is not True or record.get("operation") != "rate"
-                        or type(current) is not int or type(target) is not int
-                        or not 0 <= target <= current <= 80):
+                direction = maximum.get("direction", "charge")
+                coexistence = native_max_ev_coexistence(maximum)
+                valid_amps = (type(current) is int and type(target) is int
+                              and 0 <= current <= 80 and 0 <= target <= 80)
+                if not coexistence and (evidence.get("rate_reduction") is not True
+                        or record.get("operation") != "rate"
+                        or not valid_amps or target > current):
+                    return None
+                if coexistence and record.get("operation") not in ("start", "rate"):
                     return None
                 record["native_max_token"] = maximum["token"]
+                record["native_max_direction"] = direction
+                record["native_max_ev_coexistence"] = coexistence
+            site_enforced = self.site_armed(record["site"]) or bool(
+                maximum and native_max_ev_coexistence(maximum))
             old = self.managed.get(vin)
             record["attempt_id"] = uuid4().hex
             record["identities"] = sorted({record["identity"], *(old.get("identities", [old["identity"]]) if old else [])})
@@ -310,7 +340,7 @@ class SharedRateBudget:
                 record["reserved_w"] = max(record["reserved_w"], old["reserved_w"])
             if old:
                 record["reserved_w"] = max(record["reserved_w"], old["reserved_w"])
-            if self.site_armed(record["site"]) and not evidence.get("rate_reduction"):
+            if site_enforced and not evidence.get("rate_reduction"):
                 now = self.clock()
                 numbers = [evidence.get(k) for k in ("grid_w", "cap_w", "actual_ev_w", "battery_pending_w", "vehicle_at", "meter_at")]
                 if (not all(isinstance(n, (int, float)) and not isinstance(n, bool) and math.isfinite(n) for n in numbers)
@@ -347,7 +377,7 @@ class SharedRateBudget:
             return {"revision": self.revision, "vin": vin, "record": deepcopy(record),
                     "previous": deepcopy(old), "previous_task": self.managed_tasks.get(vin),
                     "battery_generation": evidence.get("battery_generation") if
-                        self.site_armed(record["site"]) and not evidence.get("rate_reduction") else None}
+                        site_enforced and not evidence.get("rate_reduction") else None}
 
     async def abort_managed(self, ticket):
         """Roll back a proven unsent attempt without erasing an older command."""

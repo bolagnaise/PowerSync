@@ -63,6 +63,27 @@ class _Store:
         self.saved += 1
 
 
+@pytest.mark.parametrize("journal", [
+    {"5YJ3E1EA7KF000001": {"attempts": {"old": {"operation": "start", "outcome": "sent_unknown"}},
+                           "quarantine": {"prefix": "second", "phase": "isolated"}}},
+    {"invalid": ["retained for diagnosis"]},
+])
+def test_transport_recovery_survives_runtime_save_and_reload(journal):
+    from copy import deepcopy
+    hass, entry, store = _Hass(), _Entry(), _Store()
+    runtime = hass.data["power_sync"][entry.entry_id]
+    runtime.update(automation_store=store, ev_transport_recovery=deepcopy(journal))
+    assert asyncio.run(ev_ownership.persist_ev_runtime_state(hass, entry, store))
+    restored = _Hass()
+    restored.data["power_sync"][entry.entry_id]["automation_store"] = store
+    ev_ownership.restore_ev_runtime_state(restored, entry, store)
+    assert restored.data["power_sync"][entry.entry_id]["ev_transport_recovery"] == journal
+    assert restored.data["power_sync"][entry.entry_id]["ev_transport_recovery"] is not journal
+    assert restored.data["power_sync"][entry.entry_id].get("ev_ownership", {}) == {}
+    for pending in restored.created_tasks:
+        pending.close()
+
+
 def _set_external_policy(hass, vehicle_id, policy):
     store = _Store(
         {

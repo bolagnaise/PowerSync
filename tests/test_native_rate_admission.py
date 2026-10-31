@@ -56,8 +56,8 @@ def admission(monkeypatch):
     snapshot = SimpleNamespace(grid_w=6000, load_w=5000, solar_w=0, battery_w=-1000,
         raw={'config': {'site_info': {'max_site_meter_power_ac': 15, 'min_site_meter_power_ac': -10}}})
     entry = SimpleNamespace(entry_id='one', data={'tesla_energy_site_id':'site'}, options={})
-    runtime = {'powerwall_local': {'coordinator': SimpleNamespace(data=snapshot,
-        last_success_ts=NOW, last_update_success=True)}}
+    local = SimpleNamespace(data=snapshot, last_success_ts=NOW, last_update_success=True)
+    runtime = {'entry': entry, 'powerwall_local': {'coordinator': local}}
     store = Store(); budget = b.SharedRateBudget(store, clock=lambda: NOW)
     asyncio.run(budget.load())
     budget.armed_sites.add('site')
@@ -67,7 +67,8 @@ def admission(monkeypatch):
     context = {'entry':entry,'runtime':runtime,'vin':VIN,'params':{},'hass':hass}
     token = m._EV_SUBMISSION_CONTEXT.set(context)
     yield SimpleNamespace(m=m, b=b, hass=hass, entry=entry, runtime=runtime, state=state,
-                          snapshot=snapshot, charge=charge, budget=budget, store=store)
+                          snapshot=snapshot, charge=charge, budget=budget, store=store,
+                          provider=provider, local=local)
     m._EV_SUBMISSION_CONTEXT.reset(token)
 
 
@@ -79,6 +80,217 @@ async def test_current_and_start_reuse_one_vin_demand_without_double_counting(ad
     assert await a.m.prepare_ev_submission(a.hass, 'switch.car_charge', operation='start')
     assert len(a.budget.managed) == 1
     assert a.budget.managed[VIN]['reserved_w'] == 4600
+
+
+def test_modern_teslemetry_command_uses_native_current_setting(admission, monkeypatch):
+    a = admission
+    command = SimpleNamespace(entity_id='button.modern_start', unique_id='modern',
+                              device_id='teslemetry-device', platform='teslemetry_bluetooth',
+                              config_entry_id='commands', disabled_by=None)
+    native = SimpleNamespace(entity_id='number.native_current', state='12',
+                             attributes={}, last_reported=a.state.last_reported)
+    registry = SimpleNamespace(entities={command.entity_id: command})
+    states = {command.entity_id: command, native.entity_id: native}
+    a.hass.states.get = states.get
+    commands = ModuleType('managed_admission_probe.teslemetry_bluetooth_commands')
+    commands.native_current_entity = lambda _hass, entity_id: (
+        native.entity_id if entity_id == command.entity_id else None)
+    monkeypatch.setitem(sys.modules, commands.__name__, commands)
+    setting = a.m._current_setting(
+        a.hass, registry, command, command.entity_id, 'start')
+    assert setting is native
+    native.state = 'unknown'
+    assert a.m._current_setting(
+        a.hass, registry, command, command.entity_id, 'rate') is None
+    assert a.m._current_setting(
+        a.hass, registry, command, 'button.other', 'start') is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('source_domain', ['tesla_fleet', 'teslemetry'])
+async def test_native_max_reconcile_refreshes_exact_provider_and_meter_twice(
+    admission, monkeypatch, source_domain,
+):
+    a = admission
+    now = [NOW]
+    a.m.time.time = lambda: now[0]
+    a.budget.clock = lambda: now[0]
+    coordinator = a.provider.runtime_data.vehicles[0].coordinator
+    refreshes = []
+
+    async def provider_refresh():
+        refreshes.append(source_domain)
+        now[0] += 1
+        a.charge.update(timestamp=now[0], charging_state='Stopped', charger_actual_current=0)
+        a.state.last_reported = a.stamp(now[0]) if hasattr(a, 'stamp') else datetime.fromtimestamp(now[0], timezone.utc)
+        a.local.last_success_ts = now[0]
+
+    async def local_refresh():
+        refreshes.append('meter')
+        now[0] += 1
+        a.local.last_success_ts = now[0]
+        a.state.last_reported = datetime.fromtimestamp(now[0], timezone.utc)
+
+    coordinator.async_request_refresh = provider_refresh
+    a.local.async_request_refresh = local_refresh
+    a.charge['timestamp'] = NOW - 30
+    a.hass.config_entries.async_entries = lambda domain: (
+        [a.provider] if domain == source_domain else []
+    )
+    async def advance(seconds):
+        now[0] += seconds
+    monkeypatch.setattr(a.m.asyncio, 'sleep', advance)
+    a.budget.armed_sites.clear()
+    await a.budget.admit_managed(VIN, {
+        'entry_id': 'one', 'site': 'site', 'identity': 'tesla_fleet:provider:car:amps',
+        'entity_id': a.state.entity_id, 'setting_entity_id': a.state.entity_id,
+        'target_amps': 15, 'target_w': 3450, 'reserved_w': 4600,
+        'submitted_at': NOW - 10, 'operation': 'rate', 'uncertain': True,
+    }, {}, lambda: True)
+
+    assert await a.m.reconcile_managed_for_native_max(
+        a.hass, a.budget, 'site', settle_seconds=3,
+    )
+    assert VIN not in a.budget.managed
+    assert refreshes.count(source_domain) == 2
+    assert refreshes.count('meter') == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('case', ['empty', 'active_owner', 'other_site'])
+async def test_native_max_reconcile_does_not_refresh_empty_or_unsafe_records(admission, case):
+    a = admission
+    calls = []
+    coordinator = a.provider.runtime_data.vehicles[0].coordinator
+
+    async def provider_refresh():
+        calls.append('provider')
+        raise AssertionError('provider refresh must be gated')
+
+    async def local_refresh():
+        calls.append('meter')
+        raise AssertionError('meter refresh must be gated')
+
+    coordinator.async_request_refresh = provider_refresh
+    a.local.async_request_refresh = local_refresh
+    if case != 'empty':
+        a.budget.armed_sites.clear()
+        await a.budget.admit_managed(VIN, {
+            'entry_id': 'one', 'site': 'site' if case == 'active_owner' else 'other',
+            'identity': 'tesla_fleet:provider:car:amps', 'reserved_w': 4600,
+        }, {}, lambda: True)
+    if case == 'active_owner':
+        a.runtime['ev_ownership'] = {VIN: {'owner': 'powersync'}}
+
+    result = await a.m.reconcile_managed_for_native_max(a.hass, a.budget, 'site')
+    assert calls == []
+    assert result is (case != 'active_owner')
+    if case != 'empty':
+        assert VIN in a.budget.managed
+
+
+@pytest.mark.asyncio
+async def test_native_max_reconcile_provider_failure_or_stale_report_keeps_journal(admission):
+    a = admission
+    a.budget.armed_sites.clear()
+    await a.budget.admit_managed(VIN, {
+        'entry_id': 'one', 'site': 'site', 'identity': 'tesla_fleet:provider:car:amps',
+        'entity_id': a.state.entity_id, 'setting_entity_id': a.state.entity_id,
+        'target_amps': 15, 'target_w': 3450, 'reserved_w': 4600,
+        'submitted_at': NOW - 10, 'operation': 'rate', 'uncertain': True,
+    }, {}, lambda: True)
+    a.charge['timestamp'] = NOW - 30
+
+    async def failed_refresh():
+        raise OSError('provider unavailable')
+
+    a.provider.runtime_data.vehicles[0].coordinator.async_request_refresh = failed_refresh
+    assert not await a.m.reconcile_managed_for_native_max(
+        a.hass, a.budget, 'site', settle_seconds=0,
+    )
+    assert VIN in a.budget.managed
+
+
+@pytest.mark.asyncio
+async def test_native_max_reconcile_cannot_retire_record_after_new_provider_task(admission):
+    a = admission
+    now = [NOW]
+    a.m.time.time = lambda: now[0]
+    a.budget.clock = lambda: now[0]
+    a.budget.armed_sites.clear()
+    await a.budget.admit_managed(VIN, {
+        'entry_id': 'one', 'site': 'site', 'identity': 'tesla_fleet:provider:car:amps',
+        'entity_id': a.state.entity_id, 'setting_entity_id': a.state.entity_id,
+        'target_amps': 15, 'target_w': 3450, 'reserved_w': 4600,
+        'submitted_at': NOW - 10, 'operation': 'rate', 'uncertain': True,
+    }, {}, lambda: True)
+    release = asyncio.Event()
+    provider_task = None
+
+    async def provider_refresh():
+        nonlocal provider_task
+        provider_task = asyncio.create_task(release.wait())
+        a.budget.managed_tasks[VIN] = provider_task
+        now[0] += 1
+        a.charge.update(timestamp=now[0], charging_state='Stopped', charger_actual_current=0)
+        a.state.last_reported = datetime.fromtimestamp(now[0], timezone.utc)
+        a.local.last_success_ts = now[0]
+
+    a.provider.runtime_data.vehicles[0].coordinator.async_request_refresh = provider_refresh
+    result = await a.m.reconcile_managed_for_native_max(
+        a.hass, a.budget, 'site', settle_seconds=3,
+    )
+    assert not result and VIN in a.budget.managed
+    release.set()
+    await provider_task
+
+
+def test_local_ble_reconciliation_requires_exact_configured_vin_mapping(admission, monkeypatch):
+    a = admission
+    a.entry.data.update(
+        ev_provider='tesla_ble',
+        tesla_ble_entity_prefix='car_a,car_b',
+        tesla_ble_vehicle_mapping=f'{VIN}=car_a',
+    )
+    stamp = datetime.fromtimestamp(NOW, timezone.utc)
+    ble = ModuleType('managed_admission_probe.tesla_ble')
+    current = SimpleNamespace(state='0', entity_id='sensor.car_a_charge_current')
+    charging = SimpleNamespace(state='Stopped', entity_id='sensor.car_a_charging_state')
+    receipts = {
+        'sensor.car_a_charge_current_received': SimpleNamespace(state=stamp),
+        'sensor.car_a_charging_state_received': SimpleNamespace(state=stamp),
+    }
+    a.hass.states.get = lambda entity: receipts.get(entity)
+    ble.get_tesla_ble_charge_current_state = lambda _hass, prefix: current if prefix == 'car_a' else None
+    ble.get_tesla_ble_charging_state = lambda _hass, prefix: charging if prefix == 'car_a' else None
+    ble.get_tesla_ble_observed_at = lambda _hass, state: stamp if state is not None else None
+    monkeypatch.setitem(sys.modules, ble.__name__, ble)
+    telemetry = importlib.import_module('managed_admission_probe.native_rate_telemetry')
+    report = telemetry._ble_vehicle_report(a.hass, a.entry, VIN)
+    assert report['charge_state']['charger_actual_current'] == 0
+    assert report['charge_state']['charging_state'] == 'Stopped'
+    receipts.pop('sensor.car_a_charge_current_received')
+    assert telemetry._ble_vehicle_report(a.hass, a.entry, VIN) is None
+    receipts['sensor.car_a_charge_current_received'] = SimpleNamespace(state=stamp)
+    a.entry.data['tesla_ble_vehicle_mapping'] = f'{VIN}=car_b'
+    assert telemetry._ble_vehicle_report(a.hass, a.entry, VIN) is None
+    a.entry.data['tesla_ble_vehicle_mapping'] = f'{VIN}=unconfigured'
+    assert telemetry._ble_vehicle_report(a.hass, a.entry, VIN) is None
+
+
+def test_site_evidence_uses_entry_aware_ble_report(admission, monkeypatch):
+    a = admission
+    telemetry = importlib.import_module('managed_admission_probe.native_rate_telemetry')
+    local = {'charge_state': {
+        'timestamp': NOW, 'charger_actual_current': 7,
+        'charger_voltage': 230, 'charger_phases': 1,
+        'charging_state': 'Charging'}}
+    monkeypatch.setattr(telemetry, 'vehicle_report_for_entry',
+                        lambda hass, entry, vin: local)
+    monkeypatch.setattr(telemetry, 'vehicle_report',
+                        lambda *_: (_ for _ in ()).throw(AssertionError('cloud-only report used')))
+    evidence = a.m._site_evidence(a.hass, a.entry, a.runtime, VIN, {})
+    assert evidence['actual_ev_w'] == 1610
 
 
 @pytest.mark.asyncio
@@ -157,19 +369,25 @@ async def test_manual_setting_change_during_durable_commit_prevents_submission(a
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('mutation', ['revision', 'token'])
+@pytest.mark.parametrize('mutation', ['revision', 'token', 'direction', 'capability'])
 async def test_native_max_reduction_rechecks_ownership_after_admission(admission, monkeypatch, mutation):
     a = admission
     a.budget.armed_sites.clear()
-    assert await a.budget.claim_native_max('battery', 'site', 'original', NOW+60)
+    assert await a.budget.claim_native_max(
+        'battery', 'site', 'original', NOW+60,
+        ev_coexistence=mutation == 'capability')
     original = a.budget.admit_managed
     async def interleave(*args, **kwargs):
         ticket = await original(*args, **kwargs)
         assert ticket
         if mutation == 'revision':
             a.budget.revision += 1
-        else:
+        elif mutation == 'token':
             a.budget.entries['native_max:battery']['native_max']['token'] = 'replacement'
+        elif mutation == 'direction':
+            a.budget.entries['native_max:battery']['native_max']['direction'] = 'discharge'
+        else:
+            a.budget.entries['native_max:battery']['native_max']['ev_coexistence'] = False
         return ticket
     monkeypatch.setattr(a.budget, 'admit_managed', interleave)
     with pytest.raises(a.m.SiteImportAdmissionDenied, match='ownership changed'):

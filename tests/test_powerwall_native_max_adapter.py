@@ -63,7 +63,8 @@ def setup(monkeypatch):
             return SimpleNamespace(raw={'config':deepcopy(state.config)},soc=state.soc,grid_status=state.grid,
                 battery_w=state.battery_w, load_w=state.load_w, solar_w=state.solar_w,
                 grid_w=state.load_w-state.solar_w-state.battery_w,
-                backup_reserve_percent=state.config['site_info']['backup_reserve_percent'])
+                backup_reserve_percent=state.config['site_info']['backup_reserve_percent'],
+                config_observed_monotonic=state.at)
         async def resume_battery_operation(self,*,before_write,before_submit):
             await before_submit(state.at-2)
             before_write(); state.events.append(('resume',None)); return state.resume_ok
@@ -701,7 +702,7 @@ async def test_signed_solar_standby_draw_is_balanced_without_rejecting_capture_o
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('denial', ['permission','site_cap','zero_charge','soc','grid','policy','native_ev','pending_managed'])
+@pytest.mark.parametrize('denial', ['permission','site_cap','zero_charge','soc','grid','policy'])
 async def test_current_policy_denial_prevents_every_forcing_write(setup,denial):
     s=setup
     if denial=='permission': s.state.config['site_info']['disallow_charge_from_grid_with_solar_installed']=True
@@ -710,9 +711,6 @@ async def test_current_policy_denial_prevents_every_forcing_write(setup,denial):
     if denial=='soc': s.state.soc=100
     if denial=='grid': s.state.grid='SystemIslandedActive'
     if denial=='policy': s.state.policy=False
-    if denial=='native_ev': s.budget.armed_sites.add('site')
-    if denial=='pending_managed':
-        await s.budget.admit_managed('VIN',{'site':'site','identity':'provider:car','reserved_w':0},{},lambda:True)
     with pytest.raises(Exception,match='policy denied'):
         await s.session.start(120)
     assert not s.state.events and not s.session.pending
@@ -852,7 +850,6 @@ async def test_final_charge_authority_denial_keeps_its_precise_reason(setup):
     ('off_grid', 'grid_connection_unconfirmed'),
     ('missing_capacity', 'native_capacity_unavailable'),
     ('stale_snapshot', 'native_snapshot_stale'),
-    ('managed_ev', 'managed_ev_ownership_present'),
     ('foreign_claim', 'native_max_site_already_owned'),
     ('identity_changed', 'native_max_identity_changed'),
     ('policy_denied', 'native_max_control_policy_denied'),
@@ -888,9 +885,6 @@ async def test_discharge_admission_logs_reason_without_starting_control(setup, c
             s.state.at += 6
             return result
         s.adapter.client.get_snapshot = slow_snapshot
-    elif case == 'managed_ev':
-        await s.budget.admit_managed('SECRET_VIN',
-            {'site': 'site', 'identity': 'SECRET_EV', 'reserved_w': 0}, {}, lambda: True)
     elif case == 'foreign_claim':
         await s.budget.claim_native_max('other', 'site', 'SECRET_TOKEN', s.state.at + 120)
     elif case == 'identity_changed':
@@ -925,6 +919,96 @@ async def test_export_cap_recheck_logs_values_and_clears_after_success(setup, ca
     s.state.config['site_info']['min_site_meter_power_ac'] = -10
     assert await s.adapter.guard()
     assert s.adapter.guard_denial_reason is None
+
+
+@pytest.mark.asyncio
+async def test_native_guard_offers_bounded_managed_reconciliation_before_policy(setup):
+    s = setup
+    await s.budget.admit_managed(
+        'VIN', {'site': 'site', 'identity': 'provider:car', 'reserved_w': 4600},
+        {}, lambda: True,
+    )
+    offered = []
+
+    async def reconcile(site):
+        offered.append(site)
+
+    # The callback is intentionally optional so the lightweight adapter
+    # fixture remains compatible with older construction sites.
+    s.adapter.reconcile_managed = reconcile
+    assert await s.adapter.guard()
+    assert offered == []
+    assert s.adapter.ev_coexistence is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('age', [6, None])
+async def test_stale_or_missing_config_provenance_cannot_grant_ev_coexistence(setup, age):
+    s = setup
+    await s.budget.admit_managed(
+        'VIN', {'site': 'site', 'identity': 'provider:car', 'reserved_w': 4600},
+        {}, lambda: True,
+    )
+    original = s.adapter.client.get_snapshot
+
+    async def stale_snapshot():
+        snapshot = await original()
+        snapshot.config_observed_monotonic = None if age is None else s.state.at - age
+        return snapshot
+
+    s.adapter.client.get_snapshot = stale_snapshot
+    assert not await s.adapter.guard()
+    assert s.adapter.guard_denial_reason == 'managed_ev_ownership_present'
+    assert s.adapter.ev_coexistence is False
+
+
+@pytest.mark.asyncio
+async def test_charge_session_keeps_verified_coexistence_through_native_writes(setup):
+    s = setup
+    await s.budget.admit_managed(
+        'VIN', {'site': 'site', 'identity': 'provider:car', 'reserved_w': 4600},
+        {}, lambda: True,
+    )
+    status = await s.session.start(120)
+    assert status['active']
+    assert s.budget.native_max_claim('site')['ev_coexistence'] is True
+    assert await s.session.stop()
+
+
+@pytest.mark.asyncio
+async def test_discharge_guard_keeps_managed_ev_and_skips_cleanup_reads(setup):
+    s = setup
+    s.adapter.direction = 'discharge'
+    await s.budget.admit_managed(
+        'VIN', {'site': 'site', 'identity': 'provider:car', 'reserved_w': 3450},
+        {}, lambda: True,
+    )
+    calls = []
+
+    async def reconcile(site):
+        calls.append(site)
+        raise AssertionError('discharge must not reconcile EV records')
+
+    s.adapter.reconcile_managed = reconcile
+    assert await s.adapter.guard()
+    assert calls == []
+    assert 'VIN' in s.budget.managed
+
+
+@pytest.mark.asyncio
+async def test_discharge_session_claims_site_with_existing_managed_ev(setup):
+    s = setup
+    s.adapter.direction = 'discharge'
+    s.settings['optimization_max_discharge_w'] = 14700
+    await s.budget.admit_managed(
+        'VIN', {'site': 'site', 'identity': 'provider:car', 'reserved_w': 3450},
+        {}, lambda: True,
+    )
+    status = await s.session.start(120)
+    assert status['active']
+    assert s.budget.native_max_claim('site')['direction'] == 'discharge'
+    assert await s.session.stop()
+    assert 'VIN' in s.budget.managed
 
 
 @pytest.mark.asyncio
@@ -1584,7 +1668,7 @@ async def test_optimizer_charge_enables_initially_disabled_grid_then_restores_it
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('denial', ['permission', 'site_cap', 'soc', 'grid', 'policy', 'ev'])
+@pytest.mark.parametrize('denial', ['permission', 'site_cap', 'soc', 'grid', 'policy'])
 async def test_optimizer_grid_setup_cannot_bypass_current_safety_policy(setup, denial):
     s = setup
     s.adapter.planning_request = True
@@ -1595,7 +1679,6 @@ async def test_optimizer_grid_setup_cannot_bypass_current_safety_policy(setup, d
     if denial == 'soc': s.state.soc = 100
     if denial == 'grid': s.state.grid = 'SystemIslandedActive'
     if denial == 'policy': s.state.policy = False
-    if denial == 'ev': s.budget.armed_sites.add('site')
     with pytest.raises(s.m.NativeMaxChargeError, match='policy denied'):
         await s.session.start(120)
     assert not s.state.events and not s.session.pending
