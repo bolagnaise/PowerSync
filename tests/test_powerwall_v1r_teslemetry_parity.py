@@ -1086,6 +1086,7 @@ def test_max_backup_keeps_route_specific_cleanup_and_refuses_unrestorable_fallba
         "handle_set_backup_reserve": set_backup_reserve,
         "_cloud_tariff_control_requested": lambda _call: route == "tariff",
         "_max_backup_site_current": lambda data: data.get("max_backup_site_id") == "site",
+        "_notify_max_backup_recovery": lambda _data: None,
         "_LOGGER": SimpleNamespace(error=lambda *_a, **_k: None, info=lambda *_a, **_k: None),
         "_get_tesla_coordinator_for_service": lambda _name: SimpleNamespace(_site_info_cache={}),
         "_persist_max_backup_schedule": persist,

@@ -85,6 +85,9 @@ def overlap(admission, request):
         _get_tesla_coordinator_for_service=lambda _name: NS(_site_info_cache={"backup_reserve_percent": 2}),
         canonical_site_id=core.canonical_site_id,
         CONF_TESLA_ENERGY_SITE_ID="tesla_energy_site_id",
+        _notify_max_backup_recovery=lambda _runtime: None,
+        foreign_site_owner=core.foreign_site_owner,
+        max_backup_recovery_status=core.max_backup_recovery_status,
         SERVICE_SET_BACKUP_RESERVE="set_backup_reserve",
         handle_set_backup_reserve=admission.m.guard_battery_transition(hass, entry, reserve_handler),
     )
@@ -551,6 +554,7 @@ async def test_queued_backup_final_deadline_refuses_native_actuator(overlap, mon
 async def test_transport_never_starts_backup_after_unacknowledged_cancel(overlap, cancel_ack):
     module = importlib.import_module(f"{overlap.core.__package__}.powerwall_local.transport")
     transport = object.__new__(module.TEDAPIv1rTransport)
+    transport.get_backup_events = AsyncMock(return_value=None)
     transport.cancel_manual_backup = AsyncMock(return_value=cancel_ack)
     transport.post_v1r = AsyncMock()
     assert await transport.schedule_manual_backup("DIN", 60) is False
@@ -561,6 +565,7 @@ async def test_transport_never_starts_backup_after_unacknowledged_cancel(overlap
 async def test_transport_native_packet_end_does_not_extend_after_cancel_wait(overlap, monkeypatch):
     module = importlib.import_module(f"{overlap.core.__package__}.powerwall_local.transport")
     transport = object.__new__(module.TEDAPIv1rTransport)
+    transport.get_backup_events = AsyncMock(return_value=None)
     now = [10000.0]
     monkeypatch.setattr(module.time, "time", lambda: now[0])
     async def cancel(_din):
@@ -586,6 +591,7 @@ async def test_transport_native_packet_end_does_not_extend_after_cancel_wait(ove
 async def test_transport_expired_backup_creates_no_start_packet(overlap, monkeypatch, phase):
     module = importlib.import_module(f"{overlap.core.__package__}.powerwall_local.transport")
     transport = object.__new__(module.TEDAPIv1rTransport)
+    transport.get_backup_events = AsyncMock(return_value=None)
     now = [10061.0 if phase == "before_cancel" else 10000.0]
     monkeypatch.setattr(module.time, "time", lambda: now[0])
     async def cancel(_din):

@@ -14,6 +14,8 @@ from copy import deepcopy
 from dataclasses import asdict, dataclass
 import math
 import inspect
+import hashlib
+import json
 import time
 from typing import Any
 from uuid import uuid4
@@ -148,11 +150,64 @@ _OBLIGATION_FLAGS = (
 )
 
 
-def control_obligations(runtime: Mapping) -> dict[str, Any]:
+def max_backup_recovery_status(entry_id: str, record: Any, configured_site: Any) -> dict | None:
+    """Describe an exact saved record without granting recovery authority."""
+    if record is None:
+        return None
+    def digest(value):
+        encoded = json.dumps([entry_id, value], sort_keys=True, separators=(",", ":"), default=str)
+        return hashlib.sha256(encoded.encode()).hexdigest()
+    def valid_basis(value):
+        return (isinstance(value, Mapping)
+                and "saved_reserve" in value
+                and type(value.get("end_ts")) in (int, float) and math.isfinite(value["end_ts"])
+                and type(value.get("local_event")) is bool
+                and ((value["local_event"] is True and value.get("saved_reserve") is None)
+                     or (type(value.get("saved_reserve")) in (int, float) and math.isfinite(value["saved_reserve"])
+                         and 0 <= value["saved_reserve"] <= 100 and float(value["saved_reserve"]).is_integer())))
+    receipt = digest(record)
+    valid = valid_basis(record)
+    saved = record.get("site_id") if isinstance(record, Mapping) else None
+    missing = saved in (None, "")
+    try:
+        current = canonical_site_id(configured_site)
+    except (TypeError, ValueError):
+        current = None
+    try:
+        saved = None if missing else canonical_site_id(saved)
+        if valid and "recovery" in record:
+            recovery = record["recovery"]
+            original = recovery.get("original_record") if isinstance(recovery, Mapping) else None
+            valid = (valid_basis(original) and "recovery" not in original
+                     and digest(original) == recovery.get("original_digest")
+                     and canonical_site_id(recovery.get("bound_site_id")) == saved
+                     and all(record[key] == original[key] for key in ("end_ts", "saved_reserve", "local_event")))
+            if valid:
+                original_site = original.get("site_id")
+                original_missing = original_site in (None, "")
+                valid = (recovery.get("attested_original_site") is original_missing
+                         and (original_missing or canonical_site_id(original_site) == saved))
+    except (TypeError, ValueError):
+        valid, saved = False, None
+    reason = ("malformed_record" if not valid else "site_unavailable" if current is None
+              else "site_mismatch" if saved is not None and saved != current
+              else "original_site_attestation_required" if missing else "ready")
+    return {"record_id": receipt, "site_id": saved, "configured_site_id": current,
+            "recoverable": valid and current is not None and (saved is None or saved == current), "reason": reason,
+            "attest_original_site_required": missing,
+            "cleanup_pending": bool(isinstance(record, Mapping) and record.get("apply_pending")),
+            "saved_reserve": record.get("saved_reserve") if valid else None,
+            "end_ts": record.get("end_ts") if valid else None,
+            "cleanup_method": ("native_event" if record["local_event"] else "reserve") if valid else None,
+            "service": "power_sync.recover_max_backup"}
+
+
+def control_obligations(runtime: Mapping, *, entry_id: str | None = None) -> dict[str, Any]:
     """Read current in-memory journal owners without changing their lifecycle."""
     pending = runtime.get("powerwall_settings_pending")
     incident = pending if isinstance(pending, Mapping) else {}
     native = runtime.get("powerwall_native_max_charge")
+    entry = runtime.get("entry")
     return {
         "local_settings_unresolved": bool(pending),
         "cloud_resumed_local_suspended": incident.get("resume_cloud") is True,
@@ -161,6 +216,9 @@ def control_obligations(runtime: Mapping) -> dict[str, Any]:
         "restart_restore_pending": bool(runtime.get("optimizer_force_restart_restore_pending")),
         "native_restore_pending": bool(native and native.pending),
         "runtime_available": True,
+        "max_backup_recovery": max_backup_recovery_status(
+            entry_id or getattr(entry, "entry_id", ""), runtime.get("max_backup_schedule"),
+            _entry_site_id(entry) if entry is not None else getattr(runtime.get("powerwall_site_control"), "site_id", None)),
     }
 
 
@@ -171,7 +229,7 @@ def diagnostic_snapshot(hass: Any, site: PowerwallSiteControl) -> dict:
         if not isinstance(runtime, Mapping) or runtime.get("powerwall_site_control") is not site:
             continue
         current_sources.add(entry_id)
-        site.set_obligations(entry_id, control_obligations(runtime))
+        site.set_obligations(entry_id, control_obligations(runtime, entry_id=entry_id))
     for source, previous in tuple(site._obligations.items()):
         if (source not in current_sources and isinstance(previous, Mapping)
                 and type(previous.get("runtime_available")) is bool

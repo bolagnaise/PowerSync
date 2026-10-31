@@ -577,6 +577,45 @@ refresh_calibration:
     resets the integration's local guard.
   fields: {}
 
+recover_max_backup:
+  name: Recover Max Backup
+  description: >-
+    Clean up a retained Max Backup window under supervision. Copy the exact
+    record receipt from PowerSync control diagnostics or the recovery notice.
+    This cancels the saved native event or restores its saved reserve; it never
+    starts another backup window. A legacy record without a site requires an
+    explicit attestation that the selected site is its original physical site.
+    Malformed evidence must be recovered from a known-good backup or reviewed
+    with support. Native cleanup may remain pending for at least 60 seconds.
+  fields:
+    entry_id:
+      name: PowerSync entry ID
+      required: true
+      selector:
+        text:
+    site_id:
+      name: Original Tesla site ID
+      required: true
+      selector:
+        text:
+    record_id:
+      name: Exact saved-record receipt
+      required: true
+      selector:
+        text:
+    acknowledge:
+      name: Acknowledge supervised cleanup
+      required: true
+      default: false
+      selector:
+        boolean:
+    attest_original_site:
+      name: Attest the original physical site
+      description: Required only for a legacy record without a saved site. Enable only after verifying that this is its original physical site.
+      default: false
+      selector:
+        boolean:
+
 resume_powerwall_settings:
   name: Resume Powerwall settings through cloud
   description: >-
