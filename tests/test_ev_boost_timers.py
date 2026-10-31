@@ -145,7 +145,7 @@ class BoostHarness:
             "deepcopy": deepcopy,
             "persist_ev_runtime_state": own.persist_ev_runtime_state,
             "is_current_ev_power_observation": ev_load.is_current_ev_power_observation,
-            "_get_ev_vehicles_status": lambda *_args: self.observations(),
+            "_get_ev_vehicles_status": lambda *_args, **_kwargs: self.observations(),
             "_LOGGER": logging.getLogger(__name__),
             "web": SimpleNamespace(
                 json_response=lambda body, **kwargs: SimpleNamespace(body=body, **kwargs)
@@ -172,6 +172,11 @@ class BoostHarness:
     def observations(self):
         return [{"vehicle_id": vin, "is_charging": charging,
                  "is_connected": True, "_charging_state_known": True,
+                 "_boost_charging_state_evidence": {
+                     "known": self.observation_overrides.get(vin, {}).get("_charging_state_known", True),
+                     "charging": self.observation_overrides.get(vin, {}).get("is_charging", charging),
+                     "observed_at": self.observation_overrides.get(vin, {}).get("_charging_observed_at", self.now),
+                 },
                  "_charging_observed_at": self.now, "site_presence": "home",
                  **self.observation_overrides.get(vin, {})}
                 for vin, charging in self.physical.items()]

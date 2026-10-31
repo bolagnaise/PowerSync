@@ -2052,11 +2052,13 @@ def _get_ev_vehicle_status(hass, entry) -> dict:
     return {"ev_power_kw": ev_power_kw, "ev_soc": ev_soc}
 
 
-def _get_ev_vehicles_status(hass, entry) -> list:
+def _get_ev_vehicles_status(hass, entry, *, include_control_evidence=False) -> list:
     """Get per-vehicle EV status from Tesla vehicle sensors (Fleet API).
 
     Returns a list of dicts, one per vehicle found at home, each with:
       vehicle_name, ev_power_kw, ev_soc, is_connected, is_charging.
+    Internal control consumers may request timestamped explicit charging-state
+    evidence. Meter/location updates never renew that state evidence.
     """
     from .automations.loadpoint_status import (
         charging_state_plugged_status,
@@ -2067,6 +2069,10 @@ def _get_ev_vehicles_status(hass, entry) -> list:
         is_ev_power_contradicted_by_state,
     )
 
+    # Only explicit settled states prove stopped. Plug/zero-power semantics
+    # (including Starting, Connected and No Power) grant no cleanup authority.
+    control_charging_states = {"charging": True, "stopped": False,
+                               "complete": False, "disconnected": False}
     vehicles = []
     entity_registry = er.async_get(hass)
     device_registry = dr.async_get(hass)
@@ -2097,6 +2103,7 @@ def _get_ev_vehicles_status(hass, entry) -> list:
         is_connected = False
         is_charging = False
         charging_state_known = False
+        charging_state_evidence = None
         hard_disconnected = False
         site_presence = None
         site_presence_observed_at = None
@@ -2112,9 +2119,22 @@ def _get_ev_vehicles_status(hass, entry) -> list:
                 continue
             eid = entity.entity_id.lower()
             state = hass.states.get(entity.entity_id)
+            domain = getattr(entity, "domain", entity.entity_id.split(".", 1)[0])
+            if (include_control_evidence and state is not None and domain == "sensor"
+                    and re.search(r"_(?:charging_state|charging)(?:_\d+)?$", eid)
+                    and not any(word in eid for word in ("limit", "rate", "power"))):
+                state_at = _ev_observed_at(getattr(state, "last_updated", None))
+                if (charging_state_evidence is None or state_at is not None and (
+                        charging_state_evidence["observed_at"] is None
+                        or state_at >= charging_state_evidence["observed_at"])):
+                    state_key = str(state.state).strip().lower()
+                    charging_state_evidence = {
+                        "known": state_key in control_charging_states,
+                        "charging": control_charging_states.get(state_key),
+                        "observed_at": state_at,
+                    }
             if not state or state.state in ("unknown", "unavailable"):
                 continue
-            domain = getattr(entity, "domain", entity.entity_id.split(".", 1)[0])
 
             # Away vehicles cannot be contributing to home EV power.
             if domain == "device_tracker" and "_location" in eid:
@@ -2279,6 +2299,8 @@ def _get_ev_vehicles_status(hass, entry) -> list:
             "_charging_observed_at": charging_observed_at,
             "_connected_observed_at": vehicle_connected_observed_at,
         }
+        if include_control_evidence and charging_state_evidence is not None:
+            vehicle_status["_boost_charging_state_evidence"] = charging_state_evidence
         if is_charging:
             vehicle_status["power_available"] = bool(
                 measured_power_seen
@@ -2609,6 +2631,13 @@ def _get_ev_vehicles_status(hass, entry) -> list:
                 or ble_power_observed_at
             ),
         }
+        if include_control_evidence and charge_state is not None:
+            state_key = str(charge_state.state).strip().lower()
+            ble_observation["_boost_charging_state_evidence"] = {
+                "known": state_key in control_charging_states,
+                "charging": control_charging_states.get(state_key),
+                "observed_at": _ev_observed_at(getattr(charge_state, "last_updated", None)),
+            }
         if current_amps is not None:
             ble_observation["current_amps"] = current_amps
         if ble_site_presence is not None:
@@ -19295,12 +19324,21 @@ class ChargingBoostView(HomeAssistantView):
     def _boost_observation(self, vehicle_id: str, after: str | None = None) -> str | None:
         from .ev_load import is_current_ev_power_observation
 
-        observations = [item for item in _get_ev_vehicles_status(self._hass, self._config_entry)
+        observations = [item for item in _get_ev_vehicles_status(
+                            self._hass, self._config_entry, include_control_evidence=True)
                         if item.get("vehicle_id") == vehicle_id]
         if len(observations) != 1:
             return None
         observation = observations[0]
-        observed_at = observation.get("_charging_observed_at")
+        evidence = observation.get("_boost_charging_state_evidence")
+        stopped = observation.get("is_charging") is False
+        if stopped:
+            if (not isinstance(evidence, dict) or evidence.get("known") is not True
+                    or evidence.get("charging") is not False):
+                return None
+            observed_at = evidence.get("observed_at")
+        else:
+            observed_at = observation.get("_charging_observed_at")
         if not is_current_ev_power_observation(observed_at, at=dt_util.utcnow()):
             return None
         if after:
@@ -19309,8 +19347,7 @@ class ChargingBoostView(HomeAssistantView):
                     return None
             except (TypeError, ValueError):
                 return None
-        if (observation.get("_charging_state_known") is True
-                and observation.get("is_charging") is False):
+        if stopped:
             return "stopped"
         if observation.get("site_presence") == "away":
             return None
