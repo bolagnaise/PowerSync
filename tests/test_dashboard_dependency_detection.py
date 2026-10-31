@@ -927,7 +927,7 @@ def test_dashboard_strategy_resource_uses_incremented_cache_buster():
 
     version = re.search(r'DASHBOARD_JS_VERSION = "(\d+)"', const_source)
     assert version is not None
-    assert version.group(1) == "57"
+    assert version.group(1) == "58"
     assert "url = f\"{base_path}?v={POWER_SYNC_VERSION}.{DASHBOARD_JS_VERSION}\"" in source
 
 
@@ -1415,7 +1415,7 @@ def test_dashboard_battery_controls_include_self_consumption_action():
     assert "service: 'power_sync.set_self_consumption'" in battery_controls
     assert "Set battery to self-consumption mode for ' + dur + ' min?'" in battery_controls
     assert "select.power_sync_force_discharge_duration" in battery_controls
-    assert "durationName('select.power_sync_force_discharge_duration', 'Discharge')" in battery_controls
+    assert "durationName('select.power_sync_force_discharge_duration', 'Discharge / Custom charge')" in battery_controls
     assert "durationName('select.power_sync_force_charge_duration', 'Charge timer')" in battery_controls
 
 
@@ -1473,7 +1473,7 @@ def test_dashboard_hold_and_self_consumption_keep_separate_duration():
     assert "Self Consumption', 'select.power_sync_hold_self_duration'" in battery_controls
     assert "Hold SoC', 'select.power_sync_hold_self_duration'" in battery_controls
     assert "states['select.power_sync_hold_self_duration'] ? states['select.power_sync_hold_self_duration'].state : '30'" in battery_controls
-    assert "Custom Discharge Duration (minutes)" in battery_controls
+    assert "Custom charge/discharge time (minutes)" in battery_controls
     assert "?? '60'" not in battery_controls
 
 
@@ -2119,6 +2119,13 @@ def test_energy_day_prices_are_optional_signed_history_with_independent_axes():
     builder = source[source.index('function _combinedEnergyChart'):source.index('function _demandCharge')]
     runtime = r"""
       const assert = require('node:assert/strict');
+      // Keep the existing observation on today's side of midnight regardless
+      // of when CI runs. Exercise midnight clipping explicitly below.
+      const RealDate = Date;
+      global.Date = class extends RealDate {
+        constructor(...args) { super(...(args.length ? args : ['2026-10-31T02:00:00Z'])); }
+        static now() { return RealDate.parse('2026-10-31T02:00:00Z'); }
+      };
       global.requestAnimationFrame = () => {};
       global.HTMLElement = class {
         attachShadow() {
@@ -2190,6 +2197,9 @@ def test_energy_day_prices_are_optional_signed_history_with_independent_axes():
       }
       assert.deepEqual(card._priceHistoryPoints([[now+60000, 99]], {state: 'unknown'}, window), []);
       assert.deepEqual(card._priceHistoryPoints([[observed, -0.02]], {state: 'unknown'}, window), [[observed, -0.02]]);
+      const midnightWindow = {...window, startMs: observed + 60000};
+      assert.deepEqual(card._priceHistoryPoints([], point, midnightWindow), [[midnightWindow.startMs, -0.02], [window.nowMs, -0.02]]);
+      assert.deepEqual(card._priceHistoryPoints([[observed, -0.02]], {state: 'unknown'}, midnightWindow), []);
       // Each midnight is resolved independently across daylight-saving changes.
       const spring = Date.UTC(2026, 9, 4);
       const autumn = Date.UTC(2026, 3, 5);
@@ -2210,7 +2220,7 @@ def test_force_power_slider_and_buttons_follow_renamed_entity():
         'binary_sensor.power_sync_powerwall_local_paired':{state:'on'},
       };
       const card=_batteryControls({states},id);
-      if(card.cards[0].entity!==id) throw new Error('Slider lost renamed number');
+      if(!card.cards.some(c=>c.entity===id)) throw new Error('Slider lost renamed number');
       const buttons=card.cards.find(c=>c.type==='grid').cards;
       for(const service of ['power_sync.force_charge','power_sync.force_discharge']) {
         const button=buttons.find(c=>c.tap_action?.service===service);
