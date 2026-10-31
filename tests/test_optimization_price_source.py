@@ -3093,6 +3093,7 @@ def test_configured_optimizer_builds_and_publishes_without_solar_runtime(
     coordinator._get_solar_forecast = _solar
     coordinator._get_load_forecast = _load
     coordinator._get_battery_state = _battery
+    coordinator._get_energy_data = lambda: {"battery_level": 50.0}
     coordinator._provider_priced_reference_prices = lambda: [0.20, 0.20, 0.20]
     coordinator._acquisition_reference_prices_for_run = lambda values: values
     coordinator._acquisition_cost_for_run = lambda **kwargs: 0.20
