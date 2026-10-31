@@ -291,8 +291,30 @@ def test_tesla_hold_soc_backup_reserve_write_does_not_replace_user_reserve():
     function_source = ast.get_source_segment(source, function)
 
     assert function_source is not None
-    assert 'DOMAIN, SERVICE_SET_BACKUP_RESERVE' in function_source
-    assert "{'percent': target_reserve, 'source': 'hold_soc'}" in function_source
+    reserve_calls = [node for node in ast.walk(function)
+                     if isinstance(node, ast.Call)
+                     and isinstance(node.func, ast.Name)
+                     and node.func.id == "handle_set_backup_reserve"]
+    assert len(reserve_calls) == 1
+    internal_call = reserve_calls[0].args[0]
+    assert isinstance(internal_call, ast.Call)
+    assert ast.unparse(internal_call.func) == "make_service_call"
+    assert [ast.unparse(arg) for arg in internal_call.args[:3]] == [
+        "hass", "DOMAIN", "SERVICE_SET_BACKUP_RESERVE",
+    ]
+    payload = internal_call.args[3]
+    assert isinstance(payload, ast.Dict)
+    fields = {ast.literal_eval(key): value for key, value in zip(payload.keys, payload.values)}
+    assert set(fields) == {
+        "percent", "source", "_hold_soc_transition_token", "_hold_soc_manual_origin",
+    }
+    assert ast.unparse(fields["percent"]) == "target_reserve"
+    assert ast.literal_eval(fields["source"]) == "hold_soc"
+    assert ast.unparse(fields["_hold_soc_transition_token"]) == "_hold_soc_transition_token"
+    assert ast.unparse(fields["_hold_soc_manual_origin"]) == "source in ('user', 'manual')"
+    assert {item.arg: ast.unparse(item.value) for item in internal_call.keywords} == {
+        "context": "call.context",
+    }
     assert "_disabled_optimizer_backup_reserve_target(entry)" in function_source
     assert 'hold_soc_state["saved_backup_reserve"] = saved_backup_reserve' in function_source
 
