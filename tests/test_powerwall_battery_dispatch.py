@@ -462,6 +462,8 @@ def load_routing(monitored=False, paired=True, **options):
               update_native_discharge_alert=lambda *_: None,
               update_native_charge_alert=lambda *_: None,
               local_battery_dispatch_configured=hm.local_battery_dispatch_configured, asyncio=asyncio, Any=object, ServiceCall=object, HomeAssistantError=RuntimeError,
+              resolve_manual_force_duration=durations.resolve_manual_force_duration,
+              validate_native_charge_duration=durations.validate_native_charge_duration,
               selected_discharge_duration=durations.selected_discharge_duration, validate_native_discharge_duration=durations.validate_native_discharge_duration,
               DOMAIN='power_sync', hass=hass, entry=entry, _local_powerwall_runtime=runtime, DispatchCommandFailed=module.DispatchCommandFailed, GridChargingPermissionError=module.GridChargingPermissionError, validate_dispatch_config=module.validate_dispatch_config, _LOGGER=logging.getLogger(__name__),
               force_charge_state=charge, force_discharge_state=discharge,

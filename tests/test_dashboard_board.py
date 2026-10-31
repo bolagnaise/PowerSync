@@ -184,7 +184,7 @@ def _board_script(body: str) -> str:
         + r"""
   vm.createContext(context);
   const src = fs.readFileSync(process.argv[1], 'utf8').replace(/^export \{[^}]*\};?\s*$/m, '');
-  vm.runInContext(src + '\n;globalThis.__t = { PowerSyncBoard, PsSettingsDialog, PS_SETTING_EDITORS, PsSettingsCard, PsTodayCard, PsNowCard, PsPlanCard, PsControlsCard, psSchedule, psWindows, psActionKey, PS_LAYOUT_KEY, PS_DEFAULT_LAYOUT, psChartValue, psChart, psBars, PsPricesCard, PsEnergyCard, PsLoadForecastCard, PsSolarLoadCard, PsBatteryPlanCard, psApiCache, psPlannedRunEnd };', context);
+  vm.runInContext(src + '\n;globalThis.__t = { PowerSyncBoard, PsSettingsDialog, PS_SETTING_EDITORS, PsSettingsCard, PsTodayCard, PsNowCard, PsPlanCard, PsControlsCard, psUntilPreview, psSchedule, psWindows, psActionKey, PS_LAYOUT_KEY, PS_DEFAULT_LAYOUT, psChartValue, psChart, psBars, PsPricesCard, PsEnergyCard, PsLoadForecastCard, PsSolarLoadCard, PsBatteryPlanCard, psApiCache, psPlannedRunEnd };', context);
   const T = context.__t;
 """
         + body
@@ -394,7 +394,7 @@ def test_cached_api_payload_does_not_re_render_forever():
     assert out["renders"] <= 3
 
 
-def test_discharge_uses_custom_time_only_when_select_is_custom():
+def test_saved_custom_selection_initializes_shared_charge_discharge_duration():
     """Live installs keep the custom number at its minimum (1 minute); it must
     not replace the chosen duration unless the discharge select is Custom."""
     out = _run_board(r"""
@@ -426,15 +426,17 @@ def test_discharge_uses_custom_time_only_when_select_is_custom():
   card.hass = makeHass('5', 1);
   card._duration = 30;
   press(card, 'discharge');
-  card.hass = makeHass('Custom', 90);
-  press(card, 'discharge');
-  press(card, 'charge');
+  const customCard = new T.PsControlsCard();
+  customCard.config = { entities };
+  customCard.hass = makeHass('Custom', 90);
+  press(customCard, 'discharge');
+  press(customCard, 'charge');
   setTimeout(() => console.log(JSON.stringify({ calls })), 20);
 """)
     assert out["calls"] == [
         ["force_discharge", {"duration": "30"}],
         ["force_discharge", {"duration": "90"}],
-        ["force_charge", {"duration": "30"}],
+        ["force_charge", {"duration": "90"}],
     ]
 
 
@@ -858,3 +860,118 @@ def test_solar_configuration_stays_in_existing_ev_mode_without_changing_session_
     assert len(out["calls"]) == 1
     assert out["calls"][0][2]["command"] == "start_policy_charging"
     assert out["calls"][0][2]["policy"] == "solar_only"
+
+
+def test_custom_duration_plus_moves_one_minute():
+    out = _run_board(r"""
+  const card = new T.PsControlsCard(), calls = [];
+  card.config = {entities: {customDischarge: 'number.custom', dischargeDuration: 'select.duration'}};
+  card.hass = {states: {
+    'number.custom': {state: '1', attributes: {min: 1, max: 1440, step: 1}},
+    'select.duration': {state: 'Custom', attributes: {options: ['30', 'Custom']}},
+  }, callService: async (domain, service, data) => calls.push(data)};
+  card._onClick({target: {closest: sel => sel === 'button[data-step]' ? {dataset: {step: 'custom', d: '1'}} : null}});
+  setTimeout(() => console.log(JSON.stringify({calls})), 0);
+""")
+    assert out["calls"] == [{"entity_id": "number.custom", "value": 2}]
+
+
+def test_custom_editor_applies_to_charge_discharge_but_not_hold_and_clears_confirmation():
+    out = _run_board(r"""
+  const calls = [], card = new T.PsControlsCard();
+  card.config = {entities: {chargeDuration: 'select.charge', forcePower: 'number.power'}};
+  card.hass = {states: {'select.charge': {state: '30', attributes: {options: ['30']}}, 'number.power': {state: '2', attributes: {step: .05}}},
+    config: {time_zone: 'Australia/Brisbane'}, callService: async (domain, service, data) => calls.push([service, data])};
+  const click = (selector, dataset) => card._onClick({target: {closest: sel => sel === selector ? {dataset} : null}});
+  const press = kind => click('button[data-kind]', {kind});
+  click('[data-custom-toggle]', {});
+  card._onTimingInput({target: {dataset: {timingInput: 'hours'}, value: '1'}});
+  card._onTimingInput({target: {dataset: {timingInput: 'minutes'}, value: '17'}});
+  press('charge');
+  card._onTimingInput({target: {dataset: {timingInput: 'minutes'}, value: '18'}});
+  press('charge');
+  const beforeConfirm = calls.length;
+  press('charge'); press('discharge'); press('discharge'); press('hold'); press('hold');
+  card._onTimingInput({target: {dataset: {timingInput: 'minutes'}, value: ''}});
+  press('charge'); press('charge');
+  const invalidCalls = calls.length;
+  click('button[data-min]', {min: '30'}); press('charge'); press('charge');
+  setTimeout(() => console.log(JSON.stringify({calls, beforeConfirm, invalidCalls})), 0);
+""")
+    assert out["beforeConfirm"] == 0
+    assert out["invalidCalls"] == 3
+    assert out["calls"] == [
+        ["force_charge", {"duration": "78", "power_w": 2000}],
+        ["force_discharge", {"duration": "78", "power_w": 2000}],
+        ["hold_battery_soc", {"duration": "30"}],
+        ["force_charge", {"duration": "30", "power_w": 2000}],
+    ]
+
+
+def test_until_preview_matches_ha_timezone_instead_of_browser_timezone():
+    out = _run_board(r"""
+  const sample = (zone, now, until) => T.psUntilPreview(until, zone, Date.parse(now));
+  console.log(JSON.stringify({
+    today: sample('Australia/Brisbane', '2026-10-31T08:00:20Z', '18:30'),
+    tomorrow: sample('Australia/Brisbane', '2026-10-31T13:50:00Z', '00:10'),
+    equal: sample('Australia/Brisbane', '2026-10-31T08:30:00Z', '18:30'),
+    fold: sample('America/New_York', '2026-11-01T05:45:00Z', '01:30'),
+    gap: sample('America/New_York', '2026-03-08T07:00:00Z', '02:30'),
+    long: sample('America/New_York', '2026-11-01T04:00:00Z', '00:00'),
+    invalid: sample('Australia/Brisbane', '2026-10-31T08:00:00Z', '24:00'),
+    nozone: sample(null, '2026-10-31T08:00:00Z', '18:30'),
+  }));
+""")
+    assert out["today"]["minutes"] == 30
+    assert "today" in out["today"]["label"]
+    assert out["tomorrow"]["minutes"] == 20
+    assert "tomorrow" in out["tomorrow"]["label"]
+    assert out["equal"]["minutes"] == 1440
+    assert out["fold"]["minutes"] == 45
+    assert out["gap"]["minutes"] == 1410
+    assert all("error" in out[key] for key in ("long", "invalid", "nozone"))
+
+
+def test_until_sends_clock_time_only_and_power_changes_rearm_confirmation():
+    out = _run_board(r"""
+  const calls = [], card = new T.PsControlsCard();
+  card.config = {entities: {forcePower: 'number.power'}};
+  card.hass = {states: {'number.power': {state: '1'}}, config: {time_zone: 'Australia/Brisbane'},
+    callService: async (domain, service, data) => calls.push([service, data])};
+  card._customEnabled = true; card._timingMode = 'until'; card._until = '18:30';
+  const press = kind => card._onClick({target: {closest: sel => sel === 'button[data-kind]' ? {dataset: {kind}} : null}});
+  press('charge');
+  card.hass.states['number.power'].state = '2';
+  press('charge');
+  const beforeConfirm = calls.length;
+  press('charge'); press('discharge'); press('discharge');
+  setTimeout(() => console.log(JSON.stringify({calls, beforeConfirm})), 0);
+""")
+    assert out["beforeConfirm"] == 0
+    assert out["calls"] == [
+        ["force_charge", {"until": "18:30", "power_w": 2000}],
+        ["force_discharge", {"until": "18:30", "power_w": 2000}],
+    ]
+
+
+def test_classic_controls_keep_custom_charge_duration_and_finish_time_entry():
+    script = (
+        "const fs = require('fs'); const vm = require('vm');" + BROWSER_STUBS
+        + f"vm.createContext(context); vm.runInContext(fs.readFileSync({json.dumps(str(STRATEGY_PATH))}, 'utf8'), context);"
+        + r"""
+  const states = {
+    'number.power_sync_force_discharge_custom_duration': {state: '77'},
+    'select.power_sync_force_discharge_duration': {state: 'Custom'},
+    'select.power_sync_force_charge_duration': {state: '30'},
+  };
+  context.hass = {states};
+  const controls = vm.runInContext('_batteryControls(hass)', context);
+  const cards = controls.cards.flatMap(c => c.cards || [c]);
+  const charge = cards.find(c => c.tap_action?.service === 'power_sync.force_charge');
+  const duration = new Function('states', charge.tap_action.data.duration.slice(3, -3))(states);
+  console.log(JSON.stringify({duration, until: cards.some(c => c.type === 'custom:power-sync-until-controls'),
+    editable: cards.some(c => c.type === 'entities' && c.entities?.some(e => e.entity === 'number.power_sync_force_discharge_custom_duration'))}));
+"""
+    )
+    out = _run(script)
+    assert out == {"duration": "77", "until": True, "editable": True}

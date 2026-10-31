@@ -7774,6 +7774,86 @@ function _registeredPowerSyncControl(hass, registry, domain, suffix) {
     && hass.states[row.entity_id])?.entity_id || null;
 }
 
+// Finish-at entry for the classic layout when the board module cannot load.
+// It uses standard HA services; no browser-mod/button-card scripting is needed.
+class PowerSyncUntilControls extends HTMLElement {
+  constructor() {
+    super();
+    this.attachShadow({ mode: 'open' });
+    this._until = '';
+    this._pending = null;
+    this._timer = null;
+  }
+  setConfig(config) { this._config = config; }
+  getCardSize() { return 2; }
+  set hass(hass) {
+    const oldPower = this._hass?.states?.[this._config?.power_entity]?.state;
+    if (oldPower !== hass.states?.[this._config?.power_entity]?.state || this._hass?.config?.time_zone !== hass.config?.time_zone) this._clear();
+    this._hass = hass;
+    if (!this._built) this._build();
+    this._preview();
+  }
+  disconnectedCallback() { this._clear(); }
+  _build() {
+    this._built = true;
+    this.shadowRoot.innerHTML = `<style>
+      :host{display:block}ha-card{padding:16px}label{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px}
+      input{font:inherit;color:var(--primary-text-color);background:var(--card-background-color);border:1px solid var(--divider-color);border-radius:8px;padding:8px;width:7em}
+      .actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}button{font:inherit;color:var(--primary-text-color);background:var(--secondary-background-color);border:1px solid var(--divider-color);border-radius:8px;padding:10px;cursor:pointer}
+      p{font-size:13px;color:var(--secondary-text-color);margin-bottom:0}
+      </style><ha-card><label>Charge/discharge until <input type="text" maxlength="5" placeholder="HH:mm" aria-label="Finish time HH:mm"></label><p class="preview" role="status"></p><div class="actions"><button data-kind="charge">Charge until</button><button data-kind="discharge">Discharge until</button></div><p>Tap twice to confirm. Duration controls above still use minutes.</p></ha-card>`;
+    this.shadowRoot.querySelector('input').addEventListener('input', e => { this._until = e.target.value; this._clear(); this._preview(); });
+    this.shadowRoot.querySelectorAll('button').forEach(button => button.addEventListener('click', () => this._press(button.dataset.kind)));
+  }
+  _clear() {
+    clearTimeout(this._timer);
+    this._pending = null;
+    this.shadowRoot?.querySelectorAll('button').forEach(button => { button.textContent = `${button.dataset.kind === 'charge' ? 'Charge' : 'Discharge'} until`; });
+  }
+  _preview() {
+    const target = this.shadowRoot.querySelector('.preview');
+    const zone = this._hass?.config?.time_zone;
+    this._valid = false;
+    if (!/^(?:[01][0-9]|2[0-3]):[0-5][0-9]$/.test(this._until) || !zone) { target.textContent = 'Enter HH:mm in Home Assistant’s timezone.'; return; }
+    try {
+      const clock = new Intl.DateTimeFormat('en-GB', {timeZone: zone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23'});
+      const day = new Intl.DateTimeFormat('en-CA', {timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit'});
+      const now = Date.now();
+      for (let at = (Math.floor(now / 60000) + 1) * 60000; at <= now + 48 * 3600000; at += 60000) {
+        if (clock.format(at) !== this._until) continue;
+        const minutes = Math.ceil((at - now) / 60000);
+        if (minutes > 1440) { target.textContent = 'The next occurrence exceeds the 24-hour maximum.'; return; }
+        this._valid = true;
+        target.textContent = `Until ${this._until} ${day.format(at) === day.format(now) ? 'today' : 'tomorrow'} (${zone}; about ${minutes} min).`;
+        return;
+      }
+    } catch (_) { target.textContent = 'Home Assistant timezone is unavailable.'; }
+  }
+  async _press(kind) {
+    this._preview();
+    if (!this._valid) { this._clear(); return; }
+    const kw = Number(this._hass?.states?.[this._config?.power_entity]?.state);
+    const data = { until: this._until };
+    if (Number.isFinite(kw) && kw > 0) data.power_w = Math.round(kw * 1000);
+    const token = JSON.stringify([kind, data, this._hass?.config?.time_zone, Math.floor(Date.now() / 60000)]);
+    if (this._pending !== token) {
+      this._clear();
+      this._pending = token;
+      this.shadowRoot.querySelector(`[data-kind="${kind}"]`).textContent = `Confirm ${kind} until ${this._until}`;
+      this._timer = setTimeout(() => this._clear(), 5000);
+      return;
+    }
+    this._clear();
+    try {
+      await this._hass.callService('power_sync', `force_${kind}`, data);
+      this.shadowRoot.querySelector('.preview').textContent = `${kind === 'charge' ? 'Charge' : 'Discharge'} requested until ${this._until}.`;
+    } catch (err) {
+      this.shadowRoot.querySelector('.preview').textContent = err?.message || String(err);
+    }
+  }
+}
+if (!customElements.get('power-sync-until-controls')) customElements.define('power-sync-until-controls', PowerSyncUntilControls);
+
 class PowerSyncStrategy {
   static async generate(config, hass) {
     // Check for HACS custom elements — use synchronous check first (instant if loaded),
@@ -8982,12 +9062,12 @@ function _batteryControls(hass, forcePowerEntityId = null) {
     type: 'vertical-stack',
     cards: [
       ...(hass?.states[customDischargeDuration]
-        ? [{ type: 'tile', entity: customDischargeDuration, name: 'Custom Discharge Duration (minutes)',
-             features: [{ type: 'numeric-input', mode: 'buttons' }] }]
+        ? [{ type: 'entities', entities: [{ entity: customDischargeDuration, name: 'Custom charge/discharge time (minutes)' }] }]
         : []),
       ...(hass?.states['select.power_sync_hold_self_duration']
         ? [{ type: 'tile', entity: 'select.power_sync_hold_self_duration', name: 'Hold / Self Consumption Duration' }]
         : []),
+      { type: 'custom:power-sync-until-controls', power_entity: forcePowerEntity },
       // Power slider — only shown when the ForcePowerNumber entity exists.
       // Tile card with numeric-input feature gives a clean inline slider.
       // 0 kW = auto (uses inverter rated/BMS max at dispatch).
@@ -9035,11 +9115,11 @@ function _batteryControls(hass, forcePowerEntityId = null) {
               action: 'call-service',
               service: 'power_sync.force_charge',
               data: {
-                duration: "[[[ return (states['select.power_sync_force_charge_duration'] ? states['select.power_sync_force_charge_duration'].state : '30'); ]]]",
+                duration: "[[[ const custom = states['select.power_sync_force_discharge_duration']?.state === 'Custom'; return custom ? states['number.power_sync_force_discharge_custom_duration']?.state : (states['select.power_sync_force_charge_duration']?.state ?? '30'); ]]]",
                 power_w: `[[[ const kw = parseFloat(states['${forcePowerEntity}']?.state) || 0; return kw > 0 ? Math.round(kw * 1000) : undefined; ]]]`,
               },
               confirmation: {
-                text: `[[[ const kw = parseFloat(states['${forcePowerEntity}']?.state) || 0; const dur = states['select.power_sync_force_charge_duration']?.state ?? '30'; return 'Force charge for ' + dur + ' min' + (kw > 0 ? ' at ' + kw.toFixed(1) + ' kW' : ' at max power') + '?'; ]]]`,
+                text: `[[[ const kw = parseFloat(states['${forcePowerEntity}']?.state) || 0; const custom = states['select.power_sync_force_discharge_duration']?.state === 'Custom'; const dur = custom ? states['number.power_sync_force_discharge_custom_duration']?.state : (states['select.power_sync_force_charge_duration']?.state ?? '30'); return 'Force charge for ' + dur + ' min' + (kw > 0 ? ' at ' + kw.toFixed(1) + ' kW' : ' at max power') + '?'; ]]]`,
               },
             },
           },
@@ -9049,7 +9129,7 @@ function _batteryControls(hass, forcePowerEntityId = null) {
             show_name: true,
             show_icon: true,
             icon: 'mdi:timer-outline',
-            name: durationName('select.power_sync_force_discharge_duration', 'Discharge'),
+            name: durationName('select.power_sync_force_discharge_duration', 'Discharge / Custom charge'),
             styles: sharedDischargeDurationChip,
             tap_action: { action: 'more-info' },
           },

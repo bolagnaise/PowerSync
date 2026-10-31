@@ -700,3 +700,34 @@ async def test_monitoring_handoff_fences_automatic_writes_before_options_change(
     with pytest.raises(native.modules.error, match="disabled"):
         await native.coordinator.command("charge", source="automation")
     assert not native.client.calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["charge", "discharge"])
+@pytest.mark.parametrize("data", [{"duration": 241}, {"duration": True}, {"duration": 1.5},
+                                  {"duration": 7, "until": "18:30"}, {"until": "bad"}])
+async def test_manual_timing_rejected_before_amber_ownership_or_command(modules, mode, data):
+    from unittest.mock import AsyncMock
+    manager = SimpleNamespace(relinquish=AsyncMock())
+    runtime = SimpleNamespace(
+        hass=SimpleNamespace(data={"power_sync_license_manager": manager}, config=SimpleNamespace(time_zone="Australia/Brisbane")),
+        entry=SimpleNamespace(options={}), entry_id="battery", command=AsyncMock(), command_state="idle",
+    )
+    call = SimpleNamespace(data=data, context=SimpleNamespace(user_id="user"))
+    with pytest.raises(modules.error):
+        await modules.controls.handlers(runtime)[f"force_{mode}"](call)
+    manager.relinquish.assert_not_awaited()
+    runtime.command.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["charge", "discharge"])
+async def test_manual_amber_accepts_exact_custom_minutes(modules, mode):
+    from unittest.mock import AsyncMock
+    runtime = SimpleNamespace(
+        hass=SimpleNamespace(data={}, config=SimpleNamespace(time_zone="Australia/Brisbane")),
+        entry=SimpleNamespace(options={}), entry_id="battery", command=AsyncMock(return_value=True), command_state="accepted",
+    )
+    call = SimpleNamespace(data={"duration": "7"}, context=SimpleNamespace(user_id="user"))
+    assert (await modules.controls.handlers(runtime)[f"force_{mode}"](call))["success"]
+    assert runtime.command.await_args.args == (mode, 7)

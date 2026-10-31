@@ -12,10 +12,12 @@ def handlers(runtime):
         async def handle(call):
             source = str(call.data.get("source") or ("user" if getattr(call.context, "user_id", None) else "automation"))
             duration = call.data.get("duration", 30)
-            if mode == "discharge" and source != "optimizer":
-                from ..force_discharge_duration import selected_discharge_duration
+            if mode in ("charge", "discharge") and source != "optimizer":
+                from ..force_discharge_duration import resolve_manual_force_duration
                 try:
-                    duration = selected_discharge_duration(duration, runtime.entry.options)
+                    duration = resolve_manual_force_duration(
+                        call.data, runtime.entry.options, getattr(getattr(runtime.hass, "config", None), "time_zone", None),
+                    )
                 except ValueError as err:
                     raise HomeAssistantError(str(err)) from err
                 if duration > 240:
