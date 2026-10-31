@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import math
 from pathlib import Path
 import sys
+import time
 import types
 
 import pytest
@@ -135,6 +136,44 @@ def _hass_for_cloud(vin_coordinators, registrations=None, states=None):
     return _Hass({"tesla_fleet": [entry]}, states=states, registrations=registrations)
 
 
+def _fleet_command_hass(coordinator, *, vin=VIN_A, registrations=None):
+    entity_id = "switch.car_charge"
+    vehicle = _vehicle(vin, coordinator, "device-a", "tesla_fleet")
+    entry = _entry("fleet-entry", [vehicle])
+    registration = types.SimpleNamespace(
+        config_entry_id="fleet-entry",
+        device_id="device-a",
+        platform="tesla_fleet",
+        unique_id="fleet-charge",
+        disabled_by=None,
+    )
+    hass = _Hass(
+        {"tesla_fleet": [entry]},
+        registrations={entity_id: registration, **(registrations or {})},
+    )
+    hass.device_registry.devices = {
+        "device-a": types.SimpleNamespace(
+            id="device-a",
+            identifiers={("tesla_fleet", vin)},
+        )
+    }
+    return hass, entity_id
+
+
+def _fleet_data(state, timestamp=None):
+    data = {"state": state}
+    if timestamp is not None:
+        data.update(
+            {
+                "charge_state_timestamp": timestamp,
+                "charge_state_charging_state": "Stopped",
+                "charge_state_charger_actual_current": 0,
+                "charge_state_charger_power": 0,
+            }
+        )
+    return data
+
+
 @pytest.mark.asyncio
 async def test_exact_vin_and_preferred_entity_select_the_matching_provider():
     now = datetime.now(timezone.utc).timestamp()
@@ -168,6 +207,262 @@ async def test_exact_vin_and_preferred_entity_select_the_matching_provider():
     assert result.device_id == "device-b"
     assert coordinator_a.refreshes == 0
     assert coordinator_b.refreshes == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["ASLEEP", "OFFLINE"])
+async def test_fleet_preparation_refreshes_stale_online_to_sleep_for_provider_wake(state):
+    old = math.floor(datetime.now(timezone.utc).timestamp()) - 300
+    coordinator = _Coordinator(_fleet_data("ONLINE", old))
+    hass, command_entity = _fleet_command_hass(coordinator)
+
+    async def refresh(coord):
+        coord.data = _fleet_data(state)
+
+    coordinator.refresh = refresh
+
+    assert await observation.async_prepare_tesla_fleet_command(
+        hass, VIN_A, command_entity
+    ) is True
+    assert coordinator.refreshes == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("refresh_result", ["unchanged", "error", "rate_limited"])
+async def test_fleet_preparation_rejects_online_without_new_successful_observation(
+    refresh_result,
+):
+    old = math.floor(datetime.now(timezone.utc).timestamp()) - 1
+    coordinator = _Coordinator(_fleet_data("ONLINE", old))
+    hass, command_entity = _fleet_command_hass(coordinator)
+
+    async def refresh(coord):
+        if refresh_result == "error":
+            raise RuntimeError("provider failure")
+        if refresh_result == "rate_limited":
+            coord.last_update_success = False
+        coord.data = _fleet_data("ONLINE", old)
+
+    coordinator.refresh = refresh
+
+    assert await observation.async_prepare_tesla_fleet_command(
+        hass, VIN_A, command_entity
+    ) is False
+    assert coordinator.refreshes == 1
+
+
+@pytest.mark.asyncio
+async def test_fleet_preparation_accepts_new_fresh_exact_online_observation():
+    old = math.floor(datetime.now(timezone.utc).timestamp()) - 1
+    coordinator = _Coordinator(_fleet_data("ONLINE", old))
+    hass, command_entity = _fleet_command_hass(coordinator)
+
+    async def refresh(coord):
+        coord.data = _fleet_data("ONLINE", math.floor(time.time()))
+
+    coordinator.refresh = refresh
+
+    assert await observation.async_prepare_tesla_fleet_command(
+        hass, VIN_A, command_entity
+    ) is True
+    assert coordinator.refreshes == 1
+
+
+@pytest.mark.asyncio
+async def test_concurrent_fleet_preparations_share_one_bounded_refresh():
+    coordinator = _Coordinator(_fleet_data("ONLINE", math.floor(time.time()) - 1))
+    hass, command_entity = _fleet_command_hass(coordinator)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def refresh(coord):
+        started.set()
+        await release.wait()
+        coord.data = _fleet_data("ASLEEP")
+
+    coordinator.refresh = refresh
+    first = asyncio.create_task(
+        observation.async_prepare_tesla_fleet_command(hass, VIN_A, command_entity)
+    )
+    await started.wait()
+    second = asyncio.create_task(
+        observation.async_prepare_tesla_fleet_command(hass, VIN_A, command_entity)
+    )
+    await asyncio.sleep(0)
+    release.set()
+
+    assert await asyncio.gather(first, second) == [True, True]
+    assert coordinator.refreshes == 1
+
+
+@pytest.mark.asyncio
+async def test_fleet_preparation_rejects_missing_or_rebound_exact_source():
+    old = math.floor(datetime.now(timezone.utc).timestamp()) - 1
+    coordinator = _Coordinator(_fleet_data("ONLINE", old))
+    hass, command_entity = _fleet_command_hass(coordinator)
+    assert await observation.async_prepare_tesla_fleet_command(
+        hass, VIN_A, "switch.missing"
+    ) is False
+    assert coordinator.refreshes == 0
+
+    replacement = _Coordinator(_fleet_data("ASLEEP"))
+    entry = hass.config_entries.async_entries("tesla_fleet")[0]
+
+    async def refresh(coord):
+        entry.runtime_data.vehicles = [_vehicle(VIN_A, replacement, "device-a")]
+        coord.data = _fleet_data("ONLINE", math.floor(time.time()))
+
+    coordinator.refresh = refresh
+    assert await observation.async_prepare_tesla_fleet_command(
+        hass, VIN_A, command_entity
+    ) is False
+    assert coordinator.refreshes == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field", ["platform", "config_entry_id", "device_id", "unique_id"])
+async def test_fleet_preparation_requires_complete_active_command_registration(field):
+    coordinator = _Coordinator(_fleet_data("ASLEEP"))
+    hass, command_entity = _fleet_command_hass(coordinator)
+    registration = hass.entity_registry.async_get(command_entity)
+    setattr(registration, field, None)
+
+    assert await observation.async_prepare_tesla_fleet_command(
+        hass, VIN_A, command_entity
+    ) is False
+    assert coordinator.refreshes == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field_value", ["replacement", "disabled"])
+async def test_fleet_preparation_rejects_command_identity_rebind_after_refresh(field_value):
+    coordinator = _Coordinator(_fleet_data("ASLEEP"))
+    hass, command_entity = _fleet_command_hass(coordinator)
+    registration = hass.entity_registry.async_get(command_entity)
+
+    async def refresh(coord):
+        if field_value == "replacement":
+            registration.unique_id = "other-fleet-charge"
+        else:
+            registration.disabled_by = "user"
+        coord.data = _fleet_data("ASLEEP")
+
+    coordinator.refresh = refresh
+    assert await observation.async_prepare_tesla_fleet_command(
+        hass, VIN_A, command_entity
+    ) is False
+    assert coordinator.refreshes == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mutation_target", ["vehicle", "registry"])
+async def test_fleet_preparation_rejects_provider_vin_rebind_after_refresh(
+    mutation_target,
+):
+    coordinator = _Coordinator(_fleet_data("ASLEEP"))
+    hass, command_entity = _fleet_command_hass(coordinator)
+    entry = hass.config_entries.async_entries("tesla_fleet")[0]
+    vehicle = entry.runtime_data.vehicles[0]
+    registered = hass.device_registry.devices["device-a"]
+
+    async def refresh(coord):
+        if mutation_target == "vehicle":
+            vehicle.device.identifiers = {("tesla_fleet", VIN_B)}
+        else:
+            registered.identifiers = {("tesla_fleet", VIN_B)}
+        coord.data = _fleet_data("ASLEEP")
+
+    coordinator.refresh = refresh
+    assert await observation.async_prepare_tesla_fleet_command(
+        hass, VIN_A, command_entity
+    ) is False
+    assert coordinator.refreshes == 1
+
+
+@pytest.mark.asyncio
+async def test_fleet_preparation_ignores_unrelated_three_part_identifier():
+    coordinator = _Coordinator(_fleet_data("ASLEEP"))
+    hass, command_entity = _fleet_command_hass(coordinator)
+    vehicle = hass.config_entries.async_entries("tesla_fleet")[0].runtime_data.vehicles[0]
+    vehicle.device.identifiers.add(("teslemetry", VIN_A, "vehicle"))
+    hass.device_registry.devices["device-a"].identifiers.add(
+        ("teslemetry", VIN_A, "vehicle")
+    )
+
+    assert await observation.async_prepare_tesla_fleet_command(
+        hass, VIN_A, command_entity
+    ) is True
+    assert coordinator.refreshes == 1
+
+
+@pytest.mark.asyncio
+async def test_fleet_preparation_rejects_ambiguous_same_binding_sources():
+    coordinator = _Coordinator(_fleet_data("ASLEEP"))
+    hass, command_entity = _fleet_command_hass(coordinator)
+    entry = hass.config_entries.async_entries("tesla_fleet")[0]
+    entry.runtime_data.vehicles.append(
+        _vehicle(VIN_A, _Coordinator(_fleet_data("ASLEEP")), "device-a")
+    )
+
+    assert await observation.async_prepare_tesla_fleet_command(
+        hass, VIN_A, command_entity
+    ) is False
+    assert coordinator.refreshes == 0
+
+
+@pytest.mark.asyncio
+async def test_fleet_preparation_rejects_wrong_vin_provider_and_propagates_cancel():
+    old = math.floor(datetime.now(timezone.utc).timestamp()) - 1
+    coordinator = _Coordinator(_fleet_data("ONLINE", old))
+    hass, command_entity = _fleet_command_hass(coordinator)
+    assert await observation.async_prepare_tesla_fleet_command(
+        hass, VIN_B, command_entity
+    ) is False
+    assert coordinator.refreshes == 0
+
+    fleet_entry = hass.config_entries.async_entries("tesla_fleet")[0]
+    fleet_entry.runtime_data.vehicles = []
+    teslemetry_entry = _entry(
+        "teslemetry-entry",
+        [_vehicle(VIN_A, coordinator, "device-a", "teslemetry")],
+    )
+    hass.config_entries.async_entries = lambda domain: {
+        "tesla_fleet": [fleet_entry],
+        "teslemetry": [teslemetry_entry],
+    }.get(domain, [])
+    assert await observation.async_prepare_tesla_fleet_command(
+        hass, VIN_A, command_entity
+    ) is False
+    assert coordinator.refreshes == 0
+
+    fleet_entry.runtime_data.vehicles = [
+        _vehicle(VIN_A, coordinator, "device-a", "tesla_fleet")
+    ]
+    hass.config_entries.async_entries = lambda domain: {
+        "tesla_fleet": [fleet_entry],
+    }.get(domain, [])
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def refresh(coord):
+        started.set()
+        await release.wait()
+        coord.data = _fleet_data("ASLEEP")
+
+    coordinator.refresh = refresh
+    task = asyncio.create_task(
+        observation.async_prepare_tesla_fleet_command(
+            hass, VIN_A, command_entity, timeout=2
+        )
+    )
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    release.set()
+    await asyncio.sleep(0)
+    assert coordinator.refreshes == 1
 
 
 def test_cached_fresh_observation_does_not_request_refresh():

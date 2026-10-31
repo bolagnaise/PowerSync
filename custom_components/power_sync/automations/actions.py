@@ -34,6 +34,7 @@ import re
 import time
 from collections.abc import Mapping
 from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import List, Dict, Any, Optional, Callable
 
 from homeassistant.core import HomeAssistant
@@ -2301,21 +2302,25 @@ async def _wake_tesla_ev_for_command(
     vehicle_vin: Optional[str],
     command_entity: str,
 ) -> bool:
-    """Wake an EV unless its official Fleet entity owns that operation.
+    """Prepare an EV for a command, preserving provider-specific wake ownership.
 
     Home Assistant's official Tesla Fleet command entities call
     ``wake_up_if_asleep()`` themselves. Their Charge switch is available with
     the Vehicle Charging Commands scope, whereas the separate Wake button
-    exists only with Vehicle Commands. Requiring that button therefore makes
-    a usable Charge switch unreachable for a supported Fleet setup.
+    exists only with Vehicle Commands. The Fleet preparation refreshes the
+    exact command source once so a stale cached ``ONLINE`` state cannot send a
+    command directly to a sleeping vehicle, while a charging-only setup still
+    lets the Fleet Charge switch own wake-up.
     """
     entity = er.async_get(hass).entities.get(command_entity)
     if getattr(entity, "platform", None) == "tesla_fleet":
-        _LOGGER.debug(
-            "Tesla Fleet command entity %s will perform its own wake-up",
+        from ..tesla_ev_observation import async_prepare_tesla_fleet_command
+
+        return await async_prepare_tesla_fleet_command(
+            hass,
+            str(vehicle_vin or ""),
             command_entity,
         )
-        return True
     return await _wake_tesla_ev(hass, vehicle_vin)
 
 
@@ -4231,6 +4236,278 @@ async def _run_ble_transport_command(hass, entry, params, prefix, operation, sen
     return None, bool(isolated and authority())
 
 
+@dataclass(frozen=True, slots=True)
+class _TeslaNativeMutationResult:
+    """Outcome of one journaled native HA service mutation."""
+
+    outcome: str
+    error: BaseException | None = None
+    retryable_range: bool = False
+
+
+def _tesla_native_deadline_token(value: Any) -> Any:
+    """Return a stable comparison value for the request's optional deadline."""
+    if isinstance(value, datetime):
+        try:
+            return value.timestamp()
+        except (OverflowError, OSError, TypeError, ValueError):
+            return value
+    if type(value) in (int, float) and math.isfinite(value):
+        return float(value)
+    return value
+
+
+def _tesla_native_binding(hass: HomeAssistant, entity_id: str, vehicle: Any):
+    """Pin registry identity and the provider device's exact canonical VIN."""
+    snapshot = _tesla_legacy_entity_identity(hass, (entity_id,))
+    if not snapshot or len(snapshot) != 1 or len(snapshot[0]) != 6:
+        return None
+    identity = snapshot[0]
+    if identity[5] is not None or identity[1] not in {"tesla_fleet", "teslemetry"}:
+        return None
+    if any(not isinstance(value, str) or not value.strip() for value in identity[1:5]):
+        return None
+    canonical_vehicle = str(vehicle or "").strip().upper()
+    if not re.fullmatch(r"[A-HJ-NPR-Z0-9]{17}", canonical_vehicle):
+        return None
+    try:
+        device = dr.async_get(hass).async_get(identity[3])
+    except Exception:
+        return None
+    identifiers = getattr(device, "identifiers", ()) if device is not None else ()
+    provider_vins = set()
+    for identifier in identifiers or ():
+        if not isinstance(identifier, (tuple, list)) or len(identifier) < 2:
+            continue
+        if str(identifier[0]) == identity[1]:
+            provider_vins.add(str(identifier[1]).strip().upper())
+    if provider_vins != {canonical_vehicle}:
+        return None
+    return snapshot, canonical_vehicle
+
+
+async def _tesla_native_authority_current(authorize: Callable[[], Any]) -> bool:
+    """Evaluate the request authority without allowing an awaitable to leak."""
+    try:
+        result = authorize()
+        if inspect.isawaitable(result):
+            result = await result
+        return bool(result)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        return False
+
+
+def _mark_tesla_native_unknown(params: Dict[str, Any], operation: str) -> None:
+    """Keep callers on their recovery/cleanup path after an ambiguous write."""
+    params["_tesla_transport_recovery_pending"] = True
+    if operation == "start":
+        params["_tesla_allow_plan_recovery"] = True
+
+
+def _tesla_native_deadline_current(value: Any) -> bool:
+    """Reject a native write once its original request deadline has elapsed."""
+    if value is None:
+        return True
+    if isinstance(value, datetime):
+        try:
+            token = value.timestamp()
+        except (OverflowError, OSError, TypeError, ValueError):
+            return False
+    elif type(value) in (int, float):
+        if not math.isfinite(value):
+            return False
+        token = float(value)
+    else:
+        return False
+    return datetime.now(dt_timezone.utc).timestamp() < token
+
+
+def _tesla_native_service_shape(
+    operation: str,
+    entity_id: str,
+    domain: str,
+    service: str,
+    service_data: Mapping[str, Any],
+) -> bool:
+    """Keep a journal ticket bound to exactly one documented HA mutation."""
+    expected = {
+        "start": ("switch", "turn_on"),
+        "stop": ("switch", "turn_off"),
+        "rate": ("number", "set_value"),
+        "limit": ("number", "set_value"),
+    }.get(operation)
+    return (
+        expected == (domain, service)
+        and entity_id.startswith(f"{domain}.")
+        and isinstance(service_data, Mapping)
+        and service_data.get("entity_id") == entity_id
+        and (operation in {"start", "stop"} or "value" in service_data)
+    )
+
+
+def _tesla_native_verified_range_rejection(
+    error: BaseException,
+    operation: str,
+    entity_id: str,
+    service_data: Mapping[str, Any],
+) -> bool:
+    """Recognize only HA's structured prewrite number range validation."""
+    if operation != "rate" or service_data.get("value") is None:
+        return False
+    try:
+        from homeassistant.exceptions import ServiceValidationError
+    except (ImportError, AttributeError):
+        return False
+    if not isinstance(error, ServiceValidationError):
+        return False
+    if (
+        getattr(error, "translation_domain", None) != "number"
+        or getattr(error, "translation_key", None) != "out_of_range"
+    ):
+        return False
+    placeholders = getattr(error, "translation_placeholders", None)
+    if not isinstance(placeholders, Mapping) or placeholders.get("entity_id") != entity_id:
+        return False
+    try:
+        return float(placeholders.get("value")) == float(service_data["value"])
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
+async def _run_native_tesla_service_command(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    params: Dict[str, Any],
+    operation: str,
+    entity_id: str,
+    domain: str,
+    service: str,
+    service_data: Mapping[str, Any],
+    authorize: Callable[[], Any],
+) -> _TeslaNativeMutationResult:
+    """Journal one native Tesla service write and fence its request scope."""
+    from ..tesla_ev_recovery import async_begin_attempt, async_finish_attempt
+
+    vehicle = params.get("vehicle_vin") or params.get("vehicle_id")
+    binding = _tesla_native_binding(hass, entity_id, vehicle)
+    deadline = params.get("_boost_start_deadline")
+    deadline_current = (
+        operation == "stop" or _tesla_native_deadline_current(deadline)
+    )
+    if (
+        not vehicle
+        or binding is None
+        or not _tesla_native_service_shape(
+            operation, entity_id, domain, service, service_data
+        )
+        or not deadline_current
+    ):
+        return _TeslaNativeMutationResult("not_sent")
+    command_data = dict(service_data)
+    deadline_token = _tesla_native_deadline_token(params.get("_boost_start_deadline"))
+    pinned_vehicle = str(vehicle).strip().upper()
+    ticket = None
+    try:
+        if not await _tesla_native_authority_current(authorize):
+            return _TeslaNativeMutationResult("not_sent")
+        if (
+            operation != "stop"
+            and not _tesla_native_deadline_current(params.get("_boost_start_deadline"))
+        ):
+            return _TeslaNativeMutationResult("not_sent")
+        ticket = await async_begin_attempt(
+            hass,
+            entry,
+            pinned_vehicle,
+            {"kind": "ha", "entity_id": entity_id},
+            operation,
+            entity_id,
+            deadline=deadline,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as err:
+        # The journal admission itself failed before a service write.
+        return _TeslaNativeMutationResult("not_sent", err)
+
+    try:
+        authority_current = await _tesla_native_authority_current(authorize)
+        current_vehicle = str(
+            params.get("vehicle_vin") or params.get("vehicle_id") or ""
+        ).strip().upper()
+        scope_current = (
+            ticket is not None
+            and authority_current
+            and current_vehicle == pinned_vehicle
+            and _tesla_native_binding(hass, entity_id, pinned_vehicle) == binding
+            and (
+                operation == "stop"
+                or (
+                    _tesla_native_deadline_token(params.get("_boost_start_deadline"))
+                    == deadline_token
+                    and _tesla_native_deadline_current(params.get("_boost_start_deadline"))
+                )
+            )
+        )
+    except asyncio.CancelledError:
+        if ticket is not None:
+            _mark_tesla_native_unknown(params, operation)
+            try:
+                await asyncio.shield(async_finish_attempt(ticket, "sent_unknown"))
+            except BaseException:
+                pass
+        raise
+    if not scope_current:
+        if ticket is not None:
+            await async_finish_attempt(ticket, "not_sent")
+        return _TeslaNativeMutationResult("not_sent")
+
+    if operation == "start":
+        params["_tesla_command_entity_id"] = entity_id
+    try:
+        await hass.services.async_call(
+            domain,
+            service,
+            command_data,
+            blocking=True,
+        )
+    except asyncio.CancelledError:
+        _mark_tesla_native_unknown(params, operation)
+        try:
+            await asyncio.shield(async_finish_attempt(ticket, "sent_unknown"))
+        except BaseException:
+            pass
+        raise
+    except Exception as err:
+        if getattr(err, "site_import_admission_denied", False):
+            await asyncio.shield(async_finish_attempt(ticket, "not_sent"))
+            return _TeslaNativeMutationResult("rejected", err)
+        if _tesla_native_verified_range_rejection(
+            err, operation, entity_id, command_data
+        ):
+            await asyncio.shield(async_finish_attempt(ticket, "not_sent"))
+            return _TeslaNativeMutationResult("not_sent", err, retryable_range=True)
+        _mark_tesla_native_unknown(params, operation)
+        await asyncio.shield(async_finish_attempt(ticket, "sent_unknown"))
+        _record_tesla_manual_key_failure(params, err)
+        return _TeslaNativeMutationResult("sent_unknown", err)
+
+    try:
+        finished = await asyncio.shield(async_finish_attempt(ticket, "accepted_unconfirmed"))
+    except asyncio.CancelledError:
+        _mark_tesla_native_unknown(params, operation)
+        raise
+    except Exception as err:
+        _mark_tesla_native_unknown(params, operation)
+        return _TeslaNativeMutationResult("sent_unknown", err)
+    if finished is False:
+        _mark_tesla_native_unknown(params, operation)
+        return _TeslaNativeMutationResult("sent_unknown")
+    return _TeslaNativeMutationResult("accepted_unconfirmed")
+
+
 async def _fresh_tesla_command_observation(hass, entry, vehicle, params, *, timeout=10):
     """Make one exact-vehicle provider read only during command recovery."""
     from ..tesla_ev_observation import async_read_tesla_vehicle
@@ -4245,8 +4522,19 @@ async def _fresh_tesla_command_observation(hass, entry, vehicle, params, *, time
     original_deadline = params.get("_boost_start_deadline")
     if type(original_deadline) in (int, float) and math.isfinite(original_deadline):
         timeout = min(timeout, max(0.001, original_deadline-datetime.now(dt_timezone.utc).timestamp()))
+    preferred_entity = params.get("_tesla_command_entity_id")
+    if not preferred_entity:
+        from ..tesla_ev_recovery import get_vehicle_route
+
+        route = get_vehicle_route(hass, entry, canonical)
+        route_entity = route.get("entity_id") if isinstance(route, Mapping) else None
+        if route_entity and _tesla_native_binding(hass, route_entity, canonical) is not None:
+            # A reload loses transient action params. Recover the exact native
+            # producer from its durable attempt instead of choosing another
+            # account/provider that happens to expose the same VIN.
+            preferred_entity = route_entity
     observation = await async_read_tesla_vehicle(hass, canonical,
-        preferred_entity_id=params.get("_tesla_command_entity_id"), timeout=timeout)
+        preferred_entity_id=preferred_entity, timeout=timeout)
     return observation if authority() else None
 
 
@@ -6868,12 +7156,26 @@ async def _action_start_ev_charging(
                 return False
             if not request_authority():
                 return None
-            await hass.services.async_call(
+            mutation = await _run_native_tesla_service_command(
+                hass,
+                config_entry,
+                params,
+                "start",
+                charge_switch_entity,
                 "switch",
                 "turn_on",
                 {"entity_id": charge_switch_entity},
-                blocking=True,
+                request_authority,
             )
+            if mutation.outcome == "sent_unknown":
+                _LOGGER.error("Tesla start outcome is unknown for %s: %s", charge_switch_entity, mutation.error)
+                return None
+            if mutation.outcome == "rejected":
+                if getattr(mutation.error, "site_import_admission_denied", False):
+                    raise mutation.error
+                return False
+            if mutation.outcome != "accepted_unconfirmed":
+                return False
             params["_tesla_command_entity_id"] = charge_switch_entity
             params["_tesla_start_live_read_required"] = True
             params["_tesla_allow_plan_recovery"] = True
@@ -7165,19 +7467,41 @@ async def _action_stop_ev_charging(
             return False
 
         try:
-            wake_success = await _wake_tesla_ev_for_command(
-                hass, vehicle_vin, charge_switch_entity
-            )
-            if not wake_success:
-                _LOGGER.warning("Wake failed (possibly due to API credits), skipping stop charge command")
-                return False
+            # The official Fleet Charge switch owns its own wake-up.  A
+            # separate metadata refresh can fail while the registered command
+            # entity remains valid, which must not veto cleanup Stop.  Keep the
+            # existing preparation for non-Fleet providers.
+            command_registration = er.async_get(hass).entities.get(charge_switch_entity)
+            if getattr(command_registration, "platform", None) != "tesla_fleet":
+                wake_success = await _wake_tesla_ev_for_command(
+                    hass, vehicle_vin, charge_switch_entity
+                )
+                if not wake_success:
+                    _LOGGER.warning("Wake failed (possibly due to API credits), skipping stop charge command")
+                    return False
 
-            await hass.services.async_call(
+            if await _tesla_ha_command_entity(hass, config_entry, params, "stop") != charge_switch_entity:
+                return False
+            mutation = await _run_native_tesla_service_command(
+                hass,
+                config_entry,
+                params,
+                "stop",
+                charge_switch_entity,
                 "switch",
                 "turn_off",
                 {"entity_id": charge_switch_entity},
-                blocking=True,
+                cleanup_authority,
             )
+            if mutation.outcome == "sent_unknown":
+                _LOGGER.error("Tesla stop outcome is unknown for %s: %s", charge_switch_entity, mutation.error)
+                return None
+            if mutation.outcome == "rejected":
+                if getattr(mutation.error, "site_import_admission_denied", False):
+                    raise mutation.error
+                return False
+            if mutation.outcome != "accepted_unconfirmed":
+                return False
             _LOGGER.info(f"Stopped EV charging via {charge_switch_entity}")
             return True
         except Exception as e:
@@ -7281,12 +7605,26 @@ async def _action_set_ev_charge_limit(
             if (not request_authority() or await _tesla_ha_command_entity(
                     hass, config_entry, params, "limit") != charge_limit_entity):
                 return False
-            await hass.services.async_call(
+            mutation = await _run_native_tesla_service_command(
+                hass,
+                config_entry,
+                params,
+                "limit",
+                charge_limit_entity,
                 "number",
                 "set_value",
                 {"entity_id": charge_limit_entity, "value": percent},
-                blocking=True,
+                request_authority,
             )
+            if mutation.outcome == "sent_unknown":
+                _LOGGER.error("Tesla charge-limit outcome is unknown for %s: %s", charge_limit_entity, mutation.error)
+                return None
+            if mutation.outcome == "rejected":
+                if getattr(mutation.error, "site_import_admission_denied", False):
+                    raise mutation.error
+                return False
+            if mutation.outcome != "accepted_unconfirmed":
+                return False
             _LOGGER.info(f"Set EV charge limit to {percent}% via {charge_limit_entity}")
             return True
         except Exception as e:
@@ -7549,12 +7887,77 @@ async def _action_set_ev_charging_amps(
                 return False
             if not request_authority():
                 return False
-            await hass.services.async_call(
+            mutation = await _run_native_tesla_service_command(
+                hass,
+                config_entry,
+                params,
+                "rate",
+                charging_amps_entity,
                 "number",
                 "set_value",
                 {"entity_id": charging_amps_entity, "value": amps},
-                blocking=True,
+                request_authority,
             )
+            if mutation.outcome == "sent_unknown":
+                _LOGGER.error("Tesla charging-amps outcome is unknown for %s: %s", charging_amps_entity, mutation.error)
+                return None
+            if mutation.outcome == "rejected":
+                if getattr(mutation.error, "site_import_admission_denied", False):
+                    raise mutation.error
+                return False
+            if mutation.outcome == "not_sent" and mutation.retryable_range:
+                fallback_amps = _tesla_entity_max_fallback_amps(
+                    amps,
+                    entity_min,
+                    entity_max,
+                    allow_stale_entity_max_override=allow_stale_entity_max_override,
+                    configured_max_amps=configured_max_amps,
+                )
+                if fallback_amps is None:
+                    return False
+                if not await prepare_ev_submission(
+                    hass,
+                    charging_amps_entity,
+                    operation="rate",
+                    amps=fallback_amps,
+                ):
+                    return False
+                if not request_authority():
+                    return False
+                fallback_mutation = await _run_native_tesla_service_command(
+                    hass,
+                    config_entry,
+                    params,
+                    "rate",
+                    charging_amps_entity,
+                    "number",
+                    "set_value",
+                    {"entity_id": charging_amps_entity, "value": fallback_amps},
+                    request_authority,
+                )
+                if fallback_mutation.outcome == "sent_unknown":
+                    _LOGGER.error(
+                        "Tesla charging-amps fallback outcome is unknown for %s: %s",
+                        charging_amps_entity,
+                        fallback_mutation.error,
+                    )
+                    return None
+                if fallback_mutation.outcome == "rejected":
+                    if getattr(fallback_mutation.error, "site_import_admission_denied", False):
+                        raise fallback_mutation.error
+                    return False
+                if fallback_mutation.outcome != "accepted_unconfirmed":
+                    return False
+                params["max_charge_amps"] = fallback_amps
+                params["_tesla_entity_range_fallback_amps"] = fallback_amps
+                _LOGGER.info(
+                    "Set EV charging amps to %dA via %s after structured entity range validation",
+                    fallback_amps,
+                    charging_amps_entity,
+                )
+                return True
+            if mutation.outcome != "accepted_unconfirmed":
+                return False
             params.pop("_tesla_entity_range_fallback_amps", None)
             if configured_max_amps is not None:
                 params["max_charge_amps"] = configured_max_amps
@@ -7563,42 +7966,6 @@ async def _action_set_ev_charging_amps(
         except Exception as e:
             if getattr(e, "site_import_admission_denied", False):
                 raise
-            fallback_amps = None
-            if _is_number_range_error(str(e)):
-                fallback_amps = _tesla_entity_max_fallback_amps(
-                    amps,
-                    entity_min,
-                    entity_max,
-                    allow_stale_entity_max_override=allow_stale_entity_max_override,
-                    configured_max_amps=configured_max_amps,
-                )
-            if fallback_amps is not None:
-                try:
-                    if not await prepare_ev_submission(hass, charging_amps_entity, operation="rate", amps=fallback_amps):
-                        return False
-                    await hass.services.async_call(
-                        "number",
-                        "set_value",
-                        {"entity_id": charging_amps_entity, "value": fallback_amps},
-                        blocking=True,
-                    )
-                    params["max_charge_amps"] = fallback_amps
-                    params["_tesla_entity_range_fallback_amps"] = fallback_amps
-                    _LOGGER.info(
-                        "Set EV charging amps to %dA via %s after entity range fallback",
-                        fallback_amps,
-                        charging_amps_entity,
-                    )
-                    return True
-                except Exception as fallback_error:
-                    if getattr(fallback_error, "site_import_admission_denied", False):
-                        raise
-                    _LOGGER.error(
-                        "Failed Tesla entity range fallback to %dA: %s",
-                        fallback_amps,
-                        fallback_error,
-                    )
-
             _LOGGER.error(f"Failed to set EV charging amps: {e}")
             _record_tesla_manual_key_failure(params, e)
 

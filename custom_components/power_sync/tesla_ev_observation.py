@@ -44,6 +44,7 @@ class _Source:
     device_id: str | None
     producer_identity: str
     device_identifiers: tuple[tuple[str, str], ...]
+    provider_identifiers: frozenset[tuple[str, str]]
 
     def key(self) -> tuple[Any, ...]:
         return (
@@ -59,9 +60,19 @@ class _Source:
 
 @dataclass
 class _ReadState:
-    in_flight: dict[tuple[Any, ...], asyncio.Task[TeslaVehicleObservation | None]] = field(
+    in_flight: dict[tuple[Any, ...], asyncio.Task["_SourceRefresh | None"]] = field(
         default_factory=dict
     )
+
+
+@dataclass(frozen=True, slots=True)
+class _SourceRefresh:
+    """The result of one bounded coordinator refresh."""
+
+    started_at: float
+    before_timestamp: float | None
+    data: Any
+    successful: bool
 
 
 def _canonical_vin(value: Any) -> str | None:
@@ -102,6 +113,23 @@ def _charge_state(data: Any) -> dict[str, Any]:
     }
 
 
+def _source_charge_timestamp(data: Any) -> float | None:
+    return _timestamp(_charge_state(data).get("timestamp"))
+
+
+def _fleet_state(data: Any) -> str | None:
+    """Return the normalized Fleet vehicle state from one coordinator report."""
+    if isinstance(data, Mapping):
+        value = data.get("state")
+    else:
+        value = getattr(data, "state", None)
+    if value is None:
+        return None
+    value = getattr(value, "value", value)
+    state = str(value or "").strip().upper()
+    return state or None
+
+
 def _entry_id(entry: Any) -> str | None:
     value = getattr(entry, "entry_id", None)
     return str(value) if value else None
@@ -114,11 +142,31 @@ def _identifiers(value: Any) -> tuple[tuple[str, str], ...]:
     result = []
     for identifier in identifiers or ():
         try:
-            domain, value = identifier
+            if isinstance(identifier, (str, bytes)):
+                continue
+            parts = tuple(identifier)
         except (TypeError, ValueError):
             continue
+        if len(parts) != 2:
+            continue
+        domain, value = parts
         result.append((str(domain), str(value)))
     return tuple(result)
+
+
+def _provider_identifiers(value: Any, provider: str) -> frozenset[tuple[str, str]]:
+    """Return the provider's two-part device identifiers.
+
+    Some integrations add unrelated identifiers with three or more parts.
+    ``_identifiers`` deliberately ignores those entries so they cannot make a
+    valid native source fail identity matching or trigger unpacking errors.
+    """
+    provider_key = str(provider).strip().lower()
+    return frozenset(
+        (domain.strip().lower(), identifier.strip().upper())
+        for domain, identifier in _identifiers(value)
+        if domain.strip().lower() == provider_key
+    )
 
 
 def _device_registry(hass: Any) -> Any | None:
@@ -169,6 +217,85 @@ def _entity_registration(hass: Any, entity_id: str | None) -> Any | None:
         return getter(entity_id) if callable(getter) else None
 
 
+def _registered_device(hass: Any, device_id: str | None) -> Any | None:
+    """Resolve one device-registry object without broad source fallbacks."""
+    if not device_id:
+        return None
+    registry = _device_registry(hass)
+    if registry is None:
+        return None
+    getter = getattr(registry, "async_get", None)
+    if callable(getter):
+        try:
+            registered = getter(device_id)
+        except (AttributeError, KeyError, TypeError):
+            registered = None
+        if registered is not None:
+            return registered
+    devices = getattr(registry, "devices", {})
+    if isinstance(devices, Mapping):
+        return devices.get(device_id)
+    for registered in devices or ():
+        if str(getattr(registered, "id", "") or "") == str(device_id):
+            return registered
+    return None
+
+
+def _fleet_command_binding(hass: Any, entity_id: str) -> tuple[str, str, str, str] | None:
+    """Return a complete active Fleet command registration identity."""
+    registration = _entity_registration(hass, entity_id)
+    if registration is None or getattr(registration, "disabled_by", object()) is not None:
+        return None
+    values = (
+        getattr(registration, "platform", None),
+        getattr(registration, "config_entry_id", None),
+        getattr(registration, "device_id", None),
+        getattr(registration, "unique_id", None),
+    )
+    if any(value is None or not str(value).strip() for value in values):
+        return None
+    platform, entry_id, device_id, unique_id = (str(value) for value in values)
+    if platform != "tesla_fleet":
+        return None
+    return platform, entry_id, device_id, unique_id
+
+
+def _fleet_command_source(
+    hass: Any,
+    vin: str,
+    command_entity: str,
+    binding: tuple[str, str, str, str],
+) -> _Source | None:
+    """Resolve exactly one Fleet source for an active command registration."""
+    sources = _sources(hass, vin)
+    matches = [
+        source
+        for source in sources
+        if (
+            source.domain == "tesla_fleet"
+            and source.config_entry_id == binding[1]
+            and source.device_id == binding[2]
+        )
+    ]
+    if len(matches) != 1:
+        return None
+    source = matches[0]
+    expected_provider_identifiers = frozenset({("tesla_fleet", vin)})
+    if source.provider_identifiers != expected_provider_identifiers:
+        return None
+    registered = _registered_device(hass, binding[2])
+    if (
+        registered is None
+        or _provider_identifiers(registered, "tesla_fleet")
+        != expected_provider_identifiers
+    ):
+        return None
+    selected = _select_source(hass, vin, command_entity)
+    if selected is None or selected.key() != source.key():
+        return None
+    return source
+
+
 def _sources(hass: Any, vin: str) -> list[_Source]:
     try:
         from .native_rate_telemetry import vehicle_sources
@@ -185,6 +312,9 @@ def _sources(hass: Any, vin: str) -> list[_Source]:
             continue
         device_id, identifiers = _device_identity(hass, vehicle, domain, vin)
         entry_id = _entry_id(entry)
+        provider_identifiers = _provider_identifiers(
+            getattr(vehicle, "device", None), domain
+        )
         sources.append(
             _Source(
                 domain=str(domain),
@@ -196,6 +326,7 @@ def _sources(hass: Any, vin: str) -> list[_Source]:
                 device_id=device_id,
                 producer_identity=f"{domain}:{entry_id or ''}:{device_id or ''}:{vin}",
                 device_identifiers=identifiers,
+                provider_identifiers=provider_identifiers,
             )
         )
     # Native Teslemetry retains its own BLE/cloud router.  Keep one selected
@@ -310,43 +441,6 @@ def _cached_observation(
     return _observation(source, charge, timestamp)
 
 
-async def _read_source(
-    hass: Any,
-    source: _Source,
-    *,
-    timeout: float,
-    preferred_entity_id: str | None,
-) -> TeslaVehicleObservation | None:
-    refresh = getattr(source.coordinator, "async_request_refresh", None)
-    if not callable(refresh):
-        return None
-    before = _timestamp(_charge_state(getattr(source.coordinator, "data", None)).get("timestamp"))
-    started = time.time()
-    try:
-        await asyncio.wait_for(refresh(), timeout=max(0.001, timeout))
-    except asyncio.CancelledError:
-        raise
-    except Exception:
-        return None
-    if getattr(source.coordinator, "last_update_success", False) is not True:
-        return None
-    if not _source_is_current(hass, source, preferred_entity_id):
-        return None
-    charge = _charge_state(getattr(source.coordinator, "data", None))
-    timestamp = _timestamp(charge.get("timestamp"))
-    now = time.time()
-    if timestamp is None or timestamp > now + 5 or now - timestamp > MAX_SOURCE_AGE_SECONDS:
-        return None
-    # API timestamps are often whole seconds.  A changed timestamp in the
-    # request's current second is acceptable; an unchanged cached timestamp is
-    # never accepted, even when HA reported the coordinator as updated.
-    if timestamp < math.floor(started):
-        return None
-    if before is not None and timestamp <= before:
-        return None
-    return _observation(source, charge, timestamp)
-
-
 def _read_state(hass: Any) -> _ReadState:
     data = getattr(hass, "data", None)
     if not isinstance(data, dict):
@@ -359,28 +453,25 @@ def _read_state(hass: Any) -> _ReadState:
     return state
 
 
-async def _read_shared(
+async def _refresh_shared(
     hass: Any,
     source: _Source,
     *,
     timeout: float,
-    preferred_entity_id: str | None,
-) -> TeslaVehicleObservation | None:
+) -> _SourceRefresh | None:
     state = _read_state(hass)
     key = source.key()
     task = state.in_flight.get(key)
     if task is None or task.done():
         task = asyncio.create_task(
-            _read_source(
-                hass,
+            _refresh_source(
                 source,
                 timeout=timeout,
-                preferred_entity_id=preferred_entity_id,
             )
         )
         state.in_flight[key] = task
 
-        def cleanup(completed: asyncio.Task[TeslaVehicleObservation | None]) -> None:
+        def cleanup(completed: asyncio.Task[_SourceRefresh | None]) -> None:
             if state.in_flight.get(key) is completed:
                 state.in_flight.pop(key, None)
             try:
@@ -395,6 +486,120 @@ async def _read_shared(
         return await asyncio.wait_for(asyncio.shield(task), timeout=max(0.001, timeout))
     except asyncio.TimeoutError:
         return None
+
+
+async def _read_shared(
+    hass: Any,
+    source: _Source,
+    *,
+    timeout: float,
+    preferred_entity_id: str | None,
+) -> TeslaVehicleObservation | None:
+    refreshed = await _refresh_shared(hass, source, timeout=timeout)
+    if refreshed is None or not refreshed.successful:
+        return None
+    if not _source_is_current(hass, source, preferred_entity_id):
+        return None
+    charge = _charge_state(refreshed.data)
+    timestamp = _timestamp(charge.get("timestamp"))
+    now = time.time()
+    if timestamp is None or timestamp > now + 5 or now - timestamp > MAX_SOURCE_AGE_SECONDS:
+        return None
+    if timestamp < math.floor(refreshed.started_at):
+        return None
+    if refreshed.before_timestamp is not None and timestamp <= refreshed.before_timestamp:
+        return None
+    return _observation(source, charge, timestamp)
+
+
+async def _refresh_source(
+    source: _Source,
+    *,
+    timeout: float,
+) -> _SourceRefresh | None:
+    refresh = getattr(source.coordinator, "async_request_refresh", None)
+    if not callable(refresh):
+        return None
+    before = _source_charge_timestamp(getattr(source.coordinator, "data", None))
+    started = time.time()
+    try:
+        await asyncio.wait_for(refresh(), timeout=max(0.001, timeout))
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        return None
+    return _SourceRefresh(
+        started_at=started,
+        before_timestamp=before,
+        data=getattr(source.coordinator, "data", None),
+        successful=getattr(source.coordinator, "last_update_success", False) is True,
+    )
+
+
+async def async_prepare_tesla_fleet_command(
+    hass: Any,
+    vin: str,
+    command_entity: str,
+    *,
+    timeout: float = 10,
+) -> bool:
+    """Refresh the exact Fleet vehicle before a mutating command.
+
+    Fleet command entities perform their own wake-up, but their wake decision
+    is based on coordinator state.  A stale ``ONLINE`` state can therefore
+    send a command directly to a sleeping vehicle.  Refresh one source bound
+    to the command entity and allow the provider to own wake-up only when that
+    refreshed source says ``ASLEEP`` or ``OFFLINE``.  A refreshed ``ONLINE``
+    report must also carry a newer, fresh charge timestamp; cached or
+    rate-limited data cannot authorize a write.
+    """
+    canonical = _canonical_vin(vin)
+    if canonical is None:
+        return False
+    try:
+        timeout_value = float(timeout)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    if not math.isfinite(timeout_value) or timeout_value <= 0:
+        return False
+    timeout_value = min(timeout_value, MAX_TIMEOUT_SECONDS)
+    try:
+        binding = _fleet_command_binding(hass, command_entity)
+        if binding is None:
+            return False
+        source = _fleet_command_source(hass, canonical, command_entity, binding)
+    except Exception:
+        return False
+    if source is None:
+        return False
+    try:
+        refreshed = await _refresh_shared(hass, source, timeout=timeout_value)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        return False
+    if refreshed is None or not refreshed.successful:
+        return False
+    try:
+        if _fleet_command_binding(hass, command_entity) != binding:
+            return False
+        current_source = _fleet_command_source(hass, canonical, command_entity, binding)
+    except Exception:
+        return False
+    if current_source is None or current_source.key() != source.key():
+        return False
+    state_value = _fleet_state(refreshed.data)
+    if state_value in {"ASLEEP", "OFFLINE"}:
+        return True
+    if state_value != "ONLINE":
+        return False
+    timestamp = _source_charge_timestamp(refreshed.data)
+    now = time.time()
+    if timestamp is None or timestamp > now + 5 or now - timestamp > MAX_SOURCE_AGE_SECONDS:
+        return False
+    if timestamp < math.floor(refreshed.started_at):
+        return False
+    return refreshed.before_timestamp is None or timestamp > refreshed.before_timestamp
 
 
 async def async_read_tesla_vehicle(
@@ -463,6 +668,7 @@ def get_tesla_vehicle_observation(
 
 __all__ = [
     "TeslaVehicleObservation",
+    "async_prepare_tesla_fleet_command",
     "async_read_tesla_vehicle",
     "get_tesla_vehicle_observation",
 ]

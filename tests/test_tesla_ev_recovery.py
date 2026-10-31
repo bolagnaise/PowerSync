@@ -456,6 +456,16 @@ async def test_fence_proof_is_bound_to_exact_bridge_and_valid_receipt(harness, m
     assert ticket is not None
     await recovery.async_finish_attempt(ticket, "sent_unknown")
     hass.services.update_states = True
+    original_call = hass.services.async_call
+
+    async def ordered_receipt(*args, **kwargs):
+        # A real bridge reply arrives after its request. Give the fake that
+        # ordering too: datetime's microsecond resolution can otherwise make
+        # an immediate receipt equal to the request's time.time() sample.
+        await asyncio.sleep(0.001)
+        await original_call(*args, **kwargs)
+
+    hass.services.async_call = ordered_receipt
     # Keep receipt timestamps on real wall time, but make the bounded
     # monotonic polling window deterministic under full-suite load.
     import time as wall_clock

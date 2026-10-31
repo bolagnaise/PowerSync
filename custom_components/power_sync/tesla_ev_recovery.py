@@ -501,6 +501,18 @@ async def async_finish_attempt(ticket: RecoveryTicket, outcome: Any) -> bool:
         before = _snapshot_recovery(runtime)
         if normalized in ("not_sent", "accepted_unconfirmed", "confirmed", "rejected"):
             attempts.pop(ticket.attempt_id, None)
+            if (
+                record.get("route", {}).get("kind") == "ha"
+                and isinstance(ledger.get("route"), Mapping)
+                and ledger["route"].get("kind") == "ha"
+                and not attempts
+                and not ledger.get("hazards")
+            ):
+                # A completed native fallback has no outstanding producer to
+                # pin. Let the next request try its configured BLE preference.
+                # Retain HA routing when an older attempt or isolation hazard
+                # still requires that exact producer.
+                ledger["route"] = None
         else:
             record["outcome"] = normalized
         try:

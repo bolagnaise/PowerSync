@@ -62,16 +62,34 @@ need not receive a new timestamp: the echoed fence is the fresh producer proof.
 
 This is an explicit bridge contract, not a capability inferred from a sensor
 name, project version or accepted switch write. The two installed legacy
-bridges do not expose it. Their outstanding uncertain commands remain
-quarantined pending verified producer recovery; no firmware has been flashed.
-The original node configuration and rollback artifact are still needed before
-a safe bridge firmware change can be prepared.
+bridges do not expose it. An outstanding uncertain command must remain
+quarantined pending verified producer recovery. The original node configuration
+and rollback artifact are needed before changing bridge firmware; their absence
+does not require rebuilding or pairing a bridge that can communicate normally.
+No bridge firmware has been flashed during this investigation.
 
 Fleet and native Teslemetry recovery use an explicit exact-vehicle coordinator
 refresh when needed. This works with automatic Fleet polling disabled and
 does not introduce recurring paid idle polling. An unchanged provider source
 timestamp is not a fresh observation. Such explicit reads and permitted Fleet
 fallback can incur provider charges.
+
+Before a Fleet mutation, PowerSync refreshes the exact registered provider
+vehicle once. This prevents a cached Online state from suppressing the Fleet
+integration's own wake-up while automatic polling is disabled. A refreshed
+asleep/offline state leaves wake-up to the command entity, including accounts
+without a separate Wake button. An Online result requires newer charge data;
+an unchanged or failed refresh cannot authorize a new positive command.
+Cleanup Stop remains available without that metadata-read prerequisite.
+
+Native Fleet and Teslemetry service writes also save their intent before
+submission. An ambiguous response or cancellation preserves the exact producer
+and original cleanup obligation across reload. A successful service return is
+provider acknowledgement, with physical charging confirmed separately. A
+completed native fallback returns future requests to the configured BLE
+preference when no outstanding attempt or isolation hazard needs the native
+route. Only a structured HA number validation known to precede the provider
+permits the bounded current-range retry.
 
 Legacy `tesla_bluetooth`, modern `teslemetry_bluetooth` command-only entities,
 native Teslemetry and HA Tesla Fleet are distinct adapters. Registry platform,
@@ -135,7 +153,13 @@ physical power. Both local cars and ESPHome/Fleet paths are available. Neither
 legacy nor modern Teslemetry Bluetooth is installed on this instance; their
 adapter contracts can be tested in software but cannot be called physically
 verified here. The private candidate has shown both cars in the dashboard and
-native battery charge/export with exact settings restoration. Outstanding
-legacy BLE commands still prevent the remaining two-car, Boost and active-EV
-coexistence tests. The release remains held pending bridge recovery and those
-physical checks.
+native battery charge/export with exact settings restoration. During subsequent
+operational recovery, both existing bridges were restarted, their uptime resets
+were verified, and both returned fresh stopped/zero-power charge data with the
+original current settings and limits. Pairing and firmware were unchanged. At
+that checkpoint the persisted transport-attempt journal was empty; two uncertain
+native rate reservations remained preserved. These observations do not establish
+an automatic producer-isolation contract or continuous connection reliability.
+The local connection remained intermittent, including a measured TESSY signal
+around -86 dBm. Required two-car, Boost/reload and active-EV coexistence checks
+remain incomplete; the release is still held for those physical checks.

@@ -613,6 +613,91 @@ class _Entry:
     options = {}
 
 
+def _install_native_ha_writer(hass, vin, *entity_ids, platform="tesla_fleet"):
+    """Supply real registry identity to tests exercising native service writes."""
+    for entity_id in entity_ids:
+        registration = hass.entity_registry.async_get(entity_id)
+        existing_device = getattr(registration, "device_id", None)
+        device_id = existing_device if existing_device in hass.device_registry.devices else (
+            f"native-{platform}-{vin[-4:]}"
+        )
+        entry_id = f"{platform}-entry"
+        hass.device_registry.devices[device_id] = SimpleNamespace(
+            id=device_id, name="Test vehicle", identifiers={(platform, vin)},
+            config_entries={entry_id},
+        )
+        if registration is None:
+            registration = SimpleNamespace(entity_id=entity_id)
+            hass.entity_registry.entities[entity_id] = registration
+        registration.platform = platform
+        registration.config_entry_id = entry_id
+        registration.device_id = device_id
+        registration.unique_id = f"{vin}-{entity_id.split('.', 1)[1]}"
+        registration.disabled_by = None
+
+
+def _native_number_range_error(monkeypatch, entity_id, value):
+    """Model HA number's structured validation before invoking its provider."""
+    exceptions = sys.modules["homeassistant.exceptions"]
+    base = getattr(exceptions, "ServiceValidationError", None)
+    if base is None:
+        base = type("ServiceValidationError", (Exception,), {})
+        monkeypatch.setattr(exceptions, "ServiceValidationError", base, raising=False)
+    error_type = type("NumberRangeValidationError", (base,), {
+        "translation_domain": "number", "translation_key": "out_of_range",
+        "translation_placeholders": {"entity_id": entity_id, "value": value,
+                                     "min_value": "5", "max_value": "16"},
+    })
+    return error_type("Number value is outside its allowed range")
+
+
+def _install_fleet_observation_source(monkeypatch, hass, vin, *, state="ASLEEP"):
+    """Add the minimal native Fleet coordinator used by command-gate tests."""
+    coordinator = SimpleNamespace(
+        data={"state": state},
+        last_update_success=True,
+    )
+
+    async def refresh():
+        return None
+
+    coordinator.async_request_refresh = refresh
+    fleet_entry = SimpleNamespace(
+        entry_id="fleet-entry",
+        runtime_data=SimpleNamespace(
+            vehicles=[
+                SimpleNamespace(
+                    vin=vin,
+                    coordinator=coordinator,
+                    device=SimpleNamespace(
+                        id="car-a",
+                        identifiers={("tesla_fleet", vin)},
+                    ),
+                )
+            ]
+        ),
+    )
+    hass.config_entries = SimpleNamespace(
+        async_entries=lambda domain: [fleet_entry] if domain == "tesla_fleet" else []
+    )
+    native = types.ModuleType("power_sync.native_rate_telemetry")
+
+    def vehicle_sources(hass_arg, requested_vin):
+        matches = []
+        for domain in ("teslemetry", "tesla_fleet"):
+            for entry in hass_arg.config_entries.async_entries(domain):
+                for vehicle in getattr(getattr(entry, "runtime_data", None), "vehicles", ()):
+                    if str(getattr(vehicle, "vin", "")).upper() != str(requested_vin).upper():
+                        continue
+                    coordinator_arg = getattr(vehicle, "coordinator", None)
+                    if coordinator_arg is not None:
+                        matches.append((domain, entry, vehicle, coordinator_arg))
+        return matches
+
+    native.vehicle_sources = vehicle_sources
+    monkeypatch.setitem(sys.modules, "power_sync.native_rate_telemetry", native)
+
+
 def _set_external_policy(hass, vehicle_id: str, policy: str = "yield") -> None:
     hass.data["power_sync"]["entry-1"]["automation_store"] = SimpleNamespace(
         _data={
@@ -2289,7 +2374,10 @@ def test_tesla_fleet_charge_switch_starts_without_separate_wake_button(monkeypat
             charge_switch: SimpleNamespace(
                 entity_id=charge_switch,
                 device_id="fleet-car",
+                config_entry_id="fleet-entry",
                 platform="tesla_fleet",
+                unique_id="fleet-charge",
+                disabled_by=None,
             ),
         },
         registry_devices={
@@ -2299,6 +2387,36 @@ def test_tesla_fleet_charge_switch_starts_without_separate_wake_button(monkeypat
                 identifiers={("tesla_fleet", vin)},
             ),
         },
+    )
+    coordinator = SimpleNamespace(
+        data={
+            "state": "ONLINE",
+            "charge_state_timestamp": datetime.now(timezone.utc).timestamp() - 300,
+        },
+        last_update_success=True,
+    )
+
+    async def refresh():
+        coordinator.data = {"state": "ASLEEP"}
+
+    coordinator.async_request_refresh = refresh
+    fleet_entry = SimpleNamespace(
+        entry_id="fleet-entry",
+        runtime_data=SimpleNamespace(
+            vehicles=[
+                SimpleNamespace(
+                    vin=vin,
+                    coordinator=coordinator,
+                    device=SimpleNamespace(
+                        id="fleet-car",
+                        identifiers={("tesla_fleet", vin)},
+                    ),
+                )
+            ]
+        ),
+    )
+    hass.config_entries = SimpleNamespace(
+        async_entries=lambda domain: [fleet_entry] if domain == "tesla_fleet" else []
     )
     monkeypatch.setattr(
         actions,
@@ -2310,6 +2428,22 @@ def test_tesla_fleet_charge_switch_starts_without_separate_wake_button(monkeypat
         raise AssertionError("official Tesla Fleet Charge must own wake-up")
 
     monkeypatch.setattr(actions, "_wake_tesla_ev", unexpected_separate_wake)
+    native = types.ModuleType("power_sync.native_rate_telemetry")
+
+    def vehicle_sources(hass_arg, requested_vin):
+        matches = []
+        for domain in ("teslemetry", "tesla_fleet"):
+            for entry in hass_arg.config_entries.async_entries(domain):
+                for vehicle in getattr(getattr(entry, "runtime_data", None), "vehicles", ()):
+                    if str(getattr(vehicle, "vin", "")).upper() != str(requested_vin).upper():
+                        continue
+                    coordinator_arg = getattr(vehicle, "coordinator", None)
+                    if coordinator_arg is not None:
+                        matches.append((domain, entry, vehicle, coordinator_arg))
+        return matches
+
+    native.vehicle_sources = vehicle_sources
+    monkeypatch.setitem(sys.modules, "power_sync.native_rate_telemetry", native)
 
     assert asyncio.run(
         actions._action_start_ev_charging(
@@ -2483,13 +2617,16 @@ def test_tesla_stop_accepts_numbered_teslemetry_charge_switch(monkeypatch):
     monkeypatch.setattr(
         actions.dr,
         "async_get",
-        lambda hass: SimpleNamespace(devices={"device-yf88": device}),
+        lambda hass: SimpleNamespace(devices={"device-yf88": device}, async_get={"device-yf88": device}.get),
     )
 
     async def wake_success(*args, **kwargs):
         return True
 
     monkeypatch.setattr(actions, "_wake_tesla_ev", wake_success)
+
+    hass.device_registry.devices[device.id] = device
+    _install_native_ha_writer(hass, vin, "switch.charge_2", platform="teslemetry")
 
     result = asyncio.run(
         actions._action_stop_ev_charging(
@@ -2503,6 +2640,7 @@ def test_tesla_stop_accepts_numbered_teslemetry_charge_switch(monkeypatch):
     assert hass.services.calls == [
         ("switch", "turn_off", {"entity_id": "switch.charge_2"})
     ]
+
 
 
 @pytest.mark.parametrize("cached_state", ["Stopped", "Complete"])
@@ -2548,6 +2686,11 @@ def test_explicit_tesla_stop_dispatches_despite_cached_noncharging_state(
         actions, "_get_ev_config",
         lambda _entry: {"ev_provider": actions.EV_PROVIDER_FLEET_API},
     )
+    for registration in hass.entity_registry.entities.values():
+        registration.config_entry_id = "fleet-entry"
+        registration.unique_id = registration.entity_id
+        registration.disabled_by = None
+    _install_fleet_observation_source(monkeypatch, hass, vin)
     calls = []
 
     async def command(domain, service, data, **_kwargs):
@@ -2563,10 +2706,11 @@ def test_explicit_tesla_stop_dispatches_despite_cached_noncharging_state(
 
     if user_params:
         assert calls == [("switch", "turn_off", {"entity_id": "switch.car_a_charge"})]
-        assert result is (not command_fails)
+        assert result is (None if command_fails else True)
     else:
         assert calls == []
         assert result is True
+
 
 
 def test_tesla_reconciliation_stop_bypasses_stale_stopped_and_away_guards(
@@ -2602,6 +2746,7 @@ def test_tesla_reconciliation_stop_bypasses_stale_stopped_and_away_guards(
             ),
         },
     )
+    _install_native_ha_writer(hass, vin_a, "switch.car_a_charge")
     _install_away_location_module(monkeypatch, "remote_charger")
     wake_calls: list[str] = []
     cancelled_stops: list[str] = []
@@ -2629,12 +2774,13 @@ def test_tesla_reconciliation_stop_bypasses_stale_stopped_and_away_guards(
     )
 
     assert result is True
-    assert wake_calls == [vin_a]
+    assert wake_calls == []
     assert cancelled_stops == []
     assert actions._ev_scheduled_stop["entry-1"]["vehicle_vin"] == vin_b
     assert hass.services.calls == [
         ("switch", "turn_off", {"entity_id": "switch.car_a_charge"})
     ]
+
 
 
 def test_tesla_untracked_stop_bypasses_stale_stopped_state_but_checks_location(
@@ -2662,6 +2808,7 @@ def test_tesla_untracked_stop_bypasses_stale_stopped_state_but_checks_location(
             ),
         },
     )
+    _install_native_ha_writer(hass, vin, "switch.car_a_charge")
     _install_away_location_module(monkeypatch, None)
     wake_calls: list[str] = []
 
@@ -2686,10 +2833,11 @@ def test_tesla_untracked_stop_bypasses_stale_stopped_state_but_checks_location(
     )
 
     assert result is True
-    assert wake_calls == [vin]
+    assert wake_calls == []
     assert hass.services.calls == [
         ("switch", "turn_off", {"entity_id": "switch.car_a_charge"})
     ]
+
 
 
 class _ZaptecClient:
@@ -9026,15 +9174,18 @@ def test_tesla_set_amps_clamps_to_entity_max_by_default(monkeypatch):
 
     monkeypatch.setattr(actions, "_get_tesla_ev_entity", fake_get_tesla_ev_entity)
     monkeypatch.setattr(actions, "_wake_tesla_ev", fake_wake)
+    monkeypatch.setattr(actions, "_wake_tesla_ev_for_command", fake_wake)
     hass = _Hass([
         _State("number.car_charging_amps", "16", {"min": 5, "max": 16}),
     ])
+
+    _install_native_ha_writer(hass, "5YJTEST00000000A1", "number.car_charging_amps")
 
     result = asyncio.run(
         actions._action_set_ev_charging_amps(
             hass,
             _Entry(),
-            {"vehicle_vin": "VIN123", "amps": 30},
+            {"vehicle_vin": "5YJTEST00000000A1", "amps": 30},
         )
     )
 
@@ -9042,6 +9193,7 @@ def test_tesla_set_amps_clamps_to_entity_max_by_default(monkeypatch):
     assert hass.services.calls == [
         ("number", "set_value", {"entity_id": "number.car_charging_amps", "value": 16})
     ]
+
 
 
 def test_tesla_cloud_set_amps_honors_entity_positive_floor(monkeypatch):
@@ -9053,15 +9205,18 @@ def test_tesla_cloud_set_amps_honors_entity_positive_floor(monkeypatch):
 
     monkeypatch.setattr(actions, "_get_tesla_ev_entity", fake_get_tesla_ev_entity)
     monkeypatch.setattr(actions, "_wake_tesla_ev", fake_wake)
+    monkeypatch.setattr(actions, "_wake_tesla_ev_for_command", fake_wake)
     hass = _Hass([
         _State("number.car_charging_amps", "1", {"min": 0, "max": 32}),
     ])
+
+    _install_native_ha_writer(hass, "5YJTEST00000000A1", "number.car_charging_amps")
 
     result = asyncio.run(
         actions._action_set_ev_charging_amps(
             hass,
             _Entry(),
-            {"vehicle_vin": "VIN123", "amps": 1},
+            {"vehicle_vin": "5YJTEST00000000A1", "amps": 1},
         )
     )
 
@@ -9069,6 +9224,7 @@ def test_tesla_cloud_set_amps_honors_entity_positive_floor(monkeypatch):
     assert hass.services.calls == [
         ("number", "set_value", {"entity_id": "number.car_charging_amps", "value": 1})
     ]
+
 
 
 def test_tesla_ble_set_amps_honors_entity_positive_floor(monkeypatch):
@@ -9266,16 +9422,19 @@ def test_solar_surplus_tesla_set_amps_uses_configured_max_over_idle_entity_cap(m
 
     monkeypatch.setattr(actions, "_get_tesla_ev_entity", fake_get_tesla_ev_entity)
     monkeypatch.setattr(actions, "_wake_tesla_ev", fake_wake)
+    monkeypatch.setattr(actions, "_wake_tesla_ev_for_command", fake_wake)
     hass = _Hass([
         _State("number.car_charging_amps", "16", {"min": 5, "max": 16}),
     ])
+
+    _install_native_ha_writer(hass, "5YJTEST00000000A1", "number.car_charging_amps")
 
     result = asyncio.run(
         actions._action_set_ev_charging_amps(
             hass,
             _Entry(),
             {
-                "vehicle_vin": "VIN123",
+                "vehicle_vin": "5YJTEST00000000A1",
                 "amps": 30,
                 "max_charge_amps": 30,
                 "allow_stale_entity_max_override": True,
@@ -9289,6 +9448,7 @@ def test_solar_surplus_tesla_set_amps_uses_configured_max_over_idle_entity_cap(m
     ]
 
 
+
 def test_solar_surplus_tesla_set_amps_falls_back_after_range_rejection(monkeypatch):
     async def fake_get_tesla_ev_entity(*args, **kwargs):
         return "number.car_charging_amps"
@@ -9300,19 +9460,20 @@ def test_solar_surplus_tesla_set_amps_falls_back_after_range_rejection(monkeypat
         async def async_call(self, domain: str, service: str, data: dict, blocking: bool = True):
             self.calls.append((domain, service, data))
             if len(self.calls) == 1:
-                raise Exception(
-                    "Value 30.0 for number.car_charging_amps is outside valid "
-                    "range 5.0 - 16.0"
+                raise _native_number_range_error(
+                    monkeypatch, "number.car_charging_amps", 30
                 )
 
     monkeypatch.setattr(actions, "_get_tesla_ev_entity", fake_get_tesla_ev_entity)
     monkeypatch.setattr(actions, "_wake_tesla_ev", fake_wake)
+    monkeypatch.setattr(actions, "_wake_tesla_ev_for_command", fake_wake)
     hass = _Hass([
         _State("number.car_charging_amps", "16", {"min": 5, "max": 16}),
     ])
+    _install_native_ha_writer(hass, "5YJTEST00000000A1", "number.car_charging_amps")
     hass.services = _RejectFirstRangeServices()
     params = {
-        "vehicle_vin": "VIN123",
+        "vehicle_vin": "5YJTEST00000000A1",
         "amps": 30,
         "max_charge_amps": 30,
         "allow_stale_entity_max_override": True,
@@ -9326,6 +9487,7 @@ def test_solar_surplus_tesla_set_amps_falls_back_after_range_rejection(monkeypat
         ("number", "set_value", {"entity_id": "number.car_charging_amps", "value": 16}),
     ]
     assert params["max_charge_amps"] == 16
+
 
 
 def test_exact_wall_connector_range_fallback_continues_to_vin_provider(monkeypatch):
@@ -9383,6 +9545,7 @@ def test_exact_wall_connector_range_fallback_continues_to_vin_provider(monkeypat
     monkeypatch.setattr(actions, "_is_api_credit_available", lambda *_args: True)
     monkeypatch.setattr(actions, "_get_tesla_ev_entity", fleet_current_entity)
     monkeypatch.setattr(actions, "_wake_tesla_ev", awake)
+    monkeypatch.setattr(actions, "_wake_tesla_ev_for_command", awake)
 
     hass = _Hass([
         _State(
@@ -9396,6 +9559,7 @@ def test_exact_wall_connector_range_fallback_continues_to_vin_provider(monkeypat
             {"min": 0, "max": 32},
         ),
     ])
+    _install_native_ha_writer(hass, "5YJTEST00000000C3", "number.car_charging_amps")
     hass.services = _RejectBleOverrideServices()
     params = {
         "charger_type": "tesla",
@@ -9451,6 +9615,7 @@ def test_exact_wall_connector_range_fallback_continues_to_vin_provider(monkeypat
     ]
     assert conservative_params["max_charge_amps"] == 32
     assert actions._phase_applied_amps(conservative_params, 32) == 32
+
 
 
 def test_dynamic_start_is_blocked_by_manual_owner():
@@ -12995,6 +13160,8 @@ def test_both_mode_ble_start_distinguishes_preflight_and_unconfirmed_write(monke
         _State("switch.car_charge_2", "off"),
         _State("switch.other_charge", "off"),
     ], registry, devices)
+    _install_native_ha_writer(hass, vin, "switch.car_charge")
+    _install_native_ha_writer(hass, vin, "switch.car_charge_2", platform="teslemetry")
     if wake_confirmed:
         _add_ble_session_snapshot(hass, current="0")
     async def awake(*args, **kwargs):
@@ -13027,6 +13194,7 @@ def test_both_mode_ble_start_distinguishes_preflight_and_unconfirmed_write(monke
     if stops:
         assert stops[0]["vehicle_vin"] == vin
         assert stops[0]["_force_tesla_stop_request"] is True
+
 
 
 def test_failed_ble_wake_cooldown_is_bridge_scoped():
@@ -15031,6 +15199,7 @@ def test_manual_tesla_fleet_key_rejection_is_request_scoped_and_safe(monkeypatch
         _State("switch.car_charge", "off"),
         _State("number.car_current", "10", {"min": 1, "max": 32}),
     ])
+    _install_native_ha_writer(hass, vin, "switch.car_charge", "number.car_current")
     async def entity(_hass, pattern, _vin):
         return "number.car_current" if pattern.startswith("number") else "switch.car_charge"
 
@@ -15058,16 +15227,22 @@ def test_manual_tesla_fleet_key_rejection_is_request_scoped_and_safe(monkeypatch
         "stop": actions._action_stop_ev_charging,
         "amps": actions._action_set_ev_charging_amps,
     }[action]
-    assert asyncio.run(handler(hass, _tesla_entry(), params)) is False
+    assert asyncio.run(handler(hass, _tesla_entry(), params)) is None
+    assert params["_tesla_transport_recovery_pending"] is True
     assert hass.services.async_call.await_count == 1
     assert failure == ({"provider": "tesla", "code": "key_not_paired"} if recognized else {})
     assert message not in str(failure)
     next_failure = {}
     hass.services.async_call = AsyncMock()
-    assert asyncio.run(handler(
+    result = asyncio.run(handler(
         hass, _tesla_entry(), {**params, "_manual_command_failure": next_failure},
-    )) is True
+    ))
+    # A later request cannot replay an unresolved Start or rate. Cleanup Stop
+    # remains available and does not clear the earlier uncertain attempt.
+    assert result is (True if action == "stop" else None)
+    assert hass.services.async_call.await_count == (1 if action == "stop" else 0)
     assert next_failure == {}
+
 
 
 def test_legacy_teslemetry_bt_unavailable_switch_cannot_dispatch():
