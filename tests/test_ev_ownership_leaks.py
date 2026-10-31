@@ -1503,3 +1503,65 @@ def test_anonymous_tesla_manual_start_fails_closed_before_claim(monkeypatch):
     assert result is False
     assert ev_ownership.get_ev_ownerships(hass, entry) == {}
     assert actions._dynamic_ev_state == {}
+
+
+@pytest.mark.parametrize("transport_recovery", [None, {}])
+def test_restore_empty_transport_recovery_migrates_before_real_admission(
+    transport_recovery,
+):
+    """Existing installs without a recovery journal remain command-admissible."""
+    from power_sync import tesla_ev_recovery as recovery
+
+    hass = _Hass([_State("switch.car_charger", "off")])
+    _register_ble_command(hass, "car", "start")
+    entry = _Entry()
+    store = hass.data["power_sync"][entry.entry_id]["automation_store"]
+    store._data["ev_runtime_state"] = {}
+    if transport_recovery is not None:
+        store._data["ev_runtime_state"]["transport_recovery"] = transport_recovery
+
+    ev_ownership.restore_ev_runtime_state(hass, entry, store)
+    assert hass.data["power_sync"][entry.entry_id]["ev_transport_recovery"] == {
+        "vehicles": {}
+    }
+
+    ticket = asyncio.run(
+        recovery.async_begin_attempt(
+            hass,
+            entry,
+            "5YJTEST0000000001",
+            {"kind": "ble", "prefix": "car"},
+            "start",
+            "switch.car_charger",
+        )
+    )
+    assert ticket is not None
+    persisted = store._data["ev_runtime_state"]["transport_recovery"]
+    assert persisted["vehicles"]["5YJTEST0000000001"]["attempts"][ticket.attempt_id][
+        "outcome"
+    ] == "pending"
+
+
+def test_restore_nonempty_malformed_transport_recovery_stays_fail_closed():
+    """Migration never erases a nonempty malformed journal footprint."""
+    from power_sync import tesla_ev_recovery as recovery
+
+    malformed = {"legacy": {"unexpected": "payload"}}
+    hass = _Hass([_State("switch.car_charger", "off")])
+    _register_ble_command(hass, "car", "start")
+    entry = _Entry()
+    store = hass.data["power_sync"][entry.entry_id]["automation_store"]
+    store._data["ev_runtime_state"] = {"transport_recovery": malformed}
+
+    ev_ownership.restore_ev_runtime_state(hass, entry, store)
+    assert hass.data["power_sync"][entry.entry_id]["ev_transport_recovery"] == malformed
+    assert asyncio.run(
+        recovery.async_begin_attempt(
+            hass,
+            entry,
+            "5YJTEST0000000001",
+            {"kind": "ble", "prefix": "car"},
+            "start",
+            "switch.car_charger",
+        )
+    ) is None
