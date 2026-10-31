@@ -136,7 +136,11 @@ def _entry_id(entry: Any) -> str | None:
 
 
 def _identifiers(value: Any) -> tuple[tuple[str, str], ...]:
-    identifiers = getattr(value, "identifiers", ())
+    identifiers = (
+        value.get("identifiers", ())
+        if isinstance(value, Mapping)
+        else getattr(value, "identifiers", ())
+    )
     if isinstance(identifiers, Mapping):
         identifiers = identifiers.keys()
     result = []

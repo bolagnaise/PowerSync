@@ -785,3 +785,48 @@ async def test_replaced_provider_source_cannot_complete_old_read():
 def test_invalid_vin_is_rejected_before_provider_discovery():
     hass = _Hass({})
     assert asyncio.run(observation.async_read_tesla_vehicle(hass, "5YJINVALID")) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("domain", ["tesla_fleet", "teslemetry"])
+async def test_native_vehicle_deviceinfo_mapping_retains_exact_registered_identity(domain):
+    coordinator = _Coordinator(_charge(time_value := datetime.now(timezone.utc).timestamp() - 10))
+    vehicle = _vehicle(VIN_A, coordinator, "device-a", domain)
+    # HA's TeslaFleetVehicleData and TeslemetryVehicleData carry DeviceInfo
+    # dictionaries, whereas DeviceEntry is an object in the device registry.
+    vehicle.device = {"identifiers": {(domain, VIN_A)}}
+    entry = _entry("native-entry", [vehicle])
+    entity = "switch.native_car_charge"
+    registration = types.SimpleNamespace(platform=domain, config_entry_id="native-entry",
+        device_id="device-a", unique_id=f"{VIN_A}-charge", disabled_by=None)
+    hass = _Hass({domain: [entry]}, registrations={entity: registration})
+    hass.device_registry.devices["device-a"] = types.SimpleNamespace(
+        id="device-a", identifiers={(domain, VIN_A)})
+
+    async def refresh(coord):
+        coord.data = _charge(datetime.now(timezone.utc).timestamp())
+        coord.data["state"] = "online"
+
+    coordinator.refresh = refresh
+    result = await observation.async_read_tesla_vehicle(hass, VIN_A, preferred_entity_id=entity)
+    assert result is not None and result.domain == domain and result.device_id == "device-a"
+    assert result.source_charge_timestamp > time_value
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rebind", [False, True])
+async def test_fleet_command_preparation_supports_real_deviceinfo_mapping(rebind):
+    coordinator = _Coordinator(_fleet_data("ONLINE", datetime.now(timezone.utc).timestamp() - 300))
+    hass, entity = _fleet_command_hass(coordinator)
+    source = hass.config_entries.async_entries("tesla_fleet")[0].runtime_data.vehicles[0]
+    source.device = {"identifiers": {("tesla_fleet", VIN_A)}}
+
+    async def refresh(coord):
+        coord.data = _fleet_data("ASLEEP")
+        if rebind:
+            source.device["identifiers"] = {("tesla_fleet", VIN_B)}
+
+    coordinator.refresh = refresh
+    result = await observation.async_prepare_tesla_fleet_command(hass, VIN_A, entity)
+    assert result is (not rebind)
+    assert coordinator.refreshes == 1

@@ -43,6 +43,20 @@ alone is insufficient. A bounded wake/data-refresh failure is a known
 pre-dispatch failure, so Both mode can use the exact Fleet fallback without
 creating a queued BLE mutation. Fleet data cannot certify BLE session health.
 
+BLE wake sends one request and allows up to 120 seconds for a fresh vehicle
+awake or charge-data response before considering fallback. It does not repeatedly
+queue wake requests. Ownership, registry identity and the original charging
+deadline remain effective during the wait; cancellation or expiry cannot turn
+a late wake into a new Start. The charge-data health check still precedes every
+mutation. This timing and route selection are PowerSync software behaviour and
+do not require a firmware upgrade.
+
+Cancellation while an instrumented ESPHome helper is still waking or preparing
+its first mutation records `not_sent`. Once it reaches a mutating service
+boundary, cancellation remains uncertain; a later current-range retry cannot
+erase that uncertainty. An uninstrumented producer or a restart before the
+outcome was saved also keeps the conservative recovery obligation.
+
 An uncertain dispatched command is different. Automatic handoff requires an
 ESPHome `sensor.<prefix>_transport_fence` on the same registry device/config
 entry as the command and BLE connection control. Protocol 1 reports `boot_id`,

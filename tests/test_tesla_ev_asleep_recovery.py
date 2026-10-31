@@ -74,6 +74,16 @@ def _patch_action_seams(
 ):
     """Keep this regression at the post-isolation action boundary."""
     monkeypatch.setattr(actions.er, "async_get", lambda value: value.entity_registry)
+    monkeypatch.setattr(actions.dr, "async_get", lambda value: value.device_registry)
+    for registration in hass.entity_registry.entities.values():
+        platform = getattr(registration, "platform", None)
+        device_id = getattr(registration, "device_id", None)
+        if platform not in {"tesla_fleet", "teslemetry"} or not device_id:
+            continue
+        hass.device_registry.devices.setdefault(
+            device_id,
+            SimpleNamespace(identifiers={(platform, VIN)}),
+        )
     monkeypatch.setattr(actions, "_get_ev_config", lambda entry: {
         "ev_provider": actions.EV_PROVIDER_FLEET_API,
     })

@@ -2868,20 +2868,23 @@ def _ble_block_report_due(
 async def _wake_tesla_ble(
     hass: HomeAssistant,
     ble_prefix: str,
-    wait_timeout: int = 30,
+    wait_timeout: int = 120,
     *,
     allow_backoff: bool = True,
+    authorize: Optional[Callable[[], Any]] = None,
 ) -> bool:
     """Wake up Tesla via BLE and wait for it to be awake.
 
     Args:
         hass: Home Assistant instance
         ble_prefix: The BLE entity prefix (e.g., "tesla_ble")
-        wait_timeout: Maximum seconds to wait for car to wake up (default 30)
+        wait_timeout: Maximum seconds to wait for car to wake up (default 120)
         allow_backoff: Whether the shared failed-bridge backoff may skip the
             wake attempt. The backoff exists to stop a repeating automatic loop
             from spending a full wake timeout every tick, so an explicit user
             command must never be dropped by it.
+        authorize: Recheck the original command's ownership, deadline and
+            registry binding while waiting. Waking never renews that authority.
     """
     import asyncio
 
@@ -2889,8 +2892,18 @@ async def _wake_tesla_ble(
     asleep_entity = TESLA_BLE_BINARY_ASLEEP.format(prefix=ble_prefix)
 
     state = hass.states.get(wake_entity)
-    if state is None:
-        _LOGGER.warning(f"Tesla BLE wake entity not found: {wake_entity}")
+    if state is None or str(state.state).lower() == "unavailable":
+        _LOGGER.warning("Tesla BLE wake entity missing or unavailable: %s", wake_entity)
+        return False
+    wake_identity = _tesla_legacy_entity_identity(hass, (wake_entity,))
+
+    async def current() -> bool:
+        return bool(
+            await _tesla_legacy_transport_authorized(authorize)
+            and _tesla_legacy_entity_identity(hass, (wake_entity,)) == wake_identity
+        )
+
+    if not await current():
         return False
 
     # Bridge availability/discovery is not vehicle wake acknowledgement.
@@ -2901,6 +2914,7 @@ async def _wake_tesla_ble(
         and _ble_state_observed_after(
             asleep_state,
             datetime.now(dt_timezone.utc) - timedelta(seconds=_TESLA_BLE_WAKE_FRESHNESS_SECONDS),
+            hass=hass,
         )
     ):
         hass.data.get(DOMAIN, {}).get("_ev_ble_wake_retry_after", {}).pop(ble_prefix, None)
@@ -2938,20 +2952,36 @@ async def _wake_tesla_ble(
         )
         _LOGGER.info(f"Sent wake command via Tesla BLE: {wake_entity}")
 
-        # Wait for car to wake up (poll every 2 seconds)
-        start_time = asyncio.get_event_loop().time()
-        while (asyncio.get_event_loop().time() - start_time) < wait_timeout:
-            await asyncio.sleep(2)
+        # One wake request can need up to two minutes. Do not start Fleet
+        # merely because the car has not answered in the first 30 seconds.
+        # Poll without re-queuing wake commands, and keep Stop/expiry effective.
+        start_time = asyncio.get_running_loop().time()
+        while (
+            remaining := wait_timeout - (asyncio.get_running_loop().time() - start_time)
+        ) > 0:
+            if not await current():
+                return False
+            await asyncio.sleep(min(2, remaining))
+            if not await current():
+                return False
 
             asleep_state = hass.states.get(asleep_entity)
             if (
-                asleep_state and asleep_state.state == "off"
-                and _ble_state_observed_after(asleep_state, wake_started_at)
+                (
+                    asleep_state and asleep_state.state == "off"
+                    and _ble_state_observed_after(asleep_state, wake_started_at, hass=hass)
+                )
+                or _tesla_ble_has_fresh_charge_snapshot(
+                    hass, ble_prefix, since=wake_started_at
+                )
             ):
-                _LOGGER.info(f"Tesla BLE: Car is now awake after {int(asyncio.get_event_loop().time() - start_time)}s")
+                _LOGGER.info(f"Tesla BLE: Car is now awake after {int(asyncio.get_running_loop().time() - start_time)}s")
                 # Give it a bit more time to be fully ready
                 await asyncio.sleep(2)
-                return True
+                if await current():
+                    retry_after.pop(ble_prefix, None)
+                    return True
+                return False
 
         # Do not spend another full wake timeout on the same failed bridge
         # during the following amps/start operation. Other cars are unaffected.
@@ -3209,12 +3239,18 @@ async def _tesla_ble_prepare_mutation(
         return True
     if wake_first:
         if not await _wake_tesla_ble(
-            hass, ble_prefix, allow_backoff=allow_backoff
+            hass, ble_prefix, allow_backoff=allow_backoff,
+            authorize=lambda: _tesla_ble_scope_current(
+                hass, target_entity, expected_identity, authorize
+            ),
         ):
             return False
     elif not _tesla_ble_has_fresh_charge_snapshot(hass, ble_prefix):
         if not await _wake_tesla_ble(
-            hass, ble_prefix, allow_backoff=allow_backoff
+            hass, ble_prefix, allow_backoff=allow_backoff,
+            authorize=lambda: _tesla_ble_scope_current(
+                hass, target_entity, expected_identity, authorize
+            ),
         ):
             return False
     if not await _tesla_ble_scope_current(
@@ -3306,6 +3342,23 @@ async def _tesla_ble_prepare_mutation(
 _tesla_legacy_authority: ContextVar[Optional[Callable[[], Any]]] = ContextVar(
     "tesla_legacy_authority", default=None
 )
+_tesla_ble_mutation_phase: ContextVar[dict[str, str] | None] = ContextVar(
+    "tesla_ble_mutation_phase", default=None
+)
+
+
+def _tesla_ble_mark_mutation_submitted() -> None:
+    """Mark the current journaled BLE send at its synchronous write boundary."""
+    phase = _tesla_ble_mutation_phase.get()
+    if phase is not None:
+        phase["phase"] = "submitted"
+
+
+def _tesla_ble_mark_mutation_prewrite() -> None:
+    """Establish that a known ESPHome helper owns the prewrite phase."""
+    phase = _tesla_ble_mutation_phase.get()
+    if phase is not None and phase.get("phase") == "unknown":
+        phase["phase"] = "prewrite"
 
 
 def _tesla_legacy_entity_identity(
@@ -3399,6 +3452,7 @@ async def _start_ev_charging_ble(
     expected_identity = _tesla_legacy_entity_identity(hass, (charger_entity,))
     charge_binding_holder: list = []
     command_dispatched = False
+    _tesla_ble_mark_mutation_prewrite()
     try:
         if not await _tesla_ble_prepare_mutation(
             hass,
@@ -3436,6 +3490,7 @@ async def _start_ev_charging_ble(
         command_started_at = datetime.now(dt_timezone.utc)
         hass.data.setdefault(DOMAIN, {}).setdefault("_ev_ble_start_dispatched_at", {})[ble_prefix] = command_started_at
         command_dispatched = True
+        _tesla_ble_mark_mutation_submitted()
         await hass.services.async_call(
             "switch",
             "turn_on",
@@ -3488,6 +3543,7 @@ async def _stop_ev_charging_ble(
     expected_identity = _tesla_legacy_entity_identity(hass, (charger_entity,))
     charge_binding_holder: list = []
     command_dispatched = False
+    _tesla_ble_mark_mutation_prewrite()
     try:
         if not await _tesla_ble_prepare_mutation(
             hass,
@@ -3537,6 +3593,7 @@ async def _stop_ev_charging_ble(
             return False
         command_started_at = datetime.now(dt_timezone.utc)
         command_dispatched = True
+        _tesla_ble_mark_mutation_submitted()
         await hass.services.async_call(
             "switch",
             "turn_off",
@@ -3587,6 +3644,7 @@ async def _set_ev_charge_limit_ble(
     expected_identity = _tesla_legacy_entity_identity(hass, (limit_entity,))
     charge_binding_holder: list = []
     command_dispatched = False
+    _tesla_ble_mark_mutation_prewrite()
     try:
         if not await _tesla_ble_prepare_mutation(
             hass,
@@ -3617,6 +3675,7 @@ async def _set_ev_charge_limit_ble(
             return False
         command_started_at = datetime.now(dt_timezone.utc)
         command_dispatched = True
+        _tesla_ble_mark_mutation_submitted()
         await hass.services.async_call(
             "number",
             "set_value",
@@ -3686,6 +3745,7 @@ async def _set_ev_charging_amps_ble(
 
     charge_binding_holder: list = []
     command_dispatched = False
+    _tesla_ble_mark_mutation_prewrite()
     try:
         if not await _tesla_ble_prepare_mutation(
             hass,
@@ -3722,6 +3782,7 @@ async def _set_ev_charging_amps_ble(
             return False
         command_started_at = datetime.now(dt_timezone.utc)
         command_dispatched = True
+        _tesla_ble_mark_mutation_submitted()
         await hass.services.async_call(
             "number",
             "set_value",
@@ -3752,6 +3813,7 @@ async def _set_ev_charging_amps_ble(
             )
         if fallback_amps is not None:
             try:
+                _tesla_ble_mark_mutation_prewrite()
                 if not await prepare_ev_submission(hass, amps_entity, operation="rate", amps=fallback_amps):
                     return False
                 if not await _tesla_ble_scope_current(
@@ -3770,6 +3832,7 @@ async def _set_ev_charging_amps_ble(
                 )
                 if charge_binding is None:
                     return None
+                _tesla_ble_mark_mutation_submitted()
                 await hass.services.async_call(
                     "number",
                     "set_value",
@@ -4208,23 +4271,29 @@ async def _run_ble_transport_command(hass, entry, params, prefix, operation, sen
         if ticket is not None:
             await async_finish_attempt(ticket, "not_sent")
         return False, False
+    phase = {"phase": "unknown"}
+    phase_token = _tesla_ble_mutation_phase.set(phase)
     try:
-        result = await send()
-    except asyncio.CancelledError:
-        await asyncio.shield(async_finish_attempt(ticket, "sent_unknown"))
-        raise
-    except Exception as err:
-        # Admission can reject before the helper reaches any HA service write.
-        # Keep that known refusal out of the sent-unknown/quarantine path while
-        # preserving propagation to the caller's fail-closed handling.
-        outcome = (
-            "not_sent"
-            if getattr(err, "site_import_admission_denied", False)
-            else "sent_unknown"
-        )
-        await async_finish_attempt(ticket, outcome)
-        raise
-    await async_finish_attempt(ticket, "confirmed" if result is True else "not_sent" if result is False else "sent_unknown")
+        try:
+            result = await send()
+        except asyncio.CancelledError:
+            outcome = "not_sent" if phase["phase"] == "prewrite" else "sent_unknown"
+            await asyncio.shield(async_finish_attempt(ticket, outcome))
+            raise
+        except Exception as err:
+            # Admission can reject before the helper reaches any HA service write.
+            # Keep that known refusal out of the sent-unknown/quarantine path while
+            # preserving propagation to the caller's fail-closed handling.
+            outcome = (
+                "not_sent"
+                if getattr(err, "site_import_admission_denied", False)
+                else "sent_unknown"
+            )
+            await async_finish_attempt(ticket, outcome)
+            raise
+        await async_finish_attempt(ticket, "confirmed" if result is True else "not_sent" if result is False else "sent_unknown")
+    finally:
+        _tesla_ble_mutation_phase.reset(phase_token)
     if result is not None:
         return result, False
     params["_tesla_transport_recovery_pending"] = True

@@ -766,6 +766,14 @@ def test_ble_availability_distinguishes_sleeping_from_unavailable_bridge():
 def test_both_provider_start_uses_fleet_when_paired_ble_is_unavailable(monkeypatch):
     hass = _two_fleet_vehicle_hass()
     hass.states = _States([_State("switch.bridge_alpha_charger", "unavailable")])
+    hass.entity_registry.entities["switch.w3rt1e_charge"] = SimpleNamespace(
+        entity_id="switch.w3rt1e_charge",
+        platform="tesla_fleet",
+        config_entry_id="fleet-entry",
+        device_id="fleet-b",
+        unique_id=f"{VIN_B}-charge",
+        disabled_by=None,
+    )
     entry = _both_provider_entry(
         "bridge_alpha,bridge_beta",
         f"{VIN_A}=bridge_beta,{VIN_B}=bridge_alpha",
@@ -780,6 +788,7 @@ def test_both_provider_start_uses_fleet_when_paired_ble_is_unavailable(monkeypat
         AsyncMock(return_value="switch.w3rt1e_charge"),
     )
     monkeypatch.setattr(actions, "_wake_tesla_ev", AsyncMock(return_value=True))
+    monkeypatch.setattr(actions, "_wake_tesla_ev_for_command", AsyncMock(return_value=True))
     monkeypatch.setattr(actions, "_is_api_credit_available", lambda *args: True)
 
     result = asyncio.run(
@@ -1429,6 +1438,17 @@ def test_dynamic_rate_update_becomes_noop_when_unload_invalidates_live_read(
 
 def test_window_end_callback_becomes_noop_after_entry_cleanup(monkeypatch):
     hass = _Hass([_State("switch.car_charge", "off")])
+    hass.entity_registry.entities["switch.car_charge"] = SimpleNamespace(
+        entity_id="switch.car_charge",
+        platform="tesla_fleet",
+        config_entry_id="fleet-entry",
+        device_id="fleet-device",
+        unique_id=f"{VIN_A}-charge",
+        disabled_by=None,
+    )
+    hass.device_registry.devices["fleet-device"] = SimpleNamespace(
+        identifiers={("tesla_fleet", VIN_A)},
+    )
     callbacks = []
     cancelled = []
     stop = AsyncMock(return_value=True)
@@ -1449,6 +1469,7 @@ def test_window_end_callback_becomes_noop_after_entry_cleanup(monkeypatch):
         AsyncMock(return_value="switch.car_charge"),
     )
     monkeypatch.setattr(actions, "_wake_tesla_ev", AsyncMock(return_value=True))
+    monkeypatch.setattr(actions, "_wake_tesla_ev_for_command", AsyncMock(return_value=True))
     monkeypatch.setattr(actions, "_is_api_credit_available", lambda *_args: True)
     monkeypatch.setattr(actions, "_action_stop_ev_charging", stop)
     actions._ev_scheduled_stop.clear()

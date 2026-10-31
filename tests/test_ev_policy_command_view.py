@@ -6,6 +6,8 @@ import ast
 import asyncio
 import copy
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 
 INIT_PATH = (
@@ -373,3 +375,63 @@ def test_manual_stop_and_current_commands_keep_safe_failure_detail():
     amps = _command_view_method("_set_charging_amps", {})
     assert asyncio.run(stop(View(), "car_b")) == (False, message)
     assert asyncio.run(amps(View(), 10, "car_b")) == (False, message)
+
+
+def test_manual_ble_wake_uses_shared_exact_car_wait_before_native_status():
+    """Unknown Fleet status must not turn a BLE Wake request into a no-op."""
+    for provider in ("tesla_ble", "both"):
+        wake = AsyncMock(return_value=True)
+        entry = object()
+        hass = object()
+        resolved = []
+
+        def resolve(actual_hass, actual_entry, vehicle):
+            resolved.append((actual_hass, actual_entry, vehicle))
+            return "second_bridge"
+
+        view = SimpleNamespace(
+            _hass=hass,
+            _get_powersync_config=lambda: {"ev_provider": provider},
+            _get_powersync_entry=lambda: entry,
+            _is_vehicle_asleep=AsyncMock(side_effect=AssertionError("native cache is not BLE wake proof")),
+        )
+        method = _command_view_method("_wake_vehicle", {
+            "CONF_EV_PROVIDER": "ev_provider",
+            "EV_PROVIDER_FLEET_API": "fleet_api",
+            "EV_PROVIDER_TESLA_BLE": "tesla_ble",
+            "EV_PROVIDER_BOTH": "both",
+            "EV_PROVIDER_TESLEMETRY_BT": "teslemetry_bt",
+            "_resolve_ble_prefix_for_vehicle": resolve,
+            "_is_ble_available": lambda *_args: True,
+            "_wake_tesla_ble": wake,
+        })
+
+        assert asyncio.run(method(view, "second-car-vin")) is True
+        assert resolved == [(hass, entry, "second-car-vin")]
+        wake.assert_awaited_once_with(
+            hass, "second_bridge", wait_timeout=120, allow_backoff=False,
+        )
+
+
+def test_manual_ble_wake_keeps_failed_or_quarantined_bridge_unconfirmed():
+    """A failed wake stays failed and quarantine cannot be bypassed by HTTP."""
+    for available in (True, False):
+        wake = AsyncMock(return_value=False)
+        view = SimpleNamespace(
+            _hass=object(),
+            _get_powersync_config=lambda: {"ev_provider": "tesla_ble"},
+            _get_powersync_entry=lambda: object(),
+        )
+        method = _command_view_method("_wake_vehicle", {
+            "CONF_EV_PROVIDER": "ev_provider",
+            "EV_PROVIDER_FLEET_API": "fleet_api",
+            "EV_PROVIDER_TESLA_BLE": "tesla_ble",
+            "EV_PROVIDER_BOTH": "both",
+            "EV_PROVIDER_TESLEMETRY_BT": "teslemetry_bt",
+            "_resolve_ble_prefix_for_vehicle": lambda *_args: "second_bridge",
+            "_is_ble_available": lambda *_args: available,
+            "_wake_tesla_ble": wake,
+        })
+
+        assert asyncio.run(method(view, "second-car-vin")) is False
+        assert wake.await_count == int(available)

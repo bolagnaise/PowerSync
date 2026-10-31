@@ -16561,6 +16561,12 @@ class EVVehicleCommandView(HomeAssistantView):
 
     async def _wake_vehicle(self, vehicle_vin: str | None = None) -> bool:
         """Wake up a Tesla vehicle and wait for it to be awake."""
+        from .automations.actions import (
+            _is_ble_available,
+            _resolve_ble_prefix_for_vehicle,
+            _wake_tesla_ble,
+        )
+
         config = self._get_powersync_config()
         ev_provider = config.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API)
 
@@ -16569,32 +16575,32 @@ class EVVehicleCommandView(HomeAssistantView):
             _LOGGER.debug("Teslemetry BT handles wake internally, skipping")
             return True
 
+        if ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
+            entry = self._get_powersync_entry()
+            if entry is None:
+                return False
+            ble_prefix = _resolve_ble_prefix_for_vehicle(
+                self._hass, entry, vehicle_vin
+            )
+            if ble_prefix and _is_ble_available(self._hass, ble_prefix):
+                # Use the same exact-car wake/readback contract as charging.
+                # Unknown native status must not report "awake" without a
+                # wake, and an explicit request bypasses automatic backoff.
+                return await _wake_tesla_ble(
+                    self._hass, ble_prefix, wait_timeout=120,
+                    allow_backoff=False,
+                )
+            if ev_provider == EV_PROVIDER_TESLA_BLE:
+                return False
+
         # Check if already awake
         if not await self._is_vehicle_asleep(vehicle_vin):
             _LOGGER.debug("Vehicle is already awake")
             return True
 
         _LOGGER.info("Vehicle is asleep, sending wake command...")
-        ble_prefix = _ble_prefix_for_vehicle(self._hass, config, vehicle_vin)
 
         wake_sent = False
-
-        if (
-            ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH)
-            and ble_prefix
-        ):
-            wake_entity = TESLA_BLE_BUTTON_WAKE_UP.format(prefix=ble_prefix)
-            if self._hass.states.get(wake_entity):
-                try:
-                    await self._hass.services.async_call(
-                        "button", "press",
-                        {"entity_id": wake_entity},
-                        blocking=True,
-                    )
-                    _LOGGER.info(f"Sent wake command via BLE: {wake_entity}")
-                    wake_sent = True
-                except Exception as e:
-                    _LOGGER.warning(f"BLE wake failed: {e}")
 
         # Try Fleet API
         if not wake_sent and ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH):

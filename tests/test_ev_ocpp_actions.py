@@ -14249,12 +14249,114 @@ def _failing_wake(monkeypatch):
     """Stub the wake so a blocked case asserts the gate, not a 30s timeout."""
     attempts = []
 
-    async def _wake(hass, prefix, wait_timeout=30, *, allow_backoff=True):
+    async def _wake(hass, prefix, wait_timeout=120, *, allow_backoff=True, authorize=None):
         attempts.append(prefix)
         return False
 
     monkeypatch.setattr(actions, "_wake_tesla_ble", _wake)
     return attempts
+
+
+@pytest.mark.parametrize("wake_after", [60, 90, 118])
+def test_ble_wake_allows_two_minutes_after_one_request(monkeypatch, wake_after):
+    """A slow BLE wake must not become a premature failed/fallback attempt."""
+    asleep = _State("binary_sensor.car_asleep", "on")
+    hass = _Hass([_State("button.car_wake_up", "unknown"), asleep])
+    elapsed = [0.0]
+    clock = SimpleNamespace(time=lambda: elapsed[0])
+
+    async def advance(seconds):
+        elapsed[0] += seconds
+        if elapsed[0] >= wake_after:
+            asleep.state = "off"
+            asleep.last_updated = datetime.now(timezone.utc)
+
+    monkeypatch.setattr(actions.asyncio, "get_running_loop", lambda: clock)
+    monkeypatch.setattr(actions.asyncio, "sleep", advance)
+
+    assert asyncio.run(actions._wake_tesla_ble(hass, "car")) is True
+    assert wake_after <= elapsed[0] <= 120
+    assert hass.services.calls == [
+        ("button", "press", {"entity_id": "button.car_wake_up"})
+    ]
+
+
+def test_ble_wake_times_out_after_two_minutes_without_requeue(monkeypatch):
+    """Bridge presence and an old awake state cannot shorten or pass wake."""
+    hass = _Hass([
+        _State("button.car_wake_up", "unknown"),
+        _State("binary_sensor.car_asleep", "off", last_updated=datetime.now(timezone.utc) - timedelta(hours=1)),
+        _State("binary_sensor.car_ble_status", "on"),
+    ])
+    elapsed = [0.0]
+    clock = SimpleNamespace(time=lambda: elapsed[0])
+
+    async def advance(seconds):
+        elapsed[0] += seconds
+
+    monkeypatch.setattr(actions.asyncio, "get_running_loop", lambda: clock)
+    monkeypatch.setattr(actions.asyncio, "sleep", advance)
+
+    assert asyncio.run(actions._wake_tesla_ble(hass, "car")) is False
+    assert elapsed[0] == 120
+    assert hass.services.calls == [
+        ("button", "press", {"entity_id": "button.car_wake_up"})
+    ]
+
+
+@pytest.mark.parametrize("invalidate", ["authority", "wake_binding", "target_binding"])
+def test_ble_wake_wait_aborts_before_start_when_scope_changes(monkeypatch, invalidate):
+    """Stop, expiry or a rebound entity must end the long wait before write."""
+    hass = _Hass([
+        _State("switch.car_charger", "off"),
+        _State("button.car_wake_up", "unknown"),
+        _State("binary_sensor.car_asleep", "on"),
+    ])
+    elapsed = [0.0]
+    clock = SimpleNamespace(time=lambda: elapsed[0])
+
+    async def advance(seconds):
+        elapsed[0] += seconds
+        if elapsed[0] >= 18 and invalidate != "authority":
+            entity_id = "button.car_wake_up" if invalidate == "wake_binding" else "switch.car_charger"
+            hass.entity_registry.entities[entity_id].device_id = "replacement-device"
+
+    monkeypatch.setattr(actions.asyncio, "get_running_loop", lambda: clock)
+    monkeypatch.setattr(actions.asyncio, "sleep", advance)
+
+    result = asyncio.run(actions._start_ev_charging_ble(
+        hass, "car", authorize=lambda: invalidate != "authority" or elapsed[0] < 18,
+    ))
+
+    assert result is False
+    assert elapsed[0] == 18
+    assert hass.services.calls == [
+        ("button", "press", {"entity_id": "button.car_wake_up"})
+    ]
+
+
+def test_ble_wake_accepts_new_charge_receipts_without_asleep_transition(monkeypatch):
+    """An unchanged asleep sensor need not hide a fresh vehicle charge read."""
+    hass = _Hass([
+        _State("button.car_wake_up", "unknown"),
+        _State("binary_sensor.car_asleep", "on"),
+    ])
+    elapsed = [0.0]
+    clock = SimpleNamespace(time=lambda: elapsed[0])
+
+    async def advance(seconds):
+        elapsed[0] += seconds
+        if elapsed[0] >= 90:
+            _add_ble_session_snapshot(hass, charging_state="Stopped", current="0")
+
+    monkeypatch.setattr(actions.asyncio, "get_running_loop", lambda: clock)
+    monkeypatch.setattr(actions.asyncio, "sleep", advance)
+
+    assert asyncio.run(actions._wake_tesla_ble(hass, "car")) is True
+    assert elapsed[0] == 92
+    assert hass.services.calls == [
+        ("button", "press", {"entity_id": "button.car_wake_up"})
+    ]
 
 
 @pytest.mark.parametrize(
