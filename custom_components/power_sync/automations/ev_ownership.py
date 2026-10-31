@@ -1143,6 +1143,38 @@ def claim_ev_ownership(
     return lease
 
 
+def boost_recovery_observation_after(record: dict) -> str | None:
+    """Latest strict readback fence for a finite start/stop, including a replacement.
+
+    An unknown submitted start can outlive a stopped sample in another queue.
+    Its obligation therefore survives until a sample newer than its original
+    finite deadline, as well as its last submission/stop attempt.
+    """
+    fences = []
+    for item in (record, record.get("pending_intent")):
+        if item is None:
+            continue
+        if not isinstance(item, dict):
+            raise ValueError("Invalid Boost pending intent")
+        if item is not record and any(item.get(key) != record.get(key) for key in
+                                     ("entry_id", "vehicle_id", "pairing", "stop_params")):
+            raise ValueError("Changed Boost pending identity")
+        keys = ["stop_attempted_at"]
+        if item.get("dispatch_started"):
+            keys.append("attempted_at")
+        if item.get("start_in_flight") or item.get("unknown_start_outcome"):
+            keys.append("expires_at")
+        for key in keys:
+            if item.get(key) is None and key != "stop_attempted_at":
+                raise ValueError("Missing Boost recovery timestamp")
+            if item.get(key) is not None:
+                timestamp = datetime.fromisoformat(item[key])
+                if timestamp.tzinfo is None:
+                    raise ValueError("Naive Boost recovery timestamp")
+                fences.append(timestamp)
+    return max(fences).isoformat() if fences else None
+
+
 def reconcile_boost_supersession(hass: Any, config_entry: Any, vehicle_id: Any) -> None:
     """A rolled-back provisional claim cannot cancel an accepted Boost expiry."""
     entry = _entry_data(hass, config_entry.entry_id)
