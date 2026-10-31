@@ -358,6 +358,7 @@ async def test_legacy_resumed_tariff_control_keeps_cloud_route_and_incident(dire
     await settings['handle_resume_powerwall_settings'](SimpleNamespace(data={
         'entry_id': 'entry', 'site_id': 'site', 'incident_id': 'incident', 'acknowledge': True}))
     ns, local, client, _ = load_routing(tesla_control_method='tariff')
+    settings['entry'].data['powerwall_local_ip'] = ns['entry'].data['powerwall_local_ip']
     ns['entry'] = settings['entry']
     ns['hass'] = settings['hass']
     ns['_local_powerwall_runtime'] = runtime
