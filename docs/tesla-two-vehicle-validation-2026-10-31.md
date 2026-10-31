@@ -6,12 +6,13 @@ returned home. The trial used unpublished candidate `2.12.1575.dev8`, packaged
 from `7a2c6e2fd67f9c4886774468c28c38b0de5e542b`. Subsequent source fixes were
 not installed during this trial. All times below are UTC.
 
-**Latest installed checkpoint:** `2.12.1576.dev10`, source
-`2a63050d9c311b89191d49b23073ce8136ed4fa8`. The first trial below is historical;
+**Latest installed checkpoint:** `2.12.1576.dev11`, source
+`75ba7b99d0ed529949d6215564445e4fd8b54df7`. The first trial below is historical;
 the successful Fleet overlap and reload trials are recorded separately. The
 owner's current baseline is 5% native reserve and Self-Powered mode, with
 Monitoring enabled, Fleet-only commands and all automatic EV modes disabled.
-The PR is draft and unreleased.
+The owner has authorized release after the final checks. Publication still
+requires the repository's matching protected-main regression gate.
 
 ## Starting conditions
 
@@ -186,8 +187,38 @@ The corresponding dashboard wiki text is prepared in local wiki commit
 `bf631f3` on `docs/tesla-connected-vehicle-picture`. It is held with this
 unreleased feature rather than being published as existing release behavior.
 
+Candidate11 installed the picture and cleanup repairs. All 265 file hashes
+match archive SHA-256
+`f2c5a26c78eb95abbe5f0da0a6b70476f6000e3e2d00820ceede66e425e5fb21`.
+HA configuration check/startup passed and PowerSync loaded. A cache-free browser
+reload at 08:50 showed both stopped cars, separate names/SOC/power labels and
+the existing two-car scene. Selecting each car retained both picture entries;
+the original selection was restored. The read-only picture poll remained
+active with no overlapping request.
+
+W3RT1E's completed Boost record retired naturally after startup. TESSY's stayed
+pending while Fleet reported unknown. One wake-only command and a fresh HA
+Fleet read produced explicit Stopped evidence; at 08:54:29 both Boost records
+and all EV ownership were absent. Neither journal was manually cleared, and
+no new charging command was issued. The native reserve remained 5%, mode
+Self-Powered, export permission `battery_ok`, and every Home Power setting
+matched the pre-install baseline. Monitoring stayed on and automatic EV modes
+stayed off. The original FOUR4FREE tariff hash still matched.
+
+The final independent Fleet readings reported both cars Stopped with unchanged
+70%/80% targets and 15 A/10 A requests. W3RT1E also reported positive charger
+fields (3 A and 1 kW), with climate/heater off. Read-only tracing and five
+actual-producer probes confirmed the existing display policy suppresses
+charging power for Stopped; native import admission separately uses measured
+current and verified electrical metadata. Exact-VIN Wall Connector auxiliary
+draw is accounted separately. This discrepancy does not establish active
+battery charging or a new defect, and a canonical 0 W label is not claimed as
+independent physical zero-current proof.
+
 Sanitized records: `fleet-two-vehicle-trial-20261031.json` and
 `fleet-reload-boost-trial-20261031.json` in the local evidence directory.
+The final candidate receipt, picture screenshot, selector proof, startup health
+and zero-obligation readback are retained there as candidate11 artifacts.
 
 ## Reproduced source defects
 
@@ -271,8 +302,27 @@ The follow-up source has focused regressions for two-car timers, durable
 pre-dispatch intent, reload recovery, provider cancellation, queued expiry,
 native battery flexibility and Fleet diagnostics. Full combined regression and
 installation receipts are recorded separately when complete. Candidate dev8
-does not contain these follow-ups. The PR remains draft and publication is held
-until the required local control paths, including two-car overlap, are proved.
+does not contain these follow-ups. The 46-path review records the local proofs
+and simulated boundaries explicitly. Two-car overlap, stop isolation, reload
+expiry, picture rendering and fresh stop-record retirement are now locally
+verified. Saturated allocation, native flexibility, two-VIN Smart Schedule
+export leases and manufactured fault variants retain their recorded software
+evidence; universal physical coverage is not claimed. The separate BLE firmware
+has not been installed. Release of the HA changes is authorized after final
+matching checks, using the mandatory protected-main gate.
+
+FULL17 at installed source `75ba7b99d0ed529949d6215564445e4fd8b54df7` passed
+**9,993 tests, zero skips**, four audited workers, 490.82 seconds. Run ID:
+`c0439b2c5f8346359de217721a31abab`; node-list SHA-256:
+`cc8d065195f9d757051b4b74bb8a10df8584171a2f53ff48fa9d83ff7f6da47b`.
+The 46-row software reconciliation passed. PR CI56 separately failed 22 new
+JavaScript tests before execution because Node 24.10.0 removed a CLI flag
+supported by local Node 22.23.4. A test-only repair runs the unchanged harness
+and byte-identical production modules in an explicit temporary ESM package.
+All assertions remain, with 113 focused/adjacent passes on each exact Node
+version. That repair changes no installed component bytes. Fresh complete
+validation is still required for the corrected test source; CI56 is failed
+evidence and is never reused as successful proof.
 
 At source `2a63050d9c311b89191d49b23073ce8136ed4fa8`, audited local FULL16
 passed **9,949 tests, zero skips**, four workers, 517.85 seconds; run ID
