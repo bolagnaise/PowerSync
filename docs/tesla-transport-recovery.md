@@ -101,6 +101,12 @@ site, fresh local telemetry/configuration and hardware limits within configured
 software limits. Every EV start/increase revalidates this proof after awaits.
 Persisted capability flags alone cannot authorize a command.
 
+If a native export cap exceeds the software cap, acquisition may first claim
+preparation ownership and tighten that cap under its saved restore baseline.
+This claim permits neither forcing nor EV starts/increases. Fresh exact cap
+readback and an atomic upgrade of the same owner/token precede battery or
+tariff forcing; cleanup restores the original gateway cap.
+
 The site's native controller prioritizes household and EV loads. Admission may
 spend measured battery charging that the verified native site can reduce;
 it cannot spend forecast battery charging or count battery discharge as extra

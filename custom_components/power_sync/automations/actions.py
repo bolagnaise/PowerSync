@@ -65,6 +65,10 @@ from ..const import (
     TESLA_BLE_BINARY_ASLEEP,
     TESLA_BLE_SENSOR_CHARGING_STATE,
     TESLA_BLE_SENSOR_CHARGING,
+    TESLA_BLE_SENSOR_CHARGE_CURRENT,
+    TESLA_BLE_SENSOR_CHARGER_CURRENT,
+    TESLA_BLE_SENSOR_CHARGE_POWER,
+    TESLA_BLE_SENSOR_CHARGER_POWER,
     TESLEMETRY_BT_SWITCH_CHARGE,
     TESLEMETRY_BT_NUMBER_CHARGE_AMPS,
     TESLEMETRY_BT_SENSOR_CHARGING_STATE,
@@ -1219,6 +1223,27 @@ _TESLA_NON_CHARGING_STATES = frozenset(
         "disconnected",
         "not_plugged_in",
         "stopped",
+        "unplugged",
+    }
+)
+# These are the charging-state values emitted by the ESPHome Tesla BLE
+# component, plus the normalized aliases used by older HA entity templates.
+# Admission must reject arbitrary non-empty values such as ``Error``; a
+# state string alone is not evidence that the vehicle session was read.
+_TESLA_BLE_SUPPORTED_CHARGING_STATES = frozenset(
+    {
+        "charging",
+        "starting",
+        "complete",
+        "stopped",
+        "disconnected",
+        "no_power",
+        "no power",
+        "nopower",
+        "calibrating",
+        "not_plugged_in",
+        "not charging",
+        "notcharging",
         "unplugged",
     }
 )
@@ -2614,6 +2639,14 @@ def _is_ble_available(hass: HomeAssistant, ble_prefix: str) -> bool:
 
 _TESLA_BLE_COMMAND_CONFIRMATION_SECONDS = 10
 _TESLA_BLE_WAKE_FRESHNESS_SECONDS = 120
+# The generic ESPHome Tesla BLE package exposes this as a button.  Keep this
+# exact entity separate from the broad Tesla button resolver: a force-update
+# request is a read-only session probe and must never land on another vehicle.
+_TESLA_BLE_BUTTON_FORCE_DATA_UPDATE = "button.{prefix}_force_data_update"
+_TESLA_BLE_BINDING_UNSET = object()
+_tesla_ble_cleanup_without_session: ContextVar[bool] = ContextVar(
+    "tesla_ble_cleanup_without_session", default=False
+)
 
 
 def _ble_state_observed_after(
@@ -2634,6 +2667,107 @@ def _ble_state_observed_after(
     return since <= observed <= datetime.now(dt_timezone.utc)
 
 
+def _tesla_ble_charge_data_entity_ids(
+    hass: HomeAssistant,
+    ble_prefix: str,
+    target_entity: str,
+) -> tuple[str, ...]:
+    """Return present exact-prefix data and receipt aliases used for health."""
+    base_ids = (
+        *(
+            TESLA_BLE_SENSOR_CHARGING_STATE.format(prefix=ble_prefix),
+            TESLA_BLE_SENSOR_CHARGING.format(prefix=ble_prefix),
+            TESLA_BLE_SENSOR_CHARGE_CURRENT.format(prefix=ble_prefix),
+            TESLA_BLE_SENSOR_CHARGER_CURRENT.format(prefix=ble_prefix),
+            TESLA_BLE_SENSOR_CHARGE_POWER.format(prefix=ble_prefix),
+            TESLA_BLE_SENSOR_CHARGER_POWER.format(prefix=ble_prefix),
+        ),
+        target_entity,
+    )
+    entity_ids: list[str] = []
+    for entity_id in base_ids:
+        state = hass.states.get(entity_id)
+        if state is None or not _tesla_ble_charge_state_is_present(state):
+            continue
+        entity_ids.append(entity_id)
+        receipt_id = f"{entity_id}_received"
+        if hass.states.get(receipt_id) is not None:
+            # The receipt companion overrides HA's state timestamp whenever it
+            # exists, including when its value is invalid. Pin its registry
+            # identity so another provider cannot freshen this entity id.
+            entity_ids.append(receipt_id)
+    return tuple(entity_ids)
+
+
+def _tesla_ble_charge_state_is_present(state: Any) -> bool:
+    """Whether an HA state can be used as a charge-data evidence source."""
+    value = str(getattr(state, "state", "") or "").strip().lower()
+    return value not in {"", "unknown", "unavailable", "none"}
+
+
+def _tesla_ble_charge_data_binding(
+    hass: HomeAssistant,
+    ble_prefix: str,
+    target_entity: str,
+    previous: tuple[tuple[str, tuple[Any, ...]], ...] | None = None,
+) -> tuple[tuple[str, tuple[Any, ...]], ...] | None:
+    """Bind present charge evidence entities to the target ESPHome device.
+
+    Entity ids are intentionally exact-prefix scoped, but an HA registry
+    rebind can leave another provider publishing under the same ids.  Only
+    present, usable evidence entities participate; an unavailable compatibility
+    alias is ignored so a valid alternate alias can still prove the session.
+    ``previous`` pins the identities observed before an await and catches an
+    in-place rebind even when the replacement retains the same device metadata.
+    """
+    try:
+        registry = er.async_get(hass)
+        target = registry.async_get(target_entity)
+    except Exception:
+        return None
+    if target is None or getattr(target, "disabled_by", None) is not None:
+        return None
+    target_platform = str(getattr(target, "platform", "")).lower()
+    target_entry = getattr(target, "config_entry_id", None)
+    target_device = getattr(target, "device_id", None)
+    if target_platform != "esphome" or not target_entry or not target_device:
+        return None
+    prior = dict(previous or ())
+    current: list[tuple[str, tuple[Any, ...]]] = []
+    for entity_id in _tesla_ble_charge_data_entity_ids(
+        hass, ble_prefix, target_entity
+    ):
+        state = hass.states.get(entity_id)
+        if state is None:
+            continue
+        if not entity_id.endswith("_received") and not _tesla_ble_charge_state_is_present(state):
+            continue
+        registration = registry.async_get(entity_id)
+        if registration is None or getattr(registration, "disabled_by", None) is not None:
+            return None
+        if (
+            str(getattr(registration, "platform", "")).lower() != target_platform
+            or getattr(registration, "config_entry_id", None) != target_entry
+            or getattr(registration, "device_id", None) != target_device
+        ):
+            return None
+        identity = tuple(
+            getattr(registration, field, None)
+            for field in (
+                "entity_id",
+                "platform",
+                "config_entry_id",
+                "device_id",
+                "unique_id",
+                "disabled_by",
+            )
+        )
+        if entity_id in prior and prior[entity_id] != identity:
+            return None
+        current.append((entity_id, identity))
+    return tuple(current)
+
+
 async def _wait_for_ble_command_readback(
     hass: HomeAssistant,
     entity_id: str | tuple[str, ...],
@@ -2641,6 +2775,9 @@ async def _wait_for_ble_command_readback(
     command_started_at: datetime,
     *,
     charging_prefix: str | None = None,
+    charge_binding: tuple[tuple[str, tuple[Any, ...]], ...] | None | object = _TESLA_BLE_BINDING_UNSET,
+    charge_binding_target: str | None = None,
+    charge_binding_prefix: str | None = None,
 ) -> bool:
     """Confirm a BLE write from fresh vehicle state, plus draw for a start."""
     from ..tesla_ble import get_tesla_ble_charge_current_state, get_tesla_ble_charge_power_state
@@ -2648,6 +2785,20 @@ async def _wait_for_ble_command_readback(
     entity_ids = (entity_id,) if isinstance(entity_id, str) else entity_id
     deadline = asyncio.get_running_loop().time() + _TESLA_BLE_COMMAND_CONFIRMATION_SECONDS
     while True:
+        if charge_binding is not _TESLA_BLE_BINDING_UNSET:
+            if (
+                charge_binding is None
+                or not charge_binding_target
+                or not charge_binding_prefix
+                or _tesla_ble_charge_data_binding(
+                    hass,
+                    charge_binding_prefix,
+                    charge_binding_target,
+                    previous=charge_binding,
+                )
+                is None
+            ):
+                return False
         for candidate in entity_ids:
             state = hass.states.get(candidate)
             if state is None or not _ble_state_observed_after(state, command_started_at, hass=hass):
@@ -2878,6 +3029,275 @@ def _ble_command_has_fresh_charging_evidence(
     return False
 
 
+def _tesla_ble_has_fresh_charge_snapshot(
+    hass: HomeAssistant,
+    ble_prefix: str,
+    *,
+    since: datetime | None = None,
+) -> bool:
+    """Require a recent, vehicle-originated charge snapshot for this bridge.
+
+    A fresh ``asleep=off`` or bridge-presence sample only proves that one
+    entity reported.  Before a mutating BLE write we need a known charging
+    state and at least one finite measured current/power value from the same
+    exact prefix.  Zero is a valid receipt: it proves the bridge reached the
+    vehicle even when the vehicle is not presently drawing power.
+    """
+    cutoff = since or (
+        datetime.now(dt_timezone.utc)
+        - timedelta(seconds=_TESLA_BLE_WAKE_FRESHNESS_SECONDS)
+    )
+    from ..tesla_ble import (
+        get_tesla_ble_charge_current_state,
+        get_tesla_ble_charge_power_state,
+    )
+
+    from ..tesla_ble import get_tesla_ble_observed_at
+
+    known_states = []
+    for entity_id in (
+        TESLA_BLE_SENSOR_CHARGING_STATE.format(prefix=ble_prefix),
+        TESLA_BLE_SENSOR_CHARGING.format(prefix=ble_prefix),
+    ):
+        state = hass.states.get(entity_id)
+        value = str(getattr(state, "state", "") or "").strip().lower()
+        if (
+            state is not None
+            and value in _TESLA_BLE_SUPPORTED_CHARGING_STATES
+            and _ble_state_observed_after(state, cutoff, hass=hass)
+        ):
+            known_states.append(state)
+    if not known_states:
+        return False
+
+    current = get_tesla_ble_charge_current_state(hass, ble_prefix)
+    power = get_tesla_ble_charge_power_state(hass, ble_prefix)
+    for measured in (current, power):
+        if measured is None or not _ble_state_observed_after(
+            measured, cutoff, hass=hass
+        ):
+            continue
+        try:
+            value = float(measured.state)
+            if (
+                measured is power
+                and measured.attributes.get("unit_of_measurement") == "kW"
+            ):
+                value *= 1000
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(value):
+            measured_at = get_tesla_ble_observed_at(hass, measured)
+            if measured_at is None:
+                continue
+            # A newer explicit stopped/completed state must not be hidden by
+            # a replayed positive measurement from the same bridge.
+            if value > 0 and any(
+                str(status.state).strip().lower() in _TESLA_NON_CHARGING_STATES
+                and (status_at := get_tesla_ble_observed_at(hass, status)) is not None
+                and status_at > measured_at
+                for status in known_states
+            ):
+                continue
+            if value >= 0:
+                return True
+    return False
+
+
+def _tesla_ble_force_data_update_binding(
+    hass: HomeAssistant,
+    ble_prefix: str,
+    target_entity: str,
+) -> tuple[str, tuple[tuple[Any, ...], ...]] | None:
+    """Return the active, same-device force-update button binding.
+
+    The button is deliberately registry-bound to the target charger/number.
+    A state with the right name is insufficient because a re-authenticated
+    Fleet/native entity can otherwise occupy the same HA entity id.
+    """
+    force_entity = _TESLA_BLE_BUTTON_FORCE_DATA_UPDATE.format(prefix=ble_prefix)
+    state = hass.states.get(force_entity)
+    if state is None or str(getattr(state, "state", "")).lower() == "unavailable":
+        return None
+    try:
+        registry = er.async_get(hass)
+        target = registry.async_get(target_entity)
+        force = registry.async_get(force_entity)
+    except Exception:
+        return None
+    if target is None or force is None:
+        return None
+    if getattr(target, "disabled_by", None) is not None or getattr(
+        force, "disabled_by", None
+    ) is not None:
+        return None
+    if (
+        str(getattr(target, "platform", "")).lower() != "esphome"
+        or str(getattr(force, "platform", "")).lower() != "esphome"
+    ):
+        return None
+    target_device = getattr(target, "device_id", None)
+    force_device = getattr(force, "device_id", None)
+    if not target_device or not force_device or target_device != force_device:
+        return None
+    target_entry = getattr(target, "config_entry_id", None)
+    force_entry = getattr(force, "config_entry_id", None)
+    if (
+        not target_entry
+        or not force_entry
+        or target_entry != force_entry
+    ):
+        return None
+    identity = _tesla_legacy_entity_identity(hass, (force_entity,))
+    if identity is None:
+        return None
+    return force_entity, identity
+
+
+async def _tesla_ble_scope_current(
+    hass: HomeAssistant,
+    target_entity: str,
+    expected_identity: tuple[tuple[Any, ...], ...] | None,
+    authorize: Optional[Callable[[], Any]],
+) -> bool:
+    """Check route authority and the target registry binding after an await."""
+    if not await _tesla_legacy_transport_authorized(authorize):
+        return False
+    if expected_identity is not None and _tesla_legacy_entity_identity(
+        hass, (target_entity,)
+    ) != expected_identity:
+        return False
+    return True
+
+
+async def _tesla_ble_prepare_mutation(
+    hass: HomeAssistant,
+    ble_prefix: str,
+    target_entity: str,
+    *,
+    allow_backoff: bool,
+    authorize: Optional[Callable[[], Any]],
+    wake_first: bool,
+    expected_identity: tuple[tuple[Any, ...], ...] | None,
+    charge_binding_holder: list | None = None,
+) -> bool:
+    """Establish a fresh vehicle session before any BLE mutation.
+
+    The exact target binding is captured by the caller before this coroutine's
+    first await.  If existing telemetry is healthy we keep the fast path.  A
+    wake acknowledgement without charge telemetry is insufficient, so the
+    exact registry-bound force-data button is used as a bounded read probe;
+    failure returns before a mutating HA service call.
+    """
+    charge_binding = _tesla_ble_charge_data_binding(
+        hass, ble_prefix, target_entity
+    )
+    if charge_binding_holder is not None:
+        charge_binding_holder[:] = [charge_binding]
+    if charge_binding is None:
+        return False
+    if not await _tesla_ble_scope_current(
+        hass, target_entity, expected_identity, authorize
+    ):
+        return False
+    if not wake_first and _tesla_ble_has_fresh_charge_snapshot(hass, ble_prefix):
+        return True
+    if wake_first:
+        if not await _wake_tesla_ble(
+            hass, ble_prefix, allow_backoff=allow_backoff
+        ):
+            return False
+    elif not _tesla_ble_has_fresh_charge_snapshot(hass, ble_prefix):
+        if not await _wake_tesla_ble(
+            hass, ble_prefix, allow_backoff=allow_backoff
+        ):
+            return False
+    if not await _tesla_ble_scope_current(
+        hass, target_entity, expected_identity, authorize
+    ):
+        return False
+    charge_binding = _tesla_ble_charge_data_binding(
+        hass, ble_prefix, target_entity, previous=charge_binding
+    )
+    if charge_binding is None:
+        if charge_binding_holder is not None:
+            charge_binding_holder[:] = [None]
+        return False
+    if charge_binding_holder is not None:
+        charge_binding_holder[:] = [charge_binding]
+    if _tesla_ble_has_fresh_charge_snapshot(hass, ble_prefix):
+        return True
+
+    binding = _tesla_ble_force_data_update_binding(
+        hass, ble_prefix, target_entity
+    )
+    if binding is None:
+        _LOGGER.warning(
+            "Tesla BLE %s: no exact active force-data-update entity with "
+            "fresh vehicle telemetry; mutation not sent",
+            ble_prefix,
+        )
+        return False
+    force_entity, force_identity = binding
+    refresh_started_at = datetime.now(dt_timezone.utc)
+    if not await _tesla_ble_scope_current(
+        hass, target_entity, expected_identity, authorize
+    ) or _tesla_legacy_entity_identity(hass, (force_entity,)) != force_identity:
+        return False
+    charge_binding = _tesla_ble_charge_data_binding(
+        hass, ble_prefix, target_entity, previous=charge_binding
+    )
+    if charge_binding is None:
+        if charge_binding_holder is not None:
+            charge_binding_holder[:] = [None]
+        return False
+    if charge_binding_holder is not None:
+        charge_binding_holder[:] = [charge_binding]
+    try:
+        await hass.services.async_call(
+            "button",
+            "press",
+            {"entity_id": force_entity},
+            blocking=True,
+        )
+    except Exception as err:
+        _LOGGER.warning(
+            "Tesla BLE %s: force-data-update probe failed; mutation not sent: %s",
+            ble_prefix,
+            err,
+        )
+        return False
+
+    deadline = asyncio.get_running_loop().time() + _TESLA_BLE_COMMAND_CONFIRMATION_SECONDS
+    while True:
+        if not await _tesla_ble_scope_current(
+            hass, target_entity, expected_identity, authorize
+        ) or _tesla_legacy_entity_identity(hass, (force_entity,)) != force_identity:
+            return False
+        charge_binding = _tesla_ble_charge_data_binding(
+            hass, ble_prefix, target_entity, previous=charge_binding
+        )
+        if charge_binding is None:
+            if charge_binding_holder is not None:
+                charge_binding_holder[:] = [None]
+            return False
+        if charge_binding_holder is not None:
+            charge_binding_holder[:] = [charge_binding]
+        if _tesla_ble_has_fresh_charge_snapshot(
+            hass, ble_prefix, since=refresh_started_at
+        ):
+            return True
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            _LOGGER.warning(
+                "Tesla BLE %s: force-data-update produced no fresh charge "
+                "telemetry; mutation not sent",
+                ble_prefix,
+            )
+            return False
+        await asyncio.sleep(min(1, remaining))
+
+
 _tesla_legacy_authority: ContextVar[Optional[Callable[[], Any]]] = ContextVar(
     "tesla_legacy_authority", default=None
 )
@@ -2971,17 +3391,42 @@ async def _start_ev_charging_ble(
         _LOGGER.error(f"Tesla BLE charger entity not found: {charger_entity}")
         return False
 
+    expected_identity = _tesla_legacy_entity_identity(hass, (charger_entity,))
+    charge_binding_holder: list = []
     command_dispatched = False
     try:
-        if not await _wake_tesla_ble(
-            hass, ble_prefix, allow_backoff=allow_backoff
+        if not await _tesla_ble_prepare_mutation(
+            hass,
+            ble_prefix,
+            charger_entity,
+            allow_backoff=allow_backoff,
+            authorize=authorize,
+            wake_first=True,
+            expected_identity=expected_identity,
+            charge_binding_holder=charge_binding_holder,
         ):
             return False
-        if not await _tesla_legacy_transport_authorized(authorize):
+        if not await _tesla_ble_scope_current(
+            hass, charger_entity, expected_identity, authorize
+        ):
             return False
         if not await prepare_ev_submission(hass, charger_entity, operation="start"):
             return False
-        if not await _tesla_legacy_transport_authorized(authorize):
+        if not await _tesla_ble_scope_current(
+            hass, charger_entity, expected_identity, authorize
+        ):
+            return False
+        charge_binding = (
+            None
+            if not charge_binding_holder or charge_binding_holder[0] is None
+            else _tesla_ble_charge_data_binding(
+                hass,
+                ble_prefix,
+                charger_entity,
+                previous=charge_binding_holder[0],
+            )
+        )
+        if charge_binding is None:
             return False
         command_started_at = datetime.now(dt_timezone.utc)
         hass.data.setdefault(DOMAIN, {}).setdefault("_ev_ble_start_dispatched_at", {})[ble_prefix] = command_started_at
@@ -2998,6 +3443,9 @@ async def _start_ev_charging_ble(
                 TESLA_BLE_SENSOR_CHARGING.format(prefix=ble_prefix),
             ),
             "charging", command_started_at, charging_prefix=ble_prefix,
+            charge_binding=charge_binding,
+            charge_binding_target=charger_entity,
+            charge_binding_prefix=ble_prefix,
         )
         return True if confirmed else None
     except Exception as e:
@@ -3019,41 +3467,68 @@ async def _stop_ev_charging_ble(
     *,
     allow_backoff: bool = True,
     authorize: Optional[Callable[[], Any]] = None,
+    allow_cleanup_without_session: bool = False,
 ) -> Optional[bool]:
     """Stop Tesla BLE charging; do not treat service acceptance as readback."""
+    allow_cleanup_without_session = (
+        allow_cleanup_without_session
+        or _tesla_ble_cleanup_without_session.get()
+    )
     charger_entity = TESLA_BLE_SWITCH_CHARGER.format(prefix=ble_prefix)
 
     if hass.states.get(charger_entity) is None:
         _LOGGER.error(f"Tesla BLE charger entity not found: {charger_entity}")
         return False
 
+    expected_identity = _tesla_legacy_entity_identity(hass, (charger_entity,))
+    charge_binding_holder: list = []
     command_dispatched = False
     try:
-        # A vehicle that is already awake never changes ``asleep``, so the
-        # bridge has nothing to publish and the wake acknowledgement can never
-        # arrive — which is exactly the car that is charging and needs
-        # stopping (Discord #56).  Fresh, measured, positive vehicle
-        # current/power is stronger proof of wakefulness than the binary, and
-        # is already trusted to carry a rate update on the same vehicle.
-        if _ble_command_has_fresh_charging_evidence(hass, ble_prefix):
-            _LOGGER.info(
-                "Tesla BLE %s: stop proceeding on fresh measured charging "
-                "evidence without a wake acknowledgement",
-                ble_prefix,
-            )
-        elif not await _wake_tesla_ble(
-            hass, ble_prefix, allow_backoff=allow_backoff
+        if not await _tesla_ble_prepare_mutation(
+            hass,
+            ble_prefix,
+            charger_entity,
+            allow_backoff=allow_backoff,
+            authorize=authorize,
+            wake_first=False,
+            expected_identity=expected_identity,
+            charge_binding_holder=charge_binding_holder,
         ):
-            # The start path already reports a blocked dispatch; without the
-            # same line here a dropped stop left no trace at all.
-            if _ble_block_report_due(hass, ble_prefix, "stop_not_dispatched"):
+            # A stop is the producer cleanup for an earlier unknown start.
+            # The journal/route authority still fences the target identity,
+            # but requiring a new vehicle telemetry receipt here could leave
+            # the failed producer active and suppress the only safe cleanup.
+            if allow_cleanup_without_session and await _tesla_ble_scope_current(
+                hass, charger_entity, expected_identity, authorize
+            ):
                 _LOGGER.warning(
-                    "Tesla BLE %s: stop not dispatched - no confirmed vehicle "
-                    "wake",
+                    "Tesla BLE %s: stop cleanup proceeding without a fresh "
+                    "session receipt",
                     ble_prefix,
                 )
+            else:
+                if _ble_block_report_due(hass, ble_prefix, "stop_not_dispatched"):
+                    _LOGGER.warning(
+                        "Tesla BLE %s: stop not dispatched - no confirmed vehicle "
+                        "session",
+                        ble_prefix,
+                    )
+                return False
+        if not await _tesla_ble_scope_current(
+            hass, charger_entity, expected_identity, authorize
+        ):
             return False
-        if not await _tesla_legacy_transport_authorized(authorize):
+        charge_binding = (
+            None
+            if not charge_binding_holder or charge_binding_holder[0] is None
+            else _tesla_ble_charge_data_binding(
+                hass,
+                ble_prefix,
+                charger_entity,
+                previous=charge_binding_holder[0],
+            )
+        )
+        if charge_binding is None and not allow_cleanup_without_session:
             return False
         command_started_at = datetime.now(dt_timezone.utc)
         command_dispatched = True
@@ -3071,6 +3546,9 @@ async def _stop_ev_charging_ble(
             ),
             ("stopped", "complete", "disconnected", "not charging"),
             command_started_at,
+            charge_binding=charge_binding,
+            charge_binding_target=charger_entity,
+            charge_binding_prefix=ble_prefix,
         )
         if confirmed:
             _LOGGER.info(f"Stopped EV charging via Tesla BLE: {charger_entity}")
@@ -3101,13 +3579,36 @@ async def _set_ev_charge_limit_ble(
         _LOGGER.error(f"Tesla BLE charge limit entity not found: {limit_entity}")
         return False
 
+    expected_identity = _tesla_legacy_entity_identity(hass, (limit_entity,))
+    charge_binding_holder: list = []
     command_dispatched = False
     try:
-        if not await _wake_tesla_ble(
-            hass, ble_prefix, allow_backoff=allow_backoff
+        if not await _tesla_ble_prepare_mutation(
+            hass,
+            ble_prefix,
+            limit_entity,
+            allow_backoff=allow_backoff,
+            authorize=authorize,
+            wake_first=True,
+            expected_identity=expected_identity,
+            charge_binding_holder=charge_binding_holder,
         ):
             return False
-        if not await _tesla_legacy_transport_authorized(authorize):
+        if not await _tesla_ble_scope_current(
+            hass, limit_entity, expected_identity, authorize
+        ):
+            return False
+        charge_binding = (
+            None
+            if not charge_binding_holder or charge_binding_holder[0] is None
+            else _tesla_ble_charge_data_binding(
+                hass,
+                ble_prefix,
+                limit_entity,
+                previous=charge_binding_holder[0],
+            )
+        )
+        if charge_binding is None:
             return False
         command_started_at = datetime.now(dt_timezone.utc)
         command_dispatched = True
@@ -3118,7 +3619,13 @@ async def _set_ev_charge_limit_ble(
             blocking=True,
         )
         confirmed = await _wait_for_ble_command_readback(
-            hass, limit_entity, float(percent), command_started_at
+            hass,
+            limit_entity,
+            float(percent),
+            command_started_at,
+            charge_binding=charge_binding,
+            charge_binding_target=limit_entity,
+            charge_binding_prefix=ble_prefix,
         )
         return True if confirmed else None
     except Exception as e:
@@ -3146,6 +3653,7 @@ async def _set_ev_charging_amps_ble(
     if state is None:
         _LOGGER.error(f"Tesla BLE charging amps entity not found: {amps_entity}")
         return False
+    expected_identity = _tesla_legacy_entity_identity(hass, (amps_entity,))
 
     # Cap amps to entity's min/max range. Tesla integrations can report a stale
     # 16A max while idle, so solar-surplus callers may opt into the configured
@@ -3171,19 +3679,41 @@ async def _set_ev_charging_amps_ble(
     if capped_amps != amps:
         _LOGGER.debug(f"BLE amps capped from {amps}A to {capped_amps}A (entity range: {entity_min}-{entity_max})")
 
+    charge_binding_holder: list = []
     command_dispatched = False
     try:
-        if not _ble_command_has_fresh_charging_evidence(
-            hass, ble_prefix
-        ) and not await _wake_tesla_ble(
-            hass, ble_prefix, allow_backoff=allow_backoff
+        if not await _tesla_ble_prepare_mutation(
+            hass,
+            ble_prefix,
+            amps_entity,
+            allow_backoff=allow_backoff,
+            authorize=authorize,
+            wake_first=False,
+            expected_identity=expected_identity,
+            charge_binding_holder=charge_binding_holder,
         ):
             return False
-        if not await _tesla_legacy_transport_authorized(authorize):
+        if not await _tesla_ble_scope_current(
+            hass, amps_entity, expected_identity, authorize
+        ):
             return False
         if not await prepare_ev_submission(hass, amps_entity, operation="rate", amps=capped_amps):
             return False
-        if not await _tesla_legacy_transport_authorized(authorize):
+        if not await _tesla_ble_scope_current(
+            hass, amps_entity, expected_identity, authorize
+        ):
+            return False
+        charge_binding = (
+            None
+            if not charge_binding_holder or charge_binding_holder[0] is None
+            else _tesla_ble_charge_data_binding(
+                hass,
+                ble_prefix,
+                amps_entity,
+                previous=charge_binding_holder[0],
+            )
+        )
+        if charge_binding is None:
             return False
         command_started_at = datetime.now(dt_timezone.utc)
         command_dispatched = True
@@ -3194,7 +3724,13 @@ async def _set_ev_charging_amps_ble(
             blocking=True,
         )
         confirmed = await _wait_for_ble_command_readback(
-            hass, amps_entity, float(capped_amps), command_started_at
+            hass,
+            amps_entity,
+            float(capped_amps),
+            command_started_at,
+            charge_binding=charge_binding,
+            charge_binding_target=amps_entity,
+            charge_binding_prefix=ble_prefix,
         )
         return True if confirmed else None
     except Exception as e:
@@ -3213,8 +3749,22 @@ async def _set_ev_charging_amps_ble(
             try:
                 if not await prepare_ev_submission(hass, amps_entity, operation="rate", amps=fallback_amps):
                     return False
-                if not await _tesla_legacy_transport_authorized(authorize):
+                if not await _tesla_ble_scope_current(
+                    hass, amps_entity, expected_identity, authorize
+                ):
                     return False
+                charge_binding = (
+                    None
+                    if not charge_binding_holder or charge_binding_holder[0] is None
+                    else _tesla_ble_charge_data_binding(
+                        hass,
+                        ble_prefix,
+                        amps_entity,
+                        previous=charge_binding_holder[0],
+                    )
+                )
+                if charge_binding is None:
+                    return None
                 await hass.services.async_call(
                     "number",
                     "set_value",
@@ -3227,7 +3777,13 @@ async def _set_ev_charging_amps_ble(
                     amps_entity,
                 )
                 if not await _wait_for_ble_command_readback(
-                    hass, amps_entity, float(fallback_amps), command_started_at
+                    hass,
+                    amps_entity,
+                    float(fallback_amps),
+                    command_started_at,
+                    charge_binding=charge_binding,
+                    charge_binding_target=amps_entity,
+                    charge_binding_prefix=ble_prefix,
                 ):
                     return None
                 if params is not None:
@@ -6558,17 +7114,23 @@ async def _action_stop_ev_charging(
             # An explicit user stop must always attempt the wake: the shared
             # failed-bridge backoff is armed by the automatic surplus loop and
             # would otherwise discard the command before dispatch.
-            result, _ = await _run_ble_transport_command(hass, config_entry, params,
-                ble_prefix, "stop", lambda: _run_tesla_legacy_with_authority(
-                    cleanup_authority,
-                    lambda: _stop_ev_charging_ble(
-                        hass,
-                        ble_prefix,
-                        allow_backoff=not user_initiated,
+            cleanup_token = _tesla_ble_cleanup_without_session.set(route is not None)
+            try:
+                result, _ = await _run_ble_transport_command(
+                    hass, config_entry, params, ble_prefix, "stop",
+                    lambda: _run_tesla_legacy_with_authority(
+                        cleanup_authority,
+                        lambda: _stop_ev_charging_ble(
+                            hass,
+                            ble_prefix,
+                            allow_backoff=not user_initiated,
+                        ),
+                        hass=hass,
+                        entity_ids=(TESLA_BLE_SWITCH_CHARGER.format(prefix=ble_prefix),),
                     ),
-                    hass=hass,
-                    entity_ids=(TESLA_BLE_SWITCH_CHARGER.format(prefix=ble_prefix),),
-                ))
+                )
+            finally:
+                _tesla_ble_cleanup_without_session.reset(cleanup_token)
             if result or ev_provider == EV_PROVIDER_TESLA_BLE:
                 return result
 
