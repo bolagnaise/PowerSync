@@ -2314,9 +2314,21 @@ def _extracted_tesla_reserve_pulse(apply_reserve):
     assert mapper_source is not None
     assert pulse_source is not None
 
+    class RestoreScope:
+        async def __aenter__(self):
+            return None
+
+        async def __aexit__(self, *_args):
+            return False
+
+    site = SimpleNamespace(site_id="site-1", operation=lambda **_kwargs: RestoreScope())
+    runtime = {"tesla_reserve_pulse_stopping": False, "powerwall_site_control": site}
+    entry = SimpleNamespace(entry_id="entry-one", data={"tesla_energy_site_id": "site-1"}, options={})
     namespace = {
         "Callable": Callable,
         "asyncio": _AsyncioProxy,
+        "DOMAIN": "power_sync", "entry": entry,
+        "hass": SimpleNamespace(data={"power_sync": {entry.entry_id: runtime}}),
         "_LOGGER": _NoopLogger(),
         "_normalize_tesla_backup_reserve_percent": lambda value: int(value),
         "_tesla_force_apply_backup_reserve_unlocked": apply_reserve,
@@ -2325,12 +2337,20 @@ def _extracted_tesla_reserve_pulse(apply_reserve):
         }.issubset(set(result["confirmed_sites"])),
         "_tesla_reserve_write_lock": asyncio.Lock(),
         "_tesla_reserve_write_tasks": set(),
-        "_tesla_reserve_pulse_runtime": {
-            "tesla_reserve_pulse_stopping": False,
-        },
+        "_tesla_reserve_pulse_runtime": runtime,
     }
+    load_power_sync_function("canonical_site_id", namespace,
+                             path=INIT_PATH.with_name("powerwall_control.py"))
+
+    class InjectCanonicalSite(ast.NodeTransformer):
+        def visit_ImportFrom(self, node):
+            if node.module == "powerwall_control":
+                return ast.copy_location(ast.Pass(), node)
+            return node
+
     exec(mapper_source, namespace)
-    exec(textwrap.dedent(pulse_source), namespace)
+    pulse_tree = InjectCanonicalSite().visit(ast.parse(textwrap.dedent(pulse_source)))
+    exec(compile(ast.fix_missing_locations(pulse_tree), str(INIT_PATH), "exec"), namespace)
     return namespace["_tesla_force_pulse_backup_reserve"], namespace
 
 
@@ -4826,7 +4846,6 @@ def test_goodwe_hold_cleanup_waits_for_success_and_bypasses_monitoring_gate():
     assert restore is not None
     assert hold is not None
     assert persisted is not None
-    cleanup_payload = '{"source": "hold_soc_cleanup", "_force_restore": True}'
     hold_payloads = [
         node
         for node in ast.walk(ast.parse(hold))
@@ -4846,10 +4865,23 @@ def test_goodwe_hold_cleanup_waits_for_success_and_bypasses_monitoring_gate():
         if isinstance(key, ast.Constant)
     }
     assert ast.literal_eval(hold_payload["_force_restore"]) is True
+    assert ast.literal_eval(hold_payload["_allow_monitoring_restore"]) is True
     assert isinstance(hold_payload["_solaredge_generation"], ast.Name)
     assert hold_payload["_solaredge_generation"].id == "solaredge_generation"
     assert 'solaredge_generation = coord.intent_generation if brand == "solaredge" else None' in hold
-    assert cleanup_payload in persisted
+    persisted_payloads = [
+        {key.value: value for key, value in zip(node.keys, node.values)
+         if isinstance(key, ast.Constant)}
+        for node in ast.walk(ast.parse(persisted))
+        if isinstance(node, ast.Dict)
+        and any(isinstance(key, ast.Constant) and key.value == "source"
+                and isinstance(value, ast.Constant) and value.value == "hold_soc_cleanup"
+                for key, value in zip(node.keys, node.values))
+    ]
+    assert len(persisted_payloads) == 2
+    assert all(ast.literal_eval(payload["_force_restore"]) is True
+               and ast.literal_eval(payload["_allow_monitoring_restore"]) is True
+               for payload in persisted_payloads)
     assert 'source in ("user", "manual", "unknown", "hold_soc_cleanup")' in restore
 
     goodwe_start = restore.index("if is_goodwe:")

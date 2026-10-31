@@ -32383,6 +32383,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         {
                             "source": "hold_soc_cleanup",
                             "_force_restore": True,
+                            "_allow_monitoring_restore": True,
                         }
                     )
                     if restore_completed:
@@ -32433,7 +32434,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         if hold_soc_state["active"]:
                             _LOGGER.info("⏰ Hold SoC expired (restored timer), auto-restoring")
                             await _restore_persisted_normal(
-                                {"source": "hold_soc_cleanup", "_force_restore": True},
+                                {"source": "hold_soc_cleanup", "_force_restore": True,
+                                 "_allow_monitoring_restore": True},
                             )
 
                     hold_soc_state["cancel_expiry_timer"] = async_track_point_in_utc_time(
@@ -33696,28 +33698,67 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if current_task is not None:
             _tesla_reserve_write_tasks.add(current_task)
 
+        # The exact restore runs in a shielded child task, which does not
+        # inherit the caller's site scope. Retain this physical owner while
+        # allowing cleanup to finish after a forcing deadline or cancellation.
+        restore_runtime = _tesla_reserve_pulse_runtime
+        restore_site = restore_runtime.get("powerwall_site_control")
+        restore_store = restore_runtime.get("store")
+        restore_entry_id = entry.entry_id
+        from .powerwall_control import canonical_site_id
+
+        def _restore_site_identity():
+            config = {**entry.data, **entry.options}
+            return config.get("tesla_energy_site_id") or config.get("powerwall_local_energy_site_id")
+
+        try:
+            restore_site_id = canonical_site_id(_restore_site_identity())
+        except (TypeError, ValueError):
+            restore_site_id = None
+
+        def _exact_restore_owner_current() -> bool:
+            try:
+                return (
+                    restore_site is not None
+                    and restore_site.site_id == restore_site_id
+                    and canonical_site_id(_restore_site_identity()) == restore_site_id
+                    and hass.data.get(DOMAIN, {}).get(restore_entry_id) is restore_runtime
+                    and restore_runtime.get("powerwall_site_control") is restore_site
+                    and restore_runtime.get("store") is restore_store
+                )
+            except (TypeError, ValueError):
+                return False
+
         async def _restore_exact_target() -> dict[str, list[str]]:
             """Restore the authoritative target with one bounded retry."""
-            final_result = _failed_result()
-            for attempt in range(1, 3):
-                final_result = await _tesla_force_apply_backup_reserve_unlocked(
-                    site_configs,
-                    target_percent,
-                    reason=f"{reason} restore {target_percent}%",
-                    prefer_local=prefer_local,
-                )
-                if _tesla_force_result_all_confirmed(
-                    final_result,
-                    site_configs,
-                ):
-                    return final_result
-                if attempt < 2:
-                    _LOGGER.warning(
-                        "Tesla %s exact reserve restore did not verify; retrying",
-                        reason,
+            if not _exact_restore_owner_current():
+                return _failed_result()
+            async with restore_site.operation(
+                label=f"{reason} exact reserve cleanup", entry_id=restore_entry_id,
+                restoring=True, is_current=_exact_restore_owner_current,
+                identity=_restore_site_identity,
+            ):
+                final_result = _failed_result()
+                for attempt in range(1, 3):
+                    final_result = await _tesla_force_apply_backup_reserve_unlocked(
+                        site_configs,
+                        target_percent,
+                        reason=f"{reason} restore {target_percent}%",
+                        prefer_local=prefer_local,
+                        is_current=_exact_restore_owner_current,
                     )
-                    await asyncio.sleep(1)
-            return final_result
+                    if _tesla_force_result_all_confirmed(
+                        final_result,
+                        site_configs,
+                    ):
+                        return final_result
+                    if attempt < 2:
+                        _LOGGER.warning(
+                            "Tesla %s exact reserve restore did not verify; retrying",
+                            reason,
+                        )
+                        await asyncio.sleep(1)
+                return final_result
 
         async def _finish_restore_despite_cancellation() -> dict[str, list[str]]:
             """Drain the exact restore before propagating task cancellation."""
@@ -33735,6 +33776,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             return final_result
 
         try:
+            if not _exact_restore_owner_current():
+                _LOGGER.warning("Tesla %s reserve pulse skipped: original site owner is unavailable", reason)
+                return _failed_result()
             if _tesla_reserve_pulse_runtime.get("tesla_reserve_pulse_stopping"):
                 _LOGGER.info("Tesla %s reserve pulse skipped during unload", reason)
                 return _failed_result()
@@ -39231,6 +39275,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     (entry_service_data(entry.entry_id, {
                         "source": "hold_soc_cleanup",
                         "_force_restore": True,
+                        "_allow_monitoring_restore": True,
                         "_restore_retry": next_retry,
                     }, call)),
                     blocking=True,
@@ -41009,7 +41054,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     await hass.services.async_call(
                         DOMAIN,
                         SERVICE_RESTORE_NORMAL,
-                        (entry_service_data(entry.entry_id, {"source": "hold_soc_cleanup", "_force_restore": True, "_solaredge_generation": solaredge_generation}, call)),
+                        (entry_service_data(entry.entry_id, {"source": "hold_soc_cleanup", "_force_restore": True, "_allow_monitoring_restore": True, "_solaredge_generation": solaredge_generation}, call)),
                         blocking=True,
                     )
 
