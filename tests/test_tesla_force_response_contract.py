@@ -50,6 +50,7 @@ def force_handler(monkeypatch, source_tree):
                    "powerwall_settings_control_tasks": set()}
         namespace = {
             "__package__": package.__name__,
+            "dt_util": SimpleNamespace(utcnow=lambda: datetime(2026, 10, 31, tzinfo=timezone.utc)),
             "hass": SimpleNamespace(data={"power_sync": {"entry": runtime}}),
             "entry": SimpleNamespace(entry_id="entry", data={"battery_system": "tesla"}, options={}),
             "DOMAIN": "power_sync", "_LOGGER": logging.getLogger(__name__),

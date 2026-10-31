@@ -521,12 +521,14 @@ def test_standalone_actual_prices_preserve_spikes_and_bound_history_tooltips():
     builder = source[source.index('function _priceChart('):source.index('function _lpForecastSummary(')]
     runtime = r"""
       const assert = require('node:assert/strict');
-      const NativeDate = Date;
-      let now = NativeDate.parse('2026-10-13T03:40:00Z');
-      global.Date = class extends NativeDate {
-        constructor(...args) { super(...(args.length ? args : [now])); }
-        static now() { return now; }
+      // Keep the existing observation on today's side of midnight regardless
+      // of when CI runs. Exercise midnight clipping explicitly below.
+      const RealDate = Date;
+      global.Date = class extends RealDate {
+        constructor(...args) { super(...(args.length ? args : ['2026-10-31T02:00:00Z'])); }
+        static now() { return RealDate.parse('2026-10-31T02:00:00Z'); }
       };
+      global.requestAnimationFrame = () => {};
       global.HTMLElement = class {
         attachShadow() { this.shadowRoot = {innerHTML: '', querySelectorAll() { return []; }, querySelector() { return null; }}; }
         getBoundingClientRect() { return {width: this.testWidth || 640}; }
@@ -2120,6 +2122,13 @@ def test_energy_day_prices_are_optional_signed_history_with_independent_axes():
     builder = source[source.index('function _combinedEnergyChart'):source.index('function _demandCharge')]
     runtime = r"""
       const assert = require('node:assert/strict');
+      // Keep the existing observation on today's side of midnight regardless
+      // of when CI runs. Exercise midnight clipping explicitly below.
+      const RealDate = Date;
+      global.Date = class extends RealDate {
+        constructor(...args) { super(...(args.length ? args : ['2026-10-31T02:00:00Z'])); }
+        static now() { return RealDate.parse('2026-10-31T02:00:00Z'); }
+      };
       global.requestAnimationFrame = () => {};
       const NativeDate = Date;
       const fixedNow = NativeDate.parse('2026-10-13T03:40:00Z');
@@ -2197,6 +2206,9 @@ def test_energy_day_prices_are_optional_signed_history_with_independent_axes():
       }
       assert.deepEqual(card._priceHistoryPoints([[now+60000, 99]], {state: 'unknown'}, window), []);
       assert.deepEqual(card._priceHistoryPoints([[observed, -0.02]], {state: 'unknown'}, window), [[observed, -0.02]]);
+      const midnightWindow = {...window, startMs: observed + 60000};
+      assert.deepEqual(card._priceHistoryPoints([], point, midnightWindow), [[midnightWindow.startMs, -0.02], [window.nowMs, -0.02]]);
+      assert.deepEqual(card._priceHistoryPoints([[observed, -0.02]], {state: 'unknown'}, midnightWindow), []);
       // Each midnight is resolved independently across daylight-saving changes.
       const spring = Date.UTC(2026, 9, 4);
       const autumn = Date.UTC(2026, 3, 5);
