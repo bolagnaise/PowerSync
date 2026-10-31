@@ -1640,6 +1640,29 @@ class PsMissingCards extends PsCardBase {
 
 // ─── Right now ───────────────────────────────────────────────────
 
+// A force mode is also used by the optimiser and automations. Only the
+// recorded command source can identify who requested it; an enabled plan
+// does not establish ownership of an active battery command.
+function psBatteryControl(modeState) {
+  const request = {
+    force_charge: 'Charge', force_discharge: 'Discharge',
+    hold_soc: 'Battery hold', self_consumption: 'Self-consumption',
+  }[modeState?.state];
+  if (!request) return null;
+  const rawSource = modeState?.attributes?.control_source;
+  const source = typeof rawSource === 'string' ? rawSource.trim().toLowerCase() : '';
+  const origins = {
+    optimizer: ['Optimiser control', ' by the optimiser', 'on'],
+    user: ['Manual override', ' manually', 'override'],
+    manual: ['Manual override', ' manually', 'override'],
+    automation: ['Automation control', ' by an automation', 'mon'],
+    aemo_spike: ['Price spike control', ' by the price spike automation', 'mon'],
+  };
+  const [label, attribution, pill] = Object.hasOwn(origins, source)
+    ? origins[source] : ['Battery control active', '', 'override'];
+  return {label, pill, message: `${request} requested${attribution}.`};
+}
+
 class PsNowCard extends PsCardBase {
   _signature() {
     const data = psApiPeek('power_sync/optimization');
@@ -1656,6 +1679,7 @@ class PsNowCard extends PsCardBase {
     const unit = psMinorUnit(hass);
     const modeState = psState(hass, en.mode);
     const mode = modeState?.state || 'normal';
+    const control = psBatteryControl(modeState);
     const remaining = Number(modeState?.attributes?.remaining_minutes);
     const monitoring = data ? !!data.monitoring_mode : psState(hass, en.monitoring)?.state === 'on';
     const enabled = data ? !!data.enabled : psState(hass, en.optimizer)?.state === 'on';
@@ -1665,8 +1689,8 @@ class PsNowCard extends PsCardBase {
     // Mode pill
     let pill = '', modeText = '';
     if (mode !== 'normal' && mode !== 'unknown' && mode !== 'unavailable') {
-      pill = '<span class="pill override">Manual override</span>';
-      modeText = Number.isFinite(remaining) ? `Returns to normal in ${psDuration(remaining)}` : 'Set from Battery controls';
+      pill = `<span class="pill ${control?.pill || 'override'}">${psEsc(control?.label || 'Battery control active')}</span>`;
+      modeText = Number.isFinite(remaining) ? `Current command: ${psDuration(remaining)} remaining` : 'Current battery command';
     } else if (monitoring) {
       pill = '<span class="pill mon">Monitoring</span>';
       modeText = 'The optimizer is planning but not controlling the battery';
@@ -1691,8 +1715,7 @@ class PsNowCard extends PsCardBase {
     let headline;
     if (restoring) headline = 'Restoring normal operation…';
     else if (starting) headline = mode === 'force_charge' ? 'Starting charge…' : 'Starting discharge…';
-    else if (mode === 'force_charge') headline = `Charging on your command${Number.isFinite(remaining) ? ` for ${psDuration(remaining)}` : ''}.`;
-    else if (mode === 'force_discharge') headline = `Discharging on your command${Number.isFinite(remaining) ? ` for ${psDuration(remaining)}` : ''}.`;
+    else if (mode === 'force_charge' || mode === 'force_discharge') headline = control.message;
     else if (mode === 'hold_soc') headline = `Holding the battery at ${psFix(soc, 0)}%.`;
     else if (mode === 'self_consumption') headline = 'The battery is powering the home.';
     else if (actKey === 'charge') headline = `Charging${imp <= 0.05 ? ' on free power' : solar > Math.max(0.2, -battery) ? ' from solar' : ''}.`;
@@ -1794,8 +1817,8 @@ const PS_CONTROL_KINDS = {
   hold: { service: 'hold_battery_soc', label: 'Hold charge', done: 'Holding charge' },
 };
 const PS_MODE_TEXT = {
-  force_charge: ['Charging', 'Charging the battery on your command.'],
-  force_discharge: ['Discharging', 'Discharging the battery on your command.'],
+  force_charge: ['Charging', 'Charge requested.'],
+  force_discharge: ['Discharging', 'Discharge requested.'],
   self_consumption: ['Powering the home', 'The battery is powering the home.'],
   hold_soc: ['Holding charge', 'Holding the battery at its current charge.'],
 };
@@ -1825,12 +1848,13 @@ class PsControlsCard extends PsCardBase {
     const monitoring = data ? !!data.monitoring_mode : psState(hass, en.monitoring)?.state === 'on';
     const modeState = psState(hass, en.mode);
     const mode = modeState?.state || 'normal';
+    const control = psBatteryControl(modeState);
     const status = modeState?.attributes?.command_status;
     const restoring = status === 'restore_pending';
     const starting = status === 'pending';
-    const active = restoring ? ['Restoring…', 'Restoration is in progress; waiting for confirmation.']
-      : starting ? [mode === 'force_charge' ? 'Starting charge…' : 'Starting discharge…', 'Waiting for command acknowledgement.']
-      : PS_MODE_TEXT[mode];
+    const active = restoring ? ['Restoring…', `${control ? `${control.label}. ` : ''}Restoration is in progress; waiting for confirmation.`]
+      : starting ? [mode === 'force_charge' ? 'Starting charge…' : 'Starting discharge…', `${control ? `${control.label}. ` : ''}Waiting for command acknowledgement.`]
+      : control ? [control.label, control.message] : PS_MODE_TEXT[mode];
     const remaining = restoring || starting ? NaN : Number(modeState?.attributes?.remaining_minutes);
     const power = psState(hass, en.forcePower);
     const powerKw = Number(power?.state);

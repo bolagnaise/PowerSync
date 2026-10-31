@@ -7623,8 +7623,27 @@ class BatteryModeSensor(SensorEntity):
 
         mode = self._get_current_mode()
 
+        active_state = (
+            force_charge_state
+            if mode == BATTERY_MODE_STATE_FORCE_CHARGE
+            else force_discharge_state
+            if mode == BATTERY_MODE_STATE_FORCE_DISCHARGE
+            else hold_soc_state
+            if mode == BATTERY_MODE_STATE_HOLD_SOC
+            else self_consumption_state
+            if mode == BATTERY_MODE_STATE_SELF_CONSUMPTION
+            else {}
+        )
+        raw_source = active_state.get("source")
+        control_source = (
+            raw_source.strip().lower()
+            if isinstance(raw_source, str) and raw_source.strip()
+            else "unknown"
+        )
+
         attributes = {
             "mode": mode,
+            "control_source": control_source,
         }
 
         def _populate_timer_attrs(target: dict, src: dict) -> None:

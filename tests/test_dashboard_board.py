@@ -525,6 +525,117 @@ def test_every_small_chart_has_working_pointer_and_keyboard_tooltips():
         assert all(checks.values()), (card, checks)
 
 
+def test_battery_cards_identify_command_source_without_inferring_from_optimizer():
+    out = _run_board(r"""
+  const samples = [];
+  for (const mode of ['force_charge', 'force_discharge']) {
+    for (const source of ['optimizer', 'user', 'manual', 'automation', 'aemo_spike', 'unknown', null, 'future_controller']) {
+      for (const enabled of [true, false]) {
+        const attributes = {command_status: 'accepted', remaining_minutes: 129};
+        if (source !== null) attributes.control_source = source;
+        const hass = {states: {'sensor.mode': {state: mode, attributes}}, locale: {}, config: {}};
+        const data = {enabled, monitoring_mode: false, current_action: mode === 'force_charge' ? 'charge' : 'export'};
+        const cards = [new T.PsNowCard(), new T.PsControlsCard()];
+        for (const card of cards) {
+          card._config = {entities: {mode: 'sensor.mode'}};
+          card._hass = hass;
+          card._api = () => data;
+          card._render();
+        }
+        samples.push({mode, source, enabled, now: cards[0].innerHTML, controls: cards[1].innerHTML});
+      }
+    }
+  }
+  console.log(JSON.stringify({samples}));
+""")
+    origins = {
+        "optimizer": ("Optimiser control", "by the optimiser"),
+        "user": ("Manual override", "manually"),
+        "manual": ("Manual override", "manually"),
+        "automation": ("Automation control", "by an automation"),
+        "aemo_spike": ("Price spike control", "by the price spike automation"),
+    }
+    for sample in out["samples"]:
+        label, attribution = origins.get(
+            sample["source"], ("Battery control active", "")
+        )
+        request = "Charge" if sample["mode"] == "force_charge" else "Discharge"
+        message = f"{request} requested{f' {attribution}' if attribution else ''}."
+        for card in ("now", "controls"):
+            html = sample[card]
+            assert label in html, sample
+            assert message in html, sample
+            assert "on your command" not in html, sample
+            assert ("Manual override" in html) == (
+                sample["source"] in ("user", "manual")
+            ), sample
+        assert "2 h 9 min left." in sample["controls"]
+        assert "Returns to normal in" not in sample["now"]
+
+
+def test_battery_card_source_changes_refresh_without_a_mode_change():
+    out = _run_board(r"""
+  const samples = [];
+  for (const Card of [T.PsNowCard, T.PsControlsCard]) {
+    const card = new Card();
+    card._config = {entities: {mode: 'sensor.mode'}};
+    card._api = () => null;
+    const versions = [];
+    for (const [index, source] of ['optimizer', 'user', null].entries()) {
+      const attributes = {remaining_minutes: 15};
+      if (source !== null) attributes.control_source = source;
+      card._hass = {states: {'sensor.mode': {state: 'force_discharge', attributes, last_updated: String(index)}}, locale: {}, config: {}};
+      card._render();
+      versions.push({signature: card._signature(), html: card.innerHTML});
+    }
+    samples.push(versions);
+  }
+  console.log(JSON.stringify({samples}));
+""")
+    for versions in out["samples"]:
+        assert len({v["signature"] for v in versions}) == 3
+        for version, label in zip(
+            versions, ("Optimiser control", "Manual override", "Battery control active")
+        ):
+            assert label in version["html"]
+
+
+def test_battery_command_sources_preserve_starting_and_restoring_feedback():
+    out = _run_board(r"""
+  const samples = [];
+  for (const Card of [T.PsNowCard, T.PsControlsCard]) {
+    for (const mode of ['force_charge', 'force_discharge']) {
+      for (const source of ['optimizer', 'user', 'automation', null]) {
+        for (const status of ['pending', 'restore_pending']) {
+          const card = new Card();
+          card._config = {entities: {mode: 'sensor.mode'}};
+          card._api = () => null;
+          card._hass = {states: {'sensor.mode': {state: mode, attributes: {control_source: source, command_status: status, remaining_minutes: 129}}}, locale: {}, config: {}};
+          card._render();
+          samples.push({mode, source, status, html: card.innerHTML});
+        }
+      }
+    }
+  }
+  console.log(JSON.stringify({samples}));
+""")
+    labels = {
+        "optimizer": "Optimiser control", "user": "Manual override",
+        "automation": "Automation control", None: "Battery control active",
+    }
+    for sample in out["samples"]:
+        html = sample["html"]
+        assert labels[sample["source"]] in html
+        assert "2 h 9 min" not in html
+        assert "requested" not in html
+        if sample["status"] == "pending":
+            direction = "charge" if sample["mode"] == "force_charge" else "discharge"
+            assert f"Starting {direction}…" in html
+            assert "Waiting for command acknowledgement" in html
+        else:
+            assert "Restoring" in html
+
+
 def test_controls_distinguish_starting_restoring_and_acknowledged_requests():
     out = _run_board(r"""
   const card = new T.PsControlsCard();
