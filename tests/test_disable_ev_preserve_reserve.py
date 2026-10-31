@@ -33,7 +33,7 @@ import logging
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import ANY, AsyncMock
 
 import pytest
 
@@ -85,6 +85,8 @@ def _tesla_handoff_runtime(opt_module, *, confirmed=True):
         alphaess_coordinator=None,
         hold_soc_state={}, _tesla_reserve_generation=[0],
         _tesla_charge_kick_generation=[0], _command_generation=[0],
+        _local_powerwall_runtime=runtime,
+        _local_powerwall_generation_current=lambda: True,
         _supersede_tesla_charge_kick=lambda reason: 0,
         _stop_native_max_charge=AsyncMock(),
         _get_neovolt_entry_ids=lambda *args: [],
@@ -140,8 +142,17 @@ def test_monitoring_handoff_restores_through_real_tesla_service_gate(opt_module,
                 assert c._pre_idle_backup_reserve == 30
                 assert c._idle_hold_reserve == 78
             provider.assert_awaited_once_with(
-                [("site-1", "test", "fleet")], 30, reason="set backup reserve"
+                [("site-1", "test", "fleet")], 30, reason="set backup reserve",
+                is_current=ANY,
             )
+            current = provider.await_args.kwargs['is_current']
+            assert current()
+            for owner in ('_command_generation', '_tesla_charge_kick_generation',
+                          '_tesla_reserve_generation'):
+                env[owner][0] += 1
+                assert not current(), f'A newer {owner} must cancel the old reserve restore'
+                env[owner][0] -= 1
+                assert current()
             assert calls[-1][1]["source"] == "optimizer"
             assert c._startup_backup_reserve == 30
             assert entry.options == {}
