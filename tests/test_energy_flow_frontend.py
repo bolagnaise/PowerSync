@@ -6,6 +6,8 @@ from pathlib import Path
 import re
 import subprocess
 
+import pytest
+
 
 ENERGY_FLOW_PATH = (
     Path(__file__).resolve().parent.parent
@@ -14,6 +16,23 @@ ENERGY_FLOW_PATH = (
     / "frontend"
     / "power-sync-energy-flow.js"
 )
+
+
+@pytest.mark.parametrize("scenario", [
+    "generated-idle", "generated-charging", "away", "unplugged", "empty",
+    "unknown-power", "duplicates-stable", "failed-fallback", "malformed-fallback",
+    "manual-no-poll", "cadence-overlap-disconnect", "config-change-in-flight",
+    "enabled-config-change-in-flight", "distinct-car-power-flows",
+    "reconnect-in-flight", "cache-expiry", "cache-expiry-pending",
+    "connection-change-in-flight", "selector-independent",
+    "conflicting-duplicate-presence", "two-car-weather-scenes", "generated-layouts",
+])
+def test_generated_energy_flow_uses_canonical_connected_vehicles(scenario):
+    subprocess.run(
+        ["node", "--experimental-default-type=module",
+         str(Path(__file__).with_name("energy_flow_canonical_harness.mjs")), scenario],
+        check=True, capture_output=True, text=True,
+    )
 
 
 def test_energy_flow_keeps_scene_bitmap_outside_animated_svg_layer():

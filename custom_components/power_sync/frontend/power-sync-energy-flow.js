@@ -11,6 +11,8 @@ import {
 
 (function () {
   const CARD_TYPE = 'power-sync-energy-flow';
+  const EV_LOADPOINT_POLL_MS = 30000;
+  const EV_LOADPOINT_MAX_AGE_MS = 90000;
   const FLOW_MIN_W = 50;
   const SVG_WIDTH = 600;
   const SVG_HEIGHT = 460;
@@ -952,6 +954,7 @@ import {
     power_unit_mode: 'auto',
     font_scale: 1,
     ev_hide_when_idle: false,
+    canonical_ev_loadpoints: false,
     scene_scale: 1.06,
     grid_invert: false,
     battery_invert: false,
@@ -1340,19 +1343,113 @@ import {
       this._renderQueued = false;
       this._preloadedSceneBackgrounds = new Set();
       this._backgroundLoadToken = 0;
+      this._canonicalEvGeneration = 0;
+      this._canonicalEvSnapshot = null;
+      this._canonicalEvFetchedAt = 0;
+      this._canonicalEvNextFetchAt = 0;
+      this._canonicalEvRequest = null;
+      this._canonicalEvTimer = null;
+      this._canonicalEvExpiryTimer = null;
+      this._canonicalEvConnected = false;
     }
 
     setConfig(config) {
+      this._invalidateCanonicalEv();
       this._config = deepMerge(DEFAULT_CONFIG, config || {});
       this._initialized = false;
       this._lastAppliedSceneFlowProfile = '';
       this._lastAppliedSceneFlowComponentProfile = '';
       this._scheduleRender();
+      this._refreshCanonicalEv();
     }
 
     set hass(hass) {
+      if (this._hass && this._hass.connection !== hass?.connection) {
+        this._invalidateCanonicalEv();
+      }
       this._hass = hass;
       this._scheduleRender();
+      this._refreshCanonicalEv();
+    }
+
+    connectedCallback() {
+      this._canonicalEvConnected = true;
+      this._refreshCanonicalEv();
+    }
+
+    disconnectedCallback() {
+      this._canonicalEvConnected = false;
+      this._invalidateCanonicalEv();
+    }
+
+    _invalidateCanonicalEv() {
+      this._canonicalEvGeneration += 1;
+      this._canonicalEvSnapshot = null;
+      this._canonicalEvFetchedAt = 0;
+      this._canonicalEvNextFetchAt = 0;
+      clearTimeout(this._canonicalEvTimer);
+      this._canonicalEvTimer = null;
+      clearTimeout(this._canonicalEvExpiryTimer);
+      this._canonicalEvExpiryTimer = null;
+      // An in-flight read remains tracked until it settles, so reconnecting
+      // or replacing configuration cannot launch an overlapping request.
+    }
+
+    _scheduleCanonicalEvRefresh() {
+      clearTimeout(this._canonicalEvTimer);
+      this._canonicalEvTimer = null;
+      if (!this._canonicalEvConnected || !this._config.canonical_ev_loadpoints || !this._hass?.callApi) return;
+      this._canonicalEvTimer = setTimeout(() => {
+        this._canonicalEvTimer = null;
+        this._refreshCanonicalEv();
+      }, Math.max(0, this._canonicalEvNextFetchAt - Date.now()));
+    }
+
+    async _refreshCanonicalEv() {
+      if (!this._canonicalEvConnected || !this._config.canonical_ev_loadpoints || !this._hass?.callApi || this._canonicalEvRequest) return;
+      if (Date.now() < this._canonicalEvNextFetchAt) {
+        this._scheduleCanonicalEvRefresh();
+        return;
+      }
+      const request = {
+        generation: this._canonicalEvGeneration,
+        connection: this._hass.connection,
+        startedAt: Date.now()
+      };
+      const current = () => this._canonicalEvConnected && this._config.canonical_ev_loadpoints
+        && request.generation === this._canonicalEvGeneration
+        && request.connection === this._hass?.connection;
+      this._canonicalEvRequest = request;
+      try {
+        const snapshot = await this._hass.callApi('GET', 'power_sync/ev/loadpoints/status');
+        if (!current()) return;
+        if (snapshot?.success === false || !Array.isArray(snapshot?.loadpoints)) {
+          throw new Error('EV loadpoint status unavailable');
+        }
+        this._canonicalEvSnapshot = snapshot;
+        this._canonicalEvFetchedAt = request.startedAt;
+        clearTimeout(this._canonicalEvExpiryTimer);
+        this._canonicalEvExpiryTimer = setTimeout(() => {
+          this._canonicalEvExpiryTimer = null;
+          if (current()) {
+            this._canonicalEvSnapshot = null;
+            this._scheduleRender();
+          }
+        }, Math.max(0, request.startedAt + EV_LOADPOINT_MAX_AGE_MS - Date.now()));
+      } catch (_) {
+        if (current()) this._canonicalEvSnapshot = null;
+      } finally {
+        if (this._canonicalEvRequest === request) {
+          this._canonicalEvRequest = null;
+          if (current()) {
+            this._canonicalEvNextFetchAt = Date.now() + EV_LOADPOINT_POLL_MS;
+            this._scheduleRender();
+            this._scheduleCanonicalEvRefresh();
+          } else {
+            this._refreshCanonicalEv();
+          }
+        }
+      }
     }
 
     getCardSize() {
@@ -1584,7 +1681,58 @@ import {
       return vehicles.some((vehicle) => vehicle.power > evMinW || vehicle.switchOn);
     }
 
+    _collectCanonicalEvData() {
+      const age = Date.now() - this._canonicalEvFetchedAt;
+      if (!this._config.canonical_ev_loadpoints || !this._canonicalEvSnapshot
+        || age < 0 || age > EV_LOADPOINT_MAX_AGE_MS) return null;
+      const groups = new Map();
+      for (const row of this._canonicalEvSnapshot.loadpoints) {
+        if (!row || typeof row !== 'object') continue;
+        const identity = String(row.vin || row.vehicle_id || row.loadpoint_id || '').trim().toLowerCase();
+        if (!identity) continue;
+        if (!groups.has(identity)) groups.set(identity, []);
+        groups.get(identity).push(row);
+      }
+      const vehicles = [...groups].sort(([a], [b]) => a.localeCompare(b))
+        .filter(([, rows]) => rows.some(row => row.connected === true)
+          // These are site-scoped canonical observations, including locally
+          // paired BLE cars without GPS. Explicit away/disconnected evidence
+          // must still win over a contradictory duplicate provider row.
+          && !rows.some(row => row.connected === false
+            || (row.site_presence && String(row.site_presence).trim().toLowerCase() !== 'home')))
+        .slice(0, 2)
+        .map(([identity, rows], index) => {
+          const row = rows.filter(row => row.connected === true)
+            .sort((a, b) => String(a.loadpoint_id || '').localeCompare(String(b.loadpoint_id || '')))[0];
+          const rawPower = typeof row.current_power_kw === 'number' ? row.current_power_kw * 1000 : Number.NaN;
+          const powerKnown = Number.isFinite(rawPower)
+            && !['unknown', 'commanded'].includes(row.confidence);
+          const power = powerKnown ? rawPower : 0;
+          const batteryKnown = typeof row.soc === 'number' && Number.isFinite(row.soc) && row.soc >= 0 && row.soc <= 100;
+          const charging = typeof row.actual_charging === 'boolean'
+            ? row.actual_charging : (row.is_charging === true || row.status === 'charging');
+          return {
+            key: index === 0 ? 'ev1' : 'ev2', identity, configured: true,
+            hasPowerEntity: powerKnown, powerKnown, hasBatteryEntity: batteryKnown,
+            power, drawPower: Math.max(0, power), supplyPower: Math.max(0, -power),
+            battery: batteryKnown ? row.soc : 0, switchOn: charging, present: true,
+            labelText: String(row.vehicle_name || 'EV').trim(),
+            batteryText: batteryKnown ? `${Math.round(row.soc)}%` : '--%'
+          };
+        });
+      return {
+        vehicles,
+        totalDrawPower: vehicles.reduce((sum, vehicle) => sum + vehicle.drawPower, 0),
+        totalSupplyPower: vehicles.reduce((sum, vehicle) => sum + vehicle.supplyPower, 0),
+        hasConfiguredSecondaryEv: vehicles.length > 1, hasPresenceEntities: true,
+        activeVehicles: vehicles, presenceVehicles: vehicles,
+        chargingVehicles: vehicles.filter(vehicle => vehicle.drawPower > 0 || vehicle.supplyPower > 0 || vehicle.switchOn)
+      };
+    }
+
     _collectEvData() {
+      const canonical = this._collectCanonicalEvData();
+      if (canonical) return canonical;
       const evSlots = [
         {
           key: 'ev1',

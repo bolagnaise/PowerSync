@@ -9746,6 +9746,7 @@ function _teslaStyleFlow(e, hass, findSensor) {
     language: 'en',
     grid_invert: false,
     battery_invert: true,
+    canonical_ev_loadpoints: true,
     ev_hide_when_idle: false,
     ev_min_w: 50,
     thresholds: { solar_min_w: 50, grid_min_w: 50, battery_min_w: 50 },
