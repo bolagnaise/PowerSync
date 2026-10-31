@@ -137,6 +137,9 @@ class PowerwallSnapshot:
     # Request start of this exact returned DCQ attempt; never persisted/rebased.
     observed_monotonic: float | None = None
     grid_charging_permission_source: str = "unknown"
+    # Only an actual signed config read earns this provenance; DCQ-only
+    # refreshes with supplied config leave it unknown.
+    config_observed_monotonic: float | None = None
 
 
 class PowerwallLocalClient:
@@ -312,6 +315,9 @@ class PowerwallLocalClient:
             if dcq:
                 snapshot = _snapshot_from_dcq(dcq, cfg if isinstance(cfg, dict) else None)
                 snapshot.observed_monotonic = started
+                snapshot.config_observed_monotonic = (
+                    started if native_config is None and isinstance(cfg, dict) else None
+                )
                 required = (snapshot.soc, snapshot.battery_w, snapshot.grid_w,
                             snapshot.load_w, snapshot.solar_w)
                 if attempt or all(type(v) in (int, float) and math.isfinite(v) for v in required):

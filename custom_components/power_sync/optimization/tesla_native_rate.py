@@ -57,6 +57,13 @@ class RateObservation:
     measured_ev_at: float = 0.0
     confirmed_stopped: bool = False
     measured_ev_amps: float | None = None
+    native_flexible_battery_w: float = 0.0
+    native_battery_proof: tuple | None = None
+
+
+def _native_flexible_w(observed: RateObservation) -> float:
+    return (min(max(0.0, observed.planned_battery_w), max(0.0, observed.native_flexible_battery_w))
+            if observed.native_battery_proof is not None else 0.0)
 
 
 def decide_rate(observed: RateObservation, baseline_amps: int, now: float) -> tuple[int | None, str]:
@@ -72,7 +79,7 @@ def decide_rate(observed: RateObservation, baseline_amps: int, now: float) -> tu
             or observed.schedule_at is None or not 0 <= now-observed.schedule_at <= 900):
         return None, "native_window_unavailable"
     values = (observed.watts_per_amp, observed.remaining_grid_wh, observed.non_ev_net_w,
-              observed.planned_battery_w, observed.borrowable_battery_w)
+              observed.planned_battery_w, observed.borrowable_battery_w, observed.native_flexible_battery_w)
     if not all(math.isfinite(value) for value in values) or observed.watts_per_amp <= 0:
         return None, "invalid_telemetry"
     if (observed.import_limit_w is None or not math.isfinite(observed.import_limit_w)
@@ -87,7 +94,8 @@ def decide_rate(observed: RateObservation, baseline_amps: int, now: float) -> tu
     hours = (observed.window_end-now)/3600
     needed = math.ceil(observed.remaining_grid_wh/hours/observed.watts_per_amp)
     headroom = (observed.import_limit_w-observed.non_ev_net_w
-                - max(0.0,observed.planned_battery_w-max(0.0,observed.borrowable_battery_w)))
+                - max(0.0,observed.planned_battery_w-max(0.0,observed.borrowable_battery_w)
+                          - _native_flexible_w(observed)))
     available = math.floor(headroom/observed.watts_per_amp)
     if available < minimum:
         return None, "minimum_current_does_not_fit"
@@ -99,12 +107,15 @@ def restoration_fits(observed: RateObservation, amps: int, now: float) -> bool:
     """Returning a saved current must not introduce an import-limit breach."""
     if amps <= observed.current_amps:
         return True
-    values = (observed.watts_per_amp, observed.non_ev_net_w, observed.planned_battery_w)
+    values = (observed.watts_per_amp, observed.non_ev_net_w, observed.planned_battery_w, observed.native_flexible_battery_w)
     if (not all(math.isfinite(value) for value in values) or observed.watts_per_amp <= 0
             or observed.import_limit_w is None or not math.isfinite(observed.import_limit_w)
             or not 0 <= now-observed.meter_at <= 15):
         return False
-    headroom = observed.import_limit_w-observed.non_ev_net_w-max(0,observed.planned_battery_w)
+    # Only verified native charging can yield without a PowerSync command.
+    # Generic dispatch borrowing still needs its physical settlement first.
+    headroom = observed.import_limit_w-observed.non_ev_net_w-max(
+        0, observed.planned_battery_w-_native_flexible_w(observed))
     return amps*observed.watts_per_amp <= headroom
 
 

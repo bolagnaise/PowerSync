@@ -322,7 +322,17 @@ class SharedRateBudget:
                 prospective = (evidence["grid_w"] + self.unobserved_w(record["site"], exclude_vin=vin)
                     + max(0.0, record["reserved_w"]-evidence["actual_ev_w"])
                     + max(0.0, evidence["battery_pending_w"]))
-                borrowed = max(0.0, prospective-evidence["cap_w"])
+                native_flexible = evidence.get("native_flexible_battery_w", 0.0)
+                if (not isinstance(native_flexible, (int, float)) or isinstance(native_flexible, bool)
+                        or not math.isfinite(native_flexible) or native_flexible < 0
+                        or (native_flexible and (not isinstance(evidence.get("native_battery_proof"), tuple)
+                            or not evidence["native_battery_proof"]
+                            or not isinstance(evidence.get("actual_battery_charge_w"), (int, float))
+                            or isinstance(evidence["actual_battery_charge_w"], bool)
+                            or not math.isfinite(evidence["actual_battery_charge_w"])
+                            or native_flexible > evidence["actual_battery_charge_w"]))):
+                    return None
+                borrowed = max(0.0, prospective-native_flexible-evidence["cap_w"])
                 lendable = evidence.get("borrowable_battery_w", 0)
                 if (borrowed and (evidence.get("battery_generation") is None
                         or not isinstance(lendable, (int, float)) or isinstance(lendable, bool)

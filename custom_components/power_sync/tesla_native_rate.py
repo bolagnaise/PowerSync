@@ -395,6 +395,9 @@ class NativeRatePorts:
         # An LP forecast is not a battery commitment, even when enabled. Only
         # an active grid-following generation may lend capacity to EV charging.
         planned_battery = max(actual_battery, acknowledged_battery)
+        from .native_battery_flexibility import native_battery_flexibility
+        flexibility = native_battery_flexibility(
+            self.hass, self.entry, self.runtime, site_limit, budget=self.budget)
         other_pending = self.budget.unobserved_w(self.site, exclude_vin=vin) if self.budget else 0.0
         current = _finite(state.state)
         if not current.is_integer():
@@ -414,7 +417,8 @@ class NativeRatePorts:
             planned_battery, site_limit, self.setting.rate_enabled(vin),
             planned_battery if controlled else 0.0, actual_ev_w, ev_at,
             str(charge.get("charging_state", "")).lower() in {"stopped", "complete", "disconnected"},
-            actual_amps)
+            actual_amps, flexibility.watts if flexibility else 0.0,
+            flexibility.proof if flexibility else None)
         self.observations[vin] = result
         return result
 
@@ -488,6 +492,9 @@ class NativeRatePorts:
             if latest is None or not current_authority():
                 return None
             if increases:
+                if (observation.native_battery_proof is not None
+                        and latest.native_battery_proof != observation.native_battery_proof):
+                    return None
                 now = time.time()
                 if (not 0 <= now-latest.measured_ev_at <= 15
                         or abs(latest.measured_ev_at-latest.meter_at) > 5

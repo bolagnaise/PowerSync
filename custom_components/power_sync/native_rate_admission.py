@@ -12,6 +12,7 @@ import time
 from functools import wraps
 
 from .native_rate_budget import RUNTIME_KEY, site_identity
+from .native_battery_flexibility import native_battery_flexibility
 from .teslemetry_solar import _EV_SUBMISSION_CONTEXT, ev_owner_snapshot
 
 
@@ -179,7 +180,7 @@ def guard_battery_transition(hass, entry, handler):
 
 
 def managed_borrowable_w(hass, entry, vin, profile):
-    """Planning allowance only; final admission must lower the battery first."""
+    """Planning allowance; final admission verifies native or dispatch yielding."""
     budget = hass.data.get(RUNTIME_KEY)
     site = site_identity(entry)
     if budget is None or not budget.site_armed(site) or native_coexistence_reason(hass, site, budget):
@@ -190,13 +191,13 @@ def managed_borrowable_w(hass, entry, vin, profile):
     try:
         evidence = _site_evidence(hass, entry, runtime, str(vin).upper(), profile)
         now = time.time()
-        if (evidence["battery_generation"] is None or evidence["unit_w"] <= 0
+        if (evidence["unit_w"] <= 0
                 or not 0 <= now-evidence["vehicle_at"] <= 15
                 or not 0 <= now-evidence["meter_at"] <= 15
                 or abs(evidence["vehicle_at"]-evidence["meter_at"]) > 5):
             return 0.0
         pending = budget.unobserved_w(site, exclude_vin=str(vin).upper())
-        value = evidence["borrowable_battery_w"]-pending-evidence["battery_pending_w"]
+        value = evidence["borrowable_battery_w"]+evidence["native_flexible_battery_w"]-pending-evidence["battery_pending_w"]
         return max(0.0, value) if math.isfinite(value) else 0.0
     except (AttributeError, TypeError, ValueError):
         return 0.0
@@ -276,13 +277,18 @@ def _site_evidence(hass, entry, runtime, vin, profile):
     if committed is None:
         committed = max(0.0, -_number(getattr(controller, "_last_watts", 0)))
     controlled = controller is not None and controller.charge_generation is not None
+    flexibility = native_battery_flexibility(
+        hass, entry, runtime, cap, budget=hass.data.get(RUNTIME_KEY))
     # A scheduled LP action may never be submitted (including while disabled
     # or monitoring). Only accepted/possibly submitted dispatch is committed;
     # measured battery draw is already included in the site meter below.
     return {"grid_w": _number(getattr(snapshot, "grid_w", None)), "cap_w": cap,
-            "actual_ev_w": actual_ev, "battery_pending_w": max(0.0, committed-actual_battery),
+            "actual_ev_w": actual_ev, "actual_battery_charge_w": actual_battery,
+            "battery_pending_w": max(0.0, committed-actual_battery),
             "borrowable_battery_w": actual_battery if controlled else 0.0,
             "battery_generation": controller.charge_generation if controlled else None,
+            "native_flexible_battery_w": flexibility.watts if flexibility else 0.0,
+            "native_battery_proof": flexibility.proof if flexibility else None,
             "vehicle_at": _timestamp(charge.get("timestamp")),
             "meter_at": at if getattr(local, "last_update_success", False) else 0,
             "unit_w": unit}
@@ -412,6 +418,7 @@ async def _prepare_ev_submission(hass, entity_id, *, operation, amps, committed)
     original_pairing = pairing()
     battery = runtime.get("powerwall_battery_dispatch")
     generation = evidence.get("battery_generation")
+    native_proof = evidence.get("native_battery_proof")
     owners = context.get("owner_snapshot")
     if owners is None:
         owners = ev_owner_snapshot(hass, entry, vin)
@@ -428,11 +435,17 @@ async def _prepare_ev_submission(hass, entity_id, *, operation, amps, committed)
                 and not getattr(optimizer, "_monitoring_mode_active", lambda: False)()
                 and (manager is None or manager.permits(entry.entry_id)))
 
+    def native_current():
+        if native_proof is None:
+            return True
+        latest = _site_evidence(hass, entry, runtime, vin, profile)
+        return latest.get("native_battery_proof") == native_proof
+
     def valid():
         return (hass.data.get("power_sync", {}).get(entry.entry_id) is runtime
                 and ev_owner_snapshot(hass, entry, vin) == owners and policy_current()
                 and not runtime.get("powerwall_local_dispatch_stopping")
-                and pairing() == original_pairing
+                and pairing() == original_pairing and native_current()
                 and (generation is None or (runtime.get("powerwall_battery_dispatch") is battery
                      and battery.charge_generation == generation))
                 and _identity(registry.async_get(entity_id)) == identity
@@ -462,7 +475,8 @@ async def _prepare_ev_submission(hass, entity_id, *, operation, amps, committed)
                 and abs(latest["vehicle_at"]-latest["meter_at"]) <= 5
                 and latest["grid_w"]+budget.unobserved_w(site, exclude_vin=vin)
                     + max(0, ticket["record"]["reserved_w"]-latest["actual_ev_w"])
-                    + latest["battery_pending_w"] <= latest["cap_w"])
+                    + latest["battery_pending_w"]
+                    - (latest["native_flexible_battery_w"] if native_proof is not None else 0.0) <= latest["cap_w"])
 
     if ticket["battery_generation"] is not None:
         # The reservation is already durable and included in the dispatch
