@@ -76,13 +76,53 @@ these settings. Further work must preserve that new baseline; it must not
 restore the earlier values. No PowerSync force, native-Max journal or
 settings-recovery obligation was active when this change was checked.
 
-The two-car overlap, stopping one while the other continues, and physical
-shared-capacity allocation remain **unverified**. These Manual controls also
-do not exercise Smart Schedule's two-VIN export-policy leases.
+At the end of this first trial, two-car overlap, stopping one while the other
+continues, and physical shared-capacity allocation remained unverified. The
+later Fleet trial below verifies overlap and stop isolation. Neither trial
+exercises Smart Schedule's two-VIN export-policy leases.
 
 Sanitized test records are retained locally in
 `/tmp/powersync-tesla-control-evidence/two-vehicle-live-20261031.json`.
 Vehicle identifiers and credentials are omitted from this report.
+
+## Successful Fleet trial after key repair
+
+At 07:51:25 the same application's read-only `fleet_status` returned both cars
+in `key_paired_vins`, with no unpaired vehicle. Candidate `2.12.1576.dev9`,
+from source `5f9015decd7307701719689c06a90da129de2e48`, was then installed.
+All 265 packaged files matched; HA configuration check passed and Core restarted.
+Monitoring Mode, the owner's 5% native reserve and Self-Powered mode remained.
+Provider selection was changed to Fleet-only, retaining the BLE configuration
+while excluding its unresolved command queue from these live actions.
+
+For this trial only, Home Power limited each vehicle to 5 A and site import to
+12 A at the configured single-phase voltage. SOC targets stayed 70%/80%.
+
+| Time | Event | Highest proof |
+| --- | --- | --- |
+| 07:58:25–07:58:46 | TESSY three-minute Boost | API succeeded; deadline remained 08:01:25.684638, measured from the request rather than the slower response. |
+| 07:59:49–07:59:52 | W3RT1E three-minute Boost | API succeeded with its separate 08:02:49.122383 deadline; TESSY's deadline remained intact. |
+| 08:00:35 | Independent fresh Fleet `vehicle_data`, charge-state only | Both vehicles reported Charging, actual current 5 A each, 233/229 V, and charger power 1 kW each. Targets remained 70%/80%. |
+| 08:01:23–08:01:24 | Explicit TESSY stop | API returned success at 08:01:24.114. A fresh Fleet sample at 08:01:25.030 reported TESSY Stopped/0 A while W3RT1E still reported Charging/5 A. |
+| 08:02:49–08:02:52 | W3RT1E's original Boost deadline | PowerSync recorded a successful stop at 08:02:50.754 with reason `Boost duration elapsed`. Fresh Fleet samples at 08:02:52 reported both Stopped/0 A. |
+| 08:05:16 | Fresh HA Fleet readback | Both canonical loadpoints were connected idle, with no owner, expiry or measured draw. |
+| 08:07–08:08 | Restoration | Every Home Power setting matched the saved original. Fleet accepted requested-current restoration to 15 A/10 A; fresh physical readback is recorded separately. |
+
+The cars physically charged together, and stopping the first left the second
+charging until its own deadline. Grid import remained approximately zero while
+the home batteries supplied the home and EV demand in Self-Powered mode. This
+does not test saturation of the import limit, native charging flexibility,
+native-Max exclusion during EV charging, or Smart Schedule export leases.
+
+This UI review also reproduced two source defects. Fleet-only discovery lost
+explicit VIN/BLE associations and rendered four rows for two cars; the fix
+preserves read-only identity without enabling BLE commands. Separately, the
+vehicle-list view allowed a `charge_rate` sensor in km/h to overwrite a real
+charger-power sensor in kW. It now accepts fresh finite power units, normalizes
+them to kW and chooses deterministically. Both defects have unchanged-baseline
+failures and focused regressions; the final combined artifact is checked again
+before release. Fleet remains the working command route while BLE firmware
+deployment is unresolved.
 
 ## Reproduced source defects
 
@@ -151,6 +191,15 @@ does not prove that the bridge has drained. PowerSync cannot revoke an action
 already handed to this external queue. A firmware fix and exact installed
 configuration are required before claiming that boundary repaired locally.
 
+A subsequent isolated **full generic ESP32 firmware compile** passed for both
+the unchanged pinned v2026.8.1 source and the queue-patched source, using
+ESPHome 2026.8.1 and the same pinned TeslaBLE library, configuration and partition
+table. The receipt is `/tmp/powersync-ble-firmware-lab/validation-summary.json`.
+These builds use dummy credentials and identifiers and are not production
+images. No firmware was flashed. The actual second bridge's YAML/OTA
+authentication/layout and a matching rollback remain unavailable; its HA
+device page identifies the node but does not provide those build inputs.
+
 ## Validation and release boundary
 
 The follow-up source has focused regressions for two-car timers, durable
@@ -174,3 +223,12 @@ behavior is described above. The source documentation signature for
 documentation check passes. Current-main reconciliation also brought in one
 legacy-admission test-fixture correction. Fresh final checks cover that exact
 combined repository state.
+
+FULL15 exposed four variants of one supervised-cloud-recovery route failure
+after main's paired-IP fixture correction. The unchanged published-main tests
+passed; this branch tried to acquire native control after an acknowledged Auto
+cloud handoff. The repair honors only a current same-site matching handoff for
+targetless requests. It preserves the incident, native suspension, explicit
+Local/numeric-target refusals and all cleanup/budget/monitoring fences. The four
+original checks remain unchanged, with thirteen additional predicate fences.
+FULL15 is failed evidence and is not reused as successful validation.
