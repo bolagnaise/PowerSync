@@ -5315,12 +5315,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Restore persisted daily cost data (survives HA restarts)
         await self._restore_cost_data()
         await self._restore_battery_provenance()
-        startup_soc, startup_capacity = await self._get_battery_state()
-        self._reconcile_battery_provenance(
-            startup_soc,
-            startup_capacity,
-            reason="startup_restore",
-        )
+        self._reconcile_battery_provenance_from_telemetry(reason="startup_restore")
 
         _LOGGER.info(
             "Optimization coordinator setup complete (built-in LP). "
@@ -6256,34 +6251,39 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._octopus_gate_listener_unsub = None
 
         recovery_failed = False
-        if self._executor:
-            if monitoring_mode:
-                _LOGGER.info(
-                    "Optimizer shutdown: monitoring mode active — skipping executor restore writes"
-                )
-            if licensing:
-                try:
-                    restored = await self._executor.stop(restore_normal=not monitoring_mode, retry_restore=True)
-                    recovery_failed = restored is False
-                except Exception:
+        try:
+            if self._executor:
+                if monitoring_mode:
+                    _LOGGER.info(
+                        "Optimizer shutdown: monitoring mode active — skipping executor restore writes"
+                    )
+                if licensing:
+                    try:
+                        restored = await self._executor.stop(restore_normal=not monitoring_mode, retry_restore=True)
+                        recovery_failed = restored is False
+                    except Exception:
+                        recovery_failed = True
+                        _LOGGER.warning("Battery restoration failed; continuing independent EV recovery")
+                else:
+                    await self._executor.stop(restore_normal=not monitoring_mode)
+
+            if self._ev_coordinator:
+                await self._ev_coordinator.stop()
+                if licensing and not await self._ev_coordinator.recover_license_sessions():
                     recovery_failed = True
-                    _LOGGER.warning("Battery restoration failed; continuing independent EV recovery")
-            else:
-                await self._executor.stop(restore_normal=not monitoring_mode)
 
-        if self._ev_coordinator:
-            await self._ev_coordinator.stop()
-            if licensing and not await self._ev_coordinator.recover_license_sessions():
-                recovery_failed = True
+            if recovery_failed:
+                raise RuntimeError("optimizer_restore_pending")
 
-        if recovery_failed:
-            raise RuntimeError("optimizer_restore_pending")
-
-        # Flush cost data to disk before shutdown
-        await self._cost_store.async_save(self._cost_data_to_save())
-        provenance_store = getattr(self, "_battery_provenance_store", None)
-        if provenance_store is not None:
-            await provenance_store.async_save(self._battery_provenance_data_to_save())
+        finally:
+            # Passive accounting must survive failed/cancelled hardware cleanup.
+            # Attempt both stores even if one write fails; recovery stays pending.
+            try:
+                await self._cost_store.async_save(self._cost_data_to_save())
+            finally:
+                provenance_store = getattr(self, "_battery_provenance_store", None)
+                if provenance_store is not None:
+                    await provenance_store.async_save(self._battery_provenance_data_to_save())
 
         _LOGGER.info("Optimization disabled")
 
@@ -6470,6 +6470,19 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             observed_at if isinstance(observed_at, str) else None
         )
         self._battery_provenance_reconciliation = "restored"
+
+    def _reconcile_battery_provenance_from_telemetry(self, *, reason: str) -> None:
+        """Reconcile only measured inventory, never the planning SOC fallback."""
+        data = self._get_energy_data() or {}
+        soc_percent = _nonnegative_finite_number(data.get("battery_level"))
+        # _get_battery_state defaults to 50% without telemetry. That estimate
+        # must never trim a restored ledger or become an observed SOC baseline.
+        if soc_percent is not None and self._energy_telemetry_ready():
+            self._reconcile_battery_provenance(
+                min(1.0, soc_percent / 100),
+                self._config.battery_capacity_wh,
+                reason=reason,
+            )
 
     def _reconcile_battery_provenance(
         self,
@@ -7348,11 +7361,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # first, or the SOC rise is added as unknown and counted again when
             # the regular refresh eventually records the same interval.
             self._track_actual_cost(force=True)
-            self._reconcile_battery_provenance(
-                soc,
-                capacity,
-                reason="optimizer_run",
-            )
+            self._reconcile_battery_provenance_from_telemetry(reason="optimizer_run")
             self._observe_battery_efficiency(
                 timestamp=solve_timestamp,
                 soc=soc,
