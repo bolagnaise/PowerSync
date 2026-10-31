@@ -298,6 +298,131 @@ def test_failed_read_retains_cache_but_confirmed_empty_removes_schedule():
     asyncio.run(run())
 
 
+@pytest.fixture
+def fleet_reader(monkeypatch):
+    # The optional Fleet SDK deliberately uses BaseException, not Exception.
+    class TeslaFleetError(BaseException):
+        pass
+
+    class VehicleOffline(TeslaFleetError):
+        pass
+
+    package = ModuleType("tesla_fleet_api")
+    package.__path__ = []
+    exceptions = ModuleType("tesla_fleet_api.exceptions")
+    exceptions.TeslaFleetError = TeslaFleetError
+    monkeypatch.setitem(sys.modules, package.__name__, package)
+    monkeypatch.setitem(sys.modules, exceptions.__name__, exceptions)
+    spec = importlib.util.spec_from_file_location("tesla_schedule_fleet_errors_test", SPEC.origin)
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, spec.name, module)
+    spec.loader.exec_module(module)
+    return module, VehicleOffline
+
+
+@pytest.mark.parametrize("provider", ["tesla_fleet", "teslemetry"])
+def test_sdk_offline_read_preserves_cache_and_continues_other_vehicles(fleet_reader, provider):
+    module, VehicleOffline = fleet_reader
+
+    class OfflineAPI(API):
+        async def vehicle_data(self, **kwargs):
+            self.calls.append(kwargs)
+            raise VehicleOffline("went asleep after the provider's online sample")
+
+        async def _request(self, *args):
+            return await self.vehicle_data()
+
+    async def run():
+        failing_api = OfflineAPI(vehicle())
+        hass, _, _ = hass_for(vehicle(), api=failing_api, provider=provider)
+        entries = hass.config_entries.async_entries(provider)
+        other_api = API(vehicle())
+        entries[0].runtime_data.vehicles.append(SimpleNamespace(
+            vin=OTHER, coordinator=SimpleNamespace(data=vehicle(), api=other_api)))
+        hass.config_entries.async_entries = lambda domain: entries if domain == provider else []
+        reader = module.TeslaScheduleReader()
+        cached = (NOW - timedelta(minutes=1), vehicle())
+        reader.cache[VIN] = cached
+
+        await reader.refresh(hass, NOW)
+
+        assert reader.cache[VIN] is cached
+        assert "unavailable" in reader.diagnostics[VIN]
+        assert reader.cache[OTHER][0] == NOW
+        assert len(other_api.calls) == 1
+        await reader.refresh(hass, NOW + timedelta(minutes=5))
+        assert len(failing_api.calls) == len(other_api.calls) == 1
+
+        # A failed read must not renew the old schedule's freshness.
+        await reader.refresh(hass, NOW + timedelta(days=1, minutes=1))
+        assert VIN not in reader.cache
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("error", [asyncio.CancelledError, SystemExit, KeyboardInterrupt])
+def test_schedule_read_propagates_cancellation_and_process_exit(fleet_reader, error):
+    module, _ = fleet_reader
+
+    class InterruptedAPI(API):
+        async def vehicle_data(self, **kwargs):
+            raise error()
+
+    async def run():
+        hass, _, _ = hass_for(vehicle(), api=InterruptedAPI(vehicle()), provider="tesla_fleet")
+        with pytest.raises(error):
+            await module.TeslaScheduleReader().refresh(hass, NOW)
+
+    asyncio.run(run())
+
+
+def test_sdk_offline_read_does_not_terminate_periodic_replanning(fleet_reader):
+    module, VehicleOffline = fleet_reader
+    source = ast.parse((ROOT / "optimization/coordinator.py").read_text())
+    polling = next(node for node in ast.walk(source)
+                   if isinstance(node, ast.AsyncFunctionDef) and node.name == "_schedule_polling_loop")
+    polling.decorator_list = []
+
+    async def run():
+        class OfflineAPI(API):
+            async def vehicle_data(self, **kwargs):
+                self.calls.append(kwargs)
+                raise VehicleOffline()
+
+        class AccessLost(asyncio.CancelledError):
+            pass
+
+        # Run the real polling loop and reader; replace hardware/solver work.
+        namespace = {"asyncio": asyncio, "_LOGGER": __import__("logging").getLogger(__name__),
+                     "OptimizerAccessLost": AccessLost}
+        exec(compile(ast.Module(body=[polling], type_ignores=[]), "<polling>", "exec"), namespace)
+        hass, api, _ = hass_for(vehicle(), api=OfflineAPI(vehicle()), provider="tesla_fleet")
+        reader = module.TeslaScheduleReader()
+        state = SimpleNamespace(_enabled=True, _executor=None, _initial_opt_task=None,
+            _should_restore_pre_idle_backup_reserve_from_polling=lambda: False,
+            _seconds_until_next_interval=lambda: 0,
+            _seconds_until_initial_optimization_allowed=lambda: 0,
+            async_set_updated_data=lambda data: None, get_api_data=lambda: {})
+        completed = []
+
+        async def cached():
+            pass
+
+        async def solve(**kwargs):
+            await reader.refresh(hass, NOW + timedelta(minutes=5 * len(completed)))
+            completed.append(kwargs["execution_trigger"])
+            if len(completed) == 2:
+                state._enabled = False
+
+        state._execute_cached_current_action_if_changed = cached
+        state._run_optimization = solve
+        await namespace["_schedule_polling_loop"](state)
+        assert completed == ["poll", "poll"]
+        assert len(api.calls) == 1  # Keep the paid-read throttle across cycles.
+
+    asyncio.run(run())
+
+
 def test_stale_charge_state_or_schedule_cache_never_produces_demand():
     reader = m.TeslaScheduleReader()
     reader.cache[VIN] = (NOW, vehicle())

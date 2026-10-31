@@ -15,6 +15,10 @@ When Monitoring Mode is switched on, PowerSync first releases its active battery
 
 Smart Optimization waits for startup battery restoration before solving. If that restoration is cancelled by a newer control operation, a later optimization cycle retries it automatically. Cancelling a plan refresh does not cancel the shared restoration; unresolved force cleanup still blocks new control.
 
+## Tesla vehicle schedule availability
+
+If a Tesla vehicle goes offline during a schedule read, Smart Optimization keeps replanning the home battery and reading other vehicles. The last confirmed vehicle schedule remains usable only within its existing freshness limits; a failed read does not clear or renew it. PowerSync does not wake the vehicle for these reads.
+
 ## Price interval boundaries
 
 ## FoxESS EV battery preservation

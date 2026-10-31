@@ -15,6 +15,12 @@ import hashlib
 import json
 from typing import Any, Mapping, Sequence
 
+try:
+    from tesla_fleet_api.exceptions import TeslaFleetError
+except ImportError:
+    # Tesla providers are optional; keep forecast logic usable without the SDK.
+    TeslaFleetError = Exception
+
 _LOGGER = logging.getLogger(__name__)
 REFRESH_SECONDS = 900
 MAX_CACHE_SECONDS = 86400
@@ -349,8 +355,10 @@ class TeslaScheduleReader:
                                 snapshot[section] = location
                         self.cache[vin] = (now, snapshot)
                         self.diagnostics[vin] = "Tesla schedule read confirmed"
-                    except Exception as err:
+                    except (Exception, TeslaFleetError) as err:
                         # Never turn an unavailable read into an empty schedule.
+                        # Fleet SDK errors inherit BaseException, so Exception
+                        # alone lets an offline car terminate optimizer polling.
                         self.diagnostics[vin] = "Tesla schedule read unavailable; retaining bounded cache"
                         _LOGGER.debug("Tesla schedule read unavailable (%s)", type(err).__name__)
         for vin in set(self.cache) - seen:
