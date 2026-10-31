@@ -19332,6 +19332,11 @@ class ChargingBoostView(HomeAssistantView):
             if success:
                 from .automations import actions as ev_actions
 
+                if action_params.get("charger_type", "tesla") == "tesla":
+                    boost_vehicle_id = ev_actions._canonical_dynamic_tesla_vehicle_id(
+                        self._hass, self._config_entry, boost_vehicle_id
+                    )
+
                 # A "_default" boost resolves to a concrete loadpoint inside the
                 # dynamic start; recover it so ownership and the stop command
                 # address the session that was actually created.
@@ -19369,17 +19374,20 @@ class ChargingBoostView(HomeAssistantView):
                 from .automations.ev_ownership import (
                     claim_ev_ownership,
                     get_active_ev_owner_mode,
+                    get_ev_ownership,
                     owner_family,
                     record_ev_command,
                 )
+                from .teslemetry_solar import guard_ev_control
 
                 entry_data = self._hass.data.setdefault(DOMAIN, {}).setdefault(
                     self._config_entry.entry_id,
                     {},
                 )
-                if cancel_boost := entry_data.get("ev_boost_cancel"):
+                boost_timers = entry_data.setdefault("ev_boost_timers", {})
+                previous_timer = boost_timers.get(boost_vehicle_id)
+                if previous_timer and (cancel_boost := previous_timer.get("cancel")):
                     cancel_boost()
-                    entry_data["ev_boost_cancel"] = None
 
                 boost_ownership = claim_ev_ownership(
                     self._hass,
@@ -19396,15 +19404,38 @@ class ChargingBoostView(HomeAssistantView):
                 if boost_state is not None:
                     boost_state["ownership"] = boost_ownership
 
-                async def _stop_boost_when_elapsed(_now) -> None:
-                    entry_data = self._hass.data.get(DOMAIN, {}).get(
-                        self._config_entry.entry_id,
-                        {},
+                stops_at = dt_util.utcnow() + timedelta(minutes=duration_minutes)
+                timer_record = {"stops_at": stops_at, "cancel": None}
+                boost_timers[boost_vehicle_id] = timer_record
+
+                @guard_ev_control
+                async def _stop_current_boost(hass, config_entry, params):
+                    # Check after acquiring the existing EV mutation gate: a
+                    # replacement can finish while this callback waits for it.
+                    if (
+                        hass.data.get(DOMAIN, {}).get(config_entry.entry_id)
+                        is not entry_data
+                    ):
+                        return
+                    current_timers = entry_data.get("ev_boost_timers", {})
+                    if current_timers.get(boost_vehicle_id) is not timer_record:
+                        return
+                    current_timers.pop(boost_vehicle_id)
+                    current_state = ev_actions._dynamic_ev_state.get(
+                        config_entry.entry_id, {}
+                    ).get(boost_vehicle_id)
+                    _, current_ownership = get_ev_ownership(
+                        hass, config_entry, boost_vehicle_id
                     )
-                    entry_data.pop("ev_boost_cancel", None)
+                    if (
+                        boost_state is None
+                        or current_state is not boost_state
+                        or current_ownership is not boost_ownership
+                    ):
+                        return
                     active_mode = get_active_ev_owner_mode(
-                        self._hass,
-                        self._config_entry,
+                        hass,
+                        config_entry,
                         boost_vehicle_id,
                     )
                     if owner_family(active_mode) != "boost":
@@ -19417,27 +19448,47 @@ class ChargingBoostView(HomeAssistantView):
 
                     # stop_ev_charging_dynamic tears down the periodic controller
                     # and releases the lease, so no separate release is needed.
-                    stop_success = await execute_actions(self._hass, self._config_entry, [{
+                    stop_success = await execute_actions(hass, config_entry, [{
                         "action_type": "stop_ev_charging_dynamic",
                         "parameters": {
                             **action_params,
                             "vehicle_id": boost_vehicle_id,
+                            "vehicle_vin": (
+                                boost_vehicle_id
+                                if action_params.get("charger_type", "tesla") == "tesla"
+                                else None
+                            ),
+                            "_expected_state": boost_state,
                             "stop_charging": True,
                             "stop_reason": "Boost duration elapsed",
                         },
                     }])
                     if not stop_success:
                         record_ev_command(
-                            self._hass,
-                            self._config_entry,
+                            hass,
+                            config_entry,
                             boost_vehicle_id,
                             command="stop_boost",
                             success=False,
                             reason="Boost duration elapsed but stop command failed",
                         )
 
-                stops_at = dt_util.utcnow() + timedelta(minutes=duration_minutes)
-                entry_data["ev_boost_cancel"] = async_track_point_in_utc_time(
+                async def _stop_boost_when_elapsed(_now) -> None:
+                    await _stop_current_boost(
+                        self._hass,
+                        self._config_entry,
+                        {
+                            **action_params,
+                            "vehicle_id": boost_vehicle_id,
+                            "vehicle_vin": (
+                                boost_vehicle_id
+                                if action_params.get("charger_type", "tesla") == "tesla"
+                                else None
+                            ),
+                        },
+                    )
+
+                timer_record["cancel"] = async_track_point_in_utc_time(
                     self._hass,
                     _stop_boost_when_elapsed,
                     stops_at,
@@ -50201,11 +50252,14 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         automation_cancel()
         _LOGGER.debug("Cancelled automation evaluation timer")
 
-    # Cancel any pending EV boost stop timer. Ownership diagnostics are
+    # Cancel every vehicle's pending Boost timer. Ownership diagnostics are
     # persisted below so setup can recover without restoring a stale lease.
-    if ev_boost_cancel := entry_data.get("ev_boost_cancel"):
+    for boost_timer in entry_data.pop("ev_boost_timers", {}).values():
+        if ev_boost_cancel := boost_timer.get("cancel"):
+            ev_boost_cancel()
+    # Compatibility with the former entry-wide timer on an older runtime.
+    if ev_boost_cancel := entry_data.pop("ev_boost_cancel", None):
         ev_boost_cancel()
-        entry_data["ev_boost_cancel"] = None
         _LOGGER.debug("Cancelled EV boost timer")
 
     if observed_tesla_cancel := entry_data.get("observed_tesla_session_cancel"):
