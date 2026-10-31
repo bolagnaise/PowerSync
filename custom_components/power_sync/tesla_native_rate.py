@@ -384,8 +384,6 @@ class NativeRatePorts:
             # Cleanup can reduce current but cannot increase it into unknown
             # pre-existing or unsupported managed demand.
             site_limit = None
-        action = optimizer._get_current_action() if optimizer else None
-        planned_battery = max(0.0, _finite(action.power_w)) if action and action.action == "charge" else 0.0
         battery = self.runtime.get("powerwall_battery_dispatch")
         controlled = battery is not None and battery.charge_generation is not None
         actual_battery = max(0.0, -_finite(snapshot.battery_w)) if snapshot else math.nan
@@ -393,9 +391,10 @@ class NativeRatePorts:
             if battery is not None else 0.0)
         if acknowledged_battery is None:
             acknowledged_battery = max(0.0, -_finite(getattr(battery, "_last_watts", 0)))
-        # The active grid-following controller applies the shared reservation
-        # to every renewal; its accepted target replaces a forecast-only rate.
-        planned_battery = max(0.0 if controlled else planned_battery, actual_battery, acknowledged_battery)
+        # Reserve measured draw and accepted/possibly submitted dispatch once.
+        # An LP forecast is not a battery commitment, even when enabled. Only
+        # an active grid-following generation may lend capacity to EV charging.
+        planned_battery = max(actual_battery, acknowledged_battery)
         other_pending = self.budget.unobserved_w(self.site, exclude_vin=vin) if self.budget else 0.0
         current = _finite(state.state)
         if not current.is_integer():

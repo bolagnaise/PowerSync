@@ -275,11 +275,10 @@ def _site_evidence(hass, entry, runtime, vin, profile):
     committed = getattr(controller, "prospective_charge_w", None)
     if committed is None:
         committed = max(0.0, -_number(getattr(controller, "_last_watts", 0)))
-    optimizer = runtime.get("optimization_coordinator")
-    action = optimizer._get_current_action() if optimizer is not None else None
     controlled = controller is not None and controller.charge_generation is not None
-    if not controlled and action is not None and action.action == "charge":
-        committed = max(committed, _number(action.power_w))
+    # A scheduled LP action may never be submitted (including while disabled
+    # or monitoring). Only accepted/possibly submitted dispatch is committed;
+    # measured battery draw is already included in the site meter below.
     return {"grid_w": _number(getattr(snapshot, "grid_w", None)), "cap_w": cap,
             "actual_ev_w": actual_ev, "battery_pending_w": max(0.0, committed-actual_battery),
             "borrowable_battery_w": actual_battery if controlled else 0.0,
