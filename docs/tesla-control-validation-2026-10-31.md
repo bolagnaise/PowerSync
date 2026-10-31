@@ -1,10 +1,19 @@
 # Tesla control validation — 31 October 2026
 
+**Checkpoint scope after concurrent main update:** the detailed receipts below
+record candidate7 and its frozen Tesla implementation. The branch subsequently
+integrates main commit `dbfab9dde2795dade6c94b814307392dc0dd9566`, which changes
+rolling tariff slot display to HA local time and adds five sensor tests.
+Tesla actuator source is unchanged. The combined sensor documentation signature
+was reviewed again; the post-merge full-audit and candidate8 installation
+receipts are maintained in [PR #138](https://github.com/bolagnaise/PowerSync/pull/138).
+
+
 **Status: implemented and source-validated; unreleased.** Published baseline is
 `origin/main` `904614102e1458b1d66ba99579bbb429f08a071b`, version `v2.12.1574`. Source
 `fd29787fab232030eda3ec72681294ac8997c5db` includes that baseline and the
 feature changes under review; those feature changes are not merged into
-that public baseline. The frozen final candidate is `2.12.1575.dev7`, built
+that public baseline. The tested checkpoint candidate is `2.12.1575.dev7`, built
 from `759c67bf0533902ee982d6ed088990e0593d82d4`. Candidate7 changes only the
 sensor description to **`Battery hold active`** and the manifest relative to
 dev6; the actuator source is unchanged. Candidate7 was installed at 04:58:14.
@@ -29,7 +38,7 @@ do not change the installed package. No public release is recorded here.
 | Dev6 archive | 43,749,949 bytes / 264 files; SHA-256 `59eef023a46d4f86b5a10fa009e8d876b8ef79b0dc9700f0ef90af774e935d18`; installed on the authorized HA instance |
 | Dev6 source | `fe7453f35cbeee4e547f654cf27834e45e123a36` |
 | Dev5/dev6 equivalence | 886 individual function ASTs identical; only manifest and `__init__` warning bytes differ |
-| Frozen candidate7 | `2.12.1575.dev7`, source `759c67bf0533902ee982d6ed088990e0593d82d4`, 43,749,943 bytes / 264 files, SHA-256 `0510149dea96cc525bf4e1d9c808b069178c3c92320afb9fad526bb8e8ab909a` |
+| Tested candidate7 checkpoint | `2.12.1575.dev7`, source `759c67bf0533902ee982d6ed088990e0593d82d4`, 43,749,943 bytes / 264 files, SHA-256 `0510149dea96cc525bf4e1d9c808b069178c3c92320afb9fad526bb8e8ab909a` |
 | Dev6/dev7 comparison | Only the sensor description (`Battery hold active`) and manifest differ; actuator source is unchanged |
 | Candidate7 installation | Installed at 04:58:14; all 264 archive hashes matched; Core check and startup were healthy |
 | FULL12 | Complete: 9,714 passed, zero skipped, four audited workers |

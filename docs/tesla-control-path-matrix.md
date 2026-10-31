@@ -1,5 +1,14 @@
 # Tesla control path review and verification matrix
 
+**Checkpoint scope after concurrent main update:** the detailed receipts below
+record candidate7 and its frozen Tesla implementation. The branch subsequently
+integrates main commit `dbfab9dde2795dade6c94b814307392dc0dd9566`, which changes
+rolling tariff slot display to HA local time and adds five sensor tests.
+Tesla actuator source is unchanged. The combined sensor documentation signature
+was reviewed again; the post-merge full-audit and candidate8 installation
+receipts are maintained in [PR #138](https://github.com/bolagnaise/PowerSync/pull/138).
+
+
 This checklist covers the Home Assistant integration. It inventories Tesla
 battery mutations, their admission and restoration obligations, focused
 software coverage, and the local Home Assistant results and remaining verification limits. A route decision, submitted callback, API acknowledgement,
