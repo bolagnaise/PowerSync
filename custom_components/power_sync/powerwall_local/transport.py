@@ -832,7 +832,7 @@ class TEDAPIv1rTransport:
             _LOGGER.warning("Battery dispatch %s malformed reply: watts=%s seconds=%s", operation, watts, seconds)
             return False
 
-    async def schedule_manual_backup(self, din: str, duration_s: int) -> bool:
+    async def schedule_manual_backup(self, din: str, duration_s: int, *, end_ts: float | None = None) -> bool:
         """Trigger Tesla's "Storm Watch Manual Backup" — holds SOC, stops export.
 
         This is the closest TEDAPI-native equivalent to "go off-grid" currently
@@ -843,21 +843,36 @@ class TEDAPIv1rTransport:
         if duration_s < 60:
             raise ValueError("duration_s must be at least 60")
 
-        # Tesla requires a previous event (including an expired one) to be
-        # cancelled before it accepts a replacement. A missing cancel response
-        # is harmless; continue and let the schedule response decide success.
-        await self.cancel_manual_backup(din)
+        def before_send():
+            if end_ts is not None and time.time() >= end_ts:
+                raise PowerwallLocalError("Max Backup request expired before submission")
+
+        before_send()
+
+        # A lost cancellation can arrive after a replacement start. Keep the
+        # caller's staged cleanup ownership until cancellation is acknowledged.
+        if await self.cancel_manual_backup(din) is not True:
+            return False
+
+        before_send()
+        start_ts = int(time.time())
+        seconds = min(duration_s, 86400)
+        if end_ts is not None:
+            seconds = min(seconds, int(end_ts) - start_ts)
+            if seconds < 1:
+                raise PowerwallLocalError("Max Backup request expired before packet creation")
 
         env = transport_pb2.MessageEnvelope()
         env.delivery_channel = transport_pb2.DELIVERY_CHANNEL_HERMES_COMMAND
         env.sender.authorized_client = 1
         env.recipient.din = din
         teg_req = env.teg.schedule_manual_backup_event_request
-        teg_req.scheduling_info.start_time.seconds = int(time.time())
-        teg_req.scheduling_info.duration_seconds = min(duration_s, 86400)
+        teg_req.scheduling_info.start_time.seconds = start_ts
+        teg_req.scheduling_info.duration_seconds = seconds
         teg_req.scheduling_info.priority = (1 << 64) - 1
 
-        resp = await self.post_v1r(env.SerializeToString(), din)
+        resp = await self.post_v1r(env.SerializeToString(), din,
+            **({"before_send": before_send} if end_ts is not None else {}))
         if not resp.ok or not resp.inner_bytes:
             return False
         try:

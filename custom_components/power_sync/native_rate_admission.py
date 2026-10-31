@@ -48,6 +48,21 @@ def native_coexistence_reason(hass, site, budget):
     return None
 
 
+def _max_backup_conflicting_control(runtime):
+    """Existing force/recovery must finish before a new backup commitment."""
+    if any((runtime.get(key) or {}).get("active") for key in (
+            "force_charge_state", "force_discharge_state", "hold_soc_state", "self_consumption_state")):
+        return True
+    if any(getattr(runtime.get(key), "pending", False) for key in (
+            "powerwall_native_max_charge", "powerwall_battery_dispatch")):
+        return True
+    return any(runtime.get(key) for key in (
+        "pending_tesla_restore", "optimizer_force_restart_restore_pending", "native_max_recovery_unavailable",
+        "powerwall_local_recovery_pending", "powerwall_dispatch_fallback_pending", "powerwall_settings_pending",
+        "tesla_settings_pending", "powerwall_settings_recovering", "max_backup_restore_attempts",
+        "max_backup_recovery_unavailable"))
+
+
 def guard_battery_transition(hass, entry, handler):
     """Exclude new native authority throughout a battery service handoff."""
     bound_runtime = hass.data.get("power_sync", {}).get(entry.entry_id)
@@ -68,6 +83,16 @@ def guard_battery_transition(hass, entry, handler):
             try:
                 if runtime.get("native_max_startup_pending"):
                     raise SiteImportAdmissionDenied("Waiting for native Max startup restoration")
+                name = handler.__name__
+                direction = "charge" if "force_charge" in name else "discharge" if "force_discharge" in name else None
+                episode = direction or name in ("handle_hold_battery_soc", "handle_set_self_consumption")
+                max_backup = name == "handle_schedule_max_backup"
+                if episode and (runtime.get("max_backup_end_ts") is not None or runtime.get("max_backup_recovery_unavailable")):
+                    raise SiteImportAdmissionDenied("Max Backup window or cleanup still owns this site; wait for cleanup before forcing battery power")
+                if max_backup and runtime.get("max_backup_restore_attempts"):
+                    raise SiteImportAdmissionDenied("Existing Max Backup cleanup must resolve before another window; reloading the integration retries cleanup")
+                if max_backup and _max_backup_conflicting_control(runtime):
+                    raise SiteImportAdmissionDenied("Stop or restore existing battery control before scheduling Max Backup")
                 site_control = runtime.get("powerwall_site_control")
                 if site_control is None:
                     return await handler(call)
@@ -77,12 +102,11 @@ def guard_battery_transition(hass, entry, handler):
                 )
                 if foreign_site_owner(hass, entry.entry_id, site_control.site_id) is not None:
                     raise SiteImportAdmissionDenied("Another PowerSync entry owns this Tesla site's control or recovery")
-                name = handler.__name__
                 data = getattr(call, "data", {}) or {}
                 restoring = "restore_normal" in name
-                direction = "charge" if "force_charge" in name else "discharge" if "force_discharge" in name else None
                 target = None
                 deadline = None
+                backup_end = None
                 if direction:
                     power = data.get("power_w", 0)
                     imported = data.get("grid_import_target_w")
@@ -97,9 +121,22 @@ def guard_battery_transition(hass, entry, handler):
                     duration = data.get("duration")
                     if data.get("source") == "optimizer" and type(duration) is int and 1 <= duration <= 1440:
                         deadline = time.monotonic() + max(0, requested_at + duration * 60 - time.time())
+                elif max_backup:
+                    duration = data.get("duration_minutes")
+                    try:
+                        duration = int(duration)
+                    except (TypeError, ValueError):
+                        duration = 0
+                    if 1 <= duration <= 1440:
+                        backup_end = requested_at + duration * 60
+                        deadline = time.monotonic() + max(0, backup_end - time.time())
                 def request_allowed():
                     admission = runtime.get("powerwall_control_admission")
                     return (foreign_site_owner(hass, entry.entry_id, site_control.site_id) is None
+                            and (backup_end is None or time.time() < backup_end)
+                            and not (episode and (runtime.get("max_backup_end_ts") is not None
+                                                    or runtime.get("max_backup_recovery_unavailable")))
+                            and not (max_backup and _max_backup_conflicting_control(runtime))
                             and (admission is None or admission(call, restoring=restoring) is True))
                 site_control.set_obligations(entry.entry_id, control_obligations(runtime))
                 try:

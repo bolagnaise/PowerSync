@@ -339,6 +339,9 @@ async def test_failed_tariff_cleanup_finishes_inside_battery_command(admission, 
     import logging
     from datetime import timedelta
     from unittest.mock import AsyncMock
+    from inspect import signature
+    from conftest import load_power_sync_function
+    from test_service_calls import CurrentServiceCall
     from test_ha_optimizer_runtime import Harness, guard
 
     a = admission
@@ -370,7 +373,8 @@ async def test_failed_tariff_cleanup_finishes_inside_battery_command(admission, 
         '_tesla_force_retry_expiry': lambda state, expiry, **kwargs: expiry,
         'persist_force_mode_state': AsyncMock(return_value=True),
         'handle_restore_normal': a.m.guard_battery_transition(a.hass, a.entry, restore),
-        'ServiceCall': lambda domain, service, data, context: SimpleNamespace(data=data, context=context),
+        'make_service_call': load_power_sync_function('make_service_call',
+            {'signature': signature, 'ServiceCall': CurrentServiceCall}, path=ROOT / 'service_calls.py'),
         'DOMAIN': 'power_sync', 'SERVICE_RESTORE_NORMAL': 'restore_normal',
         'async_dispatcher_send': lambda *args: None,
     }

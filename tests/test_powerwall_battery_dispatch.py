@@ -1,11 +1,14 @@
 """Local power dispatch: export semantics, lease failure and ownership recovery."""
 import asyncio
 import importlib.util
+import inspect
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from conftest import load_power_sync_function
+from test_service_calls import CurrentServiceCall
 
 ROOT = Path(__file__).resolve().parents[1]
 _hybrid_spec = importlib.util.spec_from_file_location('hybrid_policy_probe', ROOT / 'custom_components/power_sync/powerwall_local/hybrid_policy.py')
@@ -475,6 +478,9 @@ def load_routing(monitored=False, paired=True, **options):
               DEFAULT_DISCHARGE_DURATION=30, DISCHARGE_DURATIONS=[15,30,60],
               store=store, _select_restorable_tesla_tariff=lambda value: value,
               tesla_grid_charging_preferences={}, persisted_force_state={}, persisted_pending_restore={})
+    ns['make_service_call'] = load_power_sync_function('make_service_call',
+        {'signature': inspect.signature, 'ServiceCall': CurrentServiceCall},
+        path=ROOT/'custom_components/power_sync/service_calls.py')
     exec(compile(ast.fix_missing_locations(ast.Module(body=nodes, type_ignores=[])), str(ROOT/'custom_components/power_sync/__init__.py'), 'exec'), ns)
     c, client, _ = controller()
     c.config=ns['_local_powerwall_dispatch_config']

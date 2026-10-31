@@ -458,8 +458,8 @@ async def test_restore_replaces_apply_policy_but_keeps_runtime_and_identity_fenc
     {"powerwall_local_recovery_pending": True},
     {"optimizer_force_restart_restore_pending": True},
     {"powerwall_dispatch_fallback_pending": True},
-    {"max_backup_end_ts": 0},
-    {"max_backup_local_event": {"active": True}},
+    {"max_backup_end_ts": 0, "max_backup_site_id": "00123"},
+    {"max_backup_local_event": {"active": True}, "max_backup_site_id": 123},
     {"powerwall_native_max_charge": SimpleNamespace(pending=True)},
     {"powerwall_battery_dispatch": SimpleNamespace(pending=True)},
     {"aemo_spike_manager": SimpleNamespace(site_id="00123", _in_spike_mode=True)},
@@ -494,6 +494,18 @@ def test_explicit_non_tesla_generic_force_does_not_claim_unknown_tesla_site():
     assert m.foreign_site_owner(hass, "entry-b", 123) is None
     runtime["powerwall_settings_pending"] = {"id": "unknown-tesla-incident"}
     assert m.foreign_site_owner(hass, "entry-b", 123) == "entry-a"
+
+
+@pytest.mark.parametrize("obligation,unknown", [
+    ({"max_backup_schedule": {"site_id": 123, "saved_reserve": 2}}, False),
+    ({"max_backup_recovery_unavailable": True, "max_backup_site_id": "00123"}, False),
+    ({"max_backup_schedule": {"saved_reserve": 2}}, True),
+])
+def test_explicit_backup_incident_remains_owned_after_battery_brand_changes(obligation, unknown):
+    runtime = {"entry": SimpleNamespace(data={"battery_system": "sigenergy"}, options={}), **obligation}
+    hass = SimpleNamespace(data={"power_sync": {"entry-a": runtime}})
+    assert m.foreign_site_owner(hass, "entry-b", 123) == "entry-a"
+    assert m.foreign_site_owner(hass, "entry-b", 456) == ("entry-a" if unknown else None)
 
 
 @pytest.mark.asyncio

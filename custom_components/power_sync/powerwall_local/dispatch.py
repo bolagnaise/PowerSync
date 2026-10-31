@@ -28,6 +28,7 @@ from .exceptions import (
     PowerwallUnreachableError,
     PowerwallWriteRejected,
 )
+from .normalization import native_grid_charging_reading
 from .transport import TEDAPIv1rTransport
 
 _LOGGER = logging.getLogger(__name__)
@@ -121,9 +122,17 @@ async def write_config_confirmed(
         config = await transport.read_config(din)
         check_current()
         for dotted, expected in updates.items():
-            observed = config
-            for key in dotted.split("."):
-                observed = observed.get(key) if isinstance(observed, dict) else None
+            if dotted == "site_info.disallow_charge_from_grid_with_solar_installed":
+                # Native config omits this boolean when false. Its parser
+                # requires a valid site_info object and preserves unknowns;
+                # cloud payloads and unrelated fields have no such default.
+                observed = native_grid_charging_reading(config).disallowed
+                if observed is None:
+                    break
+            else:
+                observed = config
+                for key in dotted.split("."):
+                    observed = observed.get(key) if isinstance(observed, dict) else None
             if type(observed) is not type(expected) or observed != expected:
                 break
         else:

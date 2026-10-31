@@ -191,6 +191,66 @@ async def test_actual_spread_import_entry_preserves_site_target_under_each_prefe
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["tariff", "local", "auto"])
+@pytest.mark.parametrize("vehicles,battery_w", [(0, -8200), (1, -5900), (2, -3600)])
+async def test_actual_spread_import_entry_shares_durable_ev_budget_without_changing_target_or_deadline(
+        method, vehicles, battery_w):
+    harness = importlib.import_module("test_powerwall_battery_dispatch")
+    budget_harness = importlib.import_module("test_native_rate_budget")
+    native = budget_harness.m
+    budget = native.SharedRateBudget(budget_harness.Store(), clock=lambda: budget_harness.NOW)
+    journal = native.EntryRateJournal(budget, "ev-entry", "matrix-site")
+    await journal.async_save({"sessions": {
+        f"VIN{index}": dict(identity=f"provider:car{index}", baseline_amps=10,
+            attempted_amps=10, confirmed_amps=10, watts_per_amp=230, uncertain=True)
+        for index in range(vehicles)
+    }})
+    env, local, client, saved = harness.load_routing(tesla_control_method=method,
+        tesla_energy_site_id="matrix-site", optimization_spread_import_enabled=True,
+        optimization_max_charge_w=10000, optimization_max_grid_import_w=10000)
+    env["site_identity"] = native.site_identity  # Source extraction strips this import.
+    env["hass"].data[native.RUNTIME_KEY] = budget
+    configured_limits = {name: env["entry"].data[name] for name in (
+        "optimization_max_charge_w", "optimization_max_grid_import_w")}
+    try:
+        result = await env["handle_force_charge"](harness.call(source="optimizer",
+            grid_import_target_w=9000, power_w=2000, duration=15))
+        assert result["control_path"] == "powerwall_local_dispatch"
+        assert result["power_target_basis"] == "grid_import"
+        assert result["requested_power_w"] == 9000
+        assert result["battery_power_w"] == battery_w
+        assert client.dispatch_battery_power.call_args.args[0] == battery_w
+        assert budget.unobserved_w("matrix-site") == vehicles * 2300
+        assert local.grid_import_estimate_w == 9000 - vehicles * 2300
+        assert saved["force_mode_state"]["power_w"] == 2000
+        assert saved["force_mode_state"]["grid_import_target_w"] == 9000
+        deadline, expiry = local._deadline, env["force_charge_state"]["expires_at"]
+        await local._cancel_task()
+
+        # A fresh meter now includes one reserved EV and another 1 kW of home
+        # load. Its observed demand must replace that EV's outstanding claim.
+        observed_ev_w = 2300 if vehicles else 0
+        if vehicles:
+            budget.observe("VIN0", watts=observed_ev_w, at=budget_harness.NOW,
+                           meter_at=budget_harness.NOW)
+        load = 2000 + observed_ev_w
+        client.get_snapshot.return_value = harness.snapshot(load_w=load, solar_w=200, grid_w=load-200)
+        await local._write_with_limit_retry()
+        assert budget.unobserved_w("matrix-site") == max(0, vehicles-1) * 2300
+        assert client.dispatch_battery_power.call_args.args[0] == battery_w + 1000
+        assert client.dispatch_battery_power.await_count == 2
+        assert local._deadline == deadline
+        assert env["force_charge_state"]["expires_at"] == expiry
+        assert env["force_charge_state"]["grid_import_target_w"] == 9000
+        assert local._target == 9000 and local._target_basis == "grid_import"
+        assert all(env["entry"].data[name] == value for name, value in configured_limits.items())
+        assert all(local.config()[name] == value for name, value in configured_limits.items())
+    finally:
+        if local.pending:
+            await local.stop()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("revocation", ["current", "write_fence"])
 async def test_actual_tariff_writer_rechecks_authority_after_site_queue_wait(
         controls, upload_harness, monkeypatch, revocation):

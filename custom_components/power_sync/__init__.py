@@ -21,6 +21,7 @@ from .settings_metadata import (
     split_optimizer_reserve_values,
 )
 from .registry_compat import iter_device_entries
+from .service_calls import make_service_call
 from .tesla_force_tariff import configured_force_discharge_prices
 from .tesla_calibration import (
     CALIBRATION_SOURCE_LOCAL_ALERT,
@@ -22527,7 +22528,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if battery_connection_profile.monitoring_only:
             return True
         source = _control_call_source(call)
-        return _is_monitoring_mode() and source not in ("user", "manual")
+        manual_hold_transition = (
+            source == "hold_soc"
+            and call.data.get("_hold_soc_manual_origin") is True
+            and call.data.get("_hold_soc_transition_token") is _hold_soc_transition_token
+        )
+        return (_is_monitoring_mode() and source not in ("user", "manual")
+                and not manual_hold_transition)
 
     def _optimizer_current_force_action_matches(force_type: str) -> bool:
         """Return True when the optimizer is actively asking for a force mode."""
@@ -34410,7 +34417,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 # that durable owner before changing the control preference.
                 pending_restore = _local_powerwall_runtime.get("pending_tesla_restore")
                 if pending_restore or _local_powerwall_runtime.get("optimizer_force_restart_restore_pending"):
-                    await handle_restore_normal(ServiceCall(DOMAIN, "restore_normal", {
+                    await handle_restore_normal(make_service_call(hass, DOMAIN, "restore_normal", {
                         "source": "user",
                         "_force_restore": True,
                         "_confirm_restore": True,
@@ -34419,7 +34426,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         ),
                     }))
                 elif any(state.get("active") for state in (force_charge_state, force_discharge_state, hold_soc_state, self_consumption_state)):
-                    await handle_restore_normal(ServiceCall(DOMAIN, "restore_normal", {"source": "user"}))
+                    await handle_restore_normal(make_service_call(hass, DOMAIN, "restore_normal", {"source": "user"}))
                 native = _local_powerwall_runtime.get("powerwall_native_max_charge")
                 local = _local_powerwall_runtime.get("powerwall_battery_dispatch")
                 if ((native and native.pending) or (local and local.pending)
@@ -34639,6 +34646,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         def allowed(direction):
             if (not _local_powerwall_generation_current() or _monitoring_mode_should_block_control(call)
+                    or _local_powerwall_runtime.get("max_backup_end_ts") is not None
                     or _local_powerwall_runtime.get("tesla_control_method_changing") or _local_powerwall_runtime.get("powerwall_local_dispatch_stopping")):
                 return False
             state = force_charge_state if direction == "charge" else force_discharge_state
@@ -36241,7 +36249,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     # Optimizer cleanup already owns the licensing control lock.
                     # Preserve that source so restore does not queue a manual
                     # command behind the optimizer operation it is cleaning up.
-                    await handle_restore_normal(ServiceCall(
+                    await handle_restore_normal(make_service_call(hass,
                         DOMAIN, SERVICE_RESTORE_NORMAL,
                         entry_service_data(entry.entry_id, {
                             'source': 'optimizer' if source == 'optimizer' else 'force_cleanup',
@@ -38170,7 +38178,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     # Optimizer cleanup already owns the licensing control lock.
                     # Preserve that source so restore does not queue a manual
                     # command behind the optimizer operation it is cleaning up.
-                    await handle_restore_normal(ServiceCall(
+                    await handle_restore_normal(make_service_call(hass,
                         DOMAIN, SERVICE_RESTORE_NORMAL,
                         entry_service_data(entry.entry_id, {
                             'source': 'optimizer' if source == 'optimizer' else 'force_cleanup',
@@ -41054,7 +41062,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             reserve_generation_before = _tesla_reserve_generation[0]
             hold_reserve_generation = reserve_generation_before + 1
             try:
-                await handle_set_backup_reserve(ServiceCall(DOMAIN, SERVICE_SET_BACKUP_RESERVE, {'percent': target_reserve, 'source': 'hold_soc'}, context=call.context))
+                await handle_set_backup_reserve(make_service_call(hass, DOMAIN, SERVICE_SET_BACKUP_RESERVE, {
+                    'percent': target_reserve, 'source': 'hold_soc',
+                    '_hold_soc_transition_token': _hold_soc_transition_token,
+                    '_hold_soc_manual_origin': source in ('user', 'manual'),
+                }, context=call.context))
                 if (
                     _command_generation[0] != hold_command_generation
                     or _tesla_reserve_generation[0]
@@ -41068,7 +41080,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         _clear_hold_soc_state()
                         await persist_force_mode_state()
                     return
-                await handle_set_self_consumption(ServiceCall(DOMAIN, 'set_self_consumption', entry_service_data(entry.entry_id, {'source': 'hold_soc', '_reserve_restore_target': target_reserve, '_hold_soc_transition_token': _hold_soc_transition_token}, call), context=call.context))
+                await handle_set_self_consumption(make_service_call(hass, DOMAIN, 'set_self_consumption', entry_service_data(entry.entry_id, {
+                    'source': 'hold_soc', '_reserve_restore_target': target_reserve,
+                    '_hold_soc_transition_token': _hold_soc_transition_token,
+                    '_hold_soc_manual_origin': source in ('user', 'manual'),
+                }, call), context=call.context))
                 if (
                     _command_generation[0] != hold_command_generation
                     or _tesla_reserve_generation[0]
@@ -41342,7 +41358,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.info(
                 "Self-consumption override preempting active force/hold mode; restoring first"
             )
-            await handle_restore_normal(ServiceCall(DOMAIN, SERVICE_RESTORE_NORMAL, entry_service_data(entry.entry_id, {'source': 'user', '_force_restore': True}, call), context=call.context))
+            await handle_restore_normal(make_service_call(hass, DOMAIN, SERVICE_RESTORE_NORMAL, entry_service_data(entry.entry_id, {'source': 'user', '_force_restore': True}, call), context=call.context))
 
         # Check if this is a SolarEdge system
         is_solaredge_sc = bool(
@@ -42428,7 +42444,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if (force_charge_state.get("active") or force_discharge_state.get("active")
                 or runtime.get("pending_tesla_restore")
                 or (owns_operation_mode and hold_soc_state.get("active"))):
-            await handle_restore_normal(ServiceCall(
+            await handle_restore_normal(make_service_call(hass,
                 DOMAIN, SERVICE_RESTORE_NORMAL,
                 {"source": "force_cleanup", "_allow_monitoring_restore": True,
                  "_confirm_restore": True,
@@ -43183,7 +43199,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         except Exception as e:
             _LOGGER.error("Error setting VPP enrollment: %s", e, exc_info=True)
 
-    async def _persist_max_backup_schedule(payload: dict | None) -> None:
+    def _max_backup_site_current(data) -> bool:
+        """A saved baseline belongs only to its recorded physical Tesla site."""
+        from .powerwall_control import canonical_site_id
+        config = {**entry.data, **entry.options}
+        try:
+            return canonical_site_id(data.get("max_backup_site_id")) == canonical_site_id(
+                config.get(CONF_TESLA_ENERGY_SITE_ID) or config.get("powerwall_local_energy_site_id"))
+        except (TypeError, ValueError):
+            return False
+
+    async def _persist_max_backup_schedule(payload: dict | None, *, is_current=None) -> bool:
         """Write or clear the max_backup_schedule key in this entry's Store.
 
         ``payload=None`` clears the key. Survives HA restart so an in-flight
@@ -43193,18 +43219,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
         store = entry_data.get("store")
         if store is None:
-            return
+            return False
+        def current():
+            return (hass.data.get(DOMAIN, {}).get(entry.entry_id) is entry_data
+                    and _max_backup_site_current(entry_data)
+                    and (payload is None or entry_data.get("max_backup_end_ts") == payload.get("end_ts"))
+                    and (is_current is None or is_current()))
         try:
-            await _update_powerwall_store(store,
+            return await _update_powerwall_store(store,
                 {"max_backup_schedule": payload} if payload is not None else {},
-                remove=("max_backup_schedule",) if payload is None else ())
+                remove=("max_backup_schedule",) if payload is None else (), is_current=current, verify=True)
         except Exception as err:
             _LOGGER.warning("Failed to persist max_backup_schedule: %s", err)
+            return False
 
     async def _restore_max_backup_window(
         end_ts: float,
         saved_reserve: int | None,
         local_event: bool = False,
+        apply_pending: bool = False,
+        site_id=None,
     ) -> None:
         """Re-arm the restoration timer for an already-active window.
 
@@ -43221,60 +43255,146 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         entry_data["max_backup_saved_reserve"] = saved_reserve
         entry_data["max_backup_end_ts"] = end_ts
         entry_data["max_backup_local_event"] = local_event
+        entry_data["max_backup_apply_pending"] = apply_pending
+        entry_data["max_backup_site_id"] = site_id
+        generation = entry_data.get("max_backup_generation", 0) + 1
+        entry_data["max_backup_generation"] = generation
+        entry_data["max_backup_restore_attempts"] = int(apply_pending)
+        if not _max_backup_site_current(entry_data):
+            entry_data["max_backup_recovery_unavailable"] = True
+            entry_data["max_backup_restore_attempts"] = 1
+            _LOGGER.error(
+                "Max Backup cleanup blocked: saved physical site is missing or changed. "
+                "The original baseline is retained; verify the original site and saved reserve "
+                "before supervised recovery."
+            )
+            return
+        entry_data.pop("max_backup_recovery_unavailable", None)
+        if local_event and apply_pending:
+            # A signed request from the previous process can still arrive.
+            # Twelve-second signatures are conservatively drained for 60s.
+            entry_data["max_backup_cleanup_not_before"] = _time.monotonic() + 60
 
-        if remaining <= 0:
+        async def restore_this_window(now):
+            await _max_backup_restore(now, generation=generation, owner=entry_data)
+
+        if apply_pending or remaining <= 0:
             _LOGGER.info(
                 "schedule_max_backup: window expired during downtime — restoring reserve to %s%% now",
                 saved_reserve,
             )
-            await _max_backup_restore(None)
+            await restore_this_window(None)
             return
 
-        cancel = async_call_later(hass, remaining, _max_backup_restore)
+        cancel = async_call_later(hass, remaining, restore_this_window)
         entry_data["max_backup_cancel"] = cancel
         _LOGGER.info(
             "🛡️ Resumed max backup window — restoring reserve to %s%% in %d min",
             saved_reserve, int(remaining // 60),
         )
 
-    async def _max_backup_restore(_now) -> None:
-        """One-shot callback that restores the saved reserve and clears storage.
+    async def _max_backup_restore(_now, *, generation=None, owner=None) -> None:
+        """Retain this window until its cleanup and durable retirement succeed."""
+        import time as _time
+        from homeassistant.helpers.event import async_call_later
+        data = owner if owner is not None else hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+        expected = data.get("max_backup_generation", 0) if generation is None else generation
+        end_ts, target, local_event = None, None, False
 
-        Bound to ``async_call_later`` from both fresh schedules and on-startup
-        re-arm — the implementation is identical so we share the closure.
-        """
-        if getattr(hass, "data", {}).get("power_sync_license_manager") is not None:
-            from .licensing.entry_routing import entry_service_data
-        else:
-            entry_service_data = lambda _entry_id, data, origin=None: data
-        data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
-        target = data.pop("max_backup_saved_reserve", None)
-        local_event = bool(data.pop("max_backup_local_event", False))
-        data.pop("max_backup_cancel", None)
-        data.pop("max_backup_end_ts", None)
-        await _persist_max_backup_schedule(None)
-        if local_event:
-            client = (data.get("powerwall_local") or {}).get("client")
-            if client is not None:
-                try:
-                    await client.cancel_max_backup()
-                except Exception as err:
-                    _LOGGER.warning(
-                        "schedule_max_backup: local event cleanup failed: %s", err
+        def current():
+            return (end_ts is not None
+                    and hass.data.get(DOMAIN, {}).get(entry.entry_id) is data
+                    and data.get("max_backup_generation", 0) == expected
+                    and data.get("max_backup_end_ts") == end_ts
+                    and _max_backup_site_current(data))
+
+        async def cleanup():
+            if not current():
+                return
+            try:
+                if local_event:
+                    remaining = data.get("max_backup_cleanup_not_before", 0) - _time.monotonic()
+                    if remaining > 0:
+                        async def after_acceptance_window(now):
+                            await _max_backup_restore(now, generation=expected, owner=data)
+                        data["max_backup_cancel"] = async_call_later(hass, remaining, after_acceptance_window)
+                        return
+                    if not await _persist_max_backup_schedule({
+                            "end_ts": end_ts, "saved_reserve": target,
+                            "local_event": True, "apply_pending": True, "site_id": data.get("max_backup_site_id"),
+                    }, is_current=current):
+                        raise HomeAssistantError("Max Backup cancellation intent could not be persisted")
+                    data["max_backup_apply_pending"] = True
+                    client = (data.get("powerwall_local") or {}).get("client")
+                    if client is None or await client.cancel_max_backup() is not True:
+                        raise HomeAssistantError("Native Max Backup cancellation was not acknowledged")
+                    _LOGGER.info("Max Backup native cancellation acknowledged")
+                else:
+                    if target is None:
+                        raise HomeAssistantError("Max Backup saved reserve is unavailable")
+                    result = await handle_set_backup_reserve(make_service_call(
+                        hass, DOMAIN, SERVICE_SET_BACKUP_RESERVE,
+                        {"percent": int(target), "source": "user"},
+                    ))
+                    if not isinstance(result, dict) or result.get("success") is not True:
+                        raise HomeAssistantError("Max Backup reserve restoration was not confirmed")
+                if not current():
+                    return
+                if not await _persist_max_backup_schedule(None, is_current=current):
+                    raise HomeAssistantError("Max Backup cleanup could not be persisted")
+                if current():
+                    for key in ("max_backup_saved_reserve", "max_backup_local_event", "max_backup_cancel",
+                                "max_backup_end_ts", "max_backup_restore_attempts", "max_backup_apply_pending",
+                                "max_backup_cleanup_not_before", "max_backup_site_id", "max_backup_schedule",
+                                "max_backup_recovery_unavailable"):
+                        data.pop(key, None)
+            except Exception as err:
+                if not current():
+                    return
+                attempts = data.get("max_backup_restore_attempts", 0) + 1
+                data["max_backup_restore_attempts"] = attempts
+                if local_event:
+                    data["max_backup_cleanup_not_before"] = _time.monotonic() + 60
+                _LOGGER.warning("Max Backup cleanup remains pending (attempt %d): %s", attempts, err)
+                if attempts < 3:
+                    async def retry_this_window(now):
+                        await _max_backup_restore(now, generation=expected, owner=data)
+                    data["max_backup_cancel"] = async_call_later(hass, 60, retry_this_window)
+                else:
+                    _LOGGER.error(
+                        "Max Backup cleanup retries exhausted; saved baseline remains retained. "
+                        "Review the PowerSync logs; reloading this integration retries saved cleanup "
+                        "without extending the original backup window."
                     )
-            _LOGGER.info("🛡️ Local max backup event ended")
+
+        async def restore_under_route():
+            nonlocal end_ts, target, local_event
+            async with _local_powerwall_route_lock:
+                if (hass.data.get(DOMAIN, {}).get(entry.entry_id) is not data
+                        or data.get("max_backup_generation", 0) != expected):
+                    return
+                end_ts = data.get("max_backup_end_ts")
+                target = data.get("max_backup_saved_reserve")
+                local_event = bool(data.get("max_backup_local_event", False))
+                if not current():
+                    return
+                site = data.get("powerwall_site_control")
+                if site is None:
+                    await cleanup()
+                else:
+                    async with site.operation(label="Max Backup cleanup", entry_id=entry.entry_id,
+                                              restoring=True, is_current=current):
+                        await cleanup()
+
+        if hass.data.get(DOMAIN, {}).get(entry.entry_id) is not data:
             return
-        if target is None:
-            _LOGGER.warning("schedule_max_backup: no saved reserve to restore")
-            return
-        _LOGGER.info("🛡️ Max backup window ended — restoring reserve to %s%%", target)
-        try:
-            await hass.services.async_call(
-                DOMAIN, "set_backup_reserve",
-                (entry_service_data(entry.entry_id, {"percent": int(target), "source": "user"})), blocking=True,
-            )
-        except Exception as err:
-            _LOGGER.error("schedule_max_backup: restore failed: %s", err)
+        manager = hass.data.get("power_sync_license_manager")
+        manual_scope = getattr(manager, "manual_command_scope", None)
+        if manual_scope is None:
+            await restore_under_route()
+        else:
+            async with manual_scope(entry.entry_id):
+                await restore_under_route()
 
     async def handle_schedule_max_backup(call: ServiceCall) -> None:
         """Charge to 100% for a window, then restore the previous reserve.
@@ -43307,10 +43427,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             return
 
         from homeassistant.helpers.event import async_call_later
+        import time as _time
 
         entry_data = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
+        site_id = getattr(entry_data.get("powerwall_site_control"), "site_id", None)
+        if site_id is None:
+            raise HomeAssistantError("Max Backup physical site identity is unavailable")
+        end_ts = entry_data.get("battery_route_requested_at", _time.time()) + duration_minutes * 60
+        if _time.time() >= end_ts:
+            raise HomeAssistantError("Max Backup request expired before preparation")
         local_runtime = entry_data.get("powerwall_local") or {}
         local_client = local_runtime.get("client")
+        if _cloud_tariff_control_requested(call):
+            local_client = None
         coord = entry_data.get("tesla_coordinator")
         if coord is None and local_client is None:
             coord = _get_tesla_coordinator_for_service("schedule_max_backup")
@@ -43329,63 +43458,107 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 site_info = getattr(coord, "_site_info_cache", None) or {}
                 saved_reserve = site_info.get("backup_reserve_percent")
 
+        if _time.time() >= end_ts:
+            raise HomeAssistantError("Max Backup request expired while reading its restore target")
         prior_cancel = entry_data.get("max_backup_cancel")
+        if entry_data.get("max_backup_end_ts") is not None:
+            if not _max_backup_site_current(entry_data):
+                raise HomeAssistantError("Existing Max Backup belongs to a missing or changed physical site")
+            saved_reserve = entry_data.get("max_backup_saved_reserve", saved_reserve)
+            _LOGGER.info("schedule_max_backup: replacing existing schedule")
+        local_event = local_client is not None
+        if (entry_data.get("max_backup_end_ts") is not None
+                and bool(entry_data.get("max_backup_local_event")) != local_event):
+            raise HomeAssistantError("Resolve existing Max Backup cleanup before changing its control route")
+        if not local_event and saved_reserve is None:
+            raise HomeAssistantError("Max Backup has no trustworthy reserve restore target")
+        previous = {key: entry_data[key] for key in (
+            "max_backup_saved_reserve", "max_backup_end_ts", "max_backup_generation",
+            "max_backup_restore_attempts", "max_backup_local_event", "max_backup_apply_pending",
+            "max_backup_site_id") if key in entry_data}
+        entry_data["max_backup_saved_reserve"] = saved_reserve
+        entry_data["max_backup_end_ts"] = end_ts
+        generation = entry_data.get("max_backup_generation", 0) + 1
+        entry_data["max_backup_generation"] = generation
+        entry_data["max_backup_restore_attempts"] = 0
+        entry_data["max_backup_local_event"] = local_event
+        entry_data["max_backup_apply_pending"] = True
+        entry_data["max_backup_site_id"] = site_id
+
+        def current():
+            return (hass.data.get(DOMAIN, {}).get(entry.entry_id) is entry_data
+                    and entry_data.get("max_backup_generation") == generation
+                    and entry_data.get("max_backup_end_ts") == end_ts
+                    and _max_backup_site_current(entry_data))
+
+        def restore_previous_runtime():
+            if current():
+                for key in ("max_backup_saved_reserve", "max_backup_end_ts", "max_backup_generation",
+                            "max_backup_restore_attempts", "max_backup_local_event", "max_backup_apply_pending",
+                            "max_backup_site_id"):
+                    if key in previous:
+                        entry_data[key] = previous[key]
+                    else:
+                        entry_data.pop(key, None)
+
+        # The cleanup route and original baseline must survive any loss of
+        # the subsequent actuator reply. A failed save authorizes no write.
+        try:
+            persisted = await _persist_max_backup_schedule({
+                "end_ts": end_ts, "saved_reserve": saved_reserve,
+                "local_event": local_event, "apply_pending": True, "site_id": site_id,
+            }, is_current=current)
+        except BaseException:
+            restore_previous_runtime()
+            raise
+        if not persisted or not current():
+            restore_previous_runtime()
+            raise HomeAssistantError("Max Backup cleanup intent could not be persisted")
+
         if prior_cancel is not None:
             try:
                 prior_cancel()
             except Exception:
                 pass
-            saved_reserve = entry_data.get("max_backup_saved_reserve", saved_reserve)
-            _LOGGER.info("schedule_max_backup: replacing existing schedule")
 
-        import time as _time
-        entry_data["max_backup_saved_reserve"] = saved_reserve
-        end_ts = _time.time() + duration_minutes * 60
-        entry_data["max_backup_end_ts"] = end_ts
+        async def restore_this_window(now):
+            await _max_backup_restore(now, generation=generation, owner=entry_data)
+        entry_data["max_backup_cancel"] = async_call_later(
+            hass, max(0, end_ts - _time.time()), restore_this_window)
 
         _LOGGER.info(
             "🛡️ Scheduling max backup for %d min (current reserve: %s%%)",
             duration_minutes, saved_reserve,
         )
 
-        local_event = False
-        if local_client is not None:
-            try:
-                local_event = bool(
-                    await local_client.schedule_max_backup(duration_minutes * 60)
-                )
-            except Exception as err:
-                _LOGGER.warning(
-                    "schedule_max_backup: local event failed; using reserve fallback: %s",
-                    err,
-                )
-        entry_data["max_backup_local_event"] = local_event
-
-        if local_event:
-            _LOGGER.info("🛡️ Max backup scheduled via local V1R event")
-        else:
-            if saved_reserve is None:
-                entry_data.pop("max_backup_saved_reserve", None)
-                entry_data.pop("max_backup_end_ts", None)
-                entry_data.pop("max_backup_local_event", None)
-                await _persist_max_backup_schedule(None)
-                _LOGGER.error(
-                    "schedule_max_backup: native event unavailable or failed and no trustworthy "
-                    "reserve restore target is available; refusing reserve fallback"
-                )
-                return
-            await hass.services.async_call(
-                DOMAIN, "set_backup_reserve",
-                (entry_service_data(entry.entry_id, {"percent": 100, "source": "user"}, call)), blocking=True,
-            )
-
-        cancel = async_call_later(hass, duration_minutes * 60, _max_backup_restore)
-        entry_data["max_backup_cancel"] = cancel
-        await _persist_max_backup_schedule({
-            "end_ts": end_ts,
-            "saved_reserve": saved_reserve,
-            "local_event": local_event,
-        })
+        try:
+            if _time.time() >= end_ts:
+                raise HomeAssistantError("Max Backup request expired before actuation")
+            if local_event:
+                if await local_client.schedule_max_backup(duration_minutes * 60, end_ts=end_ts) is not True:
+                    raise HomeAssistantError("Max Backup native event was not acknowledged; cleanup remains owned")
+                _LOGGER.info("🛡️ Max backup acknowledged via local V1R event")
+            else:
+                result = await handle_set_backup_reserve(make_service_call(
+                    hass, DOMAIN, SERVICE_SET_BACKUP_RESERVE,
+                    entry_service_data(entry.entry_id, {"percent": 100, "source": "user"}, call),
+                    context=call.context,
+                ))
+                if not isinstance(result, dict) or result.get("success") is not True:
+                    raise HomeAssistantError("Max Backup reserve preparation was not confirmed; cleanup remains owned")
+            if not await _persist_max_backup_schedule({
+                    "end_ts": end_ts, "saved_reserve": saved_reserve,
+                    "local_event": local_event, "apply_pending": False, "site_id": site_id,
+            }, is_current=current):
+                raise HomeAssistantError("Max Backup acknowledgement could not be persisted; cleanup remains owned")
+            if current():
+                entry_data["max_backup_apply_pending"] = False
+        except BaseException:
+            if current():
+                entry_data["max_backup_restore_attempts"] = 1
+                if local_event:
+                    entry_data["max_backup_cleanup_not_before"] = _time.monotonic() + 60
+            raise
 
     async def handle_refresh_calibration(call: ServiceCall) -> None:
         """Clear PowerSync's calibration_suspected flag.
@@ -43557,6 +43730,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         handle_set_operation_mode = guard_battery_transition(hass, entry, handle_set_operation_mode)
         handle_set_grid_charging = guard_battery_transition(hass, entry, handle_set_grid_charging)
         handle_set_grid_export = guard_battery_transition(hass, entry, handle_set_grid_export)
+        handle_schedule_max_backup = guard_battery_transition(hass, entry, handle_schedule_max_backup)
     else:
         _local_powerwall_runtime.pop("native_max_startup_pending", None)
     register_handlers(hass, entry.entry_id, {
@@ -43573,6 +43747,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         'set_grid_charging': handle_set_grid_charging,
         'set_grid_export': handle_set_grid_export,
         'set_grid_export_auto': handle_set_grid_export_auto,
+        'schedule_max_backup': handle_schedule_max_backup,
+        'set_storm_watch': handle_set_storm_watch,
+        'set_off_grid_ev_reserve': handle_set_off_grid_ev_reserve,
+        'set_vpp_enrollment': handle_set_vpp_enrollment,
     })
     hass.services.async_register(
         DOMAIN, "resume_powerwall_settings",
@@ -43636,33 +43814,51 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         supports_response=SupportsResponse.OPTIONAL,
     )
     hass.services.async_register(DOMAIN, "set_grid_export_auto", routed_handler(hass, entry.entry_id, "set_grid_export_auto", handle_set_grid_export_auto))
-    hass.services.async_register(DOMAIN, "set_storm_watch", handle_set_storm_watch)
-    hass.services.async_register(DOMAIN, "set_off_grid_ev_reserve", handle_set_off_grid_ev_reserve)
-    hass.services.async_register(DOMAIN, "set_vpp_enrollment", handle_set_vpp_enrollment)
-    hass.services.async_register(DOMAIN, "schedule_max_backup", handle_schedule_max_backup)
+    hass.services.async_register(DOMAIN, "set_storm_watch", routed_handler(hass, entry.entry_id, "set_storm_watch", handle_set_storm_watch))
+    hass.services.async_register(DOMAIN, "set_off_grid_ev_reserve", routed_handler(hass, entry.entry_id, "set_off_grid_ev_reserve", handle_set_off_grid_ev_reserve))
+    hass.services.async_register(DOMAIN, "set_vpp_enrollment", routed_handler(hass, entry.entry_id, "set_vpp_enrollment", handle_set_vpp_enrollment))
+    hass.services.async_register(DOMAIN, "schedule_max_backup", routed_handler(hass, entry.entry_id, "schedule_max_backup", handle_schedule_max_backup))
     hass.services.async_register(DOMAIN, "refresh_calibration", handle_refresh_calibration)
 
     # Resume an in-flight max_backup window if HA restarted mid-schedule.
     async def _resume_max_backup_if_persisted() -> None:
+        import math as _math
         entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
         store = entry_data.get("store")
         if store is None:
             return
+        generation = entry_data.get("max_backup_generation", 0)
         try:
             data = await store.async_load() or {}
         except Exception:
             return
-        schedule = data.get("max_backup_schedule")
-        if not isinstance(schedule, dict):
+        if (hass.data.get(DOMAIN, {}).get(entry.entry_id) is not entry_data
+                or entry_data.get("store") is not store
+                or entry_data.get("max_backup_generation", 0) != generation):
             return
+        schedule = data.get("max_backup_schedule")
+        if schedule is None:
+            return
+        if not isinstance(schedule, dict):
+            entry_data["max_backup_schedule"] = schedule
+            entry_data["max_backup_recovery_unavailable"] = True
+            entry_data["max_backup_restore_attempts"] = 1
+            _LOGGER.error("Max Backup saved record is invalid; retained for supervised recovery")
+            return
+        entry_data["max_backup_schedule"] = dict(schedule)
+        entry_data["max_backup_site_id"] = schedule.get("site_id")
         end_ts = schedule.get("end_ts")
         saved_reserve = schedule.get("saved_reserve")
         local_event = bool(schedule.get("local_event", False))
-        if not isinstance(end_ts, (int, float)):
-            await _persist_max_backup_schedule(None)
+        if type(end_ts) not in (int, float) or not _math.isfinite(end_ts):
+            entry_data["max_backup_recovery_unavailable"] = True
+            entry_data["max_backup_restore_attempts"] = 1
+            _LOGGER.error("Max Backup saved window is invalid; baseline retained for supervised recovery")
             return
         await _restore_max_backup_window(
-            float(end_ts), saved_reserve, local_event=local_event
+            float(end_ts), saved_reserve, local_event=local_event,
+            apply_pending=schedule.get("apply_pending") is True,
+            site_id=schedule.get("site_id"),
         )
 
     if not is_amber_smartshift:

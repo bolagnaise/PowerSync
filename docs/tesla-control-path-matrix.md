@@ -6,10 +6,14 @@ software coverage, and the local Home Assistant scenarios still requiring
 verification. A route decision, submitted callback, API acknowledgement,
 settings readback and measured battery response are separate evidence.
 
-**Live status: not run by the matrix author.** No hardware command, credential
-access, installation, release, or physical-effect verification was performed
-while creating this document. Every live row below remains unchecked until a
-separate authorized session records its receipts.
+**Reviewed 31 October 2026.** All 46 rows have software evidence and an explicit
+local-site assessment in [the validation report](tesla-control-validation-2026-10-31.md).
+The audited final source run passed **9,408 tests, zero skipped**. The local site
+runs unpublished candidate `2.12.1573.dev3` from source `ac766794`; archive and
+installation proof are recorded in the report. Live receipts distinguish
+acknowledgement, settings readback and measured power. Unavailable hardware,
+unsupported capabilities and unsafe fault variants remain identified; the
+matrix does not claim universal physical verification.
 
 ## Review contract
 
@@ -149,57 +153,60 @@ Include the original baseline and the final restored values. `submitted`, a
 returned callback, a service success flag or an HA dashboard state alone cannot
 mark the physical-effect column passed.
 
-All rows initially have status **not run**. Expand each method, direction and
-provider variant into its own receipt when the test installation supports it.
+The table below defines each row's acceptance criteria. IDs link to the
+validation report's completed review, which records the evidence level and
+remaining variants. A reviewed row is not a claim that every physical variant
+was exercised. Expand each method, direction and provider variant into its own
+receipt when the test installation supports it.
 
 | ID | Local HA scenario | Required observation before marking complete |
 | --- | --- | --- |
-| [ ] T01 | Tariff charge, manual and optimizer sources; cloud-only/unreachable-LAN variants | No LAN prerequisite, confirmed cloud preparation/tariff, expected charging under site limits; original deadline unchanged |
-| [ ] T02 | Tariff discharge, manual and optimizer sources; cloud-only/unreachable-LAN variants | Correct export permission and discharge/reserve behavior, measured site export within effective limits |
-| [ ] T03 | Stop/expiry/restore after T01 and T02 | Exact original mode, reserve, grid/export settings and tariff restored; retained owner until required readback/settling |
-| [ ] T04 | Numeric battery charging under Tariff, Local V1R and Automatic | Same explicit battery-watt request stays local; battery input matches requested semantics within headroom |
-| [ ] T05 | Numeric grid-export target under all three preferences | Local battery target accounts for home load and solar; measured grid export follows requested quantity |
-| [ ] T06 | Site-import/spread target under all preferences, with zero/one/two EV reservations | Requested site input remains distinct from battery input; outstanding EV allocation is subtracted without rewriting configured limits |
-| [ ] T07 | Local V1R Max charge/discharge, including local refusal | Successful local behavior or precise refusal; no silent tariff fallback after a failed local route |
-| [ ] T08 | Automatic charge/discharge on both sides of the full inverter-envelope boundary | Correct local/native selection and physical behavior for each route; unknown/stale evidence cannot authorize local Max |
-| [ ] T09 | Telemetry/load changes during an active Automatic native episode | Stable owned episode and original end time; restoration before a replacement route starts |
-| [ ] T10 | Hold SOC, release and expiry during idle/force transitions | Correct captured reserve, no new force replay and restoration only of the owned override |
-| [ ] T11 | Self-consumption/idle activation, deactivation and expiry | Correct mode/reserve restoration; repeated idle-off does not upload an unrelated historical force tariff |
-| [ ] T12 | Return grid export preference to Auto during manual/EV ownership | Only manual preference ownership clears; the EV lease and actual export permission remain independently accounted for |
-| [ ] M01 | Manual operation mode changes, paired/unpaired cloud fallback | Selected entry only; exact requested mode readback and no stale bounce overriding it |
-| [ ] M02 | Manual backup reserve changes during idle and after a force handoff | Correct reserve readback and no overwritten baseline/newer owner |
-| [ ] M03 | Grid charging enable/disable and supported absent-field response | Correct boolean permission/readback contract; unknown permission never becomes a new enable |
-| [ ] M04 | Grid export `never`, `pv_only`, `battery_ok`; absent/invalid preference handling | Field-specific write and verified result; no reserve/mode mutation caused by an export-only EV request |
-| [ ] M05 | Explicit on-grid solar-curtailment setting for the selected paired entry | Fresh native readback and intended measured curtail/resume; unrelated entry unaffected |
-| [ ] M06 | Max Backup entry, exit and overlap refusal | Existing backup commitment remains authoritative; conflicting charge/discharge denied and baseline later restored |
-| [ ] M07 | Authorized Storm Watch change and direct status refresh | Generic cloud request joins the site gate, selected site only, direct enabled/active state verified |
-| [ ] M08 | Authorized off-grid vehicle reserve change | Generic cloud request joins the site gate; exact reserve readback independent of main battery backup reserve |
-| [ ] M09 | VPP enrollment API in an explicitly authorized test environment | Generic program mutation joins the site gate; account/program effect separately confirmed; otherwise record this row unverified |
-| [ ] M10 | Explicit authorized island/reconnect via service, switch and local view | All entry paths share bound site/identity control and terminal grid-state readback; run in a simulator if physical islanding is not authorized |
-| [ ] M11 | Explicit calibration delay via service/API plus read-only status | Durable request ID and signed acceptance window survive reload; no repeated delayed request after a crash; existing calibration guard retained |
-| [ ] E01 | Two-VIN Smart Schedule acquisition and staggered release | One captured original export rule; first release leaves second lease active; final release restores the original |
-| [ ] E02 | Restart with saved EV leases and one VIN reacquiring | Recovered release intent persists; reacquiring VIN retains ownership; no duplicate baseline capture |
-| [ ] E03 | EV export write/recovery acknowledgement failure in a simulator | No false acquisition/success; original recovery survives failure/cancel/backoff without repeated reserve writes |
-| [ ] B01 | Scheduled/manual TOU sync during idle, force, monitoring and restore | Existing deferrals remain; allowed upload is gated/read back and cannot replace an owned force baseline |
-| [ ] B02 | AEMO spike and saving-session enter/exit/retry | Correct scoped mode/tariff transition; failed exit retains event and original baseline for recovery |
-| [ ] B03 | Poll and websocket solar-curtailment start/resume; EV/manual override | Same site serialization, expected admission and measured solar/export behavior for both sources |
-| [ ] B04 | Charge kick/bounce with completion, new command and cancellation | No stale mode/reserve replay; actual restore/charge result tracked independently of a queued kick |
-| [ ] S01 | Monitoring/external-control activation while a request waits | No new PowerSync actuator write after authority is lost; intentional read/diagnostic work remains available |
-| [ ] S02 | Demand-charge and network-export protection; Max Backup overlap | Direction-specific denials preserved with accurate reason and no routine alert spam |
-| [ ] S03 | Disabled/unknown grid charge and export permissions | Precise refusal; no inferred permission from a malformed/missing value; original configuration preserved |
-| [ ] S04 | Stale/invalid readings, off-grid and SOC floor/cap variants in a simulator | Denial before mutation; no preference turns missing evidence into control authority |
-| [ ] S05 | Managed/native EV activity and pending capacity during charge/discharge | Shared connection budget remains enforced and no contradictory native ownership is acquired |
-| [ ] S06 | Same Tesla site through two entries/providers plus a separate site | One mutation sequence for the shared site, independent progress for the other site, identity changes fenced |
-| [ ] R01 | Existing unresolved local signed-settings incident | Conflicting local/cloud mutation remains blocked; original incident and restoration basis retained |
-| [ ] R02 | Explicit supervised cloud resumption of R01, then restart | Allowed cloud workflow retains the incident; local signed writes remain suspended across restart |
-| [ ] R03 | Restart during active/local/native/interrupted preparation | Cleanup restores captured settings, never replays the prior force action, and gates optimizer startup until verified |
-| [ ] R04 | Reload/unload with queued and submitted work | Queued work cannot later send; submitted uncertainty and terminal persistence remain owned and observable |
-| [ ] R05 | Queue/read/provider wait crossing the original deadline | No late force or deadline extension; cleanup remains possible after forcing authority expires |
-| [ ] R06 | Cancellation/response loss after submission in a simulator | Unknown effect retained; a returned callback is not reported as confirmed device state |
-| [ ] R07 | Entry/site/paired-key/generation replacement during await | Old callbacks cannot write, restore over a newer owner, or clear its UI/journal |
-| [ ] R08 | Status reads and stop/restore decision while provider reply is delayed | Status/telemetry remains responsive; one unresolved effect cannot be erased by unrelated success |
-| [ ] D01 | Read-only diagnostic GET/DCQ/BMS and authorized diagnostic mutations | Reads remain responsive; authorized mutation joins the same site gate; query POST is not mislabeled as a battery write |
-| [ ] D02 | Repeated actionable signed-settings denial, then successful admission | Accurate notice once per continuing blocker; plain actionable recovery reference; clear only after success; SOC/EV/monitoring waits quiet |
+| T01 | Tariff charge, manual and optimizer sources; cloud-only/unreachable-LAN variants | No LAN prerequisite, confirmed cloud preparation/tariff, expected charging under site limits; original deadline unchanged |
+| T02 | Tariff discharge, manual and optimizer sources; cloud-only/unreachable-LAN variants | Correct export permission and discharge/reserve behavior, measured site export within effective limits |
+| T03 | Stop/expiry/restore after T01 and T02 | Owned settings and exact original tariff restored using saved user-reserve provenance; retained owner until required readback/settling. Record intentional untracked Tariff export policy separately |
+| T04 | Numeric battery charging under Tariff, Local V1R and Automatic | Same explicit battery-watt request stays local; battery input matches requested semantics within headroom |
+| T05 | Numeric grid-export target under all three preferences | Local battery target accounts for home load and solar; measured grid export follows requested quantity |
+| T06 | Site-import/spread target under all preferences, with zero/one/two EV reservations | Requested site input remains distinct from battery input; outstanding EV allocation is subtracted without rewriting configured limits |
+| T07 | Local V1R Max charge/discharge, including local refusal | Successful local behavior or precise refusal; no silent tariff fallback after a failed local route |
+| T08 | Automatic charge/discharge on both sides of the full inverter-envelope boundary | Correct local/native selection and physical behavior for each route; unknown/stale evidence cannot authorize local Max |
+| T09 | Telemetry/load changes during an active Automatic native episode | Stable owned episode and original end time; restoration before a replacement route starts |
+| T10 | Hold SOC, release and expiry during idle/force transitions | Correct captured reserve, no new force replay and restoration only of the owned override |
+| T11 | Self-consumption/idle activation, deactivation and expiry | Correct mode/reserve restoration; repeated idle-off does not upload an unrelated historical force tariff |
+| T12 | Return grid export preference to Auto during manual/EV ownership | Only manual preference ownership clears; the EV lease and actual export permission remain independently accounted for |
+| M01 | Manual operation mode changes, paired/unpaired cloud fallback | Selected entry only; exact requested mode readback and no stale bounce overriding it |
+| M02 | Manual backup reserve changes during idle and after a force handoff | Correct reserve readback and no overwritten baseline/newer owner |
+| M03 | Grid charging enable/disable and supported absent-field response | Correct boolean permission/readback contract; unknown permission never becomes a new enable |
+| M04 | Grid export `never`, `pv_only`, `battery_ok`; absent/invalid preference handling | Field-specific write and verified result; no reserve/mode mutation caused by an export-only EV request |
+| M05 | Explicit on-grid solar-curtailment setting for the selected paired entry | Fresh native readback and intended measured curtail/resume; unrelated entry unaffected |
+| M06 | Max Backup entry, exit and overlap refusal | Existing backup commitment remains authoritative; conflicting charge/discharge denied and baseline later restored |
+| M07 | Authorized Storm Watch change and direct status refresh | Generic cloud request joins the site gate, selected site only, direct enabled/active state verified |
+| M08 | Authorized off-grid vehicle reserve change | Generic cloud request joins the site gate; exact reserve readback independent of main battery backup reserve |
+| M09 | VPP enrollment API in an explicitly authorized test environment | Generic program mutation joins the site gate; account/program effect separately confirmed; otherwise record this row unverified |
+| M10 | Explicit authorized island/reconnect via service, switch and local view | All entry paths share bound site/identity control and terminal grid-state readback; run in a simulator if physical islanding is not authorized |
+| M11 | Explicit calibration delay via service/API plus read-only status | Durable request ID and signed acceptance window survive reload; no repeated delayed request after a crash; existing calibration guard retained |
+| E01 | Two-VIN Smart Schedule acquisition and staggered release | One captured original export rule; first release leaves second lease active; final release restores the original |
+| E02 | Restart with saved EV leases and one VIN reacquiring | Recovered release intent persists; reacquiring VIN retains ownership; no duplicate baseline capture |
+| E03 | EV export write/recovery acknowledgement failure in a simulator | No false acquisition/success; original recovery survives failure/cancel/backoff without repeated reserve writes |
+| B01 | Scheduled/manual TOU sync during idle, force, monitoring and restore | Existing deferrals remain; allowed upload is gated/read back and cannot replace an owned force baseline |
+| B02 | AEMO spike and saving-session enter/exit/retry | Correct scoped mode/tariff transition; failed exit retains event and original baseline for recovery |
+| B03 | Poll and websocket solar-curtailment start/resume; EV/manual override | Same site serialization, expected admission and measured solar/export behavior for both sources |
+| B04 | Charge kick/bounce with completion, new command and cancellation | No stale mode/reserve replay; actual restore/charge result tracked independently of a queued kick |
+| S01 | Monitoring/external-control activation while a request waits | No new PowerSync actuator write after authority is lost; intentional read/diagnostic work remains available |
+| S02 | Demand-charge and network-export protection; Max Backup overlap | Direction-specific denials preserved with accurate reason and no routine alert spam |
+| S03 | Disabled/unknown grid charge and export permissions | Precise refusal; no inferred permission from a malformed/missing value; original configuration preserved |
+| S04 | Stale/invalid readings, off-grid and SOC floor/cap variants in a simulator | Denial before mutation; no preference turns missing evidence into control authority |
+| S05 | Managed/native EV activity and pending capacity during charge/discharge | Shared connection budget remains enforced and no contradictory native ownership is acquired |
+| S06 | Same Tesla site through two entries/providers plus a separate site | One mutation sequence for the shared site, independent progress for the other site, identity changes fenced |
+| R01 | Existing unresolved local signed-settings incident | Conflicting local/cloud mutation remains blocked; original incident and restoration basis retained |
+| R02 | Explicit supervised cloud resumption of R01, then restart | Allowed cloud workflow retains the incident; local signed writes remain suspended across restart |
+| R03 | Restart during active/local/native/interrupted preparation | Cleanup restores captured settings, never replays the prior force action, and gates optimizer startup until verified |
+| R04 | Reload/unload with queued and submitted work | Queued work cannot later send; submitted uncertainty and terminal persistence remain owned and observable |
+| R05 | Queue/read/provider wait crossing the original deadline | No late force or deadline extension; cleanup remains possible after forcing authority expires |
+| R06 | Cancellation/response loss after submission in a simulator | Unknown effect retained; a returned callback is not reported as confirmed device state |
+| R07 | Entry/site/paired-key/generation replacement during await | Old callbacks cannot write, restore over a newer owner, or clear its UI/journal |
+| R08 | Status reads and stop/restore decision while provider reply is delayed | Status/telemetry remains responsive; one unresolved effect cannot be erased by unrelated success |
+| D01 | Read-only diagnostic GET/DCQ/BMS and authorized diagnostic mutations | Reads remain responsive; authorized mutation joins the same site gate; query POST is not mislabeled as a battery write |
+| D02 | Repeated actionable signed-settings denial, then successful admission | Accurate notice once per continuing blocker; plain actionable recovery reference; clear only after success; SOC/EV/monitoring waits quiet |
 
 ## Suggested focused software package
 
@@ -210,6 +217,9 @@ replace them with this static inventory.
 ```sh
 /root/codex-workspaces/power-sync-test-venv/bin/python -m pytest \
   tests/test_tesla_control_path_matrix.py \
+  tests/test_tesla_force_response_contract.py \
+  tests/test_tesla_restore_retry_semantics.py \
+  tests/test_powerwall_control_diagnostics.py \
   tests/test_powerwall_control_coordinator.py \
   tests/test_powerwall_control_mutation_gates.py \
   tests/test_powerwall_control_method.py \

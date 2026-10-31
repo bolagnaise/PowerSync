@@ -1013,20 +1013,32 @@ def test_grid_charging_service_is_local_first_with_cloud_fallback_and_refresh():
     assert 'refresh_powerwall_local_after_settings_write(' in source
 
 
-def test_max_backup_service_uses_local_event_with_reserve_fallback():
+def test_max_backup_service_stages_cleanup_before_native_or_cloud_actuation():
     source = _function_source("handle_schedule_max_backup")
-    assert "await local_client.schedule_max_backup(duration_minutes * 60)" in source
-    assert "if local_event:" in source
-    assert "if saved_reserve is None:" in source
-    assert "refusing reserve fallback" in source
-    assert 'DOMAIN, "set_backup_reserve"' in source
-    assert '"local_event": local_event' in source
+    assert "await local_client.schedule_max_backup(duration_minutes * 60, end_ts=end_ts)" in source
+    assert "_cloud_tariff_control_requested(call)" in source
+    assert source.index("persisted = await _persist_max_backup_schedule(") < source.index("await local_client.schedule_max_backup(")
+    assert '"apply_pending": True' in source and '"site_id": site_id' in source
+    assert "if not local_event and saved_reserve is None:" in source
+    assert "cleanup remains owned" in source
+    assert "await handle_set_backup_reserve(make_service_call(" in source
 
 
-def test_max_backup_refuses_unrestorable_reserve_fallback():
-    """A failed local event must not leave a local-only site at 100% reserve."""
+@pytest.mark.parametrize("route,outcome,reserve,error", [
+    ("local", "ack", None, None),
+    ("local", "false", None, "not acknowledged"),
+    ("local", "exception", 2, "reply lost"),
+    ("tariff", "exception", 2, None),
+    ("cloud", "unused", 2, None),
+    ("cloud", "unused", None, "trustworthy"),
+])
+def test_max_backup_keeps_route_specific_cleanup_and_refuses_unrestorable_fallback(route, outcome, reserve, error):
+    """Unknown native replies keep cleanup; cloud never invents a baseline."""
+    from inspect import signature
+    from conftest import load_power_sync_function
+    from test_service_calls import CurrentServiceCall
+
     source = textwrap.dedent(_function_source("handle_schedule_max_backup"))
-
     event_module = types.ModuleType("homeassistant.helpers.event")
     event_module.async_call_later = lambda *_args, **_kwargs: lambda: None
     helpers_module = types.ModuleType("homeassistant.helpers")
@@ -1040,52 +1052,50 @@ def test_max_backup_refuses_unrestorable_reserve_fallback():
     }
     previous = {name: sys.modules.get(name) for name in replacements}
     sys.modules.update(replacements)
-
-    service_calls: list[tuple] = []
-    persisted: list[dict | None] = []
-
-    class Services:
-        async def async_call(self, *args, **kwargs):
-            service_calls.append((args, kwargs))
-
-    local_client = SimpleNamespace(schedule_max_backup=AsyncMock(return_value=False))
+    service_calls, persisted = [], []
+    local_client = SimpleNamespace(schedule_max_backup=AsyncMock(return_value=outcome == "ack"))
+    if outcome == "exception":
+        local_client.schedule_max_backup.side_effect = RuntimeError("reply lost")
     entry_data = {
+        "powerwall_site_control": SimpleNamespace(site_id="site"),
         "powerwall_local": {
-            "client": local_client,
-            "coordinator": SimpleNamespace(
-                data=SimpleNamespace(backup_reserve_percent=None)
-            ),
-        }
+            "client": None if route == "cloud" else local_client,
+            "coordinator": SimpleNamespace(data=SimpleNamespace(backup_reserve_percent=reserve)),
+        },
     }
-    hass = SimpleNamespace(
-        data={"power_sync": {"entry-1": entry_data}},
-        services=Services(),
-    )
-
-    async def persist(payload):
-        persisted.append(payload)
-
+    hass = SimpleNamespace(data={"power_sync": {"entry-1": entry_data}})
+    async def persist(payload, *, is_current=None):
+        assert is_current is None or is_current()
+        persisted.append(dict(payload) if payload is not None else None)
+        return True
+    async def set_backup_reserve(request):
+        service_calls.append(request.data)
+        return {"success": True}
     namespace = {
         "hass": hass,
         "entry": SimpleNamespace(entry_id="entry-1"),
         "DOMAIN": "power_sync",
         "ServiceCall": object,
-        "_LOGGER": SimpleNamespace(
-            error=lambda *_args, **_kwargs: None,
-            info=lambda *_args, **_kwargs: None,
-            warning=lambda *_args, **_kwargs: None,
-        ),
-        "_get_tesla_coordinator_for_service": lambda _name: None,
+        "HomeAssistantError": RuntimeError,
+        "SERVICE_SET_BACKUP_RESERVE": "set_backup_reserve",
+        "make_service_call": load_power_sync_function("make_service_call", {"signature": signature,
+            "ServiceCall": CurrentServiceCall}, path=ROOT / "service_calls.py"),
+        "handle_set_backup_reserve": set_backup_reserve,
+        "_cloud_tariff_control_requested": lambda _call: route == "tariff",
+        "_max_backup_site_current": lambda data: data.get("max_backup_site_id") == "site",
+        "_LOGGER": SimpleNamespace(error=lambda *_a, **_k: None, info=lambda *_a, **_k: None),
+        "_get_tesla_coordinator_for_service": lambda _name: SimpleNamespace(_site_info_cache={}),
         "_persist_max_backup_schedule": persist,
-        "_max_backup_restore": lambda *_args, **_kwargs: None,
+        "_max_backup_restore": lambda *_a, **_k: None,
     }
     try:
         exec(source, namespace)
-        asyncio.run(
-            namespace["handle_schedule_max_backup"](
-                SimpleNamespace(data={"duration_minutes": 30})
-            )
-        )
+        request = SimpleNamespace(data={"duration_minutes": 30}, context=None)
+        if error:
+            with pytest.raises(RuntimeError, match=error):
+                asyncio.run(namespace["handle_schedule_max_backup"](request))
+        else:
+            asyncio.run(namespace["handle_schedule_max_backup"](request))
     finally:
         for name, module in previous.items():
             if module is None:
@@ -1093,12 +1103,20 @@ def test_max_backup_refuses_unrestorable_reserve_fallback():
             else:
                 sys.modules[name] = module
 
-    local_client.schedule_max_backup.assert_awaited_once_with(1800)
-    assert service_calls == []
-    assert persisted == [None]
-    assert "max_backup_saved_reserve" not in entry_data
-    assert "max_backup_end_ts" not in entry_data
-    assert "max_backup_local_event" not in entry_data
+    if route == "local":
+        local_client.schedule_max_backup.assert_awaited_once_with(1800, end_ts=persisted[0]["end_ts"])
+        assert service_calls == []
+        assert persisted[0]["local_event"] is True and persisted[0]["apply_pending"] is True
+        assert persisted[0]["site_id"] == "site" and persisted[0]["saved_reserve"] == reserve
+        assert entry_data["max_backup_end_ts"] == persisted[0]["end_ts"]
+        assert persisted[-1]["apply_pending"] is bool(error)
+    else:
+        local_client.schedule_max_backup.assert_not_awaited()
+        if reserve is None:
+            assert not service_calls and not persisted and "max_backup_end_ts" not in entry_data
+        else:
+            assert service_calls == [{"percent": 100, "source": "user"}]
+            assert persisted[0]["local_event"] is False and persisted[-1]["apply_pending"] is False
 
 
 @async_test

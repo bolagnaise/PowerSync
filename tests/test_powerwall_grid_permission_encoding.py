@@ -1,4 +1,5 @@
 """Native config omits its false grid-charge disallow value on every firmware."""
+import asyncio
 import importlib
 from pathlib import Path
 import sys
@@ -6,6 +7,8 @@ from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+
+from conftest import load_power_sync_function
 
 ROOT = Path(__file__).resolve().parents[1] / 'custom_components/power_sync'
 PKG = 'native_grid_encoding_probe'
@@ -97,3 +100,159 @@ async def test_grid_toggle_false_default_true_false_default_is_not_cached():
     client._transport.read_config.side_effect = TimeoutError
     assert (await client.get_snapshot()).grid_charging_enabled is None
     client._transport.get_system_info.assert_not_awaited()
+
+
+def confirmation_writer():
+    """Run the production confirmation loop with actual native parsing."""
+    clock = SimpleNamespace(now=100.0)
+
+    async def sleep(delay):
+        clock.now += delay
+
+    namespace = {
+        'asyncio': SimpleNamespace(sleep=sleep, CancelledError=asyncio.CancelledError,
+                                  TimeoutError=asyncio.TimeoutError),
+        'time': SimpleNamespace(monotonic=lambda: clock.now),
+        'native_grid_charging_reading': normalization.native_grid_charging_reading,
+    }
+    path = ROOT / 'powerwall_local/dispatch.py'
+    denied = load_power_sync_function('_SettingsPolicyDenied', namespace, path=path)
+    writer = load_power_sync_function('write_config_confirmed', namespace, path=path)
+    return writer, denied
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('config', [{'site_info': {}}, native_config()])
+async def test_native_enable_confirmation_accepts_fresh_omitted_false_default(config):
+    writer, _ = confirmation_writer()
+    transport = SimpleNamespace(write_config=AsyncMock(return_value=True),
+                                read_config=AsyncMock(return_value=config))
+    updates = {'site_info.disallow_charge_from_grid_with_solar_installed': False}
+    assert await writer(transport, 'gateway', updates,
+                        is_current=lambda: True, deadline=105) is True
+    transport.write_config.assert_awaited_once()
+    transport.read_config.assert_awaited_once_with('gateway')
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('expected', [False, True])
+@pytest.mark.parametrize('observed', [False, True])
+async def test_native_confirmation_requires_exact_explicit_permission(expected, observed):
+    writer, _ = confirmation_writer()
+    field = 'disallow_charge_from_grid_with_solar_installed'
+    transport = SimpleNamespace(write_config=AsyncMock(return_value=True),
+                                read_config=AsyncMock(return_value={'site_info': {field: observed}}))
+    assert await writer(transport, 'gateway', {'site_info.' + field: expected},
+                        is_current=lambda: True, deadline=105) is (expected is observed)
+
+
+@pytest.mark.asyncio
+async def test_native_omitted_false_cannot_confirm_disabling_grid_charging():
+    writer, _ = confirmation_writer()
+    transport = SimpleNamespace(write_config=AsyncMock(return_value=True),
+                                read_config=AsyncMock(return_value=native_config()))
+    assert await writer(transport, 'gateway', {
+        'site_info.disallow_charge_from_grid_with_solar_installed': True},
+        is_current=lambda: True, deadline=105) is False
+    assert transport.read_config.await_count == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('config', [None, {}, {'site_info': None}, {'site_info': []},
+    {'site_info': 'unknown'}, {'response': {'site_info': {}}},
+    *[{'site_info': {'disallow_charge_from_grid_with_solar_installed': value}}
+      for value in (None, 0, 'false', [], {})]])
+async def test_native_confirmation_keeps_unavailable_or_malformed_permission_unknown(config):
+    writer, _ = confirmation_writer()
+    transport = SimpleNamespace(write_config=AsyncMock(return_value=True),
+                                read_config=AsyncMock(return_value=config))
+    assert await writer(transport, 'gateway', {
+        'site_info.disallow_charge_from_grid_with_solar_installed': False},
+        is_current=lambda: True, deadline=105) is False
+    assert transport.read_config.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_unknown_native_readback_cannot_confirm_an_unknown_update():
+    writer, _ = confirmation_writer()
+    transport = SimpleNamespace(write_config=AsyncMock(return_value=True),
+                                read_config=AsyncMock(return_value={'site_info': None}))
+    assert await writer(transport, 'gateway', {
+        'site_info.disallow_charge_from_grid_with_solar_installed': None},
+        is_current=lambda: True, deadline=105) is False
+
+
+@pytest.mark.asyncio
+async def test_native_enable_confirmation_retries_fresh_config_after_opposite_readback():
+    writer, _ = confirmation_writer()
+    field = 'disallow_charge_from_grid_with_solar_installed'
+    transport = SimpleNamespace(write_config=AsyncMock(return_value=True),
+        read_config=AsyncMock(side_effect=[{'site_info': {field: True}}, native_config(), native_config()]),
+        get_snapshot=AsyncMock(side_effect=AssertionError('confirmation must read raw native config')))
+    assert await writer(transport, 'gateway', {'site_info.' + field: False},
+                        is_current=lambda: True, deadline=105) is True
+    assert transport.read_config.await_count == 2
+    transport.write_config.assert_awaited_once()
+    transport.get_snapshot.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('field', ['site_info.unrelated_flag', 'unrelated_flag'])
+async def test_native_false_default_is_not_applied_to_other_fields(field):
+    writer, _ = confirmation_writer()
+    transport = SimpleNamespace(write_config=AsyncMock(return_value=True),
+                                read_config=AsyncMock(return_value={'site_info': {}}))
+    assert await writer(transport, 'gateway', {field: False},
+                        is_current=lambda: True, deadline=105) is False
+
+
+@pytest.mark.asyncio
+async def test_native_default_does_not_confirm_another_mismatching_setting():
+    writer, _ = confirmation_writer()
+    transport = SimpleNamespace(write_config=AsyncMock(return_value=True),
+                                read_config=AsyncMock(return_value={'site_info': {}}))
+    assert await writer(transport, 'gateway', {
+        'site_info.disallow_charge_from_grid_with_solar_installed': False,
+        'default_real_mode': 'autonomous'},
+        is_current=lambda: True, deadline=105) is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('revoked', ['generation', 'permission'])
+async def test_native_default_readback_cannot_bypass_current_owner_or_permission(revoked):
+    writer, denied = confirmation_writer()
+    allowed = SimpleNamespace(current=True, permission=True)
+
+    async def read(_din):
+        if revoked == 'generation':
+            allowed.current = False
+        else:
+            allowed.permission = False
+        return native_config()
+
+    transport = SimpleNamespace(write_config=AsyncMock(return_value=True), read_config=read)
+    error = asyncio.CancelledError if revoked == 'generation' else denied
+    with pytest.raises(error):
+        await writer(transport, 'gateway', {
+            'site_info.disallow_charge_from_grid_with_solar_installed': False},
+            is_current=lambda: allowed.current, is_allowed=lambda: allowed.permission, deadline=105)
+
+
+@pytest.mark.asyncio
+async def test_native_rejected_update_cannot_confirm_from_default_readback():
+    writer, _ = confirmation_writer()
+    transport = SimpleNamespace(write_config=AsyncMock(return_value=False),
+                                read_config=AsyncMock(return_value=native_config()))
+    assert await writer(transport, 'gateway', {
+        'site_info.disallow_charge_from_grid_with_solar_installed': False},
+        is_current=lambda: True, deadline=105) is False
+    transport.read_config.assert_not_awaited()
+
+
+def test_cloud_omitted_permission_keeps_unknown_without_native_default():
+    namespace = {}
+    path = ROOT / 'tesla_grid_control.py'
+    load_power_sync_function('_optional_bool', namespace, path=path)
+    parse = load_power_sync_function('tesla_grid_charging_enabled_from_site_info', namespace, path=path)
+    assert parse(native_config()['site_info']) is None
+    assert parse({'components': {}}) is None

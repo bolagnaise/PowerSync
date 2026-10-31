@@ -570,7 +570,6 @@ async def test_preference_change_finishes_pending_cloud_restore_after_local_stop
     runtime['optimizer_force_restart_restore_pending'] = True
     save = Mock(side_effect=lambda current, **values: setattr(current, 'options', values['options']))
     ns['hass'].config_entries = SimpleNamespace(async_get_entry=lambda key: entry, async_update_entry=save)
-    ns['ServiceCall'] = lambda domain, service, data: SimpleNamespace(data=data)
     events = []
     async def restore(call):
         assert not local.pending

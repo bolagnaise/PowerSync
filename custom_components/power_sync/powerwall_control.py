@@ -83,6 +83,7 @@ def foreign_site_owner(hass: Any, entry_id: str | None, site_id: object) -> str 
         candidates += [record.get("site_id") for key in
                        ("powerwall_settings_pending", "tesla_settings_pending", "pending_tesla_restore")
                        if isinstance(record := runtime.get(key), Mapping)]
+        candidates.append(runtime.get("max_backup_site_id"))
         for candidate in candidates:
             try:
                 identities.add(canonical_site_id(candidate))
@@ -112,10 +113,23 @@ def foreign_site_owner(hass: Any, entry_id: str | None, site_id: object) -> str 
             "powerwall_local_recovery_pending", "powerwall_dispatch_fallback_pending", "powerwall_settings_recovering"))
         recovery = recovery or (generic_applies and any(runtime.get(key) for key in
                     ("optimizer_force_restart_restore_pending", "ev_curtailment_override")))
-        event = generic_applies and (any(key in runtime and runtime[key] is not None for key in
+        event = (("max_backup_schedule" in runtime and runtime["max_backup_schedule"] is not None)
+                 or runtime.get("max_backup_recovery_unavailable")
+                 or (generic_applies and (any(key in runtime and runtime[key] is not None for key in
                      ("max_backup_end_ts", "max_backup_saved_reserve"))
-                 or runtime.get("max_backup_local_event") or runtime.get("max_backup_schedule"))
-        if (active or recovery or event or getattr(native, "pending", False)
+                     or runtime.get("max_backup_local_event"))))
+        if event:
+            record = runtime.get("max_backup_schedule")
+            recorded_site = runtime.get("max_backup_site_id") or (
+                record.get("site_id") if isinstance(record, Mapping) else None)
+            try:
+                if canonical_site_id(recorded_site) == target:
+                    return str(owner_id)
+            except (TypeError, ValueError):
+                # A legacy baseline with no physical identity cannot be
+                # proven unrelated to this site.
+                return str(owner_id)
+        if (active or recovery or getattr(native, "pending", False)
                 or getattr(dispatch, "pending", False)) and affects():
             return str(owner_id)
         for key, active_flag in (("aemo_spike_manager", "_in_spike_mode"),

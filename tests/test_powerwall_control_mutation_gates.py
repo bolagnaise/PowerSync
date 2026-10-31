@@ -462,6 +462,8 @@ async def test_local_settings_tracked_child_retains_parent_policy_fence_and_rest
     names = {"_SettingsPolicyDenied", "write_config_confirmed", "dispatch_powerwall_setting", "_record_setting_observation"}
     nodes = [node for node in tree.body if getattr(node, "name", None) in names]
     namespace = {"__package__": f"{PKG}.powerwall_local", "asyncio": asyncio, "time": time,
+                 "native_grid_charging_reading": importlib.import_module(
+                     f"{PKG}.powerwall_local.normalization").native_grid_charging_reading,
                  "DOMAIN": "power_sync", "_LOGGER": logging.getLogger(__name__),
                  "get_local_transport": lambda *args: local,
                  "_LOCAL_FALLBACK_EXC": (transport.PowerwallLocalError, asyncio.TimeoutError)}

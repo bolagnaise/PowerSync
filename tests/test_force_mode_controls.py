@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import copy
+import inspect
 import textwrap
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
@@ -12,6 +13,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from conftest import load_power_sync_function
+from test_service_calls import CurrentServiceCall
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -1381,7 +1384,8 @@ def test_tesla_hold_soc_missing_internal_target_fails_closed():
     assert "except (TypeError, ValueError):" in self_consumption_source
 
 
-def test_tesla_hold_soc_tracks_failed_transition_and_preserves_supersession():
+@pytest.mark.parametrize("starting_soc,target_reserve", [(83.9, 80), (47.4, 47), (0, 0)])
+def test_tesla_hold_soc_tracks_failed_transition_and_preserves_supersession(starting_soc, target_reserve):
     source = INIT_PATH.read_text()
     tree = ast.parse(source)
     handler = _find_function(tree, "handle_hold_battery_soc")
@@ -1444,12 +1448,15 @@ def test_tesla_hold_soc_tracks_failed_transition_and_preserves_supersession():
         persisted = []
         dispatches = []
         timers = []
+        reserve_calls = []
+        mode_calls = []
+        context = SimpleNamespace(user_id="manual-user", parent_id=None)
         logger = FakeLogger()
         services = FakeServices(
             reserve_generation,
             supersede=supersede,
         )
-        coordinator = SimpleNamespace(data={"battery_level": 83.9})
+        coordinator = SimpleNamespace(data={"battery_level": starting_soc})
         entry = SimpleNamespace(entry_id="entry", data={}, options={})
         hass = SimpleNamespace(
             data={
@@ -1474,9 +1481,13 @@ def test_tesla_hold_soc_tracks_failed_transition_and_preserves_supersession():
             return False
 
         async def handle_set_backup_reserve(_call):
+            reserve_calls.append(_call)
+            assert namespace["_monitoring_mode_should_block_control"](_call) is False
             reserve_generation[0] += 1
 
         async def handle_set_self_consumption(_call):
+            mode_calls.append(_call)
+            assert namespace["_monitoring_mode_should_block_control"](_call) is False
             if supersede:
                 reserve_generation[0] += 1
             raise HomeAssistantError("reserve readback did not verify")
@@ -1492,17 +1503,12 @@ def test_tesla_hold_soc_tracks_failed_transition_and_preserves_supersession():
 
             timers.append((restore, expires_at))
 
-        class ServiceCall:
-            def __init__(self, _domain, _service, data, context=None):
-                self.data = data
-                self.context = context
-
         namespace = {
             "_stop_local_powerwall_dispatch": no_local_dispatch,
             "handle_set_backup_reserve": handle_set_backup_reserve,
             "handle_set_self_consumption": handle_set_self_consumption,
             "_arm_hold_soc_tracking": _arm_hold_soc_tracking,
-            "ServiceCall": ServiceCall,
+            "ServiceCall": CurrentServiceCall,
             "HomeAssistantError": HomeAssistantError,
             "DEFAULT_DISCHARGE_DURATION": 60,
             "DISCHARGE_DURATIONS": (30, 60, 120),
@@ -1511,8 +1517,8 @@ def test_tesla_hold_soc_tracks_failed_transition_and_preserves_supersession():
             "SERVICE_RESTORE_NORMAL": "restore_normal",
             "HOLD_SOC_CAPS": {"tesla": {"warning": "warning"}},
             "_LOGGER": logger,
-            "_control_call_source": lambda _call: "user",
-            "_monitoring_mode_should_block_control": lambda _call: False,
+            "battery_connection_profile": SimpleNamespace(monitoring_only=False),
+            "_is_monitoring_mode": lambda: True,
             "_disabled_optimizer_backup_reserve_target": (
                 lambda _entry: (5, "configured reserve")
             ),
@@ -1540,6 +1546,11 @@ def test_tesla_hold_soc_tracks_failed_transition_and_preserves_supersession():
             "async_track_point_in_utc_time": async_track_point_in_utc_time,
             "async_dispatcher_send": async_dispatcher_send,
         }
+        namespace["make_service_call"] = load_power_sync_function("make_service_call",
+            {"signature": inspect.signature, "ServiceCall": CurrentServiceCall},
+            path=INIT_PATH.with_name("service_calls.py"))
+        load_power_sync_function("_control_call_source", namespace)
+        load_power_sync_function("_monitoring_mode_should_block_control", namespace)
         extracted = ast.Module(
             body=[
                 ast.ImportFrom(
@@ -1561,9 +1572,23 @@ def test_tesla_hold_soc_tracks_failed_transition_and_preserves_supersession():
         )
         call = SimpleNamespace(
             data={"duration": 60},
-            context=SimpleNamespace(user_id=None, parent_id=None),
+            context=context,
         )
         asyncio.run(namespace["handle_hold_battery_soc"](call))
+        assert len(reserve_calls) == len(mode_calls) == 1
+        reserve_call, mode_call = reserve_calls[0], mode_calls[0]
+        assert reserve_call.hass is hass and mode_call.hass is hass
+        assert (reserve_call.domain, reserve_call.service) == ("power_sync", "set_backup_reserve")
+        assert reserve_call.data == {"percent": target_reserve, "source": "hold_soc",
+            "_hold_soc_transition_token": namespace["_hold_soc_transition_token"],
+            "_hold_soc_manual_origin": True}
+        assert reserve_call.context is mode_call.context is context
+        assert (mode_call.domain, mode_call.service) == ("power_sync", "set_self_consumption")
+        assert mode_call.data["source"] == "hold_soc"
+        assert mode_call.data["_reserve_restore_target"] == target_reserve
+        assert mode_call.data["_hold_soc_transition_token"] is namespace["_hold_soc_transition_token"]
+        assert mode_call.data["_hold_soc_manual_origin"] is True
+        assert reserve_call.return_response is mode_call.return_response is False
         return (
             hold_state,
             persisted,
@@ -1606,6 +1631,72 @@ def test_tesla_hold_soc_tracks_failed_transition_and_preserves_supersession():
     assert persisted[-1]["active"] is False
     assert not any(payload.get("active") for _signal, payload in dispatches)
     assert not any("Hold SoC ACTIVE" in message for message in messages)
+
+
+@pytest.mark.parametrize("source,token_kind,manual_origin,monitoring_only,blocked", [
+    pytest.param("hold_soc", "actual", True, False, False, id="trusted-manual-hold"),
+    pytest.param("hold_soc", "missing", True, False, True, id="missing-token"),
+    pytest.param("hold_soc", "forged", True, False, True, id="forged-token"),
+    pytest.param("hold_soc", "actual", None, False, True, id="missing-manual-origin"),
+    pytest.param("hold_soc", "actual", False, False, True, id="optimizer-origin"),
+    pytest.param("hold_soc", "actual", "true", False, True, id="truthy-string-is-not-manual"),
+    pytest.param("hold_soc", "actual", 1, False, True, id="truthy-number-is-not-manual"),
+    pytest.param("optimizer", "actual", True, False, True, id="optimizer-source"),
+    pytest.param("automation", "actual", True, False, True, id="automation-cannot-delegate"),
+    pytest.param("hold_soc", "actual", True, True, True, id="monitoring-only-always-blocks-hold"),
+    pytest.param("user", "actual", True, True, True, id="monitoring-only-always-blocks-user"),
+])
+def test_manual_hold_delegation_requires_exact_private_identity_and_manual_origin(
+        source, token_kind, manual_origin, monitoring_only, blocked):
+    token = object()
+    env = {"_hold_soc_transition_token": token,
+           "battery_connection_profile": SimpleNamespace(monitoring_only=monitoring_only),
+           "_is_monitoring_mode": lambda: True}
+    load_power_sync_function("_control_call_source", env)
+    check = load_power_sync_function("_monitoring_mode_should_block_control", env)
+    data = {"source": source}
+    if token_kind != "missing":
+        data["_hold_soc_transition_token"] = token if token_kind == "actual" else object()
+    if manual_origin is not None:
+        data["_hold_soc_manual_origin"] = manual_origin
+    assert check(SimpleNamespace(data=data, context=SimpleNamespace(user_id=None))) is blocked
+
+
+@pytest.mark.parametrize("source", ["user", "manual", "automation", "unknown", "optimizer"])
+def test_self_consumption_preemption_preserves_internal_restore_call_data(source):
+    """Execute the actual preemption branch with HA 2026.10 call binding."""
+    tree = ast.parse(INIT_PATH.read_text())
+    handler = _find_function(tree, "handle_set_self_consumption")
+    begin = next(index for index, node in enumerate(handler.body) if isinstance(node, ast.Assign)
+                 and any(isinstance(target, ast.Name) and target.id == "user_owned_override"
+                         for target in node.targets))
+    run = ast.parse("async def run(call): pass").body[0]
+    run.body = copy.deepcopy(handler.body[begin:begin + 2])
+    restored = []
+
+    async def restore(call):
+        restored.append(call)
+
+    hass, context = object(), SimpleNamespace(user_id="test-user", parent_id=None)
+    env = dict(source=source, force_charge_state={"active": True},
+               force_discharge_state={"active": False}, hold_soc_state={"active": False},
+               hass=hass, entry=SimpleNamespace(entry_id="entry-one"), DOMAIN="power_sync",
+               SERVICE_RESTORE_NORMAL="restore_normal", handle_restore_normal=restore,
+               _LOGGER=SimpleNamespace(info=lambda *_args: None))
+    env["make_service_call"] = load_power_sync_function("make_service_call",
+        {"signature": inspect.signature, "ServiceCall": CurrentServiceCall},
+        path=INIT_PATH.with_name("service_calls.py"))
+    env["entry_service_data"] = load_power_sync_function("entry_service_data", {},
+        path=INIT_PATH.parent / "licensing/entry_routing.py")
+    exec(compile(ast.fix_missing_locations(ast.Module([run], type_ignores=[])),
+                 "<actual self-consumption preemption>", "exec"), env)
+    asyncio.run(env["run"](SimpleNamespace(data={"source": source}, context=context)))
+    assert len(restored) == int(source != "optimizer")
+    if restored:
+        call = restored[0]
+        assert call.hass is hass and call.context is context
+        assert (call.domain, call.service) == ("power_sync", "restore_normal")
+        assert call.data == {"source": "user", "_force_restore": True, "entry_id": "entry-one"}
 
 
 def test_tesla_hold_soc_reserve_readback_waits_for_exact_target():

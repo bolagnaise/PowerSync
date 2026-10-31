@@ -4,6 +4,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import logging
+import inspect
 import copy
 import time
 from pathlib import Path
@@ -13,9 +14,12 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 import aiohttp
 
-from conftest import load_source_node
+from conftest import load_source_node, load_power_sync_function, load_power_sync_submodule
+from test_service_calls import CurrentServiceCall
 
 ROOT = Path(__file__).parents[1] / "custom_components/power_sync"
+native_grid_charging_reading = load_power_sync_submodule(
+    "powerwall_local.normalization", "tesla_local_settings_normalization_probe").native_grid_charging_reading
 
 
 def load_settings_startup(namespace):
@@ -104,7 +108,7 @@ def load_function(path, name, namespace, *, strip_imports=False):
 
 
 def transaction():
-    ns = dict(asyncio=asyncio, time=time)
+    ns = dict(asyncio=asyncio, time=time, native_grid_charging_reading=native_grid_charging_reading)
     return load_function(ROOT / "powerwall_local/dispatch.py", "write_config_confirmed", ns)
 
 
@@ -201,6 +205,7 @@ def settings_context(transport=None, *, paired=True, method="auto"):
                             data={"tesla_energy_site_id": "site", "powerwall_local_din": "din",
                                   "powerwall_local_paired": paired})
     ns = dict(asyncio=asyncio, time=time, DOMAIN="power_sync", _LOGGER=logging.getLogger(__name__),
+              native_grid_charging_reading=native_grid_charging_reading,
               tesla_export_rule_from_site_info=export_namespace["tesla_export_rule_from_site_info"],
               read_export_rule=export_namespace["read_export_rule"],
               _sync_powerwall_settings_issue=Mock(), CONF_TESLA_ENERGY_SITE_ID="tesla_energy_site_id",
@@ -521,8 +526,9 @@ async def test_manual_setting_waits_for_owned_restore_and_retains_its_request(ou
               hold_soc_state={"active": False}, _local_powerwall_generation_current=lambda: True,
               _stop_local_powerwall_dispatch=AsyncMock(return_value=False),
               handle_restore_normal=restore, SERVICE_RESTORE_NORMAL="restore_normal",
-              ServiceCall=lambda domain, service, data, **kwargs: SimpleNamespace(data=data),
               HomeAssistantError=RuntimeError)
+    ns['make_service_call'] = load_power_sync_function('make_service_call',
+        {'signature': inspect.signature, 'ServiceCall': CurrentServiceCall}, path=ROOT/'service_calls.py')
     fn = load_function(ROOT / "__init__.py", "_prepare_tesla_setting_change", ns)
     if outcome == "pending":
         with pytest.raises(RuntimeError, match="restoration remains pending"):
@@ -1576,7 +1582,9 @@ def restore_context(*, mode="backup", direction="discharge", envelope="off"):
         dt_util=SimpleNamespace(utcnow=lambda: datetime.now(timezone.utc)), datetime=datetime, timedelta=timedelta,
         async_track_point_in_utc_time=Mock(return_value=lambda: None),
         _optional_bool=lambda value: value if type(value) is bool else None, _send_expo_push=AsyncMock(),
-        HomeAssistantError=RuntimeError, ServiceCall=lambda domain, service, data, **kwargs: SimpleNamespace(data=data, **kwargs))
+        HomeAssistantError=RuntimeError, ServiceCall=CurrentServiceCall)
+    ns['make_service_call'] = load_power_sync_function('make_service_call',
+        {'signature': inspect.signature, 'ServiceCall': CurrentServiceCall}, path=ROOT/'service_calls.py')
     for name in ("_update_powerwall_store", "_cancel_all_force_timers", "persist_force_mode_state",
                  "persist_pending_tesla_restore", "_tesla_force_result_all_confirmed", "handle_restore_normal",
                  "update_cached_export_rule", "_supersede_tesla_charge_kick", "_prepare_tesla_setting_change"):

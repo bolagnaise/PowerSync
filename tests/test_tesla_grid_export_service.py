@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import inspect
 import textwrap
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from conftest import load_power_sync_function
+from test_service_calls import CurrentServiceCall
 
 
 INIT_PATH = (
@@ -304,7 +307,10 @@ def _registered_export_services(service_name="set_grid_export", *, real_prepare=
                 ns[key] = runtime[key] = {"active": False}
             ns.update(_stop_local_powerwall_dispatch=AsyncMock(), handle_restore_normal=AsyncMock(),
                       SERVICE_RESTORE_NORMAL="restore_normal",
-                      ServiceCall=lambda domain, service, data, **kw: SimpleNamespace(data=data, **kw))
+                      ServiceCall=CurrentServiceCall)
+            ns['make_service_call'] = load_power_sync_function('make_service_call',
+                {'signature': inspect.signature, 'ServiceCall': CurrentServiceCall},
+                path=INIT_PATH.with_name('service_calls.py'))
             load("_supersede_tesla_charge_kick", INIT_PATH, ns)
             prepare = load("_prepare_tesla_setting_change", INIT_PATH, ns)
             ns["_prepare_tesla_setting_change"] = AsyncMock(wraps=prepare)
