@@ -39,7 +39,7 @@ import asyncio
 import importlib
 import sys
 import types
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -425,6 +425,27 @@ def test_site_admission_denial_terminates_ble_to_fleet_start_fallback(monkeypatc
     charger = actions.TESLA_BLE_SWITCH_CHARGER.format(prefix=prefix)
     hass.states._states[charger] = _State(charger, 'off')
     _register_ble_command(hass, prefix)
+    # Reach the intended admission branch with a genuine fresh, registry-bound
+    # BLE receipt.  Without this, the production session-health gate correctly
+    # blocks before prepare_ev_submission and the test never exercises the
+    # admission-denial/no-Fleet-fallback contract.
+    now = datetime.now(timezone.utc)
+    for entity_id, value, attributes in (
+        (f"sensor.{prefix}_charging_state", "Stopped", {}),
+        (f"sensor.{prefix}_charge_current", "0", {"unit_of_measurement": "A"}),
+    ):
+        state = _State(entity_id, value, attributes)
+        state.last_updated = now
+        state.last_changed = now
+        hass.states._states[entity_id] = state
+        hass.entity_registry.entities[entity_id] = SimpleNamespace(
+            entity_id=entity_id,
+            platform="esphome",
+            config_entry_id=f"bridge-{prefix}",
+            device_id=f"bridge-{prefix}",
+            unique_id=entity_id,
+            disabled_by=None,
+        )
     entry = _both_provider_entry(prefix, f'{VIN_B}={prefix}')
     monkeypatch.setattr(actions, '_is_ble_available', lambda *args: True)
     monkeypatch.setattr(actions, '_wake_tesla_ble', AsyncMock(return_value=True))
