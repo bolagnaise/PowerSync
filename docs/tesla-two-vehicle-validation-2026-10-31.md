@@ -52,6 +52,18 @@ Tesla Fleet account as the failed fallback, returned TESSY in
 to that application's key; it does not establish that the owner's PowerSync
 or BLE keys are missing. No key was reset, removed or re-paired.
 
+During the later authorized Fleet repair, the owner identified the application's
+allowed origin as `m2wun.fleetkey.cc`. That address hosted a different public
+key from HA's current key, and Tesla's partner readback denied this application
+access to that domain. It was not supplied as a pairing link. A replacement
+alias, `5hfco.fleetkey.cc`, now hosts the existing HA public key. Registration
+and independent Tesla readback at 07:49:57 both matched that same key; HA's
+private key was unchanged. The owner was asked to approve this verified key
+on W3RT1E. Pairing, a successful command and physical charging remain separate
+pending checks. The first attempted `.fleetkey.net` alias was refused because
+the application permits the `.fleetkey.cc` root; that refused registration is
+not treated as a working repair.
+
 A 25-second read-only bridge log subscription at 06:55 showed successful
 vehicle-status responses on the second bridge. Its reported ESPHome version
 was 2026.6.5 and project version 2026.8.0. Status communication alone did not
@@ -147,3 +159,18 @@ native battery flexibility and Fleet diagnostics. Full combined regression and
 installation receipts are recorded separately when complete. Candidate dev8
 does not contain these follow-ups. The PR remains draft and publication is held
 until the required local control paths, including two-car overlap, are proved.
+
+At feature source `24c3a70df014399df7665859dce94f35ca8e87fe`, audited local
+FULL14 passed **9,892 tests, zero skips**, using four workers in 546.87 seconds.
+Its run ID is `3c8f4d8fab964d32bb379fa5e1338932`; node-list SHA-256 is
+`69381901ebf6415bee9ac350604481e0e6c134fa36a2e6faeefa66c13e16ef50`.
+The combined Boost/ownership/admission package separately passed 562 tests.
+These results do not establish installation or two-car physical behavior.
+
+Documentation-impact review: the manual Fleet change adds fixed actionable
+failure text; it adds no configuration field or setup path. The diagnostic
+behavior is described above. The source documentation signature for
+`automations/actions.py` was refreshed after that review; the source-only
+documentation check passes. Current-main reconciliation also brought in one
+legacy-admission test-fixture correction. Fresh final checks cover that exact
+combined repository state.
