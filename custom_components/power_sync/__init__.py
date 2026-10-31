@@ -40899,9 +40899,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "tesla":     {
             "supported": True,
             "warning": (
-                "Tesla holds SoC as a discharge floor, but firmware may still "
-                "charge the battery from excess solar. Set Grid Export: "
-                "Everything manually for a full lock."
+                "PowerSync sets a reserve floor capped at 80%. Charging may "
+                "continue from solar or the grid; check measured battery "
+                "and grid power."
             ),
         },
         "alphaess":  {
