@@ -215,8 +215,9 @@ def test_rejected_http_200_does_not_promote_requested_rule_to_snapshot():
     namespace["refresh_powerwall_local_after_settings_write"] = _refresh
     handler = _load_grid_export_handler(namespace)
 
-    with pytest.raises(RuntimeError, match="did not accept"):
-        asyncio.run(handler(SimpleNamespace(data={"rule": "never"})))
+    result = asyncio.run(handler(SimpleNamespace(data={"rule": "never"})))
+    assert result["success"] is False
+    assert "did not accept" in result["error"]
 
     assert snapshot.grid_export_rule == "battery_ok"
     assert "cached_export_rule" not in entry_data
@@ -392,8 +393,9 @@ async def test_ev_export_composition_refuses_battery_owner_without_preparation_o
     for key in ("force_charge_state", "force_discharge_state", "hold_soc_state", "self_consumption_state"):
         if key in owner:
             ns[key] = runtime[key]
-    with pytest.raises(RuntimeError, match="waiting for battery control restoration"):
-        await service(SimpleNamespace(data={"rule": "pv_only", "entry_id": "entry1", "_ev_curtailment": True}))
+    result = await _ha_export_response(service, {"rule": "pv_only", "entry_id": "entry1", "_ev_curtailment": True})
+    assert result["success"] is False
+    assert "waiting for battery control restoration" in result["error"]
     ns["_prepare_tesla_setting_change"].assert_not_awaited()
     ns["_stop_local_powerwall_dispatch"].assert_not_awaited()
     ns["handle_restore_normal"].assert_not_awaited()
@@ -437,8 +439,8 @@ async def test_ev_export_final_helper_retains_original_owner_fences(change):
         return False
 
     ns["_tesla_force_apply_export_rule"].side_effect = apply
-    with pytest.raises(RuntimeError, match="did not accept"):
-        await service(SimpleNamespace(data={"rule": "pv_only", "entry_id": "entry1", "_ev_curtailment": True}))
+    result = await _ha_export_response(service, {"rule": "pv_only", "entry_id": "entry1", "_ev_curtailment": True})
+    assert result["success"] is False and "did not accept" in result["error"]
     ns["_prepare_tesla_setting_change"].assert_not_awaited()
     ns["handle_restore_normal"].assert_not_awaited()
     ns["update_cached_export_rule"].assert_not_awaited()
@@ -486,3 +488,86 @@ async def test_ev_export_intent_cannot_route_to_an_unrelated_inverter_controller
     controller.restore.assert_not_awaited()
     contexts["entry1"]["_tesla_force_apply_export_rule"].assert_awaited_once()
     await asyncio.gather(*tasks)
+
+
+async def _ha_export_response(service, data):
+    """Mirror HA's required dictionary result for return_response=True."""
+    response = await service(SimpleNamespace(data=data))
+    if not isinstance(response, dict):
+        raise TypeError(f"expected dictionary, got {type(response).__name__}")
+    return response
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("refusal", ["monitoring", "invalid_rule", "missing_rule", "network", "missing_runtime", "missing_config", "missing_config_ev"])
+async def test_export_no_action_returns_explicit_failure_response_without_write(refusal):
+    hass, service, contexts, tasks = _registered_export_services()
+    ns = contexts["entry1"]
+    data = {"rule": "pv_only", "entry_id": "entry1", "source": "optimizer"}
+    if refusal == "monitoring":
+        ns["_monitoring_mode_should_block_control"] = lambda call: True
+    elif refusal == "invalid_rule":
+        data["rule"] = "invalid"
+    elif refusal == "missing_rule":
+        data.pop("rule")
+    elif refusal == "network":
+        hass.data["power_sync"]["entry1"]["network_envelope_manager"] = SimpleNamespace(
+            snapshot=SimpleNamespace(mode="enforce"))
+    elif refusal == "missing_runtime":
+        hass.data["power_sync"].pop("entry1")
+        service = ns["handle_set_grid_export"]
+    else:
+        ns["_get_tesla_site_configs"] = lambda *args: []
+        if refusal == "missing_config_ev":
+            data["_ev_curtailment"] = True
+            ns["entry"].data.pop("tesla_energy_site_id")
+    result = await _ha_export_response(service, data)
+    assert result["success"] is False and result["error"]
+    ns["_tesla_force_apply_export_rule"].assert_not_awaited()
+    ns["update_cached_export_rule"].assert_not_awaited()
+    ns["refresh_powerwall_local_after_settings_write"].assert_not_awaited()
+    if refusal != "missing_config":
+        ns["_prepare_tesla_setting_change"].assert_not_awaited()
+    assert tasks == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("brand", ["alphaess", "goodwe"])
+@pytest.mark.parametrize("rule", ["never", "pv_only", "battery_ok"])
+@pytest.mark.parametrize("accepted", [False, True])
+async def test_non_tesla_export_returns_only_proven_controller_acknowledgement(brand, rule, accepted):
+    from unittest.mock import AsyncMock
+    hass, service, contexts, tasks = _registered_export_services()
+    ns = contexts["entry1"]
+    controller = SimpleNamespace(curtail=AsyncMock(return_value=accepted), restore=AsyncMock(return_value=accepted))
+    runtime = hass.data["power_sync"]["entry1"]
+    runtime[brand + "_coordinator"] = SimpleNamespace(_controller=controller)
+    result = await _ha_export_response(service, {"rule": rule, "entry_id": "entry1"})
+    assert result["success"] is accepted and result["accepted"] is accepted
+    assert result["settings_confirmed"] is False and result["physical_effect_confirmed"] is False
+    assert (result["error"] is None) is accepted
+    if rule == "never":
+        controller.curtail.assert_awaited_once()
+        controller.restore.assert_not_awaited()
+    else:
+        controller.restore.assert_awaited_once()
+        controller.curtail.assert_not_awaited()
+    if accepted:
+        assert runtime[brand + "_curtailment_state"] == ("curtailed" if rule == "never" else "normal")
+    else:
+        assert brand + "_curtailment_state" not in runtime
+    ns["_prepare_tesla_setting_change"].assert_not_awaited()
+    ns["_tesla_force_apply_export_rule"].assert_not_awaited()
+    assert tasks == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [RuntimeError("transport failed"), asyncio.CancelledError("request superseded")])
+async def test_export_response_contract_does_not_swallow_transport_errors_or_cancellation(failure):
+    _, service, contexts, tasks = _registered_export_services()
+    ns = contexts["entry1"]
+    ns["_tesla_force_apply_export_rule"].side_effect = failure
+    with pytest.raises(type(failure), match=str(failure)):
+        await _ha_export_response(service, {"rule": "never", "entry_id": "entry1"})
+    ns["update_cached_export_rule"].assert_not_awaited()
+    assert tasks == []

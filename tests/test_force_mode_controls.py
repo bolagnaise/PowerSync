@@ -3574,6 +3574,8 @@ def _run_tesla_restore_retry_generation_case(
     namespace = {
         "restore_retry_count": 0,
         "restore_was_force_charging": True,
+        "source": "user",
+        "force_restore": False,
         "force_charge_state": force_charge_state,
         "force_discharge_state": force_discharge_state,
         "_command_generation": command_generation,

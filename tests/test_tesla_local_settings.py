@@ -1693,7 +1693,7 @@ async def test_complete_replacement_restore_saves_root_before_actuation_during_o
     assert ns["_command_generation"][0] == 2
     assert ns["_tesla_force_apply_operation_mode"].await_count == 2
     release.set()
-    assert await old is None
+    assert await old == {"success": False, "error": "restore completion could not be persisted"}
     with pytest.raises(asyncio.CancelledError):
         await new
     assert ns["force_discharge_state"]["active"] is True
@@ -1914,7 +1914,7 @@ async def test_unload_drains_actual_restore_terminal_save_before_replacement():
     await asyncio.sleep(0)
     assert not reload_task.done() and ns["hass"].data["power_sync"]["entry"] is runtime
     release.set()
-    assert await old is None
+    assert await old == {"success": False, "error": "restore completion could not be persisted"}
     await reload_task
     assert saved["force_mode_state"] == {"owner": "new"}
     assert replacement["pending_tesla_restore"] == {"owner": "new"}

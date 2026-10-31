@@ -358,9 +358,11 @@ def test_only_current_verified_completion_releases_restart_gate(superseded):
                store=store, _restore_current=lambda: True,
                force_discharge_state={"active": True}, force_charge_state={"active": False},
                restore_was_hold_soc=False, _clear_hold_soc_state=lambda: None,
+               confirm_restore=False,
                _restore_superseded=lambda _: generation[0] != 1)
     seed_powerwall_store_closures(env, hass=env["hass"], entry=env["entry"])
-    exec(compile(ast.fix_missing_locations(ast.Module(body=[node], type_ignores=[])),
+    not_completed = _find_function(handler, "_restore_not_completed")
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[not_completed, node], type_ignores=[])),
                  "<verified-restore-completion>", "exec"), env)
     asyncio.run(env["run"]())
     assert data["optimizer_force_restart_restore_pending"] is superseded
@@ -424,6 +426,7 @@ def test_pending_only_restore_retry_runs_without_force_state():
         }}}, services=SimpleNamespace(async_call=service)),
         entry=SimpleNamespace(entry_id="entry-1"), DOMAIN="power_sync",
         _command_generation=[2], _restore_generation=2, skip_backup_reserve_restore=False,
+        source="startup_pending_restore", force_restore=True,
         SERVICE_RESTORE_NORMAL="restore_normal", call=None,
         dt_util=SimpleNamespace(utcnow=lambda: datetime(2026, 10, 21, tzinfo=timezone.utc)),
         timedelta=timedelta, async_track_point_in_utc_time=track,
@@ -433,5 +436,6 @@ def test_pending_only_restore_retry_runs_without_force_state():
     assert env["_schedule_tesla_restore_retry"]("readback failed") is True
     asyncio.run(scheduled[0](None))
     assert len(calls) == 1
+    assert calls[0]["source"] == "startup_pending_restore"
     assert calls[0]["_force_restore"] is True
     assert calls[0]["_tesla_restore_generation"] == 2

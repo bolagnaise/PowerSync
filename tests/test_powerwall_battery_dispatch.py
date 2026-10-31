@@ -249,6 +249,36 @@ def controller():
     return c, client, events
 
 
+@pytest.mark.parametrize('target_basis', [None, 'battery', 'grid_export'])
+@pytest.mark.asyncio
+async def test_discharge_reports_grid_export_target_separately_from_battery_watts(target_basis):
+    c, client, _ = controller()
+    client.get_snapshot.return_value = snapshot(load_w=3797, solar_w=0)
+    options = {} if target_basis is None else {'target_basis': target_basis}
+    try:
+        result = await c.start('discharge', 1000, 60, **options)
+        assert result['requested_power_w'] == 1000
+        assert result['power_target_basis'] == 'grid_export'
+        assert result['battery_power_w'] == 4797
+        assert client.dispatch_battery_power.call_args.args[0] == 4797
+        assert c._target_basis == 'grid_export'
+        assert c.grid_import_estimate_w is None
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_grid_export_basis_cannot_be_used_for_charging():
+    c, client, events = controller()
+    with pytest.raises(ValueError, match='Invalid dispatch target basis'):
+        module.battery_watts('charge', 1000, snapshot(), config(), target_basis='grid_export')
+    with pytest.raises(ValueError, match='Invalid dispatch target basis'):
+        await c.start('charge', 1000, 60, target_basis='grid_export')
+    client.dispatch_battery_power.assert_not_awaited()
+    assert not c.pending
+    assert not events
+
+
 @pytest.mark.asyncio
 async def test_pending_battery_charge_draw_survives_uncertain_ack_until_resume():
     c, client, events = controller()
@@ -479,6 +509,31 @@ def test_real_force_handlers_route_locally_and_restore_persisted_state():
     asyncio.run(run())
 
 
+@pytest.mark.asyncio
+async def test_force_discharge_reports_and_persists_grid_export_basis_before_acknowledgement():
+    ns, c, client, saved = load_routing()
+    client.get_snapshot.return_value = snapshot(load_w=3797, solar_w=0)
+
+    async def dispatch(watts, seconds):
+        assert watts == 4797
+        assert ns['force_discharge_state']['command_status'] == 'pending'
+        assert ns['force_discharge_state']['power_target_basis'] == 'grid_export'
+        assert saved['force_mode_state']['power_target_basis'] == 'grid_export'
+        return True
+
+    client.dispatch_battery_power.side_effect = dispatch
+    try:
+        result = await ns['handle_force_discharge'](call(source='user', power_w=1000, duration=15))
+        assert result['requested_power_w'] == 1000
+        assert result['power_target_basis'] == 'grid_export'
+        assert result['battery_power_w'] == 4797
+        assert ns['force_discharge_state']['battery_power_w'] == 4797
+        assert saved['force_mode_state']['power_target_basis'] == 'grid_export'
+        assert saved['force_mode_state']['power_w'] == 1000
+    finally:
+        await c.stop()
+
+
 def test_real_optimizer_monitoring_gate_sends_no_battery_command():
     async def run():
         ns,c,client,saved=load_routing(monitored=True)
@@ -513,10 +568,13 @@ def test_pending_local_intent_survives_optimizer_clear_before_restore():
     asyncio.run(run())
 
 
-def test_restart_resumes_without_replaying_dispatch_or_tariff():
+@pytest.mark.parametrize('mode,target_basis', [('charge', None), ('discharge', 'battery'), ('discharge', 'grid_export')])
+def test_restart_resumes_without_replaying_dispatch_or_tariff(mode, target_basis):
     async def run():
         ns,c,client,saved=load_routing()
-        ns['persisted_force_state']={'mode':'charge','source':'optimizer','powerwall_local_dispatch':True}
+        ns['persisted_force_state']={'mode':mode,'source':'optimizer','powerwall_local_dispatch':True}
+        if target_basis is not None:
+            ns['persisted_force_state']['power_target_basis'] = target_basis
         ns['hass'].data['power_sync']['entry']['powerwall_local_recovery_pending']=True
         await ns['restore_force_mode_from_persistence']()
         client.dispatch_battery_power.assert_not_called()

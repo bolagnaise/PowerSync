@@ -34633,6 +34633,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             raise HomeAssistantError("Optimizer local dispatch requires positive power")
         config = {**entry.data, **entry.options}
         target = grid_target if grid_target is not None else power_w or config.get("optimization_max_grid_export_w" if mode == "discharge" else "optimization_max_charge_w", 5000)
+        target_basis = "grid_import" if grid_target is not None else "grid_export" if mode == "discharge" else "battery"
 
         def allowed(direction):
             if (not _local_powerwall_generation_current() or _monitoring_mode_should_block_control(call)
@@ -34681,7 +34682,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                          scope="optimizer" if source == "optimizer" else "external",
                          started_at=dt_util.utcnow(), commitment_eligible=False,
                          grid_import_target_w=grid_target,
-                         power_target_basis="grid_import" if grid_target is not None else "battery")
+                         power_target_basis=target_basis)
             # Publish the request before waiting for LAN acknowledgement so
             # the dashboard can distinguish starting from an accepted action.
             async_dispatcher_send(hass, f"{DOMAIN}_force_{mode}_state", {
@@ -34691,7 +34692,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             try:
                 result = await controller.start(mode, target, duration * 60,
                                                 allowed=allowed, guarded_write=local_export_guard if mode == "discharge" else None,
-                                                target_basis="grid_import" if grid_target is not None else "battery",
+                                                target_basis=target_basis,
                                                 prepare_grid_charging=source == "optimizer")
             except Exception as err:
                 from .powerwall_local.battery_dispatch import DispatchCommandFailed, GridChargingPermissionError
@@ -34900,7 +34901,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 raise HomeAssistantError(
                     "Optimizer force discharge blocked by monitoring mode"
                 )
-            return
+            return {"success": False, "error": "blocked by monitoring mode"}
 
         # Every service-originated export path (manual, automation, optimizer
         # hardware extension) passes this single entry-scoped gate before the
@@ -36992,7 +36993,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 source,
                 command_power_w,
             )
-            return
+            return {"success": False, "error": "blocked by monitoring mode"}
 
         native_result = await _try_native_max_charge(call, duration, requested_at + duration * 60)
         if native_result is not None:
@@ -38872,11 +38873,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         return tariff, actual_expiry
 
     @_track_tesla_settings_control
-    async def handle_restore_normal(call: ServiceCall) -> None:
+    async def handle_restore_normal(call: ServiceCall) -> dict[str, Any] | None:
         """Restore normal operation - restore saved tariff or trigger Amber sync."""
         # Log call context for debugging (helps identify if called by automation)
         context = call.context
         source = _control_call_source(call)
+        confirm_restore = bool(call.data.get("_confirm_restore"))
+
+        def _restore_not_completed(reason: str) -> dict[str, Any] | None:
+            return {"success": False, "error": reason} if confirm_restore else None
+
         expected_tesla_restore_generation = call.data.get(
             "_tesla_restore_generation"
         )
@@ -38900,11 +38906,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 expected_tesla_restore_generation,
                 _command_generation[0],
             )
-            return
+            return _restore_not_completed("restoration superseded")
         from .powerwall_local.native_max_charge import NativeMaxRestorePending
         try:
             if await _stop_local_powerwall_dispatch():
-                return
+                if _restore_request_superseded():
+                    return _restore_not_completed("restoration superseded")
+                # The owning stop workflow completed; this response does not
+                # assert independent physical telemetry confirmation.
+                return {"success": True, "error": None} if confirm_restore else None
         except NativeMaxRestorePending:
             # A manual click requests restoration; the session watcher retains
             # ownership and finishes physical verification in the background.
@@ -38917,7 +38927,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
             return
         if _restore_request_superseded():
-            return
+            return _restore_not_completed("restoration superseded")
 
         solaredge_restore_coordinator = (
             hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get("solaredge_coordinator")
@@ -38931,7 +38941,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _LOGGER.info(f"🔄 Restore normal service called (context: user_id={context.user_id}, parent_id={context.parent_id}, source={source})")
         _LOGGER.info("🔄 RESTORE NORMAL: Restoring normal operation")
         force_restore = bool(call.data.get("_force_restore"))
-        confirm_restore = bool(call.data.get("_confirm_restore"))
         skip_backup_reserve_restore = bool(
             call.data.get("_skip_backup_reserve_restore")
             or force_charge_state.get("_skip_backup_reserve_restore")
@@ -38972,7 +38981,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "[MONITORING] Would restore normal operation (source=%s) — blocked by monitoring mode",
                 source,
             )
-            return
+            return _restore_not_completed("blocked by monitoring mode")
         if _is_monitoring_mode() and sigenergy_native_control:
             _LOGGER.info(
                 "[MONITORING] Allowing Sigenergy native/VPP restore so Remote EMS is released"
@@ -39042,9 +39051,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _restore_reserve_generation = _tesla_reserve_generation[0]
         if active_battery_system == BATTERY_SYSTEM_TESLA:
             if not await persist_force_mode_state():
-                return
+                return _restore_not_completed("restore state could not be persisted")
             if _command_generation[0] != _restore_generation:
-                return
+                return _restore_not_completed("restoration superseded")
 
         def _restore_current() -> bool:
             return (_command_generation[0] == _restore_generation
@@ -39140,7 +39149,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     SERVICE_RESTORE_NORMAL,
                     (entry_service_data(entry.entry_id, {
                         "_restore_retry": next_retry,
-                        "_force_restore": True,
+                        "source": source,
+                        "_force_restore": force_restore,
                         "_allow_monitoring_restore": True,
                         "_skip_backup_reserve_restore": (
                             skip_backup_reserve_restore
@@ -40150,7 +40160,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         "saved backup reserve unavailable"
                     )
                     await persist_force_mode_state()
-                    return
+                    return _restore_not_completed("saved backup reserve unavailable")
                 if not site_configs:
                     _LOGGER.error(
                         "Missing Tesla site ID or token for Hold SoC cleanup"
@@ -40159,7 +40169,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         "Tesla site configuration unavailable"
                     )
                     await persist_force_mode_state()
-                    return
+                    return _restore_not_completed("Tesla site configuration unavailable")
 
                 normalized_saved_reserve = (
                     _normalize_tesla_backup_reserve_percent(
@@ -40227,21 +40237,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     )
                     _clear_hold_soc_state()
                     await persist_force_mode_state()
-                    return
+                    return _restore_not_completed("restoration superseded")
                 if not cleanup_verified:
                     _schedule_tesla_hold_restore_retry(
                         "saved reserve did not verify"
                     )
                     await persist_force_mode_state()
-                    return
+                    return _restore_not_completed("saved reserve did not verify")
 
                 _clear_hold_soc_state()
-                await persist_force_mode_state()
+                if not await persist_force_mode_state():
+                    return _restore_not_completed("restore state could not be persisted")
                 _LOGGER.info(
                     "Tesla Hold SoC cleanup verified at %d%%",
                     normalized_saved_reserve,
                 )
-                return
+                return {"success": True, "error": None} if confirm_restore else None
 
             # Get Tesla gateway config
             if not site_configs:
@@ -40267,7 +40278,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 ):
                     _mark_tesla_restore_failed("initial self_consumption handoff failed")
                 if _restore_superseded("initial mode handoff"):
-                    return
+                    return _restore_not_completed("restoration superseded")
 
             # Check if user is using dynamic pricing (restore via sync instead of saved tariff)
             electricity_provider = entry.options.get(
@@ -40320,7 +40331,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     check_name="restore normal"
                 )
                 if _restore_superseded("TOU sync"):
-                    return
+                    return _restore_not_completed("restoration superseded")
                 if tariff_restored is not True:
                     _mark_tesla_restore_failed("dynamic tariff restore did not verify")
             elif saved_tariff or force_discharge_state.get("saved_states") or force_charge_state.get("saved_states"):
@@ -40347,7 +40358,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             entry_id=entry.entry_id,
                         )
                         if _restore_superseded("tariff restore"):
-                            return
+                            return _restore_not_completed("restoration superseded")
                         if success:
                             _LOGGER.info("Restored saved tariff for site %s", site_id)
                         else:
@@ -40361,7 +40372,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     if len(site_configs) > 1:
                         await asyncio.sleep(1)
                     if _restore_superseded("tariff restore"):
-                        return
+                        return _restore_not_completed("restoration superseded")
             else:
                 # No saved tariff - for tariff-backed spike users this is a problem
                 # because sync_tou_schedule intentionally skips these providers.
@@ -40389,7 +40400,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         check_name="restore normal fallback"
                     )
                     if _restore_superseded("fallback TOU sync"):
-                        return
+                        return _restore_not_completed("restoration superseded")
                     if fallback_restored is False:
                         _mark_tesla_restore_failed("fallback TOU sync failed")
 
@@ -40541,7 +40552,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     else:
                         await update_cached_export_rule(saved_export_rule, is_current=_restore_current)
                 if _restore_superseded("mode/reserve restore"):
-                    return
+                    return _restore_not_completed("restoration superseded")
 
             # Restore grid charging to the user's pre-force setting unless
             # demand protection (including its one-minute pre-arm) requires it
@@ -40599,7 +40610,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                         or not _demand_grid_charging_protection_active()),
                 )
                 if _restore_superseded("grid charging restore"):
-                    return
+                    return _restore_not_completed("restoration superseded")
                 restore_grid_confirmed = _tesla_force_result_all_confirmed(
                     restore_grid_result,
                     [(site_id, current_token, provider)],
@@ -40663,7 +40674,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     ),
                 )
                 if _restore_superseded("final reserve pulse"):
-                    return
+                    return _restore_not_completed("restoration superseded")
                 if (
                     _tesla_reserve_generation[0]
                     != _restore_reserve_generation
@@ -40715,7 +40726,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     expected_generation=_restore_generation,
                 )
                 if _restore_superseded("restore failure persistence"):
-                    return
+                    return _restore_not_completed("restoration superseded")
                 if _schedule_tesla_restore_retry("one or more Tesla restore writes failed"):
                     await persist_force_mode_state()
                 if confirm_restore:
@@ -40729,7 +40740,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 store, {"force_mode_state": None, "pending_tesla_restore": None},
                 is_current=_restore_current,
             ):
-                return
+                return _restore_not_completed("restore completion could not be persisted")
             hass.data[DOMAIN][entry.entry_id]["pending_tesla_restore"] = None
             # Clear discharge state
             force_discharge_state["active"] = False
@@ -40768,7 +40779,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _clear_hold_soc_state()
 
             if _restore_superseded("restore completion"):
-                return
+                return _restore_not_completed("restoration superseded")
             hass.data[DOMAIN][entry.entry_id][
                 "optimizer_force_restart_restore_pending"
             ] = False
@@ -40793,7 +40804,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     _LOGGER.debug(f"Could not send success notification: {notify_err}")
 
             if _restore_superseded("restore notification"):
-                return
+                return _restore_not_completed("restoration superseded")
             # Dispatch events for UI
             async_dispatcher_send(hass, f"{DOMAIN}_force_discharge_state", {
                 "active": False,
@@ -42758,19 +42769,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             raise
 
     @_track_tesla_settings_control
-    async def handle_set_grid_export(call: ServiceCall) -> dict[str, Any] | None:
+    async def handle_set_grid_export(call: ServiceCall) -> dict[str, Any]:
         """Set the grid export rule."""
         rule = call.data.get("rule")
         if rule not in ("never", "pv_only", "battery_ok"):
             _LOGGER.error(f"Invalid grid export rule: {rule}. Must be 'never', 'pv_only', or 'battery_ok'.")
-            return
+            return {"success": False, "error": "invalid grid export rule"}
 
         # A permissive export-rule write can remove an inverter-side cap and
         # increase both managed battery and unmanaged PV export.  Flexible
         # Exports therefore permits only the fail-closed `never` transition;
         # the certified site controller remains the sole authority for
         # raising a connection limit.
-        _grid_export_entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+        _grid_export_entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+        if not isinstance(_grid_export_entry_data, dict):
+            return {"success": False, "error": "PowerSync entry is unavailable"}
         _grid_export_manager = _grid_export_entry_data.get("network_envelope_manager")
         if (
             rule != "never"
@@ -42782,14 +42795,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 rule,
                 _grid_export_manager.snapshot.mode,
             )
-            return
+            return {"success": False, "error": "blocked by network export protection"}
 
         if _monitoring_mode_should_block_control(call):
             _LOGGER.info(
                 "[MONITORING] Would set grid export rule to %s — blocked by monitoring mode",
                 rule,
             )
-            return
+            return {"success": False, "error": "blocked by monitoring mode"}
 
         _LOGGER.info(f"📤 Setting grid export rule to {rule}")
 
@@ -42816,7 +42829,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         _LOGGER.info("AlphaESS: grid export set to %s (export limit restored)", rule)
                     else:
                         _LOGGER.error("AlphaESS: failed to restore export limit")
-                return
+                return {
+                    "success": success is True,
+                    "accepted": success is True,
+                    "error": None if success is True else "AlphaESS grid export update was not accepted",
+                    "settings_confirmed": False,
+                    "physical_effect_confirmed": False,
+                }
 
             # GoodWe: map rule to export limit register
             gw_coord = entry_data.get("goodwe_coordinator")
@@ -42838,25 +42857,37 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         _LOGGER.info("GoodWe: grid export set to %s (export limit removed)", rule)
                     else:
                         _LOGGER.error("GoodWe: failed to restore export limit")
-                return
+                return {
+                    "success": success is True,
+                    "accepted": success is True,
+                    "error": None if success is True else "GoodWe grid export update was not accepted",
+                    "settings_confirmed": False,
+                    "physical_effect_confirmed": False,
+                }
 
             export_runtime = entry_data
             if ev_export:
                 from .automations.ev_charging_planner import _ev_curtailment_battery_owner_present
                 from .powerwall_control import foreign_site_owner
 
+                site_configs = _get_tesla_site_configs(hass, entry)
+                if not site_configs:
+                    return {"success": False, "error": "Tesla site or API token is unavailable"}
                 export_site_id = entry.data.get(CONF_TESLA_ENERGY_SITE_ID)
                 def ev_export_unowned():
                     return (str(entry.data.get(CONF_TESLA_ENERGY_SITE_ID)) == str(export_site_id)
                             and not _ev_curtailment_battery_owner_present(export_runtime)
                             and foreign_site_owner(hass, entry.entry_id, export_site_id) is None)
                 if not ev_export_unowned():
-                    raise HomeAssistantError("EV export is waiting for battery control restoration")
+                    return {"success": False, "error": "EV export is waiting for battery control restoration"}
                 generation = (_command_generation[0], _tesla_charge_kick_generation[0])
                 operation_generation = _tesla_operation_generation[0]
             else:
                 prepared = await _prepare_tesla_setting_change(call)
                 generation = prepared[:2]
+                site_configs = _get_tesla_site_configs(hass, entry)
+                if not site_configs:
+                    return {"success": False, "error": "Tesla site or API token is unavailable"}
             def current():
                 return (hass.data.get(DOMAIN, {}).get(entry.entry_id) is export_runtime
                         and generation == (_command_generation[0], _tesla_charge_kick_generation[0])
@@ -42867,14 +42898,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             operation_generation == _tesla_operation_generation[0]
                             and ev_export_unowned())))
             success = await _tesla_force_apply_export_rule(
-                _get_tesla_site_configs(hass, entry), rule,
+                site_configs, rule,
                 reason="set grid export", is_current=current,
                 require_readback=True,
             )
             if not success:
-                raise HomeAssistantError(
-                    f"Tesla did not accept grid export rule {rule}"
-                )
+                return {"success": False, "error": f"Tesla did not accept grid export rule {rule}"}
 
             entry_data = hass.data.setdefault(DOMAIN, {}).setdefault(
                 entry.entry_id, {}

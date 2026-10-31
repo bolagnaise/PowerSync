@@ -128,7 +128,9 @@ def battery_watts(mode: str, target_w: float, snapshot: Any, config: dict, *, ta
     The export envelope clamps target_w before this function is called.
     """
     validate_dispatch_config(mode, config)
-    if target_basis not in ("battery", "grid_import") or (target_basis == "grid_import" and mode != "charge"):
+    if (target_basis not in ("battery", "grid_import", "grid_export")
+            or (target_basis == "grid_import" and mode != "charge")
+            or (target_basis == "grid_export" and mode != "discharge")):
         raise ValueError("Invalid dispatch target basis")
     target = _number(target_w, "power target")
     soc = _number(snapshot.soc, "battery SOC")
@@ -342,8 +344,14 @@ class LocalBatteryDispatch:
     async def start(self, mode: str, target_w: float, duration_seconds: int, *, allowed=None, guarded_write=None, target_basis="battery", prepare_grid_charging=False) -> dict:
         if type(duration_seconds) is not int or not 1 <= duration_seconds <= 86400:
             raise ValueError("Invalid local dispatch duration")
-        if target_basis not in ("battery", "grid_import") or (target_basis == "grid_import" and mode != "charge"):
+        if (target_basis not in ("battery", "grid_import", "grid_export")
+                or (target_basis == "grid_import" and mode != "charge")
+                or (target_basis == "grid_export" and mode != "discharge")):
             raise ValueError("Invalid dispatch target basis")
+        # Discharge has always targeted grid export. Keep the original default
+        # as an input alias while reporting the physical quantity accurately.
+        if mode == "discharge" and target_basis == "battery":
+            target_basis = "grid_export"
         async with self._lock:
             await self._cancel_task()
             if self._grid_charge_restore and (self._grid_charge_restore["phase"] != "applied"
