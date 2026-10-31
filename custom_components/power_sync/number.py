@@ -296,7 +296,7 @@ class BackupReserveNumber(_TeslaSiteNumberBase):
             DOMAIN,
             "set_backup_reserve",
             {"percent": int(value), "source": "user"},
-            blocking=False,
+            blocking=True,
         )
 
 
