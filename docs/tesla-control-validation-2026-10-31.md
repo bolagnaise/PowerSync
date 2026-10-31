@@ -1,5 +1,12 @@
 # Tesla control validation — 31 October 2026
 
+**Historical checkpoint report:** the candidate7 baselines below were captured
+before the owner changed Tesla settings. The latest two-car/Fleet and installed
+candidate10 receipts are in the [two-vehicle supplement](tesla-two-vehicle-validation-2026-10-31.md).
+The current owner baseline is 5% native reserve and Self-Powered mode; the
+earlier 100%/autonomous values below must not be restored. Current public main
+is `293a675e5548198c9f27ea8d5dee2737d9cda27f`, version `v2.12.1576`.
+
 **Checkpoint scope after concurrent main update:** the detailed receipts below
 record candidate7 and its frozen Tesla implementation. The branch subsequently
 integrates main commit `dbfab9dde2795dade6c94b814307392dc0dd9566`, which changes

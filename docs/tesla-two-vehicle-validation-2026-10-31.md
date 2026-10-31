@@ -6,6 +6,13 @@ returned home. The trial used unpublished candidate `2.12.1575.dev8`, packaged
 from `7a2c6e2fd67f9c4886774468c28c38b0de5e542b`. Subsequent source fixes were
 not installed during this trial. All times below are UTC.
 
+**Latest installed checkpoint:** `2.12.1576.dev10`, source
+`2a63050d9c311b89191d49b23073ce8136ed4fa8`. The first trial below is historical;
+the successful Fleet overlap and reload trials are recorded separately. The
+owner's current baseline is 5% native reserve and Self-Powered mode, with
+Monitoring enabled, Fleet-only commands and all automatic EV modes disabled.
+The PR is draft and unreleased.
+
 ## Starting conditions
 
 PowerSync resolved two distinct physical vehicles, each with its own paired
@@ -60,7 +67,8 @@ alias, `5hfco.fleetkey.cc`, now hosts the existing HA public key. Registration
 and independent Tesla readback at 07:49:57 both matched that same key; HA's
 private key was unchanged. The owner was asked to approve this verified key
 on W3RT1E. Pairing, a successful command and physical charging remain separate
-pending checks. The first attempted `.fleetkey.net` alias was refused because
+checks, subsequently completed in the Fleet trial below. The first attempted
+`.fleetkey.net` alias was refused because
 the application permits the `.fleetkey.cc` root; that refused registration is
 not treated as a working repair.
 
@@ -123,6 +131,63 @@ them to kW and chooses deterministically. Both defects have unchanged-baseline
 failures and focused regressions; the final combined artifact is checked again
 before release. Fleet remains the working command route while BLE firmware
 deployment is unresolved.
+
+## Installed two-car display and reload trial
+
+Candidate `2.12.1576.dev10` includes the Fleet identity and power-unit repairs.
+All 265 installed files matched archive SHA-256
+`61a74e0d7209e4ebcac594e99678fcfee23f01408844c4cf4ea00adc37d9a7ad`.
+HA configuration check and startup passed. The EV charging selector showed
+exactly two canonical cars after restart, rather than four provider rows.
+
+With the same temporary 5 A per-car and 12 A site limits, W3RT1E's two-minute
+Boost was requested at 08:20:04.680 and accepted at 08:20:08.724. Its original
+deadline was 08:22:04.972882. A fresh HA Fleet update at 08:21:09 showed Charging
+and 1 kW in both vehicle-list and canonical loadpoint APIs. The normal HA
+`homeassistant.reload_config_entry` service ran from 08:21:53.329 to
+08:22:00.468. The earlier unsupported REST reload request failed immediately
+and did not reload the integration.
+
+After the successful reload, PowerSync recorded the timed stop at
+08:22:05.874877, retaining the original deadline. Independent Fleet vehicle
+readback at 08:22:21 showed W3RT1E Stopped/0 A; TESSY was asleep. Every Home
+Power setting was restored at 08:23:09.165, and Fleet accepted W3RT1E's original
+10 A request. Fresh readback at 08:24:30 confirmed Stopped/0 A, requested 10 A
+and target 80%. TESSY had earlier fresh Stopped/0 A, requested 15 A and target
+70% readback at 08:11:29, with no subsequent charging command to that car.
+
+The house picture remained a separate defect: its generated configuration
+populated only the selected EV's entity slot even though the canonical API
+reported two home, plugged-in cars. The existing renderer already has two-car
+scenes. The follow-up connects generated house pictures to read-only canonical
+loadpoints, retaining manual entity configuration for standalone cards.
+Generated classic and board layouts use the same opt-in read-only path. Actual
+JavaScript regressions cover two stopped/charging cars, selector independence,
+separate power paths, all weather/day/night scenes, duplicate identities,
+away/unplugged cars, unavailable power and failed-read fallback. Polling is
+bounded to 30 seconds, with one in-flight read, a 90-second browser-cache limit
+and rejection of replies from a previous connection or configuration. The
+focused and adjacent package passed 113 tests before integration.
+
+The final storage review also found two Boost stop obligations retained after
+the live trials. The observation consumer required a known-state marker that
+the real discovery producer removed. A focused follow-up carries private,
+timestamped charging-state evidence to that consumer; stale, unknown or other
+vehicle observations cannot retire a stop obligation. Neither journal is
+manually cleared. Installation and fresh recovery readback of these follow-ups
+are recorded in the PR receipts when complete.
+Private evidence keeps the original charging-state timestamp; a fresh meter,
+Wall Connector sample or repeated HA report cannot renew an old state. Explicit
+Stopped/Complete/Disconnected may prove a stop. Starting, Pending, unknown and
+equal-time conflicting provider evidence remain uncertain. Default/public
+vehicle rows retain their existing schema.
+
+The corresponding dashboard wiki text is prepared in local wiki commit
+`bf631f3` on `docs/tesla-connected-vehicle-picture`. It is held with this
+unreleased feature rather than being published as existing release behavior.
+
+Sanitized records: `fleet-two-vehicle-trial-20261031.json` and
+`fleet-reload-boost-trial-20261031.json` in the local evidence directory.
 
 ## Reproduced source defects
 
@@ -208,6 +273,17 @@ native battery flexibility and Fleet diagnostics. Full combined regression and
 installation receipts are recorded separately when complete. Candidate dev8
 does not contain these follow-ups. The PR remains draft and publication is held
 until the required local control paths, including two-car overlap, are proved.
+
+At source `2a63050d9c311b89191d49b23073ce8136ed4fa8`, audited local FULL16
+passed **9,949 tests, zero skips**, four workers, 517.85 seconds; run ID
+`72b0e619932d49dfa7e02c172518d39f`, node-list SHA-256
+`addd798b8d6867c224c633879f353780769a878d566101757a2c16c019465cc3`.
+PR regression run [55](https://github.com/bolagnaise/PowerSync/actions/runs/41183782946)
+independently passed the same 9,949 tests with zero skips in 970.59 seconds;
+its audited run ID is `cf9e758ac5b8494baeaf7bfc2848952f`.
+These receipts cover that checkpoint. Subsequent code changes require a new
+complete audited run and matching installation receipts. PR success does not
+replace protected-main evidence required for publication.
 
 At feature source `24c3a70df014399df7665859dce94f35ca8e87fe`, audited local
 FULL14 passed **9,892 tests, zero skips**, using four workers in 546.87 seconds.
