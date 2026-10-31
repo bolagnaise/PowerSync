@@ -12,7 +12,7 @@ import re
 import sys
 from urllib.parse import unquote, urlsplit
 
-from .powerwall_control import ControlRequestStale, canonical_site_id, coordinator_for
+from .powerwall_control import ControlRequestStale, canonical_site_id, coordinator_for, foreign_site_owner
 
 _ENERGY_POST = re.compile(r"(?:^|/)api/1/energy_sites/([^/]+)/(.+?)/?$")
 _LABELS = frozenset({"operation", "backup", "grid_import_export", "time_of_use_settings", "device_command", "command"})
@@ -61,27 +61,31 @@ def async_get_clientsession(hass):
     return controlled_session(hass, raw_session(hass))
 
 
-def controlled_session(hass, raw_session, *, is_current=None, identity=None, before_send=None):
+def controlled_session(hass, raw_session, *, is_current=None, identity=None, before_send=None, entry_id=None):
     """Preserve reads/other services while ordering Tesla energy mutations.
 
     Per-request ``_power_sync_is_current``, ``_power_sync_before_send``,
     ``_power_sync_deadline`` and ``_power_sync_on_rejected`` compose the
     original caller's final fences. They are never forwarded to aiohttp.
     """
-    if isinstance(raw_session, _ControlledSession) and is_current is None and identity is None and before_send is None:
+    if isinstance(raw_session, _ControlledSession) and is_current is None and identity is None and before_send is None and entry_id is None:
         return raw_session
     if isinstance(raw_session, _ControlledSession):
-        result = _ControlledSession(hass, raw_session._raw, is_current, identity, before_send)
+        if entry_id is not None and raw_session._entry_id is not None and entry_id != raw_session._entry_id:
+            raise ControlRequestStale("A controlled session cannot change its owning entry")
+        result = _ControlledSession(hass, raw_session._raw, is_current, identity, before_send,
+                                    raw_session._entry_id if entry_id is None else entry_id)
         result._guards = raw_session._guards + result._guards
         result._identities = raw_session._identities + result._identities
         result._fences = raw_session._fences + result._fences
         return result
-    return _ControlledSession(hass, raw_session, is_current, identity, before_send)
+    return _ControlledSession(hass, raw_session, is_current, identity, before_send, entry_id)
 
 
 class _ControlledSession:
-    def __init__(self, hass, raw, is_current, identity, before_send):
+    def __init__(self, hass, raw, is_current, identity, before_send, entry_id):
         self._hass, self._raw = hass, raw
+        self._entry_id = entry_id
         self._guards = (is_current,) if is_current is not None else ()
         self._identities = (identity,) if identity is not None else ()
         self._fences = (before_send,) if before_send is not None else ()
@@ -108,13 +112,17 @@ class _ControlledSession:
         return self._mutation(url, lambda: self._raw.delete(url, *args, **kwargs), kwargs)
 
     def _mutation(self, url, create_request, kwargs):
-        guard, fence, on_rejected, deadline = _markers(kwargs)
+        guard, fence, on_rejected, deadline, marked_entry_id = _markers(kwargs)
         try:
             match = _ENERGY_POST.search(urlsplit(str(url)).path)
             if match is not None:
                 site_id, suffix = match.groups()
                 label = suffix if suffix in _LABELS else "energy_command"
                 site = coordinator_for(self._hass, site_id=unquote(site_id))
+                owners = {value for value in (marked_entry_id, self._entry_id, site.current_entry_id()) if value is not None}
+                if len(owners) > 1:
+                    raise ControlRequestStale("Cloud mutation entry identity does not match its operation")
+                owner = next(iter(owners), None)
         except BaseException:
             if on_rejected is not None:
                 on_rejected()
@@ -123,6 +131,8 @@ class _ControlledSession:
             return create_request()
 
         def current():
+            if foreign_site_owner(self._hass, owner, site.site_id) is not None:
+                return False
             if not _cloud_settings_allowed(self._hass, site.site_id):
                 return False
             for check in (*self._guards, guard):
@@ -150,13 +160,13 @@ class _ControlledSession:
 
         return _ControlledRequest(site, site.write_context(f"cloud_{label}", is_current=current,
                                                           identity=identity if self._identities else None,
-                                                          deadline=deadline), create_request, on_rejected)
+                                                          deadline=deadline, entry_id=owner), create_request, on_rejected)
 
 
 def _markers(kwargs):
     """Remove internal final fences before any aiohttp call is constructed."""
     return tuple(kwargs.pop(f"_power_sync_{name}", None)
-                 for name in ("is_current", "before_send", "on_rejected", "deadline"))
+                 for name in ("is_current", "before_send", "on_rejected", "deadline", "entry_id"))
 
 
 class _ControlledRequest:

@@ -184,6 +184,7 @@ async def async_restore_tesla_grid_charging_confirmed(
     *,
     gateway_din: str,
     is_current: Callable[[], bool],
+    entry_id: str | None = None,
 ) -> bool:
     """Restore a local owner's original disabled permission for a Tariff handoff.
 
@@ -235,7 +236,7 @@ async def async_restore_tesla_grid_charging_confirmed(
         _LOGGER.info('Powerwall Tariff recovery cloud permission omitted; attempting saved Grid Charging Off restore')
     outcome = await async_set_tesla_grid_charging_confirmed(
         session, api_base_url, site_id, headers, False,
-        max_post_attempts=1, is_current=is_current, require_boolean_readback=True,
+        max_post_attempts=1, is_current=is_current, require_boolean_readback=True, entry_id=entry_id,
     )
     if not outcome.applied:
         _LOGGER.warning('Powerwall Tariff recovery cloud restore did not confirm: %s', outcome.status.value)
@@ -258,6 +259,7 @@ async def async_set_tesla_grid_charging_confirmed(
     monotonic: Callable[[], float] = time.monotonic,
     is_current: Callable[[], bool] | None = None,
     require_boolean_readback: bool = False,
+    entry_id: str | None = None,
 ) -> TeslaGridWriteOutcome:
     """Write Tesla grid charging and confirm it through direct site_info reads.
 
@@ -315,6 +317,7 @@ async def async_set_tesla_grid_charging_confirmed(
                 # mutation queue's native monotonic clock.
                 _power_sync_deadline=(time.monotonic() + max(0.0, operation_deadline - monotonic())
                                       if operation_deadline is not None else None),
+                _power_sync_entry_id=entry_id,
             ) as response:
                 last_status = response.status
                 response_payload = await _response_json(response)
@@ -481,6 +484,7 @@ async def async_set_tesla_grid_charging_confirmed(
                                 (is_current is None or is_current()) and monotonic() < deadline_at
                             ),
                             _power_sync_deadline=time.monotonic() + max(0.0, deadline_at - monotonic()),
+                            _power_sync_entry_id=entry_id,
                         ) as retry_response:
                             last_status = retry_response.status
                             retry_payload = await _response_json(retry_response)

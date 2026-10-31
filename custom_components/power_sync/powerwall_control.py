@@ -8,7 +8,7 @@ boundary, after those existing locks.  Status reads never acquire that lock.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import asdict, dataclass
@@ -49,6 +49,83 @@ def coordinator_for(hass: Any, entry: Any = None, site_id: object = None) -> Pow
     if identity not in registry:
         registry[identity] = PowerwallSiteControl(identity)
     return registry[identity]
+
+
+def foreign_site_owner(hass: Any, entry_id: str | None, site_id: object) -> str | None:
+    """Find another entry's authoritative control/recovery obligation, read-only.
+
+    Expiry is deliberately not a release: the original owner must finish its
+    cleanup and retire its existing record. An unknown caller owns no entry.
+    """
+    target = canonical_site_id(site_id)
+    control = hass.data.get(REGISTRY_KEY, {}).get(target)
+    reservation = getattr(control, "route_entry_id", None)
+    if reservation is not None and reservation != entry_id:
+        return reservation
+    for owner_id, runtime in hass.data.get("power_sync", {}).items():
+        if not isinstance(runtime, Mapping) or (entry_id is not None and owner_id == entry_id):
+            continue
+        identities = set()
+        control = runtime.get("powerwall_site_control")
+        candidates = [getattr(control, "site_id", None)]
+        entry = runtime.get("entry")
+        config = {}
+        if entry is None:
+            lookup = getattr(getattr(hass, "config_entries", None), "async_get_entry", None)
+            entry = lookup(owner_id) if lookup is not None else None
+        if entry is not None:
+            config = {**getattr(entry, "data", {}), **getattr(entry, "options", {})}
+            candidates += [config.get("tesla_energy_site_id"), config.get("powerwall_local_energy_site_id")]
+        native = runtime.get("powerwall_native_max_charge")
+        dispatch = runtime.get("powerwall_battery_dispatch")
+        candidates += [getattr(getattr(native, "adapter", None), "site", None),
+                       getattr(runtime.get("tesla_coordinator"), "site_id", None)]
+        candidates += [record.get("site_id") for key in
+                       ("powerwall_settings_pending", "tesla_settings_pending", "pending_tesla_restore")
+                       if isinstance(record := runtime.get(key), Mapping)]
+        for candidate in candidates:
+            try:
+                identities.add(canonical_site_id(candidate))
+            except (TypeError, ValueError):
+                pass
+
+        def affects(record=None):
+            identity = record.get("site_id") if isinstance(record, Mapping) else None
+            if identity is not None:
+                try:
+                    return canonical_site_id(identity) == target
+                except (TypeError, ValueError):
+                    pass
+            # Unidentifiable obligations cannot be proven unrelated.
+            return not identities or target in identities
+
+        for key in ("powerwall_settings_pending", "tesla_settings_pending", "pending_tesla_restore"):
+            record = runtime.get(key)
+            if record and affects(record):
+                return str(owner_id)
+        generic_applies = bool(identities) or config.get("battery_system") in (None, "tesla")
+        active = generic_applies and any(isinstance(runtime.get(key), Mapping) and
+                     (runtime[key].get("active") or runtime[key].get("pending"))
+                     for key in ("force_charge_state", "force_discharge_state", "hold_soc_state", "self_consumption_state"))
+        recovery = any(runtime.get(key) for key in (
+            "native_max_startup_pending", "native_max_recovery_unavailable",
+            "powerwall_local_recovery_pending", "powerwall_dispatch_fallback_pending", "powerwall_settings_recovering"))
+        recovery = recovery or (generic_applies and any(runtime.get(key) for key in
+                    ("optimizer_force_restart_restore_pending", "ev_curtailment_override")))
+        event = generic_applies and (any(key in runtime and runtime[key] is not None for key in
+                     ("max_backup_end_ts", "max_backup_saved_reserve"))
+                 or runtime.get("max_backup_local_event") or runtime.get("max_backup_schedule"))
+        if (active or recovery or event or getattr(native, "pending", False)
+                or getattr(dispatch, "pending", False)) and affects():
+            return str(owner_id)
+        for key, active_flag in (("aemo_spike_manager", "_in_spike_mode"),
+                                 ("saving_session_tariff_manager", "_in_session_mode")):
+            manager = runtime.get(key)
+            if manager is not None and any(getattr(manager, flag, False) for flag in
+                    (active_flag, "_restore_pending", "_recovery_unreadable")):
+                if affects({"site_id": getattr(manager, "site_id", None)}):
+                    return str(owner_id)
+    return None
 
 
 @dataclass(frozen=True)
@@ -111,6 +188,7 @@ class ControlRequest:
     target: ControlTarget | None
     created_at: float
     deadline: float | None
+    entry_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -178,29 +256,59 @@ class PowerwallSiteControl:
         self._latest: str | None = None
         self._open_operations: set[str] = set()
         self._obligations: dict[str, Any] = {}
+        self.route_entry_id: str | None = None
+
+    @asynccontextmanager
+    async def route_scope(self, entry_id: str):
+        """Reserve admission while its existing route lock protects preparation."""
+        if not entry_id:
+            raise ControlRequestStale("A route reservation requires an owning entry")
+        async with self.route_lock:
+            previous = self.route_entry_id
+            if previous is not None and previous != entry_id:
+                raise ControlRequestStale("A nested route cannot change its owning entry")
+            self.route_entry_id = entry_id
+            try:
+                yield self
+            finally:
+                self.route_entry_id = previous
 
     def request(self, label: str, target: ControlTarget | None = None,
-                deadline: float | None = None) -> ControlRequest:
+                deadline: float | None = None, *, entry_id: str | None = None) -> ControlRequest:
         if target is not None and not isinstance(target, (NativeMaxTarget, BatteryPowerTarget, GridExportTarget, SiteImportTarget)):
             raise TypeError("A typed Powerwall control target is required")
-        return ControlRequest(uuid4().hex, self.site_id, label, target, self._clock(), _earliest(deadline))
+        return ControlRequest(uuid4().hex, self.site_id, label, target, self._clock(), _earliest(deadline), entry_id)
+
+    def current_entry_id(self) -> str | None:
+        """Return only this exact task's explicit operation owner."""
+        try:
+            task = asyncio.current_task()
+        except RuntimeError:
+            return None
+        scope = self._scopes.get(task)
+        return scope.request.entry_id if scope is not None else None
 
     @asynccontextmanager
     async def operation(self, request: ControlRequest | None = None, *, label: str = "control",
                         target: ControlTarget | None = None, deadline: float | None = None,
                         is_current: Callable[[], bool] | None = None,
                         identity: Callable[[], object] | None = None, restoring: bool = False,
-                        apply_guard: Callable[[], bool] | None = None):
+                        apply_guard: Callable[[], bool] | None = None, entry_id: str | None = None):
         """Record logical intent without holding a lock across orchestration."""
         task = asyncio.current_task()
         parent = self._scopes.get(task)
+        if parent is not None and entry_id is not None and entry_id != parent.request.entry_id:
+            raise ControlRequestStale("A nested operation cannot change its owning entry")
+        if request is not None and entry_id is not None and request.entry_id != entry_id:
+            raise ControlRequestStale("Control request entry identity does not match")
         if restoring and (target is not None or deadline is not None or request is not None):
             raise ControlRequestStale("Restoration cannot create a forcing target or deadline")
         if parent is not None and parent.restoring and (target is not None or (request is not None and request.target is not None)):
             raise ControlRequestStale("A restoration scope cannot renew a forcing request")
         if parent is not None and not restoring and request is not None and request != parent.request:
             raise ControlRequestStale("A nested operation cannot replace its parent request")
-        request = self.request(label) if restoring else parent.request if parent else request or self.request(label, target, deadline)
+        owner = parent.request.entry_id if parent is not None else entry_id
+        request = self.request(label, entry_id=owner) if restoring else parent.request if parent else request or self.request(label, target, deadline, entry_id=owner)
         if canonical_site_id(request.site_id) != self.site_id:
             raise ControlIdentityChanged("Control request belongs to another Tesla site")
         # Explicitly passing an active request to a child is not reentrancy.
@@ -274,7 +382,8 @@ class PowerwallSiteControl:
     @asynccontextmanager
     async def write_context(self, label: str, *, is_current: Callable[[], bool] | None = None,
                             deadline: float | None = None, identity: Callable[[], object] | None = None,
-                            request: ControlRequest | None = None, prepare: Callable | None = None):
+                            request: ControlRequest | None = None, prepare: Callable | None = None,
+                            entry_id: str | None = None):
         """Fence and serialize only the final mutation; retain uncertain exits.
 
         Use around direct I/O.  A cancelled context cannot prove whether a
@@ -285,12 +394,14 @@ class PowerwallSiteControl:
         parent = self._scopes.get(task)
         if parent is None:
             async with self.operation(request, label=label, deadline=deadline,
-                                      is_current=is_current, identity=identity):
+                                      is_current=is_current, identity=identity, entry_id=entry_id):
                 async with self.write_context(label, prepare=prepare) as receipt:
                     yield receipt
             return
         if request is not None and request != parent.request:
             raise ControlRequestStale("A nested write cannot replace its parent request")
+        if entry_id is not None and entry_id != parent.request.entry_id:
+            raise ControlRequestStale("A nested write cannot change its owning entry")
         scope = _Scope(parent.request, parent.guards + ((is_current,) if is_current else ()),
                        parent.identities + ((identity,) if identity else ()),
                        _earliest(parent.deadline, deadline), parent.restoring, parent.apply_guards)
@@ -332,7 +443,7 @@ class PowerwallSiteControl:
             await self._write_lock.__aexit__(None, None, None)
 
     async def run_write(self, label: str, callback: Callable, *, is_current=None,
-                        deadline=None, identity=None, request=None, prepare=None):
+                        deadline=None, identity=None, request=None, prepare=None, entry_id=None):
         """Supervise direct I/O independently of cancellation of its caller.
 
         A queued cancelled caller cancels its worker before any submission.
@@ -343,10 +454,12 @@ class PowerwallSiteControl:
         scope = self._scopes.get(task)
         if scope is None:
             async with self.operation(request, label=label, deadline=deadline,
-                                      is_current=is_current, identity=identity):
+                                      is_current=is_current, identity=identity, entry_id=entry_id):
                 return await self.run_write(label, callback, prepare=prepare)
         if request is not None and request != scope.request:
             raise ControlRequestStale("A nested write cannot replace its parent request")
+        if entry_id is not None and entry_id != scope.request.entry_id:
+            raise ControlRequestStale("A nested write cannot change its owning entry")
 
         async def invoke(job):
             async with self.write_context(label, is_current=is_current, deadline=deadline, identity=identity, prepare=prepare) as receipt:

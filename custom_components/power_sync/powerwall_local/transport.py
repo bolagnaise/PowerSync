@@ -368,7 +368,8 @@ class TEDAPIv1rTransport:
             if label is not None and site is not None:
                 raw = await site.run_write(f"local_{label}", send, prepare=prepare,
                     is_current=getattr(self, "_control_current", None),
-                    identity=getattr(self, "_control_identity", None))
+                    identity=getattr(self, "_control_identity", None),
+                    entry_id=getattr(self, "_control_entry_id", None))
             else:
                 # Unbound test/standalone transports retain their existing API;
                 # production clients are bound by the single views factory.
@@ -529,7 +530,8 @@ class TEDAPIv1rTransport:
         if site is not None:
             return await site.run_write("local_config_transaction", transaction,
                                         is_current=getattr(self, "_control_current", None),
-                                        identity=getattr(self, "_control_identity", None))
+                                        identity=getattr(self, "_control_identity", None),
+                                        entry_id=getattr(self, "_control_entry_id", None))
         return await transaction()
 
     async def _write_config(self, din: str, updates: dict[str, Any], *, before_write: Callable[[], None] | None = None,

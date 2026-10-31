@@ -4635,6 +4635,28 @@ class AutoScheduleSettings:
         )
 
 
+def _ev_curtailment_battery_owner_present(runtime: Mapping[str, Any]) -> bool:
+    """EV export permission cannot take over an active battery control episode."""
+    for key in ("force_charge_state", "force_discharge_state", "hold_soc_state", "self_consumption_state"):
+        state = runtime.get(key)
+        if state is not None and (not isinstance(state, Mapping) or state.get("active") or state.get("pending")):
+            return True
+    if any(runtime.get(key) for key in (
+        "native_max_startup_pending", "native_max_recovery_unavailable",
+        "powerwall_local_recovery_pending", "optimizer_force_restart_restore_pending",
+        "pending_tesla_restore", "powerwall_settings_pending", "tesla_settings_pending",
+        "powerwall_settings_recovering", "powerwall_dispatch_fallback_pending",
+        "tesla_control_method_changing", "max_backup_end_ts", "max_backup_schedule",
+    )):
+        return True
+    if any(getattr(runtime.get(key), "pending", False) for key in (
+        "powerwall_native_max_charge", "powerwall_battery_dispatch",
+    )):
+        return True
+    return (bool(getattr(runtime.get("aemo_spike_manager"), "_in_spike_mode", False))
+            or bool(getattr(runtime.get("saving_session_tariff_manager"), "_in_session_mode", False)))
+
+
 @dataclass
 class AutoScheduleState:
     """Current state of auto-schedule execution for a vehicle."""
@@ -7699,6 +7721,15 @@ class AutoScheduleExecutor:
                 and runtime.get("auto_schedule_executor", self) is self
                 and not runtime.get("powerwall_local_dispatch_stopping"))
 
+    def _curtailment_export_unowned(self) -> bool:
+        """Read ownership before accepting an export rule as an EV baseline."""
+        from ..powerwall_control import foreign_site_owner
+
+        site_id = self._curtailment_site_id()
+        return (self._curtailment_runtime_current() and site_id is not None
+                and not _ev_curtailment_battery_owner_present(self._curtailment_entry_data())
+                and foreign_site_owner(self.hass, self.config_entry.entry_id, site_id) is None)
+
     def _curtailment_site_id(self) -> Optional[str]:
         """Use the same physical site identity as the shared control boundary."""
         from ..powerwall_control import canonical_site_id
@@ -7816,7 +7847,7 @@ class AutoScheduleExecutor:
         entry_data = self._curtailment_entry_data()
         lock = entry_data.setdefault("ev_curtailment_lock", asyncio.Lock())
         async with lock:
-            if not self._curtailment_runtime_current():
+            if not self._curtailment_export_unowned():
                 return False
             record = self._load_curtailment_recovery()
             if record is not None and not self._curtailment_recovery_allowed(record):
@@ -7826,6 +7857,8 @@ class AutoScheduleExecutor:
                 if site_id is None:
                     return False
                 current_rule = await self._get_current_export_rule()
+                if not self._curtailment_export_unowned():
+                    return False
                 if current_rule is None:
                     return False
                 if current_rule != "never":

@@ -444,3 +444,94 @@ async def test_restore_replaces_apply_policy_but_keeps_runtime_and_identity_fenc
                 async with site.write_context("denied restore"):
                     pytest.fail("Restoration's own policy was ignored")
     assert [effect["label"] for effect in site.snapshot()["effects"]] == ["restore despite policy transition"]
+
+
+@pytest.mark.parametrize("obligation", [
+    {"force_charge_state": {"active": True, "end_time": 0}},
+    {"force_discharge_state": {"active": True}},
+    {"hold_soc_state": {"active": True}},
+    {"self_consumption_state": {"active": True}},
+    {"pending_tesla_restore": {"site_id": "00123"}},
+    {"powerwall_settings_pending": {"site_id": 123, "resume_cloud": True}},
+    {"native_max_startup_pending": True},
+    {"native_max_recovery_unavailable": True},
+    {"powerwall_local_recovery_pending": True},
+    {"optimizer_force_restart_restore_pending": True},
+    {"powerwall_dispatch_fallback_pending": True},
+    {"max_backup_end_ts": 0},
+    {"max_backup_local_event": {"active": True}},
+    {"powerwall_native_max_charge": SimpleNamespace(pending=True)},
+    {"powerwall_battery_dispatch": SimpleNamespace(pending=True)},
+    {"aemo_spike_manager": SimpleNamespace(site_id="00123", _in_spike_mode=True)},
+    {"aemo_spike_manager": SimpleNamespace(site_id="00123", _restore_pending=True)},
+    {"saving_session_tariff_manager": SimpleNamespace(site_id=123, _in_session_mode=True)},
+    {"saving_session_tariff_manager": SimpleNamespace(site_id=123, _recovery_unreadable=True)},
+])
+def test_foreign_authoritative_owner_survives_expiry_but_excludes_own_cleanup(obligation):
+    runtime = {"entry": entry(123), **obligation}
+    hass = SimpleNamespace(data={"power_sync": {"entry-a": runtime, "entry-b": {}}})
+    assert m.foreign_site_owner(hass, "entry-b", "00123") == "entry-a"
+    assert m.foreign_site_owner(hass, None, 123) == "entry-a"
+    assert m.foreign_site_owner(hass, "entry-a", 123) is None
+    assert m.foreign_site_owner(hass, "entry-b", 456) is None
+    assert all(runtime[key] is value for key, value in obligation.items())
+
+
+def test_foreign_event_owner_uses_event_site_and_unknown_obligation_fails_closed():
+    runtime = {"entry": entry(456), "aemo_spike_manager": SimpleNamespace(site_id=123, _restore_pending=True)}
+    hass = SimpleNamespace(data={"power_sync": {"entry-a": runtime}})
+    assert m.foreign_site_owner(hass, "entry-b", 123) == "entry-a"
+    assert m.foreign_site_owner(hass, "entry-b", 456) is None
+    hass.data["power_sync"]["entry-a"] = {"pending_tesla_restore": {"incident": "unknown"}}
+    assert m.foreign_site_owner(hass, "entry-b", 456) == "entry-a"
+
+
+def test_explicit_non_tesla_generic_force_does_not_claim_unknown_tesla_site():
+    runtime = {"entry": SimpleNamespace(data={"battery_system": "sigenergy"}, options={}),
+               "force_charge_state": {"active": True}, "max_backup_end_ts": 0,
+               "optimizer_force_restart_restore_pending": True}
+    hass = SimpleNamespace(data={"power_sync": {"entry-a": runtime}})
+    assert m.foreign_site_owner(hass, "entry-b", 123) is None
+    runtime["powerwall_settings_pending"] = {"id": "unknown-tesla-incident"}
+    assert m.foreign_site_owner(hass, "entry-b", 123) == "entry-a"
+
+
+@pytest.mark.asyncio
+async def test_route_reservation_is_exactly_scoped_and_reentrant_for_its_owner():
+    hass = SimpleNamespace(data={})
+    site = m.coordinator_for(hass, site_id=123)
+    async with site.route_scope("entry-a"):
+        assert m.foreign_site_owner(hass, "entry-b", "00123") == "entry-a"
+        assert m.foreign_site_owner(hass, None, 123) == "entry-a"
+        assert m.foreign_site_owner(hass, "entry-a", 123) is None
+        assert m.foreign_site_owner(hass, "entry-b", 456) is None
+        async with site.route_scope("entry-a"):
+            assert site.route_entry_id == "entry-a"
+        with pytest.raises(m.ControlRequestStale):
+            async with site.route_scope("entry-b"):
+                pytest.fail("Conflicting nested route was admitted")
+        assert site.route_entry_id == "entry-a"
+    assert site.route_entry_id is None
+
+
+@pytest.mark.asyncio
+async def test_explicit_owner_is_retained_for_nested_cleanup_and_delegated_worker_only():
+    site = m.PowerwallSiteControl(123)
+    async with site.operation(entry_id="entry-a") as request:
+        assert request.entry_id == site.current_entry_id() == "entry-a"
+        assert await asyncio.create_task(async_owner(site)) is None
+        async with site.operation(restoring=True) as cleanup:
+            assert cleanup.entry_id == site.current_entry_id() == "entry-a"
+        assert site.current_entry_id() == "entry-a"
+        assert await site.run_write("delegated", lambda: async_owner(site)) == "entry-a"
+        with pytest.raises(m.ControlRequestStale):
+            async with site.operation(entry_id="entry-b"):
+                pytest.fail("Nested scope changed its owner")
+    async with site.operation():
+        with pytest.raises(m.ControlRequestStale):
+            async with site.operation(entry_id="entry-a"):
+                pytest.fail("Unknown parent gained authority")
+
+
+async def async_owner(site):
+    return site.current_entry_id()

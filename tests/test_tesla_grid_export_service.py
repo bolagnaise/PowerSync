@@ -222,16 +222,18 @@ def test_rejected_http_200_does_not_promote_requested_rule_to_snapshot():
     assert "cached_export_rule" not in entry_data
 
 
-def _registered_export_services():
+def _registered_export_services(service_name="set_grid_export", *, real_prepare=False):
     """Execute real service registration, routing and per-entry handler bodies."""
     import logging
+    from collections.abc import Mapping
     from unittest.mock import AsyncMock
     from conftest import load_source_node
 
     handlers, tasks, contexts = {}, [], {}
 
     def register(domain, name, handler, **kwargs):
-        assert kwargs.get("supports_response") == "optional"
+        if name == "set_grid_export":
+            assert kwargs.get("supports_response") == "optional"
         handlers[(domain, name)] = handler
 
     def create_task(coro):
@@ -253,19 +255,37 @@ def _registered_export_services():
         and isinstance(node.value.func, ast.Attribute) and node.value.func.attr == "async_register"
         and len(node.value.args) > 1 and isinstance(node.value.args[1], ast.Name)
         and node.value.args[1].id == "SERVICE_SET_GRID_EXPORT")
+    auto_registration = next(node for node in setup.body
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Attribute) and node.value.func.attr == "async_register"
+        and len(node.value.args) > 1 and isinstance(node.value.args[1], ast.Constant)
+        and node.value.args[1].value == "set_grid_export_auto")
+
+    class StripImports(ast.NodeTransformer):
+        def visit_ImportFrom(self, node):
+            return ast.copy_location(ast.Pass(), node)
+
+    def load(name, path, namespace):
+        body = load_source_node(path, name)
+        body.decorator_list = []
+        body = StripImports().visit(body)
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[body], type_ignores=[])),
+                     str(path), "exec", flags=__import__("__future__").annotations.compiler_flag), namespace)
+        return namespace[name]
 
     for entry_id in ("entry1", "entry2"):
         runtime = {"store": object()}
         hass.data["power_sync"][entry_id] = runtime
-        entry = SimpleNamespace(entry_id=entry_id, data={},
+        entry = SimpleNamespace(entry_id=entry_id, data={"tesla_energy_site_id": entry_id},
                                 options={"battery_curtailment_enabled": True})
         ns = dict(asyncio=asyncio, hass=hass, entry=entry, DOMAIN="power_sync",
             SERVICE_SET_GRID_EXPORT="set_grid_export", SupportsResponse=SimpleNamespace(OPTIONAL="optional"), Any=Any,
+            CONF_TESLA_ENERGY_SITE_ID="tesla_energy_site_id", Mapping=Mapping,
             CONF_BATTERY_CURTAILMENT_ENABLED="battery_curtailment_enabled",
             HomeAssistantError=RuntimeError, _LOGGER=logging.getLogger(__name__),
             _monitoring_mode_should_block_control=lambda call: False,
             _prepare_tesla_setting_change=AsyncMock(return_value=(0, 0, 0)),
-            _command_generation=[0], _tesla_charge_kick_generation=[0],
+            _command_generation=[0], _tesla_charge_kick_generation=[0], _tesla_operation_generation=[0],
             _local_powerwall_generation_current=lambda: True,
             _tesla_force_apply_export_rule=AsyncMock(return_value=True),
             _get_tesla_site_configs=lambda h, e: [(e.entry_id, "token", "fleet")],
@@ -274,19 +294,28 @@ def _registered_export_services():
             refresh_powerwall_local_after_settings_write=AsyncMock(),
             register_handlers=routing["register_handlers"], routed_handler=routing["routed_handler"],
             amber_smartshift_coordinator=None, native_handlers={})
-        body = load_source_node(INIT_PATH, "handle_set_grid_export")
-        body.decorator_list = []
-        exec(compile(ast.fix_missing_locations(ast.Module(body=[body], type_ignores=[])),
-                     str(INIT_PATH), "exec",
-                     flags=__import__("__future__").annotations.compiler_flag), ns)
+        load("canonical_site_id", INIT_PATH.with_name("powerwall_control.py"), ns)
+        load("foreign_site_owner", INIT_PATH.with_name("powerwall_control.py"), ns)
+        load("_ev_curtailment_battery_owner_present", INIT_PATH.with_name("automations") / "ev_charging_planner.py", ns)
+        if real_prepare:
+            for key in ("force_charge_state", "force_discharge_state", "hold_soc_state", "self_consumption_state"):
+                ns[key] = runtime[key] = {"active": False}
+            ns.update(_stop_local_powerwall_dispatch=AsyncMock(), handle_restore_normal=AsyncMock(),
+                      SERVICE_RESTORE_NORMAL="restore_normal",
+                      ServiceCall=lambda domain, service, data, **kw: SimpleNamespace(data=data, **kw))
+            load("_supersede_tesla_charge_kick", INIT_PATH, ns)
+            prepare = load("_prepare_tesla_setting_change", INIT_PATH, ns)
+            ns["_prepare_tesla_setting_change"] = AsyncMock(wraps=prepare)
+        load("handle_set_grid_export", INIT_PATH, ns)
+        load("handle_set_grid_export_auto", INIT_PATH, ns)
         # Unrelated registered controls are inert; retain the production map.
         for node in ast.walk(registration):
             if isinstance(node, ast.Name) and node.id.startswith("handle_") and node.id not in ns:
                 ns[node.id] = AsyncMock()
-        unit = ast.Module(body=[registration, service_registration], type_ignores=[])
+        unit = ast.Module(body=[registration, service_registration, auto_registration], type_ignores=[])
         exec(compile(ast.fix_missing_locations(unit), str(INIT_PATH), "exec"), ns)
         contexts[entry_id] = ns
-    return hass, handlers[("power_sync", "set_grid_export")], contexts, tasks
+    return hass, handlers[("power_sync", service_name)], contexts, tasks
 
 
 @pytest.mark.asyncio
@@ -310,6 +339,7 @@ async def test_registered_export_service_routes_exact_entry_and_preserves_ev_own
         [(selected, "token", "fleet")], "pv_only")
     runtime = hass.data["power_sync"][selected]
     if ev_intent:
+        contexts[selected]["_prepare_tesla_setting_change"].assert_not_awaited()
         assert "manual_export_override" not in runtime
         assert "manual_export_rule" not in runtime
         contexts[selected]["_update_powerwall_store"].assert_not_awaited()
@@ -342,3 +372,116 @@ async def test_registered_export_rejects_unavailable_entry_without_other_site_wr
         await service(SimpleNamespace(data={"rule": "never", "entry_id": "missing", "_ev_curtailment": True}))
     for ns in contexts.values():
         ns["_tesla_force_apply_export_rule"].assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owner", [
+    {"force_charge_state": {"active": True}}, {"force_discharge_state": {"active": True}},
+    {"hold_soc_state": {"active": True}}, {"self_consumption_state": {"active": True}},
+    {"powerwall_battery_dispatch": SimpleNamespace(pending=True)},
+    {"powerwall_native_max_charge": SimpleNamespace(pending=True)},
+    {"max_backup_end_ts": 123}, {"optimizer_force_restart_restore_pending": True},
+    {"pending_tesla_restore": {"site_id": "entry1"}},
+])
+async def test_ev_export_composition_refuses_battery_owner_without_preparation_or_cleanup(owner):
+    hass, service, contexts, _ = _registered_export_services(real_prepare=True)
+    runtime = hass.data["power_sync"]["entry1"]
+    runtime.update(owner)
+    ns = contexts["entry1"]
+    for key in ("force_charge_state", "force_discharge_state", "hold_soc_state", "self_consumption_state"):
+        if key in owner:
+            ns[key] = runtime[key]
+    with pytest.raises(RuntimeError, match="waiting for battery control restoration"):
+        await service(SimpleNamespace(data={"rule": "pv_only", "entry_id": "entry1", "_ev_curtailment": True}))
+    ns["_prepare_tesla_setting_change"].assert_not_awaited()
+    ns["_stop_local_powerwall_dispatch"].assert_not_awaited()
+    ns["handle_restore_normal"].assert_not_awaited()
+    ns["_tesla_force_apply_export_rule"].assert_not_awaited()
+    assert ns["_tesla_charge_kick_generation"] == [0]
+    assert ns["_command_generation"] == [0]
+
+
+@pytest.mark.asyncio
+async def test_unowned_ev_export_uses_only_verified_export_helper_and_never_prepares():
+    _, service, contexts, tasks = _registered_export_services(real_prepare=True)
+    ns = contexts["entry1"]
+    result = await service(SimpleNamespace(data={"rule": "pv_only", "entry_id": "entry1", "_ev_curtailment": True}))
+    assert result["success"] is True and result["settings_confirmed"] is True
+    ns["_prepare_tesla_setting_change"].assert_not_awaited()
+    ns["_stop_local_powerwall_dispatch"].assert_not_awaited()
+    ns["handle_restore_normal"].assert_not_awaited()
+    ns["_tesla_force_apply_export_rule"].assert_awaited_once()
+    assert ns["_tesla_charge_kick_generation"] == [0]
+    await asyncio.gather(*tasks)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["force", "native", "operation", "runtime"])
+async def test_ev_export_final_helper_retains_original_owner_fences(change):
+    hass, service, contexts, _ = _registered_export_services(real_prepare=True)
+    ns = contexts["entry1"]
+    runtime = hass.data["power_sync"]["entry1"]
+
+    async def apply(*args, is_current, **kwargs):
+        assert is_current()
+        if change == "force":
+            runtime["force_charge_state"]["active"] = True
+        elif change == "native":
+            runtime["powerwall_native_max_charge"] = SimpleNamespace(pending=True)
+        elif change == "operation":
+            ns["_tesla_operation_generation"][0] += 1
+        else:
+            hass.data["power_sync"]["entry1"] = {}
+        assert not is_current()
+        return False
+
+    ns["_tesla_force_apply_export_rule"].side_effect = apply
+    with pytest.raises(RuntimeError, match="did not accept"):
+        await service(SimpleNamespace(data={"rule": "pv_only", "entry_id": "entry1", "_ev_curtailment": True}))
+    ns["_prepare_tesla_setting_change"].assert_not_awaited()
+    ns["handle_restore_normal"].assert_not_awaited()
+    ns["update_cached_export_rule"].assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("requested", ["entry1", "entry2", None])
+async def test_export_auto_routes_exact_entry_without_releasing_ev_lease(requested):
+    hass, service, contexts, _ = _registered_export_services("set_grid_export_auto")
+    leases = {}
+    for entry_id in contexts:
+        runtime = hass.data["power_sync"][entry_id]
+        leases[entry_id] = {"site_id": entry_id, "leases": {"VIN": {"source": "smart_schedule"}}}
+        runtime.update(manual_export_override=True, manual_export_rule="never",
+                       ev_curtailment_override=True, ev_curtailment_recovery=leases[entry_id])
+    data = {} if requested is None else {"entry_id": requested}
+    await service(SimpleNamespace(data=data))
+    selected = requested or "entry2"
+    other = "entry2" if selected == "entry1" else "entry1"
+    assert hass.data["power_sync"][selected]["manual_export_override"] is False
+    assert hass.data["power_sync"][selected]["manual_export_rule"] is None
+    assert hass.data["power_sync"][other]["manual_export_override"] is True
+    contexts[selected]["_update_powerwall_store"].assert_awaited_once()
+    assert contexts[selected]["_update_powerwall_store"].await_args.args[1] == {
+        "manual_export_override": False, "manual_export_rule": None}
+    contexts[other]["_update_powerwall_store"].assert_not_awaited()
+    for entry_id, ns in contexts.items():
+        runtime = hass.data["power_sync"][entry_id]
+        assert runtime["ev_curtailment_override"] is True
+        assert runtime["ev_curtailment_recovery"] is leases[entry_id]
+        ns["_prepare_tesla_setting_change"].assert_not_awaited()
+        ns["_tesla_force_apply_export_rule"].assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("brand", ["alphaess_coordinator", "goodwe_coordinator"])
+async def test_ev_export_intent_cannot_route_to_an_unrelated_inverter_controller(brand):
+    from unittest.mock import AsyncMock
+    hass, service, contexts, tasks = _registered_export_services(real_prepare=True)
+    controller = SimpleNamespace(curtail=AsyncMock(), restore=AsyncMock())
+    hass.data["power_sync"]["entry1"][brand] = SimpleNamespace(_controller=controller)
+    result = await service(SimpleNamespace(data={"rule": "pv_only", "entry_id": "entry1", "_ev_curtailment": True}))
+    assert result["success"] is True
+    controller.curtail.assert_not_awaited()
+    controller.restore.assert_not_awaited()
+    contexts["entry1"]["_tesla_force_apply_export_rule"].assert_awaited_once()
+    await asyncio.gather(*tasks)

@@ -73,7 +73,10 @@ def guard_battery_transition(hass, entry, handler):
                     return await handler(call)
                 from .powerwall_control import (
                     NativeMaxTarget, BatteryPowerTarget, GridExportTarget, SiteImportTarget,
+                    foreign_site_owner,
                 )
+                if foreign_site_owner(hass, entry.entry_id, site_control.site_id) is not None:
+                    raise SiteImportAdmissionDenied("Another PowerSync entry owns this Tesla site's control or recovery")
                 name = handler.__name__
                 data = getattr(call, "data", {}) or {}
                 restoring = "restore_normal" in name
@@ -96,7 +99,8 @@ def guard_battery_transition(hass, entry, handler):
                         deadline = time.monotonic() + max(0, requested_at + duration * 60 - time.time())
                 def request_allowed():
                     admission = runtime.get("powerwall_control_admission")
-                    return admission is None or admission(call, restoring=restoring) is True
+                    return (foreign_site_owner(hass, entry.entry_id, site_control.site_id) is None
+                            and (admission is None or admission(call, restoring=restoring) is True))
                 def summary():
                     pending = runtime.get("powerwall_settings_pending") or {}
                     native = runtime.get("powerwall_native_max_charge")
@@ -111,7 +115,7 @@ def guard_battery_transition(hass, entry, handler):
                 site_control.set_obligations(entry.entry_id, summary())
                 try:
                     async with site_control.operation(
-                            label=name, target=target,
+                            label=name, target=target, entry_id=entry.entry_id,
                             deadline=deadline, restoring=restoring,
                             is_current=lambda: hass.data.get("power_sync", {}).get(entry.entry_id) is runtime,
                             apply_guard=request_allowed,
@@ -125,6 +129,9 @@ def guard_battery_transition(hass, entry, handler):
                 else:
                     runtime["battery_route_requested_at"] = previous
         async def take_route():
+            if site_control := runtime.get("powerwall_site_control"):
+                async with site_control.route_scope(entry.entry_id):
+                    return await run()
             if route_lock := runtime.get("powerwall_battery_dispatch_route_lock"):
                 async with route_lock:
                     return await run()

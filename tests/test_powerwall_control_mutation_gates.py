@@ -322,7 +322,7 @@ async def test_cloud_quarantine_honors_only_exact_supervised_settings_handoff(ha
     original = deepcopy(runtime)
     hass = SimpleNamespace(data={"power_sync": {"entry-a": runtime, "entry-b": {}}})
     raw = Session()
-    session = http.controlled_session(hass, raw)
+    session = http.controlled_session(hass, raw, entry_id="entry-a")
     async def send(site_id):
         async with session.post(f"https://fleet/api/1/energy_sites/{site_id}/operation"):
             pass
@@ -637,6 +637,11 @@ def test_client_factory_binding_fences_pairing_runtime_and_site_changes():
     namespace["_bind_site_control"](hass, entry, client)
     assert client._transport._control_current()
     assert client._transport._site_control is core.coordinator_for(hass, site_id=123)
+    hass.data["power_sync"]["foreign"] = {"powerwall_site_control": client._transport._site_control,
+                                         "force_charge_state": {"active": True}}
+    assert not client._transport._control_current()
+    assert client._control_matches_entry()  # Read-only cached client remains usable.
+    del hass.data["power_sync"]["foreign"]
     entry.data["key"] = "REPAIRED"
     assert not client._transport._control_current()
     entry.data["key"] = "KEY"
@@ -680,3 +685,105 @@ async def test_signed_cloud_client_rechecks_expiry_after_queue_even_without_lan(
     await active
     assert await queued is False
     assert raw.posts == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owner_source", ["marker", "binding", "operation", "unknown"])
+async def test_cloud_foreign_owner_is_checked_at_final_gate(owner_source):
+    owner = {"entry": SimpleNamespace(data={"tesla_energy_site_id": 123}, options={}),
+             "force_charge_state": {"active": True, "end_time": 0}}
+    hass = SimpleNamespace(data={"power_sync": {"entry-a": owner, "entry-b": {}}})
+    raw = Session()
+    session = http.controlled_session(hass, raw, entry_id="entry-b" if owner_source == "binding" else None)
+    site = core.coordinator_for(hass, site_id="00123")
+    rejected = []
+    kwargs = {"_power_sync_on_rejected": lambda: rejected.append(True)}
+    if owner_source == "marker":
+        kwargs["_power_sync_entry_id"] = "entry-b"
+    async def send():
+        async with session.post("https://proxy/api/proxy/api/1/energy_sites/123/time_of_use_settings", **kwargs):
+            pytest.fail("Foreign force was overwritten")
+    with pytest.raises(core.ControlRequestStale):
+        if owner_source == "operation":
+            async with site.operation(entry_id="entry-b"):
+                await send()
+        else:
+            await send()
+    assert raw.posts == [] and rejected == [True]
+    # The original owner keeps cleanup authority, and unrelated sites work.
+    own = http.controlled_session(hass, raw, entry_id="entry-a")
+    async with site.operation(entry_id="entry-a", restoring=True):
+        async with own.post("https://fleet/api/1/energy_sites/123/operation"):
+            pass
+    async with session.post("https://fleet/api/1/energy_sites/456/operation"):
+        pass
+    assert len(raw.posts) == 2
+    assert all(not any(key.startswith("_power_sync_") for key in call[2]) for call in raw.posts)
+    assert owner["force_charge_state"]["active"] is True
+
+
+@pytest.mark.asyncio
+async def test_actual_tariff_upload_cannot_overwrite_other_entry_force_even_after_queue(monkeypatch):
+    # Execute the production TOU uploader, including its final unsent receipt.
+    from test_tesla_tariff_rate_limit import upload_harness
+    upload, hass, raw, _clock = upload_harness.__wrapped__(monkeypatch)
+    raw.responses = [200, 200]
+    site = core.coordinator_for(hass, site_id=123)
+    owner = {"entry": SimpleNamespace(data={"tesla_energy_site_id": "00123"}, options={}),
+             "force_charge_state": {"active": False}}
+    hass.data["power_sync"] = {"entry-a": owner, "entry-b": {"powerwall_site_control": site}}
+    upload.__globals__["async_get_clientsession"] = lambda _hass: http.controlled_session(hass, raw)
+    entered, release = asyncio.Event(), asyncio.Event()
+    async def hold():
+        async with site.write_context("unrelated submitted effect", entry_id="entry-a"):
+            entered.set()
+            await release.wait()
+    active = asyncio.create_task(hold())
+    await entered.wait()
+    status = {}
+    queued = asyncio.create_task(upload(hass, "123", {"name": "entry-b-force"}, "token",
+                                        entry_id="entry-b", max_retries=1, accepted_status=status))
+    await settle()
+    assert not queued.done() and raw.posts == []
+    # Ownership arises after B's original caller checks and before final I/O.
+    owner["force_charge_state"]["active"] = True
+    release.set()
+    await active
+    assert await queued is False
+    assert status == {"not_submitted": True} and raw.posts == []
+    assert await upload(hass, "00123", {"name": "entry-a-cleanup"}, "token",
+                        entry_id="entry-a", max_retries=1) is True
+    assert await upload(hass, "456", {"name": "different-site"}, "token",
+                        entry_id="entry-b", max_retries=1) is True
+    assert len(raw.posts) == 2 and owner["force_charge_state"]["active"] is True
+
+
+@pytest.mark.asyncio
+async def test_preparation_reservation_fences_queued_foreign_writer_without_revoking_owner():
+    hass, raw = SimpleNamespace(data={}), Session()
+    site = core.coordinator_for(hass, site_id=123)
+    session = http.controlled_session(hass, raw)
+    entered, release = asyncio.Event(), asyncio.Event()
+    async def hold():
+        async with site.write_context("earlier driver", entry_id="entry-a"):
+            entered.set()
+            await release.wait()
+    holder = asyncio.create_task(hold())
+    await entered.wait()
+    async def send(owner):
+        async with session.post("https://fleet/api/1/energy_sites/123/backup", _power_sync_entry_id=owner):
+            pass
+    foreign = asyncio.create_task(send("entry-b"))
+    await settle()
+    assert site.route_entry_id is None
+    async with site.route_scope("entry-a"):
+        # A has not yet published any active force state while preparing.
+        own = asyncio.create_task(send("entry-a"))
+        release.set()
+        await holder
+        with pytest.raises(core.ControlRequestStale):
+            await foreign
+        await own
+        assert len(raw.posts) == 1
+        assert core.foreign_site_owner(hass, "entry-a", 123) is None
+    assert site.route_entry_id is None

@@ -307,7 +307,7 @@ def test_restore_retry_waits_out_its_site_cooldown(limited_site, expected_delay)
         "force_discharge_state": {"active": False},
         "_command_generation": [7], "_restore_generation": 7,
         "site_configs": [("site-a", "token", "teslemetry")],
-        "entry": SimpleNamespace(data={}),
+        "entry": SimpleNamespace(entry_id="entry", data={}),
         "CONF_FLEET_API_BASE_URL": "fleet_base_url",
         "get_tesla_api_base_url": lambda provider, region: region or provider,
         "hass": SimpleNamespace(data={"power_sync": {"_tesla_tou_uploads": {
@@ -391,6 +391,7 @@ def test_force_upload_completion_preserves_newer_command_and_expiry(mode, transi
     predicates = []
 
     async def upload(*args, accepted_status, is_current, **kwargs):
+        assert kwargs["entry_id"] == "entry"
         assert is_current()
         predicates.append(is_current)
         if transition == "superseded":
@@ -406,7 +407,7 @@ def test_force_upload_completion_preserves_newer_command_and_expiry(mode, transi
     ns = {
         "hass": None,
         "site_configs": [("site-a", "token", "teslemetry")],
-        "entry": SimpleNamespace(data={}),
+        "entry": SimpleNamespace(entry_id="entry", data={}),
         "CONF_FLEET_API_BASE_URL": "fleet_base_url",
         "send_tariff_to_tesla": upload,
         "_command_generation": generation,

@@ -16,7 +16,7 @@ import aiohttp
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
-from .powerwall_control_http import async_get_clientsession
+from .powerwall_control_http import async_get_clientsession, controlled_session
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
@@ -2934,7 +2934,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         self.api_provider = api_provider
         self._entry_id = entry_id
         self._fleet_base_url = fleet_base_url  # Per-entry regional URL override
-        self.session = async_get_clientsession(hass)
+        self.session = controlled_session(hass, async_get_clientsession(hass), entry_id=entry_id or None)
         self._site_info_cache = None  # Cache site_info (normally refreshed every 6 hours)
         self._site_info_last_fetch: float = 0  # Timestamp of last successful fetch
         # Nameplate capability survives writes to mutable site settings. Keep

@@ -196,7 +196,8 @@ class _FakeSession:
 
 
 def _build_namespace(session, upload_calls, send_result=True, send_results=None):
-    async def _fake_send_tariff_to_tesla(hass, site_id, tariff, token, provider, fleet_base_url=None, is_current=None):
+    async def _fake_send_tariff_to_tesla(hass, site_id, tariff, token, provider, fleet_base_url=None, is_current=None, entry_id=None):
+        assert entry_id == "entry-1"
         if is_current is not None and not is_current():
             return False
         upload_calls.append(tariff)

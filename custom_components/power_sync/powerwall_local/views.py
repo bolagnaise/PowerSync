@@ -107,7 +107,7 @@ def _control_site_id(entry: ConfigEntry):
 
 def _bind_site_control(hass: HomeAssistant, entry: ConfigEntry, client: PowerwallLocalClient):
     """Bind the single production client factory to its physical site/pairing."""
-    from ..powerwall_control import canonical_site_id, coordinator_for
+    from ..powerwall_control import canonical_site_id, coordinator_for, foreign_site_owner
     from ..powerwall_control_http import controlled_session
     runtime = hass.data.get(DOMAIN, {}).get(entry.entry_id)
     paired = (entry.data.get(CONF_POWERWALL_LOCAL_DIN), entry.data.get(CONF_POWERWALL_LOCAL_PRIVATE_KEY),
@@ -135,10 +135,12 @@ def _bind_site_control(hass: HomeAssistant, entry: ConfigEntry, client: Powerwal
 
     client._control_matches_entry = current_identity
     client._control_session = lambda raw, **kwargs: controlled_session(
-        hass, raw, is_current=current_identity, identity=identity, **kwargs)
+        hass, raw, is_current=current_identity, identity=identity, entry_id=entry.entry_id, **kwargs)
     client._transport._site_control = site
-    client._transport._control_current = current_identity
+    client._transport._control_current = lambda: (current_identity()
+        and foreign_site_owner(hass, entry.entry_id, site.site_id) is None)
     client._transport._control_identity = identity
+    client._transport._control_entry_id = entry.entry_id
     return client
 
 
@@ -512,7 +514,8 @@ class PowerwallPairStartView(HomeAssistantView):
         if old_mgr is not None and old_mgr.is_running:
             await old_mgr.cancel()
 
-        session = async_get_clientsession(self._hass)
+        from ..powerwall_control_http import controlled_session
+        session = controlled_session(self._hass, async_get_clientsession(self._hass), entry_id=entry.entry_id)
 
         async def _on_success(result):
             updated = {
@@ -926,10 +929,12 @@ class PowerwallDebugProbeView(HomeAssistantView):
                     text = await r.text()
                     results.append({"step": "request", "method": method, "path": path, "status": r.status, "body": text[:1000]})
             else:
-                from ..powerwall_control import coordinator_for
+                from ..powerwall_control import coordinator_for, foreign_site_owner
                 site = coordinator_for(self._hass, entry=entry)
                 async with site.write_context("local_debug_probe", identity=lambda: _control_site_id(entry),
-                        is_current=lambda: self._hass.data.get(DOMAIN, {}).get(entry.entry_id) is setup_runtime):
+                        entry_id=entry.entry_id,
+                        is_current=lambda: (self._hass.data.get(DOMAIN, {}).get(entry.entry_id) is setup_runtime
+                            and foreign_site_owner(self._hass, entry.entry_id, site.site_id) is None)):
                     async with sess.post(url, json=body, headers=headers) as r:
                         text = await r.text()
                         results.append({"step": "request", "method": method, "path": path, "status": r.status, "body": text[:1000]})
@@ -984,6 +989,7 @@ class PowerwallCloudProbeView(HomeAssistantView):
         from ..powerwall_control_http import controlled_session
         session = controlled_session(self._hass, async_get_clientsession(self._hass),
                                      identity=lambda: _control_site_id(entry),
+                                     entry_id=entry.entry_id,
                                      is_current=lambda: self._hass.data.get(DOMAIN, {}).get(entry.entry_id) is setup_runtime)
         try:
             if method == "GET":

@@ -220,6 +220,103 @@ async def test_event_route_wait_cannot_overtake_a_new_force_owner(kind):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["spike", "session"])
+@pytest.mark.parametrize("owner", ["force", "native", "restore", "quarantine"])
+async def test_foreign_site_owner_blocks_event_before_baseline_capture(kind, owner):
+    p = event(kind)
+    p.manager._saved_tariff = None
+    p.manager._saved_operation_mode = None
+    other = {"entry": NS(data={"tesla_energy_site_id": p.manager.site_id}, options={})}
+    key, value = {
+        "force": ("force_discharge_state", {"active": True}),
+        "native": ("powerwall_native_max_charge", NS(pending=True)),
+        "restore": ("pending_tesla_restore", {"site_id": p.manager.site_id}),
+        "quarantine": ("powerwall_settings_pending", {"site_id": p.manager.site_id}),
+    }[owner]
+    other[key] = value
+    p.manager.hass.data["power_sync"]["entry-2"] = other
+    await enter(p, kind)
+    assert p.raw.get_calls == [] and p.raw.post_calls == [] and p.uploads == []
+    assert p.manager._saved_tariff is None and p.manager._saved_operation_mode is None
+    assert p.manager._store.save_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["spike", "session"])
+async def test_foreign_owner_acquired_after_queue_blocks_final_event_write(kind):
+    p = event(kind)
+    queued = asyncio.Event()
+    original = p.wrapped.post
+    def post(*args, **kwargs):
+        queued.set()
+        return original(*args, **kwargs)
+    p.wrapped.post = post
+    async with p.site.write_context("preceding physical mutation"):
+        pending = asyncio.create_task(enter(p, kind))
+        await asyncio.wait_for(queued.wait(), timeout=2)
+        p.manager.hass.data["power_sync"]["entry-2"] = {
+            "entry": NS(data={"tesla_energy_site_id": p.manager.site_id}, options={}),
+            "force_discharge_state": {"active": True},
+        }
+    await asyncio.wait_for(pending, timeout=2)
+    assert p.raw.post_calls == [] and p.uploads == []
+    assert p.manager._saved_tariff is not None and p.manager._restore_pending is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["spike", "session"])
+async def test_queued_foreign_write_cannot_enter_during_event_baseline_capture(kind):
+    p = event(kind)
+    harness = importlib.import_module("test_tesla_spike_session_tariff_baseline")
+    http = importlib.import_module(p.namespace["__package__"] + ".powerwall_control_http")
+    control = importlib.import_module(p.namespace["__package__"] + ".powerwall_control")
+    reading, release_read, foreign_started = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    p.manager._saved_tariff = p.manager._saved_operation_mode = None
+    p.raw._tariff_rate_response = harness._BlockingJsonResponse(
+        200, {"response": {"tariff_content_v2": harness.GENUINE_TARIFF}}, reading, release_read)
+    foreign_session = http.controlled_session(p.manager.hass, p.raw, entry_id="entry-2")
+
+    async def foreign_write():
+        foreign_started.set()
+        async with foreign_session.post("https://fleet/api/1/energy_sites/site-1/grid_import_export",
+                json={"customer_preferred_export_rule": "battery_ok"}):
+            pass
+
+    pending_event = None
+    try:
+        async with p.site.write_context("preceding physical mutation"):
+            pending_foreign = asyncio.create_task(foreign_write())
+            await asyncio.wait_for(foreign_started.wait(), timeout=2)
+            await asyncio.sleep(0)
+            assert not pending_foreign.done() and p.raw.post_calls == []
+            pending_event = asyncio.create_task(enter(p, kind))
+            await asyncio.wait_for(reading.wait(), timeout=2)
+            assert not getattr(p.manager, "_in_spike_mode" if kind == "spike" else "_in_session_mode")
+            assert p.manager._saved_tariff is None
+        with pytest.raises(control.ControlWriteRejected):
+            await asyncio.wait_for(pending_foreign, timeout=2)
+        assert p.raw.post_calls == []
+    finally:
+        release_read.set()
+        if pending_event is not None:
+            await asyncio.wait_for(pending_event, timeout=2)
+    assert getattr(p.manager, "_in_spike_mode" if kind == "spike" else "_in_session_mode")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["spike", "session"])
+async def test_unrelated_site_owner_does_not_block_same_entry_event_cleanup(kind):
+    p = event(kind, mode="backup", restoring=True)
+    p.manager.hass.data["power_sync"]["entry-2"] = {
+        "entry": NS(data={"tesla_energy_site_id": "different-site"}, options={}),
+        "force_discharge_state": {"active": True},
+    }
+    await restore(p, kind)
+    assert [payload["default_real_mode"] for _url, payload in p.raw.post_calls] == ["self_consumption", "backup"]
+    assert p.manager._restore_pending is False
+
+
+@pytest.mark.asyncio
 async def test_saving_session_persists_original_baseline_before_first_mutation():
     p = event("session")
     events = []

@@ -4,6 +4,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import copy
+from collections.abc import Mapping
 import logging
 import time
 from dataclasses import dataclass
@@ -20,7 +21,7 @@ ROOT = Path(__file__).parents[1] / "custom_components/power_sync"
 PLANNER = ROOT / "automations/ev_charging_planner.py"
 HTTP = NS(ClientTimeout=lambda total: total, ClientError=ConnectionError)
 METHODS = (
-    "_set_export_rule", "_set_tesla_backup_reserve", "_get_current_export_rule", "_curtailment_entry_data", "_curtailment_runtime_current", "_curtailment_site_id", "_curtailment_recovery_allowed",
+    "_set_export_rule", "_set_tesla_backup_reserve", "_get_current_export_rule", "_curtailment_entry_data", "_curtailment_runtime_current", "_curtailment_site_id", "_curtailment_recovery_allowed", "_curtailment_export_unowned",
     "_load_curtailment_recovery", "_persist_curtailment_recovery",
     "_disable_curtailment_for_ev", "_restore_curtailment",
     "_retry_curtailment_restoration", "evaluate",
@@ -42,9 +43,11 @@ def load(name, path, ns, *, strip_imports=False):
 
 def planner_class():
     ns = dict(asyncio=asyncio, time=time, datetime=datetime, timezone=timezone,
-              dataclass=dataclass, DOMAIN="power_sync", _LOGGER=logging.getLogger(__name__),
+              dataclass=dataclass, Mapping=Mapping, DOMAIN="power_sync", _LOGGER=logging.getLogger(__name__),
               aiohttp=HTTP, get_session_manager=lambda: None)
     load("canonical_site_id", ROOT / "powerwall_control.py", ns)
+    load("foreign_site_owner", ROOT / "powerwall_control.py", ns)
+    load("_ev_curtailment_battery_owner_present", PLANNER, ns)
     load("AutoScheduleState", PLANNER, ns)
     for name in METHODS:
         load(name, PLANNER, ns, strip_imports=True)
@@ -551,3 +554,55 @@ async def test_site_reconfiguration_while_journal_saves_blocks_original_request(
     assert runtime["ev_curtailment_recovery_blocked"]["site_id"] == "site"
     assert "ev_curtailment_override" not in runtime
     assert store.saved["ev_curtailment_recovery"]["entry"]["site_id"] == "site"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owner", [
+    {"force_charge_state": {"active": True}}, {"force_discharge_state": {"active": True}},
+    {"hold_soc_state": {"active": True}}, {"self_consumption_state": {"active": True}},
+    {"powerwall_battery_dispatch": NS(pending=True)}, {"powerwall_native_max_charge": NS(pending=True)},
+    {"max_backup_end_ts": 123}, {"optimizer_force_restart_restore_pending": True},
+    {"pending_tesla_restore": {"site_id": "site"}}, {"powerwall_settings_pending": {"site_id": "site"}},
+])
+async def test_ev_acquisition_never_captures_a_battery_owners_temporary_export_rule(owner):
+    obj, runtime, _ = executor()
+    runtime.update(owner)
+    obj._get_current_export_rule = AsyncMock(return_value="never")
+    obj._set_export_rule = AsyncMock(return_value=True)
+    a = state(obj, "VIN-A")
+    assert not await obj._disable_curtailment_for_ev(a)
+    obj._get_current_export_rule.assert_not_awaited()
+    obj._set_export_rule.assert_not_awaited()
+    assert a.original_export_rule is None and not a.curtailment_override_active
+    assert "ev_curtailment_recovery" not in runtime["automation_store"].saved
+
+
+@pytest.mark.asyncio
+async def test_battery_owner_arriving_during_baseline_read_prevents_ev_acquisition():
+    obj, runtime, _ = executor()
+
+    async def baseline():
+        runtime["force_charge_state"] = {"active": True}
+        return "never"
+
+    obj._get_current_export_rule = baseline
+    obj._set_export_rule = AsyncMock(return_value=True)
+    a = state(obj, "VIN-A")
+    assert not await obj._disable_curtailment_for_ev(a)
+    obj._set_export_rule.assert_not_awaited()
+    assert a.original_export_rule is None
+    assert "ev_curtailment_recovery" not in runtime["automation_store"].saved
+
+
+@pytest.mark.asyncio
+async def test_foreign_entry_battery_owner_blocks_ev_before_baseline_read():
+    obj, runtime, _ = executor()
+    obj.hass.data["power_sync"]["other-entry"] = {
+        "entry": NS(data={"tesla_energy_site_id": "site"}, options={}),
+        "force_charge_state": {"active": True},
+    }
+    obj._get_current_export_rule = AsyncMock(return_value="never")
+    a = state(obj, "VIN-A")
+    assert not await obj._disable_curtailment_for_ev(a)
+    obj._get_current_export_rule.assert_not_awaited()
+    assert "ev_curtailment_recovery" not in runtime["automation_store"].saved

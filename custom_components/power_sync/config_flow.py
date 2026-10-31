@@ -8390,6 +8390,7 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
                 )
             session = controlled_session(
                 self.hass, async_get_clientsession(self.hass), is_current=current,
+                entry_id=self.config_entry.entry_id,
                 identity=lambda: self.config_entry.data.get(CONF_TESLA_ENERGY_SITE_ID),
             )
             headers = {

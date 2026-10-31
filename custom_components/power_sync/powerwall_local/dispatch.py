@@ -309,6 +309,7 @@ async def dispatch_powerwall_setting(
                         try:
                             async with target_control.operation(
                                 label=f"{label} settings", deadline=deadline,
+                                entry_id=entry.entry_id,
                                 is_current=lambda: current() and allowed(), identity=cloud_identity,
                             ):
                                 confirmed = bool(await cloud_call())
