@@ -4,6 +4,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import logging
+import inspect
 import copy
 import time
 from pathlib import Path
@@ -13,9 +14,12 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 import aiohttp
 
-from conftest import load_source_node
+from conftest import load_source_node, load_power_sync_function, load_power_sync_submodule
+from test_service_calls import CurrentServiceCall
 
 ROOT = Path(__file__).parents[1] / "custom_components/power_sync"
+native_grid_charging_reading = load_power_sync_submodule(
+    "powerwall_local.normalization", "tesla_local_settings_normalization_probe").native_grid_charging_reading
 
 
 def load_settings_startup(namespace):
@@ -104,7 +108,7 @@ def load_function(path, name, namespace, *, strip_imports=False):
 
 
 def transaction():
-    ns = dict(asyncio=asyncio, time=time)
+    ns = dict(asyncio=asyncio, time=time, native_grid_charging_reading=native_grid_charging_reading)
     return load_function(ROOT / "powerwall_local/dispatch.py", "write_config_confirmed", ns)
 
 
@@ -192,15 +196,16 @@ def test_cloud_grid_parser_rejects_arbitrary_truthiness(value):
     assert parse({"disallow_charge_from_grid_with_solar_installed": value}) is None
 
 
-def settings_context(transport=None, *, paired=True):
+def settings_context(transport=None, *, paired=True, method="auto"):
     export_namespace = {}
     exec((ROOT / "tesla_export_permissions.py").read_text(), export_namespace)
     runtime = {}
     hass = SimpleNamespace(data={"power_sync": {"entry": runtime}})
-    entry = SimpleNamespace(entry_id="entry", options={"tesla_control_method": "tariff"},
+    entry = SimpleNamespace(entry_id="entry", options={"tesla_control_method": method},
                             data={"tesla_energy_site_id": "site", "powerwall_local_din": "din",
                                   "powerwall_local_paired": paired})
     ns = dict(asyncio=asyncio, time=time, DOMAIN="power_sync", _LOGGER=logging.getLogger(__name__),
+              native_grid_charging_reading=native_grid_charging_reading,
               tesla_export_rule_from_site_info=export_namespace["tesla_export_rule_from_site_info"],
               read_export_rule=export_namespace["read_export_rule"],
               _sync_powerwall_settings_issue=Mock(), CONF_TESLA_ENERGY_SITE_ID="tesla_energy_site_id",
@@ -450,7 +455,7 @@ async def test_stale_restore_cannot_clear_newer_pending_state_during_load():
     ("operation_mode", "autonomous", {"default_real_mode": "autonomous"}),
     ("grid_charging", False, {"site_info": {"disallow_charge_from_grid_with_solar_installed": True}}),
 ])
-async def test_actual_tariff_prerequisite_helper_uses_paired_local_readback(setting, value, config):
+async def test_actual_auto_prerequisite_helper_uses_paired_local_readback(setting, value, config):
     transport = SimpleNamespace(write_config=AsyncMock(return_value=True),
                                 read_config=AsyncMock(return_value=config))
     ns, _ = settings_context(transport)
@@ -521,8 +526,9 @@ async def test_manual_setting_waits_for_owned_restore_and_retains_its_request(ou
               hold_soc_state={"active": False}, _local_powerwall_generation_current=lambda: True,
               _stop_local_powerwall_dispatch=AsyncMock(return_value=False),
               handle_restore_normal=restore, SERVICE_RESTORE_NORMAL="restore_normal",
-              ServiceCall=lambda domain, service, data, **kwargs: SimpleNamespace(data=data),
               HomeAssistantError=RuntimeError)
+    ns['make_service_call'] = load_power_sync_function('make_service_call',
+        {'signature': inspect.signature, 'ServiceCall': CurrentServiceCall}, path=ROOT/'service_calls.py')
     fn = load_function(ROOT / "__init__.py", "_prepare_tesla_setting_change", ns)
     if outcome == "pending":
         with pytest.raises(RuntimeError, match="restoration remains pending"):
@@ -1576,7 +1582,9 @@ def restore_context(*, mode="backup", direction="discharge", envelope="off"):
         dt_util=SimpleNamespace(utcnow=lambda: datetime.now(timezone.utc)), datetime=datetime, timedelta=timedelta,
         async_track_point_in_utc_time=Mock(return_value=lambda: None),
         _optional_bool=lambda value: value if type(value) is bool else None, _send_expo_push=AsyncMock(),
-        HomeAssistantError=RuntimeError, ServiceCall=lambda domain, service, data, **kwargs: SimpleNamespace(data=data, **kwargs))
+        HomeAssistantError=RuntimeError, ServiceCall=CurrentServiceCall)
+    ns['make_service_call'] = load_power_sync_function('make_service_call',
+        {'signature': inspect.signature, 'ServiceCall': CurrentServiceCall}, path=ROOT/'service_calls.py')
     for name in ("_update_powerwall_store", "_cancel_all_force_timers", "persist_force_mode_state",
                  "persist_pending_tesla_restore", "_tesla_force_result_all_confirmed", "handle_restore_normal",
                  "update_cached_export_rule", "_supersede_tesla_charge_kick", "_prepare_tesla_setting_change"):
@@ -1693,7 +1701,7 @@ async def test_complete_replacement_restore_saves_root_before_actuation_during_o
     assert ns["_command_generation"][0] == 2
     assert ns["_tesla_force_apply_operation_mode"].await_count == 2
     release.set()
-    assert await old is None
+    assert await old == {"success": False, "error": "restore completion could not be persisted"}
     with pytest.raises(asyncio.CancelledError):
         await new
     assert ns["force_discharge_state"]["active"] is True
@@ -1914,7 +1922,7 @@ async def test_unload_drains_actual_restore_terminal_save_before_replacement():
     await asyncio.sleep(0)
     assert not reload_task.done() and ns["hass"].data["power_sync"]["entry"] is runtime
     release.set()
-    assert await old is None
+    assert await old == {"success": False, "error": "restore completion could not be persisted"}
     await reload_task
     assert saved["force_mode_state"] == {"owner": "new"}
     assert replacement["pending_tesla_restore"] == {"owner": "new"}
@@ -2093,3 +2101,64 @@ async def test_actual_getters_cannot_recover_expired_settings_from_newer_dcq(
     assert field not in runtime["powerwall_setting_observations"]
     assert ns["confirmed_local_powerwall_setting"](ns["hass"], ns["entry"], field, max_age=30) == cloud_value
     assert ns[property_name](entity) == cloud_value
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["tariff", None, "unsupported"])
+@pytest.mark.parametrize("reachable", [True, False])
+async def test_tariff_preparation_and_complete_restore_never_access_signed_settings(method, reachable):
+    """Tariff preparation/restoration stay cloud-only even with a paired gateway."""
+    ns, runtime, saved, call = restore_context()
+    ns["entry"].data["powerwall_local_paired"] = True
+    if method is None:
+        ns["entry"].options.pop("tesla_control_method", None)
+    else:
+        ns["entry"].options["tesla_control_method"] = method
+    error = None if reachable else ns["PowerwallUnreachableError"]("gateway offline")
+    transport = SimpleNamespace(
+        write_config=AsyncMock(return_value=True, side_effect=error),
+        read_config=AsyncMock(return_value={"default_real_mode": "backup"}, side_effect=error),
+    )
+    lookup = Mock(return_value=transport)
+    ns["get_local_transport"] = lookup
+    session = SimpleNamespace(
+        post=Mock(return_value=HttpReply({"response": {"result": True}})),
+        get=Mock(return_value=HttpReply({"response": {
+            "components": {"customer_preferred_export_rule": "pv_only"}
+        }})),
+    )
+    cloud_mode = AsyncMock(return_value=True)
+    cloud_grid = AsyncMock(return_value=SimpleNamespace(applied=True))
+    ns.update(async_get_clientsession=lambda hass: session, aiohttp=aiohttp,
+              CONF_FLEET_API_BASE_URL="base", _record_tesla_settings_submission=AsyncMock(),
+              _tesla_force_set_operation_mode=cloud_mode,
+              async_set_tesla_grid_charging_confirmed=cloud_grid,
+              GRID_CONFIRMATION_POLL_OFFSETS=(0.5, 1.5))
+    for name in ("_capture_tesla_setting_baselines", "_tesla_force_apply_operation_mode",
+                 "_tesla_force_apply_grid_charging", "_tesla_grid_export_write_result",
+                 "_tesla_force_apply_export_rule"):
+        load_function(ROOT / "__init__.py", name, ns, strip_imports=True)
+    sites = [("site", "token", "fleet")]
+    state = ns["force_discharge_state"]
+    state["saved_grid_charging_enabled"] = True
+    await ns["_capture_tesla_setting_baselines"](state, sites, is_current=lambda: True)
+    assert state["saved_states"]["site"]["saved_operation_mode"] == "backup"
+    assert state["saved_states"]["site"]["saved_grid_charging_enabled"] is True
+    prepared_mode = await ns["_tesla_force_apply_operation_mode"](
+        sites, "autonomous", reason="force discharge")
+    prepared_grid = await ns["_tesla_force_apply_grid_charging"](
+        sites, False, reason="force discharge")
+    assert prepared_mode["confirmed_sites"] == ["site"]
+    assert prepared_grid["confirmed_sites"] == ["site"]
+    result = await ns["handle_restore_normal"](call)
+    assert result["success"] is True
+    assert cloud_mode.await_args_list[0].args[4] == "autonomous"
+    assert any(item.args[4] == "backup" for item in cloud_mode.await_args_list)
+    assert cloud_grid.await_args_list[0].args[4] is False
+    assert any(item.args[4] is True for item in cloud_grid.await_args_list)
+    assert session.post.call_args.kwargs["json"] == {"customer_preferred_export_rule": "pv_only"}
+    transport.write_config.assert_not_awaited()
+    transport.read_config.assert_not_awaited()
+    lookup.assert_not_called()
+    assert not runtime.get("powerwall_settings_pending")
+    assert saved["force_mode_state"] is None

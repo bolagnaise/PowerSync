@@ -212,6 +212,24 @@ def _observation_timestamp(
 
 
 def _merge_observation_status(target: dict[str, Any], source: Mapping[str, Any]) -> None:
+    # Optional control evidence follows its own state sample, never a meter
+    # or location timestamp. Unknown newer samples invalidate older certainty.
+    evidence_key = "_boost_charging_state_evidence"
+    source_evidence = source.get(evidence_key)
+    target_evidence = target.get(evidence_key)
+    if isinstance(source_evidence, Mapping):
+        source_at = _observation_timestamp(source_evidence, "observed_at")
+        target_at = (_observation_timestamp(target_evidence, "observed_at")
+                     if isinstance(target_evidence, Mapping) else None)
+        if source_at is not None and (target_at is None or source_at > target_at):
+            target[evidence_key] = dict(source_evidence)
+        elif source_at is not None and source_at == target_at and (
+                source_evidence.get("known") is not True
+                or target_evidence.get("known") is not True
+                or source_evidence.get("charging") is not target_evidence.get("charging")):
+            # Equal-time conflicting/unknown providers cannot create certainty
+            # in either discovery order. Identical settled evidence can merge.
+            target[evidence_key] = {"known": False, "charging": None, "observed_at": source_at}
     source_observed_at = _observation_timestamp(
         source, "_observed_at", "observed_at"
     )

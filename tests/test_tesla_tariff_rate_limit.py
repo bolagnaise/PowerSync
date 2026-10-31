@@ -307,7 +307,7 @@ def test_restore_retry_waits_out_its_site_cooldown(limited_site, expected_delay)
         "force_discharge_state": {"active": False},
         "_command_generation": [7], "_restore_generation": 7,
         "site_configs": [("site-a", "token", "teslemetry")],
-        "entry": SimpleNamespace(data={}),
+        "entry": SimpleNamespace(entry_id="entry", data={}),
         "CONF_FLEET_API_BASE_URL": "fleet_base_url",
         "get_tesla_api_base_url": lambda provider, region: region or provider,
         "hass": SimpleNamespace(data={"power_sync": {"_tesla_tou_uploads": {
@@ -391,6 +391,7 @@ def test_force_upload_completion_preserves_newer_command_and_expiry(mode, transi
     predicates = []
 
     async def upload(*args, accepted_status, is_current, **kwargs):
+        assert kwargs["entry_id"] == "entry"
         assert is_current()
         predicates.append(is_current)
         if transition == "superseded":
@@ -406,7 +407,7 @@ def test_force_upload_completion_preserves_newer_command_and_expiry(mode, transi
     ns = {
         "hass": None,
         "site_configs": [("site-a", "token", "teslemetry")],
-        "entry": SimpleNamespace(data={}),
+        "entry": SimpleNamespace(entry_id="entry", data={}),
         "CONF_FLEET_API_BASE_URL": "fleet_base_url",
         "send_tariff_to_tesla": upload,
         "_command_generation": generation,
@@ -455,7 +456,17 @@ def test_sync_and_restore_uploads_pass_their_own_generation(handler_name, genera
                   and node.func.id == "send_tariff_to_tesla")
     predicate = next(keyword.value for keyword in upload.keywords if keyword.arg == "is_current")
     generation = [7]
-    namespace = {"_command_generation": generation, generation_name: 7}
+    runtime = {}
+    entry = SimpleNamespace(data={"tesla_energy_site_id": "site"})
+    namespace = {"_command_generation": generation, generation_name: 7,
+                 "sync_runtime": runtime, "sync_site_id": "site", "entry": entry,
+                 "CONF_TESLA_ENERGY_SITE_ID": "tesla_energy_site_id",
+                 "_aemo_dispatch_entry_data": lambda: runtime,
+                 "_is_monitoring_mode": lambda: False, "_monitoring_sync_override": False}
+    if isinstance(predicate, ast.Name):
+        helper = next(n for n in handler.body if isinstance(n, ast.FunctionDef)
+                      and n.name == predicate.id)
+        exec(compile(ast.Module(body=[helper], type_ignores=[]), "<upload guard>", "exec"), namespace)
     is_current = eval(compile(ast.Expression(body=predicate), "<upload-authority>", "eval"), namespace)
     assert is_current() is True
     generation[0] += 1

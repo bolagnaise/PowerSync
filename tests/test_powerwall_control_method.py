@@ -72,6 +72,102 @@ def test_auto_keeps_a_native_episode_stable_until_it_finishes():
     assert policy.runtime_route(runtime,config(),"discharge")=="local"
 
 
+def admission(runtime=None, **changes):
+    checks = dict(call_present=True, optimizer_call=False, targetless=True,
+        generation_current=True, monitoring_blocked=False, demand_charge_protected=False,
+        local_configured=True, license_allowed=True, direction='charge')
+    checks.update(changes)
+    return policy.native_control_policy({} if runtime is None else runtime, **checks)
+
+
+@pytest.mark.parametrize('key,reason', [
+    ('native_max_startup_pending', 'native_max_startup_pending'),
+    ('powerwall_local_dispatch_stopping', 'native_max_dispatch_stopping'),
+    ('tesla_control_method_changing', 'native_max_control_method_changing'),
+    ('powerwall_local_recovery_pending', 'native_max_local_recovery_pending'),
+    ('powerwall_settings_pending', 'native_max_settings_unresolved'),
+    ('tesla_settings_pending', 'native_max_settings_unresolved'),
+    ('optimizer_force_restart_restore_pending', 'native_max_restart_restore_pending'),
+    ('pending_tesla_restore', 'native_max_restore_pending'),
+    ('max_backup_end_ts', 'native_max_max_backup_active'),
+])
+def test_native_policy_retains_every_runtime_blocker_with_precise_reason(key, reason):
+    result = admission({key: True})
+    assert result.allowed is False and result.reason == reason
+    assert not result
+
+
+@pytest.mark.parametrize('changes,reason', [
+    ({'call_present': False}, 'native_max_call_unavailable'),
+    ({'optimizer_call': True, 'targetless': False}, 'native_max_explicit_target_requires_local_control'),
+    ({'generation_current': False}, 'native_max_runtime_stale'),
+    ({'monitoring_blocked': True}, 'native_max_monitoring_mode'),
+    ({'demand_charge_protected': True}, 'native_max_demand_charge_protection'),
+    ({'local_configured': False}, 'native_max_local_control_unconfigured'),
+    ({'license_allowed': False}, 'native_max_license_denied'),
+])
+def test_native_policy_retains_current_external_admission_checks(changes, reason):
+    result = admission(**changes)
+    assert result.allowed is False and result.reason == reason
+
+
+def test_cloud_handoff_does_not_authorize_native_local_signed_writes():
+    incident = {'id': 'incident', 'resume_cloud': True}
+    result = admission({'powerwall_settings_pending': incident,
+                        'powerwall_settings_cloud_handoff': 'incident'})
+    assert result.allowed is False
+    assert result.reason == 'native_max_local_settings_suspended'
+
+
+def test_native_policy_only_applies_directional_protections_to_their_direction():
+    assert admission(direction='discharge', demand_charge_protected=True).allowed is True
+    guard = SimpleNamespace(manager=SimpleNamespace(snapshot=SimpleNamespace(mode='active')))
+    assert admission({'network_export_guard': guard}).allowed is True
+    result = admission({'network_export_guard': guard}, direction='discharge')
+    assert result.allowed is False and result.reason == 'native_max_network_export_guard_active'
+    guard.manager.snapshot.mode = 'off'
+    assert admission({'network_export_guard': guard}, direction='discharge').allowed is True
+
+
+@pytest.mark.parametrize('key', ['call_present', 'optimizer_call', 'targetless',
+    'generation_current', 'monitoring_blocked', 'demand_charge_protected',
+    'local_configured', 'license_allowed'])
+@pytest.mark.parametrize('unknown', [None, 1, 'true', {}])
+def test_native_policy_unknown_check_results_fail_closed(key, unknown):
+    result = admission(**{key: unknown})
+    assert result.allowed is False and result.reason == 'native_max_policy_evidence_unavailable'
+
+
+def test_native_policy_unknown_runtime_direction_or_guard_fail_closed():
+    assert policy.native_control_policy(None, call_present=True, optimizer_call=False,
+        targetless=True, generation_current=True, monitoring_blocked=False,
+        demand_charge_protected=False, local_configured=True, license_allowed=True,
+        direction='charge').reason == 'native_max_policy_evidence_unavailable'
+    assert admission(direction='unknown').allowed is False
+    assert admission({'network_export_guard': object()}, direction='discharge').allowed is False
+    assert admission().allowed is True
+
+
+@pytest.mark.parametrize('kind', list(policy.ControlTargetKind))
+def test_typed_route_preserves_target_kind_and_precise_watt_semantics(kind):
+    plan = policy.plan_route(config(tesla_control_method='tariff'), 'discharge',
+                             target_kind=kind)
+    assert plan.target_kind is kind
+    assert plan.route == ('tariff' if kind is policy.ControlTargetKind.NATIVE_MAX else 'local')
+    runtime_plan = policy.runtime_route_plan({}, config(tesla_control_method='tariff'),
+                                            'discharge', target_kind=kind)
+    assert runtime_plan == plan
+
+
+def test_typed_native_route_matches_legacy_selection_and_rejects_unknown_kind():
+    settings, state = config(), snapshot()
+    assert policy.plan_route(settings, 'discharge', state, local_available=True).route == (
+        policy.select_route(settings, 'discharge', state, local_available=True))
+    for invalid in ('native_max', None, True, 'unknown'):
+        with pytest.raises(ValueError, match='target kind'):
+            policy.plan_route(settings, 'discharge', target_kind=invalid)
+
+
 @pytest.mark.asyncio
 async def test_preference_change_stops_local_action_before_persistence_and_does_not_replay():
     from test_powerwall_battery_dispatch import load_routing
@@ -387,6 +483,43 @@ async def test_legacy_resumed_tariff_control_keeps_cloud_route_and_incident(dire
     assert not local.pending
 
 
+@pytest.mark.parametrize('changes,expected', [
+    ({}, True),
+    ({'method': 'local'}, False),
+    ({'power': 500}, False),
+    ({'power': False}, False),
+    ({'grid_target': 1000}, False),
+    ({'pending_patch': {'resume_cloud': False}}, False),
+    ({'pending_patch': {'resume_cloud': 1}}, False),
+    ({'pending_patch': {'id': ''}}, False),
+    ({'pending_patch': {'site_id': 'other'}}, False),
+    ({'handoff': None}, False),
+    ({'handoff': 'other'}, False),
+    ({'site': None}, False),
+    ({'stale_runtime': True}, False),
+])
+def test_auto_cloud_handoff_requires_current_exact_incident_and_targetless_request(changes, expected):
+    from test_powerwall_battery_dispatch import load_routing, call
+    ns, _, client, _ = load_routing(tesla_control_method=changes.get('method', 'auto'))
+    runtime = ns['_local_powerwall_runtime']
+    ns['entry'].data['tesla_energy_site_id'] = changes.get('site', 'site')
+    pending = {'id': 'incident', 'site_id': 'site', 'resume_cloud': True,
+               'restore_basis': {'saved_operation_mode': 'backup'}}
+    pending.update(changes.get('pending_patch', {}))
+    runtime['powerwall_settings_pending'] = pending
+    runtime['powerwall_settings_cloud_handoff'] = changes.get('handoff', 'incident')
+    before = {**pending, 'restore_basis': dict(pending['restore_basis'])}
+    if changes.get('stale_runtime'):
+        ns['hass'].data['power_sync']['entry'] = {}
+    request = call(power_w=changes.get('power', 0))
+    if 'grid_target' in changes:
+        request.data['grid_import_target_w'] = changes['grid_target']
+    assert ns['_cloud_tariff_control_requested'](request) is expected
+    assert pending == before
+    client.get_snapshot.assert_not_awaited()
+    client.dispatch_battery_power.assert_not_awaited()
+
+
 @pytest.mark.asyncio
 async def test_legacy_tesla_can_change_control_method_after_cleanup():
     from test_powerwall_battery_dispatch import load_routing
@@ -549,7 +682,6 @@ async def test_preference_change_finishes_pending_cloud_restore_after_local_stop
     runtime['optimizer_force_restart_restore_pending'] = True
     save = Mock(side_effect=lambda current, **values: setattr(current, 'options', values['options']))
     ns['hass'].config_entries = SimpleNamespace(async_get_entry=lambda key: entry, async_update_entry=save)
-    ns['ServiceCall'] = lambda domain, service, data: SimpleNamespace(data=data)
     events = []
     async def restore(call):
         assert not local.pending

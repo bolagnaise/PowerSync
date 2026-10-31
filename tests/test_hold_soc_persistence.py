@@ -152,7 +152,15 @@ def test_restore_force_mode_from_persistence_handles_hold_soc_mode():
     # using the existing retry-safe handle_restore_normal contract rather
     # than reimplementing retries here.
     assert "if now >= expires_at:" in hold_section
-    assert '{"source": "hold_soc_cleanup", "_force_restore": True}' in hold_section
+    cleanup_payloads = [node for node in ast.walk(ast.parse(source))
+                        if isinstance(node, ast.Dict)
+                        and any(isinstance(key, ast.Constant) and key.value == "source"
+                                and isinstance(value, ast.Constant) and value.value == "hold_soc_cleanup"
+                                for key, value in zip(node.keys, node.values))]
+    assert len(cleanup_payloads) == 2
+    assert all(ast.literal_eval(payload) == {
+        "source": "hold_soc_cleanup", "_force_restore": True, "_allow_monitoring_restore": True,
+    } for payload in cleanup_payloads)
     assert 'if not hold_soc_state.get("active"):' in hold_section
     # Tesla's verified restore clears the journal itself (with the pending
     # marker); other brands clear it here once the hold is released.
@@ -327,7 +335,8 @@ def test_restore_force_mode_from_persistence_hold_soc_expired_restores_normal(ba
     domain, service, data = service_calls[0]
     assert domain == "power_sync"
     assert service == "restore_normal"
-    assert data == {"source": "hold_soc_cleanup", "_force_restore": True}
+    assert data == {"source": "hold_soc_cleanup", "_force_restore": True,
+                    "_allow_monitoring_restore": True}
 
     # Tesla's handle_restore_normal clears the journal atomically with the
     # pending-restore marker once verified; other brands clear it here.

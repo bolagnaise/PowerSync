@@ -104,7 +104,8 @@ def test_restore_and_charge_keep_short_confirmation_policy(reason):
     }
     apply = _load(ROOT / "__init__.py", "_tesla_force_apply_grid_charging", namespace)
     asyncio.run(apply([("a", "token", "fleet")], True, reason=reason))
-    assert set(requests[0]) == {"is_current"}
+    assert set(requests[0]) == {"is_current", "entry_id"}
+    assert requests[0]["entry_id"] == "entry"
 
 
 @pytest.mark.parametrize("change", [

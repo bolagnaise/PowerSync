@@ -17,6 +17,7 @@ import time
 
 from .battery_dispatch import battery_watts, site_grid_limits_w, validate_dispatch_config
 from .full_rate_charge import native_max_charge_eligibility
+from .control_method import control_policy_result
 from .native_max_charge import (NativeMaxChargeError, NativeMaxTariffNotSubmitted,
     NativeMaxTariffRejected, NativeMaxExportNotSubmitted, NativeMaxExportRejected)
 from ..tesla_export_permissions import EXPORT_RULES, ExportRuleReading
@@ -41,8 +42,9 @@ class NativeMaxChargeAdapter:
     ``read_tariff`` returns a fresh raw tariff. ``upload`` must invoke its
     async ``before_write`` callback before EACH POST, then invoke the returned
     synchronous fence immediately at submission. It confirms tariff readback.
-    ``restorable`` rejects temporary controller tariffs. ``policy`` and
-    ``config`` are current synchronous predicates/readers, not snapshots.
+    ``restorable`` rejects temporary controller tariffs. ``policy`` returns a
+    current ControlPolicyResult or an exact legacy boolean; ``config`` reads
+    current settings. Neither grants authority from a saved snapshot.
     """
 
     def __init__(self, *, client, identity, current_identity, policy, config,
@@ -242,8 +244,9 @@ class NativeMaxChargeAdapter:
             validate_dispatch_config(self.direction, dict(self.config()))
             if self.identity != self.current_identity():
                 return self._deny("native_max_identity_changed")
-            if self.policy() is not True:
-                return self._deny("native_max_control_policy_denied")
+            policy = control_policy_result(self.policy())
+            if not policy.allowed:
+                return self._deny(policy.reason, policy_allowed=False)
             if not self.client.local_access_enabled:
                 return self._deny("native_max_local_access_disabled")
             return True
@@ -341,7 +344,11 @@ class NativeMaxChargeAdapter:
                 grid_connected=snapshot.grid_status == "SystemGridConnected",
                 soc=snapshot.soc, soc_cap=config.get("optimization_grid_charge_soc_cap", 1)*100,
                 evidence_fresh=0 <= self.monotonic()-self._observed_at <= 5,
-                control_permitted=self.authority())
+                control_permitted=(authority_current := self.authority()))
+            # Keep the precise runtime denial from the final authority fence;
+            # the pure eligibility helper only knows its boolean outcome.
+            if not authority_current:
+                return False
             if not eligibility.eligible:
                 return self._deny(eligibility.reason, native_import_limit_w=imported,
                                   software_import_limit_w=config.get("optimization_max_grid_import_w"),

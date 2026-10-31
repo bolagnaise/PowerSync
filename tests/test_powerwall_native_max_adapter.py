@@ -766,6 +766,81 @@ async def test_native_charge_guard_retains_the_specific_admission_failure(setup,
 
 
 @pytest.mark.asyncio
+async def test_structured_policy_denial_reaches_guard_and_safe_diagnostics(setup, caplog):
+    s = setup
+    policy = importlib.import_module('native_max_adapter_probe.powerwall_local.control_method')
+    s.state.policy = policy.ControlPolicyResult(False, 'native_max_local_settings_suspended')
+    assert not await s.adapter.guard()
+    assert s.adapter.guard_denial_reason == 'native_max_local_settings_suspended'
+    assert 'policy_allowed' in caplog.text
+    assert not s.state.events and not s.budget.native_max_claim('site')
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('kind', ['legacy_true', 'structured_true'])
+async def test_legacy_and_structured_policy_allow_identical_admission(setup, kind):
+    s = setup
+    if kind == 'structured_true':
+        policy = importlib.import_module('native_max_adapter_probe.powerwall_local.control_method')
+        s.state.policy = policy.ControlPolicyResult(True)
+    assert await s.adapter.guard()
+    assert s.adapter.guard_denial_reason is None
+    assert not s.state.events  # Admission itself never mutates a device.
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('kind', ['legacy_false', 'integer', 'mapping', 'allowed_with_reason',
+    'non_boolean_allowed', 'denied_without_reason', 'untrusted_reason'])
+async def test_unknown_or_malformed_policy_results_cannot_authorize_control(setup, caplog, kind):
+    s = setup
+    policy = importlib.import_module('native_max_adapter_probe.powerwall_local.control_method')
+    s.state.policy = {
+        'legacy_false': False,
+        'integer': 1,
+        'mapping': {'allowed': True, 'reason': None},
+        'allowed_with_reason': policy.ControlPolicyResult(True, 'native_max_license_denied'),
+        'non_boolean_allowed': policy.ControlPolicyResult(1),
+        'denied_without_reason': policy.ControlPolicyResult(False),
+        'untrusted_reason': policy.ControlPolicyResult(False, 'SECRET_UNTRUSTED_TEXT'),
+    }[kind]
+    assert not await s.adapter.guard()
+    assert s.adapter.guard_denial_reason == 'native_max_control_policy_denied'
+    assert 'SECRET_' not in caplog.text
+    assert not s.state.events and not s.budget.native_max_claim('site')
+
+
+@pytest.mark.asyncio
+async def test_structured_policy_rechecked_after_snapshot_await(setup):
+    s = setup
+    policy = importlib.import_module('native_max_adapter_probe.powerwall_local.control_method')
+    original = s.adapter.client.get_snapshot
+    async def revoked_snapshot():
+        snapshot = await original()
+        s.state.policy = policy.ControlPolicyResult(False, 'native_max_monitoring_mode')
+        return snapshot
+    s.adapter.client.get_snapshot = revoked_snapshot
+    assert not await s.adapter.guard()
+    assert s.adapter.guard_denial_reason == 'native_max_monitoring_mode'
+    assert not s.state.events and not s.budget.native_max_claim('site')
+
+
+@pytest.mark.asyncio
+async def test_final_charge_authority_denial_keeps_its_precise_reason(setup):
+    s = setup
+    policy = importlib.import_module('native_max_adapter_probe.powerwall_local.control_method')
+    checks = []
+    def permitted():
+        checks.append(True)
+        return (policy.ControlPolicyResult(True) if len(checks) < 3 else
+                policy.ControlPolicyResult(False, 'native_max_runtime_stale'))
+    s.adapter.policy = permitted
+    assert not await s.adapter.guard()
+    assert len(checks) == 3
+    assert s.adapter.guard_denial_reason == 'native_max_runtime_stale'
+    assert not s.state.events and not s.budget.native_max_claim('site')
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize('case,expected', [
     ('missing_export_limit', 'native_export_limit_missing'),
     ('invalid_export_limit', 'native_site_limits_invalid'),
@@ -1091,7 +1166,7 @@ def native_http_upload(setup, upload_harness):
                   if isinstance(node, ast.AsyncFunctionDef) and node.name == 'upload')
     namespace = dict(site_config=lambda: ('site', 'token', 'fleet_api'),
                      _local_powerwall_runtime={}, hass=hass,
-                     entry=SimpleNamespace(data={}), CONF_FLEET_API_BASE_URL='fleet_base',
+                     entry=SimpleNamespace(entry_id='entry', data={}), CONF_FLEET_API_BASE_URL='fleet_base',
                      send_tariff_to_tesla=sender, _native_max_identity=lambda: 'paired',
                      identity='paired', HomeAssistantError=s.m.NativeMaxChargeError,
                      NativeMaxTariffNotSubmitted=getattr(s.m, 'NativeMaxTariffNotSubmitted', s.m.NativeMaxChargeError),

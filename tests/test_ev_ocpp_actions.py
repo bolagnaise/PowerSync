@@ -13963,3 +13963,51 @@ def test_ble_command_evidence_requires_actual_power_receipt(receipt_age, expecte
     assert actions._ble_state_observed_after(
         hass.states.get("sensor.car_charge_power"), now - timedelta(seconds=120), hass=hass,
     ) is expected
+
+
+@pytest.mark.parametrize("action", ["start", "stop", "amps"])
+@pytest.mark.parametrize("recognized", [True, False])
+def test_manual_tesla_fleet_key_rejection_is_request_scoped_and_safe(monkeypatch, action, recognized):
+    """An actual failed Fleet service records a safe code, never raw error text."""
+    vin = "5YJTEST00000000A1"
+    hass = _Hass([
+        _State("switch.car_charge", "off"),
+        _State("number.car_current", "10", {"min": 1, "max": 32}),
+    ])
+    async def entity(_hass, pattern, _vin):
+        return "number.car_current" if pattern.startswith("number") else "switch.car_charge"
+
+    async def awake(*_args, **_kwargs):
+        return True
+
+    monkeypatch.setattr(actions, "_get_tesla_ev_entity", entity)
+    monkeypatch.setattr(actions, "_wake_tesla_ev_for_command", awake)
+    monkeypatch.setattr(actions, "_wake_tesla_ev", awake)
+    monkeypatch.setattr(actions, "_get_ev_config", lambda _entry: {"ev_provider": actions.EV_PROVIDER_FLEET_API})
+    message = (
+        "Command failed: Vehicle did not recognize the key used to authorize command. "
+        "Make sure your key is paired with the vehicle"
+        if recognized else "Unknown provider failure containing a private diagnostic"
+    )
+    hass.services.async_call = AsyncMock(side_effect=RuntimeError(message))
+    failure = {}
+    params = {
+        "charger_type": "tesla", "vehicle_vin": vin, "amps": 12,
+        "_user_initiated": True, "_force_tesla_stop_request": True,
+        "_manual_command_failure": failure,
+    }
+    handler = {
+        "start": actions._action_start_ev_charging,
+        "stop": actions._action_stop_ev_charging,
+        "amps": actions._action_set_ev_charging_amps,
+    }[action]
+    assert asyncio.run(handler(hass, _tesla_entry(), params)) is False
+    assert hass.services.async_call.await_count == 1
+    assert failure == ({"provider": "tesla", "code": "key_not_paired"} if recognized else {})
+    assert message not in str(failure)
+    next_failure = {}
+    hass.services.async_call = AsyncMock()
+    assert asyncio.run(handler(
+        hass, _tesla_entry(), {**params, "_manual_command_failure": next_failure},
+    )) is True
+    assert next_failure == {}

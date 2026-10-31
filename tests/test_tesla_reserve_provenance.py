@@ -158,7 +158,7 @@ def test_cloud_acceptance_requires_independent_user_scale_readback(status, obser
             return Response(200, {'response': {'backup_reserve_percent': observed}})
     async def sleep(_):
         pass
-    env = dict(entry=NS(data={}), CONF_FLEET_API_BASE_URL='base',
+    env = dict(entry=NS(entry_id='entry', data={}), CONF_FLEET_API_BASE_URL='base',
                get_tesla_api_base_url=lambda *args: 'https://example.invalid',
                aiohttp=NS(ClientTimeout=lambda **kw: None, ClientError=RuntimeError),
                asyncio=NS(sleep=sleep, TimeoutError=TimeoutError),

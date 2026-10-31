@@ -12,6 +12,7 @@ import time
 from functools import wraps
 
 from .native_rate_budget import RUNTIME_KEY, site_identity
+from .native_battery_flexibility import native_battery_flexibility
 from .teslemetry_solar import _EV_SUBMISSION_CONTEXT, ev_owner_snapshot
 
 
@@ -48,6 +49,21 @@ def native_coexistence_reason(hass, site, budget):
     return None
 
 
+def _max_backup_conflicting_control(runtime):
+    """Existing force/recovery must finish before a new backup commitment."""
+    if any((runtime.get(key) or {}).get("active") for key in (
+            "force_charge_state", "force_discharge_state", "hold_soc_state", "self_consumption_state")):
+        return True
+    if any(getattr(runtime.get(key), "pending", False) for key in (
+            "powerwall_native_max_charge", "powerwall_battery_dispatch")):
+        return True
+    return any(runtime.get(key) for key in (
+        "pending_tesla_restore", "optimizer_force_restart_restore_pending", "native_max_recovery_unavailable",
+        "powerwall_local_recovery_pending", "powerwall_dispatch_fallback_pending", "powerwall_settings_pending",
+        "tesla_settings_pending", "powerwall_settings_recovering", "max_backup_restore_attempts",
+        "max_backup_recovery_unavailable"))
+
+
 def guard_battery_transition(hass, entry, handler):
     """Exclude new native authority throughout a battery service handoff."""
     bound_runtime = hass.data.get("power_sync", {}).get(entry.entry_id)
@@ -68,13 +84,81 @@ def guard_battery_transition(hass, entry, handler):
             try:
                 if runtime.get("native_max_startup_pending"):
                     raise SiteImportAdmissionDenied("Waiting for native Max startup restoration")
-                return await handler(call)
+                name = handler.__name__
+                direction = "charge" if "force_charge" in name else "discharge" if "force_discharge" in name else None
+                episode = direction or name in ("handle_hold_battery_soc", "handle_set_self_consumption")
+                max_backup = name == "handle_schedule_max_backup"
+                if episode and (runtime.get("max_backup_end_ts") is not None or runtime.get("max_backup_recovery_unavailable")):
+                    raise SiteImportAdmissionDenied("Max Backup window or cleanup still owns this site; wait for cleanup before forcing battery power")
+                if max_backup and runtime.get("max_backup_restore_attempts"):
+                    raise SiteImportAdmissionDenied("Existing Max Backup cleanup must resolve before another window; reloading the integration retries cleanup")
+                if max_backup and _max_backup_conflicting_control(runtime):
+                    raise SiteImportAdmissionDenied("Stop or restore existing battery control before scheduling Max Backup")
+                site_control = runtime.get("powerwall_site_control")
+                if site_control is None:
+                    return await handler(call)
+                from .powerwall_control import (
+                    NativeMaxTarget, BatteryPowerTarget, GridExportTarget, SiteImportTarget,
+                    foreign_site_owner, control_obligations,
+                )
+                if foreign_site_owner(hass, entry.entry_id, site_control.site_id) is not None:
+                    raise SiteImportAdmissionDenied("Another PowerSync entry owns this Tesla site's control or recovery")
+                data = getattr(call, "data", {}) or {}
+                restoring = "restore_normal" in name
+                target = None
+                deadline = None
+                backup_end = None
+                if direction:
+                    power = data.get("power_w", 0)
+                    imported = data.get("grid_import_target_w")
+                    if type(imported) in (int, float) and math.isfinite(imported) and imported > 0:
+                        target = SiteImportTarget(imported)
+                    elif type(power) in (int, float) and math.isfinite(power) and power > 0:
+                        target = BatteryPowerTarget(-power) if direction == "charge" else GridExportTarget(power)
+                    elif type(power) in (int, float) and power == 0:
+                        target = NativeMaxTarget(direction)
+                    # Optimizer durations are already validated by the service
+                    # contract; waiting for ownership cannot extend the window.
+                    duration = data.get("duration")
+                    if data.get("source") == "optimizer" and type(duration) is int and 1 <= duration <= 1440:
+                        deadline = time.monotonic() + max(0, requested_at + duration * 60 - time.time())
+                elif max_backup:
+                    duration = data.get("duration_minutes")
+                    try:
+                        duration = int(duration)
+                    except (TypeError, ValueError):
+                        duration = 0
+                    if 1 <= duration <= 1440:
+                        backup_end = requested_at + duration * 60
+                        deadline = time.monotonic() + max(0, backup_end - time.time())
+                def request_allowed():
+                    admission = runtime.get("powerwall_control_admission")
+                    return (foreign_site_owner(hass, entry.entry_id, site_control.site_id) is None
+                            and (backup_end is None or time.time() < backup_end)
+                            and not (episode and (runtime.get("max_backup_end_ts") is not None
+                                                    or runtime.get("max_backup_recovery_unavailable")))
+                            and not (max_backup and _max_backup_conflicting_control(runtime))
+                            and (admission is None or admission(call, restoring=restoring) is True))
+                site_control.set_obligations(entry.entry_id, control_obligations(runtime))
+                try:
+                    async with site_control.operation(
+                            label=name, target=target, entry_id=entry.entry_id,
+                            deadline=deadline, restoring=restoring,
+                            is_current=lambda: hass.data.get("power_sync", {}).get(entry.entry_id) is runtime,
+                            apply_guard=request_allowed,
+                            identity=lambda: site_identity(entry)):
+                        return await handler(call)
+                finally:
+                    site_control.set_obligations(entry.entry_id, control_obligations(runtime))
             finally:
                 if previous is None:
                     runtime.pop("battery_route_requested_at", None)
                 else:
                     runtime["battery_route_requested_at"] = previous
         async def take_route():
+            if site_control := runtime.get("powerwall_site_control"):
+                async with site_control.route_scope(entry.entry_id):
+                    return await run()
             if route_lock := runtime.get("powerwall_battery_dispatch_route_lock"):
                 async with route_lock:
                     return await run()
@@ -96,7 +180,7 @@ def guard_battery_transition(hass, entry, handler):
 
 
 def managed_borrowable_w(hass, entry, vin, profile):
-    """Planning allowance only; final admission must lower the battery first."""
+    """Planning allowance; final admission verifies native or dispatch yielding."""
     budget = hass.data.get(RUNTIME_KEY)
     site = site_identity(entry)
     if budget is None or not budget.site_armed(site) or native_coexistence_reason(hass, site, budget):
@@ -107,13 +191,13 @@ def managed_borrowable_w(hass, entry, vin, profile):
     try:
         evidence = _site_evidence(hass, entry, runtime, str(vin).upper(), profile)
         now = time.time()
-        if (evidence["battery_generation"] is None or evidence["unit_w"] <= 0
+        if (evidence["unit_w"] <= 0
                 or not 0 <= now-evidence["vehicle_at"] <= 15
                 or not 0 <= now-evidence["meter_at"] <= 15
                 or abs(evidence["vehicle_at"]-evidence["meter_at"]) > 5):
             return 0.0
         pending = budget.unobserved_w(site, exclude_vin=str(vin).upper())
-        value = evidence["borrowable_battery_w"]-pending-evidence["battery_pending_w"]
+        value = evidence["borrowable_battery_w"]+evidence["native_flexible_battery_w"]-pending-evidence["battery_pending_w"]
         return max(0.0, value) if math.isfinite(value) else 0.0
     except (AttributeError, TypeError, ValueError):
         return 0.0
@@ -192,15 +276,19 @@ def _site_evidence(hass, entry, runtime, vin, profile):
     committed = getattr(controller, "prospective_charge_w", None)
     if committed is None:
         committed = max(0.0, -_number(getattr(controller, "_last_watts", 0)))
-    optimizer = runtime.get("optimization_coordinator")
-    action = optimizer._get_current_action() if optimizer is not None else None
     controlled = controller is not None and controller.charge_generation is not None
-    if not controlled and action is not None and action.action == "charge":
-        committed = max(committed, _number(action.power_w))
+    flexibility = native_battery_flexibility(
+        hass, entry, runtime, cap, budget=hass.data.get(RUNTIME_KEY))
+    # A scheduled LP action may never be submitted (including while disabled
+    # or monitoring). Only accepted/possibly submitted dispatch is committed;
+    # measured battery draw is already included in the site meter below.
     return {"grid_w": _number(getattr(snapshot, "grid_w", None)), "cap_w": cap,
-            "actual_ev_w": actual_ev, "battery_pending_w": max(0.0, committed-actual_battery),
+            "actual_ev_w": actual_ev, "actual_battery_charge_w": actual_battery,
+            "battery_pending_w": max(0.0, committed-actual_battery),
             "borrowable_battery_w": actual_battery if controlled else 0.0,
             "battery_generation": controller.charge_generation if controlled else None,
+            "native_flexible_battery_w": flexibility.watts if flexibility else 0.0,
+            "native_battery_proof": flexibility.proof if flexibility else None,
             "vehicle_at": _timestamp(charge.get("timestamp")),
             "meter_at": at if getattr(local, "last_update_success", False) else 0,
             "unit_w": unit}
@@ -249,15 +337,36 @@ async def refresh_managed_records(hass, budget):
 
 async def prepare_ev_submission(hass, entity_id, *, operation, amps=None):
     ticket = []
+    context = _EV_SUBMISSION_CONTEXT.get()
+    params = context.get("params", {}) if context is not None else {}
+    deadline = params.get("_boost_start_deadline")
+    finite_start = (
+        "_boost_start_deadline" in params
+        and operation in ("start", "rate")
+        and not (operation == "rate" and type(amps) in (int, float) and amps <= 0)
+    )
+
+    def check_deadline():
+        if finite_start and (
+            type(deadline) not in (int, float) or not math.isfinite(deadline)
+            or time.time() >= deadline
+        ):
+            raise SiteImportAdmissionDenied("Boost start deadline has elapsed")
+
     try:
-        context = _EV_SUBMISSION_CONTEXT.get()
+        check_deadline()
         budget = hass.data.get(RUNTIME_KEY)
         if context is not None and budget is not None:
             async with budget.admission_lock(site_identity(context["entry"])):
-                return await _prepare_ev_submission(hass, entity_id, operation=operation, amps=amps,
-                                                    committed=ticket)
-        return await _prepare_ev_submission(hass, entity_id, operation=operation, amps=amps,
-                                            committed=ticket)
+                result = await _prepare_ev_submission(hass, entity_id, operation=operation, amps=amps,
+                                                      committed=ticket)
+        else:
+            result = await _prepare_ev_submission(hass, entity_id, operation=operation, amps=amps,
+                                                  committed=ticket)
+        # The gate, journal or physical battery-yield checks may have waited.
+        # No expired start/rate request may reach the provider after that wait.
+        check_deadline()
+        return result
     except BaseException:
         if ticket:
             await hass.data[RUNTIME_KEY].abort_managed(ticket[0])
@@ -330,6 +439,7 @@ async def _prepare_ev_submission(hass, entity_id, *, operation, amps, committed)
     original_pairing = pairing()
     battery = runtime.get("powerwall_battery_dispatch")
     generation = evidence.get("battery_generation")
+    native_proof = evidence.get("native_battery_proof")
     owners = context.get("owner_snapshot")
     if owners is None:
         owners = ev_owner_snapshot(hass, entry, vin)
@@ -346,11 +456,17 @@ async def _prepare_ev_submission(hass, entity_id, *, operation, amps, committed)
                 and not getattr(optimizer, "_monitoring_mode_active", lambda: False)()
                 and (manager is None or manager.permits(entry.entry_id)))
 
+    def native_current():
+        if native_proof is None:
+            return True
+        latest = _site_evidence(hass, entry, runtime, vin, profile)
+        return latest.get("native_battery_proof") == native_proof
+
     def valid():
         return (hass.data.get("power_sync", {}).get(entry.entry_id) is runtime
                 and ev_owner_snapshot(hass, entry, vin) == owners and policy_current()
                 and not runtime.get("powerwall_local_dispatch_stopping")
-                and pairing() == original_pairing
+                and pairing() == original_pairing and native_current()
                 and (generation is None or (runtime.get("powerwall_battery_dispatch") is battery
                      and battery.charge_generation == generation))
                 and _identity(registry.async_get(entity_id)) == identity
@@ -380,7 +496,8 @@ async def _prepare_ev_submission(hass, entity_id, *, operation, amps, committed)
                 and abs(latest["vehicle_at"]-latest["meter_at"]) <= 5
                 and latest["grid_w"]+budget.unobserved_w(site, exclude_vin=vin)
                     + max(0, ticket["record"]["reserved_w"]-latest["actual_ev_w"])
-                    + latest["battery_pending_w"] <= latest["cap_w"])
+                    + latest["battery_pending_w"]
+                    - (latest["native_flexible_battery_w"] if native_proof is not None else 0.0) <= latest["cap_w"])
 
     if ticket["battery_generation"] is not None:
         # The reservation is already durable and included in the dispatch

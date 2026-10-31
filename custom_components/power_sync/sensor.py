@@ -7664,7 +7664,7 @@ class BatteryModeSensor(SensorEntity):
                 attributes["description"] = "Battery is being force discharged"
             _populate_timer_attrs(attributes, force_discharge_state)
         elif mode == BATTERY_MODE_STATE_HOLD_SOC:
-            attributes["description"] = "Battery locked at current state of charge"
+            attributes["description"] = "Battery hold active"
             _populate_timer_attrs(attributes, hold_soc_state)
             if hold_soc_state.get("locked_soc") is not None:
                 attributes["locked_soc"] = hold_soc_state["locked_soc"]

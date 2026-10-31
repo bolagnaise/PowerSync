@@ -2817,6 +2817,28 @@ def test_auto_schedule_tesla_helpers_use_powersync_proxy_base(monkeypatch):
     fake_session = _FakeTeslaSession()
     hass = _FakeHass()
     hass.session = fake_session
+    current_export_rule = ["pv_only"]
+    get = fake_session.get
+
+    def site_info_readback(url, **kwargs):
+        response = get(url, **kwargs)
+        response._payload["response"]["components"]["customer_preferred_export_rule"] = current_export_rule[0]
+        return response
+
+    fake_session.get = site_info_readback
+
+    async def canonical_service(domain, service, data, *, blocking, return_response):
+        assert (domain, blocking, return_response) == ("power_sync", True, True)
+        assert data["entry_id"] == "entry-1"
+        if service == "set_backup_reserve":
+            assert data == {"percent": 35, "entry_id": "entry-1", "source": "automation_preserve_charge"}
+        else:
+            assert service == "set_grid_export"
+            assert data == {"rule": "battery_ok", "entry_id": "entry-1", "_ev_curtailment": True}
+            current_export_rule[0] = data["rule"]
+        return {"success": True, "settings_confirmed": True, "physical_effect_confirmed": False}
+
+    hass.services.async_call.side_effect = canonical_service
 
     class PowerSyncEntry(_FakeConfigEntry):
         data = {
@@ -2855,8 +2877,15 @@ def test_auto_schedule_tesla_helpers_use_powersync_proxy_base(monkeypatch):
         export_set = await executor._set_export_rule("battery_ok")
         return reserve, reserve_set, export_rule, export_set
 
-    assert asyncio.run(run_helpers()) == (42, True, "pv_only", True)
-    assert [call[0] for call in fake_session.calls] == ["GET", "POST", "GET", "POST"]
+    reserve, reserve_set, export_rule, export_set = asyncio.run(run_helpers())
+    assert (reserve, export_rule) == (42, "pv_only")
+    assert reserve_set is True and export_set is True
+    assert [call.args[1] for call in hass.services.async_call.await_args_list] == [
+        "set_backup_reserve", "set_grid_export",
+    ]
+    # The export helper independently confirms the canonical service response
+    # through the same provider proxy used for the original setting reads.
+    assert [call[0] for call in fake_session.calls] == ["GET", "GET", "GET"]
     assert all(
         url.startswith(f"{const.POWERSYNC_API_BASE_URL}/api/1/energy_sites/site-1/")
         for _method, url, _kwargs in fake_session.calls

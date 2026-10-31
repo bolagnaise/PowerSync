@@ -270,6 +270,14 @@ def _restore_modules(saved: dict) -> None:
             sys.modules[name] = mod
 
 
+def _service_call_factory():
+    from inspect import signature
+    from conftest import load_power_sync_function
+    from test_service_calls import CurrentServiceCall
+    return load_power_sync_function("make_service_call", {"signature": signature, "ServiceCall": CurrentServiceCall},
+        path=Path(__file__).parents[1] / "custom_components/power_sync/service_calls.py")
+
+
 def test_handle_schedule_max_backup_uses_resolve_restore_target_not_stale_cache():
     """Behavioral: when the optimization coordinator can resolve a trusted
     restore target, the raw (stale) _site_info_cache value must NOT be what
@@ -287,16 +295,21 @@ def test_handle_schedule_max_backup_uses_resolve_restore_target_not_stale_cache(
 
         persisted_schedules: list = []
 
-        async def _fake_persist(payload):
+        async def _fake_persist(payload, *, is_current=None):
             persisted_schedules.append(payload)
+            return is_current is None or is_current()
 
         service_calls: list = []
+
+        async def set_backup_reserve(call):
+            service_calls.append((call.domain, call.service, call.data))
+            return {"success": True}
 
         class _FakeServices:
             async def async_call(self, domain, service, data, blocking=True):
                 service_calls.append((domain, service, data))
 
-        entry_data: dict = {"optimization_coordinator": _FakeOptCoord()}
+        entry_data: dict = {"optimization_coordinator": _FakeOptCoord(), "powerwall_site_control": SimpleNamespace(site_id="site")}
         hass = SimpleNamespace(
             data={"power_sync": {"entry-1": entry_data}},
             services=_FakeServices(),
@@ -308,6 +321,12 @@ def test_handle_schedule_max_backup_uses_resolve_restore_target_not_stale_cache(
             "entry": entry,
             "DOMAIN": "power_sync",
             "ServiceCall": object,
+            "make_service_call": _service_call_factory(),
+            "handle_set_backup_reserve": set_backup_reserve,
+            "SERVICE_SET_BACKUP_RESERVE": "set_backup_reserve",
+            "_cloud_tariff_control_requested": lambda call: True,
+            "_max_backup_site_current": lambda data: data.get("max_backup_site_id") == "site",
+            "HomeAssistantError": RuntimeError,
             "_LOGGER": SimpleNamespace(
                 error=lambda *a, **k: None,
                 info=lambda *a, **k: None,
@@ -318,7 +337,7 @@ def test_handle_schedule_max_backup_uses_resolve_restore_target_not_stale_cache(
         }
         exec(source, namespace)
 
-        call = SimpleNamespace(data={"duration_minutes": 30})
+        call = SimpleNamespace(data={"duration_minutes": 30}, context=None)
         asyncio.run(namespace["handle_schedule_max_backup"](call))
     finally:
         _restore_modules(saved_modules)
@@ -346,14 +365,19 @@ def test_handle_schedule_max_backup_falls_back_to_site_info_when_optimizer_unava
 
         persisted_schedules: list = []
 
-        async def _fake_persist(payload):
+        async def _fake_persist(payload, *, is_current=None):
             persisted_schedules.append(payload)
+            return is_current is None or is_current()
+
+        async def set_backup_reserve(call):
+            assert call.data == {"percent": 100, "source": "user"}
+            return {"success": True}
 
         class _FakeServices:
             async def async_call(self, domain, service, data, blocking=True):
                 pass
 
-        entry_data: dict = {}  # no "optimization_coordinator" key at all
+        entry_data: dict = {"powerwall_site_control": SimpleNamespace(site_id="site")}  # no optimizer
         hass = SimpleNamespace(
             data={"power_sync": {"entry-1": entry_data}},
             services=_FakeServices(),
@@ -365,6 +389,12 @@ def test_handle_schedule_max_backup_falls_back_to_site_info_when_optimizer_unava
             "entry": entry,
             "DOMAIN": "power_sync",
             "ServiceCall": object,
+            "make_service_call": _service_call_factory(),
+            "handle_set_backup_reserve": set_backup_reserve,
+            "SERVICE_SET_BACKUP_RESERVE": "set_backup_reserve",
+            "_cloud_tariff_control_requested": lambda call: True,
+            "_max_backup_site_current": lambda data: data.get("max_backup_site_id") == "site",
+            "HomeAssistantError": RuntimeError,
             "_LOGGER": SimpleNamespace(
                 error=lambda *a, **k: None,
                 info=lambda *a, **k: None,
@@ -375,7 +405,7 @@ def test_handle_schedule_max_backup_falls_back_to_site_info_when_optimizer_unava
         }
         exec(source, namespace)
 
-        call = SimpleNamespace(data={"duration_minutes": 30})
+        call = SimpleNamespace(data={"duration_minutes": 30}, context=None)
         asyncio.run(namespace["handle_schedule_max_backup"](call))
     finally:
         _restore_modules(saved_modules)

@@ -8376,7 +8376,23 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
             base_url = TESLEMETRY_API_BASE_URL
 
         try:
-            session = async_get_clientsession(self.hass)
+            from .powerwall_control_http import controlled_session
+            runtime = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id)
+            def current():
+                latest = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id)
+                manager = latest.get("network_envelope_manager") if isinstance(latest, dict) else None
+                return (
+                    latest is runtime and runtime is not None
+                    and str(self.config_entry.data.get(CONF_TESLA_ENERGY_SITE_ID)) == str(site_id)
+                    and not runtime.get("aemo_dispatch_stopping")
+                    and not runtime.get("_monitoring_handoff_active")
+                    and (manager is None or manager.snapshot.mode == "off")
+                )
+            session = controlled_session(
+                self.hass, async_get_clientsession(self.hass), is_current=current,
+                entry_id=self.config_entry.entry_id,
+                identity=lambda: self.config_entry.data.get(CONF_TESLA_ENERGY_SITE_ID),
+            )
             headers = {
                 "Authorization": f"Bearer {api_token}",
                 "Content-Type": "application/json",

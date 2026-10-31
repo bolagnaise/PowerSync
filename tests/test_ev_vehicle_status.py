@@ -3961,3 +3961,127 @@ def test_ble_planner_requires_matching_current_raw_power_receipt():
             _State("sensor.car_charge_power_received", receipt_value, last_updated=now),
         ])
         assert planner._tesla_ble_charge_power_kw(hass, "car") == expected
+
+
+@pytest.mark.parametrize("provider", ["fleet_api", "both", "tesla_ble"])
+@pytest.mark.parametrize("reverse_discovery", [False, True])
+def test_two_mapped_vehicles_keep_one_loadpoint_and_power_source_per_car_for_each_provider(
+    monkeypatch, provider, reverse_discovery,
+):
+    """Changing command provider retains explicit read-only physical identities."""
+    power_sync = _power_sync_module()
+    status_module = importlib.import_module("power_sync.automations.loadpoint_status")
+    ev_load = importlib.import_module("power_sync.ev_load")
+    mapping = importlib.import_module("power_sync.tesla_ble_mapping")
+    now = datetime.now(timezone.utc)
+    fleet_at = now - timedelta(seconds=5)
+    monkeypatch.setattr(power_sync.dt_util, "utcnow", lambda: now)
+
+    async def no_sigenergy_charger(*_args):
+        return None
+
+    monkeypatch.setattr(power_sync, "_read_sigenergy_charger_state_for_entry", no_sigenergy_charger)
+    vins = ("5YJTEST0000000001", "5YJTEST0000000002")
+    prefixes = ("first_bridge", "second_bridge")
+    states, entities, devices = [], {}, {}
+    cars = list(zip(vins, prefixes, (4.0, 5.0)))
+    if reverse_discovery:
+        cars.reverse()
+    for vin, prefix, power in cars:
+        device_id = f"device-{vin[-1]}"
+        fleet_states = [
+            _State(f"sensor.car_{vin[-1]}_charging_state", "Charging", last_updated=fleet_at),
+            _State(f"binary_sensor.car_{vin[-1]}_charge_cable", "on", last_updated=fleet_at),
+            _State(f"sensor.car_{vin[-1]}_charger_power", str(power - 2),
+                   {"unit_of_measurement": "kW"}, last_updated=fleet_at),
+        ]
+        states.extend(fleet_states)
+        entities.update({state.entity_id: _entity(state.entity_id, device_id) for state in fleet_states})
+        devices[device_id] = SimpleNamespace(id=device_id, name=f"Car {vin[-1]}",
+                                             identifiers={("tesla_fleet", vin)})
+        states.extend([
+            _State(f"binary_sensor.{prefix}_status", "on", last_updated=now),
+            _State(f"binary_sensor.{prefix}_charge_flap", "on", last_updated=now),
+            _State(f"sensor.{prefix}_charging_state", "Charging", last_updated=now),
+            _State(f"sensor.{prefix}_charge_power", str(power),
+                   {"unit_of_measurement": "kW"}, last_updated=now),
+        ])
+    config = {"ev_provider": "both", "tesla_ble_entity_prefix": ",".join(prefixes),
+              "tesla_ble_vehicle_mapping": ",".join(f"{vin}={prefix}" for vin, prefix in zip(vins, prefixes))}
+    entry = SimpleNamespace(entry_id="entry-1", data=config, options={"ev_provider": provider})
+    hass = _Hass(states, entities, devices)
+    vehicles = power_sync._get_ev_vehicles_status(hass, entry)
+    expected = ({f"ble_{prefix}": power for _vin, prefix, power in cars}
+                if provider == "tesla_ble" else {vin: power for vin, _prefix, power in cars})
+    assert len(vehicles) == 2
+    assert {vehicle["vehicle_id"]: vehicle["ev_power_kw"] for vehicle in vehicles} == expected
+    rows = status_module.build_loadpoint_status({}, vehicles)
+    assert len(rows) == 2 and {row["vehicle_id"] for row in rows} == set(expected)
+    observations = asyncio.run(power_sync._get_ev_load_observations(hass, entry, vehicles))
+    snapshot = ev_load.aggregate_ev_load(observations, at=now)
+    assert snapshot.quality == ev_load.EvLoadQuality.COMPLETE
+    assert snapshot.power_kw == 9.0
+    # Telemetry coalescing must never switch the command provider, or make a
+    # BLE alias command-addressable under Fleet-only control.
+    assert entry.data["ev_provider"] == "both" and entry.options["ev_provider"] == provider
+    effective = {**entry.data, **entry.options}
+    expected_command_id = vins[0] if provider == "both" else f"ble_{prefixes[0]}"
+    assert mapping.canonical_tesla_vehicle_id(effective, f"ble_{prefixes[0]}", vins, prefixes) == expected_command_id
+
+
+def test_fleet_only_mapped_boosts_keep_fresh_fleet_power_over_old_or_unavailable_ble(monkeypatch):
+    power_sync = _power_sync_module()
+    status_module = importlib.import_module("power_sync.automations.loadpoint_status")
+    ev_load = importlib.import_module("power_sync.ev_load")
+    now = datetime.now(timezone.utc)
+    older = now - timedelta(seconds=15)
+    monkeypatch.setattr(power_sync.dt_util, "utcnow", lambda: now)
+
+    async def no_sigenergy_charger(*_args):
+        return None
+
+    monkeypatch.setattr(power_sync, "_read_sigenergy_charger_state_for_entry", no_sigenergy_charger)
+    vins = ("5YJTEST0000000001", "5YJTEST0000000002")
+    prefixes = ("first_bridge", "second_bridge")
+    states, entities, devices = [], {}, {}
+    for vin, prefix, power, ble_power, ble_state in zip(
+        vins, prefixes, (1.18, 1.15), ("1.0", "unknown"), ("Charging", "Stopped")
+    ):
+        device_id = f"device-{vin[-1]}"
+        fleet_states = [
+            _State(f"sensor.car_{vin[-1]}_charging_state", "Charging", last_updated=now),
+            _State(f"binary_sensor.car_{vin[-1]}_charge_cable", "on", last_updated=now),
+            _State(f"sensor.car_{vin[-1]}_charger_power", str(power),
+                   {"unit_of_measurement": "kW"}, last_updated=now),
+        ]
+        states.extend(fleet_states)
+        entities.update({state.entity_id: _entity(state.entity_id, device_id) for state in fleet_states})
+        devices[device_id] = SimpleNamespace(id=device_id, name=f"Car {vin[-1]}",
+                                             identifiers={("tesla_fleet", vin)})
+        states.extend([
+            _State(f"binary_sensor.{prefix}_status", "on", last_updated=now),
+            _State(f"binary_sensor.{prefix}_charge_flap", "on", last_updated=older),
+            _State(f"sensor.{prefix}_charging_state", ble_state, last_updated=older),
+            _State(f"sensor.{prefix}_charge_power", ble_power,
+                   {"unit_of_measurement": "kW"}, last_updated=older if ble_power != "unknown" else now),
+        ])
+    entry = SimpleNamespace(entry_id="entry-1", data={}, options={
+        "ev_provider": "fleet_api", "tesla_ble_entity_prefix": ",".join(prefixes),
+        "tesla_ble_vehicle_mapping": ",".join(f"{vin}={prefix}" for vin, prefix in zip(vins, prefixes)),
+    })
+    hass = _Hass(states, entities, devices)
+    vehicles = power_sync._get_ev_vehicles_status(hass, entry)
+    assert len(vehicles) == 2
+    assert {vehicle["vehicle_id"]: vehicle["ev_power_kw"] for vehicle in vehicles} == dict(zip(vins, (1.18, 1.15)))
+    runtime = {vin: {"active": True, "charging_started": True, "current_amps": 5,
+                     "target_amps": 5, "params": {"charger_type": "tesla", "owner_mode": "boost",
+                                                   "dynamic_mode": "battery_target", "voltage": 230}}
+               for vin in vins}
+    rows = status_module.build_loadpoint_status(runtime, vehicles)
+    assert len(rows) == 2 and {row["vehicle_id"] for row in rows} == set(vins)
+    assert all(row["actual_charging"] is True and row["status"] == "charging" for row in rows)
+    assert {row["vehicle_id"]: row["current_power_kw"] for row in rows} == dict(zip(vins, (1.18, 1.15)))
+    observations = asyncio.run(power_sync._get_ev_load_observations(hass, entry, vehicles))
+    snapshot = ev_load.aggregate_ev_load(observations, at=now)
+    assert snapshot.quality == ev_load.EvLoadQuality.COMPLETE
+    assert snapshot.power_kw == pytest.approx(2.33)

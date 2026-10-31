@@ -56,6 +56,69 @@ _TAG_END = 0xFF
 _SIGNATURE_TTL_SECONDS = 12
 
 
+def manual_backup_is_absent(snapshot: Any) -> bool:
+    """Accept only an explicit absence from a typed native backup-events read.
+
+    Other scheduled backup events are distinct from the manual event. A
+    present manual event remains present even if it is inactive or future.
+    """
+    return (type(snapshot) is dict and "manual_backup" in snapshot
+            and snapshot["manual_backup"] is None
+            and type(snapshot.get("backup_events")) is list)
+
+
+def _mutation_label(envelope_bytes: bytes) -> str | None:
+    """Exempt proven read envelopes; unknown wire messages are mutations.
+
+    Strict wire fields prevent protobuf's unknown/duplicate-field tolerance
+    from disguising a write as one recognized read request.
+    """
+    from .calibration_delay import _strict_fields
+    from .fleet_api_bms import build_device_controller_query_envelope, build_pw3_components_query_envelope
+    try:
+        fields = _strict_fields(envelope_bytes)
+        payload_fields = set(fields) - {1, 2, 3}
+        if len(payload_fields) != 1:
+            return "mutation"
+        payload_number = next(iter(payload_fields))
+        if fields[payload_number][0] != 2:
+            return "mutation"
+        payload = fields[payload_number][1]
+        if payload_number == 16:
+            for build in (build_device_controller_query_envelope, build_pw3_components_query_envelope):
+                if payload == _strict_fields(build(""))[16][1]:
+                    return None
+            return "mutation"
+        envelope = transport_pb2.MessageEnvelope()
+        envelope.ParseFromString(envelope_bytes)
+        descriptor = envelope.DESCRIPTOR.fields_by_number.get(payload_number)
+        reads = {
+            "filestore": {"read_file_request"},
+            "common": {"get_system_info_request", "get_networking_status_request", "check_internet_request"},
+            "authorization": {"list_authorized_clients_request"},
+            "teg": {"get_backup_events_request", "get_delay_battery_calibration_status_request"},
+        }
+        if descriptor is None or descriptor.name not in reads:
+            return "mutation"
+        message = getattr(envelope, descriptor.name)
+        child_fields = _strict_fields(payload)
+        present = message.ListFields()
+        if len(present) == 1:
+            field, _ = present[0]
+            if field.name in reads[descriptor.name] and set(child_fields) == {field.number}:
+                return None
+            if descriptor.name == "filestore" and field.name == "update_file_request":
+                return "config"
+            if descriptor.name == "teg" and field.name == "dispatch_battery_power_request":
+                return "dispatch"
+    except (ValueError, TypeError, KeyError):
+        pass
+    except Exception:
+        # Malformed or future protocol payloads must not bypass serialization.
+        pass
+    return "mutation"
+
+
 def _enum_suffix(enum_type: Any, value: int, prefix: str) -> str:
     """Return a stable short enum name for local API payloads."""
     try:
@@ -279,16 +342,27 @@ class TEDAPIv1rTransport:
             "v1r POST to %s with DIN=%s, envelope=%d bytes",
             url, din, len(payload),
         )
-        try:
+        async def prepare():
+            # Persist the actual signed acceptance deadline while serialized,
+            # then repeat all final fences. No network submission precedes it.
+            if before_submit is not None:
+                await before_submit(expires_at)
+            check_submission(include_before_send=False)
+
+        def check_submission(*, include_before_send=True):
+            if time.time() >= expires_at:
+                raise PowerwallLocalError("Signed command expired before submission")
+            current = getattr(self, "_control_current", None)
+            if label is not None and current is not None and current() is not True:
+                raise PowerwallLocalError("Powerwall pairing or setup generation changed")
+            if include_before_send and before_send is not None:
+                before_send()
+
+        async def send():
             async with await self._session() as sess:
-                # Persist the actual signed acceptance deadline before a write
-                # can leave this process. HTTP timeout alone does not expire it.
-                if before_submit is not None:
-                    await before_submit(expires_at)
-                if time.time() >= expires_at:
-                    raise PowerwallLocalError("Signed command expired before submission")
-                if before_send is not None:
-                    before_send()
+                if site is not None and label is not None:
+                    site.current_fence()()
+                check_submission()
                 async with sess.post(url, data=payload, headers=headers) as resp:
                     http_status = resp.status
                     if http_status != 200:
@@ -297,7 +371,23 @@ class TEDAPIv1rTransport:
                             "v1r POST non-200: %s — %s", http_status, body_text[:300]
                         )
                         return TEDAPIResponse(False, None, http_status=http_status)
-                    raw = await resp.read()
+                    return await resp.read()
+
+        try:
+            label = _mutation_label(envelope_bytes)
+            site = getattr(self, "_site_control", None)
+            if label is not None and site is not None:
+                raw = await site.run_write(f"local_{label}", send, prepare=prepare,
+                    is_current=getattr(self, "_control_current", None),
+                    identity=getattr(self, "_control_identity", None),
+                    entry_id=getattr(self, "_control_entry_id", None))
+            else:
+                # Unbound test/standalone transports retain their existing API;
+                # production clients are bound by the single views factory.
+                await prepare()
+                raw = await send()
+            if isinstance(raw, TEDAPIResponse):
+                return raw
         except asyncio.TimeoutError as err:
             raise PowerwallUnreachableError(
                 f"Timed out connecting to Powerwall gateway at {self._host}"
@@ -326,6 +416,14 @@ class TEDAPIv1rTransport:
 
         inner = resp_msg.protobuf_message_as_bytes
         return TEDAPIResponse(True, inner if inner else None)
+
+    @staticmethod
+    def check_signed_expiry(payload: bytes) -> None:
+        """Recheck a cloud-relayed signature after waiting for the site gate."""
+        message = signed_message_pb2.RoutableMessage()
+        message.ParseFromString(payload)
+        if time.time() >= message.signature_data.rsa_data.expires_at:
+            raise PowerwallLocalError("Signed command expired before submission")
 
     def build_signed_bytes(
         self, envelope_bytes: bytes, din: str, *, ttl_seconds: int | None = None
@@ -435,10 +533,25 @@ class TEDAPIv1rTransport:
     async def write_config(self, din: str, updates: dict[str, Any], *, before_write: Callable[[], None] | None = None,
                            validate_config: Callable[[dict[str, Any]], bool] | None = None,
                            before_submit: Callable[[int], Awaitable[None]] | None = None) -> bool:
+        """Serialize the full config read/merge/write across one physical site."""
+        async def transaction():
+            return await self._write_config(din, updates, before_write=before_write,
+                                           validate_config=validate_config, before_submit=before_submit)
+        site = getattr(self, "_site_control", None)
+        if site is not None:
+            return await site.run_write("local_config_transaction", transaction,
+                                        is_current=getattr(self, "_control_current", None),
+                                        identity=getattr(self, "_control_identity", None),
+                                        entry_id=getattr(self, "_control_entry_id", None))
+        return await transaction()
+
+    async def _write_config(self, din: str, updates: dict[str, Any], *, before_write: Callable[[], None] | None = None,
+                            validate_config: Callable[[dict[str, Any]], bool] | None = None,
+                            before_submit: Callable[[int], Awaitable[None]] | None = None) -> bool:
         """Read-modify-write ``config.json`` via FileStore updateFileRequest.
 
         ``updates`` keys use dotted paths, eg ``site_info.default_real_mode``.
-        Failed optimistic-lock writes return False; caller may retry.
+        The gateway response determines whether the write was acknowledged.
         """
         read_env = transport_pb2.MessageEnvelope()
         read_env.delivery_channel = transport_pb2.DELIVERY_CHANNEL_HERMES_COMMAND
@@ -730,7 +843,7 @@ class TEDAPIv1rTransport:
             _LOGGER.warning("Battery dispatch %s malformed reply: watts=%s seconds=%s", operation, watts, seconds)
             return False
 
-    async def schedule_manual_backup(self, din: str, duration_s: int) -> bool:
+    async def schedule_manual_backup(self, din: str, duration_s: int, *, end_ts: float | None = None) -> bool:
         """Trigger Tesla's "Storm Watch Manual Backup" — holds SOC, stops export.
 
         This is the closest TEDAPI-native equivalent to "go off-grid" currently
@@ -740,22 +853,45 @@ class TEDAPIv1rTransport:
         """
         if duration_s < 60:
             raise ValueError("duration_s must be at least 60")
+        if end_ts is None:
+            end_ts = time.time() + min(duration_s, 86400)
 
-        # Tesla requires a previous event (including an expired one) to be
-        # cancelled before it accepts a replacement. A missing cancel response
-        # is harmless; continue and let the schedule response decide success.
-        await self.cancel_manual_backup(din)
+        def before_send():
+            if time.time() >= end_ts:
+                raise PowerwallLocalError("Max Backup request expired before submission")
+
+        before_send()
+
+        try:
+            snapshot = await self.get_backup_events(din)
+        except Exception as err:
+            # A failed read is unknown; it cannot authorize skipping cancel.
+            _LOGGER.debug("Manual backup status unavailable: %s", type(err).__name__)
+            snapshot = None
+        before_send()
+        # A lost cancellation can arrive after a replacement start. Keep the
+        # caller's staged cleanup ownership until cancellation is acknowledged.
+        # A fresh explicit absence avoids issuing that cancellation at all.
+        if not manual_backup_is_absent(snapshot) and await self.cancel_manual_backup(din) is not True:
+            return False
+
+        before_send()
+        start_ts = int(time.time())
+        seconds = min(duration_s, 86400)
+        seconds = min(seconds, int(end_ts) - start_ts)
+        if seconds < 1:
+            raise PowerwallLocalError("Max Backup request expired before packet creation")
 
         env = transport_pb2.MessageEnvelope()
         env.delivery_channel = transport_pb2.DELIVERY_CHANNEL_HERMES_COMMAND
         env.sender.authorized_client = 1
         env.recipient.din = din
         teg_req = env.teg.schedule_manual_backup_event_request
-        teg_req.scheduling_info.start_time.seconds = int(time.time())
-        teg_req.scheduling_info.duration_seconds = min(duration_s, 86400)
+        teg_req.scheduling_info.start_time.seconds = start_ts
+        teg_req.scheduling_info.duration_seconds = seconds
         teg_req.scheduling_info.priority = (1 << 64) - 1
 
-        resp = await self.post_v1r(env.SerializeToString(), din)
+        resp = await self.post_v1r(env.SerializeToString(), din, before_send=before_send)
         if not resp.ok or not resp.inner_bytes:
             return False
         try:
@@ -777,14 +913,26 @@ class TEDAPIv1rTransport:
 
         resp = await self.post_v1r(env.SerializeToString(), din)
         if not resp.ok or not resp.inner_bytes:
+            _LOGGER.warning("Manual backup cancel not acknowledged: ok=%s http=%s fault=%s inner=%s",
+                            resp.ok, resp.http_status, resp.fault_name, bool(resp.inner_bytes))
             return False
         try:
             reply = transport_pb2.MessageEnvelope()
             reply.ParseFromString(resp.inner_bytes)
-            return reply.HasField("teg") and reply.teg.HasField(
+            accepted = reply.HasField("teg") and reply.teg.HasField(
                 "cancel_manual_backup_event_response"
             )
+            if not accepted:
+                status = (reply.common.error_response.status
+                          if reply.HasField("common") and reply.common.HasField("error_response") else None)
+                message = " ".join(status.message.split())[:160] if status is not None else None
+                _LOGGER.warning("Manual backup cancel unexpected reply: envelope_fields=%s teg_fields=%s error_code=%s message=%r",
+                    [field.name for field, _value in reply.ListFields()][:16],
+                    [field.name for field, _value in reply.teg.ListFields()][:16],
+                    status.code if status is not None else None, message)
+            return accepted
         except Exception:
+            _LOGGER.warning("Manual backup cancel malformed reply")
             return False
 
     async def get_backup_events(self, din: str) -> dict[str, Any] | None:

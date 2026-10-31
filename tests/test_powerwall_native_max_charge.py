@@ -398,7 +398,8 @@ def test_restore_service_reports_manual_settling_without_releasing_owner(source,
                   _command_generation=[0], _stop_local_powerwall_dispatch=stop,
                   NativeMaxRestorePending=m.NativeMaxRestorePending,
                   _LOGGER=logging.getLogger(__name__))
-        exec(compile(ast.fix_missing_locations(ast.Module(body=[handler], type_ignores=[])), '<restore_service>', 'exec'), ns)
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[handler], type_ignores=[])),
+                     '<restore_service>', 'exec', flags=__import__('__future__').annotations.compiler_flag), ns)
         call = SimpleNamespace(context=SimpleNamespace(user_id=None, parent_id=None), data={'_confirm_restore': confirm})
         try:
             if not restore_ok:

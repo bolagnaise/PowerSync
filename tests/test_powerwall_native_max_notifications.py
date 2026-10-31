@@ -274,7 +274,8 @@ def test_push_scheduling_failure_cannot_replace_control_error(notification_probe
     'native_site_limits_invalid', 'native_limit_or_config_invalid',
     'native_capacity_unavailable', 'native_snapshot_unavailable',
     'native_max_local_access_disabled', 'native_max_dispatch_config_invalid',
-    'native_max_policy_denied',
+    'native_max_settings_unresolved', 'native_max_local_settings_suspended',
+    'native_max_local_control_unconfigured',
 ])
 async def test_actionable_charge_refusals_notify_without_raw_reason_text(notification_probe, reason):
     p = notification_probe
@@ -313,6 +314,38 @@ def test_expected_charge_deferrals_do_not_alert(notification_probe):
                    'managed_ev_ownership_present', 'native_max_site_already_owned',
                    'native_max_control_policy_denied', 'unknown_private_reason', None]:
         p.charge(reason)
+    p.persistent.async_create.assert_not_called()
+    assert not p.queued
+
+
+@pytest.mark.parametrize('reason', ['native_max_settings_unresolved',
+    'native_max_local_settings_suspended', 'native_max_local_control_unconfigured'])
+def test_actionable_policy_denials_notify_discharge_with_precise_plain_text(notification_probe, reason):
+    p = notification_probe
+    p.update(reason)
+    p.update(reason)
+    p.persistent.async_create.assert_called_once()
+    message = p.persistent.async_create.call_args.args[1]
+    assert 'Scheduled battery discharge did not start:' in message
+    assert reason not in message and 'EV' not in message
+    if reason in ('native_max_settings_unresolved', 'native_max_local_settings_suspended'):
+        assert 'Repairs notice' in message
+        assert 'clear' not in message.lower() and 'reset' not in message.lower()
+
+
+@pytest.mark.parametrize('reason', ['native_max_startup_pending', 'native_max_dispatch_stopping',
+    'native_max_control_method_changing', 'native_max_local_recovery_pending',
+    'native_max_restart_restore_pending', 'native_max_restore_pending',
+    'native_max_max_backup_active', 'native_max_monitoring_mode',
+    'native_max_demand_charge_protection', 'native_max_network_export_guard_active',
+    'native_max_license_denied',
+    'native_max_policy_evidence_unavailable', 'native_max_policy_denied',
+    'charge_soc_limit_reached_or_unknown', 'discharge_reserve_floor_reached',
+    'managed_ev_ownership_present', 'native_max_site_already_owned'])
+def test_expected_native_deferrals_remain_quiet_in_both_directions(notification_probe, reason):
+    p = notification_probe
+    p.update(reason)
+    p.charge(reason)
     p.persistent.async_create.assert_not_called()
     assert not p.queued
 

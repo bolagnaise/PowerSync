@@ -5208,6 +5208,16 @@ async def _stop_zaptec_charging(
         return False
 
 
+def _record_tesla_manual_key_failure(params: Dict[str, Any], error: Exception) -> None:
+    """Expose only a recognized authorization failure to the manual UI."""
+    failure = params.get("_manual_command_failure")
+    if isinstance(failure, dict) and (
+        "vehicle did not recognize the key used to authorize command"
+        in str(error).lower()
+    ):
+        failure.update(provider="tesla", code="key_not_paired")
+
+
 @guard_ev_control
 async def _action_start_ev_charging(
     hass: HomeAssistant,
@@ -5493,6 +5503,7 @@ async def _action_start_ev_charging(
                 return False
             else:
                 _LOGGER.error(f"Failed to start EV charging: {e}")
+                _record_tesla_manual_key_failure(params, e)
 
                 # Check if this is a credit/payment error
                 if _is_api_credit_error(str(e)):
@@ -5755,6 +5766,7 @@ async def _action_stop_ev_charging(
             return True
         except Exception as e:
             _LOGGER.error(f"Failed to stop EV charging: {e}")
+            _record_tesla_manual_key_failure(params, e)
 
             # Check if this is a credit/payment error
             if _is_api_credit_error(str(e)):
@@ -6131,6 +6143,7 @@ async def _action_set_ev_charging_amps(
                     )
 
             _LOGGER.error(f"Failed to set EV charging amps: {e}")
+            _record_tesla_manual_key_failure(params, e)
 
             # Check if this is a credit/payment error
             if _is_api_credit_error(str(e)):

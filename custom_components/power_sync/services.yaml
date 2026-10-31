@@ -315,6 +315,11 @@ set_storm_watch:
   name: Set Storm Watch
   description: Enable or disable Tesla Storm Watch (predictive pre-charging before severe weather). Only applicable to energy sites that support storm mode.
   fields:
+    entry_id:
+      name: PowerSync entry
+      description: Select the entry to control when multiple PowerSync entries are configured.
+      selector:
+        text:
     enabled:
       name: Enabled
       description: Enable Storm Watch
@@ -327,6 +332,11 @@ set_off_grid_ev_reserve:
   name: Set Off-Grid EV Charging Reserve
   description: Set the percentage of battery capacity reserved for vehicle charging during a grid outage.
   fields:
+    entry_id:
+      name: PowerSync entry
+      description: Select the entry to control when multiple PowerSync entries are configured.
+      selector:
+        text:
     percent:
       name: Reserve Percent
       description: Percentage of battery capacity held for EV charging when off-grid (0-100)
@@ -343,6 +353,11 @@ set_vpp_enrollment:
   name: Set VPP Program Enrollment
   description: Enroll or unenroll the Powerwall in a Tesla Virtual Power Plant / grid services program. Program availability is region-dependent.
   fields:
+    entry_id:
+      name: PowerSync entry
+      description: Select the entry to control when multiple PowerSync entries are configured.
+      selector:
+        text:
     program_id:
       name: Program ID
       description: Tesla program identifier (fetched from the site's programs list)
@@ -535,6 +550,11 @@ schedule_max_backup:
     backup reserve. Use ahead of forecast outages or storms. Calling again while
     a window is active replaces the schedule and preserves the original reserve.
   fields:
+    entry_id:
+      name: PowerSync entry
+      description: Select the entry to control when multiple PowerSync entries are configured.
+      selector:
+        text:
     duration_minutes:
       name: Duration (minutes)
       description: How long to hold the reserve at 100% before restoring (1-1440).
@@ -556,6 +576,45 @@ refresh_calibration:
     or to retry mode toggles immediately. Doesn't touch the Powerwall — purely
     resets the integration's local guard.
   fields: {}
+
+recover_max_backup:
+  name: Recover Max Backup
+  description: >-
+    Clean up a retained Max Backup window under supervision. Copy the exact
+    record receipt from PowerSync control diagnostics or the recovery notice.
+    This cancels the saved native event or restores its saved reserve; it never
+    starts another backup window. A legacy record without a site requires an
+    explicit attestation that the selected site is its original physical site.
+    Malformed evidence must be recovered from a known-good backup or reviewed
+    with support. Native cleanup may remain pending for at least 60 seconds.
+  fields:
+    entry_id:
+      name: PowerSync entry ID
+      required: true
+      selector:
+        text:
+    site_id:
+      name: Original Tesla site ID
+      required: true
+      selector:
+        text:
+    record_id:
+      name: Exact saved-record receipt
+      required: true
+      selector:
+        text:
+    acknowledge:
+      name: Acknowledge supervised cleanup
+      required: true
+      default: false
+      selector:
+        boolean:
+    attest_original_site:
+      name: Attest the original physical site
+      description: Required only for a legacy record without a saved site. Enable only after verifying that this is its original physical site.
+      default: false
+      selector:
+        boolean:
 
 resume_powerwall_settings:
   name: Resume Powerwall settings through cloud

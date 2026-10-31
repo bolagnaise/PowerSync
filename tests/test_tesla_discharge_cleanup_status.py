@@ -6,6 +6,7 @@ import ast
 import asyncio
 import copy
 import logging
+import inspect
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -13,7 +14,8 @@ from types import SimpleNamespace as NS
 
 import pytest
 
-from conftest import seed_powerwall_store_closures
+from conftest import load_power_sync_function, seed_powerwall_store_closures
+from test_service_calls import CurrentServiceCall
 
 ROOT = Path(__file__).resolve().parents[1] / "custom_components/power_sync"
 
@@ -63,11 +65,6 @@ def test_failed_tariff_cleanup_reports_pending_restore(restore_raises, monkeypat
             raise RuntimeError("provider unavailable")
         # restore_normal can return without raising while scheduling its retry.
 
-    class ServiceCall:
-        def __init__(self, _domain, _service, data, context=None):
-            self.data = data
-            self.context = context
-
     async def handle_restore_normal(call):
         calls.append((("power_sync", "restore_normal", call.data), {}))
         if restore_raises:
@@ -79,10 +76,12 @@ def test_failed_tariff_cleanup_reports_pending_restore(restore_raises, monkeypat
                      entry=NS(entry_id="entry"), DOMAIN="power_sync",
                      SERVICE_RESTORE_NORMAL="restore_normal", dt_util=NS(utcnow=lambda: now),
                      timedelta=timedelta, persist_force_mode_state=persist,
-                     ServiceCall=ServiceCall, handle_restore_normal=handle_restore_normal,
+                     ServiceCall=CurrentServiceCall, handle_restore_normal=handle_restore_normal,
                      _tesla_force_retry_expiry=lambda _state, expiry, **_kw: expiry,
                      async_dispatcher_send=lambda *args: events.append(args),
                      _LOGGER=logging.getLogger(__name__))
+    namespace['make_service_call'] = load_power_sync_function('make_service_call',
+        {'signature': inspect.signature, 'ServiceCall': CurrentServiceCall}, path=ROOT/'service_calls.py')
     seed_powerwall_store_closures(namespace, hass=namespace["hass"], entry=namespace["entry"])
     compile_nodes([function("__init__.py", "_cleanup_failed_tesla_force_discharge")], namespace)
     asyncio.run(namespace["_cleanup_failed_tesla_force_discharge"]("tariff upload failed"))

@@ -285,8 +285,15 @@ def test_boost_runs_through_the_dynamic_controller_for_the_whole_window():
     assert "'skip_ownership': True" not in source
     # The expiry stop must tear the controller down rather than only sending a
     # physical stop and releasing the lease by hand.
-    assert "'action_type': 'stop_ev_charging_dynamic'" in source
-    assert "'stop_charging': True" in source
+    stop_source = ast.unparse(next(
+        node for node in ast.walk(ast.parse(INIT_PATH.read_text()))
+        if isinstance(node, ast.FunctionDef) and node.name == "_arm_boost_stop"
+    ))
+    transaction = ast.unparse(_get_async_class_method("ChargingBoostView", "_start_finite_boost"))
+    assert "self._start_finite_boost(" in source
+    assert "self._arm_boost_stop(" in transaction
+    assert "'action_type': 'stop_ev_charging_dynamic'" in stop_source
+    assert "'stop_charging': True" in stop_source
     assert "release_ev_ownership" not in source
 
 
@@ -297,4 +304,6 @@ def test_boost_does_not_re_raise_current_past_the_phase_clamp():
     # _set_vehicle_amps. A follow-up raw set_ev_charging_amps would push the
     # charger straight back to 32 A and undo the shared budget decision.
     assert "'action_type': 'set_ev_charging_amps'" not in source
-    assert "applied_boost_amps" in source
+    transaction = ast.unparse(_get_async_class_method("ChargingBoostView", "_start_finite_boost"))
+    assert "applied_amps" in transaction
+    assert "'action_type': 'set_ev_charging_amps'" not in transaction

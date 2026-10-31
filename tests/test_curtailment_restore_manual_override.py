@@ -91,7 +91,8 @@ class _FakeSession:
     def __init__(self):
         self.posted_rule = None
 
-    def post(self, url, headers=None, json=None, timeout=None):
+    def post(self, url, headers=None, json=None, timeout=None, **fences):
+        assert fences["_power_sync_is_current"]() is True
         self.posted_rule = json["customer_preferred_export_rule"]
         return _FakeResponse(status=200, json_body={"response": {"result": True}})
 
@@ -109,6 +110,10 @@ class _FakeSession:
 def _make_namespace():
     return {
         "aiohttp": aiohttp,
+        # This branch harness deliberately excludes the handler admission
+        # prelude; final queue currency is covered in its integration tests.
+        "curtailment_current": lambda: True,
+        "curtailment_restore_current": lambda rule: True,
     }
 
 

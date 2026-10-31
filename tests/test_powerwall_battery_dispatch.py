@@ -1,11 +1,14 @@
 """Local power dispatch: export semantics, lease failure and ownership recovery."""
 import asyncio
 import importlib.util
+import inspect
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from conftest import load_power_sync_function
+from test_service_calls import CurrentServiceCall
 
 ROOT = Path(__file__).resolve().parents[1]
 _hybrid_spec = importlib.util.spec_from_file_location('hybrid_policy_probe', ROOT / 'custom_components/power_sync/powerwall_local/hybrid_policy.py')
@@ -249,6 +252,36 @@ def controller():
     return c, client, events
 
 
+@pytest.mark.parametrize('target_basis', [None, 'battery', 'grid_export'])
+@pytest.mark.asyncio
+async def test_discharge_reports_grid_export_target_separately_from_battery_watts(target_basis):
+    c, client, _ = controller()
+    client.get_snapshot.return_value = snapshot(load_w=3797, solar_w=0)
+    options = {} if target_basis is None else {'target_basis': target_basis}
+    try:
+        result = await c.start('discharge', 1000, 60, **options)
+        assert result['requested_power_w'] == 1000
+        assert result['power_target_basis'] == 'grid_export'
+        assert result['battery_power_w'] == 4797
+        assert client.dispatch_battery_power.call_args.args[0] == 4797
+        assert c._target_basis == 'grid_export'
+        assert c.grid_import_estimate_w is None
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_grid_export_basis_cannot_be_used_for_charging():
+    c, client, events = controller()
+    with pytest.raises(ValueError, match='Invalid dispatch target basis'):
+        module.battery_watts('charge', 1000, snapshot(), config(), target_basis='grid_export')
+    with pytest.raises(ValueError, match='Invalid dispatch target basis'):
+        await c.start('charge', 1000, 60, target_basis='grid_export')
+    client.dispatch_battery_power.assert_not_awaited()
+    assert not c.pending
+    assert not events
+
+
 @pytest.mark.asyncio
 async def test_pending_battery_charge_draw_survives_uncertain_ack_until_resume():
     c, client, events = controller()
@@ -445,6 +478,9 @@ def load_routing(monitored=False, paired=True, **options):
               DEFAULT_DISCHARGE_DURATION=30, DISCHARGE_DURATIONS=[15,30,60],
               store=store, _select_restorable_tesla_tariff=lambda value: value,
               tesla_grid_charging_preferences={}, persisted_force_state={}, persisted_pending_restore={})
+    ns['make_service_call'] = load_power_sync_function('make_service_call',
+        {'signature': inspect.signature, 'ServiceCall': CurrentServiceCall},
+        path=ROOT/'custom_components/power_sync/service_calls.py')
     exec(compile(ast.fix_missing_locations(ast.Module(body=nodes, type_ignores=[])), str(ROOT/'custom_components/power_sync/__init__.py'), 'exec'), ns)
     c, client, _ = controller()
     c.config=ns['_local_powerwall_dispatch_config']
@@ -477,6 +513,31 @@ def test_real_force_handlers_route_locally_and_restore_persisted_state():
         assert saved['force_mode_state'] is None
         assert not ns['force_discharge_state']['active']
     asyncio.run(run())
+
+
+@pytest.mark.asyncio
+async def test_force_discharge_reports_and_persists_grid_export_basis_before_acknowledgement():
+    ns, c, client, saved = load_routing()
+    client.get_snapshot.return_value = snapshot(load_w=3797, solar_w=0)
+
+    async def dispatch(watts, seconds):
+        assert watts == 4797
+        assert ns['force_discharge_state']['command_status'] == 'pending'
+        assert ns['force_discharge_state']['power_target_basis'] == 'grid_export'
+        assert saved['force_mode_state']['power_target_basis'] == 'grid_export'
+        return True
+
+    client.dispatch_battery_power.side_effect = dispatch
+    try:
+        result = await ns['handle_force_discharge'](call(source='user', power_w=1000, duration=15))
+        assert result['requested_power_w'] == 1000
+        assert result['power_target_basis'] == 'grid_export'
+        assert result['battery_power_w'] == 4797
+        assert ns['force_discharge_state']['battery_power_w'] == 4797
+        assert saved['force_mode_state']['power_target_basis'] == 'grid_export'
+        assert saved['force_mode_state']['power_w'] == 1000
+    finally:
+        await c.stop()
 
 
 def test_real_optimizer_monitoring_gate_sends_no_battery_command():
@@ -513,10 +574,13 @@ def test_pending_local_intent_survives_optimizer_clear_before_restore():
     asyncio.run(run())
 
 
-def test_restart_resumes_without_replaying_dispatch_or_tariff():
+@pytest.mark.parametrize('mode,target_basis', [('charge', None), ('discharge', 'battery'), ('discharge', 'grid_export')])
+def test_restart_resumes_without_replaying_dispatch_or_tariff(mode, target_basis):
     async def run():
         ns,c,client,saved=load_routing()
-        ns['persisted_force_state']={'mode':'charge','source':'optimizer','powerwall_local_dispatch':True}
+        ns['persisted_force_state']={'mode':mode,'source':'optimizer','powerwall_local_dispatch':True}
+        if target_basis is not None:
+            ns['persisted_force_state']['power_target_basis'] = target_basis
         ns['hass'].data['power_sync']['entry']['powerwall_local_recovery_pending']=True
         await ns['restore_force_mode_from_persistence']()
         client.dispatch_battery_power.assert_not_called()
@@ -1538,13 +1602,16 @@ async def test_large_site_max_denial_never_silently_submits_capped_local_command
     runtime=ns['_local_powerwall_runtime']
     runtime['tesla_coordinator']=SimpleNamespace(_site_info_cache={'nameplate_power':21040},
         _site_info_last_fetch=__import__('time').monotonic())
-    native=SimpleNamespace(pending=False,adapter=SimpleNamespace(guard=AsyncMock(return_value=False)),start=AsyncMock())
+    reason='native_max_local_settings_suspended'
+    native=SimpleNamespace(pending=False,adapter=SimpleNamespace(
+        guard=AsyncMock(return_value=False),guard_denial_reason=reason),start=AsyncMock())
     ns['entry'].options={'tesla_control_method':'auto'}
     ns['_powerwall_prefers_native_tariff'] = lambda direction='discharge': True
     ns.update(_native_max_context={},_get_native_max_charge=AsyncMock(return_value=native),
         _get_tesla_site_configs=lambda *_:[('site','token','provider')])
-    with pytest.raises(RuntimeError,match='Max was not started'):
+    with pytest.raises(RuntimeError,match=f'Native Powerwall control did not start: {reason}'):
         await ns['_try_local_powerwall_force'](direction,call(source=source,power_w=0),15,21000)
+    assert native.adapter.guard_denial_reason == reason
     native.start.assert_not_called()
     client.dispatch_battery_power.assert_not_called()
 

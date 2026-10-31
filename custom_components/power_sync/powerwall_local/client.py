@@ -137,6 +137,9 @@ class PowerwallSnapshot:
     # Request start of this exact returned DCQ attempt; never persisted/rebased.
     observed_monotonic: float | None = None
     grid_charging_permission_source: str = "unknown"
+    # Only an actual signed config read earns this provenance; DCQ-only
+    # refreshes with supplied config leave it unknown.
+    config_observed_monotonic: float | None = None
 
 
 class PowerwallLocalClient:
@@ -312,6 +315,9 @@ class PowerwallLocalClient:
             if dcq:
                 snapshot = _snapshot_from_dcq(dcq, cfg if isinstance(cfg, dict) else None)
                 snapshot.observed_monotonic = started
+                snapshot.config_observed_monotonic = (
+                    started if native_config is None and isinstance(cfg, dict) else None
+                )
                 required = (snapshot.soc, snapshot.battery_w, snapshot.grid_w,
                             snapshot.load_w, snapshot.solar_w)
                 if attempt or all(type(v) in (int, float) and math.isfinite(v) for v in required):
@@ -553,10 +559,10 @@ class PowerwallLocalClient:
             **({"before_write": before_write} if before_write is not None else {}),
             **({"before_submit": before_submit} if before_submit is not None else {}))
 
-    async def schedule_max_backup(self, duration_seconds: int = 7200) -> bool:
+    async def schedule_max_backup(self, duration_seconds: int = 7200, *, end_ts: float | None = None) -> bool:
         """Schedule a local manual max-backup event."""
         return await self._transport.schedule_manual_backup(
-            self._din, duration_seconds
+            self._din, duration_seconds, **({"end_ts": end_ts} if end_ts is not None else {})
         )
 
     async def cancel_max_backup(self) -> bool:
@@ -840,6 +846,9 @@ class PowerwallLocalClient:
 
         try:
             async with aiohttp.ClientSession() as sess:
+                control_session = getattr(self, "_control_session", None)
+                if control_session is not None:
+                    sess = control_session(sess, before_send=lambda: self._transport.check_signed_expiry(signed_bytes))
                 async with sess.post(
                     url,
                     json=payload,

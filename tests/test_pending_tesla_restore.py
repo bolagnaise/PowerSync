@@ -358,9 +358,11 @@ def test_only_current_verified_completion_releases_restart_gate(superseded):
                store=store, _restore_current=lambda: True,
                force_discharge_state={"active": True}, force_charge_state={"active": False},
                restore_was_hold_soc=False, _clear_hold_soc_state=lambda: None,
+               confirm_restore=False,
                _restore_superseded=lambda _: generation[0] != 1)
     seed_powerwall_store_closures(env, hass=env["hass"], entry=env["entry"])
-    exec(compile(ast.fix_missing_locations(ast.Module(body=[node], type_ignores=[])),
+    not_completed = _find_function(handler, "_restore_not_completed")
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[not_completed, node], type_ignores=[])),
                  "<verified-restore-completion>", "exec"), env)
     asyncio.run(env["run"]())
     assert data["optimizer_force_restart_restore_pending"] is superseded
@@ -383,10 +385,17 @@ def test_sync_reports_all_site_upload_results_to_restore(site_results, periodic,
         assert kwargs["max_retry_after_seconds"] == expected_cap
         return site_results[int(site)]
     env = dict(site_configs=[("0", "fake", "teslemetry"), ("1", "fake", "teslemetry")],
-               hass=None, tariff={}, entry=SimpleNamespace(data={}), CONF_FLEET_API_BASE_URL="base",
+               hass=None, tariff={}, entry=SimpleNamespace(entry_id="entry-1", data={}), CONF_FLEET_API_BASE_URL="base",
                send_tariff_to_tesla=upload, _command_generation=[1], sync_command_generation=1,
                TESLA_TOU_READBACK_ZERO_NORMALIZED="normalized", _LOGGER=logging.getLogger(__name__),
                periodic=periodic, TOU_PERIODIC_SYNC_MAX_RETRY_AFTER_SECONDS=60.0)
+    runtime = {}
+    env.update(sync_runtime=runtime, sync_site_id="None",
+               CONF_TESLA_ENERGY_SITE_ID="tesla_energy_site_id",
+               _aemo_dispatch_entry_data=lambda: runtime,
+               _is_monitoring_mode=lambda: False, _monitoring_sync_override=False)
+    guard = next(n for n in sync.body if isinstance(n, ast.FunctionDef) and n.name == "sync_current")
+    exec(compile(ast.Module(body=[guard], type_ignores=[]), "<actual sync guard>", "exec"), env)
     exec(compile(ast.fix_missing_locations(ast.Module(body=[node], type_ignores=[])),
                  "<sync-upload-result>", "exec"), env)
     assert asyncio.run(env["run"]()) is all(site_results)
@@ -417,6 +426,7 @@ def test_pending_only_restore_retry_runs_without_force_state():
         }}}, services=SimpleNamespace(async_call=service)),
         entry=SimpleNamespace(entry_id="entry-1"), DOMAIN="power_sync",
         _command_generation=[2], _restore_generation=2, skip_backup_reserve_restore=False,
+        source="startup_pending_restore", force_restore=True,
         SERVICE_RESTORE_NORMAL="restore_normal", call=None,
         dt_util=SimpleNamespace(utcnow=lambda: datetime(2026, 10, 21, tzinfo=timezone.utc)),
         timedelta=timedelta, async_track_point_in_utc_time=track,
@@ -426,5 +436,6 @@ def test_pending_only_restore_retry_runs_without_force_state():
     assert env["_schedule_tesla_restore_retry"]("readback failed") is True
     asyncio.run(scheduled[0](None))
     assert len(calls) == 1
+    assert calls[0]["source"] == "startup_pending_restore"
     assert calls[0]["_force_restore"] is True
     assert calls[0]["_tesla_restore_generation"] == 2
