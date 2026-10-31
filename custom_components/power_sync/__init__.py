@@ -19221,6 +19221,266 @@ class ChargingBoostView(HomeAssistantView):
         self._hass = hass
         self._config_entry = config_entry
 
+    def _boost_pairing_identity(self) -> dict:
+        """Use configured identities only; credentials are never journaled."""
+        config = {**self._config_entry.data, **self._config_entry.options}
+        return {key: config.get(key) for key in (
+            "ev_provider", "tesla_ble_entity_prefix", "tesla_ble_vehicle_mapping",
+            "tesla_energy_site_id", "powerwall_local_energy_site_id",
+        )}
+
+    def _boost_observation(self, vehicle_id: str, after: str | None = None) -> str | None:
+        from .ev_load import is_current_ev_power_observation
+
+        observations = [item for item in _get_ev_vehicles_status(self._hass, self._config_entry)
+                        if item.get("vehicle_id") == vehicle_id]
+        if len(observations) != 1:
+            return None
+        observation = observations[0]
+        observed_at = observation.get("_charging_observed_at")
+        if not is_current_ev_power_observation(observed_at, at=dt_util.utcnow()):
+            return None
+        if after:
+            try:
+                if observed_at < datetime.fromisoformat(after):
+                    return None
+            except (TypeError, ValueError):
+                return None
+        if (observation.get("_charging_state_known") is True
+                and observation.get("is_charging") is False):
+            return "stopped"
+        if observation.get("site_presence") == "away":
+            return None
+        if observation.get("is_charging") is True and observation.get("is_connected") is True:
+            return "charging"
+        return None
+
+    async def _save_boost_state(self, record: dict) -> bool:
+        from .automations.ev_ownership import persist_ev_runtime_state
+
+        runtime = self._hass.data.get(DOMAIN, {}).get(self._config_entry.entry_id, {})
+        store = runtime.get("automation_store")
+        try:
+            if store is None or not callable(getattr(store, "async_save", None)):
+                raise RuntimeError("EV recovery storage is unavailable")
+            if await persist_ev_runtime_state(self._hass, self._config_entry, store) is not True:
+                raise RuntimeError("EV recovery storage changed")
+            return True
+        except Exception:
+            record["status"] = "pending_persistence"
+            return False
+
+    def _arm_boost_stop(self, vehicle_id, record, boost_state=None, boost_ownership=None, *, at=None):
+        """Arm an identity-fenced stop/recovery check, never a start or rate write."""
+        from .automations import actions as ev_actions
+        from .automations.actions import execute_actions
+        from .automations.ev_ownership import (
+            claim_ev_ownership, get_ev_ownership, record_ev_command, release_ev_ownership,
+            reconcile_boost_supersession,
+        )
+        from .teslemetry_solar import guard_ev_control
+
+        runtime = self._hass.data[DOMAIN][self._config_entry.entry_id]
+        timers = runtime.setdefault("ev_boost_timers", {})
+        if previous := timers.get(vehicle_id):
+            if cancel := previous.get("cancel"):
+                cancel()
+        deadline = datetime.fromisoformat(record["expires_at"])
+        original_deadline = record["expires_at"]
+        generation = record.get("generation")
+        original_pairing = dict(record["pairing"])
+        stop_params = dict(record["stop_params"])
+        timer = {"stops_at": deadline, "cancel": None}
+        timers[vehicle_id] = timer
+
+        def current():
+            return (
+                self._hass.data.get(DOMAIN, {}).get(self._config_entry.entry_id) is runtime
+                and not runtime.get("powerwall_local_dispatch_stopping")
+                and runtime.get("ev_boost_timers", {}).get(vehicle_id) is timer
+                and runtime.get("ev_boost_sessions", {}).get(vehicle_id) is record
+                and record.get("generation") == generation
+                and record.get("expires_at") == original_deadline
+                and record.get("vehicle_id") == vehicle_id
+                and record.get("entry_id") == self._config_entry.entry_id
+                and record.get("pairing") == original_pairing
+                and record.get("stop_params") == stop_params
+            )
+
+        def retry(state=None, lease=None):
+            if current():
+                self._arm_boost_stop(vehicle_id, record, state, lease,
+                                     at=dt_util.utcnow() + timedelta(seconds=30))
+
+        async def retire(state, lease):
+            # Only fresh exact-VIN stopped telemetry retires the obligation.
+            runtime["ev_boost_sessions"].pop(vehicle_id)
+            if not await self._save_boost_state(record):
+                if (self._hass.data.get(DOMAIN, {}).get(self._config_entry.entry_id) is runtime
+                        and vehicle_id not in runtime["ev_boost_sessions"]):
+                    runtime["ev_boost_sessions"][vehicle_id] = record
+                    retry(state, lease if lease is boost_ownership else None)
+                return
+            if (self._hass.data.get(DOMAIN, {}).get(self._config_entry.entry_id) is runtime
+                    and runtime.get("ev_boost_timers", {}).get(vehicle_id) is timer
+                    and vehicle_id not in runtime["ev_boost_sessions"]):
+                runtime["ev_boost_timers"].pop(vehicle_id)
+                _, current_lease = get_ev_ownership(self._hass, self._config_entry, vehicle_id)
+                if current_lease is boost_ownership and current_lease is not None:
+                    release_ev_ownership(self._hass, self._config_entry, vehicle_id,
+                                         reason="Fresh stopped Boost observation")
+
+        @guard_ev_control
+        async def check(hass, config_entry, params):
+            nonlocal boost_state, boost_ownership
+            if not current():
+                return
+            reconcile_boost_supersession(hass, config_entry, vehicle_id)
+            if self._boost_pairing_identity() != record["pairing"]:
+                record["status"] = "blocked_pairing_changed"
+                await self._save_boost_state(record)
+                retry(boost_state, boost_ownership)
+                return
+            state = ev_actions._dynamic_ev_state.get(config_entry.entry_id, {}).get(vehicle_id)
+            _, lease = get_ev_ownership(hass, config_entry, vehicle_id)
+            if (boost_ownership is not None and lease is not None
+                    and lease.get("owner_mode") == "boost"
+                    and lease.get("ownership_generation") is not None
+                    and lease.get("ownership_generation") == boost_ownership.get("ownership_generation")):
+                boost_ownership = lease
+            elif (boost_ownership is None and lease is not None
+                    and lease.get("owner_mode") == "boost"
+                    and lease.get("ownership_generation") == record.get("ownership_generation")
+                    and record.get("ownership_generation") is not None):
+                boost_ownership = lease
+            observation = self._boost_observation(vehicle_id, record.get("stop_attempted_at"))
+            if observation == "stopped":
+                await retire(state, lease)
+                return
+            if record.get("superseded"):
+                record["status"] = "superseded"
+                await self._save_boost_state(record)
+                retry(boost_state, boost_ownership)
+                return
+            if ((boost_state is not None and state is not boost_state)
+                    or (lease is not None and lease is not boost_ownership)):
+                record["status"] = "blocked_new_owner"
+                await self._save_boost_state(record)
+                retry(boost_state, boost_ownership)
+                return
+            if boost_state is None:
+                if observation != "charging":
+                    record["status"] = "pending_fresh_observation"
+                    await self._save_boost_state(record)
+                    retry()
+                    return
+                # Adoption is stop-only. It creates no dynamic controller and
+                # never rewrites the car's current or charge limit.
+                if lease is None:
+                    boost_ownership = claim_ev_ownership(
+                        hass, config_entry, vehicle_id, owner_mode="boost",
+                        session_id=record.get("session_id"),
+                        reason="Restored finite Boost stop obligation",
+                        extra={"expires_at": record["expires_at"],
+                               "duration_minutes": record["duration_minutes"]},
+                    )
+                    record["ownership_generation"] = boost_ownership["ownership_generation"]
+            if dt_util.utcnow() < deadline and not record.get("stop_required"):
+                record["status"] = "active"
+                if await self._save_boost_state(record):
+                    _, current_lease = get_ev_ownership(hass, config_entry, vehicle_id)
+                    if current() and current_lease is boost_ownership:
+                        self._arm_boost_stop(vehicle_id, record, state, boost_ownership, at=deadline)
+                    return
+                record["stop_required"] = True
+            if not current():
+                return
+            record["stop_required"] = True
+            record["stop_attempted_at"] = dt_util.utcnow().isoformat()
+            record["status"] = "pending_stop"
+            await self._save_boost_state(record)
+            if not current() or self._boost_pairing_identity() != record["pairing"]:
+                return
+            _, current_lease = get_ev_ownership(hass, config_entry, vehicle_id)
+            if current_lease is not boost_ownership:
+                retry()
+                return
+            success = await execute_actions(hass, config_entry, [{
+                "action_type": "stop_ev_charging_dynamic",
+                "parameters": {
+                    **stop_params, "vehicle_id": vehicle_id,
+                    "vehicle_vin": vehicle_id, "owner_mode": "boost",
+                    "_expected_state": state, "stop_untracked": state is None,
+                    "_user_initiated": True,
+                    "stop_charging": True, "stop_reason": "Boost duration elapsed",
+                },
+            }])
+            if not current():
+                return
+            _, current_lease = get_ev_ownership(hass, config_entry, vehicle_id)
+            current_state = ev_actions._dynamic_ev_state.get(config_entry.entry_id, {}).get(vehicle_id)
+            if ((current_lease is not None and current_lease is not boost_ownership)
+                    or (current_state is not None and current_state is not state)):
+                return
+            record["last_stop_result"] = success if success is True or success is False else None
+            record["status"] = "pending_stop_readback" if success is True else "pending_stop"
+            if success is not True:
+                record_ev_command(hass, config_entry, vehicle_id, command="stop_boost",
+                                  success=False, reason="Boost stop remains unconfirmed")
+            await self._save_boost_state(record)
+            if not current():
+                return
+            state = ev_actions._dynamic_ev_state.get(config_entry.entry_id, {}).get(vehicle_id)
+            _, lease = get_ev_ownership(hass, config_entry, vehicle_id)
+            if self._boost_observation(vehicle_id, record["stop_attempted_at"]) == "stopped":
+                await retire(state, lease)
+                return
+            retry(state, lease)
+
+        async def elapsed(_now):
+            try:
+                await check(self._hass, self._config_entry,
+                            {"vehicle_id": vehicle_id, "vehicle_vin": vehicle_id})
+            finally:
+                # A denied gate or unavailable observation must not consume
+                # the only expiry callback or grant new control authority.
+                if current():
+                    record["status"] = "pending_recovery"
+                    await self._save_boost_state(record)
+                    retry(boost_state, boost_ownership)
+
+        timer["cancel"] = async_track_point_in_utc_time(
+            self._hass, elapsed, at or deadline
+        )
+        return elapsed
+
+    async def restore_boost_sessions(self, records: dict) -> None:
+        """Recover original deadlines using fresh observations, with no starts."""
+        runtime = self._hass.data.get(DOMAIN, {}).get(self._config_entry.entry_id, {})
+        if not isinstance(records, dict):
+            runtime["ev_boost_recovery_status"] = "blocked_invalid_journal"
+            return
+        for vehicle_id, record in list(records.items()):
+            try:
+                deadline = datetime.fromisoformat(record["expires_at"])
+                valid = (record["entry_id"] == self._config_entry.entry_id
+                         and record["vehicle_id"] == vehicle_id
+                         and len(vehicle_id) == 17 and vehicle_id.isalnum()
+                         and not vehicle_id.isdigit() and deadline.tzinfo is not None
+                         and isinstance(record.get("generation"), str) and bool(record["generation"])
+                         and type(record.get("duration_minutes")) is int
+                         and 1 <= record["duration_minutes"] <= 1440
+                         and record["pairing"] == self._boost_pairing_identity()
+                         and record["stop_params"].get("charger_type", "tesla") == "tesla"
+                         and record["stop_params"].get("vehicle_vin") == vehicle_id)
+            except (KeyError, TypeError, ValueError, AttributeError):
+                valid = False
+            if not valid:
+                runtime["ev_boost_recovery_status"] = "blocked_invalid_identity_or_deadline"
+                continue
+            callback = self._arm_boost_stop(vehicle_id, record, at=dt_util.utcnow())
+            await callback(dt_util.utcnow())
+
     async def post(self, request: web.Request) -> web.Response:
         """Handle POST request - start boost charge.
 
@@ -19276,6 +19536,11 @@ class ChargingBoostView(HomeAssistantView):
             warnings: list[str] = []
 
             opts = {**self._config_entry.data, **self._config_entry.options}
+            recovery_runtime = self._hass.data.get(DOMAIN, {}).get(self._config_entry.entry_id, {})
+            if not isinstance(recovery_runtime.get("ev_boost_sessions", {}), dict):
+                return web.json_response({"success": False, "error": "Boost recovery journal is invalid"})
+            if recovery_runtime.get("powerwall_local_dispatch_stopping"):
+                return web.json_response({"success": False, "error": "Boost runtime is unloading"})
             if boost_vehicle_id == "generic_ev":
                 from .const import (
                     CONF_GENERIC_CHARGER_AMPS_ENTITY,
@@ -19342,6 +19607,10 @@ class ChargingBoostView(HomeAssistantView):
             if success:
                 from .automations import actions as ev_actions
 
+                if (self._hass.data.get(DOMAIN, {}).get(self._config_entry.entry_id)
+                        is not recovery_runtime or recovery_runtime.get("powerwall_local_dispatch_stopping")):
+                    return web.json_response({"success": False, "error": "Boost runtime changed"})
+
                 if action_params.get("charger_type", "tesla") == "tesla":
                     boost_vehicle_id = ev_actions._canonical_dynamic_tesla_vehicle_id(
                         self._hass, self._config_entry, boost_vehicle_id
@@ -19381,128 +19650,83 @@ class ChargingBoostView(HomeAssistantView):
                         "load management"
                     )
 
-                from .automations.ev_ownership import (
-                    claim_ev_ownership,
-                    get_active_ev_owner_mode,
-                    get_ev_ownership,
-                    owner_family,
-                    record_ev_command,
-                )
-                from .teslemetry_solar import guard_ev_control
+                from uuid import uuid4
+                from .automations.ev_ownership import claim_ev_ownership, get_ev_ownership
 
                 entry_data = self._hass.data.setdefault(DOMAIN, {}).setdefault(
-                    self._config_entry.entry_id,
-                    {},
+                    self._config_entry.entry_id, {},
                 )
-                boost_timers = entry_data.setdefault("ev_boost_timers", {})
-                previous_timer = boost_timers.get(boost_vehicle_id)
-                if previous_timer and (cancel_boost := previous_timer.get("cancel")):
-                    cancel_boost()
-
+                records = entry_data.setdefault("ev_boost_sessions", {})
+                if not isinstance(records, dict):
+                    raise RuntimeError("Boost recovery journal is invalid")
+                stops_at = dt_util.utcnow() + timedelta(minutes=duration_minutes)
+                record = {
+                    "entry_id": self._config_entry.entry_id,
+                    "vehicle_id": boost_vehicle_id,
+                    "generation": uuid4().hex,
+                    "pairing": self._boost_pairing_identity(),
+                    "expires_at": stops_at.isoformat(),
+                    "duration_minutes": duration_minutes,
+                    "session_id": (boost_state or {}).get("session_id"),
+                    "stop_params": {key: value for key, value in action_params.items()
+                                    if not key.startswith("_")},
+                    "status": "active",
+                }
+                if action_params.get("charger_type", "tesla") == "tesla":
+                    record["stop_params"] = {"charger_type": "tesla", "vehicle_vin": boost_vehicle_id}
+                records[boost_vehicle_id] = record
                 boost_ownership = claim_ev_ownership(
-                    self._hass,
-                    self._config_entry,
-                    boost_vehicle_id,
-                    owner_mode="boost",
-                    command="start_boost",
+                    self._hass, self._config_entry, boost_vehicle_id,
+                    owner_mode="boost", command="start_boost",
                     reason=f"Boost charge for {duration_minutes} minutes",
-                    extra={
-                        "duration_minutes": duration_minutes,
-                        "target_soc": target_soc_value,
-                    },
+                    extra={"duration_minutes": duration_minutes,
+                           "expires_at": record["expires_at"],
+                           "target_soc": target_soc_value},
                 )
                 if boost_state is not None:
                     boost_state["ownership"] = boost_ownership
-
-                stops_at = dt_util.utcnow() + timedelta(minutes=duration_minutes)
-                timer_record = {"stops_at": stops_at, "cancel": None}
-                boost_timers[boost_vehicle_id] = timer_record
-
-                @guard_ev_control
-                async def _stop_current_boost(hass, config_entry, params):
-                    # Check after acquiring the existing EV mutation gate: a
-                    # replacement can finish while this callback waits for it.
-                    if (
-                        hass.data.get(DOMAIN, {}).get(config_entry.entry_id)
-                        is not entry_data
-                    ):
-                        return
-                    current_timers = entry_data.get("ev_boost_timers", {})
-                    if current_timers.get(boost_vehicle_id) is not timer_record:
-                        return
-                    current_timers.pop(boost_vehicle_id)
-                    current_state = ev_actions._dynamic_ev_state.get(
-                        config_entry.entry_id, {}
-                    ).get(boost_vehicle_id)
-                    _, current_ownership = get_ev_ownership(
-                        hass, config_entry, boost_vehicle_id
-                    )
-                    if (
-                        boost_state is None
-                        or current_state is not boost_state
-                        or current_ownership is not boost_ownership
-                    ):
-                        return
-                    active_mode = get_active_ev_owner_mode(
-                        hass,
-                        config_entry,
-                        boost_vehicle_id,
-                    )
-                    if owner_family(active_mode) != "boost":
-                        _LOGGER.info(
-                            "Boost stop skipped for %s because ownership is now %s",
-                            boost_vehicle_id,
-                            active_mode or "unowned",
+                record["ownership_generation"] = boost_ownership["ownership_generation"]
+                try:
+                    saved = await self._save_boost_state(record)
+                except asyncio.CancelledError:
+                    if (self._hass.data.get(DOMAIN, {}).get(self._config_entry.entry_id) is entry_data
+                            and records.get(boost_vehicle_id) is record
+                            and not entry_data.get("powerwall_local_dispatch_stopping")):
+                        record["status"] = "pending_persistence"
+                        self._arm_boost_stop(
+                            boost_vehicle_id, record, boost_state, boost_ownership,
+                            at=min(stops_at, dt_util.utcnow() + timedelta(seconds=30)),
                         )
-                        return
-
-                    # stop_ev_charging_dynamic tears down the periodic controller
-                    # and releases the lease, so no separate release is needed.
-                    stop_success = await execute_actions(hass, config_entry, [{
-                        "action_type": "stop_ev_charging_dynamic",
-                        "parameters": {
-                            **action_params,
-                            "vehicle_id": boost_vehicle_id,
-                            "vehicle_vin": (
-                                boost_vehicle_id
-                                if action_params.get("charger_type", "tesla") == "tesla"
-                                else None
-                            ),
-                            "_expected_state": boost_state,
-                            "stop_charging": True,
-                            "stop_reason": "Boost duration elapsed",
-                        },
-                    }])
-                    if not stop_success:
-                        record_ev_command(
-                            hass,
-                            config_entry,
-                            boost_vehicle_id,
-                            command="stop_boost",
-                            success=False,
-                            reason="Boost duration elapsed but stop command failed",
-                        )
-
-                async def _stop_boost_when_elapsed(_now) -> None:
-                    await _stop_current_boost(
-                        self._hass,
-                        self._config_entry,
-                        {
-                            **action_params,
-                            "vehicle_id": boost_vehicle_id,
-                            "vehicle_vin": (
-                                boost_vehicle_id
-                                if action_params.get("charger_type", "tesla") == "tesla"
-                                else None
-                            ),
-                        },
-                    )
-
-                timer_record["cancel"] = async_track_point_in_utc_time(
-                    self._hass,
-                    _stop_boost_when_elapsed,
-                    stops_at,
+                    raise
+                if (self._hass.data.get(DOMAIN, {}).get(self._config_entry.entry_id) is not entry_data
+                        or records.get(boost_vehicle_id) is not record
+                        or entry_data.get("powerwall_local_dispatch_stopping")):
+                    return web.json_response({"success": False, "error": "Boost was superseded"})
+                _, current_ownership = get_ev_ownership(
+                    self._hass, self._config_entry, boost_vehicle_id
                 )
+                if (self._hass.data.get(DOMAIN, {}).get(self._config_entry.entry_id) is not entry_data
+                        or records.get(boost_vehicle_id) is not record
+                        or current_ownership is not boost_ownership
+                        or record["expires_at"] != stops_at.isoformat()
+                        or self._boost_pairing_identity() != record["pairing"]
+                        or ev_actions._dynamic_ev_state.get(self._config_entry.entry_id, {}).get(boost_vehicle_id)
+                        is not boost_state):
+                    return web.json_response({"success": False, "error": "Boost was superseded"})
+                if not saved:
+                    record["stop_required"] = True
+                callback = self._arm_boost_stop(
+                    boost_vehicle_id, record, boost_state, boost_ownership,
+                    at=stops_at if saved else dt_util.utcnow() + timedelta(seconds=30),
+                )
+                if not saved:
+                    await callback(dt_util.utcnow())
+                    return web.json_response({
+                        "success": False,
+                        "error": "Boost deadline could not be saved; stop recovery remains pending",
+                        "stops_at": stops_at.isoformat(),
+                        "recovery_pending": True,
+                    })
 
             return web.json_response({
                 "success": success,
@@ -46645,6 +46869,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     try:
         from .automations.ev_ownership import restore_ev_runtime_state
         restored_ev_runtime = restore_ev_runtime_state(hass, entry, automation_store)
+        if boost_sessions := restored_ev_runtime.get("boost_sessions"):
+            await ChargingBoostView(hass, entry).restore_boost_sessions(boost_sessions)
         if (
             restored_ev_runtime.get("restored_ownership")
             or restored_ev_runtime.get("restored_commands")

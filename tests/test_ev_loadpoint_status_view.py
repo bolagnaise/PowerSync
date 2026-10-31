@@ -285,8 +285,13 @@ def test_boost_runs_through_the_dynamic_controller_for_the_whole_window():
     assert "'skip_ownership': True" not in source
     # The expiry stop must tear the controller down rather than only sending a
     # physical stop and releasing the lease by hand.
-    assert "'action_type': 'stop_ev_charging_dynamic'" in source
-    assert "'stop_charging': True" in source
+    stop_source = ast.unparse(next(
+        node for node in ast.walk(ast.parse(INIT_PATH.read_text()))
+        if isinstance(node, ast.FunctionDef) and node.name == "_arm_boost_stop"
+    ))
+    assert "self._arm_boost_stop(" in source
+    assert "'action_type': 'stop_ev_charging_dynamic'" in stop_source
+    assert "'stop_charging': True" in stop_source
     assert "release_ev_ownership" not in source
 
 

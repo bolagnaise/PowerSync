@@ -5,13 +5,15 @@ from __future__ import annotations
 import ast
 import asyncio
 from contextlib import nullcontext
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from inspect import signature
 import logging
 from pathlib import Path
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
+from uuid import uuid4
 
 import pytest
 
@@ -26,6 +28,24 @@ own = load_power_sync_submodule(
     "automations.ev_ownership", package="boost_timer_actual"
 )
 mapping = load_power_sync_submodule("tesla_ble_mapping", package="boost_timer_actual")
+ev_load = load_power_sync_submodule("ev_load", package="boost_timer_actual")
+
+
+class Store:
+    def __init__(self):
+        self._data = {}
+        self.saved = {}
+        self.fail = False
+        self.pause = None
+
+    async def async_save(self):
+        if self.pause:
+            entered, release = self.pause
+            entered.set()
+            await release.wait()
+        if self.fail:
+            raise OSError("storage unavailable")
+        self.saved = deepcopy(self._data)
 
 
 class StripImports(ast.NodeTransformer):
@@ -53,7 +73,8 @@ class Timer:
 class BoostHarness:
     def __init__(self):
         self.entry = SimpleNamespace(entry_id="entry", data={}, options={})
-        self.runtime = {}
+        self.store = Store()
+        self.runtime = {"automation_store": self.store}
         self.hass = SimpleNamespace(data={"power_sync": {"entry": self.runtime}})
         self.view = SimpleNamespace(_hass=self.hass, _config_entry=self.entry)
         self.now = datetime(2026, 10, 31, tzinfo=timezone.utc)
@@ -62,7 +83,10 @@ class BoostHarness:
         self.calls = []
         self.fail_start = set()
         self.fail_stop = set()
+        self.unknown_stop = set()
         self.default_vin = VIN_A
+        self.physical = {}
+        self.observation_overrides = {}
         self.start_pause = None
         self.gate_requested = asyncio.Event()
         self.gate = SimpleNamespace(
@@ -109,6 +133,12 @@ class BoostHarness:
             "async_track_point_in_utc_time": self.track,
             "dt_util": SimpleNamespace(utcnow=lambda: self.now),
             "timedelta": timedelta,
+            "asyncio": asyncio,
+            "datetime": datetime,
+            "uuid4": uuid4,
+            "persist_ev_runtime_state": own.persist_ev_runtime_state,
+            "is_current_ev_power_observation": ev_load.is_current_ev_power_observation,
+            "_get_ev_vehicles_status": lambda *_args: self.observations(),
             "_LOGGER": logging.getLogger(__name__),
             "web": SimpleNamespace(
                 json_response=lambda body, **kwargs: SimpleNamespace(body=body, **kwargs)
@@ -116,13 +146,64 @@ class BoostHarness:
         }
         for name in (
             "claim_ev_ownership", "get_active_ev_owner_mode", "get_ev_ownership",
-            "owner_family", "record_ev_command",
+            "owner_family", "record_ev_command", "release_ev_ownership",
+            "reconcile_boost_supersession",
         ):
             namespace[name] = getattr(own, name)
         self.post = compile_node(
             StripImports().visit(source_node(INIT, "post", parent="ChargingBoostView")),
             namespace,
         )
+        for name in ("_boost_pairing_identity", "_boost_observation", "_save_boost_state",
+                     "_arm_boost_stop", "restore_boost_sessions"):
+            method = compile_node(
+                StripImports().visit(source_node(INIT, name, parent="ChargingBoostView")),
+                namespace,
+            )
+            setattr(self.view, name, MethodType(method, self.view))
+
+    def observations(self):
+        return [{"vehicle_id": vin, "is_charging": charging,
+                 "is_connected": True, "_charging_state_known": True,
+                 "_charging_observed_at": self.now, "site_presence": "home",
+                 **self.observation_overrides.get(vin, {})}
+                for vin, charging in self.physical.items()]
+
+    async def reload(self, at=None, fail_stop=(), blocked=()):
+        await own.persist_ev_runtime_state(self.hass, self.entry, self.store)
+        self.unload_timers()
+        restored = BoostHarness()
+        restored.now = at or self.now
+        restored.entry.data = dict(self.entry.data)
+        restored.entry.options = dict(self.entry.options)
+        restored.physical = dict(self.physical)
+        restored.fail_stop.update(fail_stop)
+        restored.gate.blocked = lambda vin: vin in blocked
+        restored.observation_overrides = deepcopy(self.observation_overrides)
+        restored.store._data = deepcopy(self.store.saved)
+        # Execute the actual setup restore call and its Boost dispatch branch.
+        setup = source_node(INIT, "async_setup_entry")
+        restore = next(node for node in ast.walk(setup)
+                       if isinstance(node, ast.Assign) and any(
+                           isinstance(target, ast.Name) and target.id == "restored_ev_runtime"
+                           for target in node.targets))
+        dispatch = next(node for node in ast.walk(setup)
+                        if isinstance(node, ast.If) and isinstance(node.test, ast.NamedExpr)
+                        and isinstance(node.test.target, ast.Name)
+                        and node.test.target.id == "boost_sessions")
+        method = ast.AsyncFunctionDef(
+            name="restore_boost_setup",
+            args=ast.arguments(posonlyargs=[], args=[ast.arg(arg=name) for name in
+                               ("hass", "entry", "automation_store")],
+                               kwonlyargs=[], kw_defaults=[], defaults=[]),
+            body=[restore, dispatch], decorator_list=[],
+        )
+        actual_setup = compile_node(method, {
+            "restore_ev_runtime_state": own.restore_ev_runtime_state,
+            "ChargingBoostView": lambda *_args: restored.view,
+        })
+        await actual_setup(restored.hass, restored.entry, restored.store)
+        return restored
 
     def track(self, _hass, callback, deadline):
         timer = Timer(callback, deadline)
@@ -144,17 +225,21 @@ class BoostHarness:
             # A duplicate start can reuse the actual controller's state object.
             state = self.states["entry"].setdefault(vin, {})
             state.update(active=True, current_amps=6, params=dict(params))
+            self.physical[vin] = True
             state["ownership"] = own.claim_ev_ownership(
                 hass, config_entry, vin, owner_mode="boost"
             )
             return True
         if kind == "stop_ev_charging_dynamic":
+            if vin in self.unknown_stop:
+                return None
             if vin in self.fail_stop:
                 return False
             expected = params.get("_expected_state")
             if expected is not None and self.states["entry"].get(vin) is not expected:
                 return True
             self.states["entry"].pop(vin, None)
+            self.physical[vin] = False
             own.release_ev_ownership(hass, config_entry, vin)
             return True
         raise AssertionError(f"Unexpected charger action: {kind}")
@@ -166,7 +251,9 @@ class BoostHarness:
                 hass, config_entry,
                 {**action["parameters"], "_kind": action["action_type"]},
             ))
-        return any(results)
+        return True if any(result is True for result in results) else (
+            None if any(result is None for result in results) else False
+        )
 
     async def start(self, vin, minutes=1):
         async def payload():
@@ -400,3 +487,424 @@ async def test_unload_cancels_all_owned_timers_and_legacy_timer_without_commands
     assert set(h.states["entry"]) == {VIN_A, VIN_B}
     h.unload_timers()
     assert legacy_cancelled == [True]
+
+
+@pytest.mark.asyncio
+async def test_reload_before_expiry_preserves_both_deadlines_without_start_or_rate_replay():
+    h = BoostHarness()
+    first = await h.start(VIN_A, 2)
+    h.now += timedelta(seconds=10)
+    second = await h.start(VIN_B, 3)
+    restored = await h.reload(at=h.now + timedelta(seconds=20))
+    assert restored.calls == [] and restored.states["entry"] == {}
+    for vin, response in ((VIN_A, first), (VIN_B, second)):
+        assert restored.owner(vin)["owner_mode"] == "boost"
+        assert restored.owner(vin)["expires_at"] == response["stops_at"]
+        assert restored.runtime["ev_boost_timers"][vin]["stops_at"].isoformat() == response["stops_at"]
+        assert restored.store.saved["ev_runtime_state"]["boost_sessions"][vin]["expires_at"] == response["stops_at"]
+    restored.now = datetime.fromisoformat(first["stops_at"])
+    await restored.due()
+    assert restored.stops() == [VIN_A]
+    assert restored.owner(VIN_B)["owner_mode"] == "boost"
+    assert set(restored.runtime["ev_boost_sessions"]) == {VIN_B}
+    restored.now = datetime.fromisoformat(second["stops_at"])
+    await restored.due()
+    assert restored.stops() == [VIN_A, VIN_B]
+    assert restored.runtime["ev_boost_sessions"] == {}
+    assert all(kind == "stop_ev_charging_dynamic" for kind, _vin, _params in restored.calls)
+
+
+@pytest.mark.asyncio
+async def test_reload_after_expiry_stops_only_expired_exact_vin_and_keeps_second_timer():
+    h = BoostHarness()
+    await h.start(VIN_A)
+    second = await h.start(VIN_B, 3)
+    restored = await h.reload(at=h.now + timedelta(minutes=2))
+    assert restored.stops() == [VIN_A]
+    assert restored.calls[0][2]["vehicle_vin"] == VIN_A
+    assert restored.calls[0][2]["stop_untracked"] is True
+    assert restored.owner(VIN_A) is None and restored.owner(VIN_B)["owner_mode"] == "boost"
+    assert restored.runtime["ev_boost_timers"][VIN_B]["stops_at"].isoformat() == second["stops_at"]
+
+
+@pytest.mark.asyncio
+async def test_failed_expiry_remains_durable_through_reload_until_fresh_stopped_readback():
+    h = BoostHarness()
+    response = await h.start(VIN_A)
+    h.fail_stop.add(VIN_A)
+    h.now = datetime.fromisoformat(response["stops_at"])
+    await h.due()
+    pending = h.store.saved["ev_runtime_state"]["boost_sessions"][VIN_A]
+    assert pending["expires_at"] == response["stops_at"]
+    assert pending["last_stop_result"] is False and pending["status"] == "pending_stop"
+    restored = await h.reload(at=h.now + timedelta(seconds=1), fail_stop=(VIN_A,))
+    assert restored.stops() == [VIN_A]
+    assert restored.store.saved["ev_runtime_state"]["boost_sessions"][VIN_A]["expires_at"] == response["stops_at"]
+    restored.fail_stop.clear()
+    restored.now += timedelta(seconds=30)
+    await restored.due()
+    assert restored.stops() == [VIN_A, VIN_A]
+    assert restored.runtime["ev_boost_sessions"] == {}
+    assert restored.store.saved["ev_runtime_state"]["boost_sessions"] == {}
+
+
+@pytest.mark.asyncio
+async def test_accepted_stop_without_fresh_readback_keeps_obligation_and_original_deadline():
+    h = BoostHarness()
+    response = await h.start(VIN_A)
+    stale_at = h.now
+    h.observation_overrides[VIN_A] = {"is_charging": True, "_charging_observed_at": stale_at}
+    h.now = datetime.fromisoformat(response["stops_at"])
+    await h.due()
+    assert h.stops() == [VIN_A]
+    pending = h.store.saved["ev_runtime_state"]["boost_sessions"][VIN_A]
+    assert pending["last_stop_result"] is True
+    assert pending["status"] == "pending_stop_readback" and pending["expires_at"] == response["stops_at"]
+    h.now += timedelta(seconds=30)
+    h.observation_overrides.clear()
+    await h.due()
+    assert h.stops() == [VIN_A]  # Fresh stop retires without sending another command.
+    assert h.store.saved["ev_runtime_state"]["boost_sessions"] == {}
+
+
+@pytest.mark.asyncio
+async def test_reload_stale_observation_keeps_pending_record_without_claim_or_start():
+    h = BoostHarness()
+    response = await h.start(VIN_A)
+    h.observation_overrides[VIN_A] = {"_charging_observed_at": h.now - timedelta(minutes=5)}
+    restored = await h.reload(at=h.now + timedelta(seconds=10))
+    assert restored.calls == [] and restored.owner(VIN_A) is None
+    assert restored.runtime["ev_boost_sessions"][VIN_A]["status"] == "pending_fresh_observation"
+    restored.observation_overrides.clear()
+    restored.now += timedelta(seconds=30)
+    await restored.due()
+    assert restored.calls == [] and restored.owner(VIN_A)["owner_mode"] == "boost"
+    assert restored.runtime["ev_boost_timers"][VIN_A]["stops_at"].isoformat() == response["stops_at"]
+
+
+@pytest.mark.asyncio
+async def test_reload_fresh_stopped_car_clears_obligation_without_owning_or_starting_it():
+    h = BoostHarness()
+    await h.start(VIN_A)
+    h.physical[VIN_A] = False
+    restored = await h.reload()
+    assert restored.calls == [] and restored.owner(VIN_A) is None
+    assert restored.store.saved["ev_runtime_state"]["boost_sessions"] == {}
+
+
+@pytest.mark.asyncio
+async def test_save_failure_returns_failure_compensates_owned_start_and_keeps_unsaved_obligation():
+    h = BoostHarness()
+    h.store.fail = True
+    response = await h.start(VIN_A)
+    assert response["success"] is False and response["recovery_pending"] is True
+    assert "saved" in response["error"]
+    assert h.stops() == [VIN_A]
+    pending = h.runtime["ev_boost_sessions"][VIN_A]
+    assert pending["expires_at"] == response["stops_at"] and pending["status"] == "pending_persistence"
+    h.store.fail = False
+    h.now += timedelta(seconds=30)
+    await h.due()
+    assert h.stops() == [VIN_A]
+    assert h.store.saved["ev_runtime_state"]["boost_sessions"] == {}
+
+
+@pytest.mark.asyncio
+async def test_save_and_compensating_stop_failure_keep_original_recovery_obligation():
+    h = BoostHarness()
+    h.store.fail = True
+    h.fail_stop.add(VIN_A)
+    response = await h.start(VIN_A)
+    assert response["success"] is False
+    record = h.runtime["ev_boost_sessions"][VIN_A]
+    assert record["last_stop_result"] is False
+    h.store.fail = False
+    h.now += timedelta(seconds=30)
+    await h.due()
+    saved = h.store.saved["ev_runtime_state"]["boost_sessions"][VIN_A]
+    assert saved["expires_at"] == response["stops_at"] and saved["stop_required"] is True
+    h.fail_stop.clear()
+    h.now += timedelta(seconds=30)
+    await h.due()
+    assert h.runtime["ev_boost_sessions"] == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("changed", ["generation", "expires_at", "pairing", "vehicle_id"])
+async def test_changed_recovery_identity_or_deadline_cannot_gain_stop_authority(changed):
+    h = BoostHarness()
+    await h.start(VIN_A)
+    record = h.runtime["ev_boost_sessions"][VIN_A]
+    if changed == "generation":
+        record[changed] = "replacement-generation"
+    elif changed == "expires_at":
+        record[changed] = (h.now + timedelta(minutes=5)).isoformat()
+    elif changed == "pairing":
+        h.entry.options["tesla_ble_entity_prefix"] = "replacement_bridge"
+    else:
+        record[changed] = VIN_B
+    await h.timers[0].callback(h.now + timedelta(minutes=1))
+    assert h.stops() == [] and h.physical[VIN_A] is True
+
+
+@pytest.mark.asyncio
+async def test_restored_same_vin_replacement_stale_callback_cannot_clear_new_obligation():
+    h = BoostHarness()
+    await h.start(VIN_A)
+    restored = await h.reload()
+    old_callback = restored.timers[-1].callback
+    replacement = await restored.start(VIN_A, 3)
+    record, lease = restored.runtime["ev_boost_sessions"][VIN_A], restored.owner(VIN_A)
+    await old_callback(restored.now + timedelta(minutes=2))
+    assert restored.stops() == []
+    assert restored.runtime["ev_boost_sessions"][VIN_A] is record and restored.owner(VIN_A) is lease
+    assert record["expires_at"] == replacement["stops_at"]
+
+
+@pytest.mark.asyncio
+async def test_superseded_boost_cannot_revive_after_reload_and_does_not_block_manual_stop():
+    h = BoostHarness()
+    response = await h.start(VIN_A)
+    own.claim_ev_ownership(h.hass, h.entry, VIN_A, owner_mode="manual", command="update_manual")
+    restored = await h.reload(at=datetime.fromisoformat(response["stops_at"]) + timedelta(seconds=1))
+    assert restored.calls == [] and restored.owner(VIN_A) is None
+    assert restored.runtime["ev_boost_sessions"][VIN_A]["superseded"] is True
+    await restored.execute(restored.hass, restored.entry, [{
+        "action_type": "stop_ev_charging_dynamic",
+        "parameters": {"vehicle_id": VIN_A, "stop_charging": True},
+    }])
+    assert restored.stops() == [VIN_A]
+    restored.now += timedelta(seconds=30)
+    await restored.due()
+    assert restored.stops() == [VIN_A]
+    assert restored.runtime["ev_boost_sessions"] == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("copy_lease", [False, True])
+async def test_failed_provisional_takeover_rollback_restores_original_boost_deadline(copy_lease):
+    h = BoostHarness()
+    response = await h.start(VIN_A)
+    prior = h.owner(VIN_A)
+    own.claim_ev_ownership(h.hass, h.entry, VIN_A, owner_mode="manual", command="start_manual")
+    assert h.runtime["ev_boost_sessions"][VIN_A]["superseded"] is True
+    own.record_ev_command(h.hass, h.entry, VIN_A, command="start_manual", success=False)
+    # Rollback restores the prior accepted lease, including its stable receipt.
+    own.get_ev_ownerships(h.hass, h.entry)[VIN_A] = dict(prior) if copy_lease else prior
+    if copy_lease:
+        await own.persist_ev_runtime_state(h.hass, h.entry, h.store)
+        assert not h.store.saved["ev_runtime_state"]["boost_sessions"][VIN_A].get("superseded")
+    assert not h.timers[0].cancelled
+    assert h.runtime["ev_boost_sessions"][VIN_A]["expires_at"] == response["stops_at"]
+    h.now = datetime.fromisoformat(response["stops_at"])
+    await h.due()
+    assert h.stops() == [VIN_A] and h.runtime["ev_boost_sessions"] == {}
+
+
+@pytest.mark.asyncio
+async def test_real_unsent_manual_start_keeps_prior_boost_owner_timer_and_deadline():
+    h = BoostHarness()
+    response = await h.start(VIN_A)
+    original_lease = h.owner(VIN_A)
+    namespace = {
+        "guard_ev_control": h.guard, "_start_dynamic_lock": asyncio.Lock(),
+        "DEFAULT_VEHICLE_ID": "_default", "_ev_action_loadpoint_id": lambda p: p["vehicle_vin"],
+    }
+    async def target(*_args):
+        return 5
+    namespace["_manual_session_target_amps"] = target
+    compile_node(source_node(ROOT / "automations/actions.py", "_action_start_ev_charging_dynamic"), namespace)
+    manual = compile_node(
+        StripImports().visit(source_node(ROOT / "automations/actions.py", "_start_manual_ev_charging")),
+        namespace,
+    )
+    h.gate.blocked = lambda _vin: True
+    assert await manual(h.hass, h.entry, {"vehicle_vin": VIN_A}) is False
+    h.gate.blocked = lambda _vin: False
+    assert h.owner(VIN_A) is original_lease and not h.timers[0].cancelled
+    assert not h.runtime["ev_boost_sessions"][VIN_A].get("superseded")
+    assert h.runtime["ev_boost_sessions"][VIN_A]["expires_at"] == response["stops_at"]
+    h.now = datetime.fromisoformat(response["stops_at"])
+    await h.due()
+    assert h.stops() == [VIN_A]
+
+
+@pytest.mark.asyncio
+async def test_unknown_stop_result_retains_unknown_durable_obligation():
+    h = BoostHarness()
+    response = await h.start(VIN_A)
+    h.unknown_stop.add(VIN_A)
+    h.now = datetime.fromisoformat(response["stops_at"])
+    await h.due()
+    record = h.store.saved["ev_runtime_state"]["boost_sessions"][VIN_A]
+    assert record["last_stop_result"] is None and record["status"] == "pending_stop"
+    assert record["expires_at"] == response["stops_at"] and h.physical[VIN_A] is True
+
+
+@pytest.mark.asyncio
+async def test_reload_native_admission_denial_retains_obligation_without_lease_or_writes():
+    h = BoostHarness()
+    response = await h.start(VIN_A)
+    restored = await h.reload(blocked=(VIN_A,))
+    assert restored.calls == [] and restored.owner(VIN_A) is None
+    assert restored.runtime["ev_boost_sessions"][VIN_A]["status"] == "pending_recovery"
+    restored.gate.blocked = lambda _vin: False
+    restored.now = datetime.fromisoformat(response["stops_at"])
+    await restored.due()
+    assert restored.stops() == [VIN_A]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("changed", ["runtime", "owner", "pairing"])
+async def test_start_persistence_await_does_not_arm_or_compensate_a_changed_owner(changed):
+    h = BoostHarness()
+    entered, release = asyncio.Event(), asyncio.Event()
+    h.store.pause = (entered, release)
+    task = asyncio.create_task(h.start(VIN_A))
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    if changed == "runtime":
+        h.hass.data["power_sync"]["entry"] = dict(h.runtime)
+    elif changed == "owner":
+        own.claim_ev_ownership(h.hass, h.entry, VIN_A, owner_mode="manual")
+    else:
+        h.entry.options["tesla_ble_entity_prefix"] = "different_bridge"
+    release.set()
+    response = await asyncio.wait_for(task, timeout=1)
+    assert response["success"] is False and "superseded" in response["error"]
+    assert h.stops() == [] and h.timers == []
+
+
+@pytest.mark.asyncio
+async def test_malformed_saved_boost_is_retained_without_becoming_control_authority():
+    h = BoostHarness()
+    await h.start(VIN_A)
+    h.runtime["ev_boost_sessions"][VIN_A].pop("expires_at")
+    restored = await h.reload()
+    assert restored.calls == [] and restored.owner(VIN_A) is None
+    assert VIN_A in restored.runtime["ev_boost_sessions"]
+    assert restored.runtime["ev_boost_recovery_status"] == "blocked_invalid_identity_or_deadline"
+
+
+@pytest.mark.asyncio
+async def test_provisional_takeover_rollback_after_expiry_check_keeps_original_authority():
+    h = BoostHarness()
+    response = await h.start(VIN_A)
+    prior = h.owner(VIN_A)
+    own.claim_ev_ownership(h.hass, h.entry, VIN_A, owner_mode="manual", command="start_manual")
+    await h.timers[0].callback(h.now)
+    assert h.stops() == []
+    own.record_ev_command(h.hass, h.entry, VIN_A, command="start_manual", success=False)
+    own.get_ev_ownerships(h.hass, h.entry)[VIN_A] = dict(prior)
+    h.now = datetime.fromisoformat(response["stops_at"])
+    await h.due()
+    assert h.stops() == [VIN_A] and h.runtime["ev_boost_sessions"] == {}
+
+
+@pytest.mark.asyncio
+async def test_failed_first_vin_stop_does_not_lose_other_recovered_deadline():
+    h = BoostHarness()
+    first = await h.start(VIN_A)
+    second = await h.start(VIN_B, 3)
+    restored = await h.reload(at=h.now + timedelta(minutes=2), fail_stop=(VIN_A,))
+    assert restored.stops() == [VIN_A]
+    assert restored.runtime["ev_boost_sessions"][VIN_A]["expires_at"] == first["stops_at"]
+    assert restored.runtime["ev_boost_timers"][VIN_B]["stops_at"].isoformat() == second["stops_at"]
+    restored.now = datetime.fromisoformat(second["stops_at"])
+    await restored.due()
+    assert restored.stops() == [VIN_A, VIN_A, VIN_B]
+    assert set(restored.runtime["ev_boost_sessions"]) == {VIN_A}
+    assert restored.owner(VIN_B) is None and restored.physical[VIN_A] is True
+
+
+@pytest.mark.asyncio
+async def test_reload_cannot_borrow_other_vins_fresh_observation():
+    h = BoostHarness()
+    await h.start(VIN_A)
+    h.observation_overrides[VIN_A] = {"vehicle_id": VIN_B}
+    restored = await h.reload()
+    assert restored.calls == [] and restored.owner(VIN_A) is None
+    assert restored.runtime["ev_boost_sessions"][VIN_A]["status"] == "pending_fresh_observation"
+
+
+@pytest.mark.asyncio
+async def test_stale_telemetry_alone_does_not_clear_live_boost_before_its_deadline():
+    h = BoostHarness()
+    response = await h.start(VIN_A, 3)
+    state, lease = h.states["entry"][VIN_A], h.owner(VIN_A)
+    h.observation_overrides[VIN_A] = {"_charging_observed_at": h.now - timedelta(minutes=5)}
+    await h.timers[0].callback(h.now)
+    assert h.stops() == [] and h.owner(VIN_A) is lease
+    assert h.states["entry"][VIN_A] is state and state["active"] is True
+    assert h.runtime["ev_boost_timers"][VIN_A]["stops_at"].isoformat() == response["stops_at"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("unloaded", [False, True])
+async def test_late_persistence_cannot_recreate_runtime_or_overwrite_an_old_store(unloaded):
+    h = BoostHarness()
+    await h.start(VIN_A)
+    saved = deepcopy(h.store.saved)
+    pending_save = own.persist_ev_runtime_state(h.hass, h.entry, h.store)
+    if unloaded:
+        h.hass.data["power_sync"].pop("entry")
+    else:
+        h.hass.data["power_sync"]["entry"] = {"automation_store": Store()}
+    assert await pending_save is False
+    assert h.store.saved == saved
+    if unloaded:
+        assert "entry" not in h.hass.data["power_sync"]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_persistence_retries_without_extending_original_expiry():
+    h = BoostHarness()
+    entered, release = asyncio.Event(), asyncio.Event()
+    h.store.pause = (entered, release)
+    task = asyncio.create_task(h.start(VIN_A))
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    expiry = h.runtime["ev_boost_sessions"][VIN_A]["expires_at"]
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert h.runtime["ev_boost_sessions"][VIN_A]["status"] == "pending_persistence"
+    h.store.pause = None
+    h.now += timedelta(seconds=30)
+    await h.due()
+    assert h.store.saved["ev_runtime_state"]["boost_sessions"][VIN_A]["expires_at"] == expiry
+    h.now = datetime.fromisoformat(expiry)
+    await h.due()
+    assert h.stops() == [VIN_A] and h.runtime["ev_boost_sessions"] == {}
+
+
+@pytest.mark.asyncio
+async def test_unload_during_persistence_cancellation_keeps_obligation_without_rearming():
+    h = BoostHarness()
+    entered, release = asyncio.Event(), asyncio.Event()
+    h.store.pause = (entered, release)
+    task = asyncio.create_task(h.start(VIN_A))
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    h.runtime["powerwall_local_dispatch_stopping"] = True
+    h.unload_timers()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert h.timers == [] and VIN_A in h.runtime["ev_boost_sessions"]
+    h.store.pause = None
+    assert await own.persist_ev_runtime_state(h.hass, h.entry, h.store) is True
+    assert VIN_A in h.store.saved["ev_runtime_state"]["boost_sessions"]
+
+
+@pytest.mark.asyncio
+async def test_legacy_boost_without_absolute_deadline_remains_blocked_without_guessing():
+    h = BoostHarness()
+    h.store._data = {"ev_runtime_state": {"active_ownership": {VIN_A: {
+        "owner": "powersync", "owner_mode": "boost", "duration_minutes": 1,
+        "started_at": h.now.isoformat(), "vehicle_id": VIN_A,
+    }}}}
+    recovered = own.restore_ev_runtime_state(h.hass, h.entry, h.store)
+    await h.view.restore_boost_sessions(recovered["boost_sessions"])
+    record = h.runtime["ev_boost_sessions"][VIN_A]
+    assert record["expires_at"] is None and record["status"] == "blocked_legacy_recovery_identity"
+    assert h.calls == [] and h.timers == [] and h.owner(VIN_A) is None
+    assert await own.persist_ev_runtime_state(h.hass, h.entry, h.store) is True
+    assert h.store.saved["ev_runtime_state"]["boost_sessions"][VIN_A] == record

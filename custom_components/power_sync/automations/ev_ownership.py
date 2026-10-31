@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from uuid import uuid4
 
 
 DEFAULT_VEHICLE_ID = "_default"
@@ -482,6 +485,9 @@ def _discard_recovered_ev_ownership(entry: dict[str, Any], vehicle_id: Any) -> N
 def _runtime_snapshot(hass: Any, config_entry: Any) -> dict[str, Any]:
     """Return the EV runtime state safe to persist across restarts."""
     entry = _entry_data(hass, config_entry.entry_id)
+    if isinstance(entry.get("ev_boost_sessions"), dict):
+        for vehicle_id in entry["ev_boost_sessions"]:
+            reconcile_boost_supersession(hass, config_entry, vehicle_id)
     return {
         "active_ownership": dict(get_ev_ownerships(hass, config_entry)),
         "last_commands": dict(get_ev_last_commands(hass, config_entry)),
@@ -491,6 +497,9 @@ def _runtime_snapshot(hass: Any, config_entry: Any) -> dict[str, Any]:
         "capability_refresh_records": dict(
             entry.get("ev_capability_refresh_records", {})
         ),
+        # Stop obligations outlive the live lease/controller after a failed
+        # stop, and must not disappear when restart clears active ownership.
+        "boost_sessions": deepcopy(entry.get("ev_boost_sessions", {})),
         "saved_at": _now_iso(),
     }
 
@@ -499,21 +508,31 @@ async def persist_ev_runtime_state(
     hass: Any,
     config_entry: Any,
     store: Any = None,
-) -> None:
+) -> bool:
     """Persist EV runtime diagnostics without relying on active leases later."""
-    entry = _entry_data(hass, config_entry.entry_id)
+    from ..const import DOMAIN
+    entry = hass.data.get(DOMAIN, {}).get(config_entry.entry_id)
+    if not isinstance(entry, dict):
+        return False
     runtime_store = store or entry.get("automation_store")
-    if runtime_store is None or not hasattr(runtime_store, "_data"):
-        return
+    if (runtime_store is None or not hasattr(runtime_store, "_data")
+            or entry.get("automation_store") is not runtime_store):
+        return False
 
-    runtime_store._data["ev_runtime_state"] = _runtime_snapshot(hass, config_entry)
-    save = getattr(runtime_store, "async_save", None)
-    if save is None:
-        return
-
-    result = save()
-    if hasattr(result, "__await__"):
-        await result
+    async with entry.setdefault("ev_runtime_save_lock", asyncio.Lock()):
+        if (hass.data.get(DOMAIN, {}).get(config_entry.entry_id) is not entry
+                or entry.get("automation_store") is not runtime_store):
+            return False
+        runtime_store._data["ev_runtime_state"] = _runtime_snapshot(hass, config_entry)
+        save = getattr(runtime_store, "async_save", None)
+        if save is None:
+            return False
+        result = save()
+        if hasattr(result, "__await__"):
+            result = await result
+        return (result is not False
+                and hass.data.get(DOMAIN, {}).get(config_entry.entry_id) is entry
+                and entry.get("automation_store") is runtime_store)
 
 
 def _schedule_runtime_save(hass: Any, config_entry: Any) -> None:
@@ -545,6 +564,10 @@ def restore_ev_runtime_state(
     stored_capability_refresh = (
         runtime_state.get("capability_refresh_records") or {}
     )
+    stored_boost_sessions = runtime_state.get("boost_sessions", {})
+    # Retain malformed records for diagnosis, without treating them as control
+    # authority. The Boost restore path validates identity and the deadline.
+    entry["ev_boost_sessions"] = deepcopy(stored_boost_sessions)
 
     if isinstance(stored_commands, dict):
         get_ev_last_commands(hass, config_entry).update(
@@ -580,6 +603,17 @@ def restore_ev_runtime_state(
             vid = normalize_vehicle_id(vehicle_id)
             owner_mode = str(lease.get("owner_mode") or "dynamic")
             recovered[vid] = dict(lease)
+            if (owner_mode == "boost" and isinstance(entry["ev_boost_sessions"], dict)
+                    and vid not in entry["ev_boost_sessions"]):
+                # Older Boost leases did not record their absolute deadline or
+                # binding. Keep the obligation visible; never infer either.
+                entry["ev_boost_sessions"][vid] = {
+                    "entry_id": config_entry.entry_id,
+                    "vehicle_id": vid,
+                    "expires_at": lease.get("expires_at"),
+                    "duration_minutes": lease.get("duration_minutes"),
+                    "status": "blocked_legacy_recovery_identity",
+                }
             if owner_mode == "manual" and lease.get("quick_control"):
                 try:
                     expires_at = datetime.fromisoformat(str(lease.get("expires_at")))
@@ -615,6 +649,7 @@ def restore_ev_runtime_state(
         "restored_commands": len(stored_commands) if isinstance(stored_commands, dict) else 0,
         "resumable_manual_sessions": resumable_manual_sessions,
         "expired_manual_sessions": expired_manual_sessions,
+        "boost_sessions": entry["ev_boost_sessions"],
     }
 
 
@@ -1085,6 +1120,14 @@ def claim_ev_ownership(
     }
     if extra:
         lease.update(dict(extra))
+    boost_sessions = _entry_data(hass, config_entry.entry_id).get("ev_boost_sessions")
+    record = boost_sessions.get(vid) if isinstance(boost_sessions, dict) else None
+    if owner_mode == "boost" or isinstance(record, dict):
+        lease["ownership_generation"] = uuid4().hex
+    if owner_mode != "boost" and isinstance(record, dict):
+        record.setdefault("status_before_supersession", record.get("status", "active"))
+        record["superseded"] = True
+        record["status"] = "superseded"
     if command:
         lease["last_command"] = {
             "command": command,
@@ -1098,6 +1141,20 @@ def claim_ev_ownership(
     leases[vid] = lease
     _schedule_runtime_save(hass, config_entry)
     return lease
+
+
+def reconcile_boost_supersession(hass: Any, config_entry: Any, vehicle_id: Any) -> None:
+    """A rolled-back provisional claim cannot cancel an accepted Boost expiry."""
+    entry = _entry_data(hass, config_entry.entry_id)
+    records = entry.get("ev_boost_sessions")
+    record = records.get(vehicle_id) if isinstance(records, dict) else None
+    _, lease = get_ev_ownership(hass, config_entry, vehicle_id)
+    if (isinstance(record, dict) and record.get("superseded") and lease is not None
+            and lease.get("owner_mode") == "boost"
+            and record.get("ownership_generation") is not None
+            and lease.get("ownership_generation") == record["ownership_generation"]):
+        record.pop("superseded", None)
+        record["status"] = record.pop("status_before_supersession", "active")
 
 
 def release_ev_ownership(
