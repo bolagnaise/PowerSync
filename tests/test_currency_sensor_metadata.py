@@ -1457,6 +1457,71 @@ def test_tariff_schedule_wall_clock_periods_do_not_roll_elapsed_slots_to_tomorro
     assert schedule[1]["date_label"] == "Today"
 
 
+@pytest.mark.parametrize("offset", [10, 11])
+def test_rolling_tariff_schedule_displays_site_local_times(monkeypatch, offset):
+    """NEM +10 prices must retain their instant when displayed during DST."""
+    sensor = _sensor_module()
+    hass = _hass("AUD")
+    entry = _entry("amber")
+    monkeypatch.setattr(
+        sensor.dt_util, "now",
+        lambda: datetime(2026, 10, 31, 15, 35, tzinfo=timezone(timedelta(hours=offset))),
+    )
+    tariff = {
+        "buy_prices": {"PERIOD_14_30": 0.02, "PERIOD_15_00": 0.297,
+                       "PERIOD_23_30": 0.16, "PERIOD_00_00": 0.17},
+        "sell_prices": {"PERIOD_15_00": 0.064},
+        "rolling_24h": True,
+        "rolling_anchor": "2026-10-31T14:35:00+10:00",
+        "last_sync": "2026-10-31 15:35:00",
+    }
+    hass.data = {"power_sync": {entry.entry_id: {"tariff_schedule": tariff}}}
+    entity = sensor.TariffScheduleSensor(hass, entry)
+    rows = entity.extra_state_attributes["schedule"]
+    high = next(row for row in rows if row["buy"] == 0.297)
+    assert high == {"time": f"{15 + offset - 10:02d}:00", "date": "2026-10-31",
+                    "date_label": "Today", "buy": 0.297, "sell": 0.064}
+    late = next(row for row in rows if row["buy"] == 0.16)
+    assert late["time"] == ("00:30" if offset == 11 else "23:30")
+    assert late["date_label"] == ("Tomorrow" if offset == 11 else "Today")
+    assert late["date"] == ("2026-11-01" if offset == 11 else "2026-10-31")
+    # Tomorrow's early-morning price remains tomorrow after conversion.
+    early = next(row for row in rows if row["buy"] == 0.17)
+    assert early["date"] == "2026-11-01"
+    assert early["time"] == ("01:00" if offset == 11 else "00:00")
+    # Presentation must not rewrite prices used for tariff upload/control.
+    assert tariff["buy_prices"]["PERIOD_15_00"] == 0.297
+    assert "PERIOD_16_00" not in tariff["buy_prices"]
+    monkeypatch.setattr(
+        sensor.dt_util, "now",
+        lambda: datetime(2026, 11, 1, 0, 5, tzinfo=timezone(timedelta(hours=offset))),
+    )
+    refreshed = entity.extra_state_attributes["schedule"]
+    late = next(row for row in refreshed if row["buy"] == 0.16)
+    assert late["date_label"] == ("Today" if offset == 11 else "Yesterday")
+    assert next(row for row in refreshed if row["buy"] == 0.297)["date_label"] == "Yesterday"
+
+
+@pytest.mark.parametrize("anchor", [None, "invalid", "2026-10-31T15:35:00"])
+def test_rolling_tariff_schedule_without_aware_anchor_keeps_local_clock(monkeypatch, anchor):
+    sensor = _sensor_module()
+    hass = _hass("AUD")
+    entry = _entry("amber")
+    monkeypatch.setattr(
+        sensor.dt_util, "now",
+        lambda: datetime(2026, 10, 31, 15, 35, tzinfo=timezone(timedelta(hours=11))),
+    )
+    entity = sensor.TariffScheduleSensor(hass, entry)
+    entity._rebuild_schedule_cache({
+        "buy_prices": {"PERIOD_16_00": 0.297}, "rolling_24h": True,
+        "rolling_anchor": anchor,
+    })
+    assert entity._schedule_cache["schedule"] == [{
+        "time": "16:00", "date": "2026-10-31", "date_label": "Today",
+        "buy": 0.297, "sell": 0,
+    }]
+
+
 def test_rolling_tariff_schedule_labels_elapsed_slots_as_tomorrow(monkeypatch):
     sensor = _sensor_module()
     hass = _hass("AUD")
@@ -1464,7 +1529,9 @@ def test_rolling_tariff_schedule_labels_elapsed_slots_as_tomorrow(monkeypatch):
     monkeypatch.setattr(
         sensor.dt_util,
         "now",
-        lambda *args, **kwargs: datetime(2026, 7, 29, 8, 53, tzinfo=timezone.utc),
+        lambda *args, **kwargs: datetime(
+            2026, 7, 29, 18, 53, tzinfo=timezone(timedelta(hours=10)),
+        ),
     )
     hass.data = {
         "power_sync": {

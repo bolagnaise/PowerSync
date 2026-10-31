@@ -4855,6 +4855,23 @@ class TariffScheduleSensor(SensorEntity):
                     )
                     else today
                 )
+                # Rolling keys are clock times in the converter's anchor zone
+                # (often NEM's fixed +10), not necessarily HA's local zone.
+                # Convert the dated slot for display without changing the raw
+                # tariff keys used for upload/control.
+                if (
+                    tariff_data.get("rolling_24h")
+                    and period_minutes is not None
+                    and schedule_anchor.utcoffset() is not None
+                ):
+                    slot_local = (
+                        datetime.combine(
+                            period_date, datetime.min.time(),
+                            tzinfo=schedule_anchor.tzinfo,
+                        ) + timedelta(minutes=period_minutes)
+                    ).astimezone(now.tzinfo)
+                    time_str = slot_local.strftime("%H:%M")
+                    period_date = slot_local.date()
                 current_date = now.date()
                 if period_date == current_date:
                     date_label = "Today"
