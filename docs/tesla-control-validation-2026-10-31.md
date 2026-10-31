@@ -130,7 +130,7 @@ simulator boundary remains explicit; no row is a universal physical pass.
 | T12 | Return export preference to Auto during manual/EV ownership | B4 | Auto service targets the selected entry and preserves EV ownership. | Dev3 manual export-to-Auto cleared the manual flag. No two-VIN installed lease interaction was exercised. |
 | M01 | Manual operation-mode handoff/readback | B4 | Old mode is restored before a new setting; local/cloud fallback is guarded. | Dev3 modes backup/self_consumption/autonomous confirmed. Dev7 autonomous restored. Other-provider/unpaired handoffs remain software-only. |
 | M02 | Backup reserve changes during idle and force handoff | B22/A1 | Reserve supersession stops stale targets and uses independent cloud readback. | Dev3 idle reserve 2→0 confirmed. Dev5 reserve 2 during active charge survived stop; canonical 0 restored afterward. Native/cloud readback limits are recorded in final baseline. |
-| M03 | Grid-charging enable/disable and absent-field compatibility | B6 | Omitted/invalid values remain unknown; disable confirmation and bounded resend are covered. | Dev5 false→true permission confirmed in about one second using corrected native parsing. Missing/malformed cloud permission remains software-only. |
+| M03 | Grid-charging enable/disable and absent-field compatibility | B6 | Omitted/invalid values remain unknown; disable confirmation and bounded resend are covered. | Dev4 false→true permission confirmed in about one second using corrected native parsing. Missing/malformed cloud permission remains software-only. |
 | M04 | Export `never`, `pv_only`, `battery_ok`, and invalid/absent input | B20 | Exact field confirmation preserves EV ownership and cannot substitute reserve/mode writes. | Dev3 never/pv_only/battery_ok readbacks confirmed; final battery_ok confirmed native. Invalid/absent and overlapping EV variants remain simulated. |
 | M05 | Selected-entry on-grid solar permission | B5 | Service checks entry, manual context, fresh native setting, and revocation inside delayed write. | Dev3 native solar permission false→true confirmed. PV was zero, so measured curtail/resume output is unverified. |
 | M06 | Max Backup entry/exit and overlap refusal | B1/L10/A1 | Restore target and local-event wiring are covered; native policy denies overlap. | Dev4 Tariff one-minute entry/expiry restored reserve and journal. Dev5 native start, measured charge, early cancellation, fresh absence and cleanup passed; four overlap requests refused. Legacy recovery refusal/cleanup also exercised. |
@@ -181,7 +181,7 @@ not physically validate every row.
 ## Candidate7 installation checkpoint
 
 Candidate7 was installed at 04:58:14. All 264 archive hashes matched, and the
-Core configuration check and startup were healthy. At 04:59:10 the actual Hold
+Core configuration check and startup were healthy. At 04:59:20.730 the actual Hold
 entity presented the description `Battery hold active`. Manual release at
 04:59:30 succeeded with reserve 0 and `self_consumption`; sampled readings were
 about 959 W house and -3 W grid. Setting autonomous at 04:59:42 returned a
@@ -267,7 +267,7 @@ or cloud readback is not physical-effect proof.
   PowerSync errors in the captured startup window. Temporary logging and the
   read-only event listener were restored/stopped; the temporary auth file is
   absent. Original backup and each candidate rollback directory are retained.
-- **Hold label:** Verified at 04:59:10 as `Battery hold active` on the
+- **Hold label:** Verified at 04:59:20.730 as `Battery hold active` on the
   installed candidate7 entity.
 
 The feature remains in draft PR [#138](https://github.com/bolagnaise/PowerSync/pull/138).
