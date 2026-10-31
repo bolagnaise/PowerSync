@@ -128,6 +128,47 @@ def foreign_site_owner(hass: Any, entry_id: str | None, site_id: object) -> str 
     return None
 
 
+_OBLIGATION_FLAGS = (
+    "local_settings_unresolved", "cloud_resumed_local_suspended", "legacy_restore_pending",
+    "restart_restore_pending", "native_restore_pending",
+)
+
+
+def control_obligations(runtime: Mapping) -> dict[str, Any]:
+    """Read current in-memory journal owners without changing their lifecycle."""
+    pending = runtime.get("powerwall_settings_pending")
+    incident = pending if isinstance(pending, Mapping) else {}
+    native = runtime.get("powerwall_native_max_charge")
+    return {
+        "local_settings_unresolved": bool(pending),
+        "cloud_resumed_local_suspended": incident.get("resume_cloud") is True,
+        "settings_incident_id": incident.get("id"),
+        "legacy_restore_pending": bool(runtime.get("pending_tesla_restore")),
+        "restart_restore_pending": bool(runtime.get("optimizer_force_restart_restore_pending")),
+        "native_restore_pending": bool(native and native.pending),
+        "runtime_available": True,
+    }
+
+
+def diagnostic_snapshot(hass: Any, site: PowerwallSiteControl) -> dict:
+    """Refresh runtime summaries synchronously; retain unrelated unknown effects."""
+    current_sources = set()
+    for entry_id, runtime in hass.data.get("power_sync", {}).items():
+        if not isinstance(runtime, Mapping) or runtime.get("powerwall_site_control") is not site:
+            continue
+        current_sources.add(entry_id)
+        site.set_obligations(entry_id, control_obligations(runtime))
+    for source, previous in tuple(site._obligations.items()):
+        if (source not in current_sources and isinstance(previous, Mapping)
+                and type(previous.get("runtime_available")) is bool
+                and all(flag in previous for flag in _OBLIGATION_FLAGS)):
+            # Losing a runtime cannot establish that its persisted incident
+            # was cleared. Keep identifying metadata and make the gap explicit.
+            site.set_obligations(source, {**previous, **dict.fromkeys(_OBLIGATION_FLAGS),
+                                          "runtime_available": False})
+    return site.snapshot()
+
+
 @dataclass(frozen=True)
 class NativeMaxTarget:
     direction: str

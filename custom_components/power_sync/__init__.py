@@ -8513,6 +8513,8 @@ class PowerwallSettingsView(HomeAssistantView):
             if type(local_grid) is bool:
                 grid_charging_enabled, grid_charging_state_known = local_grid, True
 
+            from .powerwall_control import diagnostic_snapshot
+
             result = {
                 "success": True,
                 "backup_reserve": backup_reserve,
@@ -8522,7 +8524,7 @@ class PowerwallSettingsView(HomeAssistantView):
                 "grid_charging_state_known": grid_charging_state_known,
                 "solar_curtailment_enabled": solar_curtailment_enabled,
                 "manual_export_override": manual_export_override,
-                "control_status": (entry_data["powerwall_site_control"].snapshot()
+                "control_status": (diagnostic_snapshot(self._hass, entry_data["powerwall_site_control"])
                                    if entry_data and entry_data.get("powerwall_site_control") else None),
                 "capabilities": {
                     "storm_mode": bool(tesla_capabilities.get("storm_mode", False)),

@@ -73,7 +73,7 @@ def guard_battery_transition(hass, entry, handler):
                     return await handler(call)
                 from .powerwall_control import (
                     NativeMaxTarget, BatteryPowerTarget, GridExportTarget, SiteImportTarget,
-                    foreign_site_owner,
+                    foreign_site_owner, control_obligations,
                 )
                 if foreign_site_owner(hass, entry.entry_id, site_control.site_id) is not None:
                     raise SiteImportAdmissionDenied("Another PowerSync entry owns this Tesla site's control or recovery")
@@ -101,18 +101,7 @@ def guard_battery_transition(hass, entry, handler):
                     admission = runtime.get("powerwall_control_admission")
                     return (foreign_site_owner(hass, entry.entry_id, site_control.site_id) is None
                             and (admission is None or admission(call, restoring=restoring) is True))
-                def summary():
-                    pending = runtime.get("powerwall_settings_pending") or {}
-                    native = runtime.get("powerwall_native_max_charge")
-                    return {
-                        "local_settings_unresolved": bool(pending),
-                        "cloud_resumed_local_suspended": pending.get("resume_cloud") is True,
-                        "settings_incident_id": pending.get("id"),
-                        "legacy_restore_pending": bool(runtime.get("pending_tesla_restore")),
-                        "restart_restore_pending": bool(runtime.get("optimizer_force_restart_restore_pending")),
-                        "native_restore_pending": bool(native and native.pending),
-                    }
-                site_control.set_obligations(entry.entry_id, summary())
+                site_control.set_obligations(entry.entry_id, control_obligations(runtime))
                 try:
                     async with site_control.operation(
                             label=name, target=target, entry_id=entry.entry_id,
@@ -122,7 +111,7 @@ def guard_battery_transition(hass, entry, handler):
                             identity=lambda: site_identity(entry)):
                         return await handler(call)
                 finally:
-                    site_control.set_obligations(entry.entry_id, summary())
+                    site_control.set_obligations(entry.entry_id, control_obligations(runtime))
             finally:
                 if previous is None:
                     runtime.pop("battery_route_requested_at", None)
