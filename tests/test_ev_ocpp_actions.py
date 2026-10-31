@@ -14657,6 +14657,48 @@ def test_ble_journal_persistence_rebind_is_rejected_before_send(monkeypatch):
     assert outcomes == ["not_sent"]
 
 
+@pytest.mark.parametrize("admission_denied, expected_outcome", [(True, "not_sent"), (False, "sent_unknown")])
+def test_ble_pre_dispatch_exception_classifies_admission_without_quarantine(
+    monkeypatch, admission_denied, expected_outcome
+):
+    """Known admission refusals never become an unknown hardware attempt."""
+    from power_sync import tesla_ev_recovery as recovery
+
+    hass = _Hass([_State("switch.car_charger", "off")])
+    outcomes = []
+    isolated = AsyncMock(return_value=True)
+
+    async def begin(*_args, **_kwargs):
+        return object()
+
+    async def finish(_ticket, outcome):
+        outcomes.append(outcome)
+
+    async def send():
+        error = RuntimeError("site import admission denied")
+        if admission_denied:
+            error.site_import_admission_denied = True
+        raise error
+
+    monkeypatch.setattr(recovery, "async_begin_attempt", begin)
+    monkeypatch.setattr(recovery, "async_finish_attempt", finish)
+    monkeypatch.setattr(recovery, "async_isolate_ble", isolated)
+
+    with pytest.raises(RuntimeError, match="admission denied"):
+        asyncio.run(actions._run_ble_transport_command(
+            hass,
+            _Entry(),
+            {"vehicle_vin": "5YJTEST0000000001"},
+            "car",
+            "start",
+            send,
+        ))
+
+    assert outcomes == [expected_outcome]
+    assert isolated.await_count == 0
+    assert hass.services.calls == []
+
+
 @pytest.mark.parametrize(
     ("helper", "states", "revoke_stage"),
     [

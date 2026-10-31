@@ -2294,6 +2294,158 @@ async def _wake_tesla_ev_for_command(
     return await _wake_tesla_ev(hass, vehicle_vin)
 
 
+async def _wake_tesla_ha_recovery_route(
+    hass: HomeAssistant,
+    vehicle_vin: Optional[str],
+    route: Mapping[str, Any],
+    params: Mapping[str, Any],
+    authorize: Callable[[], Any],
+) -> Optional[bool]:
+    """Wake an isolated native Tesla route before its exact source is read.
+
+    Tesla Fleet and native Teslemetry coordinators can return an unchanged
+    asleep cache after a refresh, so a post-BLE-isolation recovery read may
+    never produce a fresh stopped sample.  A registered provider-owned Wake
+    button is the only separate producer that can safely wake before that
+    read.  The charge switch is the eventual Start producer and is deliberately
+    not used as a wake probe when no Wake button is available.
+
+    ``None`` means that this exact route has no separate wake entity; callers
+    may still accept an already-fresh observation.  ``False`` means a wake was
+    required but failed or the route/authority changed, so recovery must stay
+    pending.
+    """
+    identity = route.get("entity_identity")
+    if route.get("kind") != "ha" or not isinstance(identity, Mapping):
+        return None
+    route_platform = str(identity.get("platform") or "")
+    if route_platform not in {"tesla_fleet", "teslemetry"}:
+        return None
+
+    try:
+        registry = er.async_get(hass)
+        command = registry.async_get(str(route.get("entity_id") or ""))
+    except Exception:
+        return False
+    identity_fields = ("platform", "config_entry_id", "device_id", "unique_id")
+
+    def _identity_snapshot(entity: Any) -> tuple[Any, ...] | None:
+        if entity is None:
+            return None
+        return tuple(getattr(entity, field, None) for field in identity_fields)
+
+    expected_command_identity = tuple(identity.get(field) for field in identity_fields)
+    command_identity = _identity_snapshot(command)
+    if (
+        command_identity != expected_command_identity
+        or getattr(command, "disabled_by", None) is not None
+    ):
+        return False
+
+    wake_entity = None
+    wake_identity = None
+    expected_wake_unique_id = (
+        f"{str(vehicle_vin).strip()}-wake" if vehicle_vin else ""
+    ).casefold()
+    entities = getattr(registry, "entities", {})
+    for candidate in entities.values() if isinstance(entities, Mapping) else ():
+        entity_id = str(getattr(candidate, "entity_id", "") or "")
+        if (
+            getattr(candidate, "platform", None) == route_platform
+            and getattr(candidate, "config_entry_id", None) == identity.get("config_entry_id")
+            and getattr(candidate, "device_id", None) == identity.get("device_id")
+            and getattr(candidate, "disabled_by", None) is None
+            and entity_id.startswith("button.")
+            and str(getattr(candidate, "unique_id", "") or "").casefold()
+            == expected_wake_unique_id
+        ):
+            if wake_entity is not None:
+                _LOGGER.warning(
+                    "Tesla %s recovery has duplicate wake entities for %s",
+                    route_platform,
+                    vehicle_vin,
+                )
+                return False
+            wake_entity = entity_id
+            wake_identity = _identity_snapshot(candidate)
+    if wake_entity is None:
+        return None
+    wake_registration = registry.async_get(wake_entity)
+    if wake_registration is None:
+        return False
+    wake_state = hass.states.get(wake_entity)
+    if wake_state is not None and str(getattr(wake_state, "state", "")).lower() == "unavailable":
+        return False
+
+    def _identity_matches(entity_id: str, expected: tuple[Any, ...] | None) -> bool:
+        current = registry.async_get(entity_id)
+        return current is not None and expected is not None and all(
+            getattr(current, field, None) == value
+            for field, value in zip(identity_fields, expected or ())
+        ) and getattr(current, "disabled_by", None) is None
+
+    if not _identity_matches(
+        str(route.get("entity_id") or ""), command_identity
+    ):
+        return False
+    if not _identity_matches(wake_entity, wake_identity):
+        return False
+    if not authorize():
+        return False
+
+    timeout = 45.0
+    deadline = params.get("_boost_start_deadline")
+    if type(deadline) in (int, float) and math.isfinite(deadline):
+        timeout = min(timeout, max(0.001, deadline - datetime.now(dt_timezone.utc).timestamp()))
+    try:
+        await asyncio.wait_for(
+            hass.services.async_call(
+                "button", "press", {"entity_id": wake_entity}, blocking=True
+            ),
+            timeout=timeout,
+        )
+    except asyncio.CancelledError:
+        raise
+    except TimeoutError:
+        _LOGGER.warning("Tesla %s recovery wake timed out for %s", route_platform, vehicle_vin)
+        return False
+    except Exception as err:
+        _LOGGER.warning("Tesla %s recovery wake failed for %s: %s", route_platform, vehicle_vin, err)
+        return False
+    return bool(
+        authorize()
+        and _identity_matches(str(route.get("entity_id") or ""), command_identity)
+        and _identity_matches(wake_entity, wake_identity)
+    )
+
+
+async def _tesla_recovery_wake_read_if_missing(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    vehicle_vin: Optional[str],
+    params: Mapping[str, Any],
+    route: Mapping[str, Any] | None,
+    authorize: Callable[[], Any],
+    observation: Any,
+    observed: Optional[str],
+) -> tuple[Any, Optional[str], bool]:
+    """Wake an exact native Tesla fallback only after its first read is missing."""
+    if observed is not None or not route or route.get("kind") != "ha":
+        return observation, observed, True
+    wake_result = await _wake_tesla_ha_recovery_route(
+        hass, vehicle_vin, route, params, authorize
+    )
+    if wake_result is not True:
+        return observation, observed, wake_result is not False
+    observation = await _fresh_tesla_command_observation(
+        hass, entry, vehicle_vin, params
+    )
+    observed = _tesla_observed_command_state(observation)
+    if not authorize():
+        return observation, observed, False
+    return observation, observed, True
+
+
 def _get_ev_config(config_entry: ConfigEntry) -> dict:
     """Get EV configuration from config entry."""
     config = {
@@ -3500,8 +3652,16 @@ async def _run_ble_transport_command(hass, entry, params, prefix, operation, sen
     except asyncio.CancelledError:
         await asyncio.shield(async_finish_attempt(ticket, "sent_unknown"))
         raise
-    except Exception:
-        await async_finish_attempt(ticket, "sent_unknown")
+    except Exception as err:
+        # Admission can reject before the helper reaches any HA service write.
+        # Keep that known refusal out of the sent-unknown/quarantine path while
+        # preserving propagation to the caller's fail-closed handling.
+        outcome = (
+            "not_sent"
+            if getattr(err, "site_import_admission_denied", False)
+            else "sent_unknown"
+        )
+        await async_finish_attempt(ticket, outcome)
         raise
     await async_finish_attempt(ticket, "confirmed" if result is True else "not_sent" if result is False else "sent_unknown")
     if result is not None:
@@ -5997,6 +6157,16 @@ async def _action_start_ev_charging(
         if observed == "charging":
             params["_tesla_start_observation"] = observation
             return True
+        observation, observed, recovery_ok = await _tesla_recovery_wake_read_if_missing(
+            hass, config_entry, vehicle_vin, params, route, request_authority,
+            observation, observed,
+        )
+        if not recovery_ok:
+            params["_tesla_transport_recovery_pending"] = True
+            return None
+        if observed == "charging":
+            params["_tesla_start_observation"] = observation
+            return True
         if (route and route.get("kind") == "blocked") or observed != "stopped":
             params["_tesla_transport_recovery_pending"] = True
             return None
@@ -6043,11 +6213,40 @@ async def _action_start_ev_charging(
                 if observed == "charging":
                     params["_tesla_start_observation"] = observation
                     result = True
-                elif fallback_ready and observed == "stopped":
-                    # The failed producer is durably isolated. Preserve the
-                    # plan and continue through the configured HA integration.
-                    ev_provider = EV_PROVIDER_FLEET_API
-                    result = False
+                elif fallback_ready:
+                    # Isolation may have completed during this request. Re-pin
+                    # the exact HA fallback before attempting its read/wake
+                    # recovery; never continue with a stale pre-isolation
+                    # route or use Charge as a wake probe.
+                    route = await _tesla_transport_route(
+                        hass, config_entry, params, "start"
+                    )
+                    if not route or route.get("kind") != "ha":
+                        params["_tesla_transport_recovery_pending"] = True
+                        return None
+                    observation, observed, recovery_ok = (
+                        await _tesla_recovery_wake_read_if_missing(
+                            hass, config_entry, vehicle_vin, params, route,
+                            request_authority, observation, observed,
+                        )
+                    )
+                    if not request_authority():
+                        return None
+                    if not recovery_ok:
+                        params["_tesla_transport_recovery_pending"] = True
+                        return None
+                    if observed == "charging":
+                        params["_tesla_start_observation"] = observation
+                        result = True
+                    elif observed == "stopped":
+                        # The failed producer is durably isolated. Preserve
+                        # the plan and continue through the configured HA
+                        # integration after exact-source recovery.
+                        ev_provider = EV_PROVIDER_FLEET_API
+                        result = False
+                    else:
+                        params["_tesla_transport_recovery_pending"] = True
+                        return None
                 else:
                     params["_tesla_transport_recovery_pending"] = True
                     return None
