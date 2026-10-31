@@ -131,6 +131,35 @@ def _pin_registry_bindings(monkeypatch, hass):
     monkeypatch.setattr(actions, "dr", device_registry)
 
 
+def _pin_solar_ownership(monkeypatch, action_name):
+    """Use the real solar ownership gate with a bounded in-memory store.
+
+    Collection-wide HA stubs can leave ``homeassistant.helpers.storage.Store``
+    with an incompatible constructor.  The EV action decorator owns the
+    Teslemetry solar module globals, so pin that exact binding rather than
+    changing the production guard or bypassing it.
+    """
+    guard_globals = getattr(actions, action_name).__globals__
+    solar_ownership_type = guard_globals["SolarOwnership"]
+
+    class _Store:
+        def __init__(self):
+            self.value = None
+
+        async def async_load(self):
+            return self.value
+
+        async def async_save(self, value):
+            self.value = value
+
+    gate = solar_ownership_type(_Store())
+
+    async def ownership(_hass, _entry_id):
+        return gate
+
+    monkeypatch.setitem(guard_globals, "ownership", ownership)
+
+
 def _target(operation: str) -> BluetoothCommandTarget:
     domain = "button" if operation in ("start", "stop") else "number"
     return BluetoothCommandTarget(
@@ -258,6 +287,7 @@ async def test_both_provider_uses_shared_native_router_for_all_operations(
     hass, entry = _both_native_action_harness()
     _pin_registry_bindings(monkeypatch, hass)
     params = {"vehicle_vin": VIN, "charger_type": "tesla", **params}
+    _pin_solar_ownership(monkeypatch, action_name)
     monkeypatch.setattr(
         actions, "_tesla_transport_authority", lambda *args, **kwargs: lambda: True
     )

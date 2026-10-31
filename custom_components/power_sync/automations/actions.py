@@ -28,10 +28,12 @@ EV Actions (Tesla Fleet/Teslemetry, Tesla BLE, OCPP, generic HA, Zaptec, or HA-n
 
 import logging
 import asyncio
+import inspect
 import math
 import re
 import time
 from collections.abc import Mapping
+from contextvars import ContextVar
 from typing import List, Dict, Any, Optional, Callable
 
 from homeassistant.core import HomeAssistant
@@ -2724,11 +2726,91 @@ def _ble_command_has_fresh_charging_evidence(
     return False
 
 
+_tesla_legacy_authority: ContextVar[Optional[Callable[[], Any]]] = ContextVar(
+    "tesla_legacy_authority", default=None
+)
+
+
+def _tesla_legacy_entity_identity(
+    hass: HomeAssistant, entity_ids: tuple[str, ...]
+) -> tuple[tuple[Any, ...], ...] | None:
+    """Snapshot registry bindings for entities a legacy helper will write."""
+    try:
+        registry = er.async_get(hass)
+        identities = []
+        for entity_id in entity_ids:
+            registration = registry.async_get(entity_id)
+            if registration is None:
+                # Some older HA fixtures omit registry rows for number
+                # entities. Pin that absence as part of the scope so a row
+                # appearing or rebinding during admission still invalidates
+                # the command, while preserving the existing safe fallback.
+                identities.append((entity_id, None))
+                continue
+            identities.append(tuple(
+                getattr(registration, field, None)
+                for field in (
+                    "entity_id",
+                    "platform",
+                    "config_entry_id",
+                    "device_id",
+                    "unique_id",
+                    "disabled_by",
+                )
+            ))
+        return tuple(identities)
+    except Exception:
+        return None
+
+
+async def _run_tesla_legacy_with_authority(
+    authorize: Optional[Callable[[], Any]],
+    command: Callable[[], Any],
+    *,
+    hass: HomeAssistant | None = None,
+    entity_ids: tuple[str, ...] = (),
+) -> Any:
+    """Carry the route authority through a legacy helper without changing its call shape."""
+    scoped_authorize = authorize
+    expected_identity = (
+        _tesla_legacy_entity_identity(hass, entity_ids)
+        if hass is not None and entity_ids
+        else None
+    )
+    if hass is not None and entity_ids:
+        def scoped_authorize() -> bool:
+            return bool(authorize and authorize()) and (
+                expected_identity is not None
+                and _tesla_legacy_entity_identity(hass, entity_ids) == expected_identity
+            )
+
+    token = _tesla_legacy_authority.set(scoped_authorize)
+    try:
+        return await command()
+    finally:
+        _tesla_legacy_authority.reset(token)
+
+
+async def _tesla_legacy_transport_authorized(
+    authorize: Optional[Callable[[], Any]] = None,
+) -> bool:
+    """Re-check transport ownership before a legacy HA service write."""
+    if authorize is None:
+        authorize = _tesla_legacy_authority.get()
+    if authorize is None:
+        return True
+    result = authorize()
+    if inspect.isawaitable(result):
+        result = await result
+    return bool(result)
+
+
 async def _start_ev_charging_ble(
     hass: HomeAssistant,
     ble_prefix: str,
     *,
     allow_backoff: bool = True,
+    authorize: Optional[Callable[[], Any]] = None,
 ) -> Optional[bool]:
     """Return True if confirmed, False before dispatch, None if unconfirmed."""
     charger_entity = TESLA_BLE_SWITCH_CHARGER.format(prefix=ble_prefix)
@@ -2743,7 +2825,11 @@ async def _start_ev_charging_ble(
             hass, ble_prefix, allow_backoff=allow_backoff
         ):
             return False
+        if not await _tesla_legacy_transport_authorized(authorize):
+            return False
         if not await prepare_ev_submission(hass, charger_entity, operation="start"):
+            return False
+        if not await _tesla_legacy_transport_authorized(authorize):
             return False
         command_started_at = datetime.now(dt_timezone.utc)
         hass.data.setdefault(DOMAIN, {}).setdefault("_ev_ble_start_dispatched_at", {})[ble_prefix] = command_started_at
@@ -2776,7 +2862,11 @@ async def _start_ev_charging_ble(
 
 
 async def _stop_ev_charging_ble(
-    hass: HomeAssistant, ble_prefix: str, *, allow_backoff: bool = True
+    hass: HomeAssistant,
+    ble_prefix: str,
+    *,
+    allow_backoff: bool = True,
+    authorize: Optional[Callable[[], Any]] = None,
 ) -> Optional[bool]:
     """Stop Tesla BLE charging; do not treat service acceptance as readback."""
     charger_entity = TESLA_BLE_SWITCH_CHARGER.format(prefix=ble_prefix)
@@ -2810,6 +2900,8 @@ async def _stop_ev_charging_ble(
                     "wake",
                     ble_prefix,
                 )
+            return False
+        if not await _tesla_legacy_transport_authorized(authorize):
             return False
         command_started_at = datetime.now(dt_timezone.utc)
         command_dispatched = True
@@ -2848,6 +2940,7 @@ async def _set_ev_charge_limit_ble(
     percent: int,
     *,
     allow_backoff: bool = True,
+    authorize: Optional[Callable[[], Any]] = None,
 ) -> Optional[bool]:
     """Set EV charge limit via Tesla BLE."""
     limit_entity = TESLA_BLE_NUMBER_CHARGING_LIMIT.format(prefix=ble_prefix)
@@ -2861,6 +2954,8 @@ async def _set_ev_charge_limit_ble(
         if not await _wake_tesla_ble(
             hass, ble_prefix, allow_backoff=allow_backoff
         ):
+            return False
+        if not await _tesla_legacy_transport_authorized(authorize):
             return False
         command_started_at = datetime.now(dt_timezone.utc)
         command_dispatched = True
@@ -2890,6 +2985,7 @@ async def _set_ev_charging_amps_ble(
     configured_max_amps: Optional[int] = None,
     params: Optional[dict] = None,
     allow_backoff: bool = True,
+    authorize: Optional[Callable[[], Any]] = None,
 ) -> Optional[bool]:
     """Set EV charging amps via Tesla BLE."""
     amps_entity = TESLA_BLE_NUMBER_CHARGING_AMPS.format(prefix=ble_prefix)
@@ -2931,7 +3027,11 @@ async def _set_ev_charging_amps_ble(
             hass, ble_prefix, allow_backoff=allow_backoff
         ):
             return False
+        if not await _tesla_legacy_transport_authorized(authorize):
+            return False
         if not await prepare_ev_submission(hass, amps_entity, operation="rate", amps=capped_amps):
+            return False
+        if not await _tesla_legacy_transport_authorized(authorize):
             return False
         command_started_at = datetime.now(dt_timezone.utc)
         command_dispatched = True
@@ -2960,6 +3060,8 @@ async def _set_ev_charging_amps_ble(
         if fallback_amps is not None:
             try:
                 if not await prepare_ev_submission(hass, amps_entity, operation="rate", amps=fallback_amps):
+                    return False
+                if not await _tesla_legacy_transport_authorized(authorize):
                     return False
                 await hass.services.async_call(
                     "number",
@@ -3093,17 +3195,26 @@ def _is_teslemetry_bt_available(hass: HomeAssistant, tbt_prefix: str | None) -> 
         return False
     charge_entity = TESLEMETRY_BT_SWITCH_CHARGE.format(prefix=tbt_prefix)
     state = hass.states.get(charge_entity)
-    return state is not None
+    return state is not None and str(getattr(state, "state", "")).lower() != "unavailable"
 
 
-async def _start_ev_charging_teslemetry_bt(hass: HomeAssistant, tbt_prefix: str) -> bool:
+async def _start_ev_charging_teslemetry_bt(
+    hass: HomeAssistant,
+    tbt_prefix: str,
+    *,
+    authorize: Optional[Callable[[], Any]] = None,
+) -> bool:
     """Start EV charging via Teslemetry Bluetooth."""
     entity_id = TESLEMETRY_BT_SWITCH_CHARGE.format(prefix=tbt_prefix)
-    if hass.states.get(entity_id) is None:
+    if not _is_teslemetry_bt_available(hass, tbt_prefix):
         _LOGGER.error(f"Teslemetry BT charge entity not found: {entity_id}")
         return False
     try:
+        if not await _tesla_legacy_transport_authorized(authorize):
+            return False
         if not await prepare_ev_submission(hass, entity_id, operation="start"):
+            return False
+        if not await _tesla_legacy_transport_authorized(authorize):
             return False
         await hass.services.async_call(
             "switch", "turn_on",
@@ -3123,13 +3234,20 @@ async def _start_ev_charging_teslemetry_bt(hass: HomeAssistant, tbt_prefix: str)
         return False
 
 
-async def _stop_ev_charging_teslemetry_bt(hass: HomeAssistant, tbt_prefix: str) -> bool:
+async def _stop_ev_charging_teslemetry_bt(
+    hass: HomeAssistant,
+    tbt_prefix: str,
+    *,
+    authorize: Optional[Callable[[], Any]] = None,
+) -> bool:
     """Stop EV charging via Teslemetry Bluetooth."""
     entity_id = TESLEMETRY_BT_SWITCH_CHARGE.format(prefix=tbt_prefix)
-    if hass.states.get(entity_id) is None:
+    if not _is_teslemetry_bt_available(hass, tbt_prefix):
         _LOGGER.error(f"Teslemetry BT charge entity not found: {entity_id}")
         return False
     try:
+        if not await _tesla_legacy_transport_authorized(authorize):
+            return False
         await hass.services.async_call(
             "switch", "turn_off",
             {"entity_id": entity_id},
@@ -3150,6 +3268,7 @@ async def _set_ev_charging_amps_teslemetry_bt(
     allow_stale_entity_max_override: bool = False,
     configured_max_amps: Optional[int] = None,
     params: Optional[dict] = None,
+    authorize: Optional[Callable[[], Any]] = None,
 ) -> bool:
     """Set EV charging amps via Teslemetry Bluetooth."""
     entity_id = TESLEMETRY_BT_NUMBER_CHARGE_AMPS.format(prefix=tbt_prefix)
@@ -3178,7 +3297,11 @@ async def _set_ev_charging_amps_teslemetry_bt(
     if capped != amps:
         _LOGGER.debug(f"Teslemetry BT amps capped from {amps}A to {capped}A (range: {min_val}-{max_val})")
     try:
+        if not await _tesla_legacy_transport_authorized(authorize):
+            return False
         if not await prepare_ev_submission(hass, entity_id, operation="rate", amps=capped):
+            return False
+        if not await _tesla_legacy_transport_authorized(authorize):
             return False
         await hass.services.async_call(
             "number", "set_value",
@@ -3206,6 +3329,8 @@ async def _set_ev_charging_amps_teslemetry_bt(
         if fallback_amps is not None:
             try:
                 if not await prepare_ev_submission(hass, entity_id, operation="rate", amps=fallback_amps):
+                    return False
+                if not await _tesla_legacy_transport_authorized(authorize):
                     return False
                 await hass.services.async_call(
                     "number",
@@ -3344,6 +3469,7 @@ async def _run_ble_transport_command(hass, entry, params, prefix, operation, sen
         "rate": TESLA_BLE_NUMBER_CHARGING_AMPS,
         "limit": TESLA_BLE_NUMBER_CHARGING_LIMIT,
     }[operation].format(prefix=prefix)
+    pinned_entity_identity = _tesla_legacy_entity_identity(hass, (entity,))
     authority = _tesla_transport_authority(hass, entry, effective_params, cleanup=operation == "stop")
     command_route = {"kind": "ble", "prefix": prefix}
     config = {**entry.data, **entry.options}
@@ -3362,7 +3488,10 @@ async def _run_ble_transport_command(hass, entry, params, prefix, operation, sen
     ticket = await async_begin_attempt(hass, entry, vehicle,
         command_route, operation, entity,
         deadline=params.get("_boost_start_deadline"))
-    if ticket is None or not authority():
+    entity_identity_unchanged = (
+        _tesla_legacy_entity_identity(hass, (entity,)) == pinned_entity_identity
+    )
+    if ticket is None or not authority() or not entity_identity_unchanged:
         if ticket is not None:
             await async_finish_attempt(ticket, "not_sent")
         return False, False
@@ -5888,8 +6017,16 @@ async def _action_start_ev_charging(
             command_started_at = datetime.now(dt_timezone.utc)
             result, fallback_ready = await _run_ble_transport_command(
                 hass, config_entry, params, ble_prefix, "start",
-                lambda: _start_ev_charging_ble(hass, ble_prefix,
-                    allow_backoff=not bool(params.get("_user_initiated"))))
+                lambda: _run_tesla_legacy_with_authority(
+                    request_authority,
+                    lambda: _start_ev_charging_ble(
+                        hass,
+                        ble_prefix,
+                        allow_backoff=not bool(params.get("_user_initiated")),
+                    ),
+                    hass=hass,
+                    entity_ids=(TESLA_BLE_SWITCH_CHARGER.format(prefix=ble_prefix),),
+                ))
             if result is None:
                 if not request_authority():
                     return None
@@ -5935,7 +6072,12 @@ async def _action_start_ev_charging(
         tbt_prefix = _resolve_teslemetry_bt_prefix_for_vehicle(hass, config_entry, vehicle_vin)
         if (not charging_started and not params.get("_tesla_native_router_selected")
                 and _is_teslemetry_bt_available(hass, tbt_prefix)):
-            result = await _start_ev_charging_teslemetry_bt(hass, tbt_prefix)
+            result = await _run_tesla_legacy_with_authority(
+                request_authority,
+                lambda: _start_ev_charging_teslemetry_bt(hass, tbt_prefix),
+                hass=hass,
+                entity_ids=(TESLEMETRY_BT_SWITCH_CHARGE.format(prefix=tbt_prefix),),
+            )
             if result:
                 charging_started = True
             elif ev_provider == EV_PROVIDER_TESLEMETRY_BT:
@@ -6178,6 +6320,9 @@ async def _action_stop_ev_charging(
         or params.get("quick_control")
     )
     route = await _tesla_transport_route(hass, config_entry, params, "stop")
+    cleanup_authority = _tesla_transport_authority(
+        hass, config_entry, params, cleanup=True
+    )
     if route and route.get("kind") == "ha" and ev_provider == EV_PROVIDER_BOTH:
         ev_provider = EV_PROVIDER_FLEET_API
     charging_entity = await _get_tesla_ev_entity(
@@ -6215,8 +6360,16 @@ async def _action_stop_ev_charging(
             # failed-bridge backoff is armed by the automatic surplus loop and
             # would otherwise discard the command before dispatch.
             result, _ = await _run_ble_transport_command(hass, config_entry, params,
-                ble_prefix, "stop", lambda: _stop_ev_charging_ble(
-                    hass, ble_prefix, allow_backoff=not user_initiated))
+                ble_prefix, "stop", lambda: _run_tesla_legacy_with_authority(
+                    cleanup_authority,
+                    lambda: _stop_ev_charging_ble(
+                        hass,
+                        ble_prefix,
+                        allow_backoff=not user_initiated,
+                    ),
+                    hass=hass,
+                    entity_ids=(TESLA_BLE_SWITCH_CHARGER.format(prefix=ble_prefix),),
+                ))
             if result or ev_provider == EV_PROVIDER_TESLA_BLE:
                 return result
 
@@ -6227,7 +6380,12 @@ async def _action_stop_ev_charging(
             return result
         tbt_prefix = _resolve_teslemetry_bt_prefix_for_vehicle(hass, config_entry, vehicle_vin)
         if not params.get("_tesla_native_router_selected") and _is_teslemetry_bt_available(hass, tbt_prefix):
-            result = await _stop_ev_charging_teslemetry_bt(hass, tbt_prefix)
+            result = await _run_tesla_legacy_with_authority(
+                cleanup_authority,
+                lambda: _stop_ev_charging_teslemetry_bt(hass, tbt_prefix),
+                hass=hass,
+                entity_ids=(TESLEMETRY_BT_SWITCH_CHARGE.format(prefix=tbt_prefix),),
+            )
             if result or ev_provider == EV_PROVIDER_TESLEMETRY_BT:
                 return result
 
@@ -6314,8 +6472,17 @@ async def _action_set_ev_charge_limit(
     if ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
         if _is_ble_available(hass, ble_prefix):
             result, fallback_ready = await _run_ble_transport_command(hass, config_entry, params,
-                ble_prefix, "limit", lambda: _set_ev_charge_limit_ble(hass, ble_prefix, percent,
-                    allow_backoff=not bool(params.get("_user_initiated"))))
+                ble_prefix, "limit", lambda: _run_tesla_legacy_with_authority(
+                    request_authority,
+                    lambda: _set_ev_charge_limit_ble(
+                        hass,
+                        ble_prefix,
+                        percent,
+                        allow_backoff=not bool(params.get("_user_initiated")),
+                    ),
+                    hass=hass,
+                    entity_ids=(TESLA_BLE_NUMBER_CHARGING_LIMIT.format(prefix=ble_prefix),),
+                ))
             if result is None and not fallback_ready:
                 return None
             if result is None and fallback_ready:
@@ -6462,12 +6629,21 @@ async def _action_set_ev_charging_amps(
     if ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
         if _is_ble_available(hass, ble_prefix):
             result, fallback_ready = await _run_ble_transport_command(hass, config_entry, params,
-                ble_prefix, "rate", lambda: _set_ev_charging_amps_ble(hass, ble_prefix, amps,
-                allow_stale_entity_max_override=allow_stale_entity_max_override,
-                configured_max_amps=configured_max_amps,
-                params=params,
-                allow_backoff=not bool(params.get("_user_initiated")),
-            ))
+                ble_prefix, "rate", lambda: _run_tesla_legacy_with_authority(
+                    request_authority,
+                    lambda: _set_ev_charging_amps_ble(
+                        hass,
+                        ble_prefix,
+                        amps,
+                        allow_stale_entity_max_override=allow_stale_entity_max_override,
+                        configured_max_amps=configured_max_amps,
+                        params=params,
+                        allow_backoff=not bool(params.get("_user_initiated")),
+                    ),
+                    hass=hass,
+                    entity_ids=(TESLA_BLE_NUMBER_CHARGING_AMPS.format(prefix=ble_prefix),),
+                ),
+            )
             if result is None and not fallback_ready:
                 return None
             if result is None and fallback_ready:
@@ -6497,13 +6673,21 @@ async def _action_set_ev_charging_amps(
             return result
         tbt_prefix = _resolve_teslemetry_bt_prefix_for_vehicle(hass, config_entry, vehicle_vin)
         if not params.get("_tesla_native_router_selected") and _is_teslemetry_bt_available(hass, tbt_prefix):
-            result = await _set_ev_charging_amps_teslemetry_bt(
-                hass,
-                tbt_prefix,
-                amps,
-                allow_stale_entity_max_override=allow_stale_entity_max_override,
-                configured_max_amps=configured_max_amps,
-                params=params,
+            result = await _run_tesla_legacy_with_authority(
+                request_authority,
+                lambda: _set_ev_charging_amps_teslemetry_bt(
+                    hass,
+                    tbt_prefix,
+                    amps,
+                    allow_stale_entity_max_override=allow_stale_entity_max_override,
+                    configured_max_amps=configured_max_amps,
+                    params=params,
+                ),
+                hass=hass,
+                entity_ids=(
+                    TESLEMETRY_BT_SWITCH_CHARGE.format(prefix=tbt_prefix),
+                    TESLEMETRY_BT_NUMBER_CHARGE_AMPS.format(prefix=tbt_prefix),
+                ),
             )
             range_fallback_applied = (
                 params.get("_tesla_entity_range_fallback_amps") is not None

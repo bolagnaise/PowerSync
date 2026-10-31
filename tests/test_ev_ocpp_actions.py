@@ -14092,7 +14092,7 @@ def test_start_action_scopes_ble_backoff_bypass_to_explicit_commands(
 ):
     recorded: list[bool] = []
 
-    async def fake_start(_hass, _prefix, *, allow_backoff=True):
+    async def fake_start(_hass, _prefix, *, allow_backoff=True, authorize=None):
         recorded.append(allow_backoff)
         return False
 
@@ -14139,11 +14139,11 @@ def test_tesla_ble_alias_start_stop_routes_exact_prefix_without_fallback(
     start_prefixes: list[str] = []
     stop_prefixes: list[str] = []
 
-    async def fake_start(_hass, prefix, *, allow_backoff=True):
+    async def fake_start(_hass, prefix, *, allow_backoff=True, authorize=None):
         start_prefixes.append(prefix)
         return ble_result
 
-    async def fake_stop(_hass, prefix, *, allow_backoff=True):
+    async def fake_stop(_hass, prefix, *, allow_backoff=True, authorize=None):
         stop_prefixes.append(prefix)
         return ble_result
 
@@ -14279,7 +14279,7 @@ def test_stop_action_bypasses_wake_backoff_only_for_user_commands(
 ):
     recorded: list[bool] = []
 
-    async def fake_stop_ble(_hass, _prefix, *, allow_backoff=True):
+    async def fake_stop_ble(_hass, _prefix, *, allow_backoff=True, authorize=None):
         recorded.append(allow_backoff)
         return True
 
@@ -14569,3 +14569,232 @@ def test_manual_tesla_fleet_key_rejection_is_request_scoped_and_safe(monkeypatch
         hass, _tesla_entry(), {**params, "_manual_command_failure": next_failure},
     )) is True
     assert next_failure == {}
+
+
+def test_legacy_teslemetry_bt_unavailable_switch_cannot_dispatch():
+    """An unavailable native switch is not a usable legacy BT producer."""
+    vin = "LRW3F7FS1NC484342"
+    prefix = vin.lower()
+    hass = _Hass(
+        [
+            _State(f"sensor.{prefix}_charging_state", "Stopped"),
+            _State(f"switch.{prefix}_charge", "unavailable"),
+        ],
+        _legacy_teslemetry_bt_registry((prefix,)),
+    )
+    entry = SimpleNamespace(data={}, options={"ev_provider": "teslemetry_bt"})
+
+    assert actions._resolve_teslemetry_bt_prefix_for_vehicle(hass, entry, vin) == prefix
+    assert not actions._is_teslemetry_bt_available(hass, prefix)
+    assert asyncio.run(actions._start_ev_charging_teslemetry_bt(hass, prefix)) is False
+    assert hass.services.calls == []
+
+
+def test_legacy_ble_rejects_registry_rebind_after_wake(monkeypatch):
+    """A target entity rebound while waking cannot receive the late write."""
+    hass = _Hass([_State("switch.car_charger", "off")])
+
+    async def wake(*_args, **_kwargs):
+        hass.entity_registry.entities["switch.car_charger"] = SimpleNamespace(
+            entity_id="switch.car_charger",
+            platform="tesla_fleet",
+            config_entry_id="fleet-entry",
+            device_id="fleet-device",
+            unique_id="fleet-charge",
+            disabled_by=None,
+        )
+        return True
+
+    monkeypatch.setattr(actions, "_wake_tesla_ble", wake)
+    monkeypatch.setattr(actions, "prepare_ev_submission", AsyncMock(return_value=True))
+    result = asyncio.run(actions._run_tesla_legacy_with_authority(
+        lambda: True,
+        lambda: actions._start_ev_charging_ble(hass, "car"),
+        hass=hass,
+        entity_ids=("switch.car_charger",),
+    ))
+
+    assert result is False
+    assert hass.services.calls == []
+
+
+def test_ble_journal_persistence_rebind_is_rejected_before_send(monkeypatch):
+    """A registry rebind during durable attempt creation cannot dispatch."""
+    from power_sync import tesla_ev_recovery as recovery
+
+    hass = _Hass([_State("switch.car_charger", "off")])
+    outcomes = []
+
+    async def begin(*_args, **_kwargs):
+        hass.entity_registry.entities["switch.car_charger"] = SimpleNamespace(
+            entity_id="switch.car_charger",
+            platform="tesla_fleet",
+            config_entry_id="fleet-entry",
+            device_id="fleet-device",
+            unique_id="fleet-charge",
+            disabled_by=None,
+        )
+        return object()
+
+    async def finish(_ticket, outcome):
+        outcomes.append(outcome)
+
+    send = AsyncMock(return_value=True)
+    monkeypatch.setattr(recovery, "async_begin_attempt", begin)
+    monkeypatch.setattr(recovery, "async_finish_attempt", finish)
+
+    result = asyncio.run(actions._run_ble_transport_command(
+        hass,
+        _Entry(),
+        {"vehicle_vin": "5YJTEST0000000001"},
+        "car",
+        "start",
+        send,
+    ))
+
+    assert result == (False, False)
+    assert send.await_count == 0
+    assert outcomes == ["not_sent"]
+
+
+@pytest.mark.parametrize(
+    ("helper", "states", "revoke_stage"),
+    [
+        (
+            "start_ble",
+            [_State("switch.car_charger", "off")],
+            "prepare",
+        ),
+        (
+            "amps_ble",
+            [_State("number.car_charging_amps", "16", {"min": 1, "max": 32})],
+            "wake",
+        ),
+        (
+            "limit_ble",
+            [_State("number.car_charging_limit", "70")],
+            "wake",
+        ),
+        (
+            "start_tbt",
+            [
+                _State("sensor.lrw3f7fs1nc484342_charging_state", "Stopped"),
+                _State("switch.lrw3f7fs1nc484342_charge", "off"),
+            ],
+            "prepare",
+        ),
+        (
+            "amps_tbt",
+            [
+                _State("sensor.lrw3f7fs1nc484342_charging_state", "Stopped"),
+                _State("switch.lrw3f7fs1nc484342_charge", "off"),
+                _State("number.lrw3f7fs1nc484342_charge_amps", "16", {"min": 1, "max": 32}),
+            ],
+            "prepare",
+        ),
+    ],
+)
+def test_legacy_transport_rechecks_authority_before_write(
+    monkeypatch, helper, states, revoke_stage
+):
+    """A reload/ownership revoke during wake or admission fences the write."""
+    authorized = {"value": True}
+    prefix = "car" if helper.endswith("ble") else "lrw3f7fs1nc484342"
+    registry = (
+        _legacy_teslemetry_bt_registry((prefix,))
+        if helper.endswith("tbt")
+        else None
+    )
+    hass = _Hass(states, registry)
+
+    async def wake(*_args, **_kwargs):
+        if revoke_stage == "wake":
+            authorized["value"] = False
+        return True
+
+    async def prepare(*_args, **_kwargs):
+        if revoke_stage == "prepare":
+            authorized["value"] = False
+        return True
+
+    monkeypatch.setattr(actions, "_wake_tesla_ble", wake)
+    monkeypatch.setattr(actions, "prepare_ev_submission", prepare)
+
+    authorize = lambda: authorized["value"]
+    if helper == "start_ble":
+        result = asyncio.run(actions._start_ev_charging_ble(
+            hass, prefix, authorize=authorize
+        ))
+    elif helper == "amps_ble":
+        result = asyncio.run(actions._set_ev_charging_amps_ble(
+            hass, prefix, 16, authorize=authorize
+        ))
+    elif helper == "limit_ble":
+        result = asyncio.run(actions._set_ev_charge_limit_ble(
+            hass, prefix, 70, authorize=authorize
+        ))
+    elif helper == "start_tbt":
+        result = asyncio.run(actions._start_ev_charging_teslemetry_bt(
+            hass, prefix, authorize=authorize
+        ))
+    else:
+        result = asyncio.run(actions._set_ev_charging_amps_teslemetry_bt(
+            hass, prefix, 16, authorize=authorize
+        ))
+
+    assert result is False
+    assert hass.services.calls == []
+
+
+@pytest.mark.parametrize("helper", ["ble", "tbt"])
+def test_legacy_rate_range_retry_rechecks_authority(monkeypatch, helper):
+    """A range retry cannot write after authority is revoked by the first write."""
+    prefix = "car" if helper == "ble" else "lrw3f7fs1nc484342"
+    number_entity = (
+        f"number.{prefix}_charging_amps"
+        if helper == "ble"
+        else f"number.{prefix}_charge_current_request"
+    )
+    switch_entity = (
+        f"switch.{prefix}_charger"
+        if helper == "ble"
+        else f"switch.{prefix}_charge"
+    )
+    states = [_State(number_entity, "16", {"min": 1, "max": 16})]
+    if helper == "tbt":
+        states.extend([
+            _State(f"sensor.{prefix}_charging_state", "Stopped"),
+            _State(switch_entity, "off"),
+        ])
+    hass = _Hass(
+        states,
+        _legacy_teslemetry_bt_registry((prefix,)) if helper == "tbt" else None,
+    )
+    authorized = {"value": True}
+    async def awake(*_args, **_kwargs):
+        return True
+
+    monkeypatch.setattr(actions, "_wake_tesla_ble", awake)
+    monkeypatch.setattr(actions, "prepare_ev_submission", AsyncMock(return_value=True))
+
+    async def first_write(*_args, **_kwargs):
+        authorized["value"] = False
+        raise ValueError("value outside valid range")
+
+    hass.services.async_call = AsyncMock(side_effect=first_write)
+    kwargs = {
+        "allow_stale_entity_max_override": True,
+        "configured_max_amps": 32,
+        "authorize": lambda: authorized["value"],
+    }
+    if helper == "ble":
+        result = asyncio.run(actions._set_ev_charging_amps_ble(
+            hass, prefix, 32, **kwargs
+        ))
+    else:
+        result = asyncio.run(actions._set_ev_charging_amps_teslemetry_bt(
+            hass, prefix, 32, **kwargs
+        ))
+
+    assert result is False
+    assert hass.services.async_call.await_count == 1
