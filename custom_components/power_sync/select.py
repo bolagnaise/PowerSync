@@ -335,7 +335,7 @@ class TeslaGridExportRuleSelect(_TeslaSiteSelectBase):
             DOMAIN,
             "set_grid_export",
             {"rule": option, "source": "user"},
-            blocking=False,
+            blocking=True,
         )
 
 

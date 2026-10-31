@@ -20,6 +20,50 @@ INIT_PATH = (
 )
 
 
+@pytest.mark.parametrize('export_fails', [False, True])
+def test_export_selector_finishes_before_next_automation_action(export_fails):
+    """A sequential HA automation must not race export with grid charging."""
+    tree = ast.parse(INIT_PATH.with_name('select.py').read_text())
+    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef)
+               and n.name == 'TeslaGridExportRuleSelect')
+    method = next(n for n in cls.body if isinstance(n, ast.AsyncFunctionDef)
+                  and n.name == 'async_select_option')
+    namespace = {'DOMAIN': 'power_sync'}
+    exec(compile(ast.Module(body=[method], type_ignores=[]), '<export selector>', 'exec'), namespace)
+
+    async def scenario():
+        completed, queued = [], []
+
+        async def apply_export():
+            await asyncio.sleep(0)
+            if export_fails:
+                raise RuntimeError('export did not verify')
+            completed.append('export')
+
+        async def service(domain, name, data, *, blocking):
+            assert (domain, name, data['rule']) == ('power_sync', 'set_grid_export', 'never')
+            if blocking:
+                await apply_export()
+            else:
+                queued.append(apply_export())
+
+        selector = SimpleNamespace(hass=SimpleNamespace(services=SimpleNamespace(async_call=service)))
+        try:
+            if export_fails:
+                with pytest.raises(RuntimeError, match='export did not verify'):
+                    await namespace['async_select_option'](selector, 'never')
+            else:
+                await namespace['async_select_option'](selector, 'never')
+                assert completed == ['export'], 'The following grid action must wait for export'
+                completed.append('grid charging')
+                assert completed == ['export', 'grid charging']
+        finally:
+            for operation in queued:
+                operation.close()
+
+    asyncio.run(scenario())
+
+
 def _load_response_helper():
     source = INIT_PATH.read_text()
     module = ast.parse(source)
