@@ -16958,6 +16958,11 @@ class EVVehicleCommandView(HomeAssistantView):
         finally:
             params.pop("_manual_command_failure", None)
 
+        if manual_failure.get("provider") == "tesla" and manual_failure.get("code") == "key_not_paired":
+            return success, (
+                "Tesla rejected this vehicle's Fleet command key. Pair the key "
+                "used by its Home Assistant vehicle integration, then retry."
+            )
         stage = manual_failure.get("stage")
         if not stage:
             return success, ""
@@ -17383,7 +17388,7 @@ class EVVehicleCommandView(HomeAssistantView):
     async def _stop_charging(self, vehicle_vin: str | None = None) -> tuple[bool, str]:
         """Stop charging. Returns (success, message)."""
         charger_type = self._manual_action_params(vehicle_vin).get("charger_type", "tesla")
-        success, _failure_message = await self._execute_manual_ev_action(
+        success, failure_message = await self._execute_manual_ev_action(
             "stop_ev_charging",
             vehicle_vin,
             None,
@@ -17396,7 +17401,7 @@ class EVVehicleCommandView(HomeAssistantView):
                 return True, "Charging stopped via Sigenergy charger"
             return True, "Charging stopped"
 
-        return False, "Failed to stop charging"
+        return False, failure_message or "Failed to stop charging"
 
     async def _set_charge_limit(self, percent: int, vehicle_vin: str | None = None) -> tuple[bool, str]:
         """Set charge limit percentage. Returns (success, message)."""
@@ -17432,7 +17437,7 @@ class EVVehicleCommandView(HomeAssistantView):
             _LOGGER.warning(msg)
             return False, msg
 
-        success, _failure_message = await self._execute_manual_ev_action(
+        success, failure_message = await self._execute_manual_ev_action(
             "set_ev_charging_amps",
             vehicle_vin,
             {"amps": amps},
@@ -17441,7 +17446,7 @@ class EVVehicleCommandView(HomeAssistantView):
         if success:
             return True, f"Charging amps set to {amps}A"
 
-        return False, "Failed to set charging amps"
+        return False, failure_message or "Failed to set charging amps"
 
     async def post(self, request: web.Request, vehicle_id: str) -> web.Response:
         """Handle POST request to send vehicle command."""

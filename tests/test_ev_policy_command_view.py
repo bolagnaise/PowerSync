@@ -328,3 +328,48 @@ def test_unload_does_not_drop_nonmanual_dynamic_ev_sessions():
     unload_source = source[unload_start:]
 
     assert "_dynamic_ev_state.pop(entry.entry_id" not in unload_source
+
+
+def test_manual_tesla_key_rejection_reaches_view_without_raw_provider_text():
+    async def failed_action(_hass, _entry, _action, params):
+        params["_manual_command_failure"].update({
+            "provider": "tesla", "code": "key_not_paired",
+            "message": "private provider diagnostic that must not reach the UI",
+        })
+        return False
+
+    execute = _command_view_method(
+        "_execute_manual_ev_action_for_entry", {"_execute_single_action": failed_action},
+    )
+    class View:
+        _hass = object()
+        @staticmethod
+        def _manual_action_params(_vehicle):
+            return {"charger_type": "tesla"}
+
+    success, message = asyncio.run(execute(View(), object(), "start_ev_charging", "car_b", {}, "test"))
+    assert success is False
+    assert message == (
+        "Tesla rejected this vehicle's Fleet command key. Pair the key "
+        "used by its Home Assistant vehicle integration, then retry."
+    )
+    assert "private" not in message
+
+
+def test_manual_stop_and_current_commands_keep_safe_failure_detail():
+    message = "Tesla rejected this vehicle's Fleet command key."
+    class View:
+        @staticmethod
+        def _manual_action_params(_vehicle):
+            return {"charger_type": "tesla"}
+
+        async def _execute_manual_ev_action(self, *_args):
+            return False, message
+
+        async def _is_vehicle_plugged_in(self, _vehicle):
+            return True
+
+    stop = _command_view_method("_stop_charging", {})
+    amps = _command_view_method("_set_charging_amps", {})
+    assert asyncio.run(stop(View(), "car_b")) == (False, message)
+    assert asyncio.run(amps(View(), 10, "car_b")) == (False, message)
