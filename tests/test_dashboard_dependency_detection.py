@@ -927,7 +927,7 @@ def test_dashboard_strategy_resource_uses_incremented_cache_buster():
 
     version = re.search(r'DASHBOARD_JS_VERSION = "(\d+)"', const_source)
     assert version is not None
-    assert version.group(1) == "57"
+    assert version.group(1) == "58"
     assert "url = f\"{base_path}?v={POWER_SYNC_VERSION}.{DASHBOARD_JS_VERSION}\"" in source
 
 
@@ -1415,7 +1415,7 @@ def test_dashboard_battery_controls_include_self_consumption_action():
     assert "service: 'power_sync.set_self_consumption'" in battery_controls
     assert "Set battery to self-consumption mode for ' + dur + ' min?'" in battery_controls
     assert "select.power_sync_force_discharge_duration" in battery_controls
-    assert "durationName('select.power_sync_force_discharge_duration', 'Discharge')" in battery_controls
+    assert "durationName('select.power_sync_force_discharge_duration', 'Discharge / Custom charge')" in battery_controls
     assert "durationName('select.power_sync_force_charge_duration', 'Charge timer')" in battery_controls
 
 
@@ -1473,7 +1473,8 @@ def test_dashboard_hold_and_self_consumption_keep_separate_duration():
     assert "Self Consumption', 'select.power_sync_hold_self_duration'" in battery_controls
     assert "Hold SoC', 'select.power_sync_hold_self_duration'" in battery_controls
     assert "states['select.power_sync_hold_self_duration'] ? states['select.power_sync_hold_self_duration'].state : '30'" in battery_controls
-    assert "Custom Discharge Duration (minutes)" in battery_controls
+    assert "Custom charge/discharge time (minutes)" in battery_controls
+    assert "number.power_sync_force_discharge_custom_duration" in battery_controls
     assert "?? '60'" not in battery_controls
 
 
@@ -2120,6 +2121,12 @@ def test_energy_day_prices_are_optional_signed_history_with_independent_axes():
     runtime = r"""
       const assert = require('node:assert/strict');
       global.requestAnimationFrame = () => {};
+      const NativeDate = Date;
+      const fixedNow = NativeDate.parse('2026-10-13T03:40:00Z');
+      global.Date = class extends NativeDate {
+        constructor(...args) { super(...(args.length ? args : [fixedNow])); }
+        static now() { return fixedNow; }
+      };
       global.HTMLElement = class {
         attachShadow() {
           this.shadowRoot = {
@@ -2210,7 +2217,8 @@ def test_force_power_slider_and_buttons_follow_renamed_entity():
         'binary_sensor.power_sync_powerwall_local_paired':{state:'on'},
       };
       const card=_batteryControls({states},id);
-      if(card.cards[0].entity!==id) throw new Error('Slider lost renamed number');
+      const slider=card.cards.find(card => card.entity===id);
+      if(!slider) throw new Error('Slider lost renamed number');
       const buttons=card.cards.find(c=>c.type==='grid').cards;
       for(const service of ['power_sync.force_charge','power_sync.force_discharge']) {
         const button=buttons.find(c=>c.tap_action?.service===service);
@@ -2235,7 +2243,14 @@ def test_solar_permission_uses_registry_for_ha_device_named_entities():
       registry[1].disabled_by = null; registry[1].platform = 'other';
       if (_registeredPowerSyncControl(hass, registry, 'switch', 'on_grid_solar_curtailment') !== null) throw new Error('Unrelated integration exposed');
     '''
-    subprocess.run(["node", "-e", script], check=True)
+    subprocess.run(
+        [
+            "node",
+            "-e",
+            "global.HTMLElement = class {}; global.customElements = {get: () => null, define: () => {}};\n" + script,
+        ],
+        check=True,
+    )
     assert "if (domain === 'switch' && suffix === 'on_grid_solar_curtailment' && solarPermissionEntityId) return solarPermissionEntityId;" in source
 
 
@@ -2263,7 +2278,17 @@ def test_tesla_control_method_tile_uses_registered_device_or_user_named_entity()
           registry[0].disabled_by = null; registry[0].platform = 'other';
           if (_registeredPowerSyncControl(hass,registry,'select','tesla_control_method') !== null) throw Error('Foreign selector exposed');
         """
-        subprocess.run(["node", "-e", helper + runtime], check=True, capture_output=True, text=True)
+        subprocess.run(
+            [
+                "node",
+                "-e",
+                "global.HTMLElement = class {}; global.customElements = {get: () => null, define: () => {}};\n"
+                + helper + runtime,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
     assert "hass, registry, 'select', 'tesla_control_method'" in source
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 import ast
 import asyncio
 from copy import deepcopy
+from datetime import datetime, timezone
 import logging
 from pathlib import Path
 import sys
@@ -56,6 +57,9 @@ def force_handler(monkeypatch, source_tree):
             "HomeAssistantError": RuntimeError,
             "asyncio": asyncio, "active_battery_system": "tesla", "BATTERY_SYSTEM_TESLA": "tesla",
             "_local_powerwall_runtime": runtime, "time": SimpleNamespace(time=lambda: 100),
+            # The real force handlers validate manual durations before the
+            # monitoring gate and therefore need the production clock helper.
+            "dt_util": SimpleNamespace(utcnow=lambda: datetime.now(timezone.utc)),
             "_resolve_force_command_power_w": lambda direction, watts: int(watts),
             "_coerce_force_power_w": int,
             "battery_connection_profile": SimpleNamespace(monitoring_only=monitoring_only),
