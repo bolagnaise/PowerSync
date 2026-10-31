@@ -29,11 +29,43 @@ without another Start, while any outstanding producer hazard is retained.
 For ESPHome automatic fallback, PowerSync saves the exact alternate HA
 vehicle identity before dispatch. It durably quarantines the failed bridge,
 turns off that bridge's BLE connection and requires fresh OFF observations
-from both the control and physical connection status. A replaced alternate
+from the control plus an explicit producer-fence receipt. The common legacy
+`ble_status` sensor reports advertisement presence; neither ON nor OFF proves
+GATT connection state or that queued commands have stopped. A replaced alternate
 entity, missing OFF observation or changed pairing prevents handoff. No
 firmware reboot, key change or arbitrary queue-expiry timer proves isolation.
 The failed bridge stays quarantined; PowerSync does not automatically turn
 its radio back on while its old attempt remains unresolved.
+
+Before a new BLE mutation, the exact bridge must provide fresh known charging
+state and measured current or power. Zero is valid health evidence. Wake status
+alone is insufficient. A bounded wake/data-refresh failure is a known
+pre-dispatch failure, so Both mode can use the exact Fleet fallback without
+creating a queued BLE mutation. Fleet data cannot certify BLE session health.
+
+An uncertain dispatched command is different. Automatic handoff requires an
+ESPHome `sensor.<prefix>_transport_fence` on the same registry device/config
+entry as the command and BLE connection control. Protocol 1 reports `boot_id`,
+an echoed `request_id`, an integer `generation`, booleans `radio_enabled`, `connected` and
+`producer_stopped`, and integer `queued_commands`, `queued_reads` and
+`queued_writes`. Every disable request must cancel all older producer work,
+including callbacks/retries, disconnect GATT, drain every queue and publish a
+new generation. PowerSync writes a unique persisted request ID to the matching
+`text.<prefix>_transport_isolation_request` entity; the producer must process
+that request and echo it in the completed fence receipt. This distinguishes
+the current barrier from a delayed earlier report. The receipt must be fresh, from the same boot,
+with a higher generation, radio/connection off, producer stopped and all three
+queues empty. Rebinding, reboot, generation changes or a missing/malformed
+receipt revoke the proof. Old presence-only isolation records are not reused.
+The registry-bound control must still report OFF, but its unchanged HA value
+need not receive a new timestamp: the echoed fence is the fresh producer proof.
+
+This is an explicit bridge contract, not a capability inferred from a sensor
+name, project version or accepted switch write. The two installed legacy
+bridges do not expose it. Their outstanding uncertain commands remain
+quarantined pending verified producer recovery; no firmware has been flashed.
+The original node configuration and rollback artifact are still needed before
+a safe bridge firmware change can be prepared.
 
 Fleet and native Teslemetry recovery use an explicit exact-vehicle coordinator
 refresh when needed. This works with automatic Fleet polling disabled and

@@ -521,7 +521,24 @@ def _ble_binding(hass: Any, prefix: str, charger: str) -> dict[str, Any] | None:
     keys = {(item["platform"], item["config_entry_id"], item["device_id"]) for item in entities}
     if len(keys) != 1 or next(iter(keys))[0] != "esphome":
         return None
-    return {"entities": dict(zip(("charger", "control", "status"), entities))}
+    binding = {"entities": dict(zip(("charger", "control", "status"), entities))}
+    # The legacy BLE status is commonly advertisement presence. It cannot
+    # establish GATT disconnection or prove that a producer drained its queues.
+    # Only a bridge implementing the explicit transport-fence contract can
+    # authorize automatic handoff after an uncertain mutation.
+    fence = _identity(hass, f"sensor.{prefix}_transport_fence")
+    if (fence is not None and fence.get("disabled_by") is None
+            and (fence["platform"], fence["config_entry_id"], fence["device_id"]) in keys):
+        binding["entities"]["fence"] = fence
+    else:
+        binding["entities"]["fence"] = None
+    request = _identity(hass, f"text.{prefix}_transport_isolation_request")
+    if (request is not None and request.get("disabled_by") is None
+            and (request["platform"], request["config_entry_id"], request["device_id"]) in keys):
+        binding["entities"]["request"] = request
+    else:
+        binding["entities"]["request"] = None
+    return binding
 
 
 def _observed(hass: Any, state: Any) -> float | None:
@@ -534,19 +551,65 @@ def _observed(hass: Any, state: Any) -> float | None:
         return None
 
 
-def _off_samples(hass: Any, binding: Mapping[str, Any], after: float = 0) -> dict[str, float] | None:
-    samples = {}
-    for name in ("control", "status"):
-        entity = binding["entities"][name]
-        try:
-            state = hass.states.get(entity["entity_id"])
-        except Exception:
-            state = None
-        stamp = _observed(hass, state) if state is not None else None
-        if state is None or str(getattr(state, "state", "")).lower() != "off" or stamp is None or stamp <= after:
-            return None
-        samples[name] = stamp
-    return samples
+def _valid_fence_request(value: Any) -> bool:
+    return (isinstance(value, str) and len(value) == 32
+            and all(char in "0123456789abcdef" for char in value))
+
+
+def _valid_fence_value(value: Any, *, isolated: bool = False) -> bool:
+    if (not isinstance(value, Mapping) or type(value.get("protocol")) is not int
+            or value["protocol"] != 1
+            or not isinstance(value.get("boot_id"), str)
+            or not 1 <= len(value["boot_id"]) <= 128
+            or not isinstance(value.get("request_id"), str) or len(value["request_id"]) > 128
+            or type(value.get("generation")) is not int or value["generation"] < 0
+            or any(type(value.get(key)) is not bool for key in ("radio_enabled", "connected", "producer_stopped"))
+            or any(type(value.get(key)) is not int or value[key] < 0
+                   for key in ("queued_commands", "queued_reads", "queued_writes"))):
+        return False
+    return (not isolated or (_valid_fence_request(value["request_id"])
+        and not value["radio_enabled"] and not value["connected"]
+        and value["producer_stopped"]
+        and all(value[key] == 0 for key in ("queued_commands", "queued_reads", "queued_writes"))))
+
+
+def _fence_stamp(value: Any) -> float | None:
+    return (float(value) if type(value) in (int, float) and math.isfinite(value)
+            and 0 < value <= time.time() else None)
+
+
+def _fence_receipt(hass: Any, binding: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Read the versioned producer contract, never a proximity sensor."""
+    fence = binding.get("entities", {}).get("fence")
+    if not isinstance(fence, Mapping):
+        return None
+    try:
+        state = hass.states.get(fence["entity_id"])
+        value = json.loads(state.state)
+        observed = _observed(hass, state)
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return None
+    if not _valid_fence_value(value) or _fence_stamp(observed) is None:
+        return None
+    return {**value, "observed_at": observed}
+
+
+def _off_samples(hass: Any, binding: Mapping[str, Any], after: float = 0) -> dict[str, Any] | None:
+    entity = binding["entities"]["control"]
+    try:
+        state = hass.states.get(entity["entity_id"])
+    except Exception:
+        return None
+    stamp = _observed(hass, state) if state is not None else None
+    if (state is None or str(getattr(state, "state", "")).lower() != "off"
+            or _fence_stamp(stamp) is None):
+        return None
+    proof = _fence_receipt(hass, binding)
+    if (proof is None or proof["observed_at"] <= after
+            or proof["radio_enabled"] or proof["connected"] or not proof["producer_stopped"]
+            or any(proof[key] != 0 for key in ("queued_commands", "queued_reads", "queued_writes"))):
+        return None
+    return {"control": stamp, "status": proof["observed_at"], "fence": proof}
 
 
 def _hazards(ledger: Mapping[str, Any]) -> list[Mapping[str, Any]]:
@@ -569,15 +632,31 @@ def _isolation_valid(hass: Any, hazard: Mapping[str, Any]) -> bool:
     prefix = str(hazard.get("prefix") or "")
     if not prefix or _ble_binding(hass, prefix, str(charger.get("entity_id") or "")) != binding:
         return False
-    control_off_at = _epoch(hazard.get("control_off_at"))
-    status_off_at = _epoch(hazard.get("status_off_at"))
-    if control_off_at is None or status_off_at is None:
+    control_off_at = _fence_stamp(hazard.get("control_off_at"))
+    status_off_at = _fence_stamp(hazard.get("status_off_at"))
+    requested = _fence_stamp(hazard.get("requested_epoch"))
+    proof = hazard.get("fence_proof")
+    baseline = hazard.get("fence_baseline")
+    request_id = hazard.get("request_id")
+    if (control_off_at is None or status_off_at is None or requested is None
+            or not _valid_fence_request(request_id)
+            or not _valid_fence_value(proof, isolated=True)
+            or not _valid_fence_value(baseline)
+            or _fence_stamp(proof.get("observed_at")) != status_off_at
+            or (baseline_stamp := _fence_stamp(baseline.get("observed_at"))) is None
+            or not baseline_stamp <= requested < status_off_at
+            or proof["boot_id"] != baseline["boot_id"]
+            or proof["generation"] <= baseline["generation"]
+            or proof["request_id"] != request_id):
         return False
     samples = _off_samples(hass, binding)
     if samples is None:
         return False
     return (samples["control"] >= control_off_at
-            and samples["status"] >= status_off_at)
+            and samples["status"] >= status_off_at
+            and samples["fence"]["boot_id"] == proof.get("boot_id")
+            and samples["fence"]["generation"] == proof.get("generation")
+            and samples["fence"]["request_id"] == request_id)
 
 
 def _unresolved_routes(ledger: Mapping[str, Any]) -> list[Mapping[str, Any]]:
@@ -723,10 +802,14 @@ async def async_isolate_ble(ticket: RecoveryTicket, *, authorize: Any) -> bool:
                 and _isolation_valid(ticket.hass, existing)):
             return True
         before = _snapshot_recovery(runtime)
+        fence_baseline = _fence_receipt(ticket.hass, binding)
+        request_id = uuid4().hex
         hazards[key] = {
             "kind": "ble_quarantine", "state": "pending", "prefix": prefix,
             "attempt_id": ticket.attempt_id, "binding": deepcopy(binding),
             "requested_epoch": time.time(),
+            "fence_baseline": deepcopy(fence_baseline),
+            "request_id": request_id,
         }
         try:
             if not await _persist(ticket.hass, ticket.entry, runtime):
@@ -749,12 +832,30 @@ async def async_isolate_ble(ticket: RecoveryTicket, *, authorize: Any) -> bool:
         await ticket.hass.services.async_call(
             "switch", "turn_off", {"entity_id": binding["entities"]["control"]["entity_id"]}, blocking=True
         )
+        request_binding = binding["entities"].get("request")
+        if fence_baseline is None or not isinstance(request_binding, Mapping):
+            # Keep containment and the journal, but a legacy bridge provides
+            # no queue/GATT proof. Its presence sensor must never permit handoff.
+            return False
+        # An echoed nonce correlates proof to this disable. HA receipt time
+        # alone cannot distinguish a delayed earlier fence notification.
+        if not await _gate(authorize) or _ble_binding(ticket.hass, prefix, route["entity_id"]) != binding:
+            return False
+        request_started = time.time()
+        await ticket.hass.services.async_call(
+            "text", "set_value", {"entity_id": request_binding["entity_id"], "value": request_id}, blocking=True
+        )
         deadline = time.monotonic() + BLE_ISOLATION_TIMEOUT
         samples = None
         while time.monotonic() < deadline:
             samples = _off_samples(ticket.hass, binding, started)
-            if samples is not None:
+            if (samples is not None
+                    and samples["fence"]["boot_id"] == fence_baseline["boot_id"]
+                    and samples["fence"]["generation"] > fence_baseline["generation"]
+                    and samples["fence"]["request_id"] == request_id
+                    and samples["fence"]["observed_at"] > request_started):
                 break
+            samples = None
             await asyncio.sleep(0.1)
         if samples is None or not await _gate(authorize) or _ble_binding(ticket.hass, prefix, route["entity_id"]) != binding:
             return False
@@ -775,6 +876,12 @@ async def async_isolate_ble(ticket: RecoveryTicket, *, authorize: Any) -> bool:
         if (not isinstance(current, Mapping) or current_route != route
                 or _ble_binding(ticket.hass, prefix, route["entity_id"]) != binding):
             return False
+        current_samples = _off_samples(ticket.hass, binding, started)
+        if (current_samples is None
+                or current_samples["fence"]["boot_id"] != samples["fence"]["boot_id"]
+                or current_samples["fence"]["generation"] != samples["fence"]["generation"]):
+            return False
+        samples = current_samples
         fallback = route.get("fallback")
         if (not isinstance(fallback, Mapping)
                 or not _compatible(ticket.hass, ticket.entry, runtime, ticket.vehicle_id, fallback)):
@@ -791,6 +898,7 @@ async def async_isolate_ble(ticket: RecoveryTicket, *, authorize: Any) -> bool:
         hazard.update({
             "state": "isolated", "binding": deepcopy(binding),
             "control_off_at": samples["control"], "status_off_at": samples["status"],
+            "fence_proof": deepcopy(samples["fence"]),
         })
         ledger["route"] = pinned
         try:
@@ -800,7 +908,13 @@ async def async_isolate_ble(ticket: RecoveryTicket, *, authorize: Any) -> bool:
         except asyncio.CancelledError:
             await _restore_after_cancel(ticket.hass, ticket.entry, runtime, pending)
             raise
-        return True
+        # Saving and authority checks yield to provider/registry updates. A
+        # durable record never substitutes for live queue/connection proof.
+        if not await _gate(authorize):
+            return False
+        return (_runtime(ticket.hass, ticket.entry) is runtime
+                and _ble_binding(ticket.hass, prefix, route["entity_id"]) == binding
+                and _isolation_valid(ticket.hass, hazard))
 
 
 async def _gate(gate: Any) -> bool:
