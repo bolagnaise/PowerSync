@@ -1810,6 +1810,66 @@ async def test_reported_large_site_tightens_export_before_tariff_and_restores(se
 
 
 @pytest.mark.asyncio
+async def test_managed_ev_discharge_uses_durable_cap_preparation_before_forcing(setup):
+    s = setup
+    s.adapter.direction = 'discharge'
+    s.settings.update(optimization_max_discharge_w=21000,
+                      optimization_max_grid_export_w=10000)
+    s.state.config['site_info']['min_site_meter_power_ac'] = -10.1
+    original = deepcopy(s.state.config)
+    await s.budget.admit_managed(
+        'VIN', {'site': 'site', 'identity': 'provider:car', 'reserved_w': 2300,
+                'operation': 'rate', 'target_amps': 10},
+        {'rate_reduction': False, 'current_amps': 10}, lambda: True)
+    assert (await s.session.start(120))['active']
+    claim = s.budget.native_max_claim('site')
+    assert claim['preparing'] is False and claim['ev_coexistence'] is True
+    assert s.state.config['site_info']['min_site_meter_power_ac'] == -10
+    kinds = [kind for kind, _ in s.state.events]
+    assert kinds.index('config') < kinds.index('resume') < kinds.index('tariff')
+    assert await s.session.stop()
+    assert s.state.config == original
+    assert 'VIN' in s.budget.managed
+
+
+@pytest.mark.asyncio
+async def test_supplied_writer_config_requires_exact_fresh_config_provenance(setup):
+    s = setup
+    s.adapter.direction = 'discharge'
+    s.settings['optimization_max_grid_export_w'] = 10000
+    s.state.config['site_info']['min_site_meter_power_ac'] = -10
+    await s.budget.admit_managed(
+        'VIN', {'site': 'site', 'identity': 'provider:car', 'reserved_w': 2300,
+                'operation': 'rate', 'target_amps': 10},
+        {'rate_reduction': False, 'current_amps': 10}, lambda: True)
+    candidate = deepcopy(s.state.config)
+    original = s.adapter.client.get_snapshot
+
+    async def missing_provenance():
+        snapshot = await original()
+        snapshot.config_observed_monotonic = None
+        return snapshot
+
+    s.adapter.client.get_snapshot = missing_provenance
+    assert not await s.adapter.guard(native_config=candidate)
+    assert s.adapter.guard_denial_reason == 'managed_ev_ownership_present'
+
+    async def stale_provenance():
+        snapshot = await original()
+        snapshot.config_observed_monotonic = s.state.at - 6
+        return snapshot
+
+    s.adapter.client.get_snapshot = stale_provenance
+    assert not await s.adapter.guard(native_config=candidate)
+    assert s.adapter.guard_denial_reason == 'managed_ev_ownership_present'
+
+    s.adapter.client.get_snapshot = original
+    s.state.config['site_info']['min_site_meter_power_ac'] = -9
+    assert not await s.adapter.guard(native_config=candidate)
+    assert s.adapter.guard_denial_reason == 'native_config_changed'
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize('original_limit', [-10.1, -1e9])
 @pytest.mark.parametrize('readback_seconds', [5, 6])
 async def test_slow_confirmed_export_cap_refreshes_evidence_without_rewriting(setup, original_limit, readback_seconds):

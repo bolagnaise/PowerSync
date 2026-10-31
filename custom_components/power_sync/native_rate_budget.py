@@ -95,39 +95,70 @@ class SharedRateBudget:
                      if entry.get("site") == site and entry.get("native_max")), None)
 
     async def claim_native_max(self, entry_id, site, token, deadline, direction="charge",
-                               ev_coexistence=False):
+                               ev_coexistence=False, preparing=False):
         """Atomically claim a direction-specific native Max site owner."""
         await self.load()
         task = asyncio.create_task(self._claim_native_max(
-            entry_id, site, token, deadline, direction, ev_coexistence))
+            entry_id, site, token, deadline, direction, ev_coexistence, preparing))
         self.storage_tasks.add(task)
         task.add_done_callback(self.storage_tasks.discard)
         return await asyncio.shield(task)
 
-    async def _claim_native_max(self, entry_id, site, token, deadline, direction, ev_coexistence):
+    async def _claim_native_max(self, entry_id, site, token, deadline, direction,
+                                ev_coexistence, preparing):
         if (not isinstance(entry_id, str) or not entry_id or not isinstance(site, str) or not site
                 or not isinstance(token, str) or not token or isinstance(deadline, bool)
                 or not isinstance(deadline, (int, float)) or not math.isfinite(deadline)
-                or direction not in ("charge", "discharge") or type(ev_coexistence) is not bool):
+                or direction not in ("charge", "discharge") or type(ev_coexistence) is not bool
+                or type(preparing) is not bool
+                or (preparing and direction != "discharge")):
             raise ValueError("Invalid native Max site claim")
         async with self.lock:
             key = f"native_max:{entry_id}"
             old = self.entries.get(key)
             if old:
-                return (old.get("site") == site and old.get("native_max", {}).get("token") == token
-                        and old["native_max"].get("expires_at") == deadline
-                        and old["native_max"].get("direction", "charge") == direction
-                        and native_max_ev_coexistence(old.get("native_max")) == ev_coexistence)
+                maximum = old.get("native_max", {})
+                same_owner = (old.get("site") == site and maximum.get("token") == token
+                    and maximum.get("expires_at") == deadline
+                    and maximum.get("direction", "charge") == direction)
+                if not same_owner:
+                    return False
+                if self.clock() >= deadline or self.clock() >= maximum.get("expires_at", deadline):
+                    return False
+                old_coexistence = native_max_ev_coexistence(maximum)
+                old_preparing = maximum.get("preparing", False)
+                if (type(old_preparing) is not bool
+                        or (old_coexistence and not ev_coexistence)
+                        or (preparing and ev_coexistence)):
+                    return False
+                if old_coexistence == ev_coexistence and old_preparing == preparing:
+                    return True
+                # The only permitted transition is the exact owner completing
+                # its bounded export-cap preparation.  Never downgrade a live
+                # coexistence capability or upgrade before readback proof.
+                if not (not old_coexistence and ev_coexistence
+                        and old_preparing and not preparing):
+                    return False
+                entries = deepcopy(self.entries)
+                entries[key]["native_max"]["ev_coexistence"] = True
+                entries[key]["native_max"]["preparing"] = False
+                self._validate(entries)
+                await self.store.async_save({"entries": entries, "managed": self.managed})
+                self.entries = entries
+                self.revision += 1
+                return True
             maximum = self.native_max_claim(site)
             if (self.clock() >= deadline or maximum
                     or (not ev_coexistence and (
                         self.site_armed(site)
-                        or any(record.get("site") == site for record in self.managed.values())))):
+                        or (not preparing
+                            and any(record.get("site") == site for record in self.managed.values()))))):
                 return False
             entries = deepcopy(self.entries)
             entries[key] = {"site": site, "sessions": {}, "native_max": {
                 "entry_id": entry_id, "token": token, "expires_at": deadline,
-                "direction": direction, "ev_coexistence": ev_coexistence}}
+                "direction": direction, "ev_coexistence": ev_coexistence,
+                "preparing": preparing}}
             self._validate(entries)
             await self.store.async_save({"entries": entries, "managed": self.managed})
             self.entries = entries
@@ -174,6 +205,10 @@ class SharedRateBudget:
                         or not math.isfinite(maximum["expires_at"])
                         or maximum.get("direction", "charge") not in ("charge", "discharge")
                         or type(maximum.get("ev_coexistence", False)) is not bool
+                        or type(maximum.get("preparing", False)) is not bool
+                        or (maximum.get("preparing", False)
+                            and (maximum.get("direction", "charge") != "discharge"
+                                 or maximum.get("ev_coexistence", False)))
                         or entry["site"] in max_sites):
                     raise ValueError("Native Max reservation journal is invalid")
                 max_sites.add(entry["site"])

@@ -151,6 +151,8 @@ async def test_native_route_notifies_scheduled_admission_failure(
             direction, SimpleNamespace(data={'power_w': 0}), 5, 2000)
     assert alerts == ([(direction, hass, 'one', reason)] if expected else [])
     controller.start.assert_not_awaited()
+    adapter.guard.assert_awaited_once_with(
+        **({"preparing": True} if direction == 'discharge' else {}))
 
 
 @pytest.fixture

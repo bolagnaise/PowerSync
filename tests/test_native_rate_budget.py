@@ -449,6 +449,63 @@ async def test_native_max_legacy_or_charge_claim_remains_conservative_for_ev_inc
 
 
 @pytest.mark.asyncio
+async def test_preparing_discharge_claim_blocks_ev_increases_until_exact_upgrade():
+    store = Store()
+    budget = m.SharedRateBudget(store, clock=lambda: NOW)
+    existing = {'site': 'site', 'identity': 'provider:existing', 'reserved_w': 2300,
+                'operation': 'rate', 'target_amps': 10}
+    evidence = {'rate_reduction': False, 'current_amps': 10}
+    assert await budget.admit_managed('VIN', existing, evidence, lambda: True)
+    assert await budget.claim_native_max(
+        'battery', 'site', 'generation', NOW + 60, direction='discharge',
+        ev_coexistence=False, preparing=True)
+    assert budget.native_max_claim('site')['preparing'] is True
+    increase = {'site': 'site', 'identity': 'provider:new', 'reserved_w': 2300,
+                'operation': 'rate', 'target_amps': 20}
+    assert await budget.admit_managed('VIN2', increase,
+        {'rate_reduction': False, 'current_amps': 10}, lambda: True) is None
+    assert await budget.admit_managed(
+        'VIN3', {**increase, 'identity': 'provider:reduction'},
+        {'rate_reduction': True, 'current_amps': 20}, lambda: True) is not None
+    assert await budget.claim_native_max(
+        'battery', 'site', 'generation', NOW + 60, direction='discharge',
+        ev_coexistence=True)
+    assert budget.native_max_claim('site')['preparing'] is False
+    assert budget.native_max_claim('site')['ev_coexistence'] is True
+
+
+@pytest.mark.asyncio
+async def test_preparing_claim_rejects_contradictory_coexistence_and_journal_flags():
+    budget = m.SharedRateBudget(Store(), clock=lambda: NOW)
+    with pytest.raises(ValueError, match='Native Max reservation journal is invalid'):
+        await budget.claim_native_max(
+            'battery', 'site', 'generation', NOW + 60, direction='discharge',
+            ev_coexistence=True, preparing=True)
+
+    store = Store()
+    store.data = {'entries': {'native_max:battery': {
+        'site': 'site', 'sessions': {}, 'native_max': {
+            'entry_id': 'battery', 'token': 'generation', 'expires_at': NOW + 60,
+            'direction': 'discharge', 'ev_coexistence': True, 'preparing': True}}},
+        'managed': {}}
+    with pytest.raises(ValueError, match='Native Max reservation journal is invalid'):
+        await m.SharedRateBudget(store, clock=lambda: NOW).load()
+
+
+@pytest.mark.asyncio
+async def test_preparing_claim_cannot_upgrade_after_deadline():
+    clock = [NOW]
+    budget = m.SharedRateBudget(Store(), clock=lambda: clock[0])
+    assert await budget.claim_native_max(
+        'battery', 'site', 'generation', NOW + 60, direction='discharge',
+        preparing=True)
+    clock[0] = NOW + 60
+    assert not await budget.claim_native_max(
+        'battery', 'site', 'generation', NOW + 60, direction='discharge',
+        ev_coexistence=True)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize('owner', ['native', 'managed', 'armed'])
 async def test_native_max_cannot_overtake_ev_acquisition_or_cleanup(owner):
     budget = m.SharedRateBudget(Store(), clock=lambda: NOW)

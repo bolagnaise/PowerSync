@@ -35090,7 +35090,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             controller.adapter.direction = direction
             controller.adapter.startup_kick = large_site
             controller.adapter.planning_request = targetless
-            if await controller.adapter.guard() is not True:
+            # Admission may prepare a tighter export cap under its durable
+            # restore owner. The session must verify that cap before granting
+            # coexistence or submitting any battery/tariff forcing command.
+            initial_guard = {"preparing": True} if direction == "discharge" else {}
+            if await controller.adapter.guard(**initial_guard) is not True:
                 if targetless or large_site:
                     reason = getattr(controller.adapter, "guard_denial_reason", None) or "native_max_policy_denied"
                     _LOGGER.warning("Native Powerwall %s admission refused: %s", direction, reason)
