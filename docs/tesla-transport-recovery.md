@@ -115,6 +115,12 @@ reserve, export permission, settings recovery and foreign ownership fences
 continue to apply. Other inverter brands need their own verified equivalent
 capability before this Tesla-specific coexistence contract can apply.
 
+The public Restore normal response distinguishes completed restoration, a
+manual native restore still awaiting physical settling, and nothing to restore.
+Requesting an HA service response does not request strict synchronous physical
+confirmation. Internal strict confirmation and background cleanup retain their
+existing failure, retry and ownership rules.
+
 ## Verification boundaries
 
 Focused regressions cover exact two-car routing, stale provider data, command
@@ -128,4 +134,8 @@ Core check/startup, command acceptance, fresh vehicle/settings readback and
 physical power. Both local cars and ESPHome/Fleet paths are available. Neither
 legacy nor modern Teslemetry Bluetooth is installed on this instance; their
 adapter contracts can be tested in software but cannot be called physically
-verified here. Live receipts will be added after installing the frozen candidate.
+verified here. The private candidate has shown both cars in the dashboard and
+native battery charge/export with exact settings restoration. Outstanding
+legacy BLE commands still prevent the remaining two-car, Boost and active-EV
+coexistence tests. The release remains held pending bridge recovery and those
+physical checks.
