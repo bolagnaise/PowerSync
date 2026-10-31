@@ -521,14 +521,12 @@ def test_standalone_actual_prices_preserve_spikes_and_bound_history_tooltips():
     builder = source[source.index('function _priceChart('):source.index('function _lpForecastSummary(')]
     runtime = r"""
       const assert = require('node:assert/strict');
-      // Keep the existing observation on today's side of midnight regardless
-      // of when CI runs. Exercise midnight clipping explicitly below.
-      const RealDate = Date;
-      global.Date = class extends RealDate {
-        constructor(...args) { super(...(args.length ? args : ['2026-10-31T02:00:00Z'])); }
-        static now() { return RealDate.parse('2026-10-31T02:00:00Z'); }
+      const NativeDate = Date;
+      let now = NativeDate.parse('2026-10-13T03:40:00Z');
+      global.Date = class extends NativeDate {
+        constructor(...args) { super(...(args.length ? args : [now])); }
+        static now() { return now; }
       };
-      global.requestAnimationFrame = () => {};
       global.HTMLElement = class {
         attachShadow() { this.shadowRoot = {innerHTML: '', querySelectorAll() { return []; }, querySelector() { return null; }}; }
         getBoundingClientRect() { return {width: this.testWidth || 640}; }
@@ -2130,12 +2128,6 @@ def test_energy_day_prices_are_optional_signed_history_with_independent_axes():
         static now() { return RealDate.parse('2026-10-31T02:00:00Z'); }
       };
       global.requestAnimationFrame = () => {};
-      const NativeDate = Date;
-      const fixedNow = NativeDate.parse('2026-10-13T03:40:00Z');
-      global.Date = class extends NativeDate {
-        constructor(...args) { super(...(args.length ? args : [fixedNow])); }
-        static now() { return fixedNow; }
-      };
       global.HTMLElement = class {
         attachShadow() {
           this.shadowRoot = {
@@ -2229,8 +2221,7 @@ def test_force_power_slider_and_buttons_follow_renamed_entity():
         'binary_sensor.power_sync_powerwall_local_paired':{state:'on'},
       };
       const card=_batteryControls({states},id);
-      const slider=card.cards.find(card => card.entity===id);
-      if(!slider) throw new Error('Slider lost renamed number');
+      if(!card.cards.some(c=>c.entity===id)) throw new Error('Slider lost renamed number');
       const buttons=card.cards.find(c=>c.type==='grid').cards;
       for(const service of ['power_sync.force_charge','power_sync.force_discharge']) {
         const button=buttons.find(c=>c.tap_action?.service===service);
@@ -2255,14 +2246,7 @@ def test_solar_permission_uses_registry_for_ha_device_named_entities():
       registry[1].disabled_by = null; registry[1].platform = 'other';
       if (_registeredPowerSyncControl(hass, registry, 'switch', 'on_grid_solar_curtailment') !== null) throw new Error('Unrelated integration exposed');
     '''
-    subprocess.run(
-        [
-            "node",
-            "-e",
-            "global.HTMLElement = class {}; global.customElements = {get: () => null, define: () => {}};\n" + script,
-        ],
-        check=True,
-    )
+    subprocess.run(["node", "-e", script], check=True)
     assert "if (domain === 'switch' && suffix === 'on_grid_solar_curtailment' && solarPermissionEntityId) return solarPermissionEntityId;" in source
 
 
@@ -2290,17 +2274,7 @@ def test_tesla_control_method_tile_uses_registered_device_or_user_named_entity()
           registry[0].disabled_by = null; registry[0].platform = 'other';
           if (_registeredPowerSyncControl(hass,registry,'select','tesla_control_method') !== null) throw Error('Foreign selector exposed');
         """
-        subprocess.run(
-            [
-                "node",
-                "-e",
-                "global.HTMLElement = class {}; global.customElements = {get: () => null, define: () => {}};\n"
-                + helper + runtime,
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
+        subprocess.run(["node", "-e", helper + runtime], check=True, capture_output=True, text=True)
     assert "hass, registry, 'select', 'tesla_control_method'" in source
 
 
