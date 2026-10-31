@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
+import shutil
 import subprocess
 
 import pytest
@@ -18,6 +19,26 @@ ENERGY_FLOW_PATH = (
 )
 
 
+@pytest.fixture(scope="module")
+def canonical_energy_flow_harness(tmp_path_factory):
+    """Run unchanged production ESM in an explicit, portable package scope."""
+    package = tmp_path_factory.mktemp("energy-flow-esm")
+    (package / "package.json").write_text('{"type":"module"}\n')
+    harness = Path(__file__).with_name("energy_flow_canonical_harness.mjs")
+    targets = [(harness, package / "tests" / harness.name)]
+    for name in ("power-sync-energy-flow.js", "power-sync-strategy.js", "scene-layout-data.js"):
+        targets.append((
+            ENERGY_FLOW_PATH.with_name(name),
+            package / "custom_components" / "power_sync" / "frontend" / name,
+        ))
+    for source, target in targets:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        # Copy code bytes: symlinks resolve outside the temporary ESM package.
+        shutil.copyfile(source, target)
+        assert target.read_bytes() == source.read_bytes()
+    return targets[0][1]
+
+
 @pytest.mark.parametrize("scenario", [
     "generated-idle", "generated-charging", "away", "unplugged", "empty",
     "unknown-power", "duplicates-stable", "failed-fallback", "malformed-fallback",
@@ -27,10 +48,11 @@ ENERGY_FLOW_PATH = (
     "connection-change-in-flight", "selector-independent",
     "conflicting-duplicate-presence", "two-car-weather-scenes", "generated-layouts",
 ])
-def test_generated_energy_flow_uses_canonical_connected_vehicles(scenario):
+def test_generated_energy_flow_uses_canonical_connected_vehicles(
+    scenario, canonical_energy_flow_harness
+):
     subprocess.run(
-        ["node", "--experimental-default-type=module",
-         str(Path(__file__).with_name("energy_flow_canonical_harness.mjs")), scenario],
+        ["node", str(canonical_energy_flow_harness), scenario],
         check=True, capture_output=True, text=True,
     )
 
