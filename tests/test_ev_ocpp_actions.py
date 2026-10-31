@@ -308,6 +308,22 @@ def _bind_actions_to_test_hass_registries(monkeypatch):
     monkeypatch.setattr(actions.er, "async_get", lambda hass: hass.entity_registry)
     monkeypatch.setattr(actions.dr, "async_get", lambda hass: hass.device_registry)
 
+    # Recovery and observation modules import these modules lazily through
+    # ``homeassistant.helpers``.  Full-suite collection can replace either
+    # the sys.modules slot or the package attribute after actions.py loaded;
+    # pin both views for this test's lifetime so they share the same fake HA
+    # registry and identity metadata.
+    monkeypatch.setitem(
+        sys.modules, "homeassistant.helpers.entity_registry", actions.er
+    )
+    monkeypatch.setitem(
+        sys.modules, "homeassistant.helpers.device_registry", actions.dr
+    )
+    ha_helpers = sys.modules.get("homeassistant.helpers")
+    if ha_helpers is not None:
+        monkeypatch.setattr(ha_helpers, "entity_registry", actions.er, raising=False)
+        monkeypatch.setattr(ha_helpers, "device_registry", actions.dr, raising=False)
+
 
 @pytest.fixture(autouse=True)
 def _reset_ev_action_module_state():
@@ -2183,6 +2199,19 @@ def test_already_charging_tesla_is_recovered_without_restart_or_stop(
     assert actions._dynamic_ev_state["entry-1"][vin]["active"] is True
     ownership = hass.data["power_sync"]["entry-1"]["ev_ownership"]
     assert ownership[vin]["owner_mode"] == "smart_schedule"
+
+    # A normal managed plan has no finite Boost authority. Its later rate
+    # submission must pass the real deadline guard, rather than interpreting
+    # an absent optional deadline as an expired Boost request.
+    async def later_rate_submission():
+        from power_sync.native_rate_admission import prepare_ev_submission
+        from power_sync.teslemetry_solar import _ev_submission_scope
+        stored = actions._dynamic_ev_state["entry-1"][vin]["params"]
+        with _ev_submission_scope(hass, _Entry(), vin, stored):
+            return await prepare_ev_submission(
+                hass, "number.car_charge_current", operation="rate", amps=15)
+
+    assert asyncio.run(later_rate_submission()) is True
 
 
 def test_dynamic_tesla_capability_tracks_selected_current_and_state_in_both_mode(

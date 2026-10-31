@@ -14409,9 +14409,10 @@ async def _action_start_ev_charging_dynamic_locked(
             params.get("phase_load_management_required")
         ),
         "phase_requested_amps": params.get("phase_requested_amps"),
-        "_boost_start_deadline": params.get("_boost_start_deadline"),
         "require_physical_start_confirmation": params.get("require_physical_start_confirmation", False),
     }
+    if "_boost_start_deadline" in params:
+        full_params["_boost_start_deadline"] = params["_boost_start_deadline"]
     full_params = _with_sigenergy_charger_capabilities(config_entry, full_params, hass)
 
     # Initialize entry-level state dict if needed

@@ -136,8 +136,10 @@ def _current_registry_helpers(monkeypatch):
     monkeypatch.setattr(actions.er, "async_get", lambda hass: hass.entity_registry)
     monkeypatch.setattr(actions.dr, "async_get", lambda hass: hass.device_registry)
     helpers = sys.modules["homeassistant.helpers"]
-    monkeypatch.setattr(helpers, "entity_registry", actions.er)
-    monkeypatch.setattr(helpers, "device_registry", actions.dr)
+    monkeypatch.setattr(helpers, "entity_registry", actions.er, raising=False)
+    monkeypatch.setattr(helpers, "device_registry", actions.dr, raising=False)
+    monkeypatch.setitem(sys.modules, "homeassistant.helpers.entity_registry", actions.er)
+    monkeypatch.setitem(sys.modules, "homeassistant.helpers.device_registry", actions.dr)
 
 
 class _State:
