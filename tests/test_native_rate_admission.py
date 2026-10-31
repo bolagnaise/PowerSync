@@ -331,6 +331,71 @@ def route_lock(a):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('direction', ['charge', 'discharge'])
+@pytest.mark.parametrize('source', ['optimizer', 'user'])
+async def test_failed_tariff_cleanup_finishes_inside_battery_command(admission, direction, source):
+    """A failed tariff must reach restore without reacquiring its optimizer lock."""
+    import ast
+    import logging
+    from datetime import timedelta
+    from unittest.mock import AsyncMock
+    from test_ha_optimizer_runtime import Harness, guard
+
+    a = admission
+    harness = Harness()
+    await harness.activate()
+    manager = harness.client
+    a.hass.data['power_sync_license_manager'] = manager
+    lock = route_lock(a)
+    owner = SimpleNamespace(hass=a.hass, entry_id=a.entry.entry_id)
+    state = {'active': False, 'saved_tariff': {'name': 'original'}}
+    restored = []
+
+    async def restore(call):
+        assert lock.locked() and manager.control_lock(a.entry.entry_id).locked()
+        assert state['active'] and state['saved_tariff'] == {'name': 'original'}
+        restored.append(call.data)
+        state['active'] = False
+
+    tree = ast.parse((ROOT / '__init__.py').read_text())
+    name = f'_cleanup_failed_tesla_force_{direction}'
+    helper = next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef) and n.name == name)
+    call = SimpleNamespace(data={'source': source, '_licensing_generation': 1}, context=None)
+    now = datetime(2026, 10, 31, 0, 0, tzinfo=timezone.utc)
+    namespace = {
+        '__package__': a.m.__package__, 'hass': a.hass, 'entry': a.entry,
+        '_command_generation': [1], '_restore_gen': 1, 'source': source, 'call': call,
+        f'force_{direction}_state': state, 'dt_util': SimpleNamespace(utcnow=lambda: now),
+        'timedelta': timedelta, '_LOGGER': logging.getLogger(__name__),
+        '_tesla_force_retry_expiry': lambda state, expiry, **kwargs: expiry,
+        'persist_force_mode_state': AsyncMock(return_value=True),
+        'handle_restore_normal': a.m.guard_battery_transition(a.hass, a.entry, restore),
+        'ServiceCall': lambda domain, service, data, context: SimpleNamespace(data=data, context=context),
+        'DOMAIN': 'power_sync', 'SERVICE_RESTORE_NORMAL': 'restore_normal',
+        'async_dispatcher_send': lambda *args: None,
+    }
+    exec(compile(ast.Module(body=[helper], type_ignores=[]), str(ROOT / '__init__.py'), 'exec'), namespace)
+
+    async def failed_force(_):
+        await namespace[name]('tariff upload failed after prerequisite writes')
+        return False
+
+    service = a.m.guard_battery_transition(a.hass, a.entry, failed_force)
+    async def request():
+        if source == 'optimizer':
+            return await guard.fenced_call(owner, lambda: service(call), f'force_{direction}')
+        return await service(call)
+
+    assert await asyncio.wait_for(request(), 0.5) is False
+    assert len(restored) == 1 and not state['active']
+    assert restored[0]['_allow_monitoring_restore'] is True
+    assert restored[0]['_tesla_restore_generation'] == 1
+    assert not lock.locked() and not manager.control_lock(a.entry.entry_id).locked()
+    assert a.runtime['native_rate_battery_transitions'] == 0
+    assert not manager._manual_command_owners
+
+
+@pytest.mark.asyncio
 async def test_manual_discharge_does_not_deadlock_optimizer_waiting_for_battery_route(admission):
     from test_ha_optimizer_runtime import Harness, guard
 

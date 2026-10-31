@@ -35852,7 +35852,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         "expires_at": force_discharge_state["expires_at"].isoformat(),
                         "command_status": "restore_pending",
                     })
-                    await handle_restore_normal(ServiceCall(DOMAIN, SERVICE_RESTORE_NORMAL, entry_service_data(entry.entry_id, {'source': 'force_cleanup', '_allow_monitoring_restore': True, '_skip_backup_reserve_restore': preserve_newer_reserve, '_tesla_restore_generation': _restore_gen}, call), context=call.context))
+                    # Optimizer cleanup already owns the licensing control lock.
+                    # Preserve that source so restore does not queue a manual
+                    # command behind the optimizer operation it is cleaning up.
+                    await handle_restore_normal(ServiceCall(
+                        DOMAIN, SERVICE_RESTORE_NORMAL,
+                        entry_service_data(entry.entry_id, {
+                            'source': 'optimizer' if source == 'optimizer' else 'force_cleanup',
+                            '_allow_monitoring_restore': True,
+                            '_skip_backup_reserve_restore': preserve_newer_reserve,
+                            '_tesla_restore_generation': _restore_gen,
+                        }, call),
+                        context=call.context,
+                    ))
                 except Exception as err:
                     if _command_generation[0] != _restore_gen:
                         return
@@ -37768,7 +37780,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     await persist_force_mode_state()
                     if _command_generation[0] != _restore_gen:
                         return
-                    await handle_restore_normal(ServiceCall(DOMAIN, SERVICE_RESTORE_NORMAL, entry_service_data(entry.entry_id, {'source': 'force_cleanup', '_allow_monitoring_restore': True, '_skip_backup_reserve_restore': preserve_newer_reserve, '_tesla_restore_generation': _restore_gen}, call), context=call.context))
+                    # Optimizer cleanup already owns the licensing control lock.
+                    # Preserve that source so restore does not queue a manual
+                    # command behind the optimizer operation it is cleaning up.
+                    await handle_restore_normal(ServiceCall(
+                        DOMAIN, SERVICE_RESTORE_NORMAL,
+                        entry_service_data(entry.entry_id, {
+                            'source': 'optimizer' if source == 'optimizer' else 'force_cleanup',
+                            '_allow_monitoring_restore': True,
+                            '_skip_backup_reserve_restore': preserve_newer_reserve,
+                            '_tesla_restore_generation': _restore_gen,
+                        }, call),
+                        context=call.context,
+                    ))
                 except Exception as err:
                     if _command_generation[0] != _restore_gen:
                         return
