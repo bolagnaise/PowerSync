@@ -143,7 +143,7 @@ async def test_native_start_rejects_elapsed_deadline(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("deadline", [time.time() - 1, "expired-start-deadline", True,
+@pytest.mark.parametrize("deadline", [pytest.param(0.0, id="elapsed"), "expired-start-deadline", True,
                                       float("nan"), float("inf"), float("-inf")])
 async def test_native_stop_remains_available_after_old_start_deadline(monkeypatch, deadline):
     hass = _native_hass(monkeypatch, "tesla_fleet")
