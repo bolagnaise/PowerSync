@@ -613,7 +613,7 @@ def resolve_recovery_backend(ns):
 async def test_legacy_tesla_recovery_routes_exact_entry_and_retains_incident_after_restart():
     ns, runtime, saved = recovery_context()
     resolve_recovery_backend(ns)
-    assert ns["active_battery_system"] is None
+    assert ns["active_battery_system"] == "tesla"
     register = load_function(ROOT / "licensing/entry_routing.py", "register_handlers", ns)
     register(ns["hass"], "entry", {"resume_powerwall_settings": ns["handle_resume_powerwall_settings"]})
     other = AsyncMock(side_effect=AssertionError("wrong entry"))

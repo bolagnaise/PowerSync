@@ -443,6 +443,80 @@ async def test_tariff_control_reaches_cloud_without_reading_unreachable_gateway(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('direction', ['charge', 'discharge'])
+@pytest.mark.parametrize('source', ['user', 'optimizer'])
+async def test_legacy_resumed_tariff_control_keeps_cloud_route_and_incident(direction, source):
+    from test_powerwall_battery_dispatch import load_routing, call
+    from test_tesla_local_settings import recovery_context, resolve_recovery_backend
+    from unittest.mock import Mock
+    settings, runtime, saved = recovery_context()
+    resolve_recovery_backend(settings)
+    await settings['handle_resume_powerwall_settings'](SimpleNamespace(data={
+        'entry_id': 'entry', 'site_id': 'site', 'incident_id': 'incident', 'acknowledge': True}))
+    ns, local, client, _ = load_routing(tesla_control_method='tariff')
+    ns['entry'] = settings['entry']
+    ns['hass'] = settings['hass']
+    ns['_local_powerwall_runtime'] = runtime
+    ns['active_battery_system'] = settings['active_battery_system']
+    ns['_get_tesla_site_configs'] = lambda *_: [('site', 'token', 'provider')]
+    ns['_get_native_max_charge'] = AsyncMock(side_effect=AssertionError('must use cloud tariff'))
+    # Isolate admission from the separate, retained restore owner in this fixture.
+    runtime.pop('pending_tesla_restore', None)
+    request = call(source=source, power_w=0)
+    if direction == 'charge':
+        assert await ns['_try_native_max_charge'](request, 15, 9999999999) is None
+    assert await ns['_try_local_powerwall_force'](direction, request, 15, 0) is None
+    assert ns['active_battery_system'] == 'tesla'
+    ns['_get_native_max_charge'].assert_not_awaited()
+    client.get_snapshot.assert_not_awaited()
+    client.dispatch_battery_power.assert_not_awaited()
+    settings['get_local_transport'] = Mock(side_effect=AssertionError('local settings stay suspended'))
+    cloud = AsyncMock(return_value=True)
+    assert await settings['dispatch_powerwall_setting'](
+        ns['hass'], ns['entry'], site_id='site', updates={'default_real_mode': 'autonomous'},
+        cloud_call=cloud, is_current=lambda: True, deadline=time.monotonic() + 1,
+        label='legacy tariff prerequisite')
+    cloud.assert_awaited_once()
+    assert runtime['powerwall_settings_pending']['resume_cloud'] is True
+    assert not saved['tesla_settings_pending'].get('terminal')
+    assert not local.pending
+
+
+@pytest.mark.asyncio
+async def test_legacy_tesla_can_change_control_method_after_cleanup():
+    from test_powerwall_battery_dispatch import load_routing
+    from test_tesla_local_settings import resolve_recovery_backend
+    from unittest.mock import Mock
+    ns, local, client, _ = load_routing(tesla_control_method='tariff')
+    entry = ns['entry']
+    entry.data.pop('battery_system')
+    entry.data['tesla_energy_site_id'] = 'site'
+    resolve_recovery_backend(ns)
+    ns['hass'].config_entries = SimpleNamespace(async_get_entry=lambda _: entry,
+        async_update_entry=Mock(side_effect=lambda current, **kw: setattr(current, 'options', kw['options'])))
+    await ns['_set_tesla_control_method']('local')
+    assert entry.options['tesla_control_method'] == 'local'
+    client.dispatch_battery_power.assert_not_awaited()
+    assert not local.pending
+
+
+@pytest.mark.parametrize('data,options,expected', [
+    ({'tesla_energy_site_id': 'site'}, {}, 'tesla'),
+    ({}, {'tesla_energy_site_id': 'site'}, 'tesla'),
+    ({}, {}, None),
+    ({'tesla_energy_site_id': 'site', 'battery_system': 'goodwe'}, {}, 'goodwe'),
+    ({'tesla_energy_site_id': 'site'}, {'battery_system': 'sungrow'}, 'sungrow'),
+    ({'tesla_energy_site_id': 'site', 'goodwe_host': 'inverter'}, {}, 'goodwe'),
+])
+def test_legacy_tesla_inference_preserves_explicit_and_other_backend_precedence(data, options, expected):
+    from test_tesla_local_settings import resolve_recovery_backend
+    ns = {'entry': SimpleNamespace(entry_id='entry', data=data, options=options),
+          'hass': SimpleNamespace(data={'power_sync': {'entry': {}}})}
+    resolve_recovery_backend(ns)
+    assert ns['active_battery_system'] == expected
+
+
+@pytest.mark.asyncio
 async def test_tariff_preference_keeps_an_explicit_watt_target_local():
     from test_powerwall_battery_dispatch import load_routing, call
     ns, local, client, _ = load_routing(tesla_control_method='tariff')

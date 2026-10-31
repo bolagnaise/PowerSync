@@ -3551,6 +3551,11 @@ def _active_battery_system(
     if _value(CONF_SOLAREDGE_HOST) or _value(CONF_SOLAREDGE_ENTITY_PREFIX):
         return BATTERY_SYSTEM_SOLAREDGE
 
+    # Legacy Tesla entries predate the brand field. Resolve their configured
+    # site so Tesla-only admission and recovery guards use the same backend.
+    if _value(CONF_TESLA_ENERGY_SITE_ID):
+        return BATTERY_SYSTEM_TESLA
+
     # Anker Solix and custom controllers were only ever detected via an explicit
     # CONF_BATTERY_SYSTEM selection (no host-key fallback), so there is nothing
     # to infer for legacy entries here. Fall through to None → Tesla default.
