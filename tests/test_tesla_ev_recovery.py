@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
@@ -103,6 +104,11 @@ def harness(monkeypatch):
     automations = sys.modules.setdefault("power_sync.automations", types.ModuleType("power_sync.automations"))
     automations.__path__ = [str(ROOT / "automations")]
     monkeypatch.setitem(sys.modules, "power_sync.automations.ev_ownership", fake)
+    # Other standalone tests replace the HA package and its lazy modules while
+    # workers are collecting the full suite.  Bind both the module table and
+    # the package attribute so relative imports resolve this fixture's fake.
+    monkeypatch.setattr(automations, "ev_ownership", fake, raising=False)
+    monkeypatch.setattr(recovery, "_registry", lambda _hass: hass.entity_registry)
     entry = _Entry()
     entry.data = {"profile": "ev"}
     entry.options = {}
@@ -549,7 +555,14 @@ async def test_cancelled_persist_is_drained_and_rollback_is_saved(harness, monke
     task = asyncio.create_task(
         recovery.async_begin_attempt(hass, entry, VIN_A, route, "start", route["entity_id"])
     )
-    await started.wait()
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+    except asyncio.TimeoutError:
+        task.cancel()
+        release.set()
+        with suppress(BaseException):
+            await task
+        pytest.fail("persistence coroutine did not start within the test bound")
     task.cancel()
     release.set()
     with pytest.raises(asyncio.CancelledError):

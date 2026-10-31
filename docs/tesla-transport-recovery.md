@@ -57,7 +57,7 @@ outcomes; a completed acknowledged producer does not leave a phantom queue
 hazard simply because telemetry is delayed. Verified pre-write errors permit
 fallback, while ambiguous mutating-command errors retain their attempt.
 
-The provider contract was checked against [the modern adapter source](https://github.com/Teslemetry/teslemetry_bluetooth/blob/a3a672d4116dfa9b29a68c73238e5380399736c2/custom_components/teslemetry_bluetooth/vehicle.py)
+The provider contract was checked against [the modern adapter source](https://github.com/Teslemetry/hass-teslemetry-bluetooth/blob/a3a672d4116dfa9b29a68c73238e5380399736c2/custom_components/teslemetry_bluetooth/vehicle.py)
 and [tesla-fleet-api 1.20.0's Bluetooth contract](https://github.com/Teslemetry/python-tesla-fleet-api/blob/v1.20.0/docs/bluetooth_vehicles.md).
 
 ## Native battery charge and discharge

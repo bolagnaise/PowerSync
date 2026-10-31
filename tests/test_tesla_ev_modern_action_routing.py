@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import sys
+import types
 from types import SimpleNamespace
 import time
 from unittest.mock import AsyncMock
@@ -106,6 +108,27 @@ def _both_native_action_harness():
     entry = _Entry()
     entry.options = {"ev_provider": actions.EV_PROVIDER_BOTH}
     return hass, entry
+
+
+def _pin_registry_bindings(monkeypatch, hass):
+    """Keep lazy HA registry imports local to this synthetic HA instance."""
+    ha_root = sys.modules.get("homeassistant")
+    helpers = sys.modules.get("homeassistant.helpers")
+    entity_registry = types.ModuleType("homeassistant.helpers.entity_registry")
+    device_registry = types.ModuleType("homeassistant.helpers.device_registry")
+    entity_registry.async_get = lambda _hass: hass.entity_registry
+    device_registry.async_get = lambda _hass: hass.device_registry
+    monkeypatch.setitem(sys.modules, "homeassistant.helpers.entity_registry", entity_registry)
+    monkeypatch.setitem(sys.modules, "homeassistant.helpers.device_registry", device_registry)
+    if helpers is not None:
+        monkeypatch.setattr(helpers, "entity_registry", entity_registry, raising=False)
+        monkeypatch.setattr(helpers, "device_registry", device_registry, raising=False)
+    if ha_root is not None:
+        monkeypatch.setattr(ha_root, "helpers", helpers, raising=False)
+    # actions imported these bindings at module load; pin those direct refs as
+    # well as the lazy modules used by teslemetry_bluetooth_commands.
+    monkeypatch.setattr(actions, "er", entity_registry)
+    monkeypatch.setattr(actions, "dr", device_registry)
 
 
 def _target(operation: str) -> BluetoothCommandTarget:
@@ -233,6 +256,7 @@ async def test_both_provider_uses_shared_native_router_for_all_operations(
     operation, action_name, params, expected_call, monkeypatch
 ):
     hass, entry = _both_native_action_harness()
+    _pin_registry_bindings(monkeypatch, hass)
     params = {"vehicle_vin": VIN, "charger_type": "tesla", **params}
     monkeypatch.setattr(
         actions, "_tesla_transport_authority", lambda *args, **kwargs: lambda: True
@@ -280,6 +304,7 @@ async def test_quarantined_native_anchor_keeps_rate_and_limit_on_same_provider(
     operation, expected, monkeypatch
 ):
     hass, entry = _both_native_action_harness()
+    _pin_registry_bindings(monkeypatch, hass)
     params = {"vehicle_vin": VIN, "charger_type": "tesla"}
     recovery = importlib.import_module("power_sync.tesla_ev_recovery")
     monkeypatch.setattr(

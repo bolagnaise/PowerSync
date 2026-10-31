@@ -44,6 +44,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parent.parent / "custom_components" / "power_sync"
 
@@ -128,6 +130,16 @@ actions = importlib.import_module("power_sync.automations.actions")
 ev_ownership = importlib.import_module("power_sync.automations.ev_ownership")
 
 
+@pytest.fixture(autouse=True)
+def _current_registry_helpers(monkeypatch):
+    """Keep registry reads on this test's HA instance across mixed collection."""
+    monkeypatch.setattr(actions.er, "async_get", lambda hass: hass.entity_registry)
+    monkeypatch.setattr(actions.dr, "async_get", lambda hass: hass.device_registry)
+    helpers = sys.modules["homeassistant.helpers"]
+    monkeypatch.setattr(helpers, "entity_registry", actions.er)
+    monkeypatch.setattr(helpers, "device_registry", actions.dr)
+
+
 class _State:
     def __init__(self, entity_id: str, state: str, attributes: dict | None = None) -> None:
         self.entity_id = entity_id
@@ -166,11 +178,23 @@ class _Services:
 
 class _Hass:
     def __init__(self, states: list[_State] | None = None) -> None:
-        self.data = {"power_sync": {"entry-1": {}}}
+        self.data = {"power_sync": {"entry-1": {"automation_store": SimpleNamespace(
+            _data={}, async_save=AsyncMock(return_value=None))}}}
         self.states = _States(states or [])
         self.services = _Services()
         self.entity_registry = SimpleNamespace(entities={})
+        self.entity_registry.async_get = lambda entity_id: self.entity_registry.entities.get(entity_id)
         self.device_registry = SimpleNamespace(devices={})
+        self.device_registry.async_get = lambda device_id: self.device_registry.devices.get(device_id)
+
+
+def _register_ble_command(hass, prefix, operation="start"):
+    entity_id = (f"number.{prefix}_charging_amps" if operation == "rate"
+                 else f"switch.{prefix}_charger")
+    hass.states._states.setdefault(entity_id, _State(entity_id, "10" if operation == "rate" else "off"))
+    hass.entity_registry.entities[entity_id] = SimpleNamespace(
+        entity_id=entity_id, platform="esphome", config_entry_id=f"bridge-{prefix}",
+        device_id=f"bridge-{prefix}", unique_id=f"bridge-{prefix}-{operation}", disabled_by=None)
 
 
 class _Entry:
@@ -398,6 +422,7 @@ def test_site_admission_denial_terminates_ble_to_fleet_start_fallback(monkeypatc
     prefix = 'bridge_alpha'
     charger = actions.TESLA_BLE_SWITCH_CHARGER.format(prefix=prefix)
     hass.states._states[charger] = _State(charger, 'off')
+    _register_ble_command(hass, prefix)
     entry = _both_provider_entry(prefix, f'{VIN_B}={prefix}')
     monkeypatch.setattr(actions, '_is_ble_available', lambda *args: True)
     monkeypatch.setattr(actions, '_wake_tesla_ble', AsyncMock(return_value=True))
@@ -759,6 +784,12 @@ def test_both_provider_start_uses_matching_teslemetry_bt_when_ble_is_unavailable
         "bridge_alpha,bridge_beta",
         f"{VIN_A}=bridge_beta,{VIN_B}=bridge_alpha",
     )
+    for entity_id, value in ((f"switch.{VIN_B.lower()}_charge", "off"),
+                             (f"sensor.{VIN_B.lower()}_charging_state", "Stopped")):
+        hass.states._states[entity_id] = _State(entity_id, value)
+        hass.entity_registry.entities[entity_id] = SimpleNamespace(
+            entity_id=entity_id, platform="tesla_bluetooth", config_entry_id="local-b",
+            device_id="local-b", unique_id=entity_id, disabled_by=None)
     ble_start = AsyncMock(return_value=True)
     tbt_start = AsyncMock(return_value=True)
     monkeypatch.setattr(actions, "_start_ev_charging_ble", ble_start)
@@ -781,12 +812,13 @@ def test_both_provider_start_uses_matching_teslemetry_bt_when_ble_is_unavailable
 
     assert result is True
     ble_start.assert_not_awaited()
-    tbt_start.assert_awaited_once_with(hass, VIN_B)
+    tbt_start.assert_awaited_once_with(hass, VIN_B.lower())
     fleet_entity.assert_not_awaited()
 
 
 def test_both_provider_start_prefers_paired_esphome_ble(monkeypatch):
     hass = _two_fleet_vehicle_hass()
+    _register_ble_command(hass, "bridge_alpha")
     entry = _both_provider_entry(
         "bridge_alpha,bridge_beta",
         f"{VIN_A}=bridge_beta,{VIN_B}=bridge_alpha",
@@ -815,6 +847,7 @@ def test_both_provider_start_prefers_paired_esphome_ble(monkeypatch):
 
 def test_both_provider_amp_command_uses_paired_ble_and_vehicle_cap(monkeypatch):
     hass = _two_fleet_vehicle_hass()
+    _register_ble_command(hass, "bridge_alpha", "rate")
     entry = _both_provider_entry(
         "bridge_alpha,bridge_beta",
         f"{VIN_A}=bridge_beta,{VIN_B}=bridge_alpha",

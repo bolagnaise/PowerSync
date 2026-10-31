@@ -296,6 +296,20 @@ actions = importlib.import_module("power_sync.automations.actions")
 
 
 @pytest.fixture(autouse=True)
+def _bind_actions_to_test_hass_registries(monkeypatch):
+    """Keep lazy HA registry lookups scoped to each action test harness.
+
+    Several test modules install lightweight Home Assistant registry modules
+    at collection time and reuse the same ``async_get`` attribute.  The Tesla
+    transport journal now pins entity identity through those lookups, so a
+    later module's process-wide lambda can otherwise make this file inspect a
+    different fake registry than the ``_Hass`` passed to the action.
+    """
+    monkeypatch.setattr(actions.er, "async_get", lambda hass: hass.entity_registry)
+    monkeypatch.setattr(actions.dr, "async_get", lambda hass: hass.device_registry)
+
+
+@pytest.fixture(autouse=True)
 def _reset_ev_action_module_state():
     """Keep mutable EV action state isolated from test execution order."""
     mutable_state = (
