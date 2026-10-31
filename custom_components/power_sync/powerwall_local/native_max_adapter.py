@@ -51,7 +51,8 @@ class NativeMaxChargeAdapter:
                  read_tariff, upload, restorable, forcing_tariff,
                  budget, entry_id, site, tariff_matches=None, monotonic=time.monotonic,
                  settle_interval=5, direction="charge", clock=time.time,
-                 read_export_rule=None, write_export_rule=None):
+                 read_export_rule=None, write_export_rule=None,
+                 reconcile_managed=None, reconcile_timeout=20):
         self.client, self.identity = client, identity
         self.current_identity, self.policy, self.config = current_identity, policy, config
         self.read_tariff, self.upload, self.restorable = read_tariff, upload, restorable
@@ -71,12 +72,17 @@ class NativeMaxChargeAdapter:
         self._export_limit_ready = False
         self.guard_denial_reason = None
         self.read_export_rule, self.write_export_rule = read_export_rule, write_export_rule
+        self.reconcile_managed = reconcile_managed
+        self.reconcile_timeout = reconcile_timeout
         self._export_observation = None
         self._cloud_export_owned = False
         self._export_cloud_checked = False
         self._export_conflict = False
         self._export_missing_at = None
         self._export_untracked_ready = False
+        self.ev_coexistence = False
+        self._ev_coexistence_verified = False
+        self.export_preparation_required = False
 
     def _can_prepare_untracked_export(self, config):
         """An omitted preference permits explicit setup, never inferred permission."""
@@ -253,7 +259,29 @@ class NativeMaxChargeAdapter:
         except (ValueError, TypeError):
             return self._deny("native_max_dispatch_config_invalid")
 
-    def _forcing_permitted(self, native_config=None, *, require_export_limit=False):
+    def _site_ev_coexistence(self, config, info, native_limit):
+        """Grant coexistence only from fresh finite native/software site caps."""
+        if not isinstance(info, dict) or type(native_limit) not in (int, float):
+            return False
+        if not math.isfinite(native_limit) or native_limit <= 0:
+            return False
+        # A current DCQ sample can carry an old signed config. Only the
+        # config coordinator's provenance can authorize site-controller
+        # coexistence; a missing stamp remains fail-closed.
+        config_observed = getattr(self._snapshot, "config_observed_monotonic", None)
+        if (type(config_observed) not in (int, float) or not math.isfinite(config_observed)
+                or not 0 <= self.monotonic() - config_observed <= 5):
+            return False
+        key = ("optimization_max_grid_import_w" if self.direction == "charge"
+               else "optimization_max_grid_export_w")
+        software = config.get(key)
+        if software in (None, 0):
+            return True
+        return (type(software) in (int, float) and math.isfinite(software)
+                and software > 0 and native_limit <= software)
+
+    def _forcing_permitted(self, native_config=None, *, require_export_limit=False,
+                           preparing=False):
         snapshot = self._snapshot
         if snapshot is None or self._observed_at is None:
             return self._deny("native_snapshot_unavailable")
@@ -262,8 +290,11 @@ class NativeMaxChargeAdapter:
         maximum = self.budget.native_max_claim(self.site)
         if maximum and maximum.get("token") != self.token:
             return self._deny("native_max_site_already_owned")
-        if any(r.get("site") == self.site for r in self.budget.managed.values()):
-            return self._deny("managed_ev_ownership_present")
+        if (maximum and maximum.get("direction", "charge") != self.direction):
+            return self._deny("native_max_direction_changed")
+        self.ev_coexistence = False
+        self._ev_coexistence_verified = False
+        self.export_preparation_required = False
         try:
             config = dict(self.config())
             if self.planning_request:
@@ -280,6 +311,24 @@ class NativeMaxChargeAdapter:
                                   native_import_limit_kw=limits.get("max_site_meter_power_ac"),
                                   native_export_limit_kw=limits.get("min_site_meter_power_ac"))
             permission = self._grid_value(raw)
+            coexistence_limit = imported
+            if self.direction == "discharge":
+                try:
+                    _, coexistence_limit = site_grid_limits_w(
+                        type("NativeBounds", (), {"raw": {"config": raw}})())
+                except (ValueError, TypeError, KeyError):
+                    coexistence_limit = None
+            self._ev_coexistence_verified = self._site_ev_coexistence(
+                config, info, coexistence_limit)
+            if self.direction == "discharge" and not self._ev_coexistence_verified:
+                configured = config.get("optimization_max_grid_export_w")
+                self.export_preparation_required = bool(
+                    preparing and self._export_cap_can_be_tightened(
+                        info, coexistence_limit, configured))
+            if (any(r.get("site") == self.site for r in self.budget.managed.values())
+                    and not self._ev_coexistence_verified
+                    and not self.export_preparation_required):
+                return self._deny("managed_ev_ownership_present")
             if self.direction == "discharge":
                 if not isinstance(info, dict) or "min_site_meter_power_ac" not in info:
                     return self._deny("native_export_limit_missing")
@@ -301,7 +350,7 @@ class NativeMaxChargeAdapter:
                 if (configured is not None
                         # A known unset sentinel can be tightened at acquisition.
                         # Forcing still requires a verified finite software cap.
-                        and ((self._export_limit_ready or require_export_limit)
+                        and (not preparing and (self._export_limit_ready or require_export_limit)
                             and (exported is None or exported > configured))):
                     return self._deny("native_export_limit_exceeds_software_limit",
                                       native_export_limit_w=exported, software_export_limit_w=configured)
@@ -327,6 +376,7 @@ class NativeMaxChargeAdapter:
                                       software_reserve=config.get("optimization_backup_reserve", .2),
                                       hardware_reserve=config.get("hardware_backup_reserve", 0),
                                       load_w=snapshot.load_w, solar_w=snapshot.solar_w)
+                self.ev_coexistence = self._ev_coexistence_verified
                 return True
             if type(permission) is not bool:
                 return self._deny("grid_charging_permission_unknown")
@@ -337,6 +387,7 @@ class NativeMaxChargeAdapter:
                 native_import_max_w=imported, native_import_known=isinstance(info, dict),
                 pending_ev_w=self.budget.unobserved_w(self.site),
                 native_ev_active=self.budget.site_armed(self.site),
+                ev_coexistence=self._ev_coexistence_verified,
                 grid_charging_allowed=(permission is False or (
                     permission is True and self.planning_request
                     and not self._grid_charge_ready
@@ -355,6 +406,8 @@ class NativeMaxChargeAdapter:
                                   soc_percent=snapshot.soc,
                                   soc_cap_fraction=config.get("optimization_grid_charge_soc_cap", 1),
                                   evidence_age_s=self.monotonic()-self._observed_at)
+            if eligibility.eligible:
+                self.ev_coexistence = self._ev_coexistence_verified
             return eligibility.eligible
         except (ValueError, TypeError, KeyError):
             return self._deny("native_limit_or_config_invalid")
@@ -364,30 +417,79 @@ class NativeMaxChargeAdapter:
         return (started if type(started) in (int, float) and math.isfinite(started)
                 and fallback <= started <= self.monotonic() else fallback)
 
-    async def guard(self, *, native_config=None):
+    @staticmethod
+    def _export_cap_can_be_tightened(info, native_limit, configured):
+        return (isinstance(info, dict) and type(native_limit) in (int, float)
+                and math.isfinite(native_limit) and native_limit > 0
+                and type(configured) in (int, float) and math.isfinite(configured)
+                and configured > 0 and native_limit > configured)
+
+    async def guard(self, *, native_config=None, preparing=False):
         self.guard_denial_reason = "native_max_control_not_permitted"
         if not self.authority():
             return False
         await self.budget.load()
+        reconcile = getattr(self, "reconcile_managed", None)
         try:
             started = self.monotonic()
-            refresh = getattr(self.client, "get_control_snapshot", None)
-            self._snapshot = await asyncio.wait_for(
-                refresh(native_config) if native_config is not None and callable(refresh)
-                else self.client.get_snapshot(), timeout=10)
+            if native_config is not None:
+                if not isinstance(native_config, dict):
+                    return self._deny("native_config_unavailable")
+                # A supplied writer config has no trustworthy timestamp. Read
+                # a complete fresh snapshot and require exact config equality;
+                # never promote DCQ receipt time into config provenance.
+                self._snapshot = await asyncio.wait_for(self.client.get_snapshot(), timeout=10)
+                fresh_config = (self._snapshot.raw.get("config")
+                                 if isinstance(self._snapshot.raw, dict) else None)
+                if fresh_config != native_config:
+                    return self._deny("native_config_changed")
+                config_provenance = getattr(self._snapshot, "config_observed_monotonic", None)
+                observed = self._sample_started(self._snapshot, started)
+                if not 0 <= self.monotonic() - observed <= 5:
+                    refresh = getattr(self.client, "get_control_snapshot", None)
+                    if not callable(refresh):
+                        return self._deny("native_snapshot_stale")
+                    refreshed_started = self.monotonic()
+                    refreshed = await asyncio.wait_for(refresh(native_config), timeout=10)
+                    refreshed_config = (refreshed.raw.get("config")
+                                        if isinstance(refreshed.raw, dict) else None)
+                    if refreshed_config != native_config:
+                        return self._deny("native_config_changed")
+                    # Preserve the original signed-config provenance exactly;
+                    # only DCQ observation time may advance on this retry.
+                    refreshed.config_observed_monotonic = config_provenance
+                    self._snapshot = refreshed
+                    started = refreshed_started
+            else:
+                self._snapshot = await asyncio.wait_for(self.client.get_snapshot(), timeout=10)
             self._observed_at = self._sample_started(self._snapshot, started)
             if self.direction == "discharge":
                 await self._observe_export_rule(self._snapshot.raw.get("config"))
             if native_config is None and not 0 <= self.monotonic() - self._observed_at <= 5:
-                # Refresh telemetry once, not the slow config read/transaction.
-                raw = self._snapshot.raw.get("config")
+                # Refresh DCQ once without repeating the signed config read.
+                # This path cannot grant config coexistence because the
+                # supplied config has no fresh provenance; writer fences use
+                # the explicit native_config branch above instead.
                 started = self.monotonic()
+                raw = self._snapshot.raw.get("config") if isinstance(self._snapshot.raw, dict) else None
+                refresh = getattr(self.client, "get_control_snapshot", None)
                 self._snapshot = await asyncio.wait_for(
                     refresh(raw) if isinstance(raw, dict) and callable(refresh)
                     else self.client.get_snapshot(), timeout=10)
                 self._observed_at = self._sample_started(self._snapshot, started)
             self.guard_denial_reason = "native_max_policy_denied"
-            permitted = self._forcing_permitted()
+            permitted = self._forcing_permitted(preparing=preparing)
+            if (not permitted and self.direction == "charge" and callable(reconcile)
+                    and self.guard_denial_reason == "managed_ev_ownership_present"
+                    and any(record.get("site") == self.site
+                            for record in self.budget.managed.values())):
+                try:
+                    await asyncio.wait_for(reconcile(self.site), timeout=self.reconcile_timeout)
+                except Exception:
+                    _LOGGER.warning("Native Powerwall managed EV reconciliation unavailable")
+                if not self.authority():
+                    return False
+                permitted = self._forcing_permitted()
             if permitted:
                 self.guard_denial_reason = None
             return permitted
@@ -497,9 +599,11 @@ class NativeMaxChargeAdapter:
                 return False
         return True
 
-    async def claim(self, token, deadline):
+    async def claim(self, token, deadline, *, preparing=False):
         self.token = token
-        return await self.budget.claim_native_max(self.entry_id, self.site, token, deadline)
+        return await self.budget.claim_native_max(
+            self.entry_id, self.site, token, deadline, direction=self.direction,
+            ev_coexistence=self.ev_coexistence, preparing=preparing)
 
     async def release(self, token):
         result = await self.budget.release_native_max(self.entry_id, self.site, token)
@@ -522,13 +626,9 @@ class NativeMaxChargeAdapter:
 
     async def prepare(self, baseline, before_write, *, write_intent):
         """Enable an owned optimiser setting before any battery or tariff write."""
-        if baseline.get("export_permission_untracked") is True:
-            if not await self._prepare_export_limit(baseline, before_write, write_intent):
-                return False
-            if not await self._write_cloud_export("battery_ok", self._owned_before(baseline, before_write),
-                    write_intent, require_readback=False):
-                return False
-            self._export_untracked_ready = True
+        if (self.direction == "discharge"
+                and not await self._prepare_export_limit(baseline, before_write, write_intent)):
+            return False
         if baseline.get("grid_charge_blocked") is True:
             field = "disallow_charge_from_grid_with_solar_installed"
             checked = None
@@ -562,6 +662,17 @@ class NativeMaxChargeAdapter:
             await write_intent("local_confirmed")
         self._grid_charge_ready = True
         return await self.guard()
+
+    async def prepare_after_claim(self, baseline, before_write, *, write_intent):
+        """Write omitted export permission only after full cap coexistence proof."""
+        if baseline.get("export_permission_untracked") is not True:
+            return True
+        if not await self._write_cloud_export(
+                "battery_ok", self._owned_before(baseline, before_write),
+                write_intent, require_readback=False):
+            return False
+        self._export_untracked_ready = True
+        return True
 
     async def kick(self, baseline, before_write, *, deadline, write_intent):
         """Optional one-shot pulse, never a renewable local controller."""
@@ -687,9 +798,10 @@ class NativeMaxChargeAdapter:
             info = config.get("site_info", {}) if isinstance(config, dict) else {}
             observed = info.get("min_site_meter_power_ac")
             configured = self.config().get("optimization_max_grid_export_w")
-            return (observed in (original, target) and self._forcing_permitted(config)
+            return (observed in (original, target)
+                    and self._forcing_permitted(config, preparing=True)
                     and (configured is None or -target * 1000 <= configured))
-        if target != original:
+        if target != original and not self._export_limit_ready:
             fence = await before_write()
             checked = None
             def validate(config):
@@ -706,17 +818,22 @@ class NativeMaxChargeAdapter:
                     before_submit=lambda until: write_intent("local", until))):
                 return False
         current = await self.client._transport.read_config(self.client._din)
-        if (self._observed_at is None
-                or not 0 <= self.monotonic() - self._observed_at <= 5):
-            # The acknowledged write and its readback can outlive the earlier
-            # telemetry grant. Acquire fresh evidence rather than rejecting a
-            # correctly applied cap solely because that round trip was slow.
-            # Use the new config too: a later external edit must not inherit
-            # the earlier readback's permission. No cap write is replayed.
-            if await self.guard() is not True:
-                return False
-            current = self._snapshot.raw.get("config")
-        if not owned(current) or not self._forcing_permitted(current, require_export_limit=True):
+        if not isinstance(current, dict):
+            return False
+        # The write readback has no independent provenance. Acquire a complete
+        # no-argument snapshot and require exact config equality before the
+        # coexisting/forcing proof; get_control_snapshot(raw) deliberately
+        # leaves config provenance unknown and cannot authorize this boundary.
+        started = self.monotonic()
+        fresh = await asyncio.wait_for(self.client.get_snapshot(), timeout=10)
+        fresh_config = fresh.raw.get("config") if isinstance(fresh.raw, dict) else None
+        if fresh_config != current:
+            return False
+        self._snapshot = fresh
+        self._observed_at = self._sample_started(fresh, started)
+        if (not 0 <= self.monotonic() - self._observed_at <= 5
+                or not owned(current)
+                or not self._forcing_permitted(current, require_export_limit=True)):
             return False
         await write_intent("local_confirmed")
         self._export_limit_ready = True

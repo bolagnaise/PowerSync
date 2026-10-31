@@ -19321,6 +19321,27 @@ class ChargingBoostView(HomeAssistantView):
             "tesla_energy_site_id", "powerwall_local_energy_site_id",
         )})
 
+    def _is_valid_boost_vehicle_id(self, vehicle_id: object) -> bool:
+        """Accept a canonical VIN or a configured standalone BLE identity."""
+        if not isinstance(vehicle_id, str):
+            return False
+        if (len(vehicle_id) == 17 and vehicle_id.isalnum()
+                and not vehicle_id.isdigit()):
+            return True
+
+        config = {**self._config_entry.data, **self._config_entry.options}
+        if config.get(CONF_EV_PROVIDER) != EV_PROVIDER_TESLA_BLE:
+            return False
+        if not vehicle_id.startswith("ble_"):
+            return False
+        prefix = vehicle_id[4:]
+        if (not prefix or prefix == "_default"
+                or re.fullmatch(r"[a-z0-9_]+", prefix) is None):
+            return False
+        from .tesla_ble_mapping import configured_ble_prefixes
+
+        return prefix in configured_ble_prefixes(config)
+
     def _boost_observation(self, vehicle_id: str, after: str | None = None) -> str | None:
         from .ev_load import is_current_ev_power_observation
 
@@ -19588,8 +19609,8 @@ class ChargingBoostView(HomeAssistantView):
                 deadline = datetime.fromisoformat(record["expires_at"])
                 valid = (record["entry_id"] == self._config_entry.entry_id
                          and record["vehicle_id"] == vehicle_id
-                         and len(vehicle_id) == 17 and vehicle_id.isalnum()
-                         and not vehicle_id.isdigit() and deadline.tzinfo is not None
+                         and self._is_valid_boost_vehicle_id(vehicle_id)
+                         and deadline.tzinfo is not None
                          and isinstance(record.get("generation"), str) and bool(record["generation"])
                          and type(record.get("duration_minutes")) is int
                          and 1 <= record["duration_minutes"] <= 1440
@@ -19724,6 +19745,7 @@ class ChargingBoostView(HomeAssistantView):
                 return {"success": False, "message": "Failed to start boost charge",
                         "stops_at": original_deadline, "recovery_pending": True}
             state = ev_actions._dynamic_ev_state.get(self._config_entry.entry_id, {}).get(vehicle_id)
+            recovering = bool((state or {}).get("transport_recovery_pending"))
             _, lease = get_ev_ownership(self._hass, self._config_entry, vehicle_id)
             if (lease is not None and lease.get("owner_mode") != "boost"):
                 return {"success": False, "error": "Boost was superseded"}
@@ -19732,12 +19754,17 @@ class ChargingBoostView(HomeAssistantView):
             records[vehicle_id] = record
             ownership = claim_ev_ownership(
                 self._hass, self._config_entry, vehicle_id, owner_mode="boost",
-                command="start_boost", reason=f"Boost charge for {duration_minutes} minutes",
+                command="start_boost",
+                reason=("Boost plan waiting for charging recovery" if recovering
+                        else f"Boost charge for {duration_minutes} minutes"),
+                success=not recovering,
                 extra={"duration_minutes": duration_minutes, "expires_at": original_deadline,
-                       "target_soc": target_soc})
+                       "target_soc": target_soc, "recovery_pending": recovering})
             if state is not None:
                 state["ownership"] = ownership
-            record.update(status="active", session_id=(state or {}).get("session_id"),
+            record.update(status="recovering" if recovering else "active",
+                          unknown_start_outcome=recovering,
+                          session_id=(state or {}).get("session_id"),
                           ownership_generation=ownership["ownership_generation"])
             saved = await self._save_boost_state(record)
             if not current():
@@ -19763,7 +19790,10 @@ class ChargingBoostView(HomeAssistantView):
             applied_amps = int((state or {}).get("current_amps", 32) or 0)
             if applied_amps < 32:
                 warnings.append(f"Boost limited to {applied_amps}A by per-phase load management")
-            return {"success": True, "message": "Boost charge started",
+            return {"success": True,
+                    "message": ("Boost plan accepted; waiting for charging recovery"
+                                if recovering else "Boost charge started"),
+                    "charging_confirmed": not recovering, "recovery_pending": recovering,
                     "duration_minutes": duration_minutes, "target_soc": target_soc,
                     "stops_at": original_deadline, "warnings": warnings}
         except asyncio.CancelledError:
@@ -19901,10 +19931,9 @@ class ChargingBoostView(HomeAssistantView):
                     boost_vehicle_id = candidates.pop()
                 boost_vehicle_id = ev_actions._canonical_dynamic_tesla_vehicle_id(
                     self._hass, self._config_entry, boost_vehicle_id)
-                if (not isinstance(boost_vehicle_id, str) or len(boost_vehicle_id) != 17
-                        or not boost_vehicle_id.isalnum() or boost_vehicle_id.isdigit()):
+                if not self._is_valid_boost_vehicle_id(boost_vehicle_id):
                     return web.json_response({"success": False,
-                        "error": "Finite Boost requires an exact canonical VIN"}, status=400)
+                        "error": "Finite Boost requires an exact configured vehicle ID"}, status=400)
                 action_params["vehicle_vin"] = boost_vehicle_id
 
             # The absolute request deadline also fences time spent waiting for
@@ -34855,12 +34884,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         journal = await _native_max_store.async_load()
         recovery_direction = (journal or {}).get("baseline", {}).get("direction", "charge")
+
+        async def reconcile_managed(reconcile_site):
+            if reconcile_site != site:
+                return False
+            from .native_rate_admission import reconcile_managed_for_native_max
+            return await reconcile_managed_for_native_max(hass, budget, site)
+
         adapter = NativeMaxChargeAdapter(client=client, identity=identity,
             current_identity=_native_max_identity, policy=permitted, config=_local_powerwall_dispatch_config,
             read_tariff=read_tariff, upload=upload, restorable=_select_restorable_tesla_tariff,
             forcing_tariff={}, budget=budget, entry_id=entry.entry_id, site=site,
             tariff_matches=_tesla_tariff_matches_readback, direction=recovery_direction,
-            read_export_rule=read_export_rule, write_export_rule=write_export_rule)
+            read_export_rule=read_export_rule, write_export_rule=write_export_rule,
+            reconcile_managed=reconcile_managed)
         current = NativeMaxChargeSession(adapter, _native_max_store, changed=changed)
         await current.load()
         if not _local_powerwall_generation_current():
@@ -35053,7 +35090,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             controller.adapter.direction = direction
             controller.adapter.startup_kick = large_site
             controller.adapter.planning_request = targetless
-            if await controller.adapter.guard() is not True:
+            # Admission may prepare a tighter export cap under its durable
+            # restore owner. The session must verify that cap before granting
+            # coexistence or submitting any battery/tariff forcing command.
+            initial_guard = {"preparing": True} if direction == "discharge" else {}
+            if await controller.adapter.guard(**initial_guard) is not True:
                 if targetless or large_site:
                     reason = getattr(controller.adapter, "guard_denial_reason", None) or "native_max_policy_denied"
                     _LOGGER.warning("Native Powerwall %s admission refused: %s", direction, reason)
@@ -39438,9 +39479,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         context = call.context
         source = _control_call_source(call)
         confirm_restore = bool(call.data.get("_confirm_restore"))
+        # HA's public response request does not make the restore synchronous:
+        # only the private confirmation flag requires completed restoration.
+        response_requested = bool(getattr(call, "return_response", False))
 
         def _restore_not_completed(reason: str) -> dict[str, Any] | None:
-            return {"success": False, "error": reason} if confirm_restore else None
+            return {"success": False, "error": reason} if confirm_restore or response_requested else None
 
         expected_tesla_restore_generation = call.data.get(
             "_tesla_restore_generation"
@@ -39473,7 +39517,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     return _restore_not_completed("restoration superseded")
                 # The owning stop workflow completed; this response does not
                 # assert independent physical telemetry confirmation.
-                return {"success": True, "error": None} if confirm_restore else None
+                return {"success": True, "error": None} if confirm_restore or response_requested else None
         except NativeMaxRestorePending:
             # A manual click requests restoration; the session watcher retains
             # ownership and finishes physical verification in the background.
@@ -39484,6 +39528,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "Restore normal is in progress: Native Max settings restored; "
                 "awaiting physical settling"
             )
+            if response_requested:
+                return {"success": True, "error": None, "pending": True,
+                        "physical_effect_confirmed": False}
             return
         if _restore_request_superseded():
             return _restore_not_completed("restoration superseded")
@@ -40695,6 +40742,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.info("Restore normal: no force mode active and no saved state — nothing to restore")
             if confirm_restore:
                 return {"success": False, "error": "nothing to restore"}
+            if response_requested:
+                return {"success": True, "error": None, "noop": True}
             return
 
         try:
@@ -40812,14 +40861,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     "Tesla Hold SoC cleanup verified at %d%%",
                     normalized_saved_reserve,
                 )
-                return {"success": True, "error": None} if confirm_restore else None
+                return {"success": True, "error": None} if confirm_restore or response_requested else None
 
             # Get Tesla gateway config
             if not site_configs:
                 _LOGGER.error("Missing Tesla site ID or token for restore normal")
-                if confirm_restore:
-                    return {"success": False, "error": "Tesla site configuration unavailable"}
-                return
+                return _restore_not_completed("Tesla site configuration unavailable")
 
             session = async_get_clientsession(hass)
 
@@ -41289,12 +41336,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     return _restore_not_completed("restoration superseded")
                 if _schedule_tesla_restore_retry("one or more Tesla restore writes failed"):
                     await persist_force_mode_state()
-                if confirm_restore:
-                    return {
-                        "success": False,
-                        "error": "one or more Tesla restore writes failed",
-                    }
-                return
+                return _restore_not_completed("one or more Tesla restore writes failed")
 
             if not await _update_powerwall_store(
                 store, {"force_mode_state": None, "pending_tesla_restore": None},
@@ -41378,12 +41420,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             })
 
 
-            if confirm_restore:
+            if confirm_restore or response_requested:
                 return {"success": True, "error": None}
 
         except Exception as e:
             _LOGGER.error(f"Error in restore normal: {e}", exc_info=True)
-            if confirm_restore:
+            if confirm_restore or response_requested:
                 return {"success": False, "error": str(e)}
 
     # Per-brand capability matrix for Hold SoC. "supported=True" means the

@@ -11,7 +11,7 @@ import re
 import time
 from functools import wraps
 
-from .native_rate_budget import RUNTIME_KEY, site_identity
+from .native_rate_budget import RUNTIME_KEY, native_max_ev_coexistence, site_identity
 from .native_battery_flexibility import native_battery_flexibility
 from .teslemetry_solar import _EV_SUBMISSION_CONTEXT, ev_owner_snapshot
 
@@ -232,6 +232,14 @@ def _identity(registration):
 
 
 def _current_setting(hass, registry, registration, entity_id, operation):
+    if (registration is not None and registration.platform == "teslemetry_bluetooth"
+            and operation in ("start", "rate")):
+        from .teslemetry_bluetooth_commands import native_current_entity
+        native_entity_id = native_current_entity(hass, entity_id)
+        state = hass.states.get(native_entity_id) if native_entity_id else None
+        return (state if state is not None
+                and str(getattr(state, "state", "")).strip()
+                not in ("unknown", "unavailable") else None)
     if operation == "rate":
         return hass.states.get(entity_id)
     candidates = []
@@ -252,13 +260,13 @@ def _current_setting(hass, registry, registration, entity_id, operation):
 
 
 def _site_evidence(hass, entry, runtime, vin, profile):
-    from .native_rate_telemetry import vehicle_report, charging_unit_w
+    from .native_rate_telemetry import vehicle_report_for_entry, charging_unit_w
     from .optimization.tesla_schedules import _section, _timestamp
     from .powerwall_local.battery_dispatch import site_grid_limits_w
     local = (runtime.get("powerwall_local") or {}).get("coordinator")
     snapshot = getattr(local, "data", None)
     at = getattr(local, "last_success_ts", None) or 0
-    data = vehicle_report(hass, vin) or {}
+    data = vehicle_report_for_entry(hass, entry, vin) or {}
     charge = _section(data, "charge_state")
     unit = charging_unit_w(charge, profile)
     actual_ev = _number(charge.get("charger_actual_current")) * unit
@@ -294,16 +302,20 @@ def _site_evidence(hass, entry, runtime, vin, profile):
             "unit_w": unit}
 
 
-async def refresh_managed_records(hass, budget):
+async def refresh_managed_records(hass, budget, *, vins=None, site=None):
     """Observe each managed VIN independently; never infer it from a total."""
     if not budget.managed:
         return
     from homeassistant.helpers import entity_registry as er
-    from .native_rate_telemetry import vehicle_report, charging_unit_w
+    from .native_rate_telemetry import vehicle_report_for_entry, charging_unit_w
     from .optimization.tesla_schedules import _section, _timestamp
     from .automations.ev_ownership import get_ev_ownership
     registry = er.async_get(hass)
     for vin, record in tuple(budget.managed.items()):
+        if vins is not None and vin not in vins:
+            continue
+        if site is not None and record.get("site") != site:
+            continue
         runtime = hass.data.get("power_sync", {}).get(record.get("entry_id"), {})
         local = (runtime.get("powerwall_local") or {}).get("coordinator")
         if not getattr(local, "last_update_success", False):
@@ -316,7 +328,8 @@ async def refresh_managed_records(hass, budget):
         # unknown so reconciliation retains the uncertain reservation.
         setting_entity_id = record.get("setting_entity_id")
         state = hass.states.get(setting_entity_id) if setting_entity_id else None
-        charge = _section(vehicle_report(hass, vin) or {}, "charge_state")
+        entry = runtime.get("entry")
+        charge = _section(vehicle_report_for_entry(hass, entry, vin) or {}, "charge_state")
         current = _number(charge.get("charger_actual_current"))
         unit = charging_unit_w(charge, {})
         if not math.isfinite(current) or current < 0 or (current > 0 and unit <= 0):
@@ -325,7 +338,6 @@ async def refresh_managed_records(hass, budget):
         meter_at = getattr(local, "last_success_ts", 0) or 0
         if 0 <= time.time()-at <= 15 and 0 <= time.time()-meter_at <= 15 and abs(at-meter_at) <= 5:
             budget.observe(vin, watts=current*unit, at=at, meter_at=meter_at)
-        entry = runtime.get("entry")
         owner = get_ev_ownership(hass, entry, vin)[1] if entry is not None else None
         await budget.reconcile_managed(vin, {"identity": record["identity"],
             "amps": _number(getattr(state, "state", None)), "setting_at": _fresh_at(state),
@@ -333,6 +345,74 @@ async def refresh_managed_records(hass, budget):
             "charging": str(charge.get("charging_state", "")).lower() not in
                 {"stopped", "complete", "disconnected", "nopower", "no_power"},
             "owner_active": owner is not None})
+
+
+def _managed_reconcile_allowed(hass, budget, vin, record):
+    """Require an exact runtime and no live owner/task before read-only proof."""
+    task = budget.managed_tasks.get(vin)
+    if task is not None and not task.done():
+        return False
+    runtime = hass.data.get("power_sync", {}).get(record.get("entry_id"), {})
+    entry = runtime.get("entry")
+    if entry is None:
+        return False
+    from .automations.ev_ownership import get_ev_ownership
+    if get_ev_ownership(hass, entry, vin)[1] is not None:
+        return False
+    recovered = runtime.get("ev_recovered_ownership") or {}
+    if isinstance(recovered, dict) and any(
+            isinstance(lease, dict) and lease.get("owner")
+            for key, lease in recovered.items()
+            if str(key).upper() in {str(vin).upper(), "_DEFAULT"}):
+        return False
+    return True
+
+
+async def _refresh_managed_inputs(hass, budget, vin, record, *, timeout):
+    """Refresh only the matching vehicle source and its local meter."""
+    from .native_rate_telemetry import refresh_vehicle_sources
+    runtime = hass.data.get("power_sync", {}).get(record.get("entry_id"), {})
+    local = (runtime.get("powerwall_local") or {}).get("coordinator")
+    refresh = getattr(local, "async_request_refresh", None)
+    tasks = [refresh_vehicle_sources(hass, vin, timeout=timeout)]
+    if callable(refresh):
+        tasks.append(asyncio.wait_for(refresh(), timeout=timeout))
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def reconcile_managed_for_native_max(hass, budget, site, *, settle_seconds=3,
+                                           refresh_timeout=5):
+    """Offer exact retained records two fresh, read-only settlement samples.
+
+    This is called only at an explicit native Max admission. It never submits
+    an EV command and never deletes a journal directly; SharedRateBudget keeps
+    the existing identity, owner, task, freshness and two-sample fences.
+    """
+    await budget.load()
+    matching = [
+        (vin, record) for vin, record in tuple(budget.managed.items())
+        if record.get("site") == site
+    ]
+    if not matching:
+        return True
+    for vin, record in matching:
+        if vin not in budget.managed or not _managed_reconcile_allowed(hass, budget, vin, record):
+            continue
+        await _refresh_managed_inputs(hass, budget, vin, record, timeout=refresh_timeout)
+        await refresh_managed_records(hass, budget, vins={vin}, site=site)
+        if vin not in budget.managed:
+            continue
+        if not _managed_reconcile_allowed(hass, budget, vin, budget.managed[vin]):
+            continue
+        await asyncio.sleep(settle_seconds)
+        if vin not in budget.managed:
+            continue
+        record = budget.managed[vin]
+        if not _managed_reconcile_allowed(hass, budget, vin, record):
+            continue
+        await _refresh_managed_inputs(hass, budget, vin, record, timeout=refresh_timeout)
+        await refresh_managed_records(hass, budget, vins={vin}, site=site)
+    return not any(record.get("site") == site for record in budget.managed.values())
 
 
 async def prepare_ev_submission(hass, entity_id, *, operation, amps=None):
@@ -414,7 +494,21 @@ async def _prepare_ev_submission(hass, entity_id, *, operation, amps, committed)
     if isinstance(requested, bool) or not isinstance(requested, (int, float)) or not float(requested).is_integer() or not 0 <= requested <= 80:
         return False
     profile = context.get("params") or {}
+    rate_reduction = operation == "rate" and known_setting and requested <= current
     evidence = _site_evidence(hass, entry, runtime, vin, profile)
+    evidence["rate_reduction"] = rate_reduction
+    # A persisted native-Max capability is not current authority. Starts and
+    # rate increases must prove the live native session before reserving EV
+    # demand; an absent proof must not silently turn into ordinary headroom.
+    maximum = budget.native_max_claim(site)
+    native_required = operation == "start" or (operation == "rate" and not rate_reduction)
+    if maximum and native_required:
+        from .native_battery_flexibility import native_max_coexistence_proof
+        native_proof = native_max_coexistence_proof(
+            hass, entry, runtime, site, budget)
+        if native_proof is None or native_proof[3] not in ("charge", "discharge"):
+            raise SiteImportAdmissionDenied("Native Max coexistence authority is unavailable")
+        evidence["native_battery_proof"] = native_proof
     budget.observe(vin, watts=evidence["actual_ev_w"], at=evidence["vehicle_at"],
                    meter_at=evidence["meter_at"])
     unit = evidence["unit_w"]
@@ -422,7 +516,6 @@ async def _prepare_ev_submission(hass, entity_id, *, operation, amps, committed)
         if budget.site_armed(site):
             return False
         unit = 900  # No authority is gained from this conservative legacy bound.
-    evidence["rate_reduction"] = operation == "rate" and known_setting and requested <= current
     evidence["current_amps"] = int(current) if known_setting else None
     record = {"entry_id": entry.entry_id, "site": site, "identity": identity or entity_id,
               "entity_id": entity_id, "setting_entity_id": getattr(state, "entity_id", None),
@@ -439,7 +532,8 @@ async def _prepare_ev_submission(hass, entity_id, *, operation, amps, committed)
     original_pairing = pairing()
     battery = runtime.get("powerwall_battery_dispatch")
     generation = evidence.get("battery_generation")
-    native_proof = evidence.get("native_battery_proof")
+    native_proof = (evidence.get("native_battery_proof")
+                    if operation == "start" or not evidence.get("rate_reduction") else None)
     owners = context.get("owner_snapshot")
     if owners is None:
         owners = ev_owner_snapshot(hass, entry, vin)
@@ -460,6 +554,11 @@ async def _prepare_ev_submission(hass, entity_id, *, operation, amps, committed)
         if native_proof is None:
             return True
         latest = _site_evidence(hass, entry, runtime, vin, profile)
+        if (isinstance(native_proof, tuple) and native_proof
+                and native_proof[0] == "native_max_coexistence"):
+            from .native_battery_flexibility import native_max_coexistence_proof
+            return native_max_coexistence_proof(
+                hass, entry, runtime, site, budget) == native_proof
         return latest.get("native_battery_proof") == native_proof
 
     def valid():
@@ -534,8 +633,12 @@ async def _prepare_ev_submission(hass, entity_id, *, operation, amps, committed)
             raise SiteImportAdmissionDenied("Site charging headroom changed before submission")
     maximum = budget.native_max_claim(site)
     max_token = ticket["record"].get("native_max_token")
+    max_direction = ticket["record"].get("native_max_direction")
+    max_coexistence = ticket["record"].get("native_max_ev_coexistence", False)
     if (not valid() or budget.revision != revision
-            or (maximum.get("token") if maximum else None) != max_token):
+            or (maximum.get("token") if maximum else None) != max_token
+            or (maximum.get("direction", "charge") if maximum else None) != max_direction
+            or native_max_ev_coexistence(maximum) != max_coexistence):
         raise SiteImportAdmissionDenied("Site charging ownership changed before submission")
     # The provider call follows synchronously in the caller. Keep its task
     # fenced through cancellation; an acknowledgement is not physical draw.

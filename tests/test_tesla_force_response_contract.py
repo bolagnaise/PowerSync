@@ -58,6 +58,9 @@ def force_handler(monkeypatch, source_tree):
             "HomeAssistantError": RuntimeError,
             "asyncio": asyncio, "active_battery_system": "tesla", "BATTERY_SYSTEM_TESLA": "tesla",
             "_local_powerwall_runtime": runtime, "time": SimpleNamespace(time=lambda: 100),
+            # The real force handlers validate manual durations before the
+            # monitoring gate and therefore need the production clock helper.
+            "dt_util": SimpleNamespace(utcnow=lambda: datetime.now(timezone.utc)),
             "_resolve_force_command_power_w": lambda direction, watts: int(watts),
             "_coerce_force_power_w": int,
             "battery_connection_profile": SimpleNamespace(monitoring_only=monitoring_only),
@@ -173,6 +176,26 @@ async def test_completed_local_or_native_stop_returns_confirmed_workflow_respons
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("owner", ["local", "native"])
+@pytest.mark.parametrize("requested", [False, True])
+async def test_completed_stop_response_request_does_not_require_strict_confirmation(restore_prefix, owner, requested):
+    handler, stop, downstream, runtime, _ = restore_prefix()
+    runtime["powerwall_battery_dispatch" if owner == "local" else "powerwall_native_max_charge"] = SimpleNamespace(pending=True)
+    call = service_call("user")
+    call.return_response = requested
+    response = await handler(call)
+    if requested:
+        assert isinstance(response, dict), "HA return_response=True requires a dictionary"
+        assert response == {"success": True, "error": None}
+        assert response.get("physical_effect_confirmed") is not True
+    else:
+        assert response is None
+    stop.assert_awaited_once()
+    downstream.assert_not_awaited()
+    assert runtime["pending_tesla_restore"] == {"id": "owned"}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("moment", ["before_stop", "after_stop"])
 async def test_superseded_confirmed_restore_returns_failure_without_further_routing(restore_prefix, moment):
     handler, stop, downstream, runtime, _ = restore_prefix(stop=False, superseded=moment)
@@ -202,6 +225,66 @@ async def test_pending_native_restore_preserves_existing_exception_and_backgroun
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("source,confirm,raises", [("manual", False, False), ("user", False, False),
+                                                   ("manual", True, True), ("validation", False, True)])
+async def test_requested_pending_native_restore_is_truthful_without_relaxing_strict_callers(
+        restore_prefix, source, confirm, raises):
+    handler, stop, downstream, runtime, pending_error = restore_prefix()
+    stop.side_effect = pending_error("physical settling remains pending")
+    call = service_call(source)
+    call.return_response = True
+    call.data["_confirm_restore"] = confirm
+    if raises:
+        with pytest.raises(pending_error, match="physical settling"):
+            await handler(call)
+    else:
+        response = await handler(call)
+        assert isinstance(response, dict), "HA return_response=True requires a dictionary"
+        assert response == {"success": True, "error": None, "pending": True,
+                            "physical_effect_confirmed": False}
+    downstream.assert_not_awaited()
+    assert runtime["pending_tesla_restore"] == {"id": "owned"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("moment", ["before_stop", "after_stop"])
+async def test_requested_superseded_stop_returns_failure_without_strict_flag(restore_prefix, moment):
+    handler, stop, downstream, _, _ = restore_prefix(superseded=moment)
+    call = service_call("user")
+    call.return_response = True
+    call.data["_tesla_restore_generation"] = 1
+    assert await handler(call) == {"success": False, "error": "restoration superseded"}
+    assert stop.await_count == int(moment == "after_stop")
+    downstream.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("requested,confirm,expected", [
+    (True, False, {"success": True, "error": None, "noop": True}),
+    (True, True, {"success": False, "error": "nothing to restore"}),
+    (False, True, {"success": False, "error": "nothing to restore"}),
+    (False, False, None),
+])
+async def test_actual_tesla_noop_response_contract_preserves_strict_and_nonresponse_callers(requested, confirm, expected):
+    from test_tesla_local_settings import restore_context
+    namespace, runtime, _, call = restore_context()
+    for key in ("force_charge_state", "force_discharge_state"):
+        namespace[key].update(active=False, saved_tariff=None, saved_operation_mode=None,
+                              saved_backup_reserve=None, saved_grid_charging_enabled=None,
+                              saved_export_rule=None, saved_states={})
+    runtime["pending_tesla_restore"] = None
+    call.data = {"_confirm_restore": confirm}
+    call.return_response = requested
+    response = await namespace["handle_restore_normal"](call)
+    if requested:
+        assert isinstance(response, dict), "HA return_response=True requires a dictionary"
+    assert response == expected
+    for name in ("_tesla_force_apply_operation_mode", "_tesla_force_apply_grid_charging",
+                 "_tesla_force_apply_export_rule", "send_tariff_to_tesla"):
+        namespace[name].assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_completed_stop_does_not_report_success_for_superseded_restore(restore_prefix):
     handler, _, downstream, _, _ = restore_prefix(stop=True, superseded="after_stop")
     call = service_call("validation")
@@ -211,15 +294,21 @@ async def test_completed_stop_does_not_report_success_for_superseded_restore(res
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("response_mode", ["confirmed", "requested", "unrequested"])
 @pytest.mark.parametrize("outcome,error", [
     ("completed", None), ("write_error", "restore driver failed"),
     ("persist_initial", "restore state could not be persisted"),
     ("persist_completion", "restore completion could not be persisted"),
     ("superseded", "restoration superseded"), ("monitoring", "blocked by monitoring mode"),
+    ("missing_site", "Tesla site configuration unavailable"),
+    ("unverified", "one or more Tesla restore writes failed"),
+    ("export_failed", "one or more Tesla restore writes failed"),
 ])
-async def test_full_tesla_restore_returns_completed_or_failed_confirmed_workflow(outcome, error):
+async def test_full_tesla_restore_returns_completed_or_failed_confirmed_workflow(outcome, error, response_mode):
     from test_tesla_local_settings import restore_context
     namespace, runtime, _, call = restore_context()
+    call.data["_confirm_restore"] = response_mode == "confirmed"
+    call.return_response = response_mode == "requested"
     original_active = namespace["force_discharge_state"]["active"]
     if outcome == "write_error":
         namespace["_tesla_force_apply_operation_mode"].side_effect = RuntimeError(error)
@@ -239,27 +328,43 @@ async def test_full_tesla_restore_returns_completed_or_failed_confirmed_workflow
         namespace["_tesla_force_apply_operation_mode"].side_effect = superseded
     elif outcome == "monitoring":
         namespace["_monitoring_mode_should_block_control"] = lambda call: True
+    elif outcome == "missing_site":
+        namespace["_get_tesla_site_configs"] = lambda *args: []
+    elif outcome == "unverified":
+        namespace["_tesla_force_apply_operation_mode"].return_value = {"confirmed_sites": [], "failed_sites": ["site"]}
+    elif outcome == "export_failed":
+        namespace["_tesla_force_apply_export_rule"].return_value = False
     response = await namespace["handle_restore_normal"](call)
-    assert response == {"success": error is None, "error": error}
-    assert response.get("physical_effect_confirmed") is not True
+    if response_mode == "unrequested":
+        assert response is None
+    else:
+        assert isinstance(response, dict), "HA return_response=True requires a dictionary"
+        assert response == {"success": error is None, "error": error}
+        assert response.get("physical_effect_confirmed") is not True
     if error is not None:
         assert namespace["force_discharge_state"]["active"] is original_active
-    if outcome in ("persist_initial", "monitoring"):
+    if outcome in ("persist_initial", "monitoring", "missing_site"):
         namespace["_tesla_force_apply_operation_mode"].assert_not_awaited()
+    if outcome in ("unverified", "export_failed"):
+        assert runtime["pending_tesla_restore"] is not None
+        namespace["async_track_point_in_utc_time"].assert_called_once()
     if outcome == "completed":
         assert runtime["pending_tesla_restore"] is None
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("response_mode", ["confirmed", "requested", "unrequested"])
 @pytest.mark.parametrize("outcome,error", [
     ("completed", None), ("missing_reserve", "saved backup reserve unavailable"),
     ("missing_site", "Tesla site configuration unavailable"),
     ("unverified", "saved reserve did not verify"), ("superseded", "restoration superseded"),
     ("persist_completion", "restore state could not be persisted"),
 ])
-async def test_tesla_hold_cleanup_confirmed_response_does_not_invent_completion(outcome, error):
+async def test_tesla_hold_cleanup_confirmed_response_does_not_invent_completion(outcome, error, response_mode):
     from test_tesla_local_settings import restore_context
     namespace, _, _, call = restore_context()
+    call.data["_confirm_restore"] = response_mode == "confirmed"
+    call.return_response = response_mode == "requested"
     for key in ("force_charge_state", "force_discharge_state"):
         namespace[key].update(active=False, saved_tariff=None, saved_operation_mode=None,
                               saved_grid_charging_enabled=None, saved_export_rule=None, saved_states={})
@@ -286,7 +391,12 @@ async def test_tesla_hold_cleanup_confirmed_response_does_not_invent_completion(
         async def fail_completion():
             return await persist() if hold["active"] else False
         namespace["persist_force_mode_state"] = fail_completion
-    assert await namespace["handle_restore_normal"](call) == {"success": error is None, "error": error}
+    response = await namespace["handle_restore_normal"](call)
+    if response_mode == "unrequested":
+        assert response is None
+    else:
+        assert isinstance(response, dict), "HA return_response=True requires a dictionary"
+        assert response == {"success": error is None, "error": error}
     if outcome in ("missing_reserve", "missing_site", "unverified"):
         assert hold["active"] is True
         namespace["async_track_point_in_utc_time"].assert_called_once()

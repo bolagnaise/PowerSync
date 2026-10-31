@@ -31,7 +31,7 @@ def native_max_charge_eligibility(*, source: str, requested_power_w,
         native_import_max_w, native_import_known: bool, pending_ev_w,
         native_ev_active: bool, grid_charging_allowed: bool,
         grid_connected: bool, soc, soc_cap, evidence_fresh: bool,
-        control_permitted: bool) -> NativeMaxChargeEligibility:
+        control_permitted: bool, ev_coexistence: bool = False) -> NativeMaxChargeEligibility:
     """Select deliberate native Max; never convert a precise generation.
 
     A finite software site-import cap requires a fresh native cap no higher
@@ -61,7 +61,8 @@ def native_max_charge_eligibility(*, source: str, requested_power_w,
         if configured > 0 and (imported is None or imported > configured):
             return denied("software_import_limit_requires_local_control")
     pending = _number(pending_ev_w)
-    if pending is None or pending != 0 or native_ev_active is not False:
+    if (ev_coexistence is not True
+            and (pending is None or pending != 0 or native_ev_active is not False)):
         return denied("ev_demand_requires_local_control")
     level, ceiling = _number(soc), _number(soc_cap)
     if level is None or ceiling is None or not 0 <= level < ceiling <= 100:

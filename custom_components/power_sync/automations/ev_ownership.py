@@ -488,6 +488,13 @@ def _runtime_snapshot(hass: Any, config_entry: Any) -> dict[str, Any]:
     if isinstance(entry.get("ev_boost_sessions"), dict):
         for vehicle_id in entry["ev_boost_sessions"]:
             reconcile_boost_supersession(hass, config_entry, vehicle_id)
+    missing_transport_recovery = object()
+    transport_recovery = entry.get("ev_transport_recovery", missing_transport_recovery)
+    # The recovery journal's empty schema was introduced after runtime state
+    # persistence.  Migrate absent/empty legacy footprints while preserving
+    # any nonempty malformed record for the recovery layer to reject safely.
+    if transport_recovery is missing_transport_recovery or transport_recovery == {}:
+        transport_recovery = {"vehicles": {}}
     return {
         "active_ownership": dict(get_ev_ownerships(hass, config_entry)),
         "last_commands": dict(get_ev_last_commands(hass, config_entry)),
@@ -500,6 +507,9 @@ def _runtime_snapshot(hass: Any, config_entry: Any) -> dict[str, Any]:
         # Stop obligations outlive the live lease/controller after a failed
         # stop, and must not disappear when restart clears active ownership.
         "boost_sessions": deepcopy(entry.get("ev_boost_sessions", {})),
+        # Provider uncertainty survives a session/lease replacement. Reload
+        # restores evidence for observation and cleanup, never Start authority.
+        "transport_recovery": deepcopy(transport_recovery),
         "saved_at": _now_iso(),
     }
 
@@ -565,6 +575,19 @@ def restore_ev_runtime_state(
         runtime_state.get("capability_refresh_records") or {}
     )
     stored_boost_sessions = runtime_state.get("boost_sessions", {})
+    missing_transport_recovery = object()
+    stored_transport_recovery = runtime_state.get(
+        "transport_recovery", missing_transport_recovery
+    )
+    # Older persisted runtime state had no recovery journal, or serialized an
+    # empty dict.  Both are valid empty journals under the current schema;
+    # retain every nonempty footprint unchanged so recovery can fail closed.
+    if (
+        stored_transport_recovery is missing_transport_recovery
+        or stored_transport_recovery == {}
+    ):
+        stored_transport_recovery = {"vehicles": {}}
+    entry["ev_transport_recovery"] = deepcopy(stored_transport_recovery)
     # Retain malformed records for diagnosis, without treating them as control
     # authority. The Boost restore path validates identity and the deadline.
     entry["ev_boost_sessions"] = deepcopy(stored_boost_sessions)

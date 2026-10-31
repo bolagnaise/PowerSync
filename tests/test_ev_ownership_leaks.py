@@ -39,10 +39,12 @@ import asyncio
 import importlib
 import sys
 import types
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parent.parent / "custom_components" / "power_sync"
@@ -128,6 +130,18 @@ actions = importlib.import_module("power_sync.automations.actions")
 ev_ownership = importlib.import_module("power_sync.automations.ev_ownership")
 
 
+@pytest.fixture(autouse=True)
+def _current_registry_helpers(monkeypatch):
+    """Keep registry reads on this test's HA instance across mixed collection."""
+    monkeypatch.setattr(actions.er, "async_get", lambda hass: hass.entity_registry)
+    monkeypatch.setattr(actions.dr, "async_get", lambda hass: hass.device_registry)
+    helpers = sys.modules["homeassistant.helpers"]
+    monkeypatch.setattr(helpers, "entity_registry", actions.er, raising=False)
+    monkeypatch.setattr(helpers, "device_registry", actions.dr, raising=False)
+    monkeypatch.setitem(sys.modules, "homeassistant.helpers.entity_registry", actions.er)
+    monkeypatch.setitem(sys.modules, "homeassistant.helpers.device_registry", actions.dr)
+
+
 class _State:
     def __init__(self, entity_id: str, state: str, attributes: dict | None = None) -> None:
         self.entity_id = entity_id
@@ -166,11 +180,23 @@ class _Services:
 
 class _Hass:
     def __init__(self, states: list[_State] | None = None) -> None:
-        self.data = {"power_sync": {"entry-1": {}}}
+        self.data = {"power_sync": {"entry-1": {"automation_store": SimpleNamespace(
+            _data={}, async_save=AsyncMock(return_value=None))}}}
         self.states = _States(states or [])
         self.services = _Services()
         self.entity_registry = SimpleNamespace(entities={})
+        self.entity_registry.async_get = lambda entity_id: self.entity_registry.entities.get(entity_id)
         self.device_registry = SimpleNamespace(devices={})
+        self.device_registry.async_get = lambda device_id: self.device_registry.devices.get(device_id)
+
+
+def _register_ble_command(hass, prefix, operation="start"):
+    entity_id = (f"number.{prefix}_charging_amps" if operation == "rate"
+                 else f"switch.{prefix}_charger")
+    hass.states._states.setdefault(entity_id, _State(entity_id, "10" if operation == "rate" else "off"))
+    hass.entity_registry.entities[entity_id] = SimpleNamespace(
+        entity_id=entity_id, platform="esphome", config_entry_id=f"bridge-{prefix}",
+        device_id=f"bridge-{prefix}", unique_id=f"bridge-{prefix}-{operation}", disabled_by=None)
 
 
 class _Entry:
@@ -398,6 +424,28 @@ def test_site_admission_denial_terminates_ble_to_fleet_start_fallback(monkeypatc
     prefix = 'bridge_alpha'
     charger = actions.TESLA_BLE_SWITCH_CHARGER.format(prefix=prefix)
     hass.states._states[charger] = _State(charger, 'off')
+    _register_ble_command(hass, prefix)
+    # Reach the intended admission branch with a genuine fresh, registry-bound
+    # BLE receipt.  Without this, the production session-health gate correctly
+    # blocks before prepare_ev_submission and the test never exercises the
+    # admission-denial/no-Fleet-fallback contract.
+    now = datetime.now(timezone.utc)
+    for entity_id, value, attributes in (
+        (f"sensor.{prefix}_charging_state", "Stopped", {}),
+        (f"sensor.{prefix}_charge_current", "0", {"unit_of_measurement": "A"}),
+    ):
+        state = _State(entity_id, value, attributes)
+        state.last_updated = now
+        state.last_changed = now
+        hass.states._states[entity_id] = state
+        hass.entity_registry.entities[entity_id] = SimpleNamespace(
+            entity_id=entity_id,
+            platform="esphome",
+            config_entry_id=f"bridge-{prefix}",
+            device_id=f"bridge-{prefix}",
+            unique_id=entity_id,
+            disabled_by=None,
+        )
     entry = _both_provider_entry(prefix, f'{VIN_B}={prefix}')
     monkeypatch.setattr(actions, '_is_ble_available', lambda *args: True)
     monkeypatch.setattr(actions, '_wake_tesla_ble', AsyncMock(return_value=True))
@@ -759,6 +807,12 @@ def test_both_provider_start_uses_matching_teslemetry_bt_when_ble_is_unavailable
         "bridge_alpha,bridge_beta",
         f"{VIN_A}=bridge_beta,{VIN_B}=bridge_alpha",
     )
+    for entity_id, value in ((f"switch.{VIN_B.lower()}_charge", "off"),
+                             (f"sensor.{VIN_B.lower()}_charging_state", "Stopped")):
+        hass.states._states[entity_id] = _State(entity_id, value)
+        hass.entity_registry.entities[entity_id] = SimpleNamespace(
+            entity_id=entity_id, platform="tesla_bluetooth", config_entry_id="local-b",
+            device_id="local-b", unique_id=entity_id, disabled_by=None)
     ble_start = AsyncMock(return_value=True)
     tbt_start = AsyncMock(return_value=True)
     monkeypatch.setattr(actions, "_start_ev_charging_ble", ble_start)
@@ -781,12 +835,13 @@ def test_both_provider_start_uses_matching_teslemetry_bt_when_ble_is_unavailable
 
     assert result is True
     ble_start.assert_not_awaited()
-    tbt_start.assert_awaited_once_with(hass, VIN_B)
+    tbt_start.assert_awaited_once_with(hass, VIN_B.lower())
     fleet_entity.assert_not_awaited()
 
 
 def test_both_provider_start_prefers_paired_esphome_ble(monkeypatch):
     hass = _two_fleet_vehicle_hass()
+    _register_ble_command(hass, "bridge_alpha")
     entry = _both_provider_entry(
         "bridge_alpha,bridge_beta",
         f"{VIN_A}=bridge_beta,{VIN_B}=bridge_alpha",
@@ -815,6 +870,7 @@ def test_both_provider_start_prefers_paired_esphome_ble(monkeypatch):
 
 def test_both_provider_amp_command_uses_paired_ble_and_vehicle_cap(monkeypatch):
     hass = _two_fleet_vehicle_hass()
+    _register_ble_command(hass, "bridge_alpha", "rate")
     entry = _both_provider_entry(
         "bridge_alpha,bridge_beta",
         f"{VIN_A}=bridge_beta,{VIN_B}=bridge_alpha",
@@ -1468,3 +1524,66 @@ def test_anonymous_tesla_manual_start_fails_closed_before_claim(monkeypatch):
     assert result is False
     assert ev_ownership.get_ev_ownerships(hass, entry) == {}
     assert actions._dynamic_ev_state == {}
+
+
+@pytest.mark.parametrize("transport_recovery", [None, {}])
+def test_restore_empty_transport_recovery_migrates_before_real_admission(
+    transport_recovery,
+):
+    """Existing installs without a recovery journal remain command-admissible."""
+    from power_sync import tesla_ev_recovery as recovery
+
+    hass = _Hass([_State("switch.car_charger", "off")])
+    _register_ble_command(hass, "car", "start")
+    entry = _Entry()
+    store = hass.data["power_sync"][entry.entry_id]["automation_store"]
+    store._data["ev_runtime_state"] = {}
+    if transport_recovery is not None:
+        store._data["ev_runtime_state"]["transport_recovery"] = transport_recovery
+
+    ev_ownership.restore_ev_runtime_state(hass, entry, store)
+    assert hass.data["power_sync"][entry.entry_id]["ev_transport_recovery"] == {
+        "vehicles": {}
+    }
+
+    ticket = asyncio.run(
+        recovery.async_begin_attempt(
+            hass,
+            entry,
+            "5YJTEST0000000001",
+            {"kind": "ble", "prefix": "car"},
+            "start",
+            "switch.car_charger",
+        )
+    )
+    assert ticket is not None
+    persisted = store._data["ev_runtime_state"]["transport_recovery"]
+    assert persisted["vehicles"]["5YJTEST0000000001"]["attempts"][ticket.attempt_id][
+        "outcome"
+    ] == "pending"
+
+
+@pytest.mark.parametrize("malformed", [None, {"legacy": {"unexpected": "payload"}}])
+def test_restore_malformed_transport_recovery_stays_fail_closed(malformed):
+    """Migration never erases an explicitly malformed journal footprint."""
+    from power_sync import tesla_ev_recovery as recovery
+
+    hass = _Hass([_State("switch.car_charger", "off")])
+    _register_ble_command(hass, "car", "start")
+    entry = _Entry()
+    store = hass.data["power_sync"][entry.entry_id]["automation_store"]
+    store._data["ev_runtime_state"] = {"transport_recovery": malformed}
+
+    ev_ownership.restore_ev_runtime_state(hass, entry, store)
+    assert hass.data["power_sync"][entry.entry_id]["ev_transport_recovery"] == malformed
+    assert ev_ownership._runtime_snapshot(hass, entry)["transport_recovery"] == malformed
+    assert asyncio.run(
+        recovery.async_begin_attempt(
+            hass,
+            entry,
+            "5YJTEST0000000001",
+            {"kind": "ble", "prefix": "car"},
+            "start",
+            "switch.car_charger",
+        )
+    ) is None

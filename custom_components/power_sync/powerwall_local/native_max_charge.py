@@ -164,17 +164,26 @@ class NativeMaxChargeSession:
                 raise NativeMaxChargeError("Native Max write authority expired or changed")
         return fence
 
-    async def _authorize(self, token, generation, *, native_config=None):
+    async def _authorize(self, token, generation, *, native_config=None,
+                         preparing=False):
         if not self.record or self.record["id"] != token:
             raise NativeMaxChargeError("Native Max request was replaced")
         # A denied/unknown current policy never authorizes a provider write.
-        permitted = (await self.adapter.guard() if native_config is None else
-                     await self.adapter.guard(native_config=native_config))
+        guard_kwargs = {}
+        if native_config is not None:
+            guard_kwargs["native_config"] = native_config
+        if preparing:
+            guard_kwargs["preparing"] = True
+        permitted = await self.adapter.guard(**guard_kwargs)
         if permitted is not True:
             raise NativeMaxChargeError("Native Max current policy denied charging")
         fence = self._active_fence(token, generation, self.monotonic())
         fence()
         return fence
+
+    async def _claim(self, token, deadline, *, preparing=False):
+        return await self.adapter.claim(
+            token, deadline, **({"preparing": True} if preparing else {}))
 
     async def _cancel_watch(self):
         task, self._watch_task = self._watch_task, None
@@ -263,8 +272,13 @@ class NativeMaxChargeSession:
                 await self._restore_locked()
             if generation != self._generation or self.clock() >= deadline:
                 raise NativeMaxChargeError("Native Max request expired before acquisition")
-            if self.adapter.authority() is not True or await self.adapter.guard() is not True:
+            preparation = (getattr(self.adapter, "direction", "charge") == "discharge")
+            if self.adapter.authority() is not True:
                 raise NativeMaxChargeError("Native Max current policy denied charging")
+            initial_guard = ({"preparing": True} if preparation else {})
+            if await self.adapter.guard(**initial_guard) is not True:
+                raise NativeMaxChargeError("Native Max current policy denied charging")
+            preparation = bool(getattr(self.adapter, "export_preparation_required", False))
             baseline = await self.adapter.capture()
             if not isinstance(baseline, dict) or not baseline:
                 raise NativeMaxChargeError("Native Max restore baseline is unavailable")
@@ -275,9 +289,9 @@ class NativeMaxChargeSession:
             try:
                 # Durable baseline and original deadline precede even admission.
                 await self._save()
-                if await self.adapter.claim(token, deadline) is not True:
+                if await self._claim(token, deadline, preparing=preparation) is not True:
                     raise NativeMaxChargeError("Native Max site admission was denied")
-                fence = await self._authorize(token, generation)
+                fence = await self._authorize(token, generation, preparing=preparation)
                 # Record possible mutation before the first provider command.
                 self.record["phase"] = "applying"
                 await self._save()
@@ -286,8 +300,24 @@ class NativeMaxChargeSession:
                     fence()  # storage/admission awaits must not extend a grant
                     prepare = getattr(self.adapter, "prepare", None)
                     if prepare is not None and await prepare(deepcopy(baseline),
-                            lambda native_config=None: self._authorize(token, generation, native_config=native_config), write_intent=self._write_intent) is not True:
+                            lambda native_config=None: self._authorize(
+                                token, generation, native_config=native_config,
+                                preparing=preparation),
+                            write_intent=self._write_intent) is not True:
                         raise NativeMaxChargeError("Native Max preparation readback was not confirmed")
+                    if preparation:
+                        # A fresh full guard and exact-token claim upgrade must
+                        # complete before any kick/resume/tariff write.
+                        await self._authorize(token, generation)
+                        if await self._claim(token, deadline) is not True:
+                            raise NativeMaxChargeError("Native Max coexistence admission was denied")
+                    post_prepare = getattr(self.adapter, "prepare_after_claim", None)
+                    if post_prepare is not None and await post_prepare(
+                            deepcopy(baseline),
+                            lambda native_config=None: self._authorize(
+                                token, generation, native_config=native_config),
+                            write_intent=self._write_intent) is not True:
+                        raise NativeMaxChargeError("Native Max export permission preparation was not confirmed")
                     kick = getattr(self.adapter, "kick", None)
                     if kick is not None:
                         await kick(deepcopy(baseline), lambda: self._authorize(token, generation),
@@ -301,7 +331,9 @@ class NativeMaxChargeSession:
                     await self._write_intent("kick_released")
                     await self._authorize(token, generation)
                     if await self.adapter.apply(deepcopy(baseline),
-                            lambda native_config=None: self._authorize(token, generation, native_config=native_config), write_intent=self._write_intent) is not True:
+                            lambda native_config=None: self._authorize(
+                                token, generation, native_config=native_config),
+                            write_intent=self._write_intent) is not True:
                         raise NativeMaxChargeError("Native Max command readback was not confirmed")
                     await self._authorize(token, generation)
                 self._apply_task = asyncio.create_task(apply())
