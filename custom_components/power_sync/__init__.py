@@ -2356,6 +2356,31 @@ def _get_ev_vehicles_status(hass, entry) -> list:
         if ev_provider == EV_PROVIDER_BOTH
         else {}
     )
+    if ev_provider == EV_PROVIDER_FLEET_API:
+        # Command provider selection does not erase explicit physical telemetry
+        # identity. Keep mapped BLE readings attached to their Fleet VIN while
+        # leaving standalone bridges and all command-routing config unchanged.
+        from .const import CONF_TESLA_BLE_VEHICLE_MAPPING
+        from .tesla_ble_mapping import (
+            TeslaBleMappingError,
+            configured_ble_prefixes,
+            parse_tesla_ble_vehicle_mapping,
+        )
+
+        try:
+            explicit_mapping = parse_tesla_ble_vehicle_mapping(
+                config.get(CONF_TESLA_BLE_VEHICLE_MAPPING)
+            )
+        except TeslaBleMappingError:
+            explicit_mapping = {}
+        fleet_ids = {_vehicle_identity_key(vin): vin for vin in fleet_vehicle_ids}
+        configured_prefixes = set(configured_ble_prefixes(config))
+        paired_prefixes = {
+            prefix: fleet_ids[_vehicle_identity_key(vin)]
+            for vin, prefix in explicit_mapping.items()
+            if prefix in configured_prefixes and prefix in ble_prefixes
+            and _vehicle_identity_key(vin) in fleet_ids
+        }
     away_fleet_vehicle_ids = {
         _vehicle_identity_key(vehicle.get("vehicle_id"))
         for vehicle in vehicles
@@ -2519,7 +2544,8 @@ def _get_ev_vehicles_status(hass, entry) -> list:
 
         bridge_vehicle_id = paired_prefixes.get(prefix)
         if (
-            bridge_vehicle_id
+            ev_provider == EV_PROVIDER_BOTH
+            and bridge_vehicle_id
             and _vehicle_identity_key(bridge_vehicle_id)
             in away_fleet_vehicle_ids
         ):
@@ -2590,7 +2616,7 @@ def _get_ev_vehicles_status(hass, entry) -> list:
             ble_observation["_site_presence_observed_at"] = (
                 ble_presence_observed_at
             )
-        if ev_provider == EV_PROVIDER_BOTH and bridge_vehicle_id:
+        if bridge_vehicle_id:
             ble_observation["bridge_vehicle_id"] = bridge_vehicle_id
             if (
                 _vehicle_identity_key(bridge_vehicle_id) in away_fleet_vehicle_ids
