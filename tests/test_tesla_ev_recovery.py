@@ -456,6 +456,21 @@ async def test_fence_proof_is_bound_to_exact_bridge_and_valid_receipt(harness, m
     assert ticket is not None
     await recovery.async_finish_attempt(ticket, "sent_unknown")
     hass.services.update_states = True
+    # Keep receipt timestamps on real wall time, but make the bounded
+    # monotonic polling window deterministic under full-suite load.
+    import time as wall_clock
+    monotonic_tick = 0.0
+
+    def controlled_monotonic():
+        nonlocal monotonic_tick
+        monotonic_tick += 0.001
+        return monotonic_tick
+
+    monkeypatch.setattr(
+        recovery,
+        "time",
+        types.SimpleNamespace(time=wall_clock.time, monotonic=controlled_monotonic),
+    )
     monkeypatch.setattr(recovery, "BLE_ISOLATION_TIMEOUT", 0.01)
     if invalid == "wrong_device":
         registrations["sensor.bridge_a_transport_fence"].device_id = "ble-device-b"
