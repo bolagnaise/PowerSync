@@ -56,6 +56,17 @@ _TAG_END = 0xFF
 _SIGNATURE_TTL_SECONDS = 12
 
 
+def manual_backup_is_absent(snapshot: Any) -> bool:
+    """Accept only an explicit absence from a typed native backup-events read.
+
+    Other scheduled backup events are distinct from the manual event. A
+    present manual event remains present even if it is inactive or future.
+    """
+    return (type(snapshot) is dict and "manual_backup" in snapshot
+            and snapshot["manual_backup"] is None
+            and type(snapshot.get("backup_events")) is list)
+
+
 def _mutation_label(envelope_bytes: bytes) -> str | None:
     """Exempt proven read envelopes; unknown wire messages are mutations.
 
@@ -842,25 +853,34 @@ class TEDAPIv1rTransport:
         """
         if duration_s < 60:
             raise ValueError("duration_s must be at least 60")
+        if end_ts is None:
+            end_ts = time.time() + min(duration_s, 86400)
 
         def before_send():
-            if end_ts is not None and time.time() >= end_ts:
+            if time.time() >= end_ts:
                 raise PowerwallLocalError("Max Backup request expired before submission")
 
         before_send()
 
+        try:
+            snapshot = await self.get_backup_events(din)
+        except Exception as err:
+            # A failed read is unknown; it cannot authorize skipping cancel.
+            _LOGGER.debug("Manual backup status unavailable: %s", type(err).__name__)
+            snapshot = None
+        before_send()
         # A lost cancellation can arrive after a replacement start. Keep the
         # caller's staged cleanup ownership until cancellation is acknowledged.
-        if await self.cancel_manual_backup(din) is not True:
+        # A fresh explicit absence avoids issuing that cancellation at all.
+        if not manual_backup_is_absent(snapshot) and await self.cancel_manual_backup(din) is not True:
             return False
 
         before_send()
         start_ts = int(time.time())
         seconds = min(duration_s, 86400)
-        if end_ts is not None:
-            seconds = min(seconds, int(end_ts) - start_ts)
-            if seconds < 1:
-                raise PowerwallLocalError("Max Backup request expired before packet creation")
+        seconds = min(seconds, int(end_ts) - start_ts)
+        if seconds < 1:
+            raise PowerwallLocalError("Max Backup request expired before packet creation")
 
         env = transport_pb2.MessageEnvelope()
         env.delivery_channel = transport_pb2.DELIVERY_CHANNEL_HERMES_COMMAND
@@ -871,8 +891,7 @@ class TEDAPIv1rTransport:
         teg_req.scheduling_info.duration_seconds = seconds
         teg_req.scheduling_info.priority = (1 << 64) - 1
 
-        resp = await self.post_v1r(env.SerializeToString(), din,
-            **({"before_send": before_send} if end_ts is not None else {}))
+        resp = await self.post_v1r(env.SerializeToString(), din, before_send=before_send)
         if not resp.ok or not resp.inner_bytes:
             return False
         try:
@@ -894,14 +913,26 @@ class TEDAPIv1rTransport:
 
         resp = await self.post_v1r(env.SerializeToString(), din)
         if not resp.ok or not resp.inner_bytes:
+            _LOGGER.warning("Manual backup cancel not acknowledged: ok=%s http=%s fault=%s inner=%s",
+                            resp.ok, resp.http_status, resp.fault_name, bool(resp.inner_bytes))
             return False
         try:
             reply = transport_pb2.MessageEnvelope()
             reply.ParseFromString(resp.inner_bytes)
-            return reply.HasField("teg") and reply.teg.HasField(
+            accepted = reply.HasField("teg") and reply.teg.HasField(
                 "cancel_manual_backup_event_response"
             )
+            if not accepted:
+                status = (reply.common.error_response.status
+                          if reply.HasField("common") and reply.common.HasField("error_response") else None)
+                message = " ".join(status.message.split())[:160] if status is not None else None
+                _LOGGER.warning("Manual backup cancel unexpected reply: envelope_fields=%s teg_fields=%s error_code=%s message=%r",
+                    [field.name for field, _value in reply.ListFields()][:16],
+                    [field.name for field, _value in reply.teg.ListFields()][:16],
+                    status.code if status is not None else None, message)
+            return accepted
         except Exception:
+            _LOGGER.warning("Manual backup cancel malformed reply")
             return False
 
     async def get_backup_events(self, din: str) -> dict[str, Any] | None:

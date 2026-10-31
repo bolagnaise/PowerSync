@@ -465,11 +465,13 @@ async def test_local_island_mode_uses_app_wire_values_and_identity():
 @async_test
 async def test_schedule_manual_backup_cancels_prior_and_sets_full_priority(monkeypatch):
     transport = _transport_without_key()
+    transport.get_backup_events = AsyncMock(return_value={"manual_backup": {"active": True}, "backup_events": []})
     transport.cancel_manual_backup = AsyncMock(return_value=True)
     captured: dict[str, object] = {}
     monkeypatch.setattr(transport_mod.time, "time", lambda: 1_700_000_000)
 
-    async def post_v1r(envelope_bytes: bytes, din: str):
+    async def post_v1r(envelope_bytes: bytes, din: str, **kwargs):
+        kwargs["before_send"]()
         request = transport_pb2.MessageEnvelope()
         request.ParseFromString(envelope_bytes)
         captured["request"] = request
@@ -480,6 +482,7 @@ async def test_schedule_manual_backup_cancels_prior_and_sets_full_priority(monke
     transport.post_v1r = post_v1r
 
     assert await transport.schedule_manual_backup("DIN--1", 3600) is True
+    transport.get_backup_events.assert_awaited_once_with("DIN--1")
     transport.cancel_manual_backup.assert_awaited_once_with("DIN--1")
     request = captured["request"]
     assert isinstance(request, transport_pb2.MessageEnvelope)
