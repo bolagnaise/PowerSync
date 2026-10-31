@@ -25303,7 +25303,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 # Reuse normal restoration and its persisted, bounded retry path.
                 try:
                     await hass.services.async_call(
-                        DOMAIN, SERVICE_RESTORE_NORMAL, (entry_service_data(entry.entry_id, {})), blocking=True,
+                        DOMAIN, SERVICE_RESTORE_NORMAL, entry_service_data(entry.entry_id, {
+                            "source": "force_cleanup", "_allow_monitoring_restore": True,
+                            "_tesla_restore_generation": command_generation,
+                            "_tesla_restore_kick_generation": kick_generation,
+                            "_tesla_restore_operation_generation": operation_generation,
+                        }), blocking=True,
                     )
                 except Exception as restore_err:
                     _LOGGER.error("Auto-restore after charge kick failure also failed: %s", restore_err)
@@ -33142,6 +33147,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         percent: int,
         *,
         reason: str,
+        is_current: Callable[[], bool] | None = None,
     ) -> bool:
         """Set one Tesla site's reserve through Fleet API with bounded retries."""
         headers = {
@@ -33153,6 +33159,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             entry.data.get(CONF_FLEET_API_BASE_URL),
         )
         for attempt in range(1, 4):
+            if is_current is not None and not is_current():
+                return False
             try:
                 async with session.post(
                     f"{api_base}/api/1/energy_sites/{site_id}/backup",
@@ -33167,8 +33175,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             site_id,
                             headers,
                             percent,
+                            is_current=is_current,
                         ):
-                            return True
+                            return is_current is None or is_current()
                         _LOGGER.warning(
                             "Tesla %s reserve was accepted but readback did not "
                             "verify for site %s",
@@ -33204,6 +33213,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         *,
         reason: str,
         prefer_local: bool = True,
+        is_current: Callable[[], bool] | None = None,
     ) -> dict[str, list[str]]:
         """Apply user-scale reserve through the independently verified cloud path.
 
@@ -33237,6 +33247,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 provider,
                 percent,
                 reason=reason,
+                is_current=is_current,
             ):
                 result["confirmed_sites"].append(site_id)
             else:
@@ -33249,13 +33260,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         *,
         reason: str,
         prefer_local: bool = True,
+        is_current: Callable[[], bool] | None = None,
     ) -> dict[str, list[str]]:
         """Serialize an ordinary Tesla reserve write with dispatch nudges."""
         current_task = asyncio.current_task()
         if current_task is not None:
             _tesla_reserve_write_tasks.add(current_task)
         try:
-            if _tesla_reserve_pulse_runtime.get("tesla_reserve_pulse_stopping"):
+            if (_tesla_reserve_pulse_runtime.get("tesla_reserve_pulse_stopping")
+                    or (is_current is not None and not is_current())):
                 return {
                     "confirmed_sites": [],
                     "accepted_sites": [],
@@ -33264,9 +33277,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     ],
                 }
             async with _tesla_reserve_write_lock:
-                if _tesla_reserve_pulse_runtime.get(
-                    "tesla_reserve_pulse_stopping"
-                ):
+                if (_tesla_reserve_pulse_runtime.get("tesla_reserve_pulse_stopping")
+                        or (is_current is not None and not is_current())):
                     return {
                         "confirmed_sites": [],
                         "accepted_sites": [],
@@ -33279,6 +33291,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     percent,
                     reason=reason,
                     prefer_local=prefer_local,
+                    is_current=is_current,
                 )
         finally:
             if current_task is not None:
@@ -38089,6 +38102,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 site_configs,
                 100,
                 reason="force charge",
+                is_current=lambda: (
+                    _command_generation[0] == _restore_gen
+                    and _local_powerwall_generation_current()
+                    and not _local_powerwall_runtime.get("powerwall_local_dispatch_stopping")
+                    and not _monitoring_mode_should_block_control(call)
+                ),
             )
             if not _tesla_force_result_all_confirmed(reserve_result, site_configs):
                 _LOGGER.error("Force charge failed before tariff upload: Tesla backup reserve did not verify")
@@ -38489,10 +38508,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         expected_tesla_restore_generation = call.data.get(
             "_tesla_restore_generation"
         )
-        if (
-            expected_tesla_restore_generation is not None
-            and expected_tesla_restore_generation != _command_generation[0]
-        ):
+
+        def _restore_request_superseded():
+            expected_kick = call.data.get("_tesla_restore_kick_generation")
+            expected_operation = call.data.get("_tesla_restore_operation_generation")
+            return (
+                (expected_tesla_restore_generation is not None
+                 and expected_tesla_restore_generation != _command_generation[0])
+                or (expected_kick is not None
+                    and expected_kick != _tesla_charge_kick_generation[0])
+                or (expected_operation is not None
+                    and expected_operation != _tesla_operation_generation[0])
+            )
+
+        if _restore_request_superseded():
             _LOGGER.info(
                 "Tesla restore_normal retry skipped; superseded by a newer "
                 "force command (expected generation %s, current %s)",
@@ -38515,8 +38544,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "awaiting physical settling"
             )
             return
-        if (expected_tesla_restore_generation is not None
-                and expected_tesla_restore_generation != _command_generation[0]):
+        if _restore_request_superseded():
             return
 
         solaredge_restore_coordinator = (
@@ -41631,6 +41659,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             return {"success": False, "error": "blocked by hold SoC"}
 
         _tesla_reserve_generation[0] += 1
+        backup_reserve_generation = _tesla_reserve_generation[0]
         backup_reserve_kick_generation = _supersede_tesla_charge_kick(
             "set backup reserve"
         )
@@ -41878,6 +41907,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         site_configs,
                         percent,
                         reason="set backup reserve",
+                        is_current=lambda: (
+                            _command_generation[0] == backup_reserve_command_generation
+                            and _tesla_charge_kick_generation[0] == backup_reserve_kick_generation
+                            and _tesla_reserve_generation[0] == backup_reserve_generation
+                            and _local_powerwall_generation_current()
+                            and not _local_powerwall_runtime.get("powerwall_local_dispatch_stopping")
+                        ),
                     )
                 tesla_success = _tesla_force_result_all_confirmed(
                     reserve_result,

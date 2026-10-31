@@ -73,6 +73,13 @@ def kick_harness(monkeypatch):
         async def restore(domain, service, payload, **kwargs):
             nonlocal mode
             restores.append((domain, service, payload, kwargs))
+            if supersede == 'service':
+                # HA queues a service invocation; a newer owner can arrive
+                # after the kick's last check and before handler admission.
+                command_generation[0] += 1
+                expected = payload.get('_tesla_restore_generation')
+                if expected is not None and expected != command_generation[0]:
+                    return
             if restore_fails:
                 raise RuntimeError('restore pending')
             mode = force_state['saved_operation_mode']
@@ -145,6 +152,12 @@ def test_superseded_retry_never_restores_new_owner(kick_harness, supersede):
     if supersede == 'bounce':
         assert result.writes[-1] == (2, 'self_consumption')
         assert not result.pushes
+
+
+def test_cleanup_queued_before_new_command_cannot_restore_its_settings(kick_harness):
+    result = asyncio.run(kick_harness(failure='post', supersede='service'))
+    assert result.force_state['active'], 'Stale cleanup must not release the newer owner'
+    assert result.restores[0][2]['_tesla_restore_generation'] == 1
 
 
 @pytest.mark.parametrize('charging,full', [(True, False), (False, True), (False, False)])
