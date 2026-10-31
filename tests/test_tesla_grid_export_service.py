@@ -281,6 +281,7 @@ def _registered_export_services(service_name="set_grid_export", *, real_prepare=
         ns = dict(asyncio=asyncio, hass=hass, entry=entry, DOMAIN="power_sync",
             SERVICE_SET_GRID_EXPORT="set_grid_export", SupportsResponse=SimpleNamespace(OPTIONAL="optional"), Any=Any,
             CONF_TESLA_ENERGY_SITE_ID="tesla_energy_site_id", Mapping=Mapping,
+            REGISTRY_KEY="power_sync_tesla_control",
             CONF_BATTERY_CURTAILMENT_ENABLED="battery_curtailment_enabled",
             HomeAssistantError=RuntimeError, _LOGGER=logging.getLogger(__name__),
             _monitoring_mode_should_block_control=lambda call: False,

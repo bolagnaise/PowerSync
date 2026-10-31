@@ -44,7 +44,8 @@ def load(name, path, ns, *, strip_imports=False):
 def planner_class():
     ns = dict(asyncio=asyncio, time=time, datetime=datetime, timezone=timezone,
               dataclass=dataclass, Mapping=Mapping, DOMAIN="power_sync", _LOGGER=logging.getLogger(__name__),
-              aiohttp=HTTP, get_session_manager=lambda: None)
+              aiohttp=HTTP, get_session_manager=lambda: None,
+              REGISTRY_KEY="power_sync_tesla_control")
     load("canonical_site_id", ROOT / "powerwall_control.py", ns)
     load("foreign_site_owner", ROOT / "powerwall_control.py", ns)
     load("_ev_curtailment_battery_owner_present", PLANNER, ns)
@@ -79,6 +80,25 @@ def executor(store=None):
     obj.hass = NS(data={"power_sync": {"entry": runtime}},
                   services=NS(async_call=AsyncMock()))
     return obj, runtime, ns
+
+
+async def wait_for_task_event(event, task, *, timeout=5.0):
+    """Bound a staged test and surface an early product/harness task failure."""
+    waiter = asyncio.create_task(event.wait())
+    try:
+        await asyncio.wait({waiter, task}, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
+        if task.done():
+            task.result()  # Preserve the original exception and its traceback.
+        if not event.is_set():
+            raise AssertionError("Task did not reach the expected test handshake")
+    except BaseException:
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        raise
+    finally:
+        waiter.cancel()
+        await asyncio.gather(waiter, return_exceptions=True)
 
 
 def state(obj, vin):
@@ -334,13 +354,13 @@ async def test_two_acquisitions_serialize_original_capture_before_outbound_write
 
     obj._set_export_rule = AsyncMock(side_effect=write)
     first = asyncio.create_task(obj._disable_curtailment_for_ev(a))
-    await submitted.wait()
+    await wait_for_task_event(submitted, first)
     second = asyncio.create_task(obj._disable_curtailment_for_ev(b))
     await asyncio.sleep(0)
     assert obj._get_current_export_rule.await_count == 1
     assert obj._set_export_rule.await_count == 1
     finish.set()
-    assert await first and await second
+    assert all(await asyncio.wait_for(asyncio.gather(first, second), timeout=5.0))
     record = runtime["automation_store"].saved["ev_curtailment_recovery"]["entry"]
     assert set(record["leases"]) == {"VIN-A", "VIN-B"}
     assert record["original_export_rule"] == "never"
@@ -422,11 +442,11 @@ async def test_reload_during_acquisition_save_never_submits_old_executor_intent(
 
     store.async_save = save
     task = asyncio.create_task(obj._disable_curtailment_for_ev(state(obj, "VIN-A")))
-    await started.wait()
+    await wait_for_task_event(started, task)
     replacement = {"automation_store": store, "auto_schedule_executor": object()}
     obj.hass.data["power_sync"]["entry"] = replacement
     release.set()
-    assert await task is False
+    assert await asyncio.wait_for(task, timeout=5.0) is False
     obj._set_export_rule.assert_not_awaited()
     assert "ev_curtailment_override" not in replacement
 
@@ -448,13 +468,13 @@ async def test_failed_old_save_cannot_roll_back_reloaded_executor_lease():
 
     store.async_save = failed_save
     task = asyncio.create_task(obj._restore_curtailment(a))
-    await started.wait()
+    await wait_for_task_event(started, task)
     replacement = {"automation_store": store, "auto_schedule_executor": object()}
     obj.hass.data["power_sync"]["entry"] = replacement
     newer = {"original_export_rule": "never", "leases": {"VIN-B": {"source": "new_executor"}}}
     store._data["ev_curtailment_recovery"]["entry"] = newer
     release.set()
-    await task
+    await asyncio.wait_for(task, timeout=5.0)
     assert store._data["ev_curtailment_recovery"]["entry"] is newer
     obj._set_export_rule.assert_awaited_once_with("pv_only")
     assert "ev_curtailment_override" not in replacement
@@ -606,3 +626,25 @@ async def test_foreign_entry_battery_owner_blocks_ev_before_baseline_read():
     assert not await obj._disable_curtailment_for_ev(a)
     obj._get_current_export_rule.assert_not_awaited()
     assert "ev_curtailment_recovery" not in runtime["automation_store"].saved
+
+
+@pytest.mark.asyncio
+async def test_staged_handshake_reports_early_task_exception_instead_of_waiting():
+    async def failed_before_handshake():
+        raise NameError("REGISTRY_KEY fixture binding missing")
+
+    task = asyncio.create_task(failed_before_handshake())
+    with pytest.raises(NameError, match="REGISTRY_KEY fixture binding missing"):
+        await wait_for_task_event(asyncio.Event(), task)
+    assert task.done()
+
+
+@pytest.mark.asyncio
+async def test_staged_handshake_timeout_cancels_a_task_that_never_signals():
+    async def never_signals():
+        await asyncio.Event().wait()
+
+    task = asyncio.create_task(never_signals())
+    with pytest.raises(AssertionError, match="expected test handshake"):
+        await wait_for_task_event(asyncio.Event(), task, timeout=0.01)
+    assert task.cancelled()

@@ -1166,7 +1166,7 @@ def native_http_upload(setup, upload_harness):
                   if isinstance(node, ast.AsyncFunctionDef) and node.name == 'upload')
     namespace = dict(site_config=lambda: ('site', 'token', 'fleet_api'),
                      _local_powerwall_runtime={}, hass=hass,
-                     entry=SimpleNamespace(data={}), CONF_FLEET_API_BASE_URL='fleet_base',
+                     entry=SimpleNamespace(entry_id='entry', data={}), CONF_FLEET_API_BASE_URL='fleet_base',
                      send_tariff_to_tesla=sender, _native_max_identity=lambda: 'paired',
                      identity='paired', HomeAssistantError=s.m.NativeMaxChargeError,
                      NativeMaxTariffNotSubmitted=getattr(s.m, 'NativeMaxTariffNotSubmitted', s.m.NativeMaxChargeError),

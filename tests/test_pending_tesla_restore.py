@@ -383,7 +383,7 @@ def test_sync_reports_all_site_upload_results_to_restore(site_results, periodic,
         assert kwargs["max_retry_after_seconds"] == expected_cap
         return site_results[int(site)]
     env = dict(site_configs=[("0", "fake", "teslemetry"), ("1", "fake", "teslemetry")],
-               hass=None, tariff={}, entry=SimpleNamespace(data={}), CONF_FLEET_API_BASE_URL="base",
+               hass=None, tariff={}, entry=SimpleNamespace(entry_id="entry-1", data={}), CONF_FLEET_API_BASE_URL="base",
                send_tariff_to_tesla=upload, _command_generation=[1], sync_command_generation=1,
                TESLA_TOU_READBACK_ZERO_NORMALIZED="normalized", _LOGGER=logging.getLogger(__name__),
                periodic=periodic, TOU_PERIODIC_SYNC_MAX_RETRY_AFTER_SECONDS=60.0)

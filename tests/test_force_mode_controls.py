@@ -2449,7 +2449,7 @@ def test_tesla_cloud_reserve_requires_readback_confirmation(
         "_LOGGER": _NoopLogger(),
         "_tesla_force_confirm_backup_reserve": confirm,
         "get_tesla_api_base_url": lambda *_args: "https://tesla.example",
-        "entry": SimpleNamespace(data={}),
+        "entry": SimpleNamespace(entry_id="entry", data={}),
         "CONF_FLEET_API_BASE_URL": "fleet_api_base_url",
     }
     exec(textwrap.dedent(function_source), namespace)
