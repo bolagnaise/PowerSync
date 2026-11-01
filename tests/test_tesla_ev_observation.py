@@ -45,6 +45,33 @@ def stub_native_vehicle_sources(monkeypatch):
     monkeypatch.setitem(sys.modules, "power_sync.native_rate_telemetry", native)
 
 
+@pytest.fixture(autouse=True)
+def bind_current_registry_helpers(monkeypatch):
+    """Keep lazy HA registry imports bound to each test's harness.
+
+    Full collection imports several lightweight Home Assistant module trees.
+    A later tree can leave ``device_registry.async_get`` returning a detached
+    empty registry, making the exact Fleet source look missing before refresh.
+    """
+    helpers = sys.modules.get("homeassistant.helpers")
+    entity_registry = sys.modules.get("homeassistant.helpers.entity_registry")
+    device_registry = sys.modules.get("homeassistant.helpers.device_registry")
+    if helpers is None or entity_registry is None or device_registry is None:
+        return
+    monkeypatch.setattr(
+        entity_registry, "async_get", lambda hass: hass.entity_registry,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        device_registry, "async_get", lambda hass: hass.device_registry,
+        raising=False,
+    )
+    monkeypatch.setattr(helpers, "entity_registry", entity_registry, raising=False)
+    monkeypatch.setattr(helpers, "device_registry", device_registry, raising=False)
+    monkeypatch.setitem(sys.modules, "homeassistant.helpers.entity_registry", entity_registry)
+    monkeypatch.setitem(sys.modules, "homeassistant.helpers.device_registry", device_registry)
+
+
 class _State:
     def __init__(self, entity_id, value, stamp=None):
         self.entity_id = entity_id
@@ -284,15 +311,27 @@ async def test_concurrent_fleet_preparations_share_one_bounded_refresh():
     first = asyncio.create_task(
         observation.async_prepare_tesla_fleet_command(hass, VIN_A, command_entity)
     )
-    await started.wait()
-    second = asyncio.create_task(
-        observation.async_prepare_tesla_fleet_command(hass, VIN_A, command_entity)
-    )
-    await asyncio.sleep(0)
-    release.set()
+    second = None
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1)
+        second = asyncio.create_task(
+            observation.async_prepare_tesla_fleet_command(hass, VIN_A, command_entity)
+        )
+        await asyncio.sleep(0)
+        release.set()
 
-    assert await asyncio.gather(first, second) == [True, True]
-    assert coordinator.refreshes == 1
+        assert await asyncio.wait_for(
+            asyncio.gather(first, second), timeout=1
+        ) == [True, True]
+        assert coordinator.refreshes == 1
+    finally:
+        release.set()
+        tasks = [task for task in (first, second) if task is not None]
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
 
 @pytest.mark.asyncio
