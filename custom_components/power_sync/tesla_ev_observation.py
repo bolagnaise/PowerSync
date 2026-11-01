@@ -124,6 +124,13 @@ def _source_charge_timestamp(data: Any) -> float | None:
     return _timestamp(_charge_state(data).get("timestamp"))
 
 
+def _payload_vin_matches_source(data: Any, vin: str) -> bool:
+    """Validate an explicit coordinator VIN without breaking legacy flattening."""
+    if not isinstance(data, Mapping) or "vin" not in data:
+        return True
+    return _canonical_vin(data.get("vin")) == vin
+
+
 def _fleet_state(data: Any) -> str | None:
     """Return the normalized Fleet vehicle state from one coordinator report."""
     if isinstance(data, Mapping):
@@ -442,6 +449,8 @@ def _cached_observation(
         return None
     if not _source_is_current(hass, source, preferred_entity_id):
         return None
+    if not _payload_vin_matches_source(getattr(source.coordinator, "data", None), source.vin):
+        return None
     charge = _charge_state(getattr(source.coordinator, "data", None))
     timestamp = _timestamp(charge.get("timestamp"))
     now = time.time()
@@ -510,6 +519,8 @@ async def _read_shared(
     if refreshed is None or not refreshed.successful:
         return None
     if not _source_is_current(hass, source, preferred_entity_id):
+        return None
+    if not _payload_vin_matches_source(refreshed.data, source.vin):
         return None
     charge = _charge_state(refreshed.data)
     timestamp = _timestamp(charge.get("timestamp"))
@@ -599,6 +610,8 @@ async def async_prepare_tesla_fleet_command(
         return False
     if current_source is None or current_source.key() != source.key():
         return False
+    if not _payload_vin_matches_source(refreshed.data, source.vin):
+        return False
     state_value = _fleet_state(refreshed.data)
     if state_value in {"ASLEEP", "OFFLINE"}:
         return True
@@ -665,13 +678,29 @@ def _cloud_contract(source: _Source) -> tuple[Any, Any, Any] | None:
     try:
         coordinator_name, api_module, api_name = contract
         coordinator_class = getattr(import_module(f"homeassistant.components.{source.domain}.coordinator"), coordinator_name)
-        api_class = getattr(import_module(api_module), api_name)
+        api_module_object = import_module(api_module)
+        api_class = getattr(api_module_object, api_name)
+        api_classes = (api_class,)
+        if source.domain == "tesla_fleet":
+            # HA creates a VehicleSigned client when command signing is
+            # enabled.  It inherits the read-only VehicleFleet methods, but
+            # is a distinct concrete class and must be admitted explicitly;
+            # accepting arbitrary Fleet subclasses would allow a command
+            # router or another provider to masquerade as the cloud reader.
+            signed_class = getattr(api_module_object, "VehicleSigned", None)
+            if (
+                isinstance(signed_class, type)
+                and signed_class.__module__ == "tesla_fleet_api.tesla.vehicle.signed"
+                and signed_class.__name__ == "VehicleSigned"
+                and issubclass(signed_class, api_class)
+            ):
+                api_classes = (*api_classes, signed_class)
         endpoint = import_module("tesla_fleet_api.const").VehicleDataEndpoint.CHARGE_STATE
         api = source.coordinator.api
         debouncer = source.coordinator._debounced_refresh
         if (type(source.coordinator) is not coordinator_class
-                or type(api) is not api_class
-                or not callable(getattr(api_class, "vehicle_data", None))
+                or type(api) not in api_classes
+                or not callable(getattr(type(api), "vehicle_data", None))
                 or not callable(getattr(debouncer, "async_lock", None))):
             return None
         return api, debouncer, endpoint

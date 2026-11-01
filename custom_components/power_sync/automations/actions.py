@@ -6181,7 +6181,13 @@ async def _run_native_tesla_service_command(
 
 async def _fresh_tesla_command_observation(hass, entry, vehicle, params, *, timeout=10):
     """Make one exact-vehicle provider read only during command recovery."""
-    from ..tesla_ev_observation import async_read_tesla_vehicle
+    from ..tesla_ev_observation import (
+        async_read_independent_tesla_vehicle,
+        async_read_tesla_vehicle,
+        independent_tesla_source_binding,
+    )
+    from ..tesla_ev_recovery import get_vehicle_route
+
     config = {**entry.data, **entry.options}
     try:
         canonical = canonical_tesla_vehicle_id(config, str(vehicle or ""))
@@ -6191,22 +6197,70 @@ async def _fresh_tesla_command_observation(hass, entry, vehicle, params, *, time
     if not authority():
         return None
     original_deadline = params.get("_boost_start_deadline")
-    if type(original_deadline) in (int, float) and math.isfinite(original_deadline):
-        timeout = min(timeout, max(0.001, original_deadline-datetime.now(dt_timezone.utc).timestamp()))
-    preferred_entity = params.get("_tesla_command_entity_id")
-    if not preferred_entity:
-        from ..tesla_ev_recovery import get_vehicle_route
+    deadline_token = _tesla_native_deadline_token(original_deadline)
 
+    def preferred_source_entity():
+        preferred = params.get("_tesla_command_entity_id")
+        if preferred:
+            return preferred
         route = get_vehicle_route(hass, entry, canonical)
         route_entity = route.get("entity_id") if isinstance(route, Mapping) else None
         if route_entity and _tesla_native_binding(hass, route_entity, canonical) is not None:
             # A reload loses transient action params. Recover the exact native
             # producer from its durable attempt instead of choosing another
             # account/provider that happens to expose the same VIN.
-            preferred_entity = route_entity
+            return route_entity
+        return None
+
+    preferred_entity = preferred_source_entity()
+    source_binding = independent_tesla_source_binding(
+        hass, canonical, preferred_entity_id=preferred_entity,
+    )
+
+    def scope_current():
+        try:
+            return (
+                authority()
+                and _tesla_native_deadline_token(params.get("_boost_start_deadline")) == deadline_token
+                and preferred_source_entity() == preferred_entity
+                and (source_binding is None or independent_tesla_source_binding(
+                    hass, canonical, preferred_entity_id=preferred_entity,
+                ) == source_binding)
+            )
+        except Exception:
+            return False
+
+    def remaining_timeout():
+        if type(original_deadline) in (int, float) and math.isfinite(original_deadline):
+            return min(timeout, max(0.001, original_deadline-datetime.now(dt_timezone.utc).timestamp()))
+        return timeout
+
+    def paid_refresh_allowed():
+        current_config = {**entry.data, **entry.options}
+        return (scope_current()
+                and source_binding is not None
+                and source_binding.get("domain") == "teslemetry"
+                and current_config.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API) in (
+                    EV_PROVIDER_BOTH, EV_PROVIDER_FLEET_API,
+                ))
+
+    if not scope_current():
+        return None
     observation = await async_read_tesla_vehicle(hass, canonical,
-        preferred_entity_id=preferred_entity, timeout=timeout)
-    return observation if authority() else None
+        preferred_entity_id=preferred_entity, timeout=remaining_timeout())
+    if not scope_current():
+        return None
+    if observation is not None or not paid_refresh_allowed():
+        return observation
+    # Native Teslemetry's default coordinator refresh can return its classic
+    # cache. This command-recovery path may request one explicit paid refresh;
+    # routine observations and BLE-only policy never acquire that permission.
+    observation = await async_read_independent_tesla_vehicle(
+        hass, canonical, preferred_entity_id=preferred_entity,
+        timeout=remaining_timeout(), allow_paid_refresh=True,
+        authorize=paid_refresh_allowed,
+    )
+    return observation if paid_refresh_allowed() else None
 
 
 def _tesla_observed_command_state(observation):

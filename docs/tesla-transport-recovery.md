@@ -147,8 +147,12 @@ When cloud fallback is permitted, an independent recovery read may request one
 explicit native Teslemetry refresh. A returned acknowledgement is insufficient:
 the exact vehicle's charge-state document must still pass the source timestamp,
 requested-setting and convergence checks. The refresh can consume Teslemetry
-credits. This opt-in belongs to recovery; ordinary observation does not force
-refreshes, and BLE-only configuration does not enable them.
+credits. Command readback recovery uses the same bounded opt-in only after an
+ordinary read returns no fresh observation, while retaining its original
+deadline and exact native source. Periodic observation does not force refreshes,
+and BLE-only configuration does not enable them. Both exact unsigned and signed
+native Fleet cloud clients are supported; command routers are not independent
+readers.
 
 The recovery sidecar (`power_sync.ev_transport_recovery.<entry_id>`) is
 independent of the automation store's legacy projection. It retains incidents,

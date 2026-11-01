@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import ast
 from copy import deepcopy
 from datetime import datetime, timezone
 import math
@@ -898,6 +899,270 @@ def independent_source(monkeypatch):
         return hass, entry, vehicle, coordinator
 
     return make
+
+
+@pytest.fixture
+def command_recovery_read(independent_source, monkeypatch):
+    """Use real command authority and readers around native cached SDK I/O."""
+    from conftest import load_power_sync_submodule
+    from collections.abc import Mapping
+    from power_sync.tesla_ble_mapping import canonical_tesla_vehicle_id
+
+    if "power_sync.automations" not in sys.modules:
+        automations = types.ModuleType("power_sync.automations")
+        automations.__path__ = [str(ROOT / "automations")]
+        monkeypatch.setitem(sys.modules, automations.__name__, automations)
+
+    hass, native_entry, vehicle, coordinator = independent_source("teslemetry")
+    _, fleet_entry, _, fleet = independent_source("tesla_fleet")
+    fleet_entry.entry_id = "fleet-entry"
+    fleet_entry.runtime_data.vehicles[0].device.id = "fleet-device"
+    control = types.SimpleNamespace(entry_id="control-entry", data={}, options={"ev_provider": "both"})
+    runtime = {"entry": control}
+    hass.data["power_sync"] = {control.entry_id: runtime}
+    recovery = load_power_sync_submodule("tesla_ev_recovery", "power_sync")
+    runtime["_tesla_ev_recovery_sidecar"] = recovery._new_sidecar()
+    runtime["_tesla_ev_recovery_sidecar_loaded"] = True
+    hass.config_entries.async_entries = lambda domain: {
+        "power_sync": [control], "teslemetry": [native_entry],
+        "tesla_fleet": [fleet_entry],
+    }.get(domain, [])
+    entity = "switch.native_charge"
+    registration = types.SimpleNamespace(entity_id=entity, platform="teslemetry",
+        config_entry_id=native_entry.entry_id, device_id="device-a",
+        unique_id="native-charge", disabled_by=None)
+    registrations = {entity: registration}
+    hass.entity_registry = types.SimpleNamespace(async_get=registrations.get)
+    hass.device_registry.devices["device-a"] = vehicle.device
+    clock = {"now": 2_000_000_000.0}
+    monkeypatch.setattr(observation, "time", types.SimpleNamespace(time=lambda: clock["now"]))
+    monkeypatch.setitem(sys.modules, "power_sync.tesla_ev_observation", observation)
+    coordinator.api.response = {"vin": VIN_A, **_charge(clock["now"] - 30, current=0, power=0,
+                                                       requested=15, limit=70)}
+
+    async def cached_native_refresh(coord):
+        # Installed HA's native Teslemetry coordinator invokes the default
+        # SDK vehicle_data, which can return the same classic cache document.
+        coord.data = deepcopy((await type(coord.api).vehicle_data(
+            coord.api, endpoints=["charge_state"]))["response"])
+
+    coordinator.refresh = cached_native_refresh
+    coordinator.data = deepcopy(coordinator.api.response)
+    coordinator.api.refresh_response = {"response": {"vin": VIN_A,
+        **_charge(clock["now"] + 0.25, current=0, power=0, requested=15, limit=70)}}
+    constants = load_power_sync_submodule("const", "command_recovery_observation_probe")
+    source = ROOT / "automations/actions.py"
+    names = {"_fresh_tesla_command_observation", "_tesla_transport_authority",
+             "_tesla_native_deadline_token", "_tesla_native_binding",
+             "_tesla_legacy_entity_identity"}
+    nodes = [node for node in ast.parse(source.read_text()).body if getattr(node, "name", None) in names]
+
+    class ClockDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime.fromtimestamp(clock["now"], tz)
+
+    namespace = {**vars(constants), "__name__": "power_sync.automations._command_read_probe",
+        "__package__": "power_sync.automations", "__spec__": None,
+        "datetime": ClockDatetime, "dt_timezone": timezone, "math": math, "Mapping": Mapping,
+        "re": __import__("re"),
+        "DEFAULT_VEHICLE_ID": "_default", "canonical_tesla_vehicle_id": canonical_tesla_vehicle_id,
+        "er": types.SimpleNamespace(async_get=lambda _hass: hass.entity_registry),
+        "dr": types.SimpleNamespace(async_get=lambda _hass: types.SimpleNamespace(async_get=hass.device_registry.devices.get))}
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), str(source), "exec",
+                 flags=__import__("__future__").annotations.compiler_flag), namespace)
+    return types.SimpleNamespace(hass=hass, control=control, runtime=runtime,
+        native_entry=native_entry, vehicle=vehicle, coordinator=coordinator, fleet=fleet,
+        fleet_entry=fleet_entry, recovery=recovery,
+        entity=entity, registration=registration, clock=clock,
+        params={"vehicle_vin": VIN_A, "_tesla_command_entity_id": entity,
+                "_boost_start_deadline": clock["now"] + 30},
+        read=namespace["_fresh_tesla_command_observation"])
+
+
+@pytest.mark.asyncio
+async def test_command_recovery_cached_teslemetry_read_needs_one_exact_paid_refresh(command_recovery_read):
+    probe = command_recovery_read
+    # Establish the unchanged coordinator contract without a mocked None read.
+    ordinary = await observation.async_read_tesla_vehicle(
+        probe.hass, VIN_A, preferred_entity_id=probe.entity)
+    assert ordinary is None
+    assert len(probe.coordinator.api.calls) == 1 and probe.fleet.api.calls == []
+    probe.coordinator.api.calls.clear()
+    result = await probe.read(probe.hass, probe.control, VIN_A, probe.params)
+    assert result is not None
+    assert result.domain == "teslemetry" and result.requested_current == 15
+    assert result.charge_limit_soc == 70 and result.charger_actual_current == 0
+    assert probe.coordinator.api.refresh_calls == [True]
+    assert len(probe.coordinator.api.calls) == 1
+    assert probe.fleet.api.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider,paid", [("both", True), ("fleet_api", True), ("tesla_ble", False), ("teslemetry_bt", False)])
+async def test_command_recovery_paid_read_follows_current_cloud_policy(command_recovery_read, provider, paid):
+    probe = command_recovery_read
+    probe.control.options["ev_provider"] = provider
+    result = await probe.read(probe.hass, probe.control, VIN_A, probe.params)
+    assert (result is not None) is paid
+    assert len(probe.coordinator.api.refresh_calls) == int(paid)
+    assert len(probe.coordinator.api.calls) == 1
+    assert probe.fleet.api.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mutation", ["provider", "deadline", "deadline_extended", "runtime", "generation", "registry", "client", "anchor", "owner"])
+async def test_command_recovery_revoked_scope_after_cached_read_never_pays(command_recovery_read, monkeypatch, mutation):
+    probe = command_recovery_read
+    client = probe.coordinator.api
+    paid_reads = []
+    real_paid_read = observation.async_read_independent_tesla_vehicle
+
+    async def paid_read(*args, **kwargs):
+        paid_reads.append(True)
+        return await real_paid_read(*args, **kwargs)
+
+    monkeypatch.setattr(observation, "async_read_independent_tesla_vehicle", paid_read)
+
+    async def revoke():
+        if mutation == "provider":
+            probe.control.options["ev_provider"] = "tesla_ble"
+        elif mutation == "deadline":
+            probe.clock["now"] += 31
+        elif mutation == "deadline_extended":
+            probe.params["_boost_start_deadline"] += 60
+        elif mutation == "runtime":
+            probe.hass.data["power_sync"][probe.control.entry_id] = {"entry": probe.control}
+        elif mutation == "generation":
+            probe.runtime["_tesla_ev_recovery_sidecar"]["generations"][VIN_A] = 1
+        elif mutation == "registry":
+            probe.registration.unique_id = "replacement-native-charge"
+        elif mutation == "client":
+            probe.coordinator.api = object()
+        elif mutation == "anchor":
+            probe.params["_tesla_command_entity_id"] = "switch.another_charge"
+        else:
+            probe.runtime["ev_ownership"][VIN_A] = {"owner": "powersync", "owner_mode": "manual"}
+
+    client.before_return = revoke
+    assert await probe.read(probe.hass, probe.control, VIN_A, probe.params) is None
+    assert paid_reads == []
+    assert client.refresh_calls == []
+    assert len(client.calls) == 1 and probe.fleet.api.calls == []
+
+
+@pytest.mark.asyncio
+async def test_command_recovery_rechecks_cloud_policy_inside_native_lock(command_recovery_read):
+    probe = command_recovery_read
+    ordinary_refresh = probe.coordinator.refresh
+    entered = asyncio.Event()
+
+    async def cached_read_then_lock(coord):
+        await ordinary_refresh(coord)
+        await coord.lock.acquire()
+        entered.set()
+
+    probe.coordinator.refresh = cached_read_then_lock
+    task = asyncio.create_task(probe.read(probe.hass, probe.control, VIN_A, probe.params))
+    await asyncio.wait_for(entered.wait(), 1)
+    await asyncio.sleep(0)
+    assert not task.done()
+    probe.control.options["ev_provider"] = "tesla_ble"
+    probe.coordinator.lock.release()
+    assert await asyncio.wait_for(task, 1) is None
+    assert len(probe.coordinator.api.calls) == 1
+    assert probe.coordinator.api.refresh_calls == probe.fleet.api.calls == []
+
+
+@pytest.mark.asyncio
+async def test_command_recovery_rechecks_policy_after_paid_refresh(command_recovery_read):
+    probe = command_recovery_read
+
+    async def revoke():
+        probe.control.options["ev_provider"] = "tesla_ble"
+
+    probe.coordinator.api.before_refresh_return = revoke
+    assert await probe.read(probe.hass, probe.control, VIN_A, probe.params) is None
+    assert probe.coordinator.api.refresh_calls == [True]
+    # The one ordinary read happened before refresh; revocation prevents a
+    # cache fallback or accepting the full document returned by refresh.
+    assert len(probe.coordinator.api.calls) == 1 and probe.fleet.api.calls == []
+
+
+@pytest.mark.asyncio
+async def test_command_recovery_recomputes_timeout_from_original_deadline(command_recovery_read, monkeypatch):
+    probe = command_recovery_read
+    probe.params["_boost_start_deadline"] = probe.clock["now"] + 6
+
+    async def slow_cache():
+        probe.clock["now"] += 4
+
+    async def fresh():
+        probe.coordinator.api.refresh_response = {"response": {"vin": VIN_A,
+            **_charge(probe.clock["now"] + 0.125, requested=15, limit=70)}}
+
+    probe.coordinator.api.before_return = slow_cache
+    probe.coordinator.api.before_refresh_return = fresh
+    real_paid_read = observation.async_read_independent_tesla_vehicle
+    timeouts = []
+
+    async def read(*args, **kwargs):
+        timeouts.append(kwargs["timeout"])
+        return await real_paid_read(*args, **kwargs)
+
+    monkeypatch.setattr(observation, "async_read_independent_tesla_vehicle", read)
+    assert await probe.read(probe.hass, probe.control, VIN_A, probe.params) is not None
+    assert timeouts == [2]
+    assert probe.params["_boost_start_deadline"] == 2_000_000_006
+    assert probe.coordinator.api.refresh_calls == [True]
+
+
+@pytest.mark.asyncio
+async def test_command_recovery_fresh_ordinary_source_does_not_pay(command_recovery_read):
+    probe = command_recovery_read
+    probe.coordinator.api.response["charge_state"]["timestamp"] = probe.clock["now"] + 0.25
+    result = await probe.read(probe.hass, probe.control, VIN_A, probe.params)
+    assert result is not None and result.origin == "native_coordinator"
+    assert probe.coordinator.api.refresh_calls == []
+    assert len(probe.coordinator.api.calls) == 1 and probe.fleet.api.calls == []
+
+
+@pytest.mark.asyncio
+async def test_command_recovery_pinned_fleet_never_refreshes_other_teslemetry_source(command_recovery_read):
+    probe = command_recovery_read
+    probe.registration.platform = "tesla_fleet"
+    probe.registration.config_entry_id = probe.fleet_entry.entry_id
+    probe.registration.device_id = "fleet-device"
+    probe.fleet.api.response["charge_state"]["timestamp"] = probe.clock["now"] - 30
+    probe.fleet.data = deepcopy(probe.fleet.api.response)
+
+    async def cached(coord):
+        coord.data = deepcopy((await type(coord.api).vehicle_data(
+            coord.api, endpoints=["charge_state"]))["response"])
+
+    probe.fleet.refresh = cached
+    assert await probe.read(probe.hass, probe.control, VIN_A, probe.params) is None
+    assert len(probe.fleet.api.calls) == 1 and probe.fleet.api.refresh_calls == []
+    assert probe.coordinator.api.calls == probe.coordinator.api.refresh_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rebind", [False, True])
+async def test_command_recovery_pins_durable_native_anchor_before_read(command_recovery_read, monkeypatch, rebind):
+    probe = command_recovery_read
+    probe.params.pop("_tesla_command_entity_id")
+    route = {"kind": "ha", "entity_id": probe.entity}
+    monkeypatch.setattr(probe.recovery, "get_vehicle_route", lambda *_args: dict(route))
+
+    async def change_route():
+        if rebind:
+            route["entity_id"] = "switch.another_charge"
+
+    probe.coordinator.api.before_return = change_route
+    result = await probe.read(probe.hass, probe.control, VIN_A, probe.params)
+    assert (result is not None) is (not rebind)
+    assert len(probe.coordinator.api.refresh_calls) == int(not rebind)
+    assert probe.fleet.api.calls == []
 
 
 @pytest.mark.asyncio
