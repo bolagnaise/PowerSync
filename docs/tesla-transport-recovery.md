@@ -70,6 +70,14 @@ boundary, cancellation remains uncertain; a later current-range retry cannot
 erase that uncertainty. An uninstrumented producer or a restart before the
 outcome was saved also keeps the conservative recovery obligation.
 
+BLE current and charge-limit attempts also persist their exact registry target
+and bounded possible setting values before dispatch. The final service value
+must remain inside that saved range after readiness and journal writes; a
+changing entity range cannot enlarge an already recorded effect. A structured
+current-range retry is covered by the same saved bound. Older attempts without
+these values remain uncertain; today's requested current cannot reconstruct
+what an earlier command submitted.
+
 An uncertain dispatched command is different. Automatic handoff requires an
 ESPHome `sensor.<prefix>_transport_fence` on the same registry device/config
 entry as the command and BLE connection control. Protocol 1 reports `boot_id`,

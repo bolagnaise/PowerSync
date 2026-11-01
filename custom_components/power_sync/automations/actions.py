@@ -662,6 +662,53 @@ def _tesla_entity_max_fallback_amps(
     return fallback_amps
 
 
+def _tesla_ble_rate_effect_bound(
+    hass: HomeAssistant,
+    entity_id: str,
+    requested_amps: int,
+    *,
+    allow_stale_entity_max_override: bool = False,
+    configured_max_amps: Optional[int] = None,
+) -> dict[str, int] | None:
+    """Describe every bounded Rate value the BLE helper may submit.
+
+    The initial entity-range cap and the structured stale-max retry happen
+    inside ``_set_ev_charging_amps_ble`` after the recovery ticket is opened.
+    Persist a range when that retry is possible rather than claiming the raw
+    request is the exact value that reached Home Assistant.
+    """
+    state = hass.states.get(entity_id)
+    if state is None:
+        return None
+    entity_min = (
+        _tesla_charge_current_positive_floor(hass, entity_id)
+        or TESLA_UNKNOWN_CHARGER_SAFE_AMPS
+    )
+    entity_max = _coerce_positive_int(
+        state.attributes.get("max"), int(requested_amps)
+    ) or int(requested_amps)
+    effective_max = entity_max
+    if (
+        allow_stale_entity_max_override
+        and configured_max_amps is not None
+        and configured_max_amps > entity_max
+    ):
+        effective_max = configured_max_amps
+    capped = max(entity_min, min(effective_max, int(requested_amps)))
+    fallback = _tesla_entity_max_fallback_amps(
+        capped,
+        entity_min,
+        entity_max,
+        allow_stale_entity_max_override=allow_stale_entity_max_override,
+        configured_max_amps=configured_max_amps,
+    )
+    return {
+        "kind": "rate",
+        "min_amps": int(fallback if fallback is not None else capped),
+        "max_amps": int(capped),
+    }
+
+
 def _mark_api_credits_exhausted(api_name: str = "teslemetry") -> None:
     """Mark that API credits are exhausted, triggering cooldown."""
     _api_credit_exhausted[api_name] = datetime.now()
@@ -3387,6 +3434,10 @@ async def _tesla_ble_prepare_mutation(
 _tesla_legacy_authority: ContextVar[Optional[Callable[[], Any]]] = ContextVar(
     "tesla_legacy_authority", default=None
 )
+_TESLA_BLE_EFFECT_BOUND_UNSET = object()
+_tesla_ble_effect_bound: ContextVar[object] = ContextVar(
+    "tesla_ble_effect_bound", default=_TESLA_BLE_EFFECT_BOUND_UNSET
+)
 _tesla_ble_mutation_phase: ContextVar[dict[str, str] | None] = ContextVar(
     "tesla_ble_mutation_phase", default=None
 )
@@ -3404,6 +3455,41 @@ def _tesla_ble_mark_mutation_prewrite() -> None:
     phase = _tesla_ble_mutation_phase.get()
     if phase is not None and phase.get("phase") == "unknown":
         phase["phase"] = "prewrite"
+
+
+def _tesla_ble_effect_bound_is_valid(
+    operation: str, effect_bound: Mapping[str, Any] | object
+) -> bool:
+    """Validate the bounded values persisted for one BLE mutation."""
+    if not isinstance(effect_bound, Mapping) or effect_bound.get("kind") != operation:
+        return False
+    if operation == "rate":
+        minimum, maximum = effect_bound.get("min_amps"), effect_bound.get("max_amps")
+        return (
+            type(minimum) is int
+            and type(maximum) is int
+            and 1 <= minimum <= maximum <= 80
+        )
+    if operation == "limit":
+        minimum, maximum = effect_bound.get("min_percent"), effect_bound.get("max_percent")
+        return (
+            type(minimum) is int
+            and type(maximum) is int
+            and 1 <= minimum <= maximum <= 100
+        )
+    return False
+
+
+def _tesla_ble_effect_bound_allows_submission(operation: str, value: int) -> bool:
+    """Keep a helper's final service value inside its persisted prewrite bound."""
+    effect_bound = _tesla_ble_effect_bound.get()
+    if effect_bound is _TESLA_BLE_EFFECT_BOUND_UNSET:
+        return True
+    if not _tesla_ble_effect_bound_is_valid(operation, effect_bound):
+        return False
+    if operation == "rate":
+        return effect_bound["min_amps"] <= value <= effect_bound["max_amps"]
+    return effect_bound["min_percent"] <= value <= effect_bound["max_percent"]
 
 
 def _tesla_legacy_entity_identity(
@@ -3436,6 +3522,54 @@ def _tesla_legacy_entity_identity(
         return tuple(identities)
     except Exception:
         return None
+
+
+@dataclass(frozen=True, slots=True)
+class _TeslaBleMutationTarget:
+    """Identity-only target descriptor retained with a BLE recovery attempt."""
+
+    vin: str
+    operation: str
+    entity_id: str
+    entity_domain: str
+    platform: str
+    unique_id: str
+    config_entry_id: str
+    device_id: str
+    native_config_entry_ids: tuple[str, ...]
+
+
+def _tesla_ble_mutation_target(
+    hass: HomeAssistant,
+    entity_id: str,
+    vehicle: str,
+    operation: str,
+) -> _TeslaBleMutationTarget | None:
+    """Build the exact registry target for a journaled ESPHome mutation."""
+    try:
+        registration = er.async_get(hass).async_get(entity_id)
+    except Exception:
+        return None
+    values = {
+        field: getattr(registration, field, None) if registration is not None else None
+        for field in (
+            "entity_id", "platform", "unique_id", "config_entry_id", "device_id",
+        )
+    }
+    if (
+        any(not isinstance(value, str) or not value.strip() for value in values.values())
+        or getattr(registration, "disabled_by", None) is not None
+        or entity_id.count(".") != 1
+    ):
+        return None
+    entity_domain, _ = entity_id.split(".", 1)
+    return _TeslaBleMutationTarget(
+        vin=str(vehicle),
+        operation=str(operation),
+        entity_domain=entity_domain,
+        native_config_entry_ids=(values["config_entry_id"],),
+        **values,
+    )
 
 
 async def _run_tesla_legacy_with_authority(
@@ -3718,6 +3852,8 @@ async def _set_ev_charge_limit_ble(
         )
         if charge_binding is None:
             return False
+        if not _tesla_ble_effect_bound_allows_submission("limit", int(percent)):
+            return False
         command_started_at = datetime.now(dt_timezone.utc)
         command_dispatched = True
         _tesla_ble_mark_mutation_submitted()
@@ -3787,6 +3923,13 @@ async def _set_ev_charging_amps_ble(
     capped_amps = max(entity_min, min(effective_max, int(amps)))
     if capped_amps != amps:
         _LOGGER.debug(f"BLE amps capped from {amps}A to {capped_amps}A (entity range: {entity_min}-{entity_max})")
+    if not _tesla_ble_effect_bound_allows_submission("rate", capped_amps):
+        _LOGGER.warning(
+            "BLE amps target changed outside its persisted journal bound; "
+            "refusing the write for %s",
+            amps_entity,
+        )
+        return False
 
     charge_binding_holder: list = []
     command_dispatched = False
@@ -3833,6 +3976,8 @@ async def _set_ev_charging_amps_ble(
             )
         )
         if charge_binding is None:
+            return False
+        if not _tesla_ble_effect_bound_allows_submission("rate", capped_amps):
             return False
         command_started_at = datetime.now(dt_timezone.utc)
         command_dispatched = True
@@ -3886,6 +4031,8 @@ async def _set_ev_charging_amps_ble(
                 )
                 if charge_binding is None:
                     return None
+                if not _tesla_ble_effect_bound_allows_submission("rate", fallback_amps):
+                    return False
                 _tesla_ble_mark_mutation_submitted()
                 await hass.services.async_call(
                     "number",
@@ -4462,7 +4609,16 @@ async def _tesla_transport_route(hass, entry, params, operation):
     return route
 
 
-async def _run_ble_transport_command(hass, entry, params, prefix, operation, send):
+async def _run_ble_transport_command(
+    hass,
+    entry,
+    params,
+    prefix,
+    operation,
+    send,
+    *,
+    effect_bound: Mapping[str, Any] | None | object = _TESLA_BLE_EFFECT_BOUND_UNSET,
+):
     """Journal a BLE attempt and contain its producer before another route."""
     from ..tesla_ev_recovery import async_begin_attempt, async_finish_attempt, async_isolate_ble
     vehicle = params.get("vehicle_vin") or params.get("vehicle_id")
@@ -4485,6 +4641,21 @@ async def _run_ble_transport_command(hass, entry, params, prefix, operation, sen
     pinned_entity_identity = _tesla_legacy_entity_identity(hass, (entity,))
     authority = _tesla_transport_authority(hass, entry, effective_params, cleanup=operation == "stop")
     command_route = {"kind": "ble", "prefix": prefix}
+    target = _tesla_ble_mutation_target(hass, entity, vehicle, operation)
+    if isinstance(effect_bound, Mapping):
+        # ``_pin`` preserves this diagnostic bound with the immutable BLE
+        # route.  It is intentionally a range for Rate when the helper may
+        # perform its proven entity-range retry.
+        command_route["effect_bound"] = dict(effect_bound)
+    elif effect_bound is not _TESLA_BLE_EFFECT_BOUND_UNSET:
+        # An action that cannot establish a bounded target must not let a
+        # later entity appearance turn this ticket into an unbounded write.
+        return False, False
+    if (
+        effect_bound is not _TESLA_BLE_EFFECT_BOUND_UNSET
+        and not _tesla_ble_effect_bound_is_valid(operation, effect_bound)
+    ):
+        return False, False
     config = {**entry.data, **entry.options}
     if config.get(CONF_EV_PROVIDER) == EV_PROVIDER_BOTH:
         fallback_entity = await _get_tesla_ev_entity(
@@ -4509,7 +4680,7 @@ async def _run_ble_transport_command(hass, entry, params, prefix, operation, sen
                     "identity": fallback_identity,
                 }
     ticket = await async_begin_attempt(hass, entry, vehicle,
-        command_route, operation, entity,
+        command_route, operation, entity, target=target,
         deadline=params.get("_boost_start_deadline"))
     entity_identity_unchanged = (
         _tesla_legacy_entity_identity(hass, (entity,)) == pinned_entity_identity
@@ -4519,6 +4690,11 @@ async def _run_ble_transport_command(hass, entry, params, prefix, operation, sen
             await async_finish_attempt(ticket, "not_sent")
         return False, False
     phase = {"phase": "unknown"}
+    effect_bound_token = _tesla_ble_effect_bound.set(
+        _TESLA_BLE_EFFECT_BOUND_UNSET
+        if effect_bound is _TESLA_BLE_EFFECT_BOUND_UNSET
+        else dict(effect_bound)
+    )
     phase_token = _tesla_ble_mutation_phase.set(phase)
     try:
         try:
@@ -4553,6 +4729,7 @@ async def _run_ble_transport_command(hass, entry, params, prefix, operation, sen
         )
     finally:
         _tesla_ble_mutation_phase.reset(phase_token)
+        _tesla_ble_effect_bound.reset(effect_bound_token)
     if result is not None:
         return result, False
     params["_tesla_transport_recovery_pending"] = True
@@ -8174,7 +8351,9 @@ async def _action_set_ev_charge_limit(
                     ),
                     hass=hass,
                     entity_ids=(TESLA_BLE_NUMBER_CHARGING_LIMIT.format(prefix=ble_prefix),),
-                ))
+                ),
+                effect_bound={"kind": "limit", "min_percent": percent, "max_percent": percent},
+            )
             if result is None and not fallback_ready:
                 return None
             if result is None and fallback_ready:
@@ -8334,6 +8513,14 @@ async def _action_set_ev_charging_amps(
     # Prefer the free, explicitly paired ESPHome BLE control path.
     if ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
         if _is_ble_available(hass, ble_prefix):
+            ble_amps_entity = TESLA_BLE_NUMBER_CHARGING_AMPS.format(prefix=ble_prefix)
+            ble_effect_bound = _tesla_ble_rate_effect_bound(
+                hass,
+                ble_amps_entity,
+                amps,
+                allow_stale_entity_max_override=allow_stale_entity_max_override,
+                configured_max_amps=configured_max_amps,
+            )
             result, fallback_ready = await _run_ble_transport_command(hass, config_entry, params,
                 ble_prefix, "rate", lambda: _run_tesla_legacy_with_authority(
                     request_authority,
@@ -8347,8 +8534,9 @@ async def _action_set_ev_charging_amps(
                         allow_backoff=not bool(params.get("_user_initiated")),
                     ),
                     hass=hass,
-                    entity_ids=(TESLA_BLE_NUMBER_CHARGING_AMPS.format(prefix=ble_prefix),),
+                    entity_ids=(ble_amps_entity,),
                 ),
+                effect_bound=ble_effect_bound,
             )
             if result is None and not fallback_ready:
                 return None

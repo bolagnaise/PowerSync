@@ -62,6 +62,174 @@ def _patch_ble_scope(monkeypatch):
     )
 
 
+async def _prepare_for_test(*_args, **kwargs):
+    holder = kwargs.get("charge_binding_holder")
+    if holder is not None:
+        holder[:] = [object()]
+    return True
+
+
+@pytest.mark.asyncio
+async def test_ble_rate_journal_pins_target_and_bounded_effect(monkeypatch):
+    hass = _ble_hass()
+    _patch_ble_scope(monkeypatch)
+    import importlib
+
+    recovery = importlib.import_module("power_sync.tesla_ev_recovery")
+    ticket = SimpleNamespace(attempt_id="rate-target")
+    begin_call = {}
+
+    async def begin(*args, **kwargs):
+        begin_call["route"] = args[3]
+        begin_call.update(kwargs)
+        return ticket
+
+    finished = []
+
+    async def finish(_ticket, outcome):
+        finished.append(outcome)
+        return True
+
+    monkeypatch.setattr(recovery, "async_begin_attempt", begin)
+    monkeypatch.setattr(recovery, "async_finish_attempt", finish)
+    bound = {"kind": "rate", "min_amps": 8, "max_amps": 16}
+
+    result = await actions._run_ble_transport_command(
+        hass,
+        _Entry(),
+        {"vehicle_vin": VIN},
+        "bridge",
+        "rate",
+        _true_async,
+        effect_bound=bound,
+    )
+
+    assert result == (True, False)
+    assert finished == ["confirmed"]
+    assert begin_call["route"]["effect_bound"] == bound
+    target = begin_call["target"]
+    assert target.vin == VIN
+    assert target.operation == "rate"
+    assert target.entity_id == "number.bridge_charging_amps"
+    assert target.entity_domain == "number"
+
+
+def test_ble_rate_effect_bound_covers_structured_entity_range_retry():
+    hass = _ble_hass()
+
+    assert actions._tesla_ble_rate_effect_bound(
+        hass,
+        "number.bridge_charging_amps",
+        40,
+        allow_stale_entity_max_override=True,
+        configured_max_amps=40,
+    ) == {"kind": "rate", "min_amps": 32, "max_amps": 40}
+
+
+@pytest.mark.asyncio
+async def test_ble_bound_rejects_entity_range_change_during_journal_persist(monkeypatch):
+    hass = _ble_hass()
+    _patch_ble_scope(monkeypatch)
+    monkeypatch.setattr(actions, "_tesla_ble_prepare_mutation", _prepare_for_test)
+    monkeypatch.setattr(actions, "_tesla_ble_scope_current", _true_async)
+    monkeypatch.setattr(actions, "_tesla_ble_charge_data_binding", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(actions, "prepare_ev_submission", _true_async)
+    import importlib
+
+    recovery = importlib.import_module("power_sync.tesla_ev_recovery")
+    ticket = SimpleNamespace(attempt_id="range-change")
+    finished = []
+    hass.states.get("number.bridge_charging_amps").attributes["max"] = 16
+    bound = actions._tesla_ble_rate_effect_bound(
+        hass, "number.bridge_charging_amps", 16
+    )
+
+    async def begin(*_args, **_kwargs):
+        # Model the HA registry/range changing while the durable begin is
+        # awaited.  The actual helper must remain inside the persisted bound.
+        hass.states.get("number.bridge_charging_amps").attributes["max"] = 32
+        return ticket
+
+    async def finish(_ticket, outcome):
+        finished.append(outcome)
+        return True
+
+    monkeypatch.setattr(recovery, "async_begin_attempt", begin)
+    monkeypatch.setattr(recovery, "async_finish_attempt", finish)
+
+    with_services = hass.services.calls
+    result = await actions._run_ble_transport_command(
+        hass,
+        _Entry(),
+        {"vehicle_vin": VIN},
+        "bridge",
+        "rate",
+        lambda: actions._set_ev_charging_amps_ble(hass, "bridge", 32),
+        effect_bound=bound,
+    )
+
+    assert result == (False, False)
+    assert finished == ["not_sent"]
+    assert with_services == []
+
+
+@pytest.mark.asyncio
+async def test_missing_ble_bound_cannot_write_after_entity_appears(monkeypatch):
+    hass = _ble_hass()
+    _patch_ble_scope(monkeypatch)
+    send_called = False
+
+    async def send():
+        nonlocal send_called
+        send_called = True
+        return True
+
+    result = await actions._run_ble_transport_command(
+        hass,
+        _Entry(),
+        {"vehicle_vin": VIN},
+        "bridge",
+        "rate",
+        send,
+        effect_bound=None,
+    )
+
+    assert result == (False, False)
+    assert send_called is False
+    assert hass.services.calls == []
+
+
+@pytest.mark.asyncio
+async def test_ble_unknown_persists_target_and_effect_bound(monkeypatch):
+    hass = _ble_hass()
+    runtime = {"setup_generation": 1, "runtime_generation": 1}
+    hass.data["power_sync"]["entry-1"] = runtime
+    entry = _Entry()
+    import importlib
+
+    recovery = importlib.import_module("power_sync.tesla_ev_recovery")
+    monkeypatch.setattr(recovery, "_registry", lambda _hass: hass.entity_registry)
+    monkeypatch.setattr(recovery, "_persist", lambda *_args, **_kwargs: _true_async())
+    _patch_ble_scope(monkeypatch)
+    bound = {"kind": "rate", "min_amps": 8, "max_amps": 16}
+
+    async def send():
+        return None
+
+    result = await actions._run_ble_transport_command(
+        hass, entry, {"vehicle_vin": VIN}, "bridge", "rate", send,
+        effect_bound=bound,
+    )
+
+    assert result == (None, False)
+    ledger = runtime[recovery.RECOVERY_KEY]["vehicles"][VIN]
+    attempt = next(iter(ledger["attempts"].values()))
+    assert attempt["outcome"] == "sent_unknown"
+    assert attempt["target"]["vin"] == VIN
+    assert attempt["target"]["operation"] == "rate"
+    assert attempt["route"]["effect_bound"] == bound
+
+
 @pytest.mark.asyncio
 async def test_uninstrumented_send_cancellation_stays_unknown(monkeypatch):
     hass = _ble_hass()
