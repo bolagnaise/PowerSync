@@ -32,6 +32,15 @@ compensating cleanup and cannot restore charging authority or extend its timer.
 Automatic Boost cleanup retains native solar ownership holds; the separate
 lane does not permit it to take over a foreign controller.
 
+When passive HA telemetry cannot confirm an expired Boost has stopped,
+cleanup may read its exact native Fleet or Teslemetry charge-state endpoint.
+This is available only when the configured provider policy permits that
+fallback. A source timestamp after the cleanup boundary, a stopped state,
+zero actual current and zero power are all required. The read does not wake
+the vehicle, change a setting or extend the deadline. Runtime, provider,
+device, pairing, generation and ownership fences must remain current before
+the stopped proof can retire the cleanup obligation.
+
 ## Transport selection and evidence
 
 Configured ESPHome BLE remains first. A proven pre-dispatch failure permits
@@ -336,51 +345,31 @@ physical power. Both ESPHome bridges, native HA Tesla Fleet and native
 Teslemetry are installed. Neither legacy nor modern Teslemetry Bluetooth is
 installed here; those adapter contracts have software coverage only.
 
-The 1 November 08:16 UTC checkpoint has private 2.12.1584.dev5 installed from
-290397d2, with all 272 package hashes matching and configuration checks passing.
-Its audited complete suite passed 10,977 tests without skips. W3RT1E completed
-qualified stock recovery with two advancing exact native charge observations;
-its BLE radio is on. TESSY remains held with its radio off after simultaneous
-recovery confirmations raced on the shared record. A focused regression and
-repair now retry only an existing journal-backed command-uncertainty scope;
-evidence-loss incidents still require explicit inventory confirmation. This
-repair requires private installation and live retest.
+At the 1 November 09:16 UTC checkpoint, private 2.12.1584.dev7 is installed
+from fc666795 with all 272 package hashes matching and configuration checks
+passing. That committed source passed the audited complete suite: 10,983
+tests with no skips. Subsequent Boost cleanup changes require their own
+validation and installation; this result does not cover those changes.
 
-During testing the Powerwall gateway stopped accepting local connections.
-Its forcing tariff was released, and later cloud physical telemetry showed
-battery discharge into house load with zero import. Cloud restoration commands
-were acknowledged, but subsequent mode readbacks differed, so final restoration
-and the required native coexistence checks remain unconfirmed. UniFi still
-reports the reserved local address and authorization, with a very weak Wi-Fi
-signal. No public release or final physical-verification claim is made.
+Independent Fleet charge documents confirmed both vehicles charging at
+09:09:55 UTC: TESSY at 15 A/about 4 kW and W3RT1E at 10 A/about 2 kW.
+TESSY's BLE limit change to the temporarily authorized 72% succeeded. Its
+later BLE current change was uncertain, so PowerSync disabled that bridge's
+BLE Connection switch while retaining the unresolved attempt. At the original
+09:15:38 deadline, the native Teslemetry cleanup stopped TESSY; an independent
+09:16:05 charge document confirmed zero current and power. W3RT1E reported
+disconnected before that deadline, so it is unavailable for further two-car
+checks at this checkpoint.
 
-At the 1 November 07:15 UTC checkpoint, private 2.12.1584.dev3 matched source
-2429f79a across all 272 package files, with existing storage preserved. Its
-audited complete suite passed 10,903 tests without skips. Both cars completed
-qualified stock-bridge recovery with independent fresh native charge
-observations; firmware and pairing were unchanged. TESSY's original 70% limit
-and 15 A request were independently confirmed. W3RT1E retained its 80% limit
-and 10 A request.
+Both stock bridges have previously completed qualified recovery without a
+firmware flash or pairing change. Native Max charging with an already active
+EV was also physically observed within the site's import cap, and native
+export without an active EV was observed at the export cap. Restoration was
+confirmed after background cleanup; the local gateway is reachable again.
+These individual observations do not establish every coexistence ordering.
 
-A finite W3RT1E request physically charged at about 2 kW through native Fleet,
-but it first waited two minutes for unchanged BLE status, and its expiry Stop
-was refused before dispatch when the charging lease was revoked. The vehicle
-was stopped through its exact native HA control and independently confirmed
-at zero current and power. The new readiness and native cleanup handoff fixes
-require installation and live retest. Their cleanup authority is bound to the
-original finite obligation, runtime and exact native producer; it cannot
-start charging, switch providers or take over a replacement owner.
-
-Three older TESSY native attempts were falsely retained as pending by the
-previous persistence defect. Captured direct action results and the expiry
-Stop's in-process success receipt establish accepted command completion.
-Any one-time reconciliation must add exact digest-bound completion proofs
-with those receipts retained; unknown attempts and BLE hazards are never
-blanket-cleared. A provider acknowledgement remains separate from physical
-readback.
-
-Earlier candidates exercised individual routes, the two-car dashboard and
-native battery charge/export. Those observations do not validate the final
-candidate. The required two-car allocation, independent Stop, Boost
-expiry/reload and active-EV native battery coexistence matrix must complete
-on the final implementation before release.
+The final installed implementation still requires independent vehicle Stop,
+successful Boost expiry/reload with the original deadline and no Start replay,
+the remaining active-EV native charge/export orderings, and final settings
+restoration. Public release remains pending those checks and matching trusted
+protected-main regression evidence.

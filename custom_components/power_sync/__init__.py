@@ -20117,6 +20117,81 @@ class ChargingBoostView(HomeAssistantView):
             return "charging"
         return None
 
+    async def _independent_boost_stopped(self, vehicle_id, after, *, authorize):
+        """Return a source fence for one cleanup-only native stopped read."""
+        import math
+        from .tesla_ev_observation import (
+            independent_tesla_source_binding, async_read_independent_tesla_vehicle,
+        )
+        from .tesla_ev_recovery import get_vehicle_route, _compatible
+
+        entry, hass = self._config_entry, self._hass
+        runtime = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+        pairing = self._boost_pairing_identity()
+        try:
+            route = get_vehicle_route(hass, entry, vehicle_id)
+            if route is not None and route.get("kind") == "blocked":
+                return None
+            native_route = route if isinstance(route, dict) and route.get("kind") == "ha" else (
+                route.get("fallback") if isinstance(route, dict) else None)
+            preferred = None
+            if native_route is not None:
+                if (not isinstance(native_route, dict) or native_route.get("kind") != "ha"
+                        or not _compatible(hass, entry, runtime, vehicle_id, native_route)):
+                    return None
+                preferred = native_route.get("entity_id")
+            binding = independent_tesla_source_binding(
+                hass, vehicle_id, preferred_entity_id=preferred)
+            cutoff = datetime.fromisoformat(after).timestamp()
+        except (TypeError, ValueError, AttributeError):
+            return None
+        if binding is None:
+            return None
+
+        def source_current():
+            try:
+                config = {**entry.data, **entry.options}
+                return (hass.data.get(DOMAIN, {}).get(entry.entry_id) is runtime
+                        and not runtime.get("powerwall_local_dispatch_stopping")
+                        and self._boost_pairing_identity() == pairing
+                        and config.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API) in (
+                            EV_PROVIDER_BOTH, EV_PROVIDER_FLEET_API)
+                        and get_vehicle_route(hass, entry, vehicle_id) == route
+                        and independent_tesla_source_binding(
+                            hass, vehicle_id, preferred_entity_id=preferred) == binding)
+            except Exception:
+                return False
+
+        def allowed():
+            return authorize() is True and source_current()
+
+        try:
+            if not allowed():
+                return None
+            observation = await async_read_independent_tesla_vehicle(
+                hass, vehicle_id, preferred_entity_id=preferred, timeout=5,
+                updated_after=cutoff, allow_paid_refresh=binding.get("domain") == "teslemetry",
+                authorize=allowed)
+            if not allowed() or observation is None or observation.origin != "native_cloud":
+                return None
+            if any(getattr(observation, key) != binding.get(key) for key in (
+                    "vin", "domain", "config_entry_id", "device_id", "producer_identity")):
+                return None
+            stamp = observation.source_charge_timestamp
+            if (type(stamp) not in (int, float) or not math.isfinite(stamp)
+                    or not cutoff < stamp <= dt_util.utcnow().timestamp()
+                    or dt_util.utcnow().timestamp() - stamp > 90
+                    or observation.charge_state.lower() not in {
+                        "stopped", "complete", "disconnected", "nopower"}
+                    or any(type(value) not in (int, float) or value != 0 for value in (
+                        observation.charger_actual_current, observation.charger_power))):
+                return None
+            return source_current
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return None
+
     async def _save_boost_state(self, record: dict) -> bool:
         from .automations.ev_ownership import persist_ev_runtime_state
 
@@ -20180,14 +20255,41 @@ class ChargingBoostView(HomeAssistantView):
                 self._arm_boost_stop(vehicle_id, record, state, lease,
                                      at=dt_util.utcnow() + timedelta(seconds=30))
 
-        async def retire(state, lease):
-            # Only fresh exact-VIN stopped telemetry retires the obligation.
-            runtime["ev_boost_sessions"].pop(vehicle_id)
+        async def retire(state, lease, *, evidence_current=None):
+            # Keep the obligation durable through the awaited proof checkpoint.
+            # A changed proof must never require rolling back a durable removal.
             if not await self._save_boost_state(record):
+                retry(state, lease if lease is boost_ownership else None)
+                return
+            if (not current() or self._boost_pairing_identity() != original_pairing
+                    or ev_actions._dynamic_ev_state.get(self._config_entry.entry_id, {}).get(vehicle_id) is not state
+                    or get_ev_ownership(self._hass, self._config_entry, vehicle_id)[1] is not lease
+                    or (evidence_current is not None and (
+                        record.get("superseded") or not evidence_current()))):
+                retry(state, lease if lease is boost_ownership else None)
+                return
+            # This is the retirement commit point: the stopped proof and its
+            # owner/source fences survived persistence. Later source changes
+            # cannot invalidate that accepted historical observation.
+            runtime["ev_boost_sessions"].pop(vehicle_id)
+            save_task = asyncio.create_task(self._save_boost_state(record))
+            cancelled = False
+            while not save_task.done():
+                try:
+                    await asyncio.shield(save_task)
+                except asyncio.CancelledError:
+                    cancelled = True
+            try:
+                saved = save_task.result()
+            except asyncio.CancelledError:
+                saved, cancelled = False, True
+            if not saved:
                 if (self._hass.data.get(DOMAIN, {}).get(self._config_entry.entry_id) is runtime
                         and vehicle_id not in runtime["ev_boost_sessions"]):
                     runtime["ev_boost_sessions"][vehicle_id] = record
                     retry(state, lease if lease is boost_ownership else None)
+                if cancelled:
+                    raise asyncio.CancelledError
                 return
             if (self._hass.data.get(DOMAIN, {}).get(self._config_entry.entry_id) is runtime
                     and runtime.get("ev_boost_timers", {}).get(vehicle_id) is timer
@@ -20197,6 +20299,8 @@ class ChargingBoostView(HomeAssistantView):
                 if current_lease is boost_ownership and current_lease is not None:
                     release_ev_ownership(self._hass, self._config_entry, vehicle_id,
                                          reason="Fresh stopped Boost observation")
+            if cancelled:
+                raise asyncio.CancelledError
 
         async def rebind_native_cleanup_route() -> bool:
             """Rebind a restored native producer as stop-only before cleanup."""
@@ -20294,6 +20398,25 @@ class ChargingBoostView(HomeAssistantView):
             if observation == "stopped":
                 await retire(state, lease)
                 return
+            if (observation is None and not record.get("superseded")
+                    and not record.get("start_in_flight")
+                    and (dt_util.utcnow() >= deadline or record.get("stop_required"))
+                    and (boost_state is None or state is boost_state)
+                    and (lease is None or lease is boost_ownership)):
+                def read_current():
+                    return (current() and self._boost_pairing_identity() == original_pairing
+                            and not record.get("superseded") and not record.get("start_in_flight")
+                            and ev_actions._dynamic_ev_state.get(config_entry.entry_id, {}).get(vehicle_id) is state
+                            and get_ev_ownership(hass, config_entry, vehicle_id)[1] is lease)
+
+                stopped_fence = await self._independent_boost_stopped(
+                    vehicle_id, max(deadline, datetime.fromisoformat(observation_after)).isoformat()
+                    if observation_after else deadline.isoformat(), authorize=read_current)
+                if not read_current():
+                    return
+                if stopped_fence is not None:
+                    await retire(state, lease, evidence_current=stopped_fence)
+                    return
             if record.get("superseded"):
                 record["status"] = "superseded"
                 await self._save_boost_state(record)

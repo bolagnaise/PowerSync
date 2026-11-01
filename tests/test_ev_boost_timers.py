@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from functools import wraps
 from inspect import signature
 import logging
+import math
 from pathlib import Path
 import re
 from types import MethodType, SimpleNamespace
@@ -164,12 +165,17 @@ class BoostHarness:
             "uuid4": uuid4,
             "deepcopy": deepcopy,
             "re": re,
+            "math": math,
             "CONF_EV_PROVIDER": mapping.CONF_EV_PROVIDER,
+            "EV_PROVIDER_FLEET_API": "fleet_api",
+            "EV_PROVIDER_BOTH": "both",
             "EV_PROVIDER_TESLA_BLE": mapping.EV_PROVIDER_TESLA_BLE,
             "configured_ble_prefixes": mapping.configured_ble_prefixes,
             "persist_ev_runtime_state": own.persist_ev_runtime_state,
             "get_vehicle_route": recovery.get_vehicle_route,
             "async_rebind_native_session_route": recovery.async_rebind_native_session_route,
+            "_compatible": recovery._compatible,
+            "independent_tesla_source_binding": lambda *_args, **_kwargs: None,
             "is_current_ev_power_observation": ev_load.is_current_ev_power_observation,
             "_get_ev_vehicles_status": lambda *_args, **_kwargs: self.observations(),
             "_LOGGER": logging.getLogger(__name__),
@@ -188,7 +194,7 @@ class BoostHarness:
             namespace,
         )
         for name in ("_boost_pairing_identity", "_is_valid_boost_vehicle_id",
-                     "_boost_observation", "_save_boost_state",
+                     "_boost_observation", "_independent_boost_stopped", "_save_boost_state",
                      "_arm_boost_stop", "restore_boost_sessions", "_start_finite_boost"):
             method = compile_node(
                 StripImports().visit(source_node(INIT, name, parent="ChargingBoostView")),
