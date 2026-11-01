@@ -29,9 +29,13 @@ def signed_fleet(monkeypatch):
             self.wake_calls = []
             self.payload_vin = VIN
             self.payload_state = "ONLINE"
+            self.read_error = None
+            self.wake_error = None
 
         async def vehicle_data(self, *, endpoints):
             self.read_calls.append(tuple(endpoints))
+            if self.read_error is not None:
+                raise self.read_error
             response = {
                     "state": self.payload_state,
                     "charge_state": {
@@ -49,6 +53,8 @@ def signed_fleet(monkeypatch):
 
         async def wake_up(self, *, wait=False, timeout=60):
             self.wake_calls.append((wait, timeout))
+            if self.wake_error is not None:
+                raise self.wake_error
             return {"response": {"state": "online"}}
 
         async def vehicle(self):
@@ -61,6 +67,15 @@ def signed_fleet(monkeypatch):
         """A command-router subclass must not satisfy the cloud contract."""
 
     VehicleSigned.__module__ = "tesla_fleet_api.tesla.vehicle.signed"
+
+    class TeslaFleetError(BaseException):
+        pass
+
+    class VehicleOffline(TeslaFleetError):
+        pass
+
+    TeslaFleetError.__module__ = "tesla_fleet_api.exceptions"
+    VehicleOffline.__module__ = "tesla_fleet_api.exceptions"
 
     class Debouncer:
         def __init__(self):
@@ -87,6 +102,8 @@ def signed_fleet(monkeypatch):
     api_module.VehicleSigned = VehicleSigned
     const_module = types.ModuleType("tesla_fleet_api.const")
     const_module.VehicleDataEndpoint = types.SimpleNamespace(CHARGE_STATE="charge_state")
+    exceptions_module = types.ModuleType("tesla_fleet_api.exceptions")
+    exceptions_module.TeslaFleetError = TeslaFleetError
     coordinator_module = types.ModuleType("homeassistant.components.tesla_fleet.coordinator")
     coordinator_module.TeslaFleetVehicleDataCoordinator = NativeCoordinator
 
@@ -130,6 +147,7 @@ def signed_fleet(monkeypatch):
         "homeassistant.components.tesla_fleet.coordinator": coordinator_module,
         "tesla_fleet_api.tesla": api_module,
         "tesla_fleet_api.const": const_module,
+        "tesla_fleet_api.exceptions": exceptions_module,
     }
     monkeypatch.setattr(observation, "time", types.SimpleNamespace(time=lambda: now))
     monkeypatch.setattr(observation, "_device_registry", lambda _hass: hass.device_registry)
@@ -146,6 +164,8 @@ def signed_fleet(monkeypatch):
             coordinator=coordinator,
             now=now,
             command_entity=registration.entity_id,
+            vehicle_offline=VehicleOffline,
+            tesla_fleet_error=TeslaFleetError,
         )
 
 
@@ -232,6 +252,50 @@ def test_fleet_preparation_rejects_wrong_explicit_vin_before_state_admission(sig
             signed_fleet.hass, VIN, signed_fleet.command_entity
         )
     ) is False
+
+
+def test_known_sdk_offline_error_is_missing_for_ordinary_and_independent_reads(signed_fleet):
+    signed_fleet.source_api.read_error = signed_fleet.vehicle_offline()
+    assert asyncio.run(
+        signed_fleet.observation.async_read_tesla_vehicle(signed_fleet.hass, VIN)
+    ) is None
+    assert asyncio.run(
+        signed_fleet.observation.async_read_independent_tesla_vehicle(
+            signed_fleet.hass, VIN
+        )
+    ) is None
+
+
+def test_known_sdk_offline_error_is_missing_for_cloud_wake(signed_fleet):
+    signed_fleet.source_api.wake_error = signed_fleet.vehicle_offline()
+    assert asyncio.run(
+        signed_fleet.observation.async_wake_independent_tesla_vehicle(
+            signed_fleet.hass, VIN, timeout=1
+        )
+    ) is False
+
+
+@pytest.mark.parametrize("error_factory", [asyncio.CancelledError, BaseException])
+def test_cancellation_and_unknown_base_exception_are_not_swallowed(signed_fleet, error_factory):
+    signed_fleet.source_api.read_error = error_factory()
+    with pytest.raises(error_factory):
+        asyncio.run(
+            signed_fleet.observation.async_read_tesla_vehicle(signed_fleet.hass, VIN)
+        )
+    with pytest.raises(error_factory):
+        asyncio.run(
+            signed_fleet.observation.async_read_independent_tesla_vehicle(
+                signed_fleet.hass, VIN
+            )
+        )
+    signed_fleet.source_api.read_error = None
+    signed_fleet.source_api.wake_error = error_factory()
+    with pytest.raises(error_factory):
+        asyncio.run(
+            signed_fleet.observation.async_wake_independent_tesla_vehicle(
+                signed_fleet.hass, VIN, timeout=1
+            )
+        )
 
 
 def observation_contract(harness):

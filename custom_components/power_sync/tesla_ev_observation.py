@@ -87,6 +87,20 @@ def _canonical_vin(value: Any) -> str | None:
     return vin if VIN_PATTERN.fullmatch(vin) else None
 
 
+def _is_tesla_provider_error(error: BaseException) -> bool:
+    """Identify SDK provider failures, including its BaseException hierarchy."""
+    try:
+        provider_errors = import_module("tesla_fleet_api.exceptions")
+        provider_error = getattr(provider_errors, "TeslaFleetError", None)
+        return (
+            isinstance(provider_error, type)
+            and issubclass(provider_error, BaseException)
+            and isinstance(error, provider_error)
+        )
+    except (ImportError, AttributeError, TypeError):
+        return False
+
+
 def _finite(value: Any, *, minimum: float | None = None) -> float | None:
     if value is None or isinstance(value, bool):
         return None
@@ -550,6 +564,10 @@ async def _refresh_source(
         raise
     except Exception:
         return None
+    except BaseException as error:
+        if _is_tesla_provider_error(error):
+            return None
+        raise
     return _SourceRefresh(
         started_at=started,
         before_timestamp=before,
@@ -600,6 +618,10 @@ async def async_prepare_tesla_fleet_command(
         raise
     except Exception:
         return False
+    except BaseException as error:
+        if _is_tesla_provider_error(error):
+            return False
+        raise
     if refreshed is None or not refreshed.successful:
         return False
     try:
@@ -869,6 +891,10 @@ async def async_wake_independent_tesla_vehicle(
         raise
     except Exception:
         return False
+    except BaseException as error:
+        if _is_tesla_provider_error(error):
+            return False
+        raise
     if not current():
         return False
     return True
@@ -1021,6 +1047,10 @@ async def async_read_independent_tesla_vehicle(
             raise
         except Exception:
             return None
+        except BaseException as error:
+            if _is_tesla_provider_error(error):
+                return None
+            raise
 
     task = state.independent_in_flight.get(in_flight_key)
     if task is None or task.done():
@@ -1040,6 +1070,10 @@ async def async_read_independent_tesla_vehicle(
         result = await asyncio.wait_for(asyncio.shield(task), timeout=timeout_value)
     except asyncio.TimeoutError:
         return None
+    except BaseException as error:
+        if _is_tesla_provider_error(error):
+            return None
+        raise
     if not current() or result is None or (cutoff is not None and result.source_charge_timestamp <= cutoff):
         return None
     return result

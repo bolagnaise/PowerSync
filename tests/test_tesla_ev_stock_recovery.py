@@ -120,6 +120,7 @@ class _Entry:
 class _Hass:
     def __init__(self):
         self.data = {"power_sync": {"power-entry": {}}}
+        self.executor_calls = []
         self.entities = {}
         self.states_by_id = {}
         for prefix, device in (("bridge_a", "device-a"), ("bridge_b", "device-b")):
@@ -153,6 +154,15 @@ class _Hass:
         )
         runtime["_tesla_ev_recovery_sidecar_loaded"] = True
         runtime["_tesla_ev_recovery_sidecar_store"] = _Store()
+        self.data[stock.HOST_CONTRACT_CACHE_KEY] = {
+            "state": "ready",
+            "homeassistant": "2026.10.4",
+            "aioesphomeapi": "46.6.0",
+        }
+
+    async def async_add_executor_job(self, func, *args):
+        self.executor_calls.append(func)
+        return func(*args)
 
 
 @pytest.fixture
@@ -210,6 +220,78 @@ def test_resolve_stock_bridge_requires_exact_current_profile_metadata(harness):
     assert bridge.profile["source"] == stock.STOCK_PROFILES[bridge.metadata]
     hass.entities["switch.bridge_a_charger"].platform = "mqtt"
     assert stock.resolve_stock_bridge(hass, entry, VIN_A) is None
+
+
+def test_sync_resolver_is_cache_only_when_host_contract_is_unprimed(harness, monkeypatch):
+    hass, entry = harness
+    hass.data.pop(stock.HOST_CONTRACT_CACHE_KEY)
+    metadata = importlib.import_module("importlib.metadata")
+    calls = []
+
+    def unexpected(name):
+        calls.append(name)
+        raise AssertionError("package metadata must not run in sync resolver")
+
+    monkeypatch.setattr(metadata, "version", unexpected)
+    assert stock.resolve_stock_bridge(hass, entry, VIN_A) is None
+    assert calls == []
+    assert hass.executor_calls == []
+
+
+@pytest.mark.asyncio
+async def test_host_contract_prime_uses_executor_once_and_current_is_io_free(
+    harness, monkeypatch,
+):
+    hass, entry = harness
+    hass.data.pop(stock.HOST_CONTRACT_CACHE_KEY)
+    metadata = importlib.import_module("importlib.metadata")
+    calls = []
+
+    def version(name):
+        calls.append(name)
+        return "46.6.0"
+
+    monkeypatch.setattr(metadata, "version", version)
+    assert await stock.async_prepare_stock_host_contract(hass)
+    assert calls == ["aioesphomeapi"]
+    assert len(hass.executor_calls) == 1
+    bridge = _bridge(hass, entry, VIN_A)
+    transaction = stock.StockBridgeTransaction(hass, entry, bridge)
+    assert transaction.current()
+    assert transaction.current()
+    assert calls == ["aioesphomeapi"]
+    assert len(hass.executor_calls) == 1
+    assert await stock.async_prepare_stock_host_contract(hass)
+    assert len(hass.executor_calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["unsupported", "exception"])
+async def test_failed_or_unsupported_host_contract_stays_fail_closed(
+    harness, monkeypatch, failure,
+):
+    hass, entry = harness
+    hass.data.pop(stock.HOST_CONTRACT_CACHE_KEY)
+    metadata = importlib.import_module("importlib.metadata")
+    calls = []
+
+    def version(name):
+        calls.append(name)
+        if failure == "exception":
+            raise RuntimeError("metadata unavailable")
+        return "46.6.1"
+
+    monkeypatch.setattr(metadata, "version", version)
+    assert not await stock.async_prepare_stock_host_contract(hass)
+    assert stock.resolve_stock_bridge(hass, entry, VIN_A) is None
+    with pytest.raises(ValueError, match="evidence_loss_host_contract_unavailable"):
+        await stock.async_register_evidence_loss(
+            hass, entry, vins=[VIN_A], operator_confirmation=False,
+            provenance=["test"], surviving_facts=[],
+        )
+    assert not await stock.async_prepare_stock_host_contract(hass)
+    assert calls == ["aioesphomeapi"]
+    assert hass.services.calls == []
 
 
 @pytest.mark.asyncio

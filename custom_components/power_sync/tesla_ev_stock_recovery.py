@@ -29,6 +29,83 @@ STOCK_PROFILES = {
         "PedroKTFC/esphome-tesla-ble@00ff23e74da1ec6beebca486898d48745862cd07",
 }
 
+# Host package metadata is resolved in an executor before a recovery or
+# enrollment entrypoint reaches the synchronous bridge resolver.  The
+# resolver and transaction fence are deliberately cache-only: repeated
+# identity checks run on the event loop without touching package metadata.
+HOST_CONTRACT_CACHE_KEY = "_tesla_stock_host_contract"
+_HOST_CONTRACT_LOCK_KEY = "_tesla_stock_host_contract_lock"
+_EXPECTED_HOST_CONTRACT = {
+    "homeassistant": "2026.10.4",
+    "aioesphomeapi": "46.6.0",
+}
+
+
+def _host_contract_cache(hass: Any) -> dict[str, Any] | None:
+    data = getattr(hass, "data", None)
+    value = data.get(HOST_CONTRACT_CACHE_KEY) if isinstance(data, Mapping) else None
+    return value if isinstance(value, dict) else None
+
+
+def _host_contract_cached(hass: Any) -> bool:
+    value = _host_contract_cache(hass)
+    return isinstance(value, dict) and value.get("state") == "ready" and all(
+        value.get(key) == expected
+        for key, expected in _EXPECTED_HOST_CONTRACT.items()
+    )
+
+
+def _read_host_contract_versions() -> tuple[str, str]:
+    """Read package versions; called only by an executor-backed prime."""
+    from homeassistant.const import __version__
+    from importlib.metadata import version
+
+    return str(__version__), str(version("aioesphomeapi"))
+
+
+async def async_prepare_stock_host_contract(hass: Any) -> bool:
+    """Prime the exact host contract without metadata I/O on the event loop."""
+    data = getattr(hass, "data", None)
+    if not isinstance(data, dict):
+        return False
+    cached = _host_contract_cache(hass)
+    if isinstance(cached, dict) and cached.get("state") in {"ready", "failed"}:
+        return _host_contract_cached(hass)
+    lock = data.get(_HOST_CONTRACT_LOCK_KEY)
+    if not isinstance(lock, asyncio.Lock):
+        lock = asyncio.Lock()
+        data[_HOST_CONTRACT_LOCK_KEY] = lock
+    async with lock:
+        cached = _host_contract_cache(hass)
+        if isinstance(cached, dict) and cached.get("state") in {"ready", "failed"}:
+            return _host_contract_cached(hass)
+        try:
+            executor = getattr(hass, "async_add_executor_job", None)
+            if callable(executor):
+                homeassistant_version, aioesphomeapi_version = await executor(
+                    _read_host_contract_versions
+                )
+            else:
+                loop = asyncio.get_running_loop()
+                homeassistant_version, aioesphomeapi_version = await loop.run_in_executor(
+                    None, _read_host_contract_versions
+                )
+            data[HOST_CONTRACT_CACHE_KEY] = {
+                "state": "ready",
+                "homeassistant": homeassistant_version,
+                "aioesphomeapi": aioesphomeapi_version,
+            }
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            _LOGGER.warning(
+                "Tesla stock recovery host contract unavailable: %s",
+                type(error).__name__,
+            )
+            data[HOST_CONTRACT_CACHE_KEY] = {"state": "failed"}
+            return False
+    return _host_contract_cached(hass)
+
 
 def _identity(hass: Any, entity_id: str) -> dict[str, str] | None:
     try:
@@ -105,6 +182,10 @@ def resolve_stock_bridge(
     hass: Any, entry: Any, vin: str, *, require_uptime: bool = True,
 ) -> StockBridge | None:
     """Resolve only the configured VIN's enabled exact ESPHome producer."""
+    # This synchronous function is called repeatedly from await-boundary
+    # fences.  It must never perform package metadata I/O on the event loop.
+    if not _host_contract_cached(hass):
+        return None
     from .tesla_ble_mapping import resolve_ble_prefixes, vehicle_ble_prefix
     config = {**entry.data, **entry.options}
     prefix = vehicle_ble_prefix(config, vin, resolved_prefixes=resolve_ble_prefixes(hass, config))
@@ -128,14 +209,6 @@ def resolve_stock_bridge(
     metadata = tuple(str(getattr(info, key, "")) for key in (
         "project_name", "project_version", "esphome_version"))
     if metadata not in STOCK_PROFILES or getattr(runtime_data, "client", None) is None:
-        return None
-    # The reviewed host no-replay contract is deliberately versioned too.
-    try:
-        from homeassistant.const import __version__
-        from importlib.metadata import version
-        if __version__ != "2026.10.4" or version("aioesphomeapi") != "46.6.0":
-            return None
-    except (ImportError, AttributeError):
         return None
     runtime = hass.data.get(DOMAIN, {}).get(entry.entry_id)
     if not isinstance(runtime, dict) or (
@@ -321,6 +394,8 @@ async def async_register_evidence_loss(
         recovery_sidecar_snapshot,
     )
     from .tesla_ble_mapping import parse_tesla_ble_vehicle_mapping
+    if not await async_prepare_stock_host_contract(hass):
+        raise ValueError("evidence_loss_host_contract_unavailable")
     config = {**entry.data, **entry.options}
     configured = parse_tesla_ble_vehicle_mapping(config.get("tesla_ble_vehicle_mapping"))
     if not configured or set(configured) != {str(vin) for vin in vins}:
@@ -372,6 +447,8 @@ async def async_recover_vehicle_transport(
         async_confirm_recovery_scope, async_record_evidence_loss, async_recover_stock,
         current_vehicle_generation, recovery_sidecar_snapshot,
     )
+    if not await async_prepare_stock_host_contract(hass):
+        return False
     bridge = resolve_stock_bridge(hass, entry, str(vin))
     snapshot = recovery_sidecar_snapshot(hass, entry)
     if bridge is None or snapshot is None:
