@@ -17,6 +17,90 @@ def telemetry():
     return importlib.import_module('managed_admission_probe.native_rate_telemetry')
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize('domain', ['tesla_fleet', 'teslemetry'])
+@pytest.mark.parametrize('route_kind', [None, 'ble'])
+@pytest.mark.parametrize('case', ['exact', 'ambiguous', 'disabled', 'wrong_vin',
+                                'wrong_entry', 'wrong_device', 'ble_only', 'hold',
+                                'blocked', 'remembered_rebound', 'rebound_during_read'])
+async def test_native_max_settles_ble_only_record_through_unique_exact_native_read(
+    admission, monkeypatch, domain, route_kind, case,
+):
+    a = admission
+    now = [NOW]
+    monkeypatch.setattr(a.m.time, 'time', lambda: now[0])
+    a.budget.clock = lambda: now[0]
+    a.entry.options['ev_provider'] = 'both'
+    registry = sys.modules['homeassistant.helpers.entity_registry'].async_get(a.hass)
+    number = registry.entities[a.state.entity_id]
+    number.platform = domain
+    switch = registry.entities['switch.car_charge']
+    switch.platform = 'esphome'
+    a.provider.runtime_data.vehicles[0].device.identifiers = {(domain, VIN)}
+    a.hass.config_entries.async_entries = lambda requested: [a.provider] if requested == domain else []
+    recovery = importlib.import_module(a.m.__package__ + '.tesla_ev_recovery')
+    monkeypatch.setattr(recovery, 'get_vehicle_route', lambda *_: (
+        {'kind': route_kind, 'entity_id': switch.entity_id} if route_kind else None))
+    a.budget.armed_sites.clear()
+    await a.budget.admit_managed(VIN, {
+        'entry_id': 'one', 'site': 'site', 'identity': a.m._identity(switch),
+        'entity_id': switch.entity_id, 'setting_entity_id': None,
+        'target_amps': 10, 'target_w': 2400, 'reserved_w': 19200,
+        'submitted_at': NOW-100, 'operation': 'rate', 'uncertain': True,
+        'identities': [a.m._identity(switch)],
+    }, {}, lambda: True)
+    a.charge.update(charger_actual_current=0, charger_power=0, charging_state='Stopped')
+    observation = telemetry().native_charge_setting(a.hass, VIN, number.entity_id)['observation']
+    a.charge['timestamp'] = NOW-1200
+    if case == 'ambiguous':
+        duplicate = NS(**vars(number))
+        duplicate.entity_id = 'number.duplicate_charge_current'
+        duplicate.unique_id = 'other_amps'
+        registry.entities[duplicate.entity_id] = duplicate
+    if case == 'disabled': number.disabled_by = 'user'
+    if case == 'wrong_vin': a.provider.runtime_data.vehicles[0].vin = '5YJ3E1EA7KF000002'
+    if case == 'wrong_entry': number.config_entry_id = 'other'
+    if case == 'wrong_device': number.device_id = 'other'
+    if case == 'ble_only': a.entry.options['ev_provider'] = 'tesla_ble'
+    if case == 'hold': a.runtime['_tesla_ev_recovery_sidecar_hold'] = 'unresolved'
+    if case == 'blocked':
+        monkeypatch.setattr(recovery, 'get_vehicle_route', lambda *_: {'kind': 'blocked'})
+    if case == 'remembered_rebound':
+        a.budget.managed[VIN]['identities'].append(a.m._identity(number))
+        number.unique_id = 'replacement'
+    module = importlib.import_module(a.m.__package__ + '.tesla_ev_observation')
+    reads = []
+    async def ordinary(*args, **kwargs): return None
+    async def independent(*args, **kwargs):
+        assert kwargs['preferred_entity_id'] == number.entity_id
+        assert kwargs['authorize']()
+        reads.append(now[0])
+        if case == 'rebound_during_read':
+            a.provider.runtime_data = NS(vehicles=[])
+        return replace(observation, source_charge_timestamp=now[0],
+                       raw_charge_state=dict(observation.raw_charge_state, timestamp=now[0]),
+                       origin='native_cloud')
+    async def refresh_meter(): a.local.last_success_ts = now[0]
+    async def settle(seconds): now[0] += seconds
+    a.local.async_request_refresh = refresh_meter
+    monkeypatch.setattr(module, 'async_read_tesla_vehicle', ordinary)
+    monkeypatch.setattr(module, 'async_read_independent_tesla_vehicle', independent)
+    monkeypatch.setattr(a.m.asyncio, 'sleep', settle)
+    result = await a.m.reconcile_managed_for_native_max(a.hass, a.budget, 'site')
+    if case != 'exact':
+        assert not result
+        assert a.budget.managed[VIN]['reserved_w'] == 19200
+        assert a.budget.managed[VIN]['uncertain'] is True
+        assert reads == ([NOW] if case == 'rebound_during_read' else [])
+        return
+    assert result
+    assert reads == [NOW, NOW+3]
+    assert VIN not in a.budget.managed
+    assert a.charge['timestamp'] == NOW-1200
+    assert recovery.get_vehicle_route(a.hass, a.entry, VIN) == (
+        {'kind': route_kind, 'entity_id': switch.entity_id} if route_kind else None)
+
+
 @pytest.mark.parametrize('field,value', [
     ('charge_current_request', True), ('charge_current_request', '10'),
     ('charge_current_request', 10.5), ('charge_current_request', -1),

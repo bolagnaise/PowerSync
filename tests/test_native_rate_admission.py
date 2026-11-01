@@ -1081,7 +1081,8 @@ async def test_ble_retained_demand_uses_only_exact_recovered_native_proof(
             await a.m.refresh_managed_records(a.hass, a.budget)
             if index == 0:
                 assert VIN in a.budget.managed
-        retired = case in {'recovered', 'cleared_route_recovered'}
+        retired = (case in {'recovered', 'cleared_route_recovered'}
+                   or case == 'unremembered_source' and selected_route == 'ble')
         assert (VIN not in a.budget.managed) is retired
         assert (VIN not in a.store.data['managed']) is retired
     finally:

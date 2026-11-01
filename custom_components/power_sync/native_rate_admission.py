@@ -312,7 +312,7 @@ def _site_evidence(hass, entry, runtime, vin, profile, *, native_entity_id=None,
 
 
 def _managed_native_entity(hass, entry, runtime, vin, record, registration):
-    """Use only the original native producer or a remembered recovered one."""
+    """Bind read-only settlement to remembered or unique exact native evidence."""
     from .tesla_ev_recovery import get_vehicle_route
     from .native_rate_budget import managed_devices, provider_device
     from homeassistant.helpers import entity_registry as er
@@ -338,6 +338,25 @@ def _managed_native_entity(hass, entry, runtime, vin, record, registration):
                       and getattr(candidate, "disabled_by", None) is None
                       and str(getattr(candidate, "entity_id", "")).startswith("number.")
                       and _identity(candidate) in remembered]
+        if candidates:
+            return candidates[0].entity_id if len(candidates) == 1 else None
+        if any(str(identity).split(":", 1)[0] in {"tesla_fleet", "teslemetry"}
+               for identity in remembered):
+            return None
+        # A BLE-only reservation may never have submitted a native command.
+        # Its retired route then has no remembered native identity. Acquire
+        # read-only evidence only when one exact current native producer can
+        # identify this VIN; this grants no command or route authority.
+        from .const import CONF_EV_PROVIDER, EV_PROVIDER_BOTH, EV_PROVIDER_FLEET_API
+        from .native_rate_telemetry import _native_charge_source
+        config = {**entry.data, **entry.options}
+        if config.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API) not in {
+                EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH}:
+            return None
+        candidates = [candidate for candidate in er.async_get(hass).entities.values()
+                      if re.search(r"^number\..*(charging_amps|charge_current)(?:_\d+)?$",
+                                   str(getattr(candidate, "entity_id", "")))
+                      and _native_charge_source(hass, vin, candidate.entity_id) is not None]
         return candidates[0].entity_id if len(candidates) == 1 else None
     if route.get("kind") != "ha":
         return None
