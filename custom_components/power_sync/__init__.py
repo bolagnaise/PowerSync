@@ -23140,6 +23140,12 @@ def _sync_covau_withdrawn_plan_issue(
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up PowerSync from a config entry."""
+    # Retained HTTP/service callbacks can address this entry during provider
+    # startup. Hold positive EV writes before the first setup await; ordinary
+    # bootstrap lookups must not gain authority before durable facts hydrate.
+    hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})[
+        "_tesla_ev_recovery_sidecar_hold"
+    ] = "sidecar_setup_pending"
     from .licensing.manager import async_get_manager
     await async_get_manager(hass)
     from .native_rate_budget import budget_for as _prepare_native_rate_budget

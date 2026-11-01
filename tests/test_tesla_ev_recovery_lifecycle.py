@@ -532,3 +532,134 @@ def test_unload_saves_obligations_and_shuts_recovery_before_discarding_runtime()
         return next(line for line, target in calls if target == name)
     assert line("persist_ev_runtime_state") < line("async_shutdown_recovery_state")
     assert line("async_shutdown_recovery_state") < line("hass.data[DOMAIN].pop")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("existing_bootstrap", [False, True])
+async def test_first_setup_await_holds_actual_legacy_bt_number_write(monkeypatch, existing_bootstrap):
+    """A retained HTTP callback cannot exploit the missing-number-row path."""
+    from collections.abc import Mapping
+    from contextvars import ContextVar
+    import inspect
+    import math
+    from typing import Callable, Optional
+
+    constants = load_power_sync_submodule("const", PACKAGE)
+    solar = load_power_sync_submodule("teslemetry_solar", PACKAGE)
+    admission = load_power_sync_submodule("native_rate_admission", PACKAGE)
+    hass, entry, _runtime, store, sidecar, events, tasks = _context()
+    entry.options = {"ev_provider": constants.EV_PROVIDER_TESLEMETRY_BT}
+    bootstrap = {"tariff_schedule": {"original": True}}
+    if existing_bootstrap:
+        hass.data["power_sync"][entry.entry_id] = bootstrap
+    else:
+        hass.data["power_sync"].pop(entry.entry_id)
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def first_setup_await(_hass):
+        entered.set()
+        await release.wait()
+
+    manager = types.ModuleType(f"{PACKAGE}.licensing.manager")
+    manager.async_get_manager = first_setup_await
+    monkeypatch.setitem(sys.modules, manager.__name__, manager)
+    setup = deepcopy(next(node for node in INIT_TREE.body if isinstance(node, ast.AsyncFunctionDef) and node.name == "async_setup_entry"))
+    first_await = next(index for index, statement in enumerate(setup.body) if any(isinstance(node, ast.Await) for node in ast.walk(statement)))
+    setup.body = setup.body[:first_await + 1]
+    namespace = {"__name__": f"{PACKAGE}._setup_prelude", "__package__": PACKAGE,
+                 "DOMAIN": "power_sync", "HomeAssistant": object, "ConfigEntry": object}
+    exec(compile(ast.Module(body=[setup], type_ignores=[]), str(INIT), "exec"), namespace)
+    setup_task = asyncio.create_task(namespace["async_setup_entry"](hass, entry))
+    await asyncio.wait_for(entered.wait(), 1)
+    # Ordinary read-only ownership/status lookups may create this bootstrap
+    # dictionary too; they must preserve the setup hold already installed.
+    assert ownership.get_ev_ownerships(hass, entry) == {}
+
+    prefix = VIN.lower()
+    number = constants.TESLEMETRY_BT_NUMBER_CHARGE_AMPS.format(prefix=prefix)
+    switch = constants.TESLEMETRY_BT_SWITCH_CHARGE.format(prefix=prefix)
+    sensor = constants.TESLEMETRY_BT_SENSOR_CHARGING_STATE.format(prefix=prefix)
+    states = {number: SimpleNamespace(state="10", attributes={"min": 1, "max": 32}),
+              switch: SimpleNamespace(state="off"), sensor: SimpleNamespace(state="Stopped")}
+    registrations = {entity_id: SimpleNamespace(entity_id=entity_id, platform="tesla_bluetooth",
+        config_entry_id="legacy-bt", device_id="legacy-device", unique_id=entity_id,
+        disabled_by=None) for entity_id in (switch, sensor)}
+    ha = sys.modules.get("homeassistant") or types.ModuleType("homeassistant")
+    helpers = sys.modules.get("homeassistant.helpers") or types.ModuleType("homeassistant.helpers")
+    registry = types.ModuleType("homeassistant.helpers.entity_registry")
+    registry.async_get = lambda _hass: SimpleNamespace(async_get=registrations.get)
+    monkeypatch.setitem(sys.modules, "homeassistant", ha)
+    monkeypatch.setitem(sys.modules, "homeassistant.helpers", helpers)
+    monkeypatch.setitem(sys.modules, registry.__name__, registry)
+    monkeypatch.setattr(ha, "helpers", helpers, raising=False)
+    monkeypatch.setattr(helpers, "entity_registry", registry, raising=False)
+    hass.states = SimpleNamespace(get=states.get)
+    writes = []
+
+    async def write(domain, service, data, **_kwargs):
+        writes.append((domain, service, data))
+
+    hass.services = SimpleNamespace(async_call=write)
+    source = INIT.parent / "automations/actions.py"
+    selected = {"_run_teslemetry_bt_transport_command", "_tesla_transport_authority",
+        "_tesla_legacy_entity_identity", "_tesla_legacy_transport_authorized",
+        "_run_tesla_legacy_with_authority", "_set_ev_charging_amps_teslemetry_bt",
+        "_tesla_call_service", "_tesla_charge_current_positive_floor",
+        "_generic_charger_entity_bounds", "_coerce_positive_int", "_is_number_range_error",
+        "_legacy_teslemetry_bt_identity", "_is_teslemetry_bt_available"}
+    nodes = [node for node in ast.parse(source.read_text()).body if getattr(node, "name", None) in selected]
+    action_ns = {**vars(constants), "__name__": f"{PACKAGE}.automations._setup_probe", "__spec__": None,
+        "__package__": f"{PACKAGE}.automations", "asyncio": asyncio, "inspect": inspect,
+        "math": math, "Mapping": Mapping, "Any": Any, "Optional": Optional, "Callable": Callable,
+        "_LOGGER": logging.getLogger(__name__), "DEFAULT_VEHICLE_ID": "_default",
+        "er": registry,
+        "prepare_ev_submission": admission.prepare_ev_submission,
+        "_tesla_submission_guard": ContextVar("setup_guard", default=None),
+        "_tesla_submission_handoff": ContextVar("setup_handoff", default=None),
+        "_tesla_submission_tracker": ContextVar("setup_tracker", default=None),
+        "_tesla_legacy_authority": ContextVar("setup_authority", default=None)}
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0), *nodes], type_ignores=[])), str(source), "exec"), action_ns)
+    assert action_ns["_legacy_teslemetry_bt_identity"](hass, prefix)
+    assert action_ns["_is_teslemetry_bt_available"](hass, prefix)
+    assert number not in registrations and hass.states.get(number) is not None
+
+    class GateStore:
+        async def async_load(self):
+            return {}
+
+    gate = solar.SolarOwnership(GateStore())
+
+    async def get_gate(_hass, _entry_id):
+        return gate
+
+    monkeypatch.setattr(solar, "ownership", get_gate)
+
+    @solar.guard_ev_control
+    async def legacy_rate(hass, config_entry, params):
+        return (await action_ns["_run_teslemetry_bt_transport_command"](
+            hass, config_entry, params, prefix, "rate",
+            lambda: action_ns["_set_ev_charging_amps_teslemetry_bt"](hass, prefix, 6),
+        ))[0]
+
+    try:
+        result = await legacy_rate(hass, entry, {"vehicle_vin": VIN})
+        assert writes == []
+        assert result is False
+        runtime = hass.data["power_sync"][entry.entry_id]
+        assert runtime["_tesla_ev_recovery_sidecar_hold"] == "sidecar_setup_pending"
+        if existing_bootstrap:
+            assert runtime is bootstrap and runtime["tariff_schedule"] == {"original": True}
+        assert recovery.recovery_control_allowed(hass, entry, VIN, 0, "stop")
+        assert recovery.get_vehicle_route(hass, entry, VIN) is None
+        assert hass.states.get(sensor).state == "Stopped"
+        assert entry.data.get("_tesla_ev_recovery_enrolled") is not True
+    finally:
+        release.set()
+        await setup_task
+    runtime["automation_store"] = store
+    runtime["_tesla_ev_recovery_sidecar_store"] = sidecar
+    assert await _function("_async_prepare_ev_recovery_lifecycle")(hass, entry, store)
+    assert runtime.get("_tesla_ev_recovery_sidecar_hold") is None
+    assert runtime["_tesla_ev_recovery_sidecar_loaded"] is True
+    assert recovery.recovery_control_allowed(hass, entry, VIN, 0, "rate")
+    _close(tasks)
