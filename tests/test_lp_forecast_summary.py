@@ -62,6 +62,10 @@ console.log(JSON.stringify(metrics));
 def test_summary_windows_follow_actual_solar_load_and_price_data(interval, solar_steps, price_steps):
     get_forecasts = _extract_function(COMPONENT / "optimization/coordinator.py", "get_forecast_data")
     coordinator = SimpleNamespace(
+        _solar_forecaster=SimpleNamespace(forecast_status={
+            "preferred_provider": "solcast", "active_provider": "open_meteo",
+            "fallback_reason": "solcast_quota_exhausted", "solcast_quota_exhausted": True,
+        }),
         _config=SimpleNamespace(interval_minutes=interval),
         _last_solar_forecast=[1.0] * solar_steps,
         _last_load_forecast=[2.0] * solar_steps,
@@ -79,6 +83,8 @@ def test_summary_windows_follow_actual_solar_load_and_price_data(interval, solar
     sensor_path = COMPONENT / "sensor.py"
     solar_attrs = _extract_function(sensor_path, "_lp_solar_forecast_attributes")
     attributes = [solar_attrs(data)]
+    assert data["solar_forecast_status"] == coordinator._solar_forecaster.forecast_status
+    assert attributes[0]["forecast_status"] == coordinator._solar_forecaster.forecast_status
     tree = ast.parse(sensor_path.read_text())
     for key in ("SENSOR_TYPE_LP_LOAD_FORECAST", "SENSOR_TYPE_LP_IMPORT_PRICE_FORECAST", "SENSOR_TYPE_LP_EXPORT_PRICE_FORECAST"):
         description = next(

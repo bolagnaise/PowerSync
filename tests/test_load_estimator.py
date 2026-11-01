@@ -6,6 +6,8 @@ import functools
 import importlib.util
 import sys
 import types
+
+import pytest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,6 +16,225 @@ from types import SimpleNamespace
 ROOT = Path(__file__).resolve().parent.parent
 COMPONENT_ROOT = ROOT / "custom_components" / "power_sync"
 MODULE_PATH = COMPONENT_ROOT / "optimization" / "load_estimator.py"
+
+
+def _quota_fallback_case(monkeypatch, *, builtin=False, meteo=True):
+    module = _load_estimator_module(monkeypatch)
+    start = datetime(2026, 5, 9, 10, tzinfo=timezone.utc)
+    quota = (
+        SimpleNamespace(_rate_limited=True, _api_calls_today=10,
+                        DAILY_API_LIMIT=10, _api_calls_date="2026-05-09")
+        if builtin else SimpleNamespace(api_used_count=10, api_limit=10)
+    )
+    solcast = SimpleNamespace(
+        entity_id="sensor.solcast_pv_forecast_forecast_today", state="12",
+        attributes={"detailedForecast": [
+            {"period_start": start.isoformat(), "pv_estimate": 2.0},
+        ]},
+    )
+    hass = SimpleNamespace(
+        data={}, states=_FakeStates([solcast], {solcast.entity_id: solcast}),
+    )
+    if builtin:
+        hass.data["power_sync"] = {"entry": {"solcast_coordinator": quota}}
+    else:
+        hass.config_entries = SimpleNamespace(async_entries=lambda domain: [
+            SimpleNamespace(runtime_data=SimpleNamespace(
+                coordinator=SimpleNamespace(solcast=quota)
+            ))
+        ] if domain == "solcast_solar" else [])
+    if meteo:
+        hass.data["open_meteo_solar_forecast"] = {
+            "array": SimpleNamespace(data=SimpleNamespace(watts={start: 1000})),
+        }
+    return module, start, quota, hass
+
+
+@pytest.mark.parametrize("builtin", [False, True])
+def test_solcast_quota_switches_cached_forecast_and_recovers(monkeypatch, builtin):
+    module, start, quota, hass = _quota_fallback_case(monkeypatch, builtin=builtin)
+    forecaster = module.SolcastForecaster(hass, interval_minutes=30)
+
+    assert _run(forecaster.get_forecast(1, start)) == [1000.0, 0.0]
+    assert forecaster.last_forecast_source == "open_meteo"
+    assert forecaster.forecast_status == {
+        "preferred_provider": "solcast", "active_provider": "open_meteo",
+        "fallback_reason": "solcast_quota_exhausted", "solcast_quota_exhausted": True,
+    }
+    # A restart creates a fresh selector, but reads the same restored quota.
+    restarted = module.SolcastForecaster(hass, interval_minutes=30)
+    assert _run(restarted.get_forecast(1, start)) == [1000.0, 0.0]
+    if builtin:
+        quota._api_calls_today = 0
+        quota._rate_limited = False
+    else:
+        quota.api_used_count = 0
+    assert _run(forecaster.get_forecast(1, start)) == [2000.0, 0.0]
+    assert forecaster.provider_preference == "solcast"
+    assert forecaster.forecast_status["fallback_reason"] is None
+    assert forecaster.forecast_status["solcast_quota_exhausted"] is False
+
+
+def test_builtin_yesterdays_quota_does_not_block_solcast_after_utc_midnight(monkeypatch):
+    module, start, quota, hass = _quota_fallback_case(monkeypatch, builtin=True)
+    quota._api_calls_date = "2026-05-08"
+    forecaster = module.SolcastForecaster(hass, interval_minutes=30)
+    assert _run(forecaster.get_forecast(1, start)) == [2000.0, 0.0]
+    assert forecaster.forecast_status["solcast_quota_exhausted"] is False
+
+
+@pytest.mark.parametrize("meteo", [False, True])
+def test_solcast_quota_retains_cache_if_fallback_missing_or_expired(monkeypatch, meteo):
+    module, start, _, hass = _quota_fallback_case(monkeypatch, meteo=meteo)
+    if meteo:
+        hass.data["open_meteo_solar_forecast"]["array"].data.watts = {
+            start - timedelta(days=1): 1500,
+        }
+    forecaster = module.SolcastForecaster(hass, interval_minutes=30)
+    assert _run(forecaster.get_forecast(1, start)) == [2000.0, 0.0]
+    assert forecaster.forecast_status["active_provider"] == "solcast"
+    assert forecaster.forecast_status["fallback_reason"] == (
+        "solcast_quota_exhausted_fallback_unavailable"
+    )
+
+
+@pytest.mark.parametrize("used,limit", [(9, 10), ("unknown", 10), (10, 0),
+                                          (float("nan"), 10), (10, float("inf")),
+                                          (True, 1), (10, None)])
+def test_invalid_or_remaining_quota_preserves_primary(monkeypatch, used, limit):
+    module, start, quota, hass = _quota_fallback_case(monkeypatch)
+    quota.api_used_count, quota.api_limit = used, limit
+    forecaster = module.SolcastForecaster(hass, interval_minutes=30)
+    assert _run(forecaster.get_forecast(1, start)) == [2000.0, 0.0]
+
+
+def test_solcast_quota_fallback_keeps_valid_zero_forecast(monkeypatch):
+    module, start, _, hass = _quota_fallback_case(monkeypatch)
+    hass.data["open_meteo_solar_forecast"]["array"].data.watts = {start: 0}
+    forecaster = module.SolcastForecaster(hass, interval_minutes=30)
+    summary = _run(forecaster.get_daily_summary(1, start))
+    assert summary["source"] == "open_meteo"
+    assert summary["today_kwh"] == 0
+    assert summary["fallback_reason"] == "solcast_quota_exhausted"
+
+
+def test_solcast_quota_sensors_work_without_runtime_metadata(monkeypatch):
+    module, start, _, hass = _quota_fallback_case(monkeypatch)
+    del hass.config_entries
+    states = [SimpleNamespace(entity_id=f"sensor.solcast_pv_forecast_api_{name}",
+                              state=value) for name, value in [("used", "10"), ("limit", "10")]]
+    hass.states = _FakeStates(hass.states.async_all() + states, {
+        state.entity_id: state for state in hass.states.async_all() + states
+    })
+    forecaster = module.SolcastForecaster(hass, interval_minutes=30)
+    assert _run(forecaster.get_forecast(1, start)) == [1000.0, 0.0]
+    states[0].state = "0"
+    assert _run(forecaster.get_forecast(1, start)) == [2000.0, 0.0]
+
+
+def test_external_quota_metadata_overrides_unused_builtin_and_sensor_counters(monkeypatch):
+    module, start, quota, hass = _quota_fallback_case(monkeypatch)
+    quota.api_used_count = 1
+    hass.data["power_sync"] = {"entry": {"solcast_coordinator": SimpleNamespace(
+        _rate_limited=True, _api_calls_date="2026-05-09",
+    )}}
+    forecaster = module.SolcastForecaster(hass, interval_minutes=30)
+    assert _run(forecaster.get_forecast(1, start)) == [2000.0, 0.0]
+
+
+def test_builtin_consuming_external_forecast_does_not_report_its_old_quota(monkeypatch):
+    module, start, quota, hass = _quota_fallback_case(monkeypatch, builtin=True)
+    quota.data = {"source": "solcast_integration"}
+    forecaster = module.SolcastForecaster(hass, interval_minutes=30)
+    assert _run(forecaster.get_forecast(1, start)) == [2000.0, 0.0]
+
+
+def test_builtin_quota_counter_is_honored_before_rate_limit_flag_set(monkeypatch):
+    module, start, quota, hass = _quota_fallback_case(monkeypatch, builtin=True)
+    quota._rate_limited = False
+    forecaster = module.SolcastForecaster(hass, interval_minutes=30)
+    assert _run(forecaster.get_forecast(1, start)) == [1000.0, 0.0]
+
+
+def test_legacy_external_coordinator_reports_quota(monkeypatch):
+    module, start, quota, hass = _quota_fallback_case(monkeypatch)
+    del hass.config_entries
+    hass.data["solcast_solar"] = {"entry": SimpleNamespace(solcast=quota)}
+    forecaster = module.SolcastForecaster(hass, interval_minutes=30)
+    assert _run(forecaster.get_forecast(1, start)) == [1000.0, 0.0]
+
+
+def test_external_yesterdays_usage_cache_recovers_even_before_provider_refresh(monkeypatch):
+    module, start, quota, hass = _quota_fallback_case(monkeypatch)
+    quota.sites_cache = SimpleNamespace(stale_usage_cache=False)
+    forecaster = module.SolcastForecaster(hass, interval_minutes=30)
+    assert _run(forecaster.get_forecast(1, start)) == [1000.0, 0.0]
+
+    # Upstream reports yesterday's counters as stale after UTC midnight,
+    # including when HA was offline during the scheduled counter reset.
+    quota.sites_cache.stale_usage_cache = True
+    assert _run(forecaster.get_forecast(1, start)) == [2000.0, 0.0]
+    restarted = module.SolcastForecaster(hass, interval_minutes=30)
+    assert _run(restarted.get_forecast(1, start)) == [2000.0, 0.0]
+    quota.api_used_count = 0
+    quota.sites_cache.stale_usage_cache = False
+    assert _run(forecaster.get_forecast(1, start)) == [2000.0, 0.0]
+
+
+def test_external_startup_empty_quota_cache_does_not_break_forecast(monkeypatch):
+    module, start, _, hass = _quota_fallback_case(monkeypatch)
+
+    class EmptyUsageCache:
+        @property
+        def api_used_count(self):
+            return max([])  # Matches upstream's property before initialization.
+
+    entry = SimpleNamespace(runtime_data=SimpleNamespace(
+        coordinator=SimpleNamespace(solcast=EmptyUsageCache())
+    ))
+    hass.config_entries.async_entries = lambda domain: [entry]
+    forecaster = module.SolcastForecaster(hass, interval_minutes=30)
+    assert _run(forecaster.get_forecast(1, start)) == [2000.0, 0.0]
+
+
+def test_quota_limited_solcast_with_no_forecasts_keeps_missing_source(monkeypatch):
+    module, start, _, hass = _quota_fallback_case(monkeypatch, meteo=False)
+    hass.states = _FakeStates()
+    forecaster = module.SolcastForecaster(hass, interval_minutes=30)
+    assert _run(forecaster.get_forecast(1, start)) == [0.0, 0.0]
+    assert forecaster.last_forecast_source is None
+    assert forecaster.forecast_status["fallback_reason"] == "solcast_quota_exhausted_fallback_unavailable"
+
+
+@pytest.mark.parametrize("bad_power", [float("nan"), float("inf"), -float("inf")])
+def test_invalid_meteo_values_do_not_replace_cached_solcast(monkeypatch, bad_power):
+    module, start, _, hass = _quota_fallback_case(monkeypatch)
+    hass.data["open_meteo_solar_forecast"]["array"].data.watts = {start: bad_power}
+    forecaster = module.SolcastForecaster(hass, interval_minutes=30)
+    assert _run(forecaster.get_forecast(1, start)) == [2000.0, 0.0]
+
+
+def test_explicit_open_meteo_preference_is_not_a_quota_fallback(monkeypatch):
+    module, start, _, hass = _quota_fallback_case(monkeypatch)
+    forecaster = module.SolcastForecaster(hass, interval_minutes=30, provider_preference="open_meteo")
+    assert _run(forecaster.get_forecast(1, start)) == [1000.0, 0.0]
+    assert forecaster.forecast_status["fallback_reason"] is None
+
+
+def test_explicit_volcast_remains_primary_when_solcast_quota_exhausted(monkeypatch):
+    module, start, _, hass = _quota_fallback_case(monkeypatch)
+    volcast = SimpleNamespace(
+        entity_id="sensor.volcast_energy_forecast_today", state="12",
+        attributes={"detailedHourly": [
+            {"period_start": start.isoformat(), "power_kw": 0.5, "energy_kwh": 0.5},
+        ]},
+    )
+    states = hass.states.async_all() + [volcast]
+    hass.states = _FakeStates(states, {state.entity_id: state for state in states})
+    forecaster = module.SolcastForecaster(hass, interval_minutes=30, provider_preference="volcast")
+    assert _run(forecaster.get_forecast(1, start))[0] == 500.0
+    assert forecaster.last_forecast_source == "volcast"
+    assert forecaster.forecast_status["fallback_reason"] is None
 
 
 def _load_estimator_module(monkeypatch):

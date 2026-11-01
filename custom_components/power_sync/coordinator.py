@@ -12643,6 +12643,16 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
             # that makes the sensor display only the rest-of-day forecast.
             await self._restore_daily_forecast_cache()
 
+        # Reset before any cached-data return or budget guard. Previously a
+        # rate-limited client with a good cache could return forever without
+        # reaching _track_api_call(), where the UTC-day reset also occurs.
+        today_utc = dt_util.utcnow().strftime("%Y-%m-%d")
+        if self._api_calls_date is not None and self._api_calls_date != today_utc:
+            self._api_calls_date = today_utc
+            self._api_calls_today = 0
+            self._rate_limited = False
+            self._rate_limit_verified = False
+
         # First, check if Solcast HA integration is installed and has data
         # This avoids doubling API calls if user has both integrations
         solcast_data = await self._try_read_from_solcast_integration()

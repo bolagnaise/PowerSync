@@ -6284,8 +6284,14 @@ def test_api_current_action_uses_effective_runtime_action(opt_module):
     coordinator._config.min_export_price = 0.30
     coordinator._last_price_timestamps = [now]
     coordinator._last_settlement_export_prices = [0.09]
+    forecast_status = {
+        "preferred_provider": "solcast", "active_provider": "open_meteo",
+        "fallback_reason": "solcast_quota_exhausted", "solcast_quota_exhausted": True,
+    }
+    coordinator._solar_forecaster = SimpleNamespace(forecast_status=forecast_status)
     data = coordinator.get_api_data()
 
+    assert data["solar_forecast_status"] == forecast_status
     assert data["planned_current_action"] == "export"
     assert data["planned_current_power_w"] == 5000
     assert data["effective_current_action"] == "self_consumption"
@@ -6835,6 +6841,26 @@ def test_solar_forecast_warning_waits_for_forecast_attempt(opt_module):
     warnings = coordinator._get_warnings()
     assert [warning["type"] for warning in warnings] == ["no_solar_forecast"]
 
+    coordinator._has_solar_forecast = True
+    assert coordinator._get_warnings() == []
+
+
+@pytest.mark.parametrize("active,reason,warning_type", [
+    ("open_meteo", "solcast_quota_exhausted", "solar_forecast_fallback"),
+    ("solcast", "solcast_quota_exhausted_fallback_unavailable", "solar_forecast_fallback_unavailable"),
+    (None, "solcast_quota_exhausted_fallback_unavailable", "no_solar_forecast"),
+])
+def test_solar_quota_warning_tracks_active_provider_and_clears_on_recovery(
+    opt_module, active, reason, warning_type
+):
+    coordinator = _coordinator(opt_module, "octopus")
+    coordinator._has_solar_forecast = active is not None
+    status = {"active_provider": active, "fallback_reason": reason}
+    coordinator._solar_forecaster = SimpleNamespace(forecast_status=status)
+
+    assert [warning["type"] for warning in coordinator._get_warnings()] == [warning_type]
+
+    status.update(active_provider="solcast", fallback_reason=None)
     coordinator._has_solar_forecast = True
     assert coordinator._get_warnings() == []
 

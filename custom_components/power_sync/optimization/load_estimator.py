@@ -14,6 +14,7 @@ import bisect
 import functools
 import inspect
 import logging
+import math
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -1664,6 +1665,8 @@ class SolcastForecaster:
             else DEFAULT_SOLAR_FORECAST_PROVIDER
         )
         self.last_forecast_source: str | None = None
+        self._solcast_quota_limited = False
+        self._fallback_reason: str | None = None
         self.estimate_type = (
             estimate_type
             if estimate_type in _SOLCAST_ESTIMATE_FIELDS
@@ -1681,6 +1684,145 @@ class SolcastForecaster:
         if self.provider_preference == SOLAR_FORECAST_PROVIDER_OPEN_METEO:
             return (SOLAR_FORECAST_PROVIDER_OPEN_METEO, SOLAR_FORECAST_PROVIDER_SOLCAST)
         return (SOLAR_FORECAST_PROVIDER_SOLCAST, SOLAR_FORECAST_PROVIDER_OPEN_METEO)
+
+    @property
+    def forecast_status(self) -> dict[str, Any]:
+        """Describe the last selection without changing the saved preference."""
+        return {
+            "preferred_provider": self.provider_preference,
+            "active_provider": self.last_forecast_source,
+            "fallback_reason": self._fallback_reason,
+            "solcast_quota_exhausted": self._solcast_quota_limited,
+        }
+
+    @staticmethod
+    def _quota_exhausted(used: Any, limit: Any) -> bool | None:
+        """Read quota metadata; unknown or malformed values prove nothing."""
+        if isinstance(used, bool) or isinstance(limit, bool):
+            return None
+        try:
+            used, limit = float(used), float(limit)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if not math.isfinite(used) or not math.isfinite(limit) or used < 0 or limit <= 0:
+            return None
+        return used >= limit
+
+    def _solcast_quota_exhausted(self) -> bool:
+        """Inspect existing quota counters only; never request a provider update.
+
+        Solcast Solar owns its persisted counters and UTC-midnight reset. Its
+        public API properties are authoritative over possibly stale sensors or
+        an unused built-in client. Older versions can expose only sensors.
+        """
+        sources = []
+        async_entries = getattr(getattr(self.hass, "config_entries", None), "async_entries", None)
+        if callable(async_entries):
+            for entry in async_entries("solcast_solar"):
+                runtime = getattr(entry, "runtime_data", None)
+                sources.append(getattr(runtime, "coordinator", None))
+        domain_data = getattr(self.hass, "data", {})
+        legacy = domain_data.get("solcast_solar")
+        if isinstance(legacy, dict):
+            sources.extend(legacy.values())
+        elif legacy is not None:
+            sources.append(legacy)
+
+        quotas = []
+        for source in sources:
+            api = getattr(source, "solcast", source)
+            try:
+                if getattr(getattr(api, "sites_cache", None), "stale_usage_cache", False) is True:
+                    # On restart after UTC midnight, upstream may still hold
+                    # yesterday's counters until its next update. Its public
+                    # freshness flag proves these cannot exhaust today's quota.
+                    quotas.append(False)
+                    continue
+                quota = self._quota_exhausted(
+                    getattr(api, "api_used_count", None), getattr(api, "api_limit", None)
+                )
+            except (AttributeError, KeyError, TypeError, ValueError):
+                # Upstream's max/min properties can raise while usage caches
+                # are empty during startup. Try sensors instead.
+                continue
+            if quota is not None:
+                quotas.append(quota)
+        if quotas:
+            return any(quotas)
+
+        # Pair each API Used sensor with its own API Limit sensor. Do not
+        # combine counts from differently named Solcast installations.
+        hass_states = getattr(self.hass, "states", None)
+        async_all = getattr(hass_states, "async_all", None)
+        if callable(async_all):
+            try:
+                states = async_all("sensor")
+            except TypeError:
+                states = async_all()
+        else:
+            states = (
+                [hass_states.get("sensor.solcast_pv_forecast_api_used")]
+                if hass_states is not None else []
+            )
+        for state in states or []:
+            entity_id = getattr(state, "entity_id", "")
+            if "solcast" not in entity_id or not entity_id.endswith("_api_used"):
+                continue
+            limit_state = self.hass.states.get(entity_id.removesuffix("_used") + "_limit")
+            if any(
+                (getattr(item, "attributes", {}) or {}).get("restored") is True
+                for item in (state, limit_state)
+            ):
+                continue
+            quota = self._quota_exhausted(
+                state.state, getattr(limit_state, "state", None)
+            )
+            if quota is not None:
+                quotas.append(quota)
+        if quotas:
+            return any(quotas)
+
+        today = dt_util.utcnow().strftime("%Y-%m-%d")
+        for entry_data in domain_data.get("power_sync", {}).values():
+            if not isinstance(entry_data, dict):
+                continue
+            coordinator = entry_data.get("solcast_coordinator")
+            cached_data = getattr(coordinator, "data", None)
+            if isinstance(cached_data, dict) and str(cached_data.get("source", "")).startswith("solcast_integration"):
+                # This client is consuming external forecasts and is not the
+                # source of quota truth, even if old API counters remain.
+                continue
+            if getattr(coordinator, "_api_calls_date", None) != today:
+                # The built-in coordinator may not have polled since midnight.
+                # Yesterday's exhausted quota must not make fallback sticky.
+                continue
+            if getattr(coordinator, "_rate_limited", False) is True:
+                return True
+            if self._quota_exhausted(
+                getattr(coordinator, "_api_calls_today", None),
+                getattr(coordinator, "DAILY_API_LIMIT", None),
+            ):
+                return True
+        return False
+
+    def _record_forecast_selection(self, provider: str | None) -> None:
+        """Publish why the selected provider differs from the preference."""
+        previous = self.forecast_status
+        self.last_forecast_source = provider
+        self._fallback_reason = None
+        if self._solcast_quota_limited and provider in (None, SOLAR_FORECAST_PROVIDER_SOLCAST):
+            self._fallback_reason = "solcast_quota_exhausted_fallback_unavailable"
+        elif provider != self.provider_preference:
+            self._fallback_reason = (
+                "solcast_quota_exhausted"
+                if self._solcast_quota_limited and provider == SOLAR_FORECAST_PROVIDER_OPEN_METEO
+                else "preferred_provider_unavailable"
+            )
+        if self.forecast_status != previous:
+            _LOGGER.info(
+                "Solar forecast selection: preferred=%s, active=%s, reason=%s",
+                self.provider_preference, provider, self._fallback_reason,
+            )
 
     def _get_pv_estimate(self, period: dict[str, Any]) -> float:
         """Return the configured Solcast estimate value for a forecast period."""
@@ -1742,9 +1884,20 @@ class SolcastForecaster:
 
         if getattr(self, "no_solar_installed", False):
             self.last_forecast_source = "no_solar_installed"
+            self._solcast_quota_limited = False
+            self._fallback_reason = None
             return [0.0] * n_intervals
 
-        for provider in self._provider_order():
+        self._solcast_quota_limited = self._solcast_quota_exhausted()
+        provider_order = self._provider_order()
+        if self._solcast_quota_limited:
+            # Try Open-Meteo even when Solcast's cache still covers the horizon.
+            # Keep usable Solcast cache as a last resort if fallback is absent.
+            provider_order = tuple(
+                provider for provider in provider_order
+                if provider != SOLAR_FORECAST_PROVIDER_SOLCAST
+            ) + (SOLAR_FORECAST_PROVIDER_SOLCAST,)
+        for provider in provider_order:
             if provider == SOLAR_FORECAST_PROVIDER_SOLCAST:
                 forecast = await self._get_solcast_forecast(start_time, n_intervals)
             elif provider == SOLAR_FORECAST_PROVIDER_OPEN_METEO:
@@ -1752,12 +1905,12 @@ class SolcastForecaster:
             else:
                 forecast = self._get_volcast_forecast(start_time, n_intervals)
             if forecast is not None:
-                self.last_forecast_source = provider
+                self._record_forecast_selection(provider)
                 return forecast
 
         # No solar forecast available — use zero solar so LP makes
         # purely price-based decisions rather than guessing production
-        self.last_forecast_source = None
+        self._record_forecast_selection(None)
         _LOGGER.warning(
             "Solar forecast not available — using zero solar forecast. "
             "Install Solcast Solar, Open-Meteo Solar Forecast, or Volcast "
@@ -1794,6 +1947,7 @@ class SolcastForecaster:
             "tomorrow_kwh": tomorrow_kwh,
             "today_forecast_kwh": today_kwh,
             "source": self.last_forecast_source,
+            **self.forecast_status,
         }
 
     def _get_volcast_forecast(
@@ -2156,6 +2310,8 @@ class SolcastForecaster:
             try:
                 point_time = self._parse_forecast_time(raw_time, start_time)
                 point_power = max(0.0, float(raw_power))
+                if not math.isfinite(float(raw_power)):
+                    continue
             except (TypeError, ValueError):
                 continue
             points.append((point_time, point_power))
@@ -2165,6 +2321,9 @@ class SolcastForecaster:
 
         sorted_points = sorted(points, key=lambda item: item[0])
         last_point_time = sorted_points[-1][0]
+        horizon_end = start_time + timedelta(minutes=n_intervals * self.interval_minutes)
+        if last_point_time < start_time or sorted_points[0][0] >= horizon_end:
+            return None
         result: list[float] = []
         point_index = 0
         current_power = 0.0

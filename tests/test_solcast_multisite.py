@@ -81,7 +81,7 @@ def _make_coordinator(responses: list[list[dict[str, Any]] | None], calls: int =
     coordinator = object.__new__(coordinator_class)
     coordinator._resource_ids = ["site-a", "site-b"]
     coordinator._estimate_type = "estimate"
-    coordinator._api_calls_date = "2026-10-10"
+    coordinator._api_calls_date = _FrozenDtUtil.utcnow().strftime("%Y-%m-%d")
     coordinator._api_calls_today = calls
     coordinator._rate_limited = False
     coordinator._daily_forecast_date = None
@@ -126,6 +126,31 @@ def _run_update(coordinator):
         return result
 
     return asyncio.run(run())
+
+
+def test_exhausted_quota_resets_before_cached_return_on_new_utc_day():
+    coordinator, saved, tracked = _make_coordinator([
+        [_period("2026-10-10T01:00:00+10:00", 2.0)],
+        [_period("2026-10-10T01:00:00+10:00", 1.0)],
+    ], calls=10)
+    coordinator._api_calls_date = (
+        _FrozenDtUtil.utcnow() - timedelta(days=1)
+    ).strftime("%Y-%m-%d")
+    coordinator._rate_limited = True
+    coordinator._rate_limit_verified = True
+    coordinator.data = {
+        "available": True, "resource_ids": ["site-a", "site-b"],
+        "forecasts": [_period("2026-10-10T01:00:00+10:00", 9.0)],
+    }
+
+    result = _run_update(coordinator)
+
+    assert tracked() == 2  # Fetch again, rather than returning yesterday's cache.
+    assert coordinator._api_calls_today == 2
+    assert coordinator._rate_limited is False
+    assert coordinator._api_calls_date == _FrozenDtUtil.utcnow().strftime("%Y-%m-%d")
+    assert result["forecasts"][0]["pv_estimate"] == 3.0
+    assert len(saved) == 1
 
 
 def test_secondary_empty_response_never_publishes_single_site_forecast():

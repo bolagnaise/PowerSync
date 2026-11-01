@@ -17633,6 +17633,25 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "title": "Solar Forecast Unavailable",
                 "message": "No usable current solar forecast data is available. The optimizer is making decisions based on price only, without knowing when solar will be available. Check that the selected Solcast, Open-Meteo, or Volcast provider is loaded and exposing current forecast periods.",
             })
+        forecaster = getattr(self, "_solar_forecaster", None)
+        forecast_status = getattr(forecaster, "forecast_status", {})
+        reason = forecast_status.get("fallback_reason")
+        if not no_solar_installed and reason == "solcast_quota_exhausted":
+            warnings.append({
+                "type": "solar_forecast_fallback",
+                "title": "Using Open-Meteo solar forecast",
+                "message": "Solcast's daily API quota is exhausted. PowerSync is using Open-Meteo and will automatically return to your preferred provider when Solcast's quota resets.",
+            })
+        elif (
+            not no_solar_installed
+            and forecast_status.get("active_provider") == "solcast"
+            and reason == "solcast_quota_exhausted_fallback_unavailable"
+        ):
+            warnings.append({
+                "type": "solar_forecast_fallback_unavailable",
+                "title": "Solcast quota exhausted; fallback unavailable",
+                "message": "PowerSync is using cached Solcast forecasts because Open-Meteo has no usable forecast. Configure the Open-Meteo Solar Forecast integration in Home Assistant for automatic fallback. Solcast will resume automatically when its quota resets.",
+            })
         return warnings
 
     def _record_solar_forecast_availability(
@@ -20742,6 +20761,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         }
         learner = getattr(self, "_solar_forecast_learner", None)
         forecaster = getattr(self, "_solar_forecaster", None)
+        data["solar_forecast_status"] = dict(getattr(forecaster, "forecast_status", {}))
         if learner is not None:
             learning_diagnostics = learner.diagnostics(
                 getattr(forecaster, "last_forecast_source", None)
@@ -21169,6 +21189,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         data = {
             "success": True,
+            "solar_forecast_status": dict(getattr(
+                getattr(self, "_solar_forecaster", None), "forecast_status", {}
+            )),
             **currency_metadata(currency_for_entry(self._entry, self.hass)),
             "enabled": self._enabled,
             "monitoring_mode": monitoring_mode,
