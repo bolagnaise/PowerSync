@@ -41,6 +41,44 @@ _ha_event.async_track_point_in_utc_time = lambda *_args, **_kwargs: None
 ev_ownership = importlib.import_module("power_sync.automations.ev_ownership")
 
 
+@pytest.fixture(autouse=True)
+def _bind_current_homeassistant_event_module(monkeypatch):
+    """Patch the event module object used by each full-collection test.
+
+    Several AST-style tests install lightweight Home Assistant helper modules
+    while the suite is collected.  A later test can replace
+    ``sys.modules['homeassistant.helpers.event']`` and leave the module object
+    cached above detached from the import path used by ``ev_ownership``.
+    Bind both the canonical module entry and its parent package immediately
+    before each test so the existing per-test monkeypatches affect the object
+    that production code imports.
+    """
+    module = sys.modules[__name__]
+    ha_root = sys.modules.get("homeassistant")
+    if ha_root is None:
+        ha_root = types.ModuleType("homeassistant")
+    monkeypatch.setitem(sys.modules, "homeassistant", ha_root)
+    helpers = sys.modules.get("homeassistant.helpers")
+    if helpers is None:
+        helpers = types.ModuleType("homeassistant.helpers")
+    monkeypatch.setitem(sys.modules, "homeassistant.helpers", helpers)
+    event = sys.modules.get("homeassistant.helpers.event")
+    if event is None:
+        event = types.ModuleType("homeassistant.helpers.event")
+    monkeypatch.setitem(sys.modules, "homeassistant.helpers.event", event)
+    if not hasattr(event, "async_track_point_in_utc_time"):
+        monkeypatch.setattr(
+            event,
+            "async_track_point_in_utc_time",
+            lambda *_args, **_kwargs: None,
+            raising=False,
+        )
+    monkeypatch.setattr(ha_root, "helpers", helpers, raising=False)
+    monkeypatch.setattr(helpers, "event", event, raising=False)
+    monkeypatch.setattr(module, "_ha_helpers", helpers)
+    monkeypatch.setattr(module, "_ha_event", event)
+
+
 class _Entry:
     entry_id = "entry-1"
     data = {}

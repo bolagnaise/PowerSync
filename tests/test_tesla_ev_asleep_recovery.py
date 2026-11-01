@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import importlib
+import sys
 import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -14,6 +16,29 @@ from test_ev_ocpp_actions import _Hass, _State, actions
 VIN = "5YJ3E1EA7NF0000A1"
 COMMAND = "switch.fleet_charge"
 WAKE = "button.fleet_wake"
+
+
+@pytest.fixture(autouse=True)
+def _bind_current_actions_module(monkeypatch):
+    """Keep this file's action seams on the module used by product calls.
+
+    Several AST-style test modules replace the lightweight ``power_sync``
+    package while the full collection is imported.  That can leave the
+    ``actions`` object imported above detached from the canonical module in
+    ``sys.modules``; patches then affect a dead module and the action silently
+    follows the real transport path.  Rebind this test module for each case
+    and keep registry helpers attached to the same canonical action module.
+    """
+    current = importlib.import_module("power_sync.automations.actions")
+    monkeypatch.setattr(sys.modules[__name__], "actions", current)
+    monkeypatch.setattr(current.er, "async_get", lambda hass: hass.entity_registry)
+    monkeypatch.setattr(current.dr, "async_get", lambda hass: hass.device_registry)
+    helpers = sys.modules.get("homeassistant.helpers")
+    if helpers is not None:
+        monkeypatch.setattr(helpers, "entity_registry", current.er, raising=False)
+        monkeypatch.setattr(helpers, "device_registry", current.dr, raising=False)
+    monkeypatch.setitem(sys.modules, "homeassistant.helpers.entity_registry", current.er)
+    monkeypatch.setitem(sys.modules, "homeassistant.helpers.device_registry", current.dr)
 
 
 def _fleet_registry(

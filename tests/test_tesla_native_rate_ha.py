@@ -24,7 +24,8 @@ def adapter(monkeypatch):
     m = importlib.import_module(package+'.tesla_native_rate')
     solar = importlib.import_module(package+'.teslemetry_solar')
     monkeypatch.setattr(m.time, 'time', lambda: NOW)
-    gate = SimpleNamespace(lock=asyncio.Lock(), owner=None, blocked=lambda _: False)
+    gate = solar.SolarOwnership(None)
+    gate.blocked = lambda _: False
     async def load(): pass
     gate.load = load
     async def ownership(*_): return gate
