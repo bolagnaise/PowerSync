@@ -551,7 +551,9 @@ def route_lock(a):
 @pytest.mark.asyncio
 @pytest.mark.parametrize('direction', ['charge', 'discharge'])
 @pytest.mark.parametrize('source', ['optimizer', 'user'])
-async def test_failed_tariff_cleanup_finishes_inside_battery_command(admission, direction, source):
+@pytest.mark.parametrize('cancelled', [False, True, 'again'])
+@pytest.mark.parametrize('site_scope', [False, True])
+async def test_failed_tariff_cleanup_finishes_inside_battery_command(admission, direction, source, cancelled, site_scope):
     """A failed tariff must reach restore without reacquiring its optimizer lock."""
     import ast
     import logging
@@ -568,14 +570,27 @@ async def test_failed_tariff_cleanup_finishes_inside_battery_command(admission, 
     manager = harness.client
     a.hass.data['power_sync_license_manager'] = manager
     lock = route_lock(a)
+    if site_scope:
+        controls = importlib.import_module(a.m.__package__ + '.powerwall_control')
+        site = controls.coordinator_for(a.hass, a.entry)
+        a.runtime['powerwall_site_control'] = site
+        lock = site.route_lock
     owner = SimpleNamespace(hass=a.hass, entry_id=a.entry.entry_id)
     state = {'active': False, 'saved_tariff': {'name': 'original'}}
     restored = []
+    journal = []
+    preparing = asyncio.Event()
+    restore_started = asyncio.Event()
+    finish_restore = asyncio.Event()
+    command_task = None
 
-    async def restore(call):
+    async def handle_restore_normal(call):
+        assert asyncio.current_task() is command_task
         assert lock.locked() and manager.control_lock(a.entry.entry_id).locked()
         assert state['active'] and state['saved_tariff'] == {'name': 'original'}
         restored.append(call.data)
+        restore_started.set()
+        await finish_restore.wait()
         state['active'] = False
 
     tree = ast.parse((ROOT / '__init__.py').read_text())
@@ -589,8 +604,8 @@ async def test_failed_tariff_cleanup_finishes_inside_battery_command(admission, 
         f'force_{direction}_state': state, 'dt_util': SimpleNamespace(utcnow=lambda: now),
         'timedelta': timedelta, '_LOGGER': logging.getLogger(__name__),
         '_tesla_force_retry_expiry': lambda state, expiry, **kwargs: expiry,
-        'persist_force_mode_state': AsyncMock(return_value=True),
-        'handle_restore_normal': a.m.guard_battery_transition(a.hass, a.entry, restore),
+        'persist_force_mode_state': AsyncMock(side_effect=lambda: journal.append(deepcopy(state))),
+        'handle_restore_normal': a.m.guard_battery_transition(a.hass, a.entry, handle_restore_normal),
         'make_service_call': load_power_sync_function('make_service_call',
             {'signature': signature, 'ServiceCall': CurrentServiceCall}, path=ROOT / 'service_calls.py'),
         'DOMAIN': 'power_sync', 'SERVICE_RESTORE_NORMAL': 'restore_normal',
@@ -598,9 +613,26 @@ async def test_failed_tariff_cleanup_finishes_inside_battery_command(admission, 
     }
     exec(compile(ast.Module(body=[helper], type_ignores=[]), str(ROOT / '__init__.py'), 'exec'), namespace)
 
-    async def failed_force(_):
-        await namespace[name]('tariff upload failed after prerequisite writes')
-        return False
+    async def prepare():
+        preparing.set()
+        await asyncio.Event().wait()
+
+    if cancelled:
+        handler = next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef)
+                       and n.name == f'handle_force_{direction}')
+        cancellation = next(n for n in ast.walk(handler) if isinstance(n, ast.ExceptHandler)
+                            and n.type is not None and ast.unparse(n.type) == 'asyncio.CancelledError')
+        probe = ast.parse('async def failed_force(call):\n    try:\n        await prepare()\n    except asyncio.CancelledError:\n        raise').body[0]
+        probe.body[0].handlers = [cancellation]
+        namespace.update(asyncio=asyncio, prepare=prepare,
+                         **{f'tesla_force_{direction}_mutated': True})
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[probe], type_ignores=[])),
+                     str(ROOT / '__init__.py'), 'exec'), namespace)
+        failed_force = namespace['failed_force']
+    else:
+        async def failed_force(_):
+            await namespace[name]('tariff upload failed after prerequisite writes')
+            return False
 
     service = a.m.guard_battery_transition(a.hass, a.entry, failed_force)
     async def request():
@@ -608,8 +640,40 @@ async def test_failed_tariff_cleanup_finishes_inside_battery_command(admission, 
             return await guard.fenced_call(owner, lambda: service(call), f'force_{direction}')
         return await service(call)
 
-    assert await asyncio.wait_for(request(), 0.5) is False
-    assert len(restored) == 1 and not state['active']
+    command_task = asyncio.create_task(request())
+    competitor_entered = asyncio.Event()
+    async def compete(_):
+        competitor_entered.set()
+    competitor = None
+    try:
+        if cancelled:
+            await asyncio.wait_for(preparing.wait(), 0.5)
+            command_task.cancel()
+        await asyncio.wait_for(restore_started.wait(), 0.5)
+        competitor = asyncio.create_task(a.m.guard_battery_transition(a.hass, a.entry, compete)(call))
+        await asyncio.sleep(0)
+        assert not competitor_entered.is_set()
+        if cancelled == 'again':
+            command_task.cancel()
+        finish_restore.set()
+        if cancelled:
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(command_task, 0.5)
+        else:
+            assert await asyncio.wait_for(command_task, 0.5) is False
+        await asyncio.wait_for(competitor, 0.5)
+    finally:
+        finish_restore.set()
+        for task in (command_task, competitor):
+            if task is not None and not task.done():
+                task.cancel()
+        await asyncio.gather(*(task for task in (command_task, competitor) if task is not None),
+                             return_exceptions=True)
+    assert len(restored) == 1
+    assert state['active'] is (cancelled == 'again')
+    assert journal[0]['active'] and journal[0]['saved_tariff'] == {'name': 'original'}
+    if direction == 'discharge':
+        assert journal[0]['command_status'] == 'restore_pending'
     assert restored[0]['_allow_monitoring_restore'] is True
     assert restored[0]['_tesla_restore_generation'] == 1
     assert not lock.locked() and not manager.control_lock(a.entry.entry_id).locked()

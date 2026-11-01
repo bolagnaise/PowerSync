@@ -38028,11 +38028,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         except asyncio.CancelledError:
             if tesla_force_discharge_mutated and _command_generation[0] == _restore_gen:
                 # Cancellation cannot release ownership of a possibly applied
-                # grid write. Shield cleanup; its existing retry journal stays
-                # armed if restoration cannot yet be confirmed.
-                await asyncio.shield(_cleanup_failed_tesla_force_discharge(
+                # grid write. Restore in this task: a shielded child cannot
+                # re-enter our battery-route or licensing locks. The original
+                # cancellation is caught; a further cancellation leaves the
+                # persisted cleanup journal armed for restart/retry.
+                await _cleanup_failed_tesla_force_discharge(
                     "force discharge cancelled during preparation"
-                ))
+                )
             raise
         except HomeAssistantError as e:
             _LOGGER.error("Force discharge rejected: %s", e)
@@ -39984,7 +39986,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         except asyncio.CancelledError:
             if tesla_force_charge_mutated and _command_generation[0] == _restore_gen:
-                await asyncio.shield(_cleanup_failed_tesla_force_charge("force charge cancelled during preparation"))
+                # Keep restoration in the task that owns the route/licensing
+                # locks, as in discharge cancellation cleanup above.
+                await _cleanup_failed_tesla_force_charge("force charge cancelled during preparation")
             raise
         except Exception as e:
             _LOGGER.error(f"Error in force charge: {e}", exc_info=True)

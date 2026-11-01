@@ -1717,16 +1717,22 @@ class PsNowCard extends PsCardBase {
     const actKey = psActionKey(data?.effective_current_action || data?.current_action);
     const { interval } = psSchedule(data);
     const runEnd = psPlannedRunEnd(rows, interval, actKey, now);
+    // Self-consumption allows solar charging as well as supplying the home.
+    // Describe the measured flow rather than treating this control as discharge.
+    const selfHeadline = !Number.isFinite(battery) ? 'Self-consumption is enabled.'
+      : battery < -0.1 ? 'The battery is charging.'
+      : battery > 0.1 ? 'The battery is powering the home.'
+      : 'The battery is idle.';
     let headline;
     if (restoring) headline = 'Restoring normal operation…';
     else if (starting) headline = mode === 'force_charge' ? 'Starting charge…' : 'Starting discharge…';
     else if (mode === 'force_charge' || mode === 'force_discharge') headline = control.message;
     else if (mode === 'hold_soc') headline = `Holding the battery at ${psFix(soc, 0)}%.`;
-    else if (mode === 'self_consumption') headline = 'The battery is powering the home.';
+    else if (mode === 'self_consumption') headline = selfHeadline;
     else if (actKey === 'charge') headline = `Charging${imp <= 0.05 ? ' on free power' : solar > Math.max(0.2, -battery) ? ' from solar' : ''}.`;
     else if (actKey === 'export') headline = 'Exporting to the grid.';
     else if (actKey === 'hold') headline = `Holding the battery at ${psFix(soc, 0)}%.`;
-    else if (actKey === 'self') headline = 'The battery is powering the home.';
+    else if (actKey === 'self') headline = selfHeadline;
     else if (Number.isFinite(battery) && battery < -0.1) headline = 'The battery is charging.';
     else if (Number.isFinite(battery) && battery > 0.1) headline = 'The battery is powering the home.';
     else headline = 'The battery is idle.';
@@ -1735,7 +1741,7 @@ class PsNowCard extends PsCardBase {
     const parts = [];
     const planDriven = !restoring && !starting && !PS_MODE_TEXT[mode];
     if (planDriven && runEnd && runEnd - now >= 20 * 60_000) {
-      parts.push(`The plan keeps this going until <span class="num">${psEsc(psWhen(hass, runEnd))}</span>.`);
+      parts.push(`The plan keeps ${actKey === 'self' ? 'self-consumption' : 'this going'} until <span class="num">${psEsc(psWhen(hass, runEnd))}</span>.`);
     }
     const nextChange = psNextChange(data, actKey, now);
     if (nextChange) {
@@ -2196,7 +2202,7 @@ class PsPlanCard extends PsCardBase {
     const actChip = key => (key === 'charge' ? 'gr' : key === 'export' ? 'rd' : key === 'self' ? 'pu' : '');
     const chips = [
       `<span class="chip ${data.monitoring_mode ? 'cy' : data.enabled ? 'gr' : ''}"><span>Mode</span><b>${data.monitoring_mode ? 'Monitoring' : data.enabled ? 'Optimizing' : 'Off'}</b></span>`,
-      curKey ? `<span class="chip ${actChip(curKey)}"><span>Now</span><b>${psEsc(PS_ACT[curKey][0])}${nowRunEnd ? ` until ${psEsc(psWhen(hass, nowRunEnd))}` : ''}</b></span>` : '',
+      curKey ? `<span class="chip ${actChip(curKey)}"><span>Current control</span><b>${psEsc(curKey === 'self' ? 'Self-consumption' : PS_ACT[curKey][0])}${nowRunEnd ? ` until ${psEsc(psWhen(hass, nowRunEnd))}` : ''}</b></span>` : '',
       nextChange ? `<span class="chip ${actChip(nextChange.key)}"><span>Next control</span><b>${psEsc(PS_ACT[nextChange.key][0])} ${psEsc(psWhen(hass, nextChange.t))}</b></span>` : '',
       data.last_optimization ? `<span class="chip"><span>Optimized</span><b class="num">${psEsc(psTime(hass, data.last_optimization))}</b></span>` : '',
       Number.isFinite(floor) && floor > 0 ? `<span class="chip"><span>Export floor</span><b class="num">${Math.round(floor)}%</b></span>` : '',
