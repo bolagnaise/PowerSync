@@ -1474,6 +1474,7 @@ def test_dashboard_hold_and_self_consumption_keep_separate_duration():
     assert "Hold SoC', 'select.power_sync_hold_self_duration'" in battery_controls
     assert "states['select.power_sync_hold_self_duration'] ? states['select.power_sync_hold_self_duration'].state : '30'" in battery_controls
     assert "Custom charge/discharge time (minutes)" in battery_controls
+    assert "number.power_sync_force_discharge_custom_duration" in battery_controls
     assert "?? '60'" not in battery_controls
 
 

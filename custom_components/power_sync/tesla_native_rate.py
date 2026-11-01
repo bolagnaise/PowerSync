@@ -258,7 +258,18 @@ class NativeRatePorts:
         if observed is None:
             return False
         baseline = self.controller.sessions.get(vin, {}).get("baseline_amps", observed.current_amps)
-        return decide_rate(observed, baseline, time.time())[0] is not None
+        target, _ = decide_rate(observed, baseline, time.time())
+        if target is None:
+            return False
+        claim = getattr(self.budget, "native_max_claim", None) if self.budget is not None else None
+        maximum = claim(self.site) if callable(claim) else None
+        if maximum and target > observed.current_amps:
+            from .native_battery_flexibility import native_max_coexistence_proof
+            proof = native_max_coexistence_proof(
+                self.hass, self.entry, self.runtime, self.site, self.budget)
+            if proof is None or proof[3] not in ("charge", "discharge"):
+                return False
+        return True
 
     def claim(self, vin, session):
         from .automations.ev_ownership import claim_ev_ownership
@@ -278,7 +289,8 @@ class NativeRatePorts:
 
     async def _entity(self, vin):
         from .automations.actions import (_get_ev_config, _resolve_ble_prefix_for_vehicle,
-            _resolve_teslemetry_bt_prefix, _get_tesla_ev_entity)
+            _resolve_teslemetry_bt_prefix_for_vehicle,
+            _get_tesla_ev_number_entity, _canonical_dynamic_tesla_vehicle_id)
         from .const import (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_TESLEMETRY_BT,
                            EV_PROVIDER_BOTH, EV_PROVIDER_FLEET_API)
         from homeassistant.helpers import entity_registry as er
@@ -289,17 +301,51 @@ class NativeRatePorts:
         if not entity_id:
             candidates = []
             provider = _get_ev_config(self.entry)["ev_provider"]
+            lookup_vin = _canonical_dynamic_tesla_vehicle_id(
+                self.hass, self.entry, vin
+            )
             if provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
-                prefix = _resolve_ble_prefix_for_vehicle(self.hass, self.entry, vin)
+                prefix = _resolve_ble_prefix_for_vehicle(
+                    self.hass, self.entry, lookup_vin
+                )
                 if prefix:
                     candidates.append(f"number.{prefix}_charging_amps")
             if provider in (EV_PROVIDER_TESLEMETRY_BT, EV_PROVIDER_BOTH):
-                prefix = _resolve_teslemetry_bt_prefix(self.hass)
-                if str(prefix or "").upper() == vin:
-                    candidates.append(f"number.{prefix}_charge_current_request")
+                from .teslemetry_bluetooth_commands import resolve_native_current
+                native_target = resolve_native_current(self.hass, lookup_vin)
+                if native_target is not None:
+                    candidates.append(native_target.entity_id)
+                else:
+                    # Legacy tesla_bluetooth exposes the number as its actual
+                    # telemetry entity. Keep its VIN and producer binding
+                    # exact so a same-shaped Fleet entity cannot be reused.
+                    prefix = _resolve_teslemetry_bt_prefix_for_vehicle(
+                        self.hass, self.entry, lookup_vin
+                    )
+                    if prefix:
+                        candidate = f"number.{prefix}_charge_current_request"
+                        candidate_registration = registry.async_get(candidate)
+                        switch_registration = registry.async_get(
+                            f"switch.{prefix}_charge"
+                        )
+                        if (
+                            candidate_registration is not None
+                            and switch_registration is not None
+                            and getattr(candidate_registration, "platform", None)
+                            == "tesla_bluetooth"
+                            and getattr(candidate_registration, "config_entry_id", None)
+                            == getattr(switch_registration, "config_entry_id", None)
+                            and (
+                                not getattr(candidate_registration, "device_id", None)
+                                or getattr(candidate_registration, "device_id", None)
+                                == getattr(switch_registration, "device_id", None)
+                            )
+                        ):
+                            candidates.append(candidate)
             if provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH):
-                candidate = await _get_tesla_ev_entity(self.hass,
-                    r"number\..*(charging_amps|charge_current)(?:_\d+)?$", vin)
+                candidate = await _get_tesla_ev_number_entity(
+                    self.hass, lookup_vin, config_entry=self.entry
+                )
                 if candidate:
                     candidates.append(candidate)
             entity_id = next((candidate for candidate in candidates
@@ -333,8 +379,8 @@ class NativeRatePorts:
         # Cleanup may outlive the native window, but a current increase still
         # needs the same fresh whole-site power budget as an active session.
         data = cached[1] if cached else {}
-        from .native_rate_telemetry import vehicle_report, newer_schedule_report, charging_unit_w
-        live = vehicle_report(self.hass, vin)
+        from .native_rate_telemetry import vehicle_report_for_entry, newer_schedule_report, charging_unit_w
+        live = vehicle_report_for_entry(self.hass, self.entry, vin)
         charge = _section(live or data, "charge_state")
         location = _section(live or data, "drive_state") or _section(live or data, "location_data")
         now = dt_util.now()
@@ -455,9 +501,24 @@ class NativeRatePorts:
         generation = battery.charge_generation if battery is not None else None
         acknowledged_at = None
         increases = amps > observation.current_amps
+        native_proof = None
+        claim = getattr(self.budget, "native_max_claim", None) if self.budget is not None else None
+        if increases and callable(claim) and claim(self.site):
+            from .native_battery_flexibility import native_max_coexistence_proof
+            native_proof = native_max_coexistence_proof(
+                self.hass, self.entry, self.runtime, self.site, self.budget)
+            if native_proof is None or native_proof[3] not in ("charge", "discharge"):
+                return False
 
         def current_authority():
-            return (authorize() and (self.budget is None or self.budget.revision == revision)
+            current_native = True
+            if increases and native_proof is not None:
+                from .native_battery_flexibility import native_max_coexistence_proof
+                current_native = (native_max_coexistence_proof(
+                    self.hass, self.entry, self.runtime, self.site, self.budget)
+                    == native_proof)
+            return (authorize() and current_native
+                    and (self.budget is None or self.budget.revision == revision)
                     and (generation is None or (self.runtime.get("powerwall_battery_dispatch") is battery
                          and battery.charge_generation == generation)))
 
@@ -546,6 +607,15 @@ async def async_start(hass, entry):
     controller = runtime[RUNTIME_KEY]
     async def tick(_now=None):
         await controller.tick()
+        # Native-rate reads already reconcile while a VIN is enabled. Keep a
+        # disabled/idle controller able to consume the existing cached report
+        # as well, without creating a new provider poll or vehicle command.
+        ports = getattr(controller, "ports", None)
+        budget = getattr(ports, "budget", None)
+        site = getattr(ports, "site", None)
+        if budget is not None and site is not None:
+            from .native_rate_admission import refresh_managed_records
+            await refresh_managed_records(hass, budget, site=site)
     runtime["tesla_native_rate_cancel"] = async_track_time_interval(hass, tick, timedelta(seconds=30))
     hass.async_create_task(tick())
 

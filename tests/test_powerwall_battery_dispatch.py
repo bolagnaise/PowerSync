@@ -1664,9 +1664,14 @@ def _install_native_discharge_owner(ns,local,client):
         fence=await before_write();fence();return True
     async def restore(baseline,before_write,**kwargs):
         fence=await before_write();fence();return True
+    async def guard(*, preparing=False):
+        # This fixture uses the pre-native local-dispatch availability probe.
+        # It has no preparation phase, but must accept the native adapter's
+        # bounded keyword so routing tests exercise the real policy result.
+        return await local.native_max_discharge_available()
     adapter=SimpleNamespace(identity='paired',direction='discharge',
         authority=lambda:not ns['_local_powerwall_runtime'].get('powerwall_local_dispatch_stopping'),
-        guard=local.native_max_discharge_available,capture=AsyncMock(return_value={'original':'tariff'}),
+        guard=guard,capture=AsyncMock(return_value={'original':'tariff'}),
         claim=AsyncMock(return_value=True),release=AsyncMock(return_value=True),resume=resume,apply=apply,
         restore=restore,settled=AsyncMock(return_value=True))
     session=native_module.NativeMaxChargeSession(adapter,Store())

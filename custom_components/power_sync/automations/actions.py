@@ -28,10 +28,13 @@ EV Actions (Tesla Fleet/Teslemetry, Tesla BLE, OCPP, generic HA, Zaptec, or HA-n
 
 import logging
 import asyncio
+import inspect
 import math
 import re
 import time
 from collections.abc import Mapping
+from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import List, Dict, Any, Optional, Callable
 
 from homeassistant.core import HomeAssistant
@@ -42,7 +45,12 @@ from datetime import timedelta, datetime, timezone as dt_timezone, time as dt_ti
 from homeassistant.util import dt as dt_util
 
 from ..teslemetry_solar import guard_ev_control
-from ..native_rate_admission import prepare_ev_submission, bind_vehicle, managed_borrowable_w
+from ..native_rate_admission import (
+    prepare_ev_submission,
+    validate_ev_submission,
+    bind_vehicle,
+    managed_borrowable_w,
+)
 
 from ..const import (
     DOMAIN,
@@ -54,6 +62,7 @@ from ..const import (
     EV_PROVIDER_TESLEMETRY_BT,
     EV_PROVIDER_BOTH,
     CONF_TESLA_BLE_ENTITY_PREFIX,
+    CONF_TESLA_BLE_VEHICLE_MAPPING,
     DEFAULT_TESLA_BLE_ENTITY_PREFIX,
     TESLA_BLE_SWITCH_CHARGER,
     TESLA_BLE_NUMBER_CHARGING_AMPS,
@@ -62,8 +71,13 @@ from ..const import (
     TESLA_BLE_BINARY_ASLEEP,
     TESLA_BLE_SENSOR_CHARGING_STATE,
     TESLA_BLE_SENSOR_CHARGING,
+    TESLA_BLE_SENSOR_CHARGE_CURRENT,
+    TESLA_BLE_SENSOR_CHARGER_CURRENT,
+    TESLA_BLE_SENSOR_CHARGE_POWER,
+    TESLA_BLE_SENSOR_CHARGER_POWER,
     TESLEMETRY_BT_SWITCH_CHARGE,
     TESLEMETRY_BT_NUMBER_CHARGE_AMPS,
+    TESLEMETRY_BT_SENSOR_CHARGING_STATE,
 )
 from ..solar_surplus_config import (
     DEFAULT_SOLAR_SURPLUS_MIN_BATTERY_SOC,
@@ -305,22 +319,15 @@ async def _resolve_tesla_charge_current_entity(
         return TESLA_BLE_NUMBER_CHARGING_AMPS.format(prefix=ble_prefix)
 
     if ev_provider in (EV_PROVIDER_TESLEMETRY_BT, EV_PROVIDER_BOTH):
-        tbt_prefix = _resolve_teslemetry_bt_prefix(hass)
-        tbt_matches_vehicle = (
-            not vehicle_vin
-            or not (len(vehicle_vin) == 17 and vehicle_vin.isalnum())
-            or str(tbt_prefix or "").lower() == vehicle_vin.lower()
-        )
-        if tbt_matches_vehicle and _is_teslemetry_bt_available(hass, tbt_prefix):
+        tbt_prefix = _resolve_teslemetry_bt_prefix_for_vehicle(hass, config_entry, vehicle_vin)
+        if _is_teslemetry_bt_available(hass, tbt_prefix):
             return TESLEMETRY_BT_NUMBER_CHARGE_AMPS.format(prefix=tbt_prefix)
 
     if ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH):
         try:
-            return await _get_tesla_ev_entity(
-                hass,
-                r"number\..*(charging_amps|charge_current)(?:_\d+)?$",
-                vehicle_vin,
-                warn_on_missing=False,
+            return await _get_tesla_ev_number_entity(
+                hass, vehicle_vin, warn_on_missing=False,
+                config_entry=config_entry,
             )
         except Exception as err:
             _LOGGER.debug(
@@ -655,6 +662,53 @@ def _tesla_entity_max_fallback_amps(
     return fallback_amps
 
 
+def _tesla_ble_rate_effect_bound(
+    hass: HomeAssistant,
+    entity_id: str,
+    requested_amps: int,
+    *,
+    allow_stale_entity_max_override: bool = False,
+    configured_max_amps: Optional[int] = None,
+) -> dict[str, int] | None:
+    """Describe every bounded Rate value the BLE helper may submit.
+
+    The initial entity-range cap and the structured stale-max retry happen
+    inside ``_set_ev_charging_amps_ble`` after the recovery ticket is opened.
+    Persist a range when that retry is possible rather than claiming the raw
+    request is the exact value that reached Home Assistant.
+    """
+    state = hass.states.get(entity_id)
+    if state is None:
+        return None
+    entity_min = (
+        _tesla_charge_current_positive_floor(hass, entity_id)
+        or TESLA_UNKNOWN_CHARGER_SAFE_AMPS
+    )
+    entity_max = _coerce_positive_int(
+        state.attributes.get("max"), int(requested_amps)
+    ) or int(requested_amps)
+    effective_max = entity_max
+    if (
+        allow_stale_entity_max_override
+        and configured_max_amps is not None
+        and configured_max_amps > entity_max
+    ):
+        effective_max = configured_max_amps
+    capped = max(entity_min, min(effective_max, int(requested_amps)))
+    fallback = _tesla_entity_max_fallback_amps(
+        capped,
+        entity_min,
+        entity_max,
+        allow_stale_entity_max_override=allow_stale_entity_max_override,
+        configured_max_amps=configured_max_amps,
+    )
+    return {
+        "kind": "rate",
+        "min_amps": int(fallback if fallback is not None else capped),
+        "max_amps": int(capped),
+    }
+
+
 def _mark_api_credits_exhausted(api_name: str = "teslemetry") -> None:
     """Mark that API credits are exhausted, triggering cooldown."""
     _api_credit_exhausted[api_name] = datetime.now()
@@ -856,6 +910,7 @@ async def _get_tesla_ev_entity(
     vehicle_vin: Optional[str] = None,
     *,
     warn_on_missing: bool = True,
+    config_entry: ConfigEntry | None = None,
 ) -> Optional[str]:
     """
     Find a Tesla EV entity by pattern.
@@ -871,6 +926,57 @@ async def _get_tesla_ev_entity(
         Entity ID if found, None otherwise
     """
     import re
+
+    # A paired BLE profile is a display alias, not a Fleet identity.  Resolve
+    # it through the active PowerSync entry before looking at the device
+    # registry; an unresolved explicit alias must never become an anonymous
+    # lookup that can select the first Tesla device.
+    requested_vehicle = str(vehicle_vin or "").strip()
+    if requested_vehicle.startswith("ble_"):
+        resolved_vins: set[str] = set()
+        unresolved_pairings = 0
+        runtime_data = getattr(hass, "data", {}).get(DOMAIN, {})
+        runtimes = runtime_data.values() if isinstance(runtime_data, dict) else ()
+        entries = [config_entry] if config_entry is not None else []
+        for runtime in runtimes:
+            entry = runtime.get("entry") if isinstance(runtime, dict) else None
+            if entry is not None:
+                entries.append(entry)
+        manager = getattr(hass, "config_entries", None)
+        async_entries = getattr(manager, "async_entries", None)
+        if callable(async_entries):
+            try:
+                entries.extend(async_entries(DOMAIN) or ())
+            except Exception:
+                pass
+        seen_entries: set[str] = set()
+        for entry in entries:
+            entry_key = str(getattr(entry, "entry_id", id(entry)))
+            if entry_key in seen_entries:
+                continue
+            seen_entries.add(entry_key)
+            config = {
+                **getattr(entry, "data", {}),
+                **getattr(entry, "options", {}),
+            }
+            try:
+                canonical = canonical_tesla_vehicle_id(config, requested_vehicle)
+            except (TypeError, ValueError):
+                continue
+            if config.get(CONF_EV_PROVIDER) != EV_PROVIDER_BOTH:
+                continue
+            if canonical == requested_vehicle:
+                unresolved_pairings += 1
+                continue
+            if canonical != requested_vehicle and re.fullmatch(
+                r"[A-HJ-NPR-Z0-9]{17}", str(canonical).upper()
+            ):
+                resolved_vins.add(str(canonical).upper())
+        if unresolved_pairings or len(resolved_vins) != 1:
+            return None
+        vehicle_vin = next(iter(resolved_vins))
+    elif re.fullmatch(r"[A-HJ-NPR-Z0-9]{17}", requested_vehicle.upper()):
+        vehicle_vin = requested_vehicle.upper()
 
     entity_registry = er.async_get(hass)
     device_registry = dr.async_get(hass)
@@ -1010,6 +1116,11 @@ async def _get_tesla_ev_entity(
     for entity in entity_registry.entities.values():
         if getattr(entity, "disabled_by", None):
             continue
+        # The modern teslemetry_bluetooth integration exposes command-only
+        # number entities on the native vehicle device.  They are valid write
+        # targets but cannot serve as a current/readback entity here.
+        if getattr(entity, "platform", None) == "teslemetry_bluetooth":
+            continue
         if entity.device_id in entities_by_device:
             entities_by_device[entity.device_id].append(entity.entity_id)
 
@@ -1113,6 +1224,23 @@ async def _get_tesla_ev_entity(
     return None
 
 
+async def _get_tesla_ev_number_entity(
+    hass: HomeAssistant,
+    vehicle_vin: Optional[str] = None,
+    *,
+    warn_on_missing: bool = True,
+    config_entry: ConfigEntry | None = None,
+) -> Optional[str]:
+    """Resolve an exact Tesla number entity suitable for telemetry/readback."""
+    return await _get_tesla_ev_entity(
+        hass,
+        r"number\..*(charging_amps|charge_current)(?:_\d+)?$",
+        vehicle_vin,
+        warn_on_missing=warn_on_missing,
+        config_entry=config_entry,
+    )
+
+
 def _get_vehicle_name_from_vin(hass: HomeAssistant, vehicle_vin: str) -> str:
     """
     Look up the friendly name of a Tesla vehicle from its VIN.
@@ -1148,6 +1276,27 @@ _TESLA_NON_CHARGING_STATES = frozenset(
         "disconnected",
         "not_plugged_in",
         "stopped",
+        "unplugged",
+    }
+)
+# These are the charging-state values emitted by the ESPHome Tesla BLE
+# component, plus the normalized aliases used by older HA entity templates.
+# Admission must reject arbitrary non-empty values such as ``Error``; a
+# state string alone is not evidence that the vehicle session was read.
+_TESLA_BLE_SUPPORTED_CHARGING_STATES = frozenset(
+    {
+        "charging",
+        "starting",
+        "complete",
+        "stopped",
+        "disconnected",
+        "no_power",
+        "no power",
+        "nopower",
+        "calibrating",
+        "not_plugged_in",
+        "not charging",
+        "notcharging",
         "unplugged",
     }
 )
@@ -1277,6 +1426,50 @@ def _tesla_dynamic_restart_due(state: Dict[str, Any]) -> bool:
     ).total_seconds() >= _TESLA_DYNAMIC_RESTART_RETRY_SECONDS
 
 
+def _mark_tesla_plan_pending(state: Dict[str, Any], amps: int) -> None:
+    """Retain possible draw while an owned charging plan waits for recovery."""
+    state["transport_recovery_pending"] = True
+    state["physical_restart_required"] = True
+    state["charging_started"] = False
+    state["current_amps"] = max(int(state.get("current_amps", 0) or 0), amps)
+    state["reason"] = "Charging plan waiting for transport recovery and fresh vehicle confirmation"
+
+
+def _tesla_plan_expired(params: Dict[str, Any]) -> bool:
+    deadline = params.get("_boost_start_deadline")
+    return deadline is not None and (type(deadline) not in (int, float)
+        or not math.isfinite(deadline) or datetime.now(dt_timezone.utc).timestamp() >= deadline)
+
+
+async def _restart_owned_tesla(hass, entry, vehicle_id, state, amps):
+    """Retry a current plan without renewing its deadline or replaying saved intent."""
+    params = dict(state.get("params") or {})
+    params.update(vehicle_vin=vehicle_id if vehicle_id != DEFAULT_VEHICLE_ID else None, amps=amps)
+    params["_tesla_plan_recovery_attempt"] = bool(state.get("transport_recovery_pending"))
+    baseline = _tesla_physical_charging_snapshot(hass, entry, vehicle_id, params)
+    started_at = datetime.now().astimezone()
+    state["last_physical_restart_attempt_at"] = started_at
+    ownership = state.get("ownership")
+    def current():
+        return (_dynamic_ev_state.get(entry.entry_id, {}).get(vehicle_id) is state
+                and state.get("active") and state.get("ownership") is ownership)
+    success = await _action_start_ev_charging(hass, entry, params, context=None)
+    if not current():
+        return False
+    if success and params.get("_tesla_start_live_read_required"):
+        success, _evidence = await _wait_for_tesla_physical_start(
+            hass, entry, vehicle_id, params, baseline, started_at)
+        if not current():
+            return False
+    if not success and (success is None or params.get("_tesla_transport_recovery_pending")
+                        or params.get("_tesla_allow_plan_recovery")):
+        _mark_tesla_plan_pending(state, amps)
+    if success:
+        state.pop("transport_recovery_pending", None)
+        state["reason"] = ""
+    return bool(success)
+
+
 async def _reconcile_stopped_smart_schedule_tesla(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
@@ -1288,6 +1481,7 @@ async def _reconcile_stopped_smart_schedule_tesla(
     current_amps = int(state.get("current_amps", 0) or 0)
     if (
         params.get("charger_type", "tesla") != "tesla"
+        or state.get("transport_recovery_pending")
         or params.get("owner_mode") != "smart_schedule"
         or current_amps <= 0
         or _tesla_restart_telemetry_pending(state)
@@ -1575,7 +1769,23 @@ async def _wait_for_tesla_physical_start(
     """Wait for fresh VIN-scoped charging state plus measured draw."""
     loop = asyncio.get_running_loop()
     deadline = loop.time() + max(0, timeout_seconds)
+    live_reads = 0
+    next_live_read = loop.time()
+    request_live_read = bool(params.pop("_tesla_start_live_read_required", False))
+    from ..tesla_ev_observation import TeslaVehicleObservation, get_tesla_vehicle_observation
+    config = {**config_entry.data, **config_entry.options}
+    canonical = canonical_tesla_vehicle_id(config, str(vehicle_vin or ""))
     while True:
+        direct = params.get("_tesla_start_observation")
+        if not isinstance(direct, TeslaVehicleObservation):
+            direct = get_tesla_vehicle_observation(hass, canonical,
+                preferred_entity_id=params.get("_tesla_command_entity_id"),
+                updated_after=command_started_at.timestamp())
+        if (isinstance(direct, TeslaVehicleObservation)
+                and command_started_at.timestamp() < direct.source_charge_timestamp
+                and 0 <= datetime.now(dt_timezone.utc).timestamp() - direct.source_charge_timestamp <= 90
+                and _tesla_observed_command_state(direct) == "charging"):
+            return True, f"fresh {direct.domain} charging state and measured draw"
         snapshot = _tesla_physical_charging_snapshot(
             hass,
             config_entry,
@@ -1615,6 +1825,14 @@ async def _wait_for_tesla_physical_start(
                 "no fresh VIN-scoped charging state and measured draw or "
                 "fresh exact-VIN Wall Connector charging power"
             )
+        if request_live_read and live_reads < 2 and loop.time() >= next_live_read:
+            live_reads += 1
+            direct = await _fresh_tesla_command_observation(
+                hass, config_entry, vehicle_vin, params, timeout=min(10, remaining))
+            next_live_read = loop.time() + 5
+            if direct is not None:
+                params["_tesla_start_observation"] = direct
+            continue
         await asyncio.sleep(
             min(_TESLA_START_CONFIRMATION_POLL_SECONDS, remaining)
         )
@@ -2136,22 +2354,178 @@ async def _wake_tesla_ev_for_command(
     vehicle_vin: Optional[str],
     command_entity: str,
 ) -> bool:
-    """Wake an EV unless its official Fleet entity owns that operation.
+    """Prepare an EV for a command, preserving provider-specific wake ownership.
 
     Home Assistant's official Tesla Fleet command entities call
     ``wake_up_if_asleep()`` themselves. Their Charge switch is available with
     the Vehicle Charging Commands scope, whereas the separate Wake button
-    exists only with Vehicle Commands. Requiring that button therefore makes
-    a usable Charge switch unreachable for a supported Fleet setup.
+    exists only with Vehicle Commands. The Fleet preparation refreshes the
+    exact command source once so a stale cached ``ONLINE`` state cannot send a
+    command directly to a sleeping vehicle, while a charging-only setup still
+    lets the Fleet Charge switch own wake-up.
     """
     entity = er.async_get(hass).entities.get(command_entity)
     if getattr(entity, "platform", None) == "tesla_fleet":
-        _LOGGER.debug(
-            "Tesla Fleet command entity %s will perform its own wake-up",
+        from ..tesla_ev_observation import async_prepare_tesla_fleet_command
+
+        return await async_prepare_tesla_fleet_command(
+            hass,
+            str(vehicle_vin or ""),
             command_entity,
         )
-        return True
     return await _wake_tesla_ev(hass, vehicle_vin)
+
+
+async def _wake_tesla_ha_recovery_route(
+    hass: HomeAssistant,
+    vehicle_vin: Optional[str],
+    route: Mapping[str, Any],
+    params: Mapping[str, Any],
+    authorize: Callable[[], Any],
+) -> Optional[bool]:
+    """Wake an isolated native Tesla route before its exact source is read.
+
+    Tesla Fleet and native Teslemetry coordinators can return an unchanged
+    asleep cache after a refresh, so a post-BLE-isolation recovery read may
+    never produce a fresh stopped sample.  A registered provider-owned Wake
+    button is the only separate producer that can safely wake before that
+    read.  The charge switch is the eventual Start producer and is deliberately
+    not used as a wake probe when no Wake button is available.
+
+    ``None`` means that this exact route has no separate wake entity; callers
+    may still accept an already-fresh observation.  ``False`` means a wake was
+    required but failed or the route/authority changed, so recovery must stay
+    pending.
+    """
+    identity = route.get("entity_identity")
+    if route.get("kind") != "ha" or not isinstance(identity, Mapping):
+        return None
+    route_platform = str(identity.get("platform") or "")
+    if route_platform not in {"tesla_fleet", "teslemetry"}:
+        return None
+
+    try:
+        registry = er.async_get(hass)
+        command = registry.async_get(str(route.get("entity_id") or ""))
+    except Exception:
+        return False
+    identity_fields = ("platform", "config_entry_id", "device_id", "unique_id")
+
+    def _identity_snapshot(entity: Any) -> tuple[Any, ...] | None:
+        if entity is None:
+            return None
+        return tuple(getattr(entity, field, None) for field in identity_fields)
+
+    expected_command_identity = tuple(identity.get(field) for field in identity_fields)
+    command_identity = _identity_snapshot(command)
+    if (
+        command_identity != expected_command_identity
+        or getattr(command, "disabled_by", None) is not None
+    ):
+        return False
+
+    wake_entity = None
+    wake_identity = None
+    expected_wake_unique_id = (
+        f"{str(vehicle_vin).strip()}-wake" if vehicle_vin else ""
+    ).casefold()
+    entities = getattr(registry, "entities", {})
+    for candidate in entities.values() if isinstance(entities, Mapping) else ():
+        entity_id = str(getattr(candidate, "entity_id", "") or "")
+        if (
+            getattr(candidate, "platform", None) == route_platform
+            and getattr(candidate, "config_entry_id", None) == identity.get("config_entry_id")
+            and getattr(candidate, "device_id", None) == identity.get("device_id")
+            and getattr(candidate, "disabled_by", None) is None
+            and entity_id.startswith("button.")
+            and str(getattr(candidate, "unique_id", "") or "").casefold()
+            == expected_wake_unique_id
+        ):
+            if wake_entity is not None:
+                _LOGGER.warning(
+                    "Tesla %s recovery has duplicate wake entities for %s",
+                    route_platform,
+                    vehicle_vin,
+                )
+                return False
+            wake_entity = entity_id
+            wake_identity = _identity_snapshot(candidate)
+    if wake_entity is None:
+        return None
+    wake_registration = registry.async_get(wake_entity)
+    if wake_registration is None:
+        return False
+    wake_state = hass.states.get(wake_entity)
+    if wake_state is not None and str(getattr(wake_state, "state", "")).lower() == "unavailable":
+        return False
+
+    def _identity_matches(entity_id: str, expected: tuple[Any, ...] | None) -> bool:
+        current = registry.async_get(entity_id)
+        return current is not None and expected is not None and all(
+            getattr(current, field, None) == value
+            for field, value in zip(identity_fields, expected or ())
+        ) and getattr(current, "disabled_by", None) is None
+
+    if not _identity_matches(
+        str(route.get("entity_id") or ""), command_identity
+    ):
+        return False
+    if not _identity_matches(wake_entity, wake_identity):
+        return False
+    if not authorize():
+        return False
+
+    timeout = 45.0
+    deadline = params.get("_boost_start_deadline")
+    if type(deadline) in (int, float) and math.isfinite(deadline):
+        timeout = min(timeout, max(0.001, deadline - datetime.now(dt_timezone.utc).timestamp()))
+    try:
+        await asyncio.wait_for(
+            hass.services.async_call(
+                "button", "press", {"entity_id": wake_entity}, blocking=True
+            ),
+            timeout=timeout,
+        )
+    except asyncio.CancelledError:
+        raise
+    except TimeoutError:
+        _LOGGER.warning("Tesla %s recovery wake timed out for %s", route_platform, vehicle_vin)
+        return False
+    except Exception as err:
+        _LOGGER.warning("Tesla %s recovery wake failed for %s: %s", route_platform, vehicle_vin, err)
+        return False
+    return bool(
+        authorize()
+        and _identity_matches(str(route.get("entity_id") or ""), command_identity)
+        and _identity_matches(wake_entity, wake_identity)
+    )
+
+
+async def _tesla_recovery_wake_read_if_missing(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    vehicle_vin: Optional[str],
+    params: Mapping[str, Any],
+    route: Mapping[str, Any] | None,
+    authorize: Callable[[], Any],
+    observation: Any,
+    observed: Optional[str],
+) -> tuple[Any, Optional[str], bool]:
+    """Wake an exact native Tesla fallback only after its first read is missing."""
+    if observed is not None or not route or route.get("kind") != "ha":
+        return observation, observed, True
+    wake_result = await _wake_tesla_ha_recovery_route(
+        hass, vehicle_vin, route, params, authorize
+    )
+    if wake_result is not True:
+        return observation, observed, wake_result is not False
+    observation = await _fresh_tesla_command_observation(
+        hass, entry, vehicle_vin, params
+    )
+    observed = _tesla_observed_command_state(observation)
+    if not authorize():
+        return observation, observed, False
+    return observation, observed, True
 
 
 def _get_ev_config(config_entry: ConfigEntry) -> dict:
@@ -2306,19 +2680,167 @@ def _canonical_dynamic_tesla_vehicle_id(
         return normalized_id
 
 
+_TESLA_BLE_RADIO_SWITCH = "switch.{prefix}_ble_connection"
+_TESLA_BLE_RADIO_BLOCKED_STATES = frozenset({"off", "unknown", "unavailable"})
+
+
+def _tesla_ble_radio_binding(
+    hass: HomeAssistant,
+    ble_prefix: str,
+) -> tuple[tuple[tuple[Any, ...], ...] | None, str | None] | None:
+    """Snapshot the optional exact BLE connection-control entity.
+
+    Older ESPHome bridges do not expose a connection switch at all.  Preserve
+    that legacy shape as ``None`` while still pinning both the registry row and
+    state whenever the entity exists, so a row appearing or rebinding during
+    admission cannot silently become the producer for a command.
+    """
+    radio_entity = _TESLA_BLE_RADIO_SWITCH.format(prefix=ble_prefix)
+    state = hass.states.get(radio_entity)
+    try:
+        registration = er.async_get(hass).async_get(radio_entity)
+    except Exception:
+        registration = None
+    if state is None and registration is None:
+        return None
+    return (
+        _tesla_legacy_entity_identity(hass, (radio_entity,)),
+        None if state is None else str(getattr(state, "state", "")).strip().lower(),
+    )
+
+
+def _tesla_ble_radio_reason(
+    hass: HomeAssistant,
+    ble_prefix: str,
+) -> str | None:
+    """Return a fail-closed reason for an explicitly known radio problem."""
+    radio_entity = _TESLA_BLE_RADIO_SWITCH.format(prefix=ble_prefix)
+    state = hass.states.get(radio_entity)
+    try:
+        registration = er.async_get(hass).async_get(radio_entity)
+    except Exception:
+        registration = None
+
+    # No state and no registry row is the legacy bridge shape.  There is no
+    # radio control to inspect, so do not turn absence into a false failure.
+    if state is None and registration is None:
+        return None
+    if registration is not None and getattr(registration, "disabled_by", None):
+        return "registry_disabled"
+    if state is None:
+        return "unavailable"
+    normalized = str(getattr(state, "state", "") or "").strip().lower()
+    if normalized != "on":
+        if normalized in _TESLA_BLE_RADIO_BLOCKED_STATES or not normalized:
+            return normalized or "unavailable"
+        return "invalid_state"
+    return None
+
+
+def _tesla_ble_radio_available(
+    hass: HomeAssistant,
+    ble_prefix: str,
+    *,
+    report: bool = True,
+) -> bool:
+    """Check an optional exact BLE radio control without using GATT presence."""
+    reason = _tesla_ble_radio_reason(hass, ble_prefix)
+    if reason is None:
+        return True
+    if report and _ble_block_report_due(hass, ble_prefix, f"radio_{reason}"):
+        _LOGGER.warning(
+            "Tesla BLE %s: BLE connection control is %s; BLE wake or positive "
+            "mutation was not sent",
+            ble_prefix,
+            reason.replace("_", " "),
+        )
+    return False
+
+
+def _tesla_ble_radio_matches_target(
+    hass: HomeAssistant,
+    ble_prefix: str,
+    target_entity: str | None,
+) -> bool:
+    """Keep a present radio switch on the same ESPHome producer as the target."""
+    if not target_entity:
+        return True
+    radio_entity = _TESLA_BLE_RADIO_SWITCH.format(prefix=ble_prefix)
+    try:
+        registry = er.async_get(hass)
+        radio = registry.async_get(radio_entity)
+        target = registry.async_get(target_entity)
+    except Exception:
+        return True
+    # An old bridge can expose state without registry rows.  The ordinary
+    # target/charge binding remains the authority in that compatibility case.
+    if radio is None or target is None:
+        return True
+    radio_platform = str(getattr(radio, "platform", "") or "").lower()
+    target_platform = str(getattr(target, "platform", "") or "").lower()
+    if radio_platform != "esphome" or target_platform != "esphome":
+        return False
+    return all(
+        getattr(radio, field, None) == getattr(target, field, None)
+        and getattr(radio, field, None)
+        for field in ("config_entry_id", "device_id")
+    )
+
+
+def _tesla_ble_radio_scope_current(
+    hass: HomeAssistant,
+    ble_prefix: str,
+    expected_binding: tuple[tuple[tuple[Any, ...], ...] | None, str | None] | None,
+    *,
+    target_entity: str | None = None,
+) -> bool:
+    """Require the optional radio control to remain available and unchanged."""
+    if not _tesla_ble_radio_available(hass, ble_prefix):
+        return False
+    if not _tesla_ble_radio_matches_target(hass, ble_prefix, target_entity):
+        if _ble_block_report_due(hass, ble_prefix, "radio_binding"):
+            _LOGGER.warning(
+                "Tesla BLE %s: BLE connection control is bound to a different "
+                "producer; BLE mutation was not sent",
+                ble_prefix,
+            )
+        return False
+    return _tesla_ble_radio_binding(hass, ble_prefix) == expected_binding
+
+
 def _is_ble_available(hass: HomeAssistant, ble_prefix: str) -> bool:
-    """Check if Tesla BLE entities are available."""
+    """Check if Tesla BLE entities and an optional radio control are available."""
+    from ..tesla_ev_recovery import ble_quarantined
+    if ble_quarantined(hass, ble_prefix):
+        return False
     charger_entity = TESLA_BLE_SWITCH_CHARGER.format(prefix=ble_prefix)
     state = hass.states.get(charger_entity)
     # ESPHome commonly reports ``unknown`` while the vehicle is asleep; the
     # bridge can still wake it and then issue the command.  ``unavailable`` is
     # different: Home Assistant cannot currently reach the control entity, so
     # Both mode must proceed directly to its Teslemetry/Fleet fallback.
-    return state is not None and state.state != "unavailable"
+    return (
+        state is not None
+        and state.state != "unavailable"
+        and _tesla_ble_radio_available(hass, ble_prefix)
+    )
 
 
 _TESLA_BLE_COMMAND_CONFIRMATION_SECONDS = 10
 _TESLA_BLE_WAKE_FRESHNESS_SECONDS = 120
+# The generic ESPHome Tesla BLE package exposes this as a button.  Keep this
+# exact entity separate from the broad Tesla button resolver: a force-update
+# request is a read-only session probe and must never land on another vehicle.
+_TESLA_BLE_BUTTON_FORCE_DATA_UPDATE = "button.{prefix}_force_data_update"
+_TESLA_BLE_SENSOR_LAST_UPDATE = "sensor.{prefix}_last_update"
+_TESLA_BLE_SENSOR_CHARGE_ENERGY_ADDED = "sensor.{prefix}_charge_energy_added"
+_TESLA_BLE_SENSOR_RANGE = "sensor.{prefix}_range"
+_TESLA_BLE_BINDING_UNSET = object()
+_TESLA_BLE_STOCK_TOKEN_UNSET = object()
+_TESLA_BLE_STOCK_SOURCE_UNSET = object()
+_tesla_ble_cleanup_without_session: ContextVar[bool] = ContextVar(
+    "tesla_ble_cleanup_without_session", default=False
+)
 
 
 def _ble_state_observed_after(
@@ -2339,6 +2861,453 @@ def _ble_state_observed_after(
     return since <= observed <= datetime.now(dt_timezone.utc)
 
 
+def _tesla_ble_charge_data_entity_ids(
+    hass: HomeAssistant,
+    ble_prefix: str,
+    target_entity: str,
+) -> tuple[str, ...]:
+    """Return present exact-prefix data and receipt aliases used for health."""
+    base_ids = (
+        *(
+            TESLA_BLE_SENSOR_CHARGING_STATE.format(prefix=ble_prefix),
+            TESLA_BLE_SENSOR_CHARGING.format(prefix=ble_prefix),
+            TESLA_BLE_SENSOR_CHARGE_CURRENT.format(prefix=ble_prefix),
+            TESLA_BLE_SENSOR_CHARGER_CURRENT.format(prefix=ble_prefix),
+            TESLA_BLE_SENSOR_CHARGE_POWER.format(prefix=ble_prefix),
+            TESLA_BLE_SENSOR_CHARGER_POWER.format(prefix=ble_prefix),
+            _TESLA_BLE_SENSOR_LAST_UPDATE.format(prefix=ble_prefix),
+            _TESLA_BLE_SENSOR_CHARGE_ENERGY_ADDED.format(prefix=ble_prefix),
+            _TESLA_BLE_SENSOR_RANGE.format(prefix=ble_prefix),
+        ),
+        target_entity,
+    )
+    entity_ids: list[str] = []
+    for entity_id in base_ids:
+        state = hass.states.get(entity_id)
+        if state is None or not _tesla_ble_charge_state_is_present(state):
+            continue
+        entity_ids.append(entity_id)
+        receipt_id = f"{entity_id}_received"
+        if hass.states.get(receipt_id) is not None:
+            # The receipt companion overrides HA's state timestamp whenever it
+            # exists, including when its value is invalid. Pin its registry
+            # identity so another provider cannot freshen this entity id.
+            entity_ids.append(receipt_id)
+    return tuple(entity_ids)
+
+
+def _tesla_ble_charge_state_is_present(state: Any) -> bool:
+    """Whether an HA state can be used as a charge-data evidence source."""
+    value = str(getattr(state, "state", "") or "").strip().lower()
+    return value not in {"", "unknown", "unavailable", "none"}
+
+
+def _tesla_ble_charge_data_binding(
+    hass: HomeAssistant,
+    ble_prefix: str,
+    target_entity: str,
+    previous: tuple[tuple[str, tuple[Any, ...]], ...] | None = None,
+) -> tuple[tuple[str, tuple[Any, ...]], ...] | None:
+    """Bind present charge evidence entities to the target ESPHome device.
+
+    Entity ids are intentionally exact-prefix scoped, but an HA registry
+    rebind can leave another provider publishing under the same ids.  Only
+    present, usable evidence entities participate; an unavailable compatibility
+    alias is ignored so a valid alternate alias can still prove the session.
+    ``previous`` pins the identities observed before an await and catches an
+    in-place rebind even when the replacement retains the same device metadata.
+    """
+    try:
+        registry = er.async_get(hass)
+        target = registry.async_get(target_entity)
+    except Exception:
+        return None
+    if target is None or getattr(target, "disabled_by", None) is not None:
+        return None
+    target_platform = str(getattr(target, "platform", "")).lower()
+    target_entry = getattr(target, "config_entry_id", None)
+    target_device = getattr(target, "device_id", None)
+    if target_platform != "esphome" or not target_entry or not target_device:
+        return None
+    prior = dict(previous or ())
+    current: list[tuple[str, tuple[Any, ...]]] = []
+    for entity_id in _tesla_ble_charge_data_entity_ids(
+        hass, ble_prefix, target_entity
+    ):
+        state = hass.states.get(entity_id)
+        if state is None:
+            continue
+        if not entity_id.endswith("_received") and not _tesla_ble_charge_state_is_present(state):
+            continue
+        registration = registry.async_get(entity_id)
+        if registration is None or getattr(registration, "disabled_by", None) is not None:
+            return None
+        if (
+            str(getattr(registration, "platform", "")).lower() != target_platform
+            or getattr(registration, "config_entry_id", None) != target_entry
+            or getattr(registration, "device_id", None) != target_device
+        ):
+            return None
+        identity = tuple(
+            getattr(registration, field, None)
+            for field in (
+                "entity_id",
+                "platform",
+                "config_entry_id",
+                "device_id",
+                "unique_id",
+                "disabled_by",
+            )
+        )
+        if entity_id in prior and prior[entity_id] != identity:
+            return None
+        current.append((entity_id, identity))
+    return tuple(current)
+
+
+def _tesla_ble_stock_profile_token(
+    hass: HomeAssistant, target_entity: str | None,
+) -> tuple[Any, Any, Any, Any, Any, tuple[str, str, str], Any, bool] | None:
+    """Capture the cached stock producer identity before an await."""
+    if not target_entity:
+        return None
+    try:
+        registry = er.async_get(hass)
+        target = registry.async_get(target_entity)
+        if target is None or getattr(target, "disabled_by", None) is not None:
+            return None
+        if str(getattr(target, "platform", "")).lower() != "esphome":
+            return None
+        entry_id = getattr(target, "config_entry_id", None)
+        if not entry_id:
+            return None
+        config_entries = getattr(hass, "config_entries", None)
+        getter = getattr(config_entries, "async_get_entry", None)
+        config_entry = getter(entry_id) if callable(getter) else None
+        runtime_data = getattr(config_entry, "runtime_data", None)
+        info = getattr(runtime_data, "device_info", None)
+        metadata = tuple(
+            str(getattr(info, field, ""))
+            for field in ("project_name", "project_version", "esphome_version")
+        )
+        from ..tesla_ev_stock_recovery import STOCK_PROFILES
+
+        client = getattr(runtime_data, "client", None)
+        connection = getattr(client, "_connection", None)
+        return (
+            entry_id,
+            config_entry,
+            runtime_data,
+            client,
+            info,
+            metadata,
+            connection,
+            bool(metadata in STOCK_PROFILES and client is not None),
+        )
+    except Exception:
+        return None
+
+
+def _tesla_ble_stock_profile_token_current(
+    hass: HomeAssistant,
+    target_entity: str | None,
+    token: tuple[Any, Any, Any, Any, Any, tuple[str, str, str], Any, bool] | None,
+) -> bool:
+    """Check that the same qualified stock producer still owns the target."""
+    if token is None or len(token) < 8 or not token[-1]:
+        return False
+    current = _tesla_ble_stock_profile_token(hass, target_entity)
+    if current is None or not current[-1]:
+        return False
+    return (
+        current[0] == token[0]
+        and current[1] is token[1]
+        and current[2] is token[2]
+        and current[3] is token[3]
+        and current[4] is token[4]
+        and current[5] == token[5]
+        and current[6] is token[6]
+        and current[7] == token[7]
+    )
+
+
+def _tesla_ble_stock_profile_qualified(
+    hass: HomeAssistant, target_entity: str | None,
+) -> bool:
+    """Require the cached config-entry metadata for a supported stock bridge."""
+    token = _tesla_ble_stock_profile_token(hass, target_entity)
+    return bool(token is not None and token[-1])
+
+
+def _tesla_ble_parse_last_update(value: Any) -> datetime | None:
+    """Parse the bridge's native ``ctime`` value without timezone inference."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.strptime(text, "%a %b %d %H:%M:%S %Y")
+    except (TypeError, ValueError):
+        return None
+
+
+def _tesla_ble_stock_last_update_source_token(
+    hass: HomeAssistant,
+    ble_prefix: str,
+    target_entity: str | None,
+    *,
+    charge_binding: tuple[tuple[str, tuple[Any, ...]], ...] | None = None,
+    stock_token: tuple[Any, Any, Any, Any, Any, tuple[str, str, str], Any, bool]
+    | None
+    | object = _TESLA_BLE_STOCK_TOKEN_UNSET,
+) -> dict[str, Any] | None:
+    """Capture the exact native LastUpdate source before an awaited probe.
+
+    HA's state timestamp can advance for a restored/replayed value.  The
+    stock bridge's authenticated response is represented by one
+    ``TextSensorState`` in the ESPHome runtime; pin its connection, state
+    subscription key, info object, and non-stale baseline so only a later
+    native value can qualify sparse transport health.
+    """
+    if stock_token is _TESLA_BLE_STOCK_TOKEN_UNSET:
+        stock_token = _tesla_ble_stock_profile_token(hass, target_entity)
+    if not isinstance(stock_token, tuple) or not stock_token[-1]:
+        return None
+    binding = charge_binding
+    if binding is None:
+        binding = _tesla_ble_charge_data_binding(
+            hass, ble_prefix, target_entity or ""
+        )
+    last_update_entity = _TESLA_BLE_SENSOR_LAST_UPDATE.format(prefix=ble_prefix)
+    if binding is None or last_update_entity not in {
+        entity_id for entity_id, _identity in binding
+    }:
+        return None
+    registry = er.async_get(hass)
+    target_registration = registry.async_get(target_entity) if target_entity else None
+    target_unique_id = str(getattr(target_registration, "unique_id", ""))
+    target_unique_parts = target_unique_id.split("/")
+    target_native_prefix = ""
+    target_native_index = ""
+    if len(target_unique_parts) >= 3 and target_unique_parts[1].isdigit():
+        target_native_prefix = target_unique_parts[0]
+        target_native_index = target_unique_parts[1]
+    runtime_data = stock_token[2]
+    client = stock_token[3]
+    connection = getattr(client, "_connection", None)
+    if connection is None or getattr(connection, "is_connected", None) is not True:
+        return None
+    states = getattr(runtime_data, "state", None)
+    infos = getattr(runtime_data, "info", None)
+    if not isinstance(states, Mapping) or not isinstance(infos, Mapping):
+        return None
+    stale_state = getattr(runtime_data, "stale_state", set())
+    if not isinstance(stale_state, (set, frozenset)):
+        stale_state = set(stale_state or ())
+    candidates: list[tuple[Any, Any, tuple[Any, ...], Any, Any]] = []
+    for state_type, state_by_key in states.items():
+        if getattr(state_type, "__name__", "") != "TextSensorState":
+            continue
+        if not isinstance(state_by_key, Mapping):
+            continue
+        for candidate_key, candidate_state in state_by_key.items():
+            if not isinstance(candidate_key, tuple) or len(candidate_key) != 2:
+                continue
+            info_matches: list[tuple[Any, Any]] = []
+            for info_type, info_by_key in infos.items():
+                if getattr(info_type, "__name__", "") != "TextSensorInfo":
+                    continue
+                if isinstance(info_by_key, Mapping):
+                    candidate_info = info_by_key.get(candidate_key)
+                    if (
+                        str(getattr(candidate_info, "object_id", ""))
+                        == "last_update"
+                        and getattr(candidate_info, "device_id", None)
+                        == candidate_key[0]
+                        and getattr(candidate_info, "key", None)
+                        == candidate_key[1]
+                    ):
+                        info_matches.append((info_type, candidate_info))
+            if len(info_matches) != 1:
+                continue
+            info_type_match, info_match = info_matches[0]
+            registration = registry.async_get(last_update_entity)
+            unique_id = str(getattr(registration, "unique_id", ""))
+            native_name = str(
+                getattr(info_match, "name", "")
+                or getattr(info_match, "object_id", "")
+            )
+            native_object_id = str(getattr(info_match, "object_id", ""))
+            # HA 2026.10 supports ESPHome unique-id v1/v2/v3.  The suffix
+            # must identify this exact native text sensor; a matching entity
+            # id alone must never select another virtual device's state key.
+            expected_suffixes = (
+                f"/{candidate_key[0]}/text_sensor/{native_name}",
+                f"/{candidate_key[0]}/text_sensor/{native_object_id}",
+                f"-text_sensor-{native_name}",
+                f"-text_sensor-{native_object_id}",
+            )
+            if registration is None or not any(
+                unique_id.endswith(suffix) for suffix in expected_suffixes
+            ):
+                return None
+            if target_native_prefix:
+                if target_native_index != str(candidate_key[0]) or not (
+                    unique_id.startswith(
+                        f"{target_native_prefix}/{candidate_key[0]}/"
+                    )
+                    or unique_id.startswith(
+                        f"{target_native_prefix}-{candidate_key[0]}-"
+                    )
+                ):
+                    return None
+            source_key = (state_type, *candidate_key)
+            if source_key in stale_state:
+                continue
+            baseline = _tesla_ble_parse_last_update(
+                getattr(candidate_state, "state", None)
+            )
+            if baseline is None or getattr(candidate_state, "missing_state", False):
+                continue
+            candidates.append(
+                (state_type, info_type_match, candidate_key, candidate_state, info_match)
+            )
+    if len(candidates) != 1:
+        return None
+    source_state_type, source_info_type, source_key, source_state, source_info = (
+        candidates[0]
+    )
+    return {
+        "stock_token": stock_token,
+        "runtime": runtime_data,
+        "client": client,
+        "connection": connection,
+        "state_type": source_state_type,
+        "info_type": source_info_type,
+        "state_key": source_key,
+        "state": source_state,
+        "info": source_info,
+        "baseline": _tesla_ble_parse_last_update(
+            getattr(source_state, "state", None)
+        ),
+    }
+
+
+def _tesla_ble_stock_last_update_source_current(
+    hass: HomeAssistant,
+    ble_prefix: str,
+    target_entity: str | None,
+    source_token: Mapping[str, Any] | None,
+    *,
+    since: datetime,
+    charge_binding: tuple[tuple[str, tuple[Any, ...]], ...] | None = None,
+) -> bool:
+    """Require a post-probe HA delivery backed by an advancing native value."""
+    if not isinstance(source_token, Mapping):
+        return False
+    stock_token = source_token.get("stock_token")
+    if stock_token is not None and not _tesla_ble_stock_profile_token_current(
+        hass, target_entity, stock_token
+    ):
+        return False
+    runtime_data = source_token.get("runtime")
+    client = source_token.get("client")
+    if runtime_data is None or client is None:
+        return False
+    if getattr(client, "_connection", None) is not source_token.get("connection"):
+        return False
+    connection = source_token.get("connection")
+    if connection is None or getattr(connection, "is_connected", None) is not True:
+        return False
+    states = getattr(runtime_data, "state", None)
+    infos = getattr(runtime_data, "info", None)
+    state_type = source_token.get("state_type")
+    info_type = source_token.get("info_type")
+    state_key = source_token.get("state_key")
+    if not isinstance(states, Mapping) or not isinstance(infos, Mapping):
+        return False
+    current_states = states.get(state_type)
+    current_infos = infos.get(info_type)
+    if not isinstance(current_states, Mapping) or not isinstance(current_infos, Mapping):
+        return False
+    if not isinstance(state_key, tuple) or state_key not in current_states:
+        return False
+    if current_infos.get(state_key) is not source_token.get("info"):
+        return False
+    stale_state = getattr(runtime_data, "stale_state", set())
+    if (state_type, *state_key) in stale_state:
+        return False
+    current_state = current_states[state_key]
+    current_value = _tesla_ble_parse_last_update(
+        getattr(current_state, "state", None)
+    )
+    baseline = source_token.get("baseline")
+    if (
+        current_value is None
+        or not isinstance(baseline, datetime)
+        or current_value <= baseline
+        or getattr(current_state, "missing_state", False)
+    ):
+        return False
+    last_update_entity = _TESLA_BLE_SENSOR_LAST_UPDATE.format(prefix=ble_prefix)
+    binding = charge_binding
+    if binding is None:
+        binding = _tesla_ble_charge_data_binding(
+            hass, ble_prefix, target_entity or ""
+        )
+    if binding is None or last_update_entity not in {
+        entity_id for entity_id, _identity in binding
+    }:
+        return False
+    last_update = hass.states.get(last_update_entity)
+    return bool(
+        last_update is not None
+        and _tesla_ble_charge_state_is_present(last_update)
+        and _ble_state_observed_after(last_update, since, hass=hass)
+    )
+
+
+def _tesla_ble_has_fresh_stock_charge_response(
+    hass: HomeAssistant,
+    ble_prefix: str,
+    target_entity: str | None,
+    *,
+    since: datetime,
+    charge_binding: tuple[tuple[str, tuple[Any, ...]], ...] | None = None,
+    stock_token: tuple[Any, Any, Any, Any, Any, tuple[str, str, str], Any, bool]
+    | None
+    | object = _TESLA_BLE_STOCK_TOKEN_UNSET,
+    stock_source_token: Mapping[str, Any] | None = None,
+) -> bool:
+    """Recognize a fresh sparse charge response for a qualified stock bridge.
+
+    Stock Tesla responses may omit unchanged current, power, and state fields.
+    LastUpdate is emitted for several vehicle-data sections, so the native
+    TextSensorState source key and value must advance within one API epoch,
+    with a post-probe HA delivery and exact producer identity. This is
+    transport/session health, never physical confirmation.
+    """
+    if stock_token is _TESLA_BLE_STOCK_TOKEN_UNSET:
+        stock_token = _tesla_ble_stock_profile_token(hass, target_entity)
+    if not _tesla_ble_stock_profile_token_current(hass, target_entity, stock_token):
+        return False
+    if stock_source_token is None:
+        stock_source_token = _tesla_ble_stock_last_update_source_token(
+            hass,
+            ble_prefix,
+            target_entity,
+            charge_binding=charge_binding,
+            stock_token=stock_token,
+        )
+    return _tesla_ble_stock_last_update_source_current(
+        hass,
+        ble_prefix,
+        target_entity,
+        stock_source_token,
+        since=since,
+        charge_binding=charge_binding,
+    )
+
+
 async def _wait_for_ble_command_readback(
     hass: HomeAssistant,
     entity_id: str | tuple[str, ...],
@@ -2346,6 +3315,9 @@ async def _wait_for_ble_command_readback(
     command_started_at: datetime,
     *,
     charging_prefix: str | None = None,
+    charge_binding: tuple[tuple[str, tuple[Any, ...]], ...] | None | object = _TESLA_BLE_BINDING_UNSET,
+    charge_binding_target: str | None = None,
+    charge_binding_prefix: str | None = None,
 ) -> bool:
     """Confirm a BLE write from fresh vehicle state, plus draw for a start."""
     from ..tesla_ble import get_tesla_ble_charge_current_state, get_tesla_ble_charge_power_state
@@ -2353,6 +3325,20 @@ async def _wait_for_ble_command_readback(
     entity_ids = (entity_id,) if isinstance(entity_id, str) else entity_id
     deadline = asyncio.get_running_loop().time() + _TESLA_BLE_COMMAND_CONFIRMATION_SECONDS
     while True:
+        if charge_binding is not _TESLA_BLE_BINDING_UNSET:
+            if (
+                charge_binding is None
+                or not charge_binding_target
+                or not charge_binding_prefix
+                or _tesla_ble_charge_data_binding(
+                    hass,
+                    charge_binding_prefix,
+                    charge_binding_target,
+                    previous=charge_binding,
+                )
+                is None
+            ):
+                return False
         for candidate in entity_ids:
             state = hass.states.get(candidate)
             if state is None or not _ble_state_observed_after(state, command_started_at, hass=hass):
@@ -2417,29 +3403,86 @@ def _ble_block_report_due(
 async def _wake_tesla_ble(
     hass: HomeAssistant,
     ble_prefix: str,
-    wait_timeout: int = 30,
+    wait_timeout: int = 120,
     *,
+    target_entity: str | None = None,
+    stock_token: tuple[Any, Any, Any, Any, Any, tuple[str, str, str], Any, bool]
+    | None
+    | object = _TESLA_BLE_STOCK_TOKEN_UNSET,
     allow_backoff: bool = True,
+    authorize: Optional[Callable[[], Any]] = None,
 ) -> bool:
     """Wake up Tesla via BLE and wait for it to be awake.
 
     Args:
         hass: Home Assistant instance
         ble_prefix: The BLE entity prefix (e.g., "tesla_ble")
-        wait_timeout: Maximum seconds to wait for car to wake up (default 30)
+        wait_timeout: Maximum seconds to wait for car to wake up (default 120)
         allow_backoff: Whether the shared failed-bridge backoff may skip the
             wake attempt. The backoff exists to stop a repeating automatic loop
             from spending a full wake timeout every tick, so an explicit user
             command must never be dropped by it.
+        authorize: Recheck the original command's ownership, deadline and
+            registry binding while waiting. Waking never renews that authority.
     """
     import asyncio
 
     wake_entity = TESLA_BLE_BUTTON_WAKE_UP.format(prefix=ble_prefix)
     asleep_entity = TESLA_BLE_BINARY_ASLEEP.format(prefix=ble_prefix)
+    charge_target = target_entity or TESLA_BLE_SWITCH_CHARGER.format(prefix=ble_prefix)
 
     state = hass.states.get(wake_entity)
-    if state is None:
-        _LOGGER.warning(f"Tesla BLE wake entity not found: {wake_entity}")
+    if state is None or str(state.state).lower() == "unavailable":
+        _LOGGER.warning("Tesla BLE wake entity missing or unavailable: %s", wake_entity)
+        return False
+    wake_identity = _tesla_legacy_entity_identity(hass, (wake_entity,))
+    asleep_identity = _tesla_legacy_entity_identity(hass, (asleep_entity,))
+    radio_binding = _tesla_ble_radio_binding(hass, ble_prefix)
+    charge_binding = None
+    if hass.states.get(charge_target) is not None:
+        charge_binding = _tesla_ble_charge_data_binding(
+            hass, ble_prefix, charge_target
+        )
+    # Capture the producer before the first await.  Passing an explicit None
+    # to sparse health keeps an initially unsupported bridge from becoming a
+    # qualified stock producer during Wake.
+    if stock_token is _TESLA_BLE_STOCK_TOKEN_UNSET:
+        stock_token = _tesla_ble_stock_profile_token(hass, charge_target)
+    stock_source_token = _tesla_ble_stock_last_update_source_token(
+        hass,
+        ble_prefix,
+        charge_target,
+        charge_binding=charge_binding,
+        stock_token=stock_token,
+    )
+
+    async def current() -> bool:
+        return bool(
+            await _tesla_legacy_transport_authorized(authorize)
+            and _tesla_legacy_entity_identity(hass, (wake_entity,)) == wake_identity
+            and _tesla_ble_radio_scope_current(
+                hass,
+                ble_prefix,
+                radio_binding,
+                target_entity=wake_entity,
+            )
+            and (
+                charge_binding is None
+                or _tesla_ble_charge_data_binding(
+                    hass, ble_prefix, charge_target, previous=charge_binding
+                )
+                is not None
+            )
+            and (
+                stock_token is None
+                or not stock_token[-1]
+                or _tesla_ble_stock_profile_token_current(
+                    hass, charge_target, stock_token
+                )
+            )
+        )
+
+    if not await current():
         return False
 
     # Bridge availability/discovery is not vehicle wake acknowledgement.
@@ -2450,6 +3493,7 @@ async def _wake_tesla_ble(
         and _ble_state_observed_after(
             asleep_state,
             datetime.now(dt_timezone.utc) - timedelta(seconds=_TESLA_BLE_WAKE_FRESHNESS_SECONDS),
+            hass=hass,
         )
     ):
         hass.data.get(DOMAIN, {}).get("_ev_ble_wake_retry_after", {}).pop(ble_prefix, None)
@@ -2477,6 +3521,24 @@ async def _wake_tesla_ble(
                 )
             return False
     wake_started_at = datetime.now(dt_timezone.utc)
+    start_time = asyncio.get_running_loop().time()
+    wake_deadline = start_time + wait_timeout
+
+    def fresh_same_bridge_asleep() -> bool:
+        state = hass.states.get(asleep_entity)
+        return bool(
+            state is not None and state.state == "on"
+            and _ble_state_observed_after(state, wake_started_at, hass=hass)
+            and wake_identity is not None and asleep_identity is not None
+            and len(wake_identity) == len(asleep_identity) == 1
+            and len(wake_identity[0]) == len(asleep_identity[0]) == 6
+            and wake_identity[0][1] == asleep_identity[0][1] == "esphome"
+            and all(wake_identity[0][index] for index in (2, 3, 4))
+            and all(asleep_identity[0][index] for index in (2, 3, 4))
+            and wake_identity[0][2:4] == asleep_identity[0][2:4]
+            and asleep_identity[0][5] is None
+            and _tesla_legacy_entity_identity(hass, (asleep_entity,)) == asleep_identity
+        )
 
     try:
         await hass.services.async_call(
@@ -2487,20 +3549,63 @@ async def _wake_tesla_ble(
         )
         _LOGGER.info(f"Sent wake command via Tesla BLE: {wake_entity}")
 
-        # Wait for car to wake up (poll every 2 seconds)
-        start_time = asyncio.get_event_loop().time()
-        while (asyncio.get_event_loop().time() - start_time) < wait_timeout:
-            await asyncio.sleep(2)
+        # A request can need up to two minutes. Stock bridges discard queued
+        # work while their GATT connection is down. If this exact bridge later
+        # reports the vehicle still asleep, allow one Wake retry after that
+        # response; presence advertisements alone never trigger a retry.
+        # Both requests share the original timeout, ownership and deadline.
+        retried_after_asleep = False
+        while (
+            remaining := wake_deadline - asyncio.get_running_loop().time()
+        ) > 0:
+            if not await current():
+                return False
+            await asyncio.sleep(min(2, remaining))
+            if not await current():
+                return False
 
             asleep_state = hass.states.get(asleep_entity)
             if (
-                asleep_state and asleep_state.state == "off"
-                and _ble_state_observed_after(asleep_state, wake_started_at)
+                (
+                    asleep_state and asleep_state.state == "off"
+                    and _ble_state_observed_after(asleep_state, wake_started_at, hass=hass)
+                )
+                or _tesla_ble_has_fresh_charge_snapshot(
+                    hass,
+                    ble_prefix,
+                    since=wake_started_at,
+                    target_entity=charge_target,
+                    charge_binding=charge_binding,
+                    stock_token=stock_token,
+                    stock_source_token=stock_source_token,
+                )
             ):
-                _LOGGER.info(f"Tesla BLE: Car is now awake after {int(asyncio.get_event_loop().time() - start_time)}s")
+                _LOGGER.info(f"Tesla BLE: Car is now awake after {int(asyncio.get_running_loop().time() - start_time)}s")
                 # Give it a bit more time to be fully ready
                 await asyncio.sleep(2)
-                return True
+                if await current():
+                    retry_after.pop(ble_prefix, None)
+                    return True
+                return False
+
+            if not retried_after_asleep and fresh_same_bridge_asleep():
+                if not await current():
+                    return False
+                # The authority callback can yield. Re-read the response and
+                # its binding after that await, at the actual request boundary.
+                if asyncio.get_running_loop().time() >= wake_deadline:
+                    break
+                if not fresh_same_bridge_asleep():
+                    continue
+                retried_after_asleep = True
+                wake_started_at = datetime.now(dt_timezone.utc)
+                await hass.services.async_call(
+                    "button", "press", {"entity_id": wake_entity}, blocking=True
+                )
+                _LOGGER.info(
+                    "Tesla BLE %s: retrying Wake once after a fresh asleep response",
+                    ble_prefix,
+                )
 
         # Do not spend another full wake timeout on the same failed bridge
         # during the following amps/start operation. Other cars are unaffected.
@@ -2583,11 +3688,773 @@ def _ble_command_has_fresh_charging_evidence(
     return False
 
 
+def _tesla_ble_has_fresh_charge_snapshot(
+    hass: HomeAssistant,
+    ble_prefix: str,
+    *,
+    since: datetime | None = None,
+    target_entity: str | None = None,
+    charge_binding: tuple[tuple[str, tuple[Any, ...]], ...] | None = None,
+    stock_token: tuple[Any, Any, Any, Any, Any, tuple[str, str, str], Any, bool]
+    | None
+    | object = _TESLA_BLE_STOCK_TOKEN_UNSET,
+    stock_source_token: Mapping[str, Any] | None = None,
+) -> bool:
+    """Require a recent, vehicle-originated charge snapshot for this bridge.
+
+    A fresh ``asleep=off`` or bridge-presence sample only proves that one
+    entity reported.  Before a mutating BLE write we need a known charging
+    state and at least one finite measured current/power value from the same
+    exact prefix.  Zero is a valid receipt: it proves the bridge reached the
+    vehicle even when the vehicle is not presently drawing power.
+    """
+    cutoff = since or (
+        datetime.now(dt_timezone.utc)
+        - timedelta(seconds=_TESLA_BLE_WAKE_FRESHNESS_SECONDS)
+    )
+    from ..tesla_ble import (
+        get_tesla_ble_charge_current_state,
+        get_tesla_ble_charge_power_state,
+    )
+
+    from ..tesla_ble import get_tesla_ble_observed_at
+
+    known_states = []
+    known_state_any = False
+    for entity_id in (
+        TESLA_BLE_SENSOR_CHARGING_STATE.format(prefix=ble_prefix),
+        TESLA_BLE_SENSOR_CHARGING.format(prefix=ble_prefix),
+    ):
+        state = hass.states.get(entity_id)
+        value = str(getattr(state, "state", "") or "").strip().lower()
+        if (
+            state is not None
+            and value in _TESLA_BLE_SUPPORTED_CHARGING_STATES
+        ):
+            known_state_any = True
+            if _ble_state_observed_after(state, cutoff, hass=hass):
+                known_states.append(state)
+    # A qualified stock bridge can prove session health from an authenticated
+    # advancing LastUpdate even when unchanged charging fields/state were
+    # suppressed.  This is health-only; command readback remains below.
+    if target_entity and _tesla_ble_has_fresh_stock_charge_response(
+        hass,
+        ble_prefix,
+        target_entity,
+        since=cutoff,
+        charge_binding=charge_binding,
+        stock_token=stock_token,
+        stock_source_token=stock_source_token,
+    ):
+        return True
+    if not known_state_any:
+        return False
+
+    if known_states:
+        current = get_tesla_ble_charge_current_state(hass, ble_prefix)
+        power = get_tesla_ble_charge_power_state(hass, ble_prefix)
+        for measured in (current, power):
+            if measured is None or not _ble_state_observed_after(
+                measured, cutoff, hass=hass
+            ):
+                continue
+            try:
+                value = float(measured.state)
+                if (
+                    measured is power
+                    and measured.attributes.get("unit_of_measurement") == "kW"
+                ):
+                    value *= 1000
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(value):
+                measured_at = get_tesla_ble_observed_at(hass, measured)
+                if measured_at is None:
+                    continue
+                # A newer explicit stopped/completed state must not be hidden by
+                # a replayed positive measurement from the same bridge.
+                if value > 0 and any(
+                    str(status.state).strip().lower() in _TESLA_NON_CHARGING_STATES
+                    and (status_at := get_tesla_ble_observed_at(hass, status)) is not None
+                    and status_at > measured_at
+                    for status in known_states
+                ):
+                    continue
+                if value >= 0:
+                    return True
+    return False
+
+
+def _tesla_ble_force_data_update_binding(
+    hass: HomeAssistant,
+    ble_prefix: str,
+    target_entity: str,
+) -> tuple[str, tuple[tuple[Any, ...], ...]] | None:
+    """Return the active, same-device force-update button binding.
+
+    The button is deliberately registry-bound to the target charger/number.
+    A state with the right name is insufficient because a re-authenticated
+    Fleet/native entity can otherwise occupy the same HA entity id.
+    """
+    force_entity = _TESLA_BLE_BUTTON_FORCE_DATA_UPDATE.format(prefix=ble_prefix)
+    state = hass.states.get(force_entity)
+    if state is None or str(getattr(state, "state", "")).lower() == "unavailable":
+        return None
+    try:
+        registry = er.async_get(hass)
+        target = registry.async_get(target_entity)
+        force = registry.async_get(force_entity)
+    except Exception:
+        return None
+    if target is None or force is None:
+        return None
+    if getattr(target, "disabled_by", None) is not None or getattr(
+        force, "disabled_by", None
+    ) is not None:
+        return None
+    if (
+        str(getattr(target, "platform", "")).lower() != "esphome"
+        or str(getattr(force, "platform", "")).lower() != "esphome"
+    ):
+        return None
+    target_device = getattr(target, "device_id", None)
+    force_device = getattr(force, "device_id", None)
+    if not target_device or not force_device or target_device != force_device:
+        return None
+    target_entry = getattr(target, "config_entry_id", None)
+    force_entry = getattr(force, "config_entry_id", None)
+    if (
+        not target_entry
+        or not force_entry
+        or target_entry != force_entry
+    ):
+        return None
+    identity = _tesla_legacy_entity_identity(hass, (force_entity,))
+    if identity is None:
+        return None
+    return force_entity, identity
+
+
+async def _tesla_ble_scope_current(
+    hass: HomeAssistant,
+    target_entity: str,
+    expected_identity: tuple[tuple[Any, ...], ...] | None,
+    authorize: Optional[Callable[[], Any]],
+    stock_token: tuple[Any, Any, Any, Any, Any, tuple[str, str, str], Any, bool]
+    | None = None,
+) -> bool:
+    """Check route authority and the target registry binding after an await."""
+    if not await _tesla_legacy_transport_authorized(authorize):
+        return False
+    if expected_identity is not None and _tesla_legacy_entity_identity(
+        hass, (target_entity,)
+    ) != expected_identity:
+        return False
+    if stock_token is not None and stock_token[-1] and not _tesla_ble_stock_profile_token_current(
+        hass, target_entity, stock_token
+    ):
+        return False
+    return True
+
+
+async def _tesla_ble_prepare_mutation(
+    hass: HomeAssistant,
+    ble_prefix: str,
+    target_entity: str,
+    *,
+    allow_backoff: bool,
+    authorize: Optional[Callable[[], Any]],
+    wake_first: bool,
+    expected_identity: tuple[tuple[Any, ...], ...] | None,
+    charge_binding_holder: list | None = None,
+    stock_token: tuple[Any, Any, Any, Any, Any, tuple[str, str, str], Any, bool]
+    | None
+    | object = _TESLA_BLE_STOCK_TOKEN_UNSET,
+) -> bool:
+    """Establish a fresh vehicle session before any BLE mutation.
+
+    The exact target binding is captured by the caller before this coroutine's
+    first await.  If existing telemetry is healthy we keep the fast path.  A
+    wake acknowledgement without charge telemetry is insufficient, so the
+    exact registry-bound force-data button is used as a bounded read probe;
+    failure returns before a mutating HA service call.
+    """
+    charge_binding = _tesla_ble_charge_data_binding(
+        hass, ble_prefix, target_entity
+    )
+    if charge_binding_holder is not None:
+        charge_binding_holder[:] = [charge_binding]
+    if charge_binding is None:
+        return False
+    radio_binding = _tesla_ble_radio_binding(hass, ble_prefix)
+    # Capture the stock producer before the first await.  An explicit None is
+    # passed to sparse health checks so an unsupported/missing producer cannot
+    # become qualified halfway through this mutation's probe.
+    if stock_token is _TESLA_BLE_STOCK_TOKEN_UNSET:
+        stock_token = _tesla_ble_stock_profile_token(hass, target_entity)
+    stock_source_token = _tesla_ble_stock_last_update_source_token(
+        hass,
+        ble_prefix,
+        target_entity,
+        charge_binding=charge_binding,
+        stock_token=stock_token,
+    )
+
+    async def scope_current() -> bool:
+        if not await _tesla_ble_scope_current(
+            hass, target_entity, expected_identity, authorize
+        ):
+            return False
+        if not _tesla_ble_radio_scope_current(
+            hass,
+            ble_prefix,
+            radio_binding,
+            target_entity=target_entity,
+        ):
+            return False
+        # Strict full snapshots keep the legacy path available when no stock
+        # producer is present.  Once a qualified stock token was captured,
+        # however, every awaited handover must remain on that exact producer.
+        if stock_token is not None and stock_token[-1]:
+            return _tesla_ble_stock_profile_token_current(
+                hass, target_entity, stock_token
+            )
+        return True
+
+    if not await scope_current():
+        return False
+    if not wake_first and _tesla_ble_has_fresh_charge_snapshot(
+        hass,
+        ble_prefix,
+        target_entity=target_entity,
+        charge_binding=charge_binding,
+        stock_token=stock_token,
+        stock_source_token=stock_source_token,
+    ):
+        return True
+    if wake_first:
+        if not await _wake_tesla_ble(
+            hass, ble_prefix, allow_backoff=allow_backoff,
+            target_entity=target_entity,
+            stock_token=stock_token,
+            authorize=scope_current,
+        ):
+            return False
+    elif not _tesla_ble_has_fresh_charge_snapshot(
+        hass,
+        ble_prefix,
+        target_entity=target_entity,
+        charge_binding=charge_binding,
+        stock_token=stock_token,
+        stock_source_token=stock_source_token,
+    ):
+        if not await _wake_tesla_ble(
+            hass, ble_prefix, allow_backoff=allow_backoff,
+            target_entity=target_entity,
+            stock_token=stock_token,
+            authorize=scope_current,
+        ):
+            return False
+    if not await scope_current():
+        return False
+    charge_binding = _tesla_ble_charge_data_binding(
+        hass, ble_prefix, target_entity, previous=charge_binding
+    )
+    if charge_binding is None:
+        if charge_binding_holder is not None:
+            charge_binding_holder[:] = [None]
+        return False
+    if charge_binding_holder is not None:
+        charge_binding_holder[:] = [charge_binding]
+    if _tesla_ble_has_fresh_charge_snapshot(
+        hass,
+        ble_prefix,
+        target_entity=target_entity,
+        charge_binding=charge_binding,
+        stock_token=stock_token,
+        stock_source_token=stock_source_token,
+    ):
+        return True
+
+    binding = _tesla_ble_force_data_update_binding(
+        hass, ble_prefix, target_entity
+    )
+    if binding is None:
+        _LOGGER.warning(
+            "Tesla BLE %s: no exact active force-data-update entity with "
+            "fresh vehicle telemetry; mutation not sent",
+            ble_prefix,
+        )
+        return False
+    force_entity, force_identity = binding
+    refresh_started_at = datetime.now(dt_timezone.utc)
+    if not await scope_current() or _tesla_legacy_entity_identity(
+        hass, (force_entity,)
+    ) != force_identity:
+        return False
+    charge_binding = _tesla_ble_charge_data_binding(
+        hass, ble_prefix, target_entity, previous=charge_binding
+    )
+    if charge_binding is None:
+        if charge_binding_holder is not None:
+            charge_binding_holder[:] = [None]
+        return False
+    if charge_binding_holder is not None:
+        charge_binding_holder[:] = [charge_binding]
+    try:
+        await hass.services.async_call(
+            "button",
+            "press",
+            {"entity_id": force_entity},
+            blocking=True,
+        )
+    except Exception as err:
+        _LOGGER.warning(
+            "Tesla BLE %s: force-data-update probe failed; mutation not sent: %s",
+            ble_prefix,
+            err,
+        )
+        return False
+
+    deadline = asyncio.get_running_loop().time() + _TESLA_BLE_COMMAND_CONFIRMATION_SECONDS
+    while True:
+        if not await scope_current() or _tesla_legacy_entity_identity(
+            hass, (force_entity,)
+        ) != force_identity:
+            return False
+        charge_binding = _tesla_ble_charge_data_binding(
+            hass, ble_prefix, target_entity, previous=charge_binding
+        )
+        if charge_binding is None:
+            if charge_binding_holder is not None:
+                charge_binding_holder[:] = [None]
+            return False
+        if charge_binding_holder is not None:
+            charge_binding_holder[:] = [charge_binding]
+        if _tesla_ble_has_fresh_charge_snapshot(
+            hass,
+            ble_prefix,
+            since=refresh_started_at,
+            target_entity=target_entity,
+            charge_binding=charge_binding,
+            stock_token=stock_token,
+            stock_source_token=stock_source_token,
+        ):
+            return True
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            _LOGGER.warning(
+                "Tesla BLE %s: force-data-update produced no fresh charge "
+                "telemetry; mutation not sent",
+                ble_prefix,
+            )
+            return False
+        await asyncio.sleep(min(1, remaining))
+
+
+_tesla_legacy_authority: ContextVar[Optional[Callable[[], Any]]] = ContextVar(
+    "tesla_legacy_authority", default=None
+)
+_TESLA_BLE_EFFECT_BOUND_UNSET = object()
+_tesla_ble_effect_bound: ContextVar[object] = ContextVar(
+    "tesla_ble_effect_bound", default=_TESLA_BLE_EFFECT_BOUND_UNSET
+)
+_tesla_ble_mutation_phase: ContextVar[dict[str, str] | None] = ContextVar(
+    "tesla_ble_mutation_phase", default=None
+)
+_tesla_submission_tracker: ContextVar[Optional[Callable[[Callable[[], Any]], Any]] | None] = ContextVar(
+    "tesla_submission_tracker", default=None
+)
+_tesla_submission_handoff: ContextVar[dict[str, bool] | None] = ContextVar(
+    "tesla_submission_handoff", default=None
+)
+_tesla_submission_guard: ContextVar[Optional[Callable[[], Any]] | None] = ContextVar(
+    "tesla_submission_guard", default=None
+)
+_tesla_ble_stock_submission_scope: ContextVar[Any] = ContextVar(
+    "tesla_ble_stock_submission_scope", default=None
+)
+
+
+def _tesla_ble_stock_submission_scope_current(hass: HomeAssistant) -> bool:
+    """Recheck a captured stock producer at the final provider handoff."""
+    scope = _tesla_ble_stock_submission_scope.get()
+    if scope is None:
+        return True
+    if not isinstance(scope, tuple) or len(scope) != 2:
+        return False
+    target_entity, stock_token = scope
+    if stock_token is None or not isinstance(stock_token, tuple):
+        return True
+    if len(stock_token) < 7 or not stock_token[-1]:
+        return True
+    return _tesla_ble_stock_profile_token_current(
+        hass, target_entity, stock_token
+    )
+
+
+def _tesla_cleanup_route_metadata(params: Mapping[str, Any]) -> dict[str, Any]:
+    """Describe an already-durable cleanup scope to the recovery journal.
+
+    The recovery owner validates the token/producer scope before returning its
+    typed persistence-refusal admission.  Positive operations deliberately do
+    not carry this marker, so a storage failure can never become an unjournaled
+    Start, Rate, or Limit write.
+    """
+    if params.get("_ev_cleanup_only") is not True:
+        return {}
+    metadata: dict[str, Any] = {"cleanup_only": True}
+    token = params.get("_quick_control_obligation_id")
+    if isinstance(token, str) and token:
+        metadata["cleanup_obligation_id"] = token
+    return metadata
+
+
+def _tesla_cleanup_persistence_refused(
+    ticket: Any,
+    params: Mapping[str, Any],
+) -> bool:
+    """Recognize the typed recovery-core admission for one cleanup write.
+
+    The recovery module owns the concrete type.  The route marker is retained
+    as a compatibility seam for the transition from the old ticket class and
+    is only trusted when the caller supplied ``_ev_cleanup_only``.
+    """
+    route = getattr(ticket, "route", None)
+    if not isinstance(route, Mapping) or params.get("_ev_cleanup_only") is not True:
+        return False
+    token = params.get("_quick_control_obligation_id")
+    expected_token = route.get("cleanup_obligation_id")
+    scope_valid = route.get("cleanup_scope_valid") is True
+    token_valid = (
+        isinstance(token, str)
+        and bool(token)
+        and isinstance(expected_token, str)
+        and token == expected_token
+    )
+    if not (scope_valid or token_valid):
+        return False
+    return bool(
+        getattr(ticket, "cleanup_persistence_refused", False)
+        or getattr(ticket, "ev_recovery_persistence_refused", False)
+        or getattr(ticket, "ev_recovery_best_effort_cleanup", False)
+        or route.get("cleanup_persistence_refused") is True
+    )
+
+
+def _tesla_cleanup_persistence_marker(ticket: Any) -> bool:
+    """Return whether recovery classified this ticket as cleanup-only."""
+    route = getattr(ticket, "route", None)
+    return bool(
+        getattr(ticket, "cleanup_persistence_refused", False)
+        or (isinstance(route, Mapping) and route.get("cleanup_persistence_refused") is True)
+    )
+
+
+def _tesla_cleanup_submission_tracker(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    handoff: dict[str, bool],
+    *,
+    refusal: Any = None,
+    vehicle_id: str | None = None,
+    generation: int | None = None,
+):
+    """Track one unjournaled cleanup child in memory and shield its I/O.
+
+    This path is reachable only after recovery has returned its typed
+    persistence-refusal admission for an existing cleanup scope.  Keeping the
+    child alive after outer cancellation preserves the same conservative
+    submitted/unknown boundary as the ordinary journaled tracker.
+    """
+    async def track(submit):
+        handoff["attempted"] = True
+        # Production recovery owns the shared submission registry and the
+        # in-flight cleanup claim.  Keep the local task set only as a
+        # compatibility path for un-enrolled test runtimes; it must not be a
+        # second production drain/claim mechanism.
+        try:
+            from .. import tesla_ev_recovery as recovery
+            shared_tracker = getattr(
+                recovery, "async_track_cleanup_submission", None
+            )
+        except (ImportError, AttributeError):
+            shared_tracker = None
+        if callable(shared_tracker) and refusal is not None:
+            return await shared_tracker(
+                hass,
+                entry,
+                refusal,
+                submit,
+                vehicle_id=vehicle_id,
+                generation=generation,
+            )
+        runtime = hass.data.get(DOMAIN, {}).get(getattr(entry, "entry_id", None))
+        if isinstance(runtime, dict) and (
+            runtime.get("_ev_recovery_lifecycle_prepared") is True
+            or runtime.get("_tesla_ev_recovery_sidecar_loaded") is True
+        ):
+            raise RuntimeError("Tesla cleanup submission tracker is unavailable")
+        task = asyncio.ensure_future(submit())
+        if isinstance(runtime, dict):
+            tasks = runtime.setdefault("_tesla_cleanup_submission_tasks", set())
+            if isinstance(tasks, set):
+                tasks.add(task)
+
+                def _forget(_done):
+                    tasks.discard(task)
+
+                task.add_done_callback(_forget)
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # Do not cancel a child that may already be at the provider.
+            raise
+
+    return track
+
+
+async def _tesla_call_service(
+    hass: HomeAssistant,
+    domain: str,
+    service: str,
+    service_data: Mapping[str, Any],
+    *,
+    blocking: bool = True,
+) -> Any:
+    """Submit one Tesla mutation through the active durable task tracker.
+
+    The tracker is installed only around an already journaled mutation.  Wake,
+    force-refresh, and readback services therefore remain ordinary provider
+    I/O, while the actual charger/rate/limit write becomes a tracked child
+    before Home Assistant is awaited.
+    """
+    handoff = _tesla_submission_handoff.get()
+    guard = _tesla_submission_guard.get()
+
+    async def _submit() -> Any:
+        if not _tesla_ble_stock_submission_scope_current(hass):
+            from ..tesla_ev_recovery import RecoverySubmissionDenied
+
+            refusal = RecoverySubmissionDenied(
+                "Tesla stock BLE producer changed before provider handover"
+            )
+            refusal.tesla_stock_producer_changed_before_handoff = True
+            raise refusal
+        if guard is not None:
+            result = guard()
+            if inspect.isawaitable(result):
+                result = await result
+            if result is not True:
+                from ..tesla_ev_recovery import RecoverySubmissionDenied
+
+                raise RecoverySubmissionDenied(
+                    "Tesla transport authority changed before provider handover"
+                )
+        if handoff is not None:
+            handoff["handed_off"] = True
+        return await hass.services.async_call(
+            domain, service, dict(service_data), blocking=blocking
+        )
+
+    tracker = _tesla_submission_tracker.get()
+    if tracker is None:
+        return await _submit()
+    return await tracker(_submit)
+
+
+def _tesla_ble_mark_mutation_submitted() -> None:
+    """Mark the current journaled BLE send at its synchronous write boundary."""
+    phase = _tesla_ble_mutation_phase.get()
+    if phase is not None:
+        phase["phase"] = "submitted"
+
+
+def _tesla_ble_mark_mutation_prewrite() -> None:
+    """Establish that a known ESPHome helper owns the prewrite phase."""
+    phase = _tesla_ble_mutation_phase.get()
+    if phase is not None and phase.get("phase") == "unknown":
+        phase["phase"] = "prewrite"
+
+
+def _tesla_submission_mark_prewrite_rejection() -> None:
+    """Retire a handoff only after HA proves a mutation was rejected prewrite."""
+    handoff = _tesla_submission_handoff.get()
+    if not isinstance(handoff, dict):
+        return
+    # ``_tesla_call_service`` marks the child handed off immediately before
+    # entering Home Assistant.  Structured number validation is the one
+    # documented exception that proves HA rejected the value before any
+    # provider mutation.  Keep this marker explicit so a later refused retry
+    # can finish the original ticket as not_sent without hiding a real write.
+    if handoff.get("handed_off") is True:
+        handoff["handed_off"] = False
+        handoff["handoff_retired"] = True
+
+
+def _tesla_ble_effect_bound_is_valid(
+    operation: str, effect_bound: Mapping[str, Any] | object
+) -> bool:
+    """Validate the bounded values persisted for one BLE mutation."""
+    if not isinstance(effect_bound, Mapping) or effect_bound.get("kind") != operation:
+        return False
+    if operation == "rate":
+        minimum, maximum = effect_bound.get("min_amps"), effect_bound.get("max_amps")
+        return (
+            type(minimum) is int
+            and type(maximum) is int
+            and 1 <= minimum <= maximum <= 80
+        )
+    if operation == "limit":
+        minimum, maximum = effect_bound.get("min_percent"), effect_bound.get("max_percent")
+        return (
+            type(minimum) is int
+            and type(maximum) is int
+            and 1 <= minimum <= maximum <= 100
+        )
+    return False
+
+
+def _tesla_ble_effect_bound_allows_submission(operation: str, value: int) -> bool:
+    """Keep a helper's final service value inside its persisted prewrite bound."""
+    effect_bound = _tesla_ble_effect_bound.get()
+    if effect_bound is _TESLA_BLE_EFFECT_BOUND_UNSET:
+        return True
+    if not _tesla_ble_effect_bound_is_valid(operation, effect_bound):
+        return False
+    if operation == "rate":
+        return effect_bound["min_amps"] <= value <= effect_bound["max_amps"]
+    return effect_bound["min_percent"] <= value <= effect_bound["max_percent"]
+
+
+def _tesla_legacy_entity_identity(
+    hass: HomeAssistant, entity_ids: tuple[str, ...]
+) -> tuple[tuple[Any, ...], ...] | None:
+    """Snapshot registry bindings for entities a legacy helper will write."""
+    try:
+        registry = er.async_get(hass)
+        identities = []
+        for entity_id in entity_ids:
+            registration = registry.async_get(entity_id)
+            if registration is None:
+                # Some older HA fixtures omit registry rows for number
+                # entities. Pin that absence as part of the scope so a row
+                # appearing or rebinding during admission still invalidates
+                # the command, while preserving the existing safe fallback.
+                identities.append((entity_id, None))
+                continue
+            identities.append(tuple(
+                getattr(registration, field, None)
+                for field in (
+                    "entity_id",
+                    "platform",
+                    "config_entry_id",
+                    "device_id",
+                    "unique_id",
+                    "disabled_by",
+                )
+            ))
+        return tuple(identities)
+    except Exception:
+        return None
+
+
+@dataclass(frozen=True, slots=True)
+class _TeslaBleMutationTarget:
+    """Identity-only target descriptor retained with a BLE recovery attempt."""
+
+    vin: str
+    operation: str
+    entity_id: str
+    entity_domain: str
+    platform: str
+    unique_id: str
+    config_entry_id: str
+    device_id: str
+    native_config_entry_ids: tuple[str, ...]
+
+
+def _tesla_ble_mutation_target(
+    hass: HomeAssistant,
+    entity_id: str,
+    vehicle: str,
+    operation: str,
+) -> _TeslaBleMutationTarget | None:
+    """Build the exact registry target for a journaled ESPHome mutation."""
+    try:
+        registration = er.async_get(hass).async_get(entity_id)
+    except Exception:
+        return None
+    values = {
+        field: getattr(registration, field, None) if registration is not None else None
+        for field in (
+            "entity_id", "platform", "unique_id", "config_entry_id", "device_id",
+        )
+    }
+    if (
+        any(not isinstance(value, str) or not value.strip() for value in values.values())
+        or getattr(registration, "disabled_by", None) is not None
+        or entity_id.count(".") != 1
+    ):
+        return None
+    entity_domain, _ = entity_id.split(".", 1)
+    return _TeslaBleMutationTarget(
+        vin=str(vehicle),
+        operation=str(operation),
+        entity_domain=entity_domain,
+        native_config_entry_ids=(values["config_entry_id"],),
+        **values,
+    )
+
+
+async def _run_tesla_legacy_with_authority(
+    authorize: Optional[Callable[[], Any]],
+    command: Callable[[], Any],
+    *,
+    hass: HomeAssistant | None = None,
+    entity_ids: tuple[str, ...] = (),
+) -> Any:
+    """Carry the route authority through a legacy helper without changing its call shape."""
+    scoped_authorize = authorize
+    expected_identity = (
+        _tesla_legacy_entity_identity(hass, entity_ids)
+        if hass is not None and entity_ids
+        else None
+    )
+    if hass is not None and entity_ids:
+        def scoped_authorize() -> bool:
+            return bool(authorize and authorize()) and (
+                expected_identity is not None
+                and _tesla_legacy_entity_identity(hass, entity_ids) == expected_identity
+            )
+
+    token = _tesla_legacy_authority.set(scoped_authorize)
+    try:
+        return await command()
+    finally:
+        _tesla_legacy_authority.reset(token)
+
+
+async def _tesla_legacy_transport_authorized(
+    authorize: Optional[Callable[[], Any]] = None,
+) -> bool:
+    """Re-check transport ownership before a legacy HA service write."""
+    if authorize is None:
+        authorize = _tesla_legacy_authority.get()
+    if authorize is None:
+        return True
+    result = authorize()
+    if inspect.isawaitable(result):
+        result = await result
+    return bool(result)
+
+
 async def _start_ev_charging_ble(
     hass: HomeAssistant,
     ble_prefix: str,
     *,
     allow_backoff: bool = True,
+    authorize: Optional[Callable[[], Any]] = None,
 ) -> Optional[bool]:
     """Return True if confirmed, False before dispatch, None if unconfirmed."""
     charger_entity = TESLA_BLE_SWITCH_CHARGER.format(prefix=ble_prefix)
@@ -2596,34 +4463,80 @@ async def _start_ev_charging_ble(
         _LOGGER.error(f"Tesla BLE charger entity not found: {charger_entity}")
         return False
 
+    expected_identity = _tesla_legacy_entity_identity(hass, (charger_entity,))
+    stock_token = _tesla_ble_stock_profile_token(hass, charger_entity)
+    charge_binding_holder: list = []
     command_dispatched = False
+    _tesla_ble_mark_mutation_prewrite()
     try:
-        if not await _wake_tesla_ble(
-            hass, ble_prefix, allow_backoff=allow_backoff
+        if not await _tesla_ble_prepare_mutation(
+            hass,
+            ble_prefix,
+            charger_entity,
+            allow_backoff=allow_backoff,
+            authorize=authorize,
+            wake_first=True,
+            expected_identity=expected_identity,
+            charge_binding_holder=charge_binding_holder,
+            stock_token=stock_token,
+        ):
+            return False
+        if not await _tesla_ble_scope_current(
+            hass, charger_entity, expected_identity, authorize, stock_token
         ):
             return False
         if not await prepare_ev_submission(hass, charger_entity, operation="start"):
             return False
+        if not await _tesla_ble_scope_current(
+            hass, charger_entity, expected_identity, authorize, stock_token
+        ):
+            return False
+        charge_binding = (
+            None
+            if not charge_binding_holder or charge_binding_holder[0] is None
+            else _tesla_ble_charge_data_binding(
+                hass,
+                ble_prefix,
+                charger_entity,
+                previous=charge_binding_holder[0],
+            )
+        )
+        if charge_binding is None:
+            return False
         command_started_at = datetime.now(dt_timezone.utc)
         hass.data.setdefault(DOMAIN, {}).setdefault("_ev_ble_start_dispatched_at", {})[ble_prefix] = command_started_at
         command_dispatched = True
-        await hass.services.async_call(
-            "switch",
-            "turn_on",
-            {"entity_id": charger_entity},
-            blocking=True,
+        _tesla_ble_mark_mutation_submitted()
+        stock_submission_token = _tesla_ble_stock_submission_scope.set(
+            (charger_entity, stock_token)
         )
+        try:
+            await _tesla_call_service(
+                hass,
+                "switch",
+                "turn_on",
+                {"entity_id": charger_entity},
+                blocking=True,
+            )
+        finally:
+            _tesla_ble_stock_submission_scope.reset(stock_submission_token)
         confirmed = await _wait_for_ble_command_readback(
             hass, (
                 TESLA_BLE_SENSOR_CHARGING_STATE.format(prefix=ble_prefix),
                 TESLA_BLE_SENSOR_CHARGING.format(prefix=ble_prefix),
             ),
             "charging", command_started_at, charging_prefix=ble_prefix,
+            charge_binding=charge_binding,
+            charge_binding_target=charger_entity,
+            charge_binding_prefix=ble_prefix,
         )
         return True if confirmed else None
     except Exception as e:
         if getattr(e, "site_import_admission_denied", False):
             raise
+        if getattr(e, "tesla_stock_producer_changed_before_handoff", False):
+            command_dispatched = False
+            return False
         err_str = str(e).lower()
         if "complete" in err_str:
             _LOGGER.info(f"EV charging is complete (at target SOC) via BLE — skipping start")
@@ -2635,44 +4548,80 @@ async def _start_ev_charging_ble(
 
 
 async def _stop_ev_charging_ble(
-    hass: HomeAssistant, ble_prefix: str, *, allow_backoff: bool = True
+    hass: HomeAssistant,
+    ble_prefix: str,
+    *,
+    allow_backoff: bool = True,
+    authorize: Optional[Callable[[], Any]] = None,
+    allow_cleanup_without_session: bool = False,
 ) -> Optional[bool]:
     """Stop Tesla BLE charging; do not treat service acceptance as readback."""
+    allow_cleanup_without_session = (
+        allow_cleanup_without_session
+        or _tesla_ble_cleanup_without_session.get()
+    )
     charger_entity = TESLA_BLE_SWITCH_CHARGER.format(prefix=ble_prefix)
 
     if hass.states.get(charger_entity) is None:
         _LOGGER.error(f"Tesla BLE charger entity not found: {charger_entity}")
         return False
 
+    expected_identity = _tesla_legacy_entity_identity(hass, (charger_entity,))
+    charge_binding_holder: list = []
     command_dispatched = False
+    _tesla_ble_mark_mutation_prewrite()
     try:
-        # A vehicle that is already awake never changes ``asleep``, so the
-        # bridge has nothing to publish and the wake acknowledgement can never
-        # arrive — which is exactly the car that is charging and needs
-        # stopping (Discord #56).  Fresh, measured, positive vehicle
-        # current/power is stronger proof of wakefulness than the binary, and
-        # is already trusted to carry a rate update on the same vehicle.
-        if _ble_command_has_fresh_charging_evidence(hass, ble_prefix):
-            _LOGGER.info(
-                "Tesla BLE %s: stop proceeding on fresh measured charging "
-                "evidence without a wake acknowledgement",
-                ble_prefix,
-            )
-        elif not await _wake_tesla_ble(
-            hass, ble_prefix, allow_backoff=allow_backoff
+        if not await _tesla_ble_prepare_mutation(
+            hass,
+            ble_prefix,
+            charger_entity,
+            allow_backoff=allow_backoff,
+            authorize=authorize,
+            wake_first=False,
+            expected_identity=expected_identity,
+            charge_binding_holder=charge_binding_holder,
         ):
-            # The start path already reports a blocked dispatch; without the
-            # same line here a dropped stop left no trace at all.
-            if _ble_block_report_due(hass, ble_prefix, "stop_not_dispatched"):
+            # A stop is the producer cleanup for an earlier unknown start.
+            # The journal/route authority still fences the target identity,
+            # but requiring a new vehicle telemetry receipt here could leave
+            # the failed producer active and suppress the only safe cleanup.
+            if allow_cleanup_without_session and await _tesla_ble_scope_current(
+                hass, charger_entity, expected_identity, authorize
+            ):
                 _LOGGER.warning(
-                    "Tesla BLE %s: stop not dispatched - no confirmed vehicle "
-                    "wake",
+                    "Tesla BLE %s: stop cleanup proceeding without a fresh "
+                    "session receipt",
                     ble_prefix,
                 )
+            else:
+                if _ble_block_report_due(hass, ble_prefix, "stop_not_dispatched"):
+                    _LOGGER.warning(
+                        "Tesla BLE %s: stop not dispatched - no confirmed vehicle "
+                        "session",
+                        ble_prefix,
+                    )
+                return False
+        if not await _tesla_ble_scope_current(
+            hass, charger_entity, expected_identity, authorize
+        ):
+            return False
+        charge_binding = (
+            None
+            if not charge_binding_holder or charge_binding_holder[0] is None
+            else _tesla_ble_charge_data_binding(
+                hass,
+                ble_prefix,
+                charger_entity,
+                previous=charge_binding_holder[0],
+            )
+        )
+        if charge_binding is None and not allow_cleanup_without_session:
             return False
         command_started_at = datetime.now(dt_timezone.utc)
         command_dispatched = True
-        await hass.services.async_call(
+        _tesla_ble_mark_mutation_submitted()
+        await _tesla_call_service(
+            hass,
             "switch",
             "turn_off",
             {"entity_id": charger_entity},
@@ -2686,6 +4635,9 @@ async def _stop_ev_charging_ble(
             ),
             ("stopped", "complete", "disconnected", "not charging"),
             command_started_at,
+            charge_binding=charge_binding,
+            charge_binding_target=charger_entity,
+            charge_binding_prefix=ble_prefix,
         )
         if confirmed:
             _LOGGER.info(f"Stopped EV charging via Tesla BLE: {charger_entity}")
@@ -2707,6 +4659,7 @@ async def _set_ev_charge_limit_ble(
     percent: int,
     *,
     allow_backoff: bool = True,
+    authorize: Optional[Callable[[], Any]] = None,
 ) -> Optional[bool]:
     """Set EV charge limit via Tesla BLE."""
     limit_entity = TESLA_BLE_NUMBER_CHARGING_LIMIT.format(prefix=ble_prefix)
@@ -2715,25 +4668,72 @@ async def _set_ev_charge_limit_ble(
         _LOGGER.error(f"Tesla BLE charge limit entity not found: {limit_entity}")
         return False
 
+    expected_identity = _tesla_legacy_entity_identity(hass, (limit_entity,))
+    stock_token = _tesla_ble_stock_profile_token(hass, limit_entity)
+    charge_binding_holder: list = []
     command_dispatched = False
+    _tesla_ble_mark_mutation_prewrite()
     try:
-        if not await _wake_tesla_ble(
-            hass, ble_prefix, allow_backoff=allow_backoff
+        if not await _tesla_ble_prepare_mutation(
+            hass,
+            ble_prefix,
+            limit_entity,
+            allow_backoff=allow_backoff,
+            authorize=authorize,
+            wake_first=True,
+            expected_identity=expected_identity,
+            charge_binding_holder=charge_binding_holder,
+            stock_token=stock_token,
         ):
+            return False
+        if not await _tesla_ble_scope_current(
+            hass, limit_entity, expected_identity, authorize, stock_token
+        ):
+            return False
+        charge_binding = (
+            None
+            if not charge_binding_holder or charge_binding_holder[0] is None
+            else _tesla_ble_charge_data_binding(
+                hass,
+                ble_prefix,
+                limit_entity,
+                previous=charge_binding_holder[0],
+            )
+        )
+        if charge_binding is None:
+            return False
+        if not _tesla_ble_effect_bound_allows_submission("limit", int(percent)):
             return False
         command_started_at = datetime.now(dt_timezone.utc)
         command_dispatched = True
-        await hass.services.async_call(
-            "number",
-            "set_value",
-            {"entity_id": limit_entity, "value": percent},
-            blocking=True,
+        _tesla_ble_mark_mutation_submitted()
+        stock_submission_token = _tesla_ble_stock_submission_scope.set(
+            (limit_entity, stock_token)
         )
+        try:
+            await _tesla_call_service(
+                hass,
+                "number",
+                "set_value",
+                {"entity_id": limit_entity, "value": percent},
+                blocking=True,
+            )
+        finally:
+            _tesla_ble_stock_submission_scope.reset(stock_submission_token)
         confirmed = await _wait_for_ble_command_readback(
-            hass, limit_entity, float(percent), command_started_at
+            hass,
+            limit_entity,
+            float(percent),
+            command_started_at,
+            charge_binding=charge_binding,
+            charge_binding_target=limit_entity,
+            charge_binding_prefix=ble_prefix,
         )
         return True if confirmed else None
     except Exception as e:
+        if getattr(e, "tesla_stock_producer_changed_before_handoff", False):
+            command_dispatched = False
+            return False
         _LOGGER.error(f"Failed to set EV charge limit via BLE: {e}")
         if type(e).__name__ in {"ServiceNotFound", "ServiceValidationError"}:
             return False
@@ -2749,6 +4749,7 @@ async def _set_ev_charging_amps_ble(
     configured_max_amps: Optional[int] = None,
     params: Optional[dict] = None,
     allow_backoff: bool = True,
+    authorize: Optional[Callable[[], Any]] = None,
 ) -> Optional[bool]:
     """Set EV charging amps via Tesla BLE."""
     amps_entity = TESLA_BLE_NUMBER_CHARGING_AMPS.format(prefix=ble_prefix)
@@ -2757,6 +4758,8 @@ async def _set_ev_charging_amps_ble(
     if state is None:
         _LOGGER.error(f"Tesla BLE charging amps entity not found: {amps_entity}")
         return False
+    expected_identity = _tesla_legacy_entity_identity(hass, (amps_entity,))
+    stock_token = _tesla_ble_stock_profile_token(hass, amps_entity)
 
     # Cap amps to entity's min/max range. Tesla integrations can report a stale
     # 16A max while idle, so solar-surplus callers may opt into the configured
@@ -2781,34 +4784,108 @@ async def _set_ev_charging_amps_ble(
     capped_amps = max(entity_min, min(effective_max, int(amps)))
     if capped_amps != amps:
         _LOGGER.debug(f"BLE amps capped from {amps}A to {capped_amps}A (entity range: {entity_min}-{entity_max})")
+    if not _tesla_ble_effect_bound_allows_submission("rate", capped_amps):
+        _LOGGER.warning(
+            "BLE amps target changed outside its persisted journal bound; "
+            "refusing the write for %s",
+            amps_entity,
+        )
+        return False
 
+    charge_binding_holder: list = []
     command_dispatched = False
+    _tesla_ble_mark_mutation_prewrite()
     try:
-        if not _ble_command_has_fresh_charging_evidence(
-            hass, ble_prefix
-        ) and not await _wake_tesla_ble(
-            hass, ble_prefix, allow_backoff=allow_backoff
+        if await _tesla_ble_native_current_satisfied(
+            hass,
+            params,
+            amps_entity,
+            capped_amps,
+            expected_identity,
+            authorize,
+        ):
+            return True
+        if not await _tesla_ble_prepare_mutation(
+            hass,
+            ble_prefix,
+            amps_entity,
+            allow_backoff=allow_backoff,
+            authorize=authorize,
+            wake_first=False,
+            expected_identity=expected_identity,
+            charge_binding_holder=charge_binding_holder,
+            stock_token=stock_token,
+        ):
+            return False
+        if not await _tesla_ble_scope_current(
+            hass, amps_entity, expected_identity, authorize, stock_token
         ):
             return False
         if not await prepare_ev_submission(hass, amps_entity, operation="rate", amps=capped_amps):
             return False
+        if not await _tesla_ble_scope_current(
+            hass, amps_entity, expected_identity, authorize, stock_token
+        ):
+            return False
+        charge_binding = (
+            None
+            if not charge_binding_holder or charge_binding_holder[0] is None
+            else _tesla_ble_charge_data_binding(
+                hass,
+                ble_prefix,
+                amps_entity,
+                previous=charge_binding_holder[0],
+            )
+        )
+        if charge_binding is None:
+            return False
+        if not _tesla_ble_effect_bound_allows_submission("rate", capped_amps):
+            return False
         command_started_at = datetime.now(dt_timezone.utc)
         command_dispatched = True
-        await hass.services.async_call(
-            "number",
-            "set_value",
-            {"entity_id": amps_entity, "value": capped_amps},
-            blocking=True,
+        _tesla_ble_mark_mutation_submitted()
+        stock_submission_token = _tesla_ble_stock_submission_scope.set(
+            (amps_entity, stock_token)
         )
+        try:
+            await _tesla_call_service(
+                hass,
+                "number",
+                "set_value",
+                {"entity_id": amps_entity, "value": capped_amps},
+                blocking=True,
+            )
+        finally:
+            _tesla_ble_stock_submission_scope.reset(stock_submission_token)
         confirmed = await _wait_for_ble_command_readback(
-            hass, amps_entity, float(capped_amps), command_started_at
+            hass,
+            amps_entity,
+            float(capped_amps),
+            command_started_at,
+            charge_binding=charge_binding,
+            charge_binding_target=amps_entity,
+            charge_binding_prefix=ble_prefix,
         )
         return True if confirmed else None
     except Exception as e:
         if getattr(e, "site_import_admission_denied", False):
             raise
+        if getattr(e, "tesla_stock_producer_changed_before_handoff", False):
+            command_dispatched = False
+            return False
         fallback_amps = None
-        if _is_number_range_error(str(e)):
+        # Only Home Assistant's structured number validation proves that the
+        # first service call was rejected before the provider saw it.  A
+        # range-looking RuntimeError may be raised after handoff and must stay
+        # unknown; retrying it could duplicate a mutation.
+        if _tesla_native_verified_range_rejection(
+            e,
+            "rate",
+            amps_entity,
+            {"entity_id": amps_entity, "value": capped_amps},
+        ):
+            _tesla_submission_mark_prewrite_rejection()
+            command_dispatched = False
             fallback_amps = _tesla_entity_max_fallback_amps(
                 capped_amps,
                 entity_min,
@@ -2818,21 +4895,54 @@ async def _set_ev_charging_amps_ble(
             )
         if fallback_amps is not None:
             try:
+                _tesla_ble_mark_mutation_prewrite()
                 if not await prepare_ev_submission(hass, amps_entity, operation="rate", amps=fallback_amps):
                     return False
-                await hass.services.async_call(
-                    "number",
-                    "set_value",
-                    {"entity_id": amps_entity, "value": fallback_amps},
-                    blocking=True,
+                if not await _tesla_ble_scope_current(
+                    hass, amps_entity, expected_identity, authorize, stock_token
+                ):
+                    return False
+                charge_binding = (
+                    None
+                    if not charge_binding_holder or charge_binding_holder[0] is None
+                    else _tesla_ble_charge_data_binding(
+                        hass,
+                        ble_prefix,
+                        amps_entity,
+                        previous=charge_binding_holder[0],
+                    )
                 )
+                if charge_binding is None:
+                    return None
+                if not _tesla_ble_effect_bound_allows_submission("rate", fallback_amps):
+                    return False
+                _tesla_ble_mark_mutation_submitted()
+                stock_submission_token = _tesla_ble_stock_submission_scope.set(
+                    (amps_entity, stock_token)
+                )
+                try:
+                    await _tesla_call_service(
+                        hass,
+                        "number",
+                        "set_value",
+                        {"entity_id": amps_entity, "value": fallback_amps},
+                        blocking=True,
+                    )
+                finally:
+                    _tesla_ble_stock_submission_scope.reset(stock_submission_token)
                 _LOGGER.info(
                     "Set EV charging amps to %dA via Tesla BLE after entity range fallback: %s",
                     fallback_amps,
                     amps_entity,
                 )
                 if not await _wait_for_ble_command_readback(
-                    hass, amps_entity, float(fallback_amps), command_started_at
+                    hass,
+                    amps_entity,
+                    float(fallback_amps),
+                    command_started_at,
+                    charge_binding=charge_binding,
+                    charge_binding_target=amps_entity,
+                    charge_binding_prefix=ble_prefix,
                 ):
                     return None
                 if params is not None:
@@ -2842,6 +4952,17 @@ async def _set_ev_charging_amps_ble(
             except Exception as fallback_error:
                 if getattr(fallback_error, "site_import_admission_denied", False):
                     raise
+                if _tesla_native_verified_range_rejection(
+                    fallback_error,
+                    "rate",
+                    amps_entity,
+                    {"entity_id": amps_entity, "value": fallback_amps},
+                ):
+                    # The fallback was also rejected by HA before provider
+                    # handoff.  The first structured rejection already
+                    # retired its handoff; retire this distinct retry too.
+                    _tesla_submission_mark_prewrite_rejection()
+                    command_dispatched = False
                 _LOGGER.error(
                     "Failed Tesla BLE entity range fallback to %dA: %s",
                     fallback_amps,
@@ -2851,6 +4972,166 @@ async def _set_ev_charging_amps_ble(
         if type(e).__name__ in {"ServiceNotFound", "ServiceValidationError"}:
             return False
         return None if command_dispatched else False
+
+
+async def _tesla_ble_native_current_satisfied(
+    hass: HomeAssistant,
+    params: Optional[dict[str, Any]],
+    ble_entity: str,
+    target_amps: int,
+    expected_ble_identity: tuple[tuple[Any, ...], ...] | None,
+    authorize: Optional[Callable[[], Any]],
+) -> bool:
+    """Skip a BLE current write when a fresh native report already matches.
+
+    This is deliberately a cached observation fence.  It is evaluated before
+    BLE preparation so a satisfied native current never wakes the vehicle or
+    dispatches an ESPHome service.  The native anchor and BLE target are both
+    rechecked after site admission, because the admission await can replace a
+    provider binding or revoke the request.
+    """
+    if not isinstance(params, Mapping):
+        return False
+    # A successful BLE Start has no native command anchor.  The journal may
+    # nevertheless have pinned an exact native producer while resolving the
+    # BOTH-provider fallback; that marker is observation-only and must never
+    # be promoted into the native command route.
+    observation_target = params.get("_tesla_ble_native_observation_target")
+    anchor = params.get("_tesla_command_entity_id")
+    vehicle = str(
+        params.get("vehicle_vin") or params.get("vehicle_id") or ""
+    ).strip().upper()
+    if ((not anchor and not isinstance(observation_target, Mapping))
+            or not re.fullmatch(r"[A-HJ-NPR-Z0-9]{17}", vehicle)):
+        return False
+    binding = None
+    if isinstance(observation_target, Mapping):
+        target_entity = observation_target.get("entity_id")
+        target_identity = observation_target.get("identity")
+        if (not isinstance(target_entity, str)
+                or not isinstance(target_identity, Mapping)):
+            return False
+        anchor = target_entity
+        binding = _tesla_native_binding(hass, target_entity, vehicle)
+        if (binding is None
+                or _tesla_native_binding_identity(binding) != dict(target_identity)):
+            return False
+    elif anchor:
+        binding = _tesla_native_anchor_binding(hass, params)
+    if binding is None:
+        return False
+    if not await _tesla_ble_scope_current(
+        hass, ble_entity, expected_ble_identity, authorize
+    ):
+        return False
+
+    try:
+        from ..tesla_ev_observation import get_tesla_vehicle_observation
+
+        observation = get_tesla_vehicle_observation(
+            hass,
+            vehicle,
+            preferred_entity_id=str(anchor),
+        )
+    except Exception as err:
+        _LOGGER.debug(
+            "Tesla native current satisfaction check unavailable for %s: %s",
+            vehicle,
+            err,
+        )
+        return False
+    if not _tesla_native_current_observation_matches(
+        observation, binding, vehicle, target_amps
+    ):
+        return False
+
+    if not await validate_ev_submission(
+        hass, str(anchor), operation="rate", amps=target_amps
+    ):
+        return False
+    if (
+        not await _tesla_ble_scope_current(
+            hass, ble_entity, expected_ble_identity, authorize
+        )
+        or _tesla_native_binding(hass, str(anchor), vehicle) != binding
+    ):
+        return False
+    try:
+        observation = get_tesla_vehicle_observation(
+            hass,
+            vehicle,
+            preferred_entity_id=str(anchor),
+        )
+    except Exception:
+        return False
+    if not _tesla_native_current_observation_matches(
+        observation, binding, vehicle, target_amps
+    ):
+        return False
+
+    # The BLE journal wrapper maps this explicit marker to ``not_sent`` while
+    # preserving the successful action result and exact observed values.
+    params["_tesla_ble_native_satisfied"] = {
+        "vin": vehicle,
+        "requested_current": observation.requested_current,
+        "target_current": target_amps,
+        "source_charge_timestamp": observation.source_charge_timestamp,
+        "producer_identity": observation.producer_identity,
+    }
+    _LOGGER.info(
+        "Tesla BLE current already satisfied by fresh native report for %s: "
+        "requested=%.1fA target=%dA; BLE write skipped",
+        vehicle,
+        observation.requested_current,
+        target_amps,
+    )
+    return True
+
+
+def _tesla_native_current_observation_matches(
+    observation: Any,
+    binding: Any,
+    vehicle: str,
+    target_amps: int,
+) -> bool:
+    """Verify one cached native report still belongs to the pinned binding."""
+    if observation is None:
+        return False
+    identity = _tesla_native_binding_identity(binding)
+    requested = getattr(observation, "requested_current", None)
+    try:
+        requested_value = float(requested)
+        source_timestamp = float(
+            getattr(observation, "source_charge_timestamp", float("nan"))
+        )
+    except (TypeError, ValueError, OverflowError):
+        return False
+    if (
+        isinstance(requested, bool)
+        or not math.isfinite(requested_value)
+        or not math.isfinite(source_timestamp)
+        or source_timestamp > time.time() + 5
+        or time.time() - source_timestamp > 90
+        or requested_value != float(target_amps)
+    ):
+        return False
+    expected_producer = ":".join(
+        (
+            str(identity.get("platform")),
+            str(identity.get("config_entry_id")),
+            str(identity.get("device_id")),
+            vehicle,
+        )
+    ) if identity is not None else None
+    return (
+        str(getattr(observation, "vin", "")).strip().upper() == vehicle
+        and identity is not None
+        and getattr(observation, "domain", None) == identity.get("platform")
+        and str(getattr(observation, "config_entry_id", ""))
+        == identity.get("config_entry_id")
+        and str(getattr(observation, "device_id", "")) == identity.get("device_id")
+        and getattr(observation, "producer_identity", None) == expected_producer
+    )
 
 
 # =============================================================================
@@ -2871,9 +5152,79 @@ def _resolve_teslemetry_bt_prefix(hass: HomeAssistant) -> str | None:
             candidate = match.group(1)
             if len(candidate) == 17 and candidate.isalnum():
                 charge_switch = f"switch.{candidate}_charge"
-                if hass.states.get(charge_switch) is not None:
+                if hass.states.get(charge_switch) is not None and _legacy_teslemetry_bt_identity(
+                    hass, candidate
+                ):
                     return candidate
     return None
+
+
+def _legacy_teslemetry_bt_identity(hass: HomeAssistant, prefix: str) -> bool:
+    """Require registry identity for the legacy tesla_bluetooth entities."""
+    registry = er.async_get(hass)
+    try:
+        switch_registration = registry.async_get(
+            TESLEMETRY_BT_SWITCH_CHARGE.format(prefix=prefix)
+        )
+        sensor_registration = registry.async_get(
+            TESLEMETRY_BT_SENSOR_CHARGING_STATE.format(prefix=prefix)
+        )
+    except Exception:
+        switch_registration = sensor_registration = None
+    if switch_registration is None:
+        return False
+    registrations = [switch_registration]
+    if sensor_registration is not None:
+        registrations.append(sensor_registration)
+
+    # A VIN-shaped Fleet entity can expose the same state/switch names.  The
+    # registry platform and entry/device binding are the source of truth for
+    # distinguishing that stale provider from the legacy Bluetooth producer.
+    if any(getattr(item, "platform", None) != "tesla_bluetooth" for item in registrations):
+        return False
+    entry_ids = {
+        str(getattr(item, "config_entry_id", ""))
+        for item in registrations
+        if getattr(item, "config_entry_id", None)
+    }
+    if len(entry_ids) != 1:
+        return False
+    device_ids = {
+        str(getattr(item, "device_id", ""))
+        for item in registrations
+        if getattr(item, "device_id", None)
+    }
+    return len(device_ids) <= 1
+
+
+def _resolve_teslemetry_bt_prefix_for_vehicle(
+    hass: HomeAssistant, config_entry: ConfigEntry, vehicle_id: str | None,
+) -> str | None:
+    """Resolve the requested car before choosing a local command producer.
+
+    Discovery order is a display default, not vehicle identity. In particular,
+    an unresolved ESPHome alias must never fall through to another car's BT
+    integration. An anonymous legacy request is safe only with one BT car.
+    """
+    config = {**getattr(config_entry, "data", {}), **getattr(config_entry, "options", {})}
+    if vehicle_id:
+        try:
+            canonical = canonical_tesla_vehicle_id(config, str(vehicle_id))
+        except (TypeError, ValueError):
+            return None
+        if not re.fullmatch(r"[A-HJ-NPR-Z0-9]{17}", canonical.upper()):
+            return None
+        prefix = canonical.lower()
+        return prefix if hass.states.get(
+            TESLEMETRY_BT_SWITCH_CHARGE.format(prefix=prefix)
+        ) is not None and _legacy_teslemetry_bt_identity(hass, prefix) else None
+    candidates = {
+        match.group(1) for state in hass.states.async_all()
+        if (match := re.fullmatch(r"sensor\.([a-hj-npr-z0-9]{17})_charging_state", state.entity_id))
+        and hass.states.get(TESLEMETRY_BT_SWITCH_CHARGE.format(prefix=match.group(1))) is not None
+        and _legacy_teslemetry_bt_identity(hass, match.group(1))
+    }
+    return next(iter(candidates)) if len(candidates) == 1 else None
 
 
 def _is_teslemetry_bt_available(hass: HomeAssistant, tbt_prefix: str | None) -> bool:
@@ -2882,19 +5233,29 @@ def _is_teslemetry_bt_available(hass: HomeAssistant, tbt_prefix: str | None) -> 
         return False
     charge_entity = TESLEMETRY_BT_SWITCH_CHARGE.format(prefix=tbt_prefix)
     state = hass.states.get(charge_entity)
-    return state is not None
+    return state is not None and str(getattr(state, "state", "")).lower() != "unavailable"
 
 
-async def _start_ev_charging_teslemetry_bt(hass: HomeAssistant, tbt_prefix: str) -> bool:
+async def _start_ev_charging_teslemetry_bt(
+    hass: HomeAssistant,
+    tbt_prefix: str,
+    *,
+    authorize: Optional[Callable[[], Any]] = None,
+) -> bool:
     """Start EV charging via Teslemetry Bluetooth."""
     entity_id = TESLEMETRY_BT_SWITCH_CHARGE.format(prefix=tbt_prefix)
-    if hass.states.get(entity_id) is None:
+    if not _is_teslemetry_bt_available(hass, tbt_prefix):
         _LOGGER.error(f"Teslemetry BT charge entity not found: {entity_id}")
         return False
     try:
+        if not await _tesla_legacy_transport_authorized(authorize):
+            return False
         if not await prepare_ev_submission(hass, entity_id, operation="start"):
             return False
-        await hass.services.async_call(
+        if not await _tesla_legacy_transport_authorized(authorize):
+            return False
+        await _tesla_call_service(
+            hass,
             "switch", "turn_on",
             {"entity_id": entity_id},
             blocking=True,
@@ -2912,14 +5273,22 @@ async def _start_ev_charging_teslemetry_bt(hass: HomeAssistant, tbt_prefix: str)
         return False
 
 
-async def _stop_ev_charging_teslemetry_bt(hass: HomeAssistant, tbt_prefix: str) -> bool:
+async def _stop_ev_charging_teslemetry_bt(
+    hass: HomeAssistant,
+    tbt_prefix: str,
+    *,
+    authorize: Optional[Callable[[], Any]] = None,
+) -> bool:
     """Stop EV charging via Teslemetry Bluetooth."""
     entity_id = TESLEMETRY_BT_SWITCH_CHARGE.format(prefix=tbt_prefix)
-    if hass.states.get(entity_id) is None:
+    if not _is_teslemetry_bt_available(hass, tbt_prefix):
         _LOGGER.error(f"Teslemetry BT charge entity not found: {entity_id}")
         return False
     try:
-        await hass.services.async_call(
+        if not await _tesla_legacy_transport_authorized(authorize):
+            return False
+        await _tesla_call_service(
+            hass,
             "switch", "turn_off",
             {"entity_id": entity_id},
             blocking=True,
@@ -2939,6 +5308,7 @@ async def _set_ev_charging_amps_teslemetry_bt(
     allow_stale_entity_max_override: bool = False,
     configured_max_amps: Optional[int] = None,
     params: Optional[dict] = None,
+    authorize: Optional[Callable[[], Any]] = None,
 ) -> bool:
     """Set EV charging amps via Teslemetry Bluetooth."""
     entity_id = TESLEMETRY_BT_NUMBER_CHARGE_AMPS.format(prefix=tbt_prefix)
@@ -2967,9 +5337,14 @@ async def _set_ev_charging_amps_teslemetry_bt(
     if capped != amps:
         _LOGGER.debug(f"Teslemetry BT amps capped from {amps}A to {capped}A (range: {min_val}-{max_val})")
     try:
+        if not await _tesla_legacy_transport_authorized(authorize):
+            return False
         if not await prepare_ev_submission(hass, entity_id, operation="rate", amps=capped):
             return False
-        await hass.services.async_call(
+        if not await _tesla_legacy_transport_authorized(authorize):
+            return False
+        await _tesla_call_service(
+            hass,
             "number", "set_value",
             {"entity_id": entity_id, "value": capped},
             blocking=True,
@@ -2984,7 +5359,16 @@ async def _set_ev_charging_amps_teslemetry_bt(
         if getattr(e, "site_import_admission_denied", False):
             raise
         fallback_amps = None
-        if _is_number_range_error(str(e)):
+        # Text such as "outside valid range" is not a safe prewrite proof.
+        # Only HA's structured number validation may authorize the bounded
+        # lower-value retry.
+        if _tesla_native_verified_range_rejection(
+            e,
+            "rate",
+            entity_id,
+            {"entity_id": entity_id, "value": capped},
+        ):
+            _tesla_submission_mark_prewrite_rejection()
             fallback_amps = _tesla_entity_max_fallback_amps(
                 capped,
                 min_val,
@@ -2996,7 +5380,10 @@ async def _set_ev_charging_amps_teslemetry_bt(
             try:
                 if not await prepare_ev_submission(hass, entity_id, operation="rate", amps=fallback_amps):
                     return False
-                await hass.services.async_call(
+                if not await _tesla_legacy_transport_authorized(authorize):
+                    return False
+                await _tesla_call_service(
+                    hass,
                     "number",
                     "set_value",
                     {"entity_id": entity_id, "value": fallback_amps},
@@ -3014,6 +5401,13 @@ async def _set_ev_charging_amps_teslemetry_bt(
             except Exception as fallback_error:
                 if getattr(fallback_error, "site_import_admission_denied", False):
                     raise
+                if _tesla_native_verified_range_rejection(
+                    fallback_error,
+                    "rate",
+                    entity_id,
+                    {"entity_id": entity_id, "value": fallback_amps},
+                ):
+                    _tesla_submission_mark_prewrite_rejection()
                 _LOGGER.error(
                     "Failed Teslemetry BT entity range fallback to %dA: %s",
                     fallback_amps,
@@ -3062,6 +5456,2028 @@ async def _get_sigenergy_controller(config_entry: ConfigEntry) -> Optional["Sige
         slave_id=modbus_slave_id,
         max_export_limit_kw=export_limit_kw,
     )
+
+
+def _tesla_transport_authority(
+    hass,
+    entry,
+    params,
+    *,
+    cleanup=False,
+    operation=None,
+    generation=None,
+    ignore_recovery_gate=False,
+):
+    """Bind provider recovery to this request without extending its deadline."""
+    from ..teslemetry_solar import ev_owner_snapshot
+    from ..tesla_ev_recovery import current_vehicle_generation, recovery_control_allowed
+    runtime = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    vehicle = params.get("vehicle_vin") or params.get("vehicle_id")
+    captured_generation = (
+        generation
+        if type(generation) is int and generation >= 0
+        else current_vehicle_generation(hass, entry, vehicle)
+    )
+    authority_operation = "stop" if cleanup else str(operation or "start")
+    owners = ev_owner_snapshot(hass, entry, vehicle)
+    def stop_holds():
+        holds = (runtime or {}).get("ev_manual_stop_holds", {})
+        return tuple(repr(holds.get(key)) for key in (vehicle, DEFAULT_VEHICLE_ID))
+    original_holds = stop_holds()
+    def pairing():
+        config = {**entry.data, **entry.options}
+        return tuple(config.get(key) for key in (
+            CONF_EV_PROVIDER, CONF_TESLA_BLE_ENTITY_PREFIX, CONF_TESLA_BLE_VEHICLE_MAPPING))
+    original_pairing = pairing()
+    deadline = params.get("_boost_start_deadline")
+    def current():
+        binding_ok = (
+            not params.get("_quick_control_binding")
+            or _tesla_quick_control_binding_current(hass, entry, params)
+        )
+        return (runtime is not None and hass.data.get(DOMAIN, {}).get(entry.entry_id) is runtime
+                and not runtime.get("powerwall_local_dispatch_stopping")
+                and binding_ok
+                and pairing() == original_pairing
+                and (
+                    ignore_recovery_gate
+                    or recovery_control_allowed(
+                        hass, entry, vehicle, captured_generation, authority_operation
+                    )
+                )
+                and (cleanup or (ev_owner_snapshot(hass, entry, vehicle) == owners
+                    and stop_holds() == original_holds
+                    and (deadline is None or (type(deadline) in (int, float)
+                         and math.isfinite(deadline) and datetime.now(dt_timezone.utc).timestamp() < deadline)))))
+    return current
+
+
+async def _tesla_transport_route(hass, entry, params, operation):
+    """Resolve inherited uncertainty before selecting another command writer."""
+    from ..tesla_ev_recovery import (
+        async_isolate_ble,
+        get_vehicle_route,
+        pending_ble_attempt,
+        recovery_sidecar_snapshot,
+    )
+    params.pop("_tesla_transport_recovery_pending", None)
+    params.pop("_tesla_native_router_selected", None)
+    params.pop("_tesla_native_command_entity_id", None)
+    params.pop("_tesla_native_router_target", None)
+    # A native Start can complete before dynamic ownership is claimed. Carry
+    # its exact mutation-time anchor into the first Rate/Limit/Stop command so
+    # route selection cannot fall back to BLE during that handoff window.
+    vehicle = params.get("vehicle_vin") or params.get("vehicle_id")
+    route = get_vehicle_route(hass, entry, vehicle)
+    if route is None and operation in {"rate", "limit", "stop"}:
+        anchor = params.get("_tesla_command_entity_id")
+        if anchor:
+            if (
+                _tesla_native_anchor_entity(hass, params, operation) is not None
+                or _tesla_native_anchor_binding(hass, params) is not None
+            ):
+                return {"kind": "ha", "entity_id": anchor}
+            # A mutation-time native anchor that no longer has its exact
+            # provider/config/device/VIN binding must fail closed. Returning a
+            # HA route without an entity prevents BLE/native discovery from
+            # selecting a replacement vehicle entity.
+            return {"kind": "ha"}
+    pending = None
+    if route and route.get("kind") == "blocked":
+        pending = pending_ble_attempt(hass, entry, vehicle)
+        if pending is not None:
+            isolated = await async_isolate_ble(
+                pending, authorize=_tesla_transport_authority(hass, entry, params, cleanup=True))
+            if isolated:
+                route = get_vehicle_route(hass, entry, vehicle)
+                pending = None
+        # Stops remain available while older starts are being contained.
+        if operation == "stop":
+            return {"kind": "ha"}
+    if operation != "stop":
+        # A sidecar incident can outlive the projected legacy ledger (for
+        # example after an older serializer removed that projection).  Select
+        # only an exact single-VIN, still-held incident; the stock adapter
+        # independently validates the enrolled ESPHome producer before doing
+        # any reset.  Unenrolled test/legacy runtimes must never reach it.
+        runtime = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+        sidecar_loaded = isinstance(runtime, dict) and runtime.get(
+            "_tesla_ev_recovery_sidecar_loaded") is True
+        snapshot = recovery_sidecar_snapshot(hass, entry) if sidecar_loaded else None
+        incident_id = None
+        if isinstance(snapshot, Mapping):
+            incidents = snapshot.get("incidents", {})
+            if isinstance(incidents, Mapping):
+                for candidate_id, incident in incidents.items():
+                    if not isinstance(incident, Mapping) or incident.get("phase") == "released":
+                        continue
+                    vehicles = incident.get("current_candidate_vehicles")
+                    if isinstance(vehicles, (list, tuple, set, frozenset)) and {
+                        str(item) for item in vehicles
+                    } == {str(vehicle)}:
+                        incident_id = str(candidate_id)
+                        break
+
+        recovery_candidate = pending is not None or incident_id is not None
+        blocked_route = route if route and route.get("kind") == "blocked" else None
+        if blocked_route is not None:
+            # Preserve the existing controller retry marker even when this
+            # runtime is not enrolled for the stock-reset adapter.
+            params["_tesla_transport_recovery_pending"] = True
+        if recovery_candidate:
+            params["_tesla_transport_recovery_pending"] = True
+            # One reset attempt belongs to one concrete command request.  A
+            # successful reset still cannot reuse this request's captured
+            # authority: its next retry must capture the new generation.
+            if sidecar_loaded and not params.get("_tesla_stock_recovery_attempted"):
+                intent_authority = _tesla_transport_authority(
+                    hass, entry, params, operation=operation,
+                    ignore_recovery_gate=True,
+                )
+                if intent_authority():
+                    params["_tesla_stock_recovery_attempted"] = True
+                    try:
+                        from ..tesla_ev_stock_recovery import async_recover_vehicle_transport
+
+                        recovered = await async_recover_vehicle_transport(
+                            hass, entry, str(vehicle), incident_id=incident_id,
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        _LOGGER.exception("Tesla stock transport recovery remains pending")
+                        recovered = False
+                    # Re-read the durable route for diagnostics and to ensure
+                    # the adapter did not leave a writable old route behind;
+                    # this request remains deferred regardless of that result.
+                    if recovered:
+                        get_vehicle_route(hass, entry, vehicle)
+            if blocked_route is not None:
+                return blocked_route
+            return {"kind": "blocked", "vehicle_id": str(vehicle),
+                    "reason": "stock_recovery_pending"}
+    return route
+
+
+async def _run_ble_transport_command(
+    hass,
+    entry,
+    params,
+    prefix,
+    operation,
+    send,
+    *,
+    effect_bound: Mapping[str, Any] | None | object = _TESLA_BLE_EFFECT_BOUND_UNSET,
+):
+    """Journal a BLE attempt and contain its producer before another route."""
+    from ..tesla_ev_recovery import (
+        async_begin_attempt,
+        async_finish_attempt,
+        async_isolate_ble,
+        async_track_submission,
+        current_vehicle_generation,
+    )
+    vehicle = params.get("vehicle_vin") or params.get("vehicle_id")
+    if not vehicle:
+        config = {**entry.data, **entry.options}
+        configured = [item.strip() for item in str(config.get(
+            CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX)).split(",") if item.strip()]
+        if len(configured) != 1:
+            return False, False
+        vehicle = canonical_tesla_vehicle_id(config, f"ble_{prefix}")
+    effective_params = {**params, "vehicle_vin": vehicle}
+    bind_vehicle(vehicle)
+    generation = current_vehicle_generation(hass, entry, vehicle)
+    entity = {
+        "start": TESLA_BLE_SWITCH_CHARGER, "stop": TESLA_BLE_SWITCH_CHARGER,
+        "rate": TESLA_BLE_NUMBER_CHARGING_AMPS,
+        "limit": TESLA_BLE_NUMBER_CHARGING_LIMIT,
+    }[operation].format(prefix=prefix)
+    params.pop("_tesla_ble_native_satisfied", None)
+    params.pop("_tesla_ble_native_observation_target", None)
+    pinned_entity_identity = _tesla_legacy_entity_identity(hass, (entity,))
+    pinned_radio_binding = _tesla_ble_radio_binding(hass, prefix)
+    authority = _tesla_transport_authority(
+        hass,
+        entry,
+        effective_params,
+        cleanup=operation == "stop",
+        operation=operation,
+        generation=generation,
+    )
+    command_route = {"kind": "ble", "prefix": prefix}
+    command_route.update(_tesla_cleanup_route_metadata(params))
+    target = _tesla_ble_mutation_target(hass, entity, vehicle, operation)
+    if isinstance(effect_bound, Mapping):
+        # ``_pin`` preserves this diagnostic bound with the immutable BLE
+        # route.  It is intentionally a range for Rate when the helper may
+        # perform its proven entity-range retry.
+        command_route["effect_bound"] = dict(effect_bound)
+    elif effect_bound is not _TESLA_BLE_EFFECT_BOUND_UNSET:
+        # An action that cannot establish a bounded target must not let a
+        # later entity appearance turn this ticket into an unbounded write.
+        return False, False
+    if (
+        effect_bound is not _TESLA_BLE_EFFECT_BOUND_UNSET
+        and not _tesla_ble_effect_bound_is_valid(operation, effect_bound)
+    ):
+        return False, False
+    if operation != "stop" and not _tesla_ble_radio_scope_current(
+        hass,
+        prefix,
+        pinned_radio_binding,
+        target_entity=entity,
+    ):
+        return False, False
+    config = {**entry.data, **entry.options}
+    if config.get(CONF_EV_PROVIDER) == EV_PROVIDER_BOTH:
+        fallback_entity = await _get_tesla_ev_entity(
+            hass, r"switch\..*(?<!dis)charge(?:_\d+)?$", vehicle,
+            warn_on_missing=False)
+        fallback_registration = er.async_get(hass).async_get(fallback_entity) if fallback_entity else None
+        if (fallback_registration is not None
+                and getattr(fallback_registration, "platform", None) in {"tesla_fleet", "teslemetry"}
+                and not getattr(fallback_registration, "disabled_by", None)
+                and all(isinstance(getattr(fallback_registration, field, None), str)
+                        and getattr(fallback_registration, field) for field in (
+                        "platform", "config_entry_id", "device_id", "unique_id"))):
+            command_route["fallback"] = {"kind": "ha", "entity_id": fallback_entity}
+            fallback_binding = _tesla_native_binding(hass, fallback_entity, vehicle)
+            fallback_identity = _tesla_native_binding_identity(fallback_binding)
+            if fallback_identity is not None:
+                # This is observation-only metadata for the current BLE
+                # attempt. It must never become the native command anchor or
+                # change route ownership after a successful BLE Start.
+                params["_tesla_ble_native_observation_target"] = {
+                    "entity_id": fallback_entity,
+                    "identity": fallback_identity,
+                }
+    try:
+        ticket = await async_begin_attempt(
+            hass, entry, vehicle, command_route, operation, entity,
+            target=target, deadline=params.get("_boost_start_deadline"),
+            allow_persist_refused_cleanup=(
+                operation == "stop" and params.get("_ev_cleanup_only") is True
+            ),
+            cleanup_obligation_token=params.get("_quick_control_obligation_id"),
+        )
+    except Exception as err:
+        if (
+            operation == "stop"
+            and params.get("_ev_cleanup_only") is True
+            and _tesla_cleanup_persistence_refused(err, params)
+        ):
+            # Recovery deliberately returns this typed exception when the
+            # existing cleanup scope is valid but the replacement journal
+            # row could not be persisted.  Treat the exception as the
+            # one-request cleanup ticket; no positive operation reaches this
+            # branch.
+            ticket = err
+        else:
+            raise
+    # The native observation target is only an alternate read source for this
+    # exact BLE attempt.  Carry the durable attempt ID before any provider
+    # helper can inspect or use it, so a stale native report cannot satisfy a
+    # different pending BLE attempt after reload/replacement.
+    observation_target = params.get("_tesla_ble_native_observation_target")
+    attempt_id = getattr(ticket, "attempt_id", None)
+    if (
+        isinstance(observation_target, Mapping)
+        and isinstance(attempt_id, str)
+        and attempt_id
+    ):
+        params["_tesla_ble_native_observation_target"] = {
+            **observation_target,
+            "attempt_id": attempt_id,
+        }
+    entity_identity_unchanged = (
+        _tesla_legacy_entity_identity(hass, (entity,)) == pinned_entity_identity
+    )
+    if (
+        _tesla_cleanup_persistence_marker(ticket)
+        and (
+            operation != "stop"
+            or not _tesla_cleanup_persistence_refused(ticket, params)
+        )
+    ):
+        return False, False
+    if (
+        operation == "stop"
+        and params.get("_ev_cleanup_only") is True
+        and _tesla_cleanup_persistence_refused(ticket, params)
+    ):
+        # Recovery has proved that this is an existing exact cleanup scope but
+        # could not persist a second attempt.  One direct Stop is permitted;
+        # its outcome remains unknown and no alternate provider may follow it.
+        if not authority() or not entity_identity_unchanged:
+            return False, False
+        handoff = {"attempted": False, "handed_off": False}
+
+        async def cleanup_guard():
+            if not await _tesla_legacy_transport_authorized(authority):
+                return False
+            return _tesla_legacy_entity_identity(hass, (entity,)) == pinned_entity_identity
+
+        tracker_token = _tesla_submission_tracker.set(
+            _tesla_cleanup_submission_tracker(
+                hass,
+                entry,
+                handoff,
+                refusal=ticket,
+                vehicle_id=str(vehicle),
+                generation=generation,
+            )
+        )
+        handoff_token = _tesla_submission_handoff.set(handoff)
+        guard_token = _tesla_submission_guard.set(cleanup_guard)
+        try:
+            try:
+                await send()
+            except asyncio.CancelledError:
+                if handoff["handed_off"]:
+                    params["_tesla_cleanup_fallback_consumed"] = True
+                raise
+            except Exception:
+                if handoff["handed_off"]:
+                    params["_tesla_cleanup_fallback_consumed"] = True
+                    return None, False
+                return False, False
+            if handoff["handed_off"]:
+                params["_tesla_cleanup_fallback_consumed"] = True
+                return None, False
+            return False, False
+        finally:
+            _tesla_submission_handoff.reset(handoff_token)
+            _tesla_submission_tracker.reset(tracker_token)
+            _tesla_submission_guard.reset(guard_token)
+    if ticket is None or not authority() or not entity_identity_unchanged:
+        if ticket is not None:
+            await async_finish_attempt(ticket, "not_sent")
+        return False, False
+    phase = {"phase": "unknown"}
+    handoff = {"attempted": False, "handed_off": False}
+
+    async def final_submission_guard():
+        """Recheck authority and the exact legacy target after ticket save."""
+        if not await _tesla_legacy_transport_authorized(authority):
+            return False
+        if _tesla_legacy_entity_identity(hass, (entity,)) != pinned_entity_identity:
+            return False
+        if operation != "stop" and not _tesla_ble_radio_scope_current(
+            hass,
+            prefix,
+            pinned_radio_binding,
+            target_entity=entity,
+        ):
+            return False
+        if operation != "stop" and not _tesla_ble_stock_submission_scope_current(
+            hass
+        ):
+            return False
+        return True
+
+    async def track_submission(submit):
+        handoff["attempted"] = True
+        runtime = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+        if not isinstance(runtime, dict):
+            return await submit()
+        return await async_track_submission(
+            hass,
+            entry,
+            submit,
+            generation,
+            vehicle_id=vehicle,
+            operation=operation,
+            metadata={"route": command_route, "entity_id": entity},
+        )
+
+    effect_bound_token = _tesla_ble_effect_bound.set(
+        _TESLA_BLE_EFFECT_BOUND_UNSET
+        if effect_bound is _TESLA_BLE_EFFECT_BOUND_UNSET
+        else dict(effect_bound)
+    )
+    phase_token = _tesla_ble_mutation_phase.set(phase)
+    tracker_token = _tesla_submission_tracker.set(track_submission)
+    handoff_token = _tesla_submission_handoff.set(handoff)
+    guard_token = _tesla_submission_guard.set(final_submission_guard)
+    try:
+        try:
+            result = await send()
+        except asyncio.CancelledError:
+            outcome = (
+                "not_sent"
+                if handoff["attempted"] and not handoff["handed_off"]
+                else "not_sent"
+                if phase["phase"] == "prewrite" and not handoff["handed_off"]
+                else "sent_unknown"
+            )
+            await asyncio.shield(async_finish_attempt(ticket, outcome))
+            raise
+        except Exception as err:
+            # Admission can reject before the helper reaches any HA service write.
+            # Keep that known refusal out of the sent-unknown/quarantine path while
+            # preserving propagation to the caller's fail-closed handling.
+            outcome = (
+                "sent_unknown"
+                if handoff["handed_off"]
+                else "not_sent"
+                if (
+                    getattr(err, "site_import_admission_denied", False)
+                    or (handoff["attempted"] and not handoff["handed_off"])
+                )
+                else "sent_unknown"
+            )
+            await async_finish_attempt(ticket, outcome)
+            raise
+        if result is False and handoff["handed_off"]:
+            # A helper may return False after a prior service handoff (for
+            # example, an unstructured range exception followed by a refused
+            # retry).  The request is then ambiguous and cannot retire its
+            # journal ticket as not_sent.  Continue through the ordinary
+            # unknown-result path so Both-mode isolation/fallback still runs.
+            result = None
+        no_write_satisfied = result is True and params.get(
+            "_tesla_ble_native_satisfied"
+        ) is not None
+        await async_finish_attempt(
+            ticket,
+            "not_sent"
+            if no_write_satisfied
+            else "confirmed"
+            if result is True
+            else "not_sent"
+            if result is False
+            else "sent_unknown",
+        )
+    finally:
+        _tesla_submission_handoff.reset(handoff_token)
+        _tesla_submission_tracker.reset(tracker_token)
+        _tesla_submission_guard.reset(guard_token)
+        _tesla_ble_mutation_phase.reset(phase_token)
+        _tesla_ble_effect_bound.reset(effect_bound_token)
+    if result is not None:
+        return result, False
+    params["_tesla_transport_recovery_pending"] = True
+    config = {**entry.data, **entry.options}
+    if config.get(CONF_EV_PROVIDER) != EV_PROVIDER_BOTH:
+        return None, False
+    isolated = await async_isolate_ble(
+        ticket, authorize=_tesla_transport_authority(hass, entry, effective_params, cleanup=True))
+    return None, bool(isolated and authority())
+
+
+async def _run_teslemetry_bt_transport_command(
+    hass,
+    entry,
+    params,
+    prefix,
+    operation,
+    send,
+):
+    """Journal the legacy VIN-scoped Teslemetry-BT service path.
+
+    This adapter has no producer-fence operation equivalent to ESPHome BLE;
+    an unresolved result therefore remains a Teslemetry-BT hazard and cannot
+    silently fall through to another writer.
+    """
+    from ..tesla_ev_recovery import (
+        async_begin_attempt,
+        async_finish_attempt,
+        async_track_submission,
+        current_vehicle_generation,
+        RecoverySubmissionDenied,
+    )
+
+    vehicle = params.get("vehicle_vin") or params.get("vehicle_id")
+    if not vehicle:
+        return False, False
+    entity = {
+        "start": TESLEMETRY_BT_SWITCH_CHARGE,
+        "stop": TESLEMETRY_BT_SWITCH_CHARGE,
+        "rate": TESLEMETRY_BT_NUMBER_CHARGE_AMPS,
+    }.get(operation)
+    if entity is None:
+        return False, False
+    entity = entity.format(prefix=prefix)
+    generation = current_vehicle_generation(hass, entry, vehicle)
+    authority = _tesla_transport_authority(
+        hass,
+        entry,
+        params,
+        cleanup=operation == "stop",
+        operation=operation,
+        generation=generation,
+    )
+    pinned_identity = _tesla_legacy_entity_identity(hass, (entity,))
+    # Some older HA installations expose the VIN-scoped number state before
+    # its registry row is created.  The legacy helper still pins the complete
+    # available identity and refuses a row appearing/rebinding during its
+    # admission; retain that compatibility path until a durable target can be
+    # formed instead of suppressing a safe no-op test/installation path.
+    if (
+        operation == "stop"
+        and params.get("_ev_cleanup_only") is True
+        and (pinned_identity is None or any(
+            len(item) != 6 or item[1] is None for item in pinned_identity
+        ))
+    ):
+        return False, False
+    if pinned_identity is None or any(
+        len(item) != 6 or item[1] is None for item in pinned_identity
+    ):
+        async def direct_submission_guard():
+            if not await _tesla_legacy_transport_authorized(authority):
+                return False
+            return _tesla_legacy_entity_identity(hass, (entity,)) == pinned_identity
+
+        guard_token = _tesla_submission_guard.set(direct_submission_guard)
+        try:
+            return await send(), False
+        except RecoverySubmissionDenied:
+            return False, False
+        finally:
+            _tesla_submission_guard.reset(guard_token)
+    command_route = {"kind": "teslemetry_bt", "prefix": prefix}
+    command_route.update(_tesla_cleanup_route_metadata(params))
+    try:
+        ticket = await async_begin_attempt(
+            hass,
+            entry,
+            vehicle,
+            command_route,
+            operation,
+            entity,
+            deadline=params.get("_boost_start_deadline"),
+            allow_persist_refused_cleanup=(
+                operation == "stop" and params.get("_ev_cleanup_only") is True
+            ),
+            cleanup_obligation_token=params.get("_quick_control_obligation_id"),
+        )
+    except Exception as err:
+        if (
+            operation == "stop"
+            and params.get("_ev_cleanup_only") is True
+            and _tesla_cleanup_persistence_refused(err, params)
+        ):
+            ticket = err
+        else:
+            raise
+    entity_identity_unchanged = (
+        _tesla_legacy_entity_identity(hass, (entity,)) == pinned_identity
+    )
+    if (
+        _tesla_cleanup_persistence_marker(ticket)
+        and (
+            operation != "stop"
+            or not _tesla_cleanup_persistence_refused(ticket, params)
+        )
+    ):
+        return False, False
+    if (
+        operation == "stop"
+        and params.get("_ev_cleanup_only") is True
+        and _tesla_cleanup_persistence_refused(ticket, params)
+    ):
+        if not authority() or not entity_identity_unchanged:
+            return False, False
+        handoff = {"attempted": False, "handed_off": False}
+
+        async def cleanup_guard():
+            if not await _tesla_legacy_transport_authorized(authority):
+                return False
+            return _tesla_legacy_entity_identity(hass, (entity,)) == pinned_identity
+
+        tracker_token = _tesla_submission_tracker.set(
+            _tesla_cleanup_submission_tracker(
+                hass,
+                entry,
+                handoff,
+                refusal=ticket,
+                vehicle_id=str(vehicle),
+                generation=generation,
+            )
+        )
+        handoff_token = _tesla_submission_handoff.set(handoff)
+        guard_token = _tesla_submission_guard.set(cleanup_guard)
+        try:
+            try:
+                await send()
+            except asyncio.CancelledError:
+                if handoff["handed_off"]:
+                    params["_tesla_cleanup_fallback_consumed"] = True
+                raise
+            except Exception:
+                if handoff["handed_off"]:
+                    params["_tesla_cleanup_fallback_consumed"] = True
+                    return None, False
+                return False, False
+            if handoff["handed_off"]:
+                params["_tesla_cleanup_fallback_consumed"] = True
+                return None, False
+            return False, False
+        finally:
+            _tesla_submission_handoff.reset(handoff_token)
+            _tesla_submission_tracker.reset(tracker_token)
+            _tesla_submission_guard.reset(guard_token)
+    if ticket is None or not authority() or _tesla_legacy_entity_identity(hass, (entity,)) != pinned_identity:
+        if ticket is not None:
+            await async_finish_attempt(ticket, "not_sent")
+        return False, False
+
+    handoff = {"attempted": False, "handed_off": False}
+
+    async def final_submission_guard():
+        """Recheck authority and the exact legacy target after ticket save."""
+        if not await _tesla_legacy_transport_authorized(authority):
+            return False
+        return _tesla_legacy_entity_identity(hass, (entity,)) == pinned_identity
+
+    async def track_submission(submit):
+        handoff["attempted"] = True
+        runtime = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+        if not isinstance(runtime, dict):
+            return await submit()
+        return await async_track_submission(
+            hass,
+            entry,
+            submit,
+            generation,
+            vehicle_id=vehicle,
+            operation=operation,
+            metadata={"route": {"kind": "teslemetry_bt", "prefix": prefix},
+                      "entity_id": entity},
+        )
+
+    tracker_token = _tesla_submission_tracker.set(track_submission)
+    handoff_token = _tesla_submission_handoff.set(handoff)
+    guard_token = _tesla_submission_guard.set(final_submission_guard)
+    try:
+        try:
+            result = await send()
+        except asyncio.CancelledError:
+            await asyncio.shield(async_finish_attempt(
+                ticket, "sent_unknown" if handoff["handed_off"] else "not_sent"
+            ))
+            raise
+        except Exception as err:
+            outcome = (
+                "sent_unknown"
+                if handoff["handed_off"]
+                else "not_sent"
+                if (
+                    getattr(err, "site_import_admission_denied", False)
+                    or (handoff["attempted"] and not handoff["handed_off"])
+                )
+                else "sent_unknown"
+            )
+            await async_finish_attempt(ticket, outcome)
+            raise
+        if result is False and handoff["handed_off"]:
+            # Preserve the normal unknown-result handling below, including
+            # its recovery marker and provider policy.
+            result = None
+        await async_finish_attempt(
+            ticket,
+            "accepted_unconfirmed" if result is True
+            else "not_sent" if result is False
+            else "sent_unknown",
+        )
+        if result is None:
+            params["_tesla_transport_recovery_pending"] = True
+        return result, False
+    finally:
+        _tesla_submission_handoff.reset(handoff_token)
+        _tesla_submission_tracker.reset(tracker_token)
+        _tesla_submission_guard.reset(guard_token)
+
+
+@dataclass(frozen=True, slots=True)
+class _TeslaNativeMutationResult:
+    """Outcome of one journaled native HA service mutation."""
+
+    outcome: str
+    error: BaseException | None = None
+    retryable_range: bool = False
+
+
+def _tesla_native_deadline_token(value: Any) -> Any:
+    """Return a stable comparison value for the request's optional deadline."""
+    if isinstance(value, datetime):
+        try:
+            return value.timestamp()
+        except (OverflowError, OSError, TypeError, ValueError):
+            return value
+    if type(value) in (int, float) and math.isfinite(value):
+        return float(value)
+    return value
+
+
+def _tesla_native_binding(hass: HomeAssistant, entity_id: str, vehicle: Any):
+    """Pin registry identity and the provider device's exact canonical VIN."""
+    snapshot = _tesla_legacy_entity_identity(hass, (entity_id,))
+    if not snapshot or len(snapshot) != 1 or len(snapshot[0]) != 6:
+        return None
+    identity = snapshot[0]
+    if identity[5] is not None or identity[1] not in {"tesla_fleet", "teslemetry"}:
+        return None
+    if any(not isinstance(value, str) or not value.strip() for value in identity[1:5]):
+        return None
+    canonical_vehicle = str(vehicle or "").strip().upper()
+    if not re.fullmatch(r"[A-HJ-NPR-Z0-9]{17}", canonical_vehicle):
+        return None
+    try:
+        device = dr.async_get(hass).async_get(identity[3])
+    except Exception:
+        return None
+    identifiers = getattr(device, "identifiers", ()) if device is not None else ()
+    provider_vins = set()
+    for identifier in identifiers or ():
+        if not isinstance(identifier, (tuple, list)) or len(identifier) < 2:
+            continue
+        if str(identifier[0]) == identity[1]:
+            provider_vins.add(str(identifier[1]).strip().upper())
+    if provider_vins != {canonical_vehicle}:
+        return None
+    return snapshot, canonical_vehicle
+
+
+def _tesla_native_binding_identity(binding: Any) -> dict[str, Any] | None:
+    """Return the six-field registry identity from a native binding snapshot."""
+    try:
+        identity = binding[0][0]
+        return {
+            key: identity[index]
+            for index, key in enumerate((
+                "entity_id", "platform", "config_entry_id", "device_id",
+                "unique_id", "disabled_by",
+            ))
+        }
+    except (IndexError, KeyError, TypeError):
+        return None
+
+
+def _tesla_native_anchor_binding(
+    hass: HomeAssistant,
+    params: Mapping[str, Any],
+):
+    """Return a transient native anchor only while its exact identity holds."""
+    anchor = params.get("_tesla_command_entity_id")
+    vehicle = str(
+        params.get("vehicle_vin") or params.get("vehicle_id") or ""
+    ).strip().upper()
+    if not anchor or not re.fullmatch(r"[A-HJ-NPR-Z0-9]{17}", vehicle):
+        return None
+    binding = _tesla_native_binding(hass, str(anchor), vehicle)
+    expected = params.get("_tesla_native_command_identity")
+    if not isinstance(expected, Mapping):
+        return None
+    expected_identity = {
+        key: expected.get(key)
+        for key in (
+            "entity_id",
+            "platform",
+            "config_entry_id",
+            "device_id",
+            "unique_id",
+            "disabled_by",
+        )
+    }
+    if (
+        binding is None
+        or _tesla_native_binding_identity(binding) != expected_identity
+    ):
+        return None
+    return binding
+
+
+def _quick_control_identity_rows(value: Any) -> tuple[tuple[Any, ...], ...] | None:
+    """Normalize JSON-restored registry identity rows for exact comparison."""
+    if not isinstance(value, (list, tuple)):
+        return None
+    rows = []
+    for row in value:
+        if not isinstance(row, (list, tuple)):
+            return None
+        rows.append(tuple(row))
+    return tuple(rows)
+
+
+async def _tesla_quick_control_binding(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    params: Mapping[str, Any],
+    vehicle_id: str,
+) -> dict[str, Any]:
+    """Capture immutable provider/pairing bindings before finite dispatch."""
+    config = {**getattr(entry, "data", {}), **getattr(entry, "options", {})}
+    provider = config.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API)
+    binding: dict[str, Any] = {
+        "vehicle_id": str(vehicle_id or "").strip().upper(),
+        "provider": provider,
+        "ble_prefixes": tuple(resolve_ble_prefixes(hass, config)),
+        "ble_mapping": config.get(CONF_TESLA_BLE_VEHICLE_MAPPING),
+    }
+
+    ble_prefix = _resolve_ble_prefix_for_vehicle(hass, entry, vehicle_id)
+    if ble_prefix:
+        binding["ble_prefix"] = ble_prefix
+        binding["ble_entities"] = _tesla_legacy_entity_identity(
+            hass,
+            tuple(
+                template.format(prefix=ble_prefix)
+                for template in (
+                    TESLA_BLE_SWITCH_CHARGER,
+                    TESLA_BLE_NUMBER_CHARGING_AMPS,
+                    TESLA_BLE_NUMBER_CHARGING_LIMIT,
+                )
+            ),
+        )
+
+    tbt_prefix = _resolve_teslemetry_bt_prefix_for_vehicle(
+        hass, entry, vehicle_id
+    )
+    if tbt_prefix:
+        binding["teslemetry_bt_prefix"] = tbt_prefix
+        binding["teslemetry_bt_entities"] = _tesla_legacy_entity_identity(
+            hass,
+            (
+                TESLEMETRY_BT_SWITCH_CHARGE.format(prefix=tbt_prefix),
+                TESLEMETRY_BT_NUMBER_CHARGE_AMPS.format(prefix=tbt_prefix),
+            ),
+        )
+
+    if provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH):
+        native_entity = await _tesla_ha_command_entity(
+            hass,
+            entry,
+            {**params, "vehicle_vin": vehicle_id},
+            "start",
+        )
+        native_binding = (
+            _tesla_native_binding_identity(
+                _tesla_native_binding(hass, native_entity, vehicle_id)
+            )
+            if native_entity
+            else None
+        )
+        if native_binding is not None or provider == EV_PROVIDER_FLEET_API:
+            binding["native_entity"] = native_binding
+
+    return binding
+
+
+def _tesla_quick_control_binding_current(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    params: Mapping[str, Any],
+) -> bool:
+    """Reject a reload cleanup whose original producer/pairing was rebound."""
+    expected = params.get("_quick_control_binding")
+    if not isinstance(expected, Mapping):
+        return False
+    vehicle_id = str(
+        params.get("vehicle_vin") or params.get("vehicle_id") or ""
+    ).strip()
+    if not vehicle_id:
+        return False
+    config = {**getattr(entry, "data", {}), **getattr(entry, "options", {})}
+    if expected.get("vehicle_id") != vehicle_id.upper():
+        return False
+    if expected.get("provider") != config.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API):
+        return False
+    if tuple(expected.get("ble_prefixes") or ()) != tuple(
+        resolve_ble_prefixes(hass, config)
+    ):
+        return False
+    if expected.get("ble_mapping") != config.get(CONF_TESLA_BLE_VEHICLE_MAPPING):
+        return False
+
+    expected_ble = expected.get("ble_prefix")
+    if expected_ble is not None:
+        if _resolve_ble_prefix_for_vehicle(hass, entry, vehicle_id) != expected_ble:
+            return False
+        expected_rows = _quick_control_identity_rows(expected.get("ble_entities"))
+        current_rows = _tesla_legacy_entity_identity(
+            hass,
+            tuple(
+                template.format(prefix=expected_ble)
+                for template in (
+                    TESLA_BLE_SWITCH_CHARGER,
+                    TESLA_BLE_NUMBER_CHARGING_AMPS,
+                    TESLA_BLE_NUMBER_CHARGING_LIMIT,
+                )
+            ),
+        )
+        if expected_rows is None or current_rows != expected_rows:
+            return False
+
+    expected_tbt = expected.get("teslemetry_bt_prefix")
+    if expected_tbt is not None:
+        if _resolve_teslemetry_bt_prefix_for_vehicle(hass, entry, vehicle_id) != expected_tbt:
+            return False
+        expected_rows = _quick_control_identity_rows(
+            expected.get("teslemetry_bt_entities")
+        )
+        current_rows = _tesla_legacy_entity_identity(
+            hass,
+            (
+                TESLEMETRY_BT_SWITCH_CHARGE.format(prefix=expected_tbt),
+                TESLEMETRY_BT_NUMBER_CHARGE_AMPS.format(prefix=expected_tbt),
+            ),
+        )
+        if expected_rows is None or current_rows != expected_rows:
+            return False
+
+    if "native_entity" in expected:
+        expected_native = expected.get("native_entity")
+        if not isinstance(expected_native, Mapping):
+            return False
+        native_entity = expected_native.get("entity_id") if isinstance(expected_native, Mapping) else None
+        current_binding = (
+            _tesla_native_binding_identity(
+                _tesla_native_binding(hass, native_entity, vehicle_id)
+            )
+            if native_entity
+            else None
+        )
+        if current_binding != dict(expected_native):
+            return False
+    return True
+
+
+def _tesla_native_anchor_entity(
+    hass: HomeAssistant,
+    params: Mapping[str, Any],
+    operation: str,
+) -> str | None:
+    """Resolve a mutation-time native anchor for a same-session command."""
+    if operation not in {"rate", "limit", "stop"}:
+        return None
+    anchor = params.get("_tesla_command_entity_id")
+    binding = _tesla_native_anchor_binding(hass, params)
+    if binding is None:
+        return None
+    from ..teslemetry_bluetooth_commands import native_command_entity
+
+    return native_command_entity(hass, anchor, operation)
+
+
+async def _tesla_native_authority_current(authorize: Callable[[], Any]) -> bool:
+    """Evaluate the request authority without allowing an awaitable to leak."""
+    try:
+        result = authorize()
+        if inspect.isawaitable(result):
+            result = await result
+        return bool(result)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        return False
+
+
+def _mark_tesla_native_unknown(params: Dict[str, Any], operation: str) -> None:
+    """Keep callers on their recovery/cleanup path after an ambiguous write."""
+    params["_tesla_transport_recovery_pending"] = True
+    if operation == "start":
+        params["_tesla_allow_plan_recovery"] = True
+
+
+def _tesla_native_deadline_current(value: Any) -> bool:
+    """Reject a native write once its original request deadline has elapsed."""
+    if value is None:
+        return True
+    if isinstance(value, datetime):
+        try:
+            token = value.timestamp()
+        except (OverflowError, OSError, TypeError, ValueError):
+            return False
+    elif type(value) in (int, float):
+        if not math.isfinite(value):
+            return False
+        token = float(value)
+    else:
+        return False
+    return datetime.now(dt_timezone.utc).timestamp() < token
+
+
+def _tesla_native_service_shape(
+    operation: str,
+    entity_id: str,
+    domain: str,
+    service: str,
+    service_data: Mapping[str, Any],
+) -> bool:
+    """Keep a journal ticket bound to exactly one documented HA mutation."""
+    expected = {
+        "start": ("switch", "turn_on"),
+        "stop": ("switch", "turn_off"),
+        "rate": ("number", "set_value"),
+        "limit": ("number", "set_value"),
+    }.get(operation)
+    return (
+        expected == (domain, service)
+        and entity_id.startswith(f"{domain}.")
+        and isinstance(service_data, Mapping)
+        and service_data.get("entity_id") == entity_id
+        and (operation in {"start", "stop"} or "value" in service_data)
+    )
+
+
+def _tesla_native_verified_range_rejection(
+    error: BaseException,
+    operation: str,
+    entity_id: str,
+    service_data: Mapping[str, Any],
+) -> bool:
+    """Recognize only HA's structured prewrite number range validation."""
+    if operation != "rate" or service_data.get("value") is None:
+        return False
+    try:
+        from homeassistant.exceptions import ServiceValidationError
+    except (ImportError, AttributeError):
+        return False
+    if not isinstance(error, ServiceValidationError):
+        return False
+    if (
+        getattr(error, "translation_domain", None) != "number"
+        or getattr(error, "translation_key", None) != "out_of_range"
+    ):
+        return False
+    placeholders = getattr(error, "translation_placeholders", None)
+    if not isinstance(placeholders, Mapping) or placeholders.get("entity_id") != entity_id:
+        return False
+    try:
+        return float(placeholders.get("value")) == float(service_data["value"])
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
+async def _run_native_tesla_service_command(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    params: Dict[str, Any],
+    operation: str,
+    entity_id: str,
+    domain: str,
+    service: str,
+    service_data: Mapping[str, Any],
+    authorize: Callable[[], Any],
+) -> _TeslaNativeMutationResult:
+    """Journal one native Tesla service write and fence its request scope."""
+    from ..tesla_ev_recovery import (
+        async_begin_attempt,
+        async_finish_attempt,
+        async_track_submission,
+        current_vehicle_generation,
+        recovery_control_allowed,
+    )
+
+    vehicle = params.get("vehicle_vin") or params.get("vehicle_id")
+    generation = current_vehicle_generation(hass, entry, vehicle)
+    binding = _tesla_native_binding(hass, entity_id, vehicle)
+    deadline = params.get("_boost_start_deadline")
+    deadline_current = (
+        operation == "stop" or _tesla_native_deadline_current(deadline)
+    )
+    if (
+        not vehicle
+        or binding is None
+        or not _tesla_native_service_shape(
+            operation, entity_id, domain, service, service_data
+        )
+        or not deadline_current
+    ):
+        return _TeslaNativeMutationResult("not_sent")
+    command_data = dict(service_data)
+    deadline_token = _tesla_native_deadline_token(params.get("_boost_start_deadline"))
+    pinned_vehicle = str(vehicle).strip().upper()
+    ticket = None
+    try:
+        if not await _tesla_native_authority_current(authorize):
+            return _TeslaNativeMutationResult("not_sent")
+        if (
+            operation != "stop"
+            and not _tesla_native_deadline_current(params.get("_boost_start_deadline"))
+        ):
+            return _TeslaNativeMutationResult("not_sent")
+        command_route = {"kind": "ha", "entity_id": entity_id}
+        command_route.update(_tesla_cleanup_route_metadata(params))
+        try:
+            ticket = await async_begin_attempt(
+                hass,
+                entry,
+                pinned_vehicle,
+                command_route,
+                operation,
+                entity_id,
+                deadline=deadline,
+                allow_persist_refused_cleanup=(
+                    operation == "stop" and params.get("_ev_cleanup_only") is True
+                ),
+                cleanup_obligation_token=params.get("_quick_control_obligation_id"),
+            )
+        except Exception as err:
+            if (
+                operation == "stop"
+                and params.get("_ev_cleanup_only") is True
+                and _tesla_cleanup_persistence_refused(err, params)
+            ):
+                ticket = err
+            else:
+                raise
+    except asyncio.CancelledError:
+        raise
+    except Exception as err:
+        # The journal admission itself failed before a service write.
+        return _TeslaNativeMutationResult("not_sent", err)
+
+    if (
+        _tesla_cleanup_persistence_marker(ticket)
+        and (
+            operation != "stop"
+            or not _tesla_cleanup_persistence_refused(ticket, params)
+        )
+    ):
+        return _TeslaNativeMutationResult("not_sent")
+
+    try:
+        authority_current = await _tesla_native_authority_current(authorize)
+        current_vehicle = str(
+            params.get("vehicle_vin") or params.get("vehicle_id") or ""
+        ).strip().upper()
+        scope_current = (
+            ticket is not None
+            and authority_current
+            and recovery_control_allowed(
+                hass,
+                entry,
+                pinned_vehicle,
+                generation,
+                "stop" if operation == "stop" else operation,
+            )
+            and current_vehicle == pinned_vehicle
+            and _tesla_native_binding(hass, entity_id, pinned_vehicle) == binding
+            and (
+                operation == "stop"
+                or (
+                    _tesla_native_deadline_token(params.get("_boost_start_deadline"))
+                    == deadline_token
+                    and _tesla_native_deadline_current(params.get("_boost_start_deadline"))
+                )
+            )
+        )
+    except asyncio.CancelledError:
+        if ticket is not None:
+            try:
+                await asyncio.shield(async_finish_attempt(ticket, "not_sent"))
+            except BaseException:
+                pass
+        raise
+    if not scope_current:
+        if ticket is not None and not _tesla_cleanup_persistence_marker(ticket):
+            await async_finish_attempt(ticket, "not_sent")
+        return _TeslaNativeMutationResult("not_sent")
+
+    # Keep the mutation-time registry binding available to the dynamic-session
+    # handoff below. It prevents a provider device rebind between an accepted
+    # Start and the later ownership claim from pinning the replacement entity.
+    cleanup_persistence_refused = (
+        operation == "stop"
+        and params.get("_ev_cleanup_only") is True
+        and _tesla_cleanup_persistence_refused(ticket, params)
+    )
+
+    if operation == "start":
+        try:
+            identity = binding[0][0]
+            params["_tesla_native_command_identity"] = {
+                key: identity[index]
+                for index, key in enumerate((
+                    "entity_id", "platform", "config_entry_id", "device_id",
+                    "unique_id", "disabled_by",
+                ))
+            }
+        except (IndexError, KeyError, TypeError):
+            params.pop("_tesla_native_command_identity", None)
+
+    if operation == "start":
+        params["_tesla_command_entity_id"] = entity_id
+    handoff = {"attempted": False, "handed_off": False}
+
+    async def final_submission_guard():
+        """Recheck authority, generation, deadline, and exact native binding."""
+        if not await _tesla_native_authority_current(authorize):
+            return False
+        current_vehicle = str(
+            params.get("vehicle_vin") or params.get("vehicle_id") or ""
+        ).strip().upper()
+        if current_vehicle != pinned_vehicle:
+            return False
+        if not recovery_control_allowed(
+            hass,
+            entry,
+            pinned_vehicle,
+            generation,
+            "stop" if operation == "stop" else operation,
+        ):
+            return False
+        if _tesla_native_binding(hass, entity_id, pinned_vehicle) != binding:
+            return False
+        return (
+            operation == "stop"
+            or (
+                _tesla_native_deadline_token(params.get("_boost_start_deadline"))
+                == deadline_token
+                and _tesla_native_deadline_current(params.get("_boost_start_deadline"))
+            )
+        )
+
+    async def track_submission(submit):
+        handoff["attempted"] = True
+        runtime = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+        if not isinstance(runtime, dict):
+            return await submit()
+        return await async_track_submission(
+            hass,
+            entry,
+            submit,
+            generation,
+            vehicle_id=pinned_vehicle,
+            operation=operation,
+            metadata={"route": {"kind": "ha", "entity_id": entity_id}},
+        )
+
+    if cleanup_persistence_refused:
+        if not await final_submission_guard():
+            return _TeslaNativeMutationResult("not_sent")
+        handoff = {"attempted": False, "handed_off": False}
+        tracker_token = _tesla_submission_tracker.set(
+            _tesla_cleanup_submission_tracker(
+                hass,
+                entry,
+                handoff,
+                refusal=ticket,
+                vehicle_id=pinned_vehicle,
+                generation=generation,
+            )
+        )
+        handoff_token = _tesla_submission_handoff.set(handoff)
+        guard_token = _tesla_submission_guard.set(final_submission_guard)
+        try:
+            try:
+                await _tesla_call_service(
+                    hass,
+                    domain,
+                    service,
+                    command_data,
+                    blocking=True,
+                )
+            except asyncio.CancelledError:
+                if handoff["handed_off"]:
+                    params["_tesla_cleanup_fallback_consumed"] = True
+                raise
+            except Exception as err:
+                if handoff["handed_off"]:
+                    params["_tesla_cleanup_fallback_consumed"] = True
+                    return _TeslaNativeMutationResult("sent_unknown", err)
+                return _TeslaNativeMutationResult("not_sent", err)
+            if handoff["handed_off"]:
+                params["_tesla_cleanup_fallback_consumed"] = True
+                return _TeslaNativeMutationResult("sent_unknown")
+            return _TeslaNativeMutationResult("not_sent")
+        finally:
+            _tesla_submission_handoff.reset(handoff_token)
+            _tesla_submission_tracker.reset(tracker_token)
+            _tesla_submission_guard.reset(guard_token)
+
+    tracker_token = _tesla_submission_tracker.set(track_submission)
+    handoff_token = _tesla_submission_handoff.set(handoff)
+    guard_token = _tesla_submission_guard.set(final_submission_guard)
+    try:
+        await _tesla_call_service(
+            hass,
+            domain,
+            service,
+            command_data,
+            blocking=True,
+        )
+    except asyncio.CancelledError:
+        if handoff["handed_off"]:
+            _mark_tesla_native_unknown(params, operation)
+        try:
+            await asyncio.shield(async_finish_attempt(
+                ticket,
+                "sent_unknown" if handoff["handed_off"] else "not_sent",
+            ))
+        except BaseException:
+            pass
+        finally:
+            _tesla_submission_handoff.reset(handoff_token)
+            _tesla_submission_tracker.reset(tracker_token)
+            _tesla_submission_guard.reset(guard_token)
+        raise
+    except Exception as err:
+        _tesla_submission_handoff.reset(handoff_token)
+        _tesla_submission_tracker.reset(tracker_token)
+        _tesla_submission_guard.reset(guard_token)
+        if handoff["attempted"] and not handoff["handed_off"]:
+            try:
+                await asyncio.shield(async_finish_attempt(ticket, "not_sent"))
+            except BaseException:
+                pass
+            return _TeslaNativeMutationResult("not_sent", err)
+        if getattr(err, "site_import_admission_denied", False):
+            await asyncio.shield(async_finish_attempt(ticket, "not_sent"))
+            return _TeslaNativeMutationResult("rejected", err)
+        if _tesla_native_verified_range_rejection(
+            err, operation, entity_id, command_data
+        ):
+            await asyncio.shield(async_finish_attempt(ticket, "not_sent"))
+            return _TeslaNativeMutationResult("not_sent", err, retryable_range=True)
+        _mark_tesla_native_unknown(params, operation)
+        await asyncio.shield(async_finish_attempt(ticket, "sent_unknown"))
+        _record_tesla_manual_key_failure(params, err)
+        return _TeslaNativeMutationResult("sent_unknown", err)
+    else:
+        _tesla_submission_handoff.reset(handoff_token)
+        _tesla_submission_tracker.reset(tracker_token)
+        _tesla_submission_guard.reset(guard_token)
+
+    try:
+        finished = await asyncio.shield(async_finish_attempt(ticket, "accepted_unconfirmed"))
+    except asyncio.CancelledError:
+        _mark_tesla_native_unknown(params, operation)
+        raise
+    except Exception as err:
+        _mark_tesla_native_unknown(params, operation)
+        return _TeslaNativeMutationResult("sent_unknown", err)
+    if finished is False:
+        _mark_tesla_native_unknown(params, operation)
+        return _TeslaNativeMutationResult("sent_unknown")
+    return _TeslaNativeMutationResult("accepted_unconfirmed")
+
+
+async def _fresh_tesla_command_observation(hass, entry, vehicle, params, *, timeout=10):
+    """Make one exact-vehicle provider read only during command recovery."""
+    from ..tesla_ev_observation import (
+        async_read_independent_tesla_vehicle,
+        async_read_tesla_vehicle,
+        independent_tesla_source_binding,
+    )
+    from ..tesla_ev_recovery import get_vehicle_route
+
+    config = {**entry.data, **entry.options}
+    try:
+        canonical = canonical_tesla_vehicle_id(config, str(vehicle or ""))
+    except (TypeError, ValueError):
+        return None
+    authority = _tesla_transport_authority(hass, entry, params)
+    if not authority():
+        return None
+    original_deadline = params.get("_boost_start_deadline")
+    deadline_token = _tesla_native_deadline_token(original_deadline)
+
+    def preferred_source_entity():
+        preferred = params.get("_tesla_command_entity_id")
+        if preferred:
+            return preferred
+        route = get_vehicle_route(hass, entry, canonical)
+        route_entity = route.get("entity_id") if isinstance(route, Mapping) else None
+        if route_entity and _tesla_native_binding(hass, route_entity, canonical) is not None:
+            # A reload loses transient action params. Recover the exact native
+            # producer from its durable attempt instead of choosing another
+            # account/provider that happens to expose the same VIN.
+            return route_entity
+        return None
+
+    preferred_entity = preferred_source_entity()
+    source_binding = independent_tesla_source_binding(
+        hass, canonical, preferred_entity_id=preferred_entity,
+    )
+
+    def scope_current():
+        try:
+            return (
+                authority()
+                and _tesla_native_deadline_token(params.get("_boost_start_deadline")) == deadline_token
+                and preferred_source_entity() == preferred_entity
+                and (source_binding is None or independent_tesla_source_binding(
+                    hass, canonical, preferred_entity_id=preferred_entity,
+                ) == source_binding)
+            )
+        except Exception:
+            return False
+
+    def remaining_timeout():
+        if type(original_deadline) in (int, float) and math.isfinite(original_deadline):
+            return min(timeout, max(0.001, original_deadline-datetime.now(dt_timezone.utc).timestamp()))
+        return timeout
+
+    def paid_refresh_allowed():
+        current_config = {**entry.data, **entry.options}
+        return (scope_current()
+                and source_binding is not None
+                and source_binding.get("domain") == "teslemetry"
+                and current_config.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API) in (
+                    EV_PROVIDER_BOTH, EV_PROVIDER_FLEET_API,
+                ))
+
+    if not scope_current():
+        return None
+    observation = await async_read_tesla_vehicle(hass, canonical,
+        preferred_entity_id=preferred_entity, timeout=remaining_timeout())
+    if not scope_current():
+        return None
+    if observation is not None or not paid_refresh_allowed():
+        return observation
+    # Native Teslemetry's default coordinator refresh can return its classic
+    # cache. This command-recovery path may request one explicit paid refresh;
+    # routine observations and BLE-only policy never acquire that permission.
+    observation = await async_read_independent_tesla_vehicle(
+        hass, canonical, preferred_entity_id=preferred_entity,
+        timeout=remaining_timeout(), allow_paid_refresh=True,
+        authorize=paid_refresh_allowed,
+    )
+    return observation if paid_refresh_allowed() else None
+
+
+def _tesla_observed_command_state(observation):
+    """Separate physical charging, physical stop and missing evidence."""
+    if observation is None:
+        return None
+    measured = [value for value in (
+        observation.charger_actual_current, observation.charger_power) if value is not None]
+    state = observation.charge_state.strip().lower()
+    if state == "charging" and any(value > 0 for value in measured):
+        return "charging"
+    if state in {"stopped", "complete", "disconnected"} and measured and all(value == 0 for value in measured):
+        return "stopped"
+    return None
+
+
+async def _run_modern_teslemetry_bluetooth(hass, entry, params, operation, value=None):
+    """Use the separate command-only integration with native readback."""
+    from ..teslemetry_bluetooth_commands import native_command_entity, resolve_command
+    from ..tesla_ev_dispatch import async_dispatch_bluetooth_command, DispatchOutcome
+    from ..tesla_ev_recovery import (
+        async_begin_attempt,
+        async_finish_attempt,
+        async_track_submission,
+        current_vehicle_generation,
+        recovery_control_allowed,
+        RecoverySubmissionDenied,
+    )
+    config = {**entry.data, **entry.options}
+    vehicle = canonical_tesla_vehicle_id(config, str(params.get("vehicle_vin") or params.get("vehicle_id") or ""))
+    generation = current_vehicle_generation(hass, entry, vehicle)
+    target = resolve_command(hass, vehicle, operation)
+    if target is None:
+        return False, False
+    if config.get(CONF_EV_PROVIDER) == EV_PROVIDER_BOTH:
+        # The native Teslemetry entity already routes Bluetooth first and
+        # safely fails over to its cloud backend. Avoid nesting the separate
+        # command-only adapter in front of that router for the Both provider.
+        native_entity = native_command_entity(hass, target)
+        if native_entity is not None:
+            params["_tesla_native_router_selected"] = True
+            params["_tesla_native_command_entity_id"] = native_entity
+            params["_tesla_native_router_target"] = target
+            return False, False
+    authority = _tesla_transport_authority(
+        hass,
+        entry,
+        params,
+        cleanup=operation == "stop",
+        operation=operation,
+        generation=generation,
+    )
+    ticket = None
+    handoff = {"handed_off": False}
+    cleanup_direct = {"active": False}
+
+    async def track_submission(submit):
+        async def _tracked_submit():
+            if not await _tesla_native_authority_current(authority):
+                raise RecoverySubmissionDenied(
+                    "Tesla Bluetooth authority changed before provider handover"
+                )
+            current_generation = current_vehicle_generation(hass, entry, vehicle)
+            if (
+                operation != "stop"
+                and current_generation != generation
+            ) or not recovery_control_allowed(
+                hass,
+                entry,
+                vehicle,
+                generation,
+                "stop" if operation == "stop" else operation,
+            ):
+                raise RecoverySubmissionDenied(
+                    "Tesla Bluetooth generation changed before provider handover"
+                )
+            if operation != "stop" and not _tesla_native_deadline_current(
+                params.get("_boost_start_deadline")
+            ):
+                raise RecoverySubmissionDenied(
+                    "Tesla Bluetooth deadline elapsed before provider handover"
+                )
+            if resolve_command(hass, vehicle, operation) != target:
+                raise RecoverySubmissionDenied(
+                    "Tesla Bluetooth target changed before provider handover"
+                )
+            handoff["handed_off"] = True
+            return await submit()
+
+        runtime = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+        if cleanup_direct["active"]:
+            return await _tesla_cleanup_submission_tracker(
+                hass,
+                entry,
+                handoff,
+                refusal=ticket,
+                vehicle_id=vehicle,
+                generation=generation,
+            )(_tracked_submit)
+        if not isinstance(runtime, dict):
+            return await _tracked_submit()
+        return await async_track_submission(
+            hass,
+            entry,
+            _tracked_submit,
+            generation,
+            vehicle_id=vehicle,
+            operation=operation,
+            metadata={"route": {"kind": "teslemetry_bluetooth"},
+                      "entity_id": target.entity_id},
+        )
+
+    async def before_dispatch():
+        nonlocal ticket
+        command_route = {"kind": "teslemetry_bluetooth"}
+        command_route.update(_tesla_cleanup_route_metadata(params))
+        try:
+            ticket = await async_begin_attempt(
+                hass, entry, vehicle, command_route, operation,
+                target.entity_id, target=target,
+                deadline=params.get("_boost_start_deadline"),
+                allow_persist_refused_cleanup=(
+                    operation == "stop" and params.get("_ev_cleanup_only") is True
+                ),
+                cleanup_obligation_token=params.get("_quick_control_obligation_id"),
+            )
+        except Exception as err:
+            if (
+                operation == "stop"
+                and params.get("_ev_cleanup_only") is True
+                and _tesla_cleanup_persistence_refused(err, params)
+            ):
+                ticket = err
+                cleanup_direct["active"] = True
+                return True
+            raise
+        if (
+            _tesla_cleanup_persistence_marker(ticket)
+            and (
+                operation != "stop"
+                or not _tesla_cleanup_persistence_refused(ticket, params)
+            )
+        ):
+            return False
+        if (
+            operation == "stop"
+            and params.get("_ev_cleanup_only") is True
+            and _tesla_cleanup_persistence_refused(ticket, params)
+        ):
+            cleanup_direct["active"] = True
+            return True
+        if ticket is None or not authority():
+            return False
+        if operation in ("start", "rate"):
+            return await prepare_ev_submission(hass, target.entity_id,
+                operation=operation, amps=value if operation == "rate" else None)
+        return True
+    try:
+        receipt = await async_dispatch_bluetooth_command(
+            hass,
+            target,
+            value=value,
+            authorize=authority,
+            before_dispatch=before_dispatch,
+            submit=track_submission,
+        )
+    except asyncio.CancelledError:
+        if cleanup_direct["active"]:
+            if handoff["handed_off"]:
+                params["_tesla_cleanup_fallback_consumed"] = True
+            raise
+        if ticket is not None:
+            await asyncio.shield(async_finish_attempt(ticket, "sent_unknown"))
+        raise
+    except Exception as err:
+        if cleanup_direct["active"]:
+            if handoff["handed_off"]:
+                params["_tesla_cleanup_fallback_consumed"] = True
+                return True, None
+            return True, False
+        # The command service may have queued work before an adapter-side
+        # exception escaped. Keep the exact attempt as an unresolved hazard;
+        # callers must reconcile it before selecting another producer.
+        if ticket is not None:
+            await async_finish_attempt(
+                ticket,
+                "not_sent"
+                if getattr(err, "site_import_admission_denied", False)
+                and not handoff["handed_off"]
+                else "sent_unknown"
+            )
+        raise
+    if cleanup_direct["active"]:
+        if handoff["handed_off"]:
+            params["_tesla_cleanup_fallback_consumed"] = True
+            return True, None
+        return True, False
+    if ticket is not None:
+        await async_finish_attempt(ticket, receipt.outcome)
+    if receipt.outcome is DispatchOutcome.CONFIRMED:
+        return True, True
+    if receipt.outcome is DispatchOutcome.ACCEPTED_UNCONFIRMED:
+        # The provider returned a validated result, so this producer is
+        # complete. Physical telemetry is still required before claiming a
+        # Charging effect, but stale telemetry must not leave a phantom
+        # producer hazard or force an unsafe fallback.
+        params.pop("_tesla_transport_recovery_pending", None)
+        if operation == "start":
+            params["_tesla_command_entity_id"] = target.entity_id
+            try:
+                observation = await _fresh_tesla_command_observation(
+                    hass, entry, vehicle, params)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                observation = None
+            if authority() and _tesla_observed_command_state(observation) == "charging":
+                params["_tesla_start_observation"] = observation
+                params["_tesla_start_live_read_required"] = True
+                return True, True
+            params["_tesla_physical_confirmation_pending"] = True
+            params["_tesla_allow_plan_recovery"] = True
+            return True, None
+        return True, True
+    if receipt.outcome is DispatchOutcome.SENT_UNKNOWN:
+        if operation == "start":
+            # A dispatcher unknown is not an HA-state acknowledgement. Read
+            # the exact native Teslemetry source once and adopt charging only
+            # when it reports fresh physical draw for this VIN.
+            params["_tesla_command_entity_id"] = target.entity_id
+            try:
+                observation = await _fresh_tesla_command_observation(
+                    hass, entry, vehicle, params)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                observation = None
+            if authority() and _tesla_observed_command_state(observation) == "charging":
+                params["_tesla_start_observation"] = observation
+                params["_tesla_start_live_read_required"] = True
+                # Physical Charging proves that this command (or another
+                # producer) took effect, but it cannot prove that the
+                # command-only adapter did not queue a later packet. Keep the
+                # original sent_unknown attempt as a durable hazard until a
+                # producer-specific recovery fence resolves it.
+                return True, True
+        params["_tesla_transport_recovery_pending"] = True
+        return True, None
+    return True, False
+
+
+async def _tesla_ha_command_entity(hass, entry, params, operation):
+    """Keep a selected native producer bound across all command operations."""
+    from ..tesla_ev_recovery import get_vehicle_route
+    from ..teslemetry_bluetooth_commands import native_command_entity, resolve_command
+    vehicle = params.get("vehicle_vin") or params.get("vehicle_id")
+    target = params.get("_tesla_native_router_target")
+    if target is not None:
+        if resolve_command(hass, target.vin, operation) != target:
+            return None
+        return native_command_entity(hass, target, operation)
+    route = get_vehicle_route(hass, entry, vehicle)
+    if route and route.get("kind") == "ha":
+        entity_id = route.get("entity_id")
+        # A durable cleanup-only route is an exact negative producer fence.
+        # Its native entity may be ``unavailable`` while the integration is
+        # waking/reloading, which makes the normal command resolver reject it
+        # before the provider-specific wake/read can run.  Permit only the
+        # persisted switch identity for Stop; positive operations must still
+        # require an available native command entity and may never inherit a
+        # stop-only route.
+        if (
+            operation == "stop"
+            and route.get("cleanup_only") is True
+            and isinstance(entity_id, str)
+            and entity_id.startswith("switch.")
+        ):
+            binding = _tesla_native_binding(hass, entity_id, vehicle)
+            expected_identity = route.get("entity_identity")
+            current_identity = _tesla_native_binding_identity(binding)
+            if (
+                binding is not None
+                and isinstance(expected_identity, Mapping)
+                and current_identity == {
+                    key: expected_identity.get(key)
+                    for key in (
+                        "entity_id",
+                        "platform",
+                        "config_entry_id",
+                        "device_id",
+                        "unique_id",
+                        "disabled_by",
+                    )
+                }
+            ):
+                return entity_id
+        return native_command_entity(hass, entity_id, operation) if entity_id else None
+    if route is None:
+        if params.get("_tesla_command_entity_id"):
+            if _tesla_native_anchor_binding(hass, params) is None:
+                return None
+            return _tesla_native_anchor_entity(hass, params, operation)
+    if route and route.get("kind") == "blocked":
+        if operation != "stop":
+            return None
+        # Dynamic teardown releases the lease before dispatching its physical
+        # Stop. Recover the previously pinned native entity only when its
+        # exact provider/config/device/VIN binding is still current; a stale
+        # route must never fall through to an arbitrary matching vehicle.
+        if route.get("reason") == "route_identity_changed":
+            entity_id = route.get("entity_id")
+            binding = (
+                _tesla_native_binding(hass, entity_id, vehicle)
+                if entity_id
+                else None
+            )
+            expected_identity = route.get("entity_identity")
+            current_identity = None
+            if binding is not None:
+                try:
+                    current = binding[0][0]
+                    current_identity = {
+                        key: current[index]
+                        for index, key in enumerate((
+                            "entity_id", "platform", "config_entry_id", "device_id",
+                            "unique_id", "disabled_by",
+                        ))
+                    }
+                except (IndexError, KeyError, TypeError):
+                    current_identity = None
+            if (
+                binding is not None
+                and isinstance(expected_identity, Mapping)
+                and current_identity == {
+                    key: expected_identity.get(key)
+                    for key in current_identity
+                }
+            ):
+                return native_command_entity(hass, entity_id, operation)
+            return None
+    pattern = {
+        "start": r"switch\..*(?<!dis)charge(?:_\d+)?$",
+        "stop": r"switch\..*(?<!dis)charge(?:_\d+)?$",
+        "rate": r"number\..*(charging_amps|charge_current)(?:_\d+)?$",
+        "limit": r"number\..*charge_limit(?:_\d+)?$",
+    }[operation]
+    return await _get_tesla_ev_entity(hass, pattern, vehicle)
+
+
+async def _tesla_prepare_native_cleanup_handoff(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    params: Mapping[str, Any],
+) -> bool:
+    """Rebind one expired native session for its exact cleanup Stop.
+
+    Finite-session expiry revokes the positive ownership lease before the
+    physical Stop is submitted.  A native session route is intentionally
+    scoped to that lease, so recovery reports ``route_identity_changed`` even
+    though the persisted producer entity is still the exact current vehicle.
+    Establish a short-lived stop-only lease from the already durable finite
+    obligation, rebind that same producer, and let the normal native journal
+    submit the Stop.  This path never creates a positive route or discovers a
+    replacement provider.
+    """
+    if params.get("_ev_cleanup_only") is not True:
+        return False
+    vehicle = str(
+        params.get("vehicle_vin") or params.get("vehicle_id") or ""
+    ).strip().upper()
+    token = params.get("_quick_control_obligation_id")
+    if not vehicle or not isinstance(token, str) or not token:
+        return False
+
+    from .ev_ownership import (
+        claim_ev_ownership,
+        get_ev_ownership,
+        get_ev_quick_control_obligation,
+    )
+    from ..tesla_ev_recovery import (
+        async_rebind_native_session_route,
+        get_vehicle_route,
+    )
+
+    # The cleanup lease and journal route belong to one live PowerSync
+    # runtime generation.  A durable rebind awaits the sidecar Store; if the
+    # entry is reloaded during that await, the replacement runtime must never
+    # inherit this callback's lease or be mutated by its release path.
+    runtime_store = hass.data.get(DOMAIN, {})
+    original_runtime = (
+        runtime_store.get(entry.entry_id)
+        if isinstance(runtime_store, Mapping)
+        else None
+    )
+    if not isinstance(original_runtime, dict):
+        return False
+
+    def runtime_current() -> bool:
+        current_store = hass.data.get(DOMAIN, {})
+        return (
+            isinstance(current_store, Mapping)
+            and current_store.get(entry.entry_id) is original_runtime
+        )
+
+    # A replacement owner must win over an old finite-session cleanup.  This
+    # check and the synchronous claim below have no await between them, so a
+    # concurrent replacement cannot be overwritten in this event-loop turn.
+    _lease_id, current_owner = get_ev_ownership(hass, entry, vehicle)
+    if current_owner is not None:
+        return False
+    obligation = get_ev_quick_control_obligation(hass, entry, vehicle)
+    if not isinstance(obligation, Mapping) or obligation.get("obligation_id") != token:
+        return False
+    original_params = obligation.get("params")
+    binding_params = (
+        {**original_params, "vehicle_vin": vehicle}
+        if isinstance(original_params, Mapping)
+        else dict(params)
+    )
+    if not _tesla_quick_control_binding_current(hass, entry, binding_params):
+        return False
+
+    route = get_vehicle_route(hass, entry, vehicle)
+    if not isinstance(route, Mapping) or route.get("kind") != "blocked":
+        return False
+    if route.get("reason") != "route_identity_changed":
+        return False
+    entity_id = str(route.get("entity_id") or "")
+    expected_identity = route.get("entity_identity")
+    if not entity_id or not isinstance(expected_identity, Mapping):
+        return False
+    # Recovery performs the same identity checks while rebinding.  Keep this
+    # action-side check explicit so a malformed blocked route cannot create a
+    # cleanup lease at all.
+    if _tesla_native_binding(hass, entity_id, vehicle) is None:
+        return False
+
+    cleanup_lease = claim_ev_ownership(
+        hass,
+        entry,
+        vehicle,
+        owner_mode="tesla_cleanup",
+        session_id=f"cleanup:{token}",
+        reason="Finite Tesla cleanup Stop",
+        command="stop",
+        success=False,
+        extra={
+            "charger_type": "tesla",
+            "quick_control": True,
+            "_ev_cleanup_only": True,
+            "_quick_control_obligation_id": token,
+        },
+    )
+
+    def release_claim() -> None:
+        if not runtime_current():
+            return
+        _lease_id, current = get_ev_ownership(hass, entry, vehicle)
+        if current is cleanup_lease:
+            from .ev_ownership import release_ev_ownership
+
+            release_ev_ownership(
+                hass,
+                entry,
+                vehicle,
+                reason="Native cleanup producer handoff rejected",
+                command="cleanup_route_release",
+                success=False,
+            )
+
+    rebound = False
+    try:
+        rebound = await async_rebind_native_session_route(
+            hass,
+            entry,
+            vehicle,
+            entity_id=entity_id,
+            expected_identity=expected_identity,
+            mode="cleanup_stop",
+        )
+    except asyncio.CancelledError:
+        release_claim()
+        raise
+    except Exception:
+        rebound = False
+    if not rebound:
+        # Release only our exact temporary lease.  A replacement cannot be
+        # cleared after the awaited rebind returns.
+        release_claim()
+        return False
+    if not runtime_current():
+        # async_rebind_native_session_route may have completed its old-runtime
+        # Store write just as setup replaced the entry runtime.  Its route is
+        # inert now; do not inspect or release a lease in the replacement.
+        return False
+    # The journal rebind awaited durable storage.  Revalidate the exact
+    # obligation, original producer binding, and registry identity before
+    # exposing the route to the command dispatcher; a reload/replacement
+    # during that await must leave the cleanup blocked.
+    current_obligation = get_ev_quick_control_obligation(hass, entry, vehicle)
+    current_obligation_params = (
+        current_obligation.get("params")
+        if isinstance(current_obligation, Mapping)
+        else None
+    )
+    if (
+        not runtime_current()
+        or get_ev_ownership(hass, entry, vehicle)[1] is not cleanup_lease
+        or not isinstance(current_obligation, Mapping)
+        or current_obligation.get("obligation_id") != token
+        or not isinstance(current_obligation_params, Mapping)
+        or current_obligation_params.get("_quick_control_binding")
+        != binding_params.get("_quick_control_binding")
+        or not _tesla_quick_control_binding_current(
+            hass, entry, binding_params
+        )
+        or _tesla_native_binding_identity(
+            _tesla_native_binding(hass, entity_id, vehicle)
+        )
+        != {
+            key: expected_identity.get(key)
+            for key in (
+                "entity_id",
+                "platform",
+                "config_entry_id",
+                "device_id",
+                "unique_id",
+                "disabled_by",
+            )
+        }
+    ):
+        release_claim()
+        return False
+    # The marker is request-local and never enters the durable obligation.
+    # _action_stop_ev_charging releases it after the native mutation attempt.
+    if isinstance(params, dict):
+        params["_tesla_native_cleanup_lease"] = cleanup_lease
+        params["_tesla_native_cleanup_runtime"] = original_runtime
+        params["_tesla_native_cleanup_entity_id"] = entity_id
+        original_binding = binding_params.get("_quick_control_binding")
+        if isinstance(original_binding, Mapping):
+            params["_quick_control_binding"] = dict(original_binding)
+    return True
+
+
+def _tesla_release_native_cleanup_handoff(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    params: Mapping[str, Any],
+    *,
+    success: bool = False,
+) -> None:
+    """Release the exact temporary cleanup lease without touching replacements."""
+    lease = params.pop("_tesla_native_cleanup_lease", None) if isinstance(params, dict) else None
+    runtime_marker = (
+        params.pop("_tesla_native_cleanup_runtime", None)
+        if isinstance(params, dict)
+        else None
+    )
+    if lease is None:
+        return
+    vehicle = str(params.get("vehicle_vin") or params.get("vehicle_id") or "").strip().upper()
+    if not vehicle:
+        return
+    from .ev_ownership import get_ev_ownership, release_ev_ownership
+
+    current_runtime = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    if runtime_marker is not None and current_runtime is not runtime_marker:
+        return
+    _lease_id, current = get_ev_ownership(hass, entry, vehicle)
+    if current is lease:
+        release_ev_ownership(
+            hass,
+            entry,
+            vehicle,
+            reason="Native cleanup Stop submitted",
+            command="cleanup_route_release",
+            success=success,
+        )
 
 
 async def execute_actions(
@@ -5235,6 +9651,10 @@ async def _action_start_ev_charging(
     Parameters:
         stop_outside_window: If True, schedule charging to stop at end of time window
     """
+    # A controller may retain its params dictionary for a later retry.  The
+    # stock-reset hook is one-shot for this concrete positive action, not for
+    # the whole managed plan; route-internal retries retain the marker.
+    params.pop("_tesla_stock_recovery_attempted", None)
     charger_type = params.get("charger_type", "tesla")
 
     if charger_type == "tesla" and not params.get("vehicle_vin") and params.get(
@@ -5372,6 +9792,39 @@ async def _action_start_ev_charging(
     vehicle_vin = params.get("vehicle_vin")
     ble_prefix = _resolve_ble_prefix_for_vehicle(hass, config_entry, vehicle_vin)
     stop_outside_window = params.get("stop_outside_window", False)
+    request_authority = _tesla_transport_authority(
+        hass, config_entry, params, operation="start"
+    )
+    route = await _tesla_transport_route(hass, config_entry, params, "start")
+    if not request_authority():
+        return False
+    recovering_route = route and route.get("kind") in {"blocked", "ha"}
+    if recovering_route or params.get("_tesla_plan_recovery_attempt"):
+        # A previous local command may already have taken effect. Reconcile
+        # physical state before issuing another Start, even after isolation.
+        observation = await _fresh_tesla_command_observation(
+            hass, config_entry, vehicle_vin, params)
+        observed = _tesla_observed_command_state(observation)
+        if not request_authority():
+            return None
+        if observed == "charging":
+            params["_tesla_start_observation"] = observation
+            return True
+        observation, observed, recovery_ok = await _tesla_recovery_wake_read_if_missing(
+            hass, config_entry, vehicle_vin, params, route, request_authority,
+            observation, observed,
+        )
+        if not recovery_ok:
+            params["_tesla_transport_recovery_pending"] = True
+            return None
+        if observed == "charging":
+            params["_tesla_start_observation"] = observation
+            return True
+        if (route and route.get("kind") == "blocked") or observed != "stopped":
+            params["_tesla_transport_recovery_pending"] = True
+            return None
+    if route and route.get("kind") == "ha" and ev_provider == EV_PROVIDER_BOTH:
+        ev_provider = EV_PROVIDER_FLEET_API
 
     # Get time window from context
     time_window_start = context.get("time_window_start") if context else None
@@ -5385,50 +9838,71 @@ async def _action_start_ev_charging(
         if _is_ble_available(hass, ble_prefix):
             hass.data.setdefault(DOMAIN, {}).setdefault("_ev_ble_start_dispatched_at", {}).pop(ble_prefix, None)
             command_started_at = datetime.now(dt_timezone.utc)
-            result = await _start_ev_charging_ble(
-                hass,
-                ble_prefix,
-                allow_backoff=not bool(params.get("_user_initiated")),
-            )
+            result, fallback_ready = await _run_ble_transport_command(
+                hass, config_entry, params, ble_prefix, "start",
+                lambda: _run_tesla_legacy_with_authority(
+                    request_authority,
+                    lambda: _start_ev_charging_ble(
+                        hass,
+                        ble_prefix,
+                        allow_backoff=not bool(params.get("_user_initiated")),
+                    ),
+                    hass=hass,
+                    entity_ids=(TESLA_BLE_SWITCH_CHARGER.format(prefix=ble_prefix),),
+                ))
             if result is None:
-                # A sent BLE command can start charging after its local
-                # readback times out. Settle it through the existing VIN-scoped
-                # confirmation/compensation path, never a second start provider.
-                command_started_at = hass.data.get(DOMAIN, {}).get(
-                    "_ev_ble_start_dispatched_at", {}
-                ).get(ble_prefix, command_started_at)
-                # Rebaseline after the local wait: a value that merely
-                # appeared while waking is not proof of the later start write.
-                baseline = _tesla_physical_charging_snapshot(
-                    hass, config_entry, vehicle_vin, params
-                )
-                stop_params = {
-                    **params, "vehicle_vin": vehicle_vin,
-                    "_force_tesla_stop_request": True,
-                }
+                if not request_authority():
+                    return None
                 try:
-                    # Dynamic sessions normally apply their initial rate after
-                    # start. A car with a zero prior rate needs that permitted
-                    # target before physical draw can be confirmed here.
-                    if params.get("amps") is not None:
-                        await _action_set_ev_charging_amps(hass, config_entry, params)
-                    confirmed, evidence = await _wait_for_tesla_physical_start(
-                        hass, config_entry, vehicle_vin, params,
-                        baseline, command_started_at,
-                    )
+                    observation = await _fresh_tesla_command_observation(
+                        hass, config_entry, vehicle_vin, params)
                 except asyncio.CancelledError:
                     await asyncio.shield(_action_stop_ev_charging(
-                        hass, config_entry, stop_params
-                    ))
+                        hass, config_entry, {**params, "_force_tesla_stop_request": True}))
                     raise
-                if not confirmed:
-                    stopped = await _action_stop_ev_charging(hass, config_entry, stop_params)
-                    _LOGGER.warning(
-                        "Tesla BLE start unconfirmed (%s); exact-vehicle compensating stop accepted=%s",
-                        evidence, stopped,
+                if not request_authority():
+                    return None
+                observed = _tesla_observed_command_state(observation)
+                if observed == "charging":
+                    params["_tesla_start_observation"] = observation
+                    result = True
+                elif fallback_ready:
+                    # Isolation may have completed during this request. Re-pin
+                    # the exact HA fallback before attempting its read/wake
+                    # recovery; never continue with a stale pre-isolation
+                    # route or use Charge as a wake probe.
+                    route = await _tesla_transport_route(
+                        hass, config_entry, params, "start"
                     )
-                    return False
-                result = True
+                    if not route or route.get("kind") != "ha":
+                        params["_tesla_transport_recovery_pending"] = True
+                        return None
+                    observation, observed, recovery_ok = (
+                        await _tesla_recovery_wake_read_if_missing(
+                            hass, config_entry, vehicle_vin, params, route,
+                            request_authority, observation, observed,
+                        )
+                    )
+                    if not request_authority():
+                        return None
+                    if not recovery_ok:
+                        params["_tesla_transport_recovery_pending"] = True
+                        return None
+                    if observed == "charging":
+                        params["_tesla_start_observation"] = observation
+                        result = True
+                    elif observed == "stopped":
+                        # The failed producer is durably isolated. Preserve
+                        # the plan and continue through the configured HA
+                        # integration after exact-source recovery.
+                        ev_provider = EV_PROVIDER_FLEET_API
+                        result = False
+                    else:
+                        params["_tesla_transport_recovery_pending"] = True
+                        return None
+                else:
+                    params["_tesla_transport_recovery_pending"] = True
+                    return None
             if result:
                 charging_started = True
             elif ev_provider == EV_PROVIDER_TESLA_BLE:
@@ -5437,14 +9911,32 @@ async def _action_start_ev_charging(
     # Teslemetry Bluetooth is the next local fallback. Its entity prefix is a
     # VIN, so never apply one vehicle's bridge to a different requested VIN.
     if not charging_started and ev_provider in (EV_PROVIDER_TESLEMETRY_BT, EV_PROVIDER_BOTH):
-        tbt_prefix = _resolve_teslemetry_bt_prefix(hass)
-        tbt_matches_vehicle = (
-            not vehicle_vin
-            or not (len(vehicle_vin) == 17 and vehicle_vin.isalnum())
-            or str(tbt_prefix or "").lower() == vehicle_vin.lower()
-        )
-        if tbt_matches_vehicle and _is_teslemetry_bt_available(hass, tbt_prefix):
-            result = await _start_ev_charging_teslemetry_bt(hass, tbt_prefix)
+        if not request_authority():
+            return None
+        found, result = await _run_modern_teslemetry_bluetooth(
+            hass, config_entry, params, "start")
+        if found and result is None:
+            return None
+        if found and result:
+            charging_started = True
+        elif found and ev_provider == EV_PROVIDER_TESLEMETRY_BT:
+            return False
+        tbt_prefix = _resolve_teslemetry_bt_prefix_for_vehicle(hass, config_entry, vehicle_vin)
+        if (not charging_started and not params.get("_tesla_native_router_selected")
+                and _is_teslemetry_bt_available(hass, tbt_prefix)):
+            result, _ = await _run_teslemetry_bt_transport_command(
+                hass,
+                config_entry,
+                params,
+                tbt_prefix,
+                "start",
+                lambda: _run_tesla_legacy_with_authority(
+                    request_authority,
+                    lambda: _start_ev_charging_teslemetry_bt(hass, tbt_prefix),
+                    hass=hass,
+                    entity_ids=(TESLEMETRY_BT_SWITCH_CHARGE.format(prefix=tbt_prefix),),
+                ),
+            )
             if result:
                 charging_started = True
             elif ev_provider == EV_PROVIDER_TESLEMETRY_BT:
@@ -5453,11 +9945,7 @@ async def _action_start_ev_charging(
     # Use Fleet API
     if not charging_started and ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH):
         # Tesla Fleet uses switch.X_charge, not button.X_charge_start
-        charge_switch_entity = await _get_tesla_ev_entity(
-            hass,
-            r"switch\..*(?<!dis)charge(?:_\d+)?$",
-            vehicle_vin
-        )
+        charge_switch_entity = await _tesla_ha_command_entity(hass, config_entry, params, "start")
 
         if not charge_switch_entity:
             _LOGGER.error("Could not find Tesla charge switch entity (switch.*charge)")
@@ -5476,14 +9964,37 @@ async def _action_start_ev_charging(
                 _LOGGER.warning("Wake failed (possibly due to API credits), skipping charge command")
                 return False
 
+            if not request_authority():
+                return None
+            if await _tesla_ha_command_entity(hass, config_entry, params, "start") != charge_switch_entity:
+                return False
             if not await prepare_ev_submission(hass, charge_switch_entity, operation="start"):
                 return False
-            await hass.services.async_call(
+            if not request_authority():
+                return None
+            mutation = await _run_native_tesla_service_command(
+                hass,
+                config_entry,
+                params,
+                "start",
+                charge_switch_entity,
                 "switch",
                 "turn_on",
                 {"entity_id": charge_switch_entity},
-                blocking=True,
+                request_authority,
             )
+            if mutation.outcome == "sent_unknown":
+                _LOGGER.error("Tesla start outcome is unknown for %s: %s", charge_switch_entity, mutation.error)
+                return None
+            if mutation.outcome == "rejected":
+                if getattr(mutation.error, "site_import_admission_denied", False):
+                    raise mutation.error
+                return False
+            if mutation.outcome != "accepted_unconfirmed":
+                return False
+            params["_tesla_command_entity_id"] = charge_switch_entity
+            params["_tesla_start_live_read_required"] = True
+            params["_tesla_allow_plan_recovery"] = True
             _LOGGER.info(f"Started EV charging via {charge_switch_entity}")
             charging_started = True
         except Exception as e:
@@ -5597,6 +10108,9 @@ async def _action_stop_ev_charging(
         charger_type == "tesla"
         and params.get("_force_tesla_stop_request")
     )
+    # This marker is scoped to one Stop request and suppresses provider
+    # fallthrough only after the exact cleanup fallback has handed off.
+    params.pop("_tesla_cleanup_fallback_consumed", None)
 
     # Cancel any scheduled stop
     if not force_tesla_stop_request and entry_id in _ev_scheduled_stop:
@@ -5681,100 +10195,209 @@ async def _action_stop_ev_charging(
         or params.get("manual_stop")
         or params.get("quick_control")
     )
-    charging_entity = await _get_tesla_ev_entity(
-        hass, r"sensor\..*_charging(?:_\d+)?$", vehicle_vin
+    route = await _tesla_transport_route(hass, config_entry, params, "stop")
+    cleanup_authority = _tesla_transport_authority(
+        hass, config_entry, params, cleanup=True, operation="stop"
     )
-    # A cached noncharging state cannot acknowledge an explicit user stop.
-    # Dispatch it and let the actuator result determine success instead.
-    if charging_entity and not force_tesla_stop_request and not user_initiated:
-        charging_state = hass.states.get(charging_entity)
-        if charging_state and charging_state.state not in ("unavailable", "unknown"):
-            state_lower = charging_state.state.lower()
-            if state_lower and state_lower != "charging":
-                if params.get("stop_untracked"):
-                    _LOGGER.info(
-                        "EV charging state is %s, but independent charging "
-                        "detection requested an untracked stop; sending the "
-                        "stop command",
-                        state_lower,
-                    )
-                else:
-                    _LOGGER.info(
-                        "EV is not charging (state: %s) - treating stop as complete",
-                        state_lower,
-                    )
-                    return True
-
-    # Prefer the free, explicitly paired ESPHome BLE control path.
-    if ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
-        if _is_ble_available(hass, ble_prefix):
-            # An explicit user stop must always attempt the wake: the shared
-            # failed-bridge backoff is armed by the automatic surplus loop and
-            # would otherwise discard the command before dispatch.
-            result = await _stop_ev_charging_ble(
-                hass, ble_prefix, allow_backoff=not user_initiated
+    if route and route.get("kind") == "ha" and ev_provider == EV_PROVIDER_BOTH:
+        ev_provider = EV_PROVIDER_FLEET_API
+    native_cleanup_handoff = False
+    if (
+        ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH)
+        and params.get("_ev_cleanup_only") is True
+    ):
+        native_cleanup_handoff = await _tesla_prepare_native_cleanup_handoff(
+            hass, config_entry, params
+        )
+        if native_cleanup_handoff:
+            # The handoff claims a temporary negative-only lease after the
+            # outer action admission. Reacquire the cleanup authority against
+            # that current runtime/lease before the provider handover.
+            cleanup_authority = _tesla_transport_authority(
+                hass, config_entry, params, cleanup=True, operation="stop"
             )
-            if result or ev_provider == EV_PROVIDER_TESLA_BLE:
-                return result
-
-    # Teslemetry Bluetooth is the next local, vehicle-specific fallback.
-    if ev_provider in (EV_PROVIDER_TESLEMETRY_BT, EV_PROVIDER_BOTH):
-        tbt_prefix = _resolve_teslemetry_bt_prefix(hass)
-        tbt_matches_vehicle = (
-            not vehicle_vin
-            or not (len(vehicle_vin) == 17 and vehicle_vin.isalnum())
-            or str(tbt_prefix or "").lower() == vehicle_vin.lower()
-        )
-        if tbt_matches_vehicle and _is_teslemetry_bt_available(hass, tbt_prefix):
-            result = await _stop_ev_charging_teslemetry_bt(hass, tbt_prefix)
-            if result or ev_provider == EV_PROVIDER_TESLEMETRY_BT:
-                return result
-
-    # Use Fleet API
-    if ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH):
-        # Check API credits before attempting
-        if not _is_api_credit_available("teslemetry"):
-            _LOGGER.warning("Skipping EV charging stop - API credits exhausted, in cooldown period")
-            return False
-
-        # Tesla Fleet uses switch.X_charge, not button.X_charge_stop
-        charge_switch_entity = await _get_tesla_ev_entity(
-            hass,
-            r"switch\..*(?<!dis)charge(?:_\d+)?$",
-            vehicle_vin
-        )
-
-        if not charge_switch_entity:
-            _LOGGER.error("Could not find Tesla charge switch entity (switch.*charge)")
-            return False
-
+            # A successful handoff is an exact native-producer cleanup scope.
+            # Do not allow a Both-mode request to revisit BLE/Teslemetry-BT
+            # merely because the pre-rebind route snapshot was generic.
+            ev_provider = EV_PROVIDER_FLEET_API
+            route = {
+                "kind": "ha",
+                "entity_id": params.get("_tesla_native_cleanup_entity_id"),
+            }
+    async def _dispatch_post_native_handoff() -> bool:
         try:
-            wake_success = await _wake_tesla_ev_for_command(
-                hass, vehicle_vin, charge_switch_entity
+            charging_entity = await _get_tesla_ev_entity(
+                hass, r"sensor\..*_charging(?:_\d+)?$", vehicle_vin
             )
-            if not wake_success:
-                _LOGGER.warning("Wake failed (possibly due to API credits), skipping stop charge command")
+        except BaseException:
+            raise
+        # A cached noncharging state cannot acknowledge an explicit user stop.
+        # Dispatch it and let the actuator result determine success instead.
+        if charging_entity and route is None and not force_tesla_stop_request and not user_initiated:
+            charging_state = hass.states.get(charging_entity)
+            if charging_state and charging_state.state not in ("unavailable", "unknown"):
+                state_lower = charging_state.state.lower()
+                if state_lower and state_lower != "charging":
+                    if params.get("stop_untracked"):
+                        _LOGGER.info(
+                            "EV charging state is %s, but independent charging "
+                            "detection requested an untracked stop; sending the "
+                            "stop command",
+                            state_lower,
+                        )
+                    else:
+                        _LOGGER.info(
+                            "EV is not charging (state: %s) - treating stop as complete",
+                            state_lower,
+                        )
+                        return True
+
+        # Prefer the free, explicitly paired ESPHome BLE control path.
+        if ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
+            local_control = hass.states.get(f"switch.{ble_prefix}_ble_connection")
+            strict_cleanup = (ev_provider == EV_PROVIDER_TESLA_BLE
+                and route is not None and (local_control is None or local_control.state != "off")
+                and hass.states.get(TESLA_BLE_SWITCH_CHARGER.format(prefix=ble_prefix)) is not None)
+            # A known route/incident is also an owned negative cleanup scope.  It
+            # may use the exact charger Stop even when the optional connection
+            # switch is off or unavailable; positive wake/mutations remain gated.
+            owned_cleanup = (
+                route is not None
+                and hass.states.get(TESLA_BLE_SWITCH_CHARGER.format(prefix=ble_prefix))
+                is not None
+            )
+            if _is_ble_available(hass, ble_prefix) or strict_cleanup or owned_cleanup:
+                # An explicit user stop must always attempt the wake: the shared
+                # failed-bridge backoff is armed by the automatic surplus loop and
+                # would otherwise discard the command before dispatch.
+                cleanup_token = _tesla_ble_cleanup_without_session.set(route is not None)
+                try:
+                    result, _ = await _run_ble_transport_command(
+                        hass, config_entry, params, ble_prefix, "stop",
+                        lambda: _run_tesla_legacy_with_authority(
+                            cleanup_authority,
+                            lambda: _stop_ev_charging_ble(
+                                hass,
+                                ble_prefix,
+                                allow_backoff=not user_initiated,
+                            ),
+                            hass=hass,
+                            entity_ids=(TESLA_BLE_SWITCH_CHARGER.format(prefix=ble_prefix),),
+                        ),
+                    )
+                finally:
+                    _tesla_ble_cleanup_without_session.reset(cleanup_token)
+                if params.get("_tesla_cleanup_fallback_consumed"):
+                    return None
+                if result or ev_provider == EV_PROVIDER_TESLA_BLE:
+                    return result
+
+        # Teslemetry Bluetooth is the next local, vehicle-specific fallback.
+        if ev_provider in (EV_PROVIDER_TESLEMETRY_BT, EV_PROVIDER_BOTH):
+            found, result = await _run_modern_teslemetry_bluetooth(hass, config_entry, params, "stop")
+            if params.get("_tesla_cleanup_fallback_consumed"):
+                return None
+            if found and (result or ev_provider == EV_PROVIDER_TESLEMETRY_BT):
+                return result
+            tbt_prefix = _resolve_teslemetry_bt_prefix_for_vehicle(hass, config_entry, vehicle_vin)
+            if not params.get("_tesla_native_router_selected") and _is_teslemetry_bt_available(hass, tbt_prefix):
+                result, _ = await _run_teslemetry_bt_transport_command(
+                    hass,
+                    config_entry,
+                    params,
+                    tbt_prefix,
+                    "stop",
+                    lambda: _run_tesla_legacy_with_authority(
+                    cleanup_authority,
+                    lambda: _stop_ev_charging_teslemetry_bt(hass, tbt_prefix),
+                    hass=hass,
+                    entity_ids=(TESLEMETRY_BT_SWITCH_CHARGE.format(prefix=tbt_prefix),),
+                    ),
+                )
+                if params.get("_tesla_cleanup_fallback_consumed"):
+                    return None
+                if result or ev_provider == EV_PROVIDER_TESLEMETRY_BT:
+                    return result
+
+        # Use Fleet API
+        if ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH):
+            # Check API credits before attempting
+            if not _is_api_credit_available("teslemetry"):
+                _LOGGER.warning("Skipping EV charging stop - API credits exhausted, in cooldown period")
                 return False
 
-            await hass.services.async_call(
-                "switch",
-                "turn_off",
-                {"entity_id": charge_switch_entity},
-                blocking=True,
+            # Tesla Fleet uses switch.X_charge, not button.X_charge_stop
+            try:
+                charge_switch_entity = await _tesla_ha_command_entity(
+                    hass, config_entry, params, "stop"
+                )
+            except BaseException:
+                raise
+
+            if not charge_switch_entity:
+                _LOGGER.error("Could not find Tesla charge switch entity (switch.*charge)")
+                return False
+
+            mutation = None
+            try:
+                # The official Fleet Charge switch owns its own wake-up.  A
+                # separate metadata refresh can fail while the registered command
+                # entity remains valid, which must not veto cleanup Stop.  Keep the
+                # existing preparation for non-Fleet providers.
+                command_registration = er.async_get(hass).entities.get(charge_switch_entity)
+                if getattr(command_registration, "platform", None) != "tesla_fleet":
+                    wake_success = await _wake_tesla_ev_for_command(
+                        hass, vehicle_vin, charge_switch_entity
+                    )
+                    if not wake_success:
+                        _LOGGER.warning("Wake failed (possibly due to API credits), skipping stop charge command")
+                        return False
+
+                if await _tesla_ha_command_entity(
+                    hass, config_entry, params, "stop"
+                ) != charge_switch_entity:
+                    return False
+                mutation = await _run_native_tesla_service_command(
+                    hass,
+                    config_entry,
+                    params,
+                    "stop",
+                    charge_switch_entity,
+                    "switch",
+                    "turn_off",
+                    {"entity_id": charge_switch_entity},
+                    cleanup_authority,
+                )
+                if mutation.outcome == "sent_unknown":
+                    _LOGGER.error("Tesla stop outcome is unknown for %s: %s", charge_switch_entity, mutation.error)
+                    return None
+                if mutation.outcome == "rejected":
+                    if getattr(mutation.error, "site_import_admission_denied", False):
+                        raise mutation.error
+                    return False
+                if mutation.outcome != "accepted_unconfirmed":
+                    return False
+                _LOGGER.info(f"Stopped EV charging via {charge_switch_entity}")
+                return True
+            except Exception as e:
+                _LOGGER.error(f"Failed to stop EV charging: {e}")
+                _record_tesla_manual_key_failure(params, e)
+
+                # Check if this is a credit/payment error
+                if _is_api_credit_error(str(e)):
+                    _mark_api_credits_exhausted("teslemetry")
+
+                return False
+
+        return False
+    try:
+        return await _dispatch_post_native_handoff()
+    finally:
+        if native_cleanup_handoff:
+            _tesla_release_native_cleanup_handoff(
+                hass, config_entry, params
             )
-            _LOGGER.info(f"Stopped EV charging via {charge_switch_entity}")
-            return True
-        except Exception as e:
-            _LOGGER.error(f"Failed to stop EV charging: {e}")
-            _record_tesla_manual_key_failure(params, e)
 
-            # Check if this is a credit/payment error
-            if _is_api_credit_error(str(e)):
-                _mark_api_credits_exhausted("teslemetry")
-
-            return False
-
-    return False
 
 
 @guard_ev_control
@@ -5787,6 +10410,7 @@ async def _action_set_ev_charge_limit(
     Set EV charge limit percentage via Tesla Fleet/Teslemetry or Tesla BLE.
     OCPP, generic, and Zaptec chargers don't support vehicle charge limits — returns True (no-op).
     """
+    params.pop("_tesla_stock_recovery_attempted", None)
     charger_type = params.get("charger_type", "tesla")
     if charger_type in ("ocpp", "generic", "zaptec"):
         _LOGGER.info("set_ev_charge_limit: not supported for %s chargers (no-op)", charger_type)
@@ -5796,6 +10420,9 @@ async def _action_set_ev_charge_limit(
     ev_provider = ev_config["ev_provider"]
     vehicle_vin = params.get("vehicle_vin")
     ble_prefix = _resolve_ble_prefix_for_vehicle(hass, config_entry, vehicle_vin)
+    request_authority = _tesla_transport_authority(
+        hass, config_entry, params, operation="limit"
+    )
 
     # Accept multiple parameter names for flexibility
     percent = params.get("percent") or params.get("limit") or params.get("charge_limit_percent")
@@ -5806,34 +10433,50 @@ async def _action_set_ev_charge_limit(
     # Clamp to valid range (50-100%)
     percent = max(50, min(100, int(percent)))
 
-    # Teslemetry BT doesn't support charge limit — skip to BLE/Fleet API
+    route = await _tesla_transport_route(hass, config_entry, params, "limit")
+    if route and route.get("kind") == "blocked":
+        return None
+    if route and route.get("kind") == "ha" and ev_provider == EV_PROVIDER_BOTH:
+        ev_provider = EV_PROVIDER_FLEET_API
 
     # Try ESPHome BLE if configured
     if ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
         if _is_ble_available(hass, ble_prefix):
-            result = await _set_ev_charge_limit_ble(
-                hass,
-                ble_prefix,
-                percent,
-                allow_backoff=not bool(params.get("_user_initiated")),
+            result, fallback_ready = await _run_ble_transport_command(hass, config_entry, params,
+                ble_prefix, "limit", lambda: _run_tesla_legacy_with_authority(
+                    request_authority,
+                    lambda: _set_ev_charge_limit_ble(
+                        hass,
+                        ble_prefix,
+                        percent,
+                        allow_backoff=not bool(params.get("_user_initiated")),
+                    ),
+                    hass=hass,
+                    entity_ids=(TESLA_BLE_NUMBER_CHARGING_LIMIT.format(prefix=ble_prefix),),
+                ),
+                effect_bound={"kind": "limit", "min_percent": percent, "max_percent": percent},
             )
-            if result is None:
-                return False
+            if result is None and not fallback_ready:
+                return None
+            if result is None and fallback_ready:
+                ev_provider = EV_PROVIDER_FLEET_API
             if result or ev_provider == EV_PROVIDER_TESLA_BLE:
                 return result
 
-    # Use Fleet API (also fallback for Teslemetry BT which lacks charge limit)
+    if ev_provider in (EV_PROVIDER_TESLEMETRY_BT, EV_PROVIDER_BOTH):
+        found, result = await _run_modern_teslemetry_bluetooth(
+            hass, config_entry, params, "limit", percent)
+        if found and (result is not False or ev_provider == EV_PROVIDER_TESLEMETRY_BT):
+            return result
+
+    # Legacy Tesla Bluetooth lacks charge-limit control; keep its HA exception.
     if ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_TESLEMETRY_BT, EV_PROVIDER_BOTH):
         # Check API credits before attempting
         if not _is_api_credit_available("teslemetry"):
             _LOGGER.debug("Skipping set EV charge limit - API credits exhausted, in cooldown period")
             return False
 
-        charge_limit_entity = await _get_tesla_ev_entity(
-            hass,
-            r"number\..*charge_limit(?:_\d+)?$",
-            vehicle_vin
-        )
+        charge_limit_entity = await _tesla_ha_command_entity(hass, config_entry, params, "limit")
 
         if not charge_limit_entity:
             _LOGGER.error("Could not find Tesla charge_limit number entity")
@@ -5847,12 +10490,29 @@ async def _action_set_ev_charge_limit(
                 _LOGGER.debug("Wake failed (possibly due to API credits), skipping set charge limit command")
                 return False
 
-            await hass.services.async_call(
+            if (not request_authority() or await _tesla_ha_command_entity(
+                    hass, config_entry, params, "limit") != charge_limit_entity):
+                return False
+            mutation = await _run_native_tesla_service_command(
+                hass,
+                config_entry,
+                params,
+                "limit",
+                charge_limit_entity,
                 "number",
                 "set_value",
                 {"entity_id": charge_limit_entity, "value": percent},
-                blocking=True,
+                request_authority,
             )
+            if mutation.outcome == "sent_unknown":
+                _LOGGER.error("Tesla charge-limit outcome is unknown for %s: %s", charge_limit_entity, mutation.error)
+                return None
+            if mutation.outcome == "rejected":
+                if getattr(mutation.error, "site_import_admission_denied", False):
+                    raise mutation.error
+                return False
+            if mutation.outcome != "accepted_unconfirmed":
+                return False
             _LOGGER.info(f"Set EV charge limit to {percent}% via {charge_limit_entity}")
             return True
         except Exception as e:
@@ -5876,6 +10536,7 @@ async def _action_set_ev_charging_amps(
     """
     Set EV charging amperage via Tesla, OCPP, generic, or Zaptec charger.
     """
+    params.pop("_tesla_stock_recovery_attempted", None)
     # Accept both "amps" and "charging_amps" for flexibility. Preserve 0A
     # values for charger APIs that use amps=0 as a pause/stop command.
     amps = params.get("amps")
@@ -5933,6 +10594,9 @@ async def _action_set_ev_charging_amps(
     ev_provider = ev_config["ev_provider"]
     vehicle_vin = params.get("vehicle_vin")
     ble_prefix = _resolve_ble_prefix_for_vehicle(hass, config_entry, vehicle_vin)
+    request_authority = _tesla_transport_authority(
+        hass, config_entry, params, operation="rate"
+    )
     configured_max_amps = _coerce_positive_int(params.get("max_charge_amps"))
     allow_stale_entity_max_override = bool(
         params.get("allow_stale_entity_max_override")
@@ -5945,20 +10609,44 @@ async def _action_set_ev_charging_amps(
     if configured_max_amps is not None:
         amps = min(configured_max_amps, amps)
 
+    route = await _tesla_transport_route(hass, config_entry, params, "rate")
+    if route and route.get("kind") == "blocked":
+        return None
+    if route and route.get("kind") == "ha" and ev_provider == EV_PROVIDER_BOTH:
+        ev_provider = EV_PROVIDER_FLEET_API
+
     # Prefer the free, explicitly paired ESPHome BLE control path.
     if ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
         if _is_ble_available(hass, ble_prefix):
-            result = await _set_ev_charging_amps_ble(
+            ble_amps_entity = TESLA_BLE_NUMBER_CHARGING_AMPS.format(prefix=ble_prefix)
+            ble_effect_bound = _tesla_ble_rate_effect_bound(
                 hass,
-                ble_prefix,
+                ble_amps_entity,
                 amps,
                 allow_stale_entity_max_override=allow_stale_entity_max_override,
                 configured_max_amps=configured_max_amps,
-                params=params,
-                allow_backoff=not bool(params.get("_user_initiated")),
             )
-            if result is None:
-                return False
+            result, fallback_ready = await _run_ble_transport_command(hass, config_entry, params,
+                ble_prefix, "rate", lambda: _run_tesla_legacy_with_authority(
+                    request_authority,
+                    lambda: _set_ev_charging_amps_ble(
+                        hass,
+                        ble_prefix,
+                        amps,
+                        allow_stale_entity_max_override=allow_stale_entity_max_override,
+                        configured_max_amps=configured_max_amps,
+                        params=params,
+                        allow_backoff=not bool(params.get("_user_initiated")),
+                    ),
+                    hass=hass,
+                    entity_ids=(ble_amps_entity,),
+                ),
+                effect_bound=ble_effect_bound,
+            )
+            if result is None and not fallback_ready:
+                return None
+            if result is None and fallback_ready:
+                ev_provider = EV_PROVIDER_FLEET_API
             range_fallback_applied = (
                 params.get("_tesla_entity_range_fallback_amps") is not None
             )
@@ -5979,20 +10667,33 @@ async def _action_set_ev_charging_amps(
 
     # Teslemetry Bluetooth is the next local, vehicle-specific fallback.
     if ev_provider in (EV_PROVIDER_TESLEMETRY_BT, EV_PROVIDER_BOTH):
-        tbt_prefix = _resolve_teslemetry_bt_prefix(hass)
-        tbt_matches_vehicle = (
-            not vehicle_vin
-            or not (len(vehicle_vin) == 17 and vehicle_vin.isalnum())
-            or str(tbt_prefix or "").lower() == vehicle_vin.lower()
-        )
-        if tbt_matches_vehicle and _is_teslemetry_bt_available(hass, tbt_prefix):
-            result = await _set_ev_charging_amps_teslemetry_bt(
+        found, result = await _run_modern_teslemetry_bluetooth(hass, config_entry, params, "rate", amps)
+        if found and (result is not False or ev_provider == EV_PROVIDER_TESLEMETRY_BT):
+            return result
+        tbt_prefix = _resolve_teslemetry_bt_prefix_for_vehicle(hass, config_entry, vehicle_vin)
+        if not params.get("_tesla_native_router_selected") and _is_teslemetry_bt_available(hass, tbt_prefix):
+            result, _ = await _run_teslemetry_bt_transport_command(
                 hass,
+                config_entry,
+                params,
                 tbt_prefix,
-                amps,
-                allow_stale_entity_max_override=allow_stale_entity_max_override,
-                configured_max_amps=configured_max_amps,
-                params=params,
+                "rate",
+                lambda: _run_tesla_legacy_with_authority(
+                    request_authority,
+                    lambda: _set_ev_charging_amps_teslemetry_bt(
+                        hass,
+                        tbt_prefix,
+                        amps,
+                        allow_stale_entity_max_override=allow_stale_entity_max_override,
+                        configured_max_amps=configured_max_amps,
+                        params=params,
+                    ),
+                    hass=hass,
+                    entity_ids=(
+                        TESLEMETRY_BT_SWITCH_CHARGE.format(prefix=tbt_prefix),
+                        TESLEMETRY_BT_NUMBER_CHARGE_AMPS.format(prefix=tbt_prefix),
+                    ),
+                ),
             )
             range_fallback_applied = (
                 params.get("_tesla_entity_range_fallback_amps") is not None
@@ -6020,11 +10721,7 @@ async def _action_set_ev_charging_amps(
             return False
 
         # Tesla Fleet uses charge_current, some versions use charging_amps
-        charging_amps_entity = await _get_tesla_ev_entity(
-            hass,
-            r"number\..*(charging_amps|charge_current)(?:_\d+)?$",
-            vehicle_vin
-        )
+        charging_amps_entity = await _tesla_ha_command_entity(hass, config_entry, params, "rate")
 
         if not charging_amps_entity:
             _LOGGER.error("Could not find Tesla charge_current/charging_amps number entity")
@@ -6090,14 +10787,84 @@ async def _action_set_ev_charging_amps(
                 )
                 return False
 
+            if (not request_authority() or await _tesla_ha_command_entity(
+                    hass, config_entry, params, "rate") != charging_amps_entity):
+                return False
             if not await prepare_ev_submission(hass, charging_amps_entity, operation="rate", amps=amps):
                 return False
-            await hass.services.async_call(
+            if not request_authority():
+                return False
+            mutation = await _run_native_tesla_service_command(
+                hass,
+                config_entry,
+                params,
+                "rate",
+                charging_amps_entity,
                 "number",
                 "set_value",
                 {"entity_id": charging_amps_entity, "value": amps},
-                blocking=True,
+                request_authority,
             )
+            if mutation.outcome == "sent_unknown":
+                _LOGGER.error("Tesla charging-amps outcome is unknown for %s: %s", charging_amps_entity, mutation.error)
+                return None
+            if mutation.outcome == "rejected":
+                if getattr(mutation.error, "site_import_admission_denied", False):
+                    raise mutation.error
+                return False
+            if mutation.outcome == "not_sent" and mutation.retryable_range:
+                fallback_amps = _tesla_entity_max_fallback_amps(
+                    amps,
+                    entity_min,
+                    entity_max,
+                    allow_stale_entity_max_override=allow_stale_entity_max_override,
+                    configured_max_amps=configured_max_amps,
+                )
+                if fallback_amps is None:
+                    return False
+                if not await prepare_ev_submission(
+                    hass,
+                    charging_amps_entity,
+                    operation="rate",
+                    amps=fallback_amps,
+                ):
+                    return False
+                if not request_authority():
+                    return False
+                fallback_mutation = await _run_native_tesla_service_command(
+                    hass,
+                    config_entry,
+                    params,
+                    "rate",
+                    charging_amps_entity,
+                    "number",
+                    "set_value",
+                    {"entity_id": charging_amps_entity, "value": fallback_amps},
+                    request_authority,
+                )
+                if fallback_mutation.outcome == "sent_unknown":
+                    _LOGGER.error(
+                        "Tesla charging-amps fallback outcome is unknown for %s: %s",
+                        charging_amps_entity,
+                        fallback_mutation.error,
+                    )
+                    return None
+                if fallback_mutation.outcome == "rejected":
+                    if getattr(fallback_mutation.error, "site_import_admission_denied", False):
+                        raise fallback_mutation.error
+                    return False
+                if fallback_mutation.outcome != "accepted_unconfirmed":
+                    return False
+                params["max_charge_amps"] = fallback_amps
+                params["_tesla_entity_range_fallback_amps"] = fallback_amps
+                _LOGGER.info(
+                    "Set EV charging amps to %dA via %s after structured entity range validation",
+                    fallback_amps,
+                    charging_amps_entity,
+                )
+                return True
+            if mutation.outcome != "accepted_unconfirmed":
+                return False
             params.pop("_tesla_entity_range_fallback_amps", None)
             if configured_max_amps is not None:
                 params["max_charge_amps"] = configured_max_amps
@@ -6106,42 +10873,6 @@ async def _action_set_ev_charging_amps(
         except Exception as e:
             if getattr(e, "site_import_admission_denied", False):
                 raise
-            fallback_amps = None
-            if _is_number_range_error(str(e)):
-                fallback_amps = _tesla_entity_max_fallback_amps(
-                    amps,
-                    entity_min,
-                    entity_max,
-                    allow_stale_entity_max_override=allow_stale_entity_max_override,
-                    configured_max_amps=configured_max_amps,
-                )
-            if fallback_amps is not None:
-                try:
-                    if not await prepare_ev_submission(hass, charging_amps_entity, operation="rate", amps=fallback_amps):
-                        return False
-                    await hass.services.async_call(
-                        "number",
-                        "set_value",
-                        {"entity_id": charging_amps_entity, "value": fallback_amps},
-                        blocking=True,
-                    )
-                    params["max_charge_amps"] = fallback_amps
-                    params["_tesla_entity_range_fallback_amps"] = fallback_amps
-                    _LOGGER.info(
-                        "Set EV charging amps to %dA via %s after entity range fallback",
-                        fallback_amps,
-                        charging_amps_entity,
-                    )
-                    return True
-                except Exception as fallback_error:
-                    if getattr(fallback_error, "site_import_admission_denied", False):
-                        raise
-                    _LOGGER.error(
-                        "Failed Tesla entity range fallback to %dA: %s",
-                        fallback_amps,
-                        fallback_error,
-                    )
-
             _LOGGER.error(f"Failed to set EV charging amps: {e}")
             _record_tesla_manual_key_failure(params, e)
 
@@ -6573,7 +11304,7 @@ async def record_manual_ev_charging_session(
     vehicle_id: Optional[str] = None,
     params: Optional[Dict[str, Any]] = None,
     reason: str = "Manual charging",
-) -> None:
+) -> dict[str, Any] | None:
     """Record a user-started EV session so automation modes do not fight it."""
     from ..const import DOMAIN
 
@@ -6638,6 +11369,7 @@ async def record_manual_ev_charging_session(
         _dynamic_ev_state[entry_id] = {}
 
     session_id = None
+    session_manager = None
     try:
         from .ev_charging_session import get_session_manager
         session_manager = get_session_manager()
@@ -6650,11 +11382,48 @@ async def record_manual_ev_charging_session(
     except Exception as e:
         _LOGGER.debug("Manual EV: could not start session tracking: %s", e)
 
+    async def _manual_restore_authority_current() -> bool:
+        callback = full_params.get("_manual_restore_authority")
+        if not callable(callback):
+            return True
+        try:
+            result = callback()
+            if inspect.isawaitable(result):
+                result = await result
+            return bool(result)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return False
+
+    async def _end_started_manual_session(reason: str) -> None:
+        if session_manager is None or not session_id:
+            return
+        try:
+            await session_manager.end_session(
+                vehicle_id=resolved_vehicle_id,
+                reason=reason,
+                expected_session_id=session_id,
+            )
+        except Exception as err:
+            _LOGGER.debug(
+                "Manual EV: could not end rejected session %s: %s",
+                session_id,
+                err,
+            )
+
+    # Restore may have awaited teardown, telemetry, and session tracking. Do
+    # not claim a new owner if the original finite producer/deadline changed
+    # during that window.
+    if not await _manual_restore_authority_current():
+        await _end_started_manual_session("manual restore authority changed")
+        return
+
     # The fixed-rate branch of _dynamic_ev_update only commands when the target
     # differs from current_amps.  When a clamp is due, seed 0 so the first pass
     # actually re-applies the rate through the phase wrapper; otherwise seed the
     # rate the charger is already on so the controller holds it silently.
-    _dynamic_ev_state[entry_id][resolved_vehicle_id] = {
+    manual_state = {
         "active": True,
         "params": full_params,
         "current_amps": 0 if reconcile_now else requested_amps,
@@ -6670,8 +11439,13 @@ async def record_manual_ev_charging_session(
         "vehicle_name": full_params.get("vehicle_name"),
         "session_id": session_id,
     }
-    from .ev_ownership import claim_ev_ownership
-    _dynamic_ev_state[entry_id][resolved_vehicle_id]["ownership"] = claim_ev_ownership(
+    _dynamic_ev_state[entry_id][resolved_vehicle_id] = manual_state
+    from .ev_ownership import (
+        claim_ev_ownership,
+        get_ev_ownership,
+        release_ev_ownership,
+    )
+    manual_ownership = claim_ev_ownership(
         hass,
         config_entry,
         resolved_vehicle_id,
@@ -6687,6 +11461,110 @@ async def record_manual_ev_charging_session(
             "quick_control": full_params.get("quick_control"),
         },
     )
+    manual_state["ownership"] = manual_ownership
+
+    def _manual_registration_is_current() -> bool:
+        current_state = _dynamic_ev_state.get(entry_id, {}).get(resolved_vehicle_id)
+        _lease_id, current_ownership = get_ev_ownership(
+            hass, config_entry, resolved_vehicle_id
+        )
+        return current_state is manual_state and current_ownership is manual_ownership
+
+    async def _rollback_manual_registration(reason: str) -> None:
+        # The session ID is checked under the session manager lock, so an
+        # intervening replacement cannot be ended by this rollback.
+        await _end_started_manual_session(reason)
+        if not _manual_registration_is_current():
+            return
+        cancel_timer = manual_state.get("cancel_timer")
+        if callable(cancel_timer):
+            cancel_timer()
+        manual_state["active"] = False
+        if _dynamic_ev_state.get(entry_id, {}).get(resolved_vehicle_id) is manual_state:
+            _dynamic_ev_state[entry_id].pop(resolved_vehicle_id, None)
+        release_ev_ownership(
+            hass,
+            config_entry,
+            resolved_vehicle_id,
+            reason=reason,
+            command="restore_registration_rejected",
+            success=False,
+        )
+
+    # A restored finite Tesla session may have a native HA route whose old
+    # session scope was invalidated when runtime ownership was rehydrated.
+    # Re-pin that exact persisted producer to the newly claimed lease before
+    # scheduling or reconciling any positive Rate command.  A current config
+    # lookup is unsafe here because it can select another vehicle/provider.
+    restored_native_route = full_params.get("_tesla_restored_native_route")
+    if restored_native_route is not None:
+        from ..tesla_ev_recovery import (
+            async_rebind_native_session_route,
+            get_vehicle_route,
+        )
+
+        route_bound = False
+        try:
+            current_route = get_vehicle_route(
+                hass, config_entry, resolved_vehicle_id
+            )
+        except Exception:
+            current_route = None
+        if isinstance(restored_native_route, Mapping) and isinstance(
+            current_route, Mapping
+        ):
+            expected_entity = restored_native_route.get("entity_id")
+            expected_identity = restored_native_route.get("entity_identity")
+            current_identity = current_route.get("entity_identity")
+            route_matches = (
+                current_route.get("kind") == "ha"
+                and str(current_route.get("entity_id") or "")
+                == str(expected_entity or "")
+                and isinstance(expected_identity, Mapping)
+                and dict(current_identity or {}) == dict(expected_identity)
+            )
+            # After restore the previous route normally reports
+            # route_identity_changed because its old lease scope is gone.
+            # If the route is already compatible, accepting the same exact
+            # identity is also safe and makes this handoff idempotent.
+            if not route_matches and current_route.get("kind") == "blocked":
+                route_matches = (
+                    current_route.get("reason") == "route_identity_changed"
+                    and str(current_route.get("entity_id") or "")
+                    == str(expected_entity or "")
+                    and isinstance(expected_identity, Mapping)
+                    and dict(current_route.get("entity_identity") or {})
+                    == dict(expected_identity)
+                )
+            if route_matches:
+                try:
+                    route_bound = await async_rebind_native_session_route(
+                        hass,
+                        config_entry,
+                        resolved_vehicle_id,
+                        entity_id=str(expected_entity),
+                        expected_identity=expected_identity,
+                        mode="positive_resume",
+                    )
+                except asyncio.CancelledError:
+                    await asyncio.shield(
+                        _rollback_manual_registration(
+                            "restored native producer handoff cancelled"
+                        )
+                    )
+                    raise
+                except Exception:
+                    route_bound = False
+        params["_manual_restore_native_route_bound"] = route_bound
+        full_params["_manual_restore_native_route_bound"] = route_bound
+        if not route_bound:
+            # Keep the durable finite obligation for its exact cleanup path,
+            # but release the newly created manual lease and state so periodic
+            # updates cannot attempt a positive Rate against an old route.
+            await _rollback_manual_registration(
+                "restored native producer handoff failed"
+            )
+            return
 
     if DOMAIN in hass.data and entry_id in hass.data[DOMAIN]:
         hass.data[DOMAIN][entry_id]["dynamic_ev_state"] = _dynamic_ev_state[entry_id]
@@ -6707,6 +11585,11 @@ async def record_manual_ev_charging_session(
         )
     )
     if reconcile_now:
+        if not await _manual_restore_authority_current():
+            await _rollback_manual_registration(
+                "Restored finite EV producer binding changed"
+            )
+            return
         await _dynamic_ev_update(
             hass,
             config_entry,
@@ -6715,6 +11598,12 @@ async def record_manual_ev_charging_session(
         )
 
     _LOGGER.info("Manual EV charging session recorded for %s", resolved_vehicle_id)
+    return {
+        "state": manual_state,
+        "ownership": manual_ownership,
+        "session_id": session_id,
+        "rollback": _rollback_manual_registration,
+    }
 
 
 async def clear_tracked_ev_charging_session(
@@ -9276,18 +14165,22 @@ async def _update_smart_schedule_battery_target_group(
         params = state.get("params") or {}
         current_amps = int(state.get("current_amps", 0) or 0)
         target_amps = targets[vehicle_id]
-        if not _plan_still_owns_vehicle(vehicle_id):
+        if not _plan_still_owns_vehicle(vehicle_id) or _tesla_plan_expired(params):
             return False
         physical_restart_required = bool(
             state.get("physical_restart_required")
         )
+        recovering = bool(state.get("transport_recovery_pending"))
         if (
-            current_amps <= 0 < target_amps
+            (current_amps <= 0 or recovering) and target_amps > 0
             and physical_restart_required
             and not _tesla_dynamic_restart_due(state)
         ):
             state["target_amps"] = current_amps
             return True
+
+        if recovering:
+            state["last_physical_restart_attempt_at"] = datetime.now().astimezone()
 
         amps_set = await _set_vehicle_amps(
             hass,
@@ -9301,26 +14194,18 @@ async def _update_smart_schedule_battery_target_group(
             return False
 
         success = amps_set
+        if amps_set is None or params.get("_tesla_transport_recovery_pending"):
+            _mark_tesla_plan_pending(state, target_amps)
         if (
             amps_set
             and params.get("charger_type", "tesla") == "tesla"
-            and current_amps <= 0 < target_amps
+            and (current_amps <= 0 or recovering) and target_amps > 0
         ):
             if physical_restart_required:
                 state["last_physical_restart_attempt_at"] = (
                     datetime.now().astimezone()
                 )
-            start_params = dict(params)
-            start_params["vehicle_vin"] = (
-                vehicle_id if vehicle_id != DEFAULT_VEHICLE_ID else None
-            )
-            start_params["amps"] = target_amps
-            success = await _action_start_ev_charging(
-                hass,
-                config_entry,
-                start_params,
-                context=None,
-            )
+            success = await _restart_owned_tesla(hass, config_entry, vehicle_id, state, target_amps)
             if not _plan_still_owns_vehicle(vehicle_id):
                 return False
 
@@ -9328,7 +14213,7 @@ async def _update_smart_schedule_battery_target_group(
             state["current_amps"] = target_amps
             state["target_amps"] = target_amps
             state["charging_started"] = target_amps > 0
-            if current_amps <= 0 < target_amps:
+            if (current_amps <= 0 or recovering) and target_amps > 0:
                 state["last_start_command_at"] = datetime.now().astimezone()
                 state.pop("physical_restart_required", None)
             return True
@@ -9349,7 +14234,9 @@ async def _update_smart_schedule_battery_target_group(
     increases = [
         item
         for item in changes
-        if targets[item[0]] > int(item[1].get("current_amps", 0) or 0)
+        if (targets[item[0]] > int(item[1].get("current_amps", 0) or 0)
+            or (targets[item[0]] > 0 and item[1].get("transport_recovery_pending")
+                and targets[item[0]] == int(item[1].get("current_amps", 0) or 0)))
     ]
 
     decreases_succeeded = True
@@ -10605,15 +15492,17 @@ async def _dynamic_ev_update_surplus(
                     return
 
                 # Send the actual start-charging command to the vehicle.
+                if state.get("transport_recovery_pending") and not _tesla_dynamic_restart_due(state):
+                    return
                 start_params = dict(params)
                 if start_params.get("charger_type") in {"sigenergy", "tesla"}:
                     start_params["amps"] = new_amps
-                start_success = await _action_start_ev_charging(
-                    hass,
-                    config_entry,
-                    start_params,
-                    context=None,
-                )
+                if params.get("charger_type", "tesla") == "tesla":
+                    start_success = await _restart_owned_tesla(
+                        hass, config_entry, vehicle_id, state, new_amps)
+                else:
+                    start_success = await _action_start_ev_charging(
+                        hass, config_entry, start_params, context=None)
                 if _session_was_replaced("solar charging start"):
                     return
                 if not start_success:
@@ -12078,6 +16967,33 @@ async def _dynamic_ev_update(
     params = _with_sigenergy_charger_capabilities(config_entry, params, hass)
     state["params"] = params
 
+    async def _manual_restore_authority_current() -> bool:
+        callback = params.get("_manual_restore_authority")
+        if not callable(callback):
+            return True
+        try:
+            result = callback()
+            if inspect.isawaitable(result):
+                result = await result
+            return bool(result)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return False
+
+    if not await _manual_restore_authority_current():
+        _LOGGER.debug(
+            "Dynamic EV: restored finite session lost producer authority for %s",
+            vehicle_id,
+        )
+        return
+
+    if _tesla_plan_expired(params):
+        await _action_stop_ev_charging_dynamic(hass, config_entry, {
+            "vehicle_id": vehicle_id, "stop_charging": True, "_expected_state": state,
+        })
+        return
+
     # Check which mode we're in
     mode = params.get("dynamic_mode", "battery_target")
     if mode == "solar_surplus":
@@ -12232,6 +17148,7 @@ async def _dynamic_ev_update(
     ):
         current_amps = 0
     physical_restart_required = bool(state.get("physical_restart_required"))
+    recovering = bool(state.get("transport_recovery_pending"))
     expected_ownership = state.get("ownership")
     scheduled_floor_active = owner_mode == "scheduled" and not no_grid_import
 
@@ -12279,7 +17196,7 @@ async def _dynamic_ev_update(
     if fixed_charge_amps:
         fixed_amps = max(min_amps, min(max_amps, fixed_charge_amps))
         state["target_amps"] = fixed_amps
-        if abs(fixed_amps - current_amps) >= 1:
+        if abs(fixed_amps - current_amps) >= 1 or recovering:
             if (
                 physical_restart_required
                 and not _tesla_dynamic_restart_due(state)
@@ -12287,10 +17204,14 @@ async def _dynamic_ev_update(
                 return
             if not _session_is_current():
                 return
+            if recovering:
+                state["last_physical_restart_attempt_at"] = datetime.now().astimezone()
             _LOGGER.info(
                 f"⚡ Dynamic EV: Holding fixed charge rate {fixed_amps}A "
                 f"(current={current_amps}A)"
             )
+            if not await _manual_restore_authority_current():
+                return
             amps_set = await _set_vehicle_amps(
                 hass,
                 config_entry,
@@ -12299,21 +17220,13 @@ async def _dynamic_ev_update(
                 params,
             )
             success = amps_set
+            if amps_set is None or params.get("_tesla_transport_recovery_pending"):
+                _mark_tesla_plan_pending(state, fixed_amps)
             if amps_set and physical_restart_required:
                 state["last_physical_restart_attempt_at"] = (
                     datetime.now().astimezone()
                 )
-                start_params = dict(params)
-                start_params["vehicle_vin"] = (
-                    vehicle_id if vehicle_id != DEFAULT_VEHICLE_ID else None
-                )
-                start_params["amps"] = fixed_amps
-                success = await _action_start_ev_charging(
-                    hass,
-                    config_entry,
-                    start_params,
-                    context=None,
-                )
+                success = await _restart_owned_tesla(hass, config_entry, vehicle_id, state, fixed_amps)
                 if success:
                     state["last_start_command_at"] = datetime.now().astimezone()
                     state["charging_started"] = True
@@ -12530,6 +17443,8 @@ async def _dynamic_ev_update(
                 f"ev_relevant={ev_grid_check:.2f}kW, inverter_max={max_inverter_kw}kW), "
                 f"reducing to {new_amps}A"
             )
+            if not await _manual_restore_authority_current():
+                return
             success = await _set_vehicle_amps(hass, config_entry, vehicle_id, new_amps, params)
             if success:
                 state["current_amps"] = _phase_applied_amps(params, new_amps)
@@ -12549,7 +17464,7 @@ async def _dynamic_ev_update(
     )
 
     # Only update if change is >= 1 amp (avoid constant micro-adjustments)
-    if abs(new_amps - current_amps) >= 1:
+    if abs(new_amps - current_amps) >= 1 or (recovering and new_amps > 0):
         _LOGGER.info(
             f"⚡ Dynamic EV: Adjusting from {current_amps}A to {new_amps}A "
             f"(battery={battery_power_kw:.1f}kW, grid={grid_power_kw:.1f}kW, "
@@ -12558,7 +17473,7 @@ async def _dynamic_ev_update(
         )
         tesla_restart_required = (
             params.get("charger_type", "tesla") == "tesla"
-            and current_amps <= 0
+            and (current_amps <= 0 or recovering)
             and new_amps > 0
         )
         if (
@@ -12574,6 +17489,10 @@ async def _dynamic_ev_update(
                 vehicle_id,
             )
             return
+        if recovering:
+            state["last_physical_restart_attempt_at"] = datetime.now().astimezone()
+        if not await _manual_restore_authority_current():
+            return
         amps_set = await _set_vehicle_amps(
             hass,
             config_entry,
@@ -12583,6 +17502,8 @@ async def _dynamic_ev_update(
         )
         applied_amps = _phase_applied_amps(params, new_amps)
         success = amps_set
+        if amps_set is None or params.get("_tesla_transport_recovery_pending"):
+            _mark_tesla_plan_pending(state, new_amps)
         if amps_set and tesla_restart_required and applied_amps > 0:
             if not _session_still_owns_vehicle():
                 _LOGGER.debug(
@@ -12592,21 +17513,11 @@ async def _dynamic_ev_update(
                     vehicle_id,
                 )
                 return
-            start_params = dict(params)
-            start_params["vehicle_vin"] = (
-                vehicle_id if vehicle_id != DEFAULT_VEHICLE_ID else None
-            )
-            start_params["amps"] = applied_amps
             if physical_restart_required:
                 state["last_physical_restart_attempt_at"] = (
                     datetime.now().astimezone()
                 )
-            success = await _action_start_ev_charging(
-                hass,
-                config_entry,
-                start_params,
-                context=None,
-            )
+            success = await _restart_owned_tesla(hass, config_entry, vehicle_id, state, applied_amps)
             if not success:
                 _LOGGER.warning(
                     "Dynamic EV: Failed to restart Tesla charging at %sA",
@@ -12751,6 +17662,40 @@ def _consume_recovered_solar_surplus_continuation_amps(
     if not recovered.get("session_id"):
         reject("the recovered session has no session identity")
         return None
+
+    # A native HA Start keeps its exact producer route in the recovery journal.
+    # Runtime restore creates a new ownership lease, so the old session scope
+    # cannot authorize the next Solar rate until the route is explicitly
+    # rebound.  Preserve the journal's entity identity for that handoff; never
+    # rediscover a same-VIN entity from the current registry.  BLE recovery
+    # routes carry a prefix and remain on their existing isolation path.
+    try:
+        from ..tesla_ev_recovery import get_vehicle_route
+
+        route = get_vehicle_route(hass, config_entry, vehicle_id)
+    except Exception:
+        route = None
+    if isinstance(route, Mapping):
+        route_kind = route.get("kind")
+        route_entity = str(route.get("entity_id") or "").strip()
+        route_identity = route.get("entity_identity")
+        native_route = (
+            route_kind == "ha"
+            or (
+                route_kind == "blocked"
+                and route.get("reason") == "route_identity_changed"
+                and not route.get("prefix")
+            )
+        )
+        if native_route:
+            if not route_entity or not isinstance(route_identity, Mapping):
+                reject("the persisted native producer identity is incomplete")
+                params["_tesla_native_resume_rejected"] = True
+                return None
+            params["_tesla_native_resume_route"] = {
+                "entity_id": route_entity,
+                "entity_identity": dict(route_identity),
+            }
 
     charging_state = _get_tesla_charging_state(
         hass,
@@ -12967,9 +17912,11 @@ async def _action_start_ev_charging_dynamic_locked(
         can_claim_ev_ownership,
         can_take_over_ev_ownership,
         claim_ev_ownership,
+        get_ev_ownership,
         manual_stop_hold_reason,
         owner_family,
         record_ev_command,
+        release_ev_ownership,
     )
 
     if owner_family(owner_mode) == "solar_surplus":
@@ -13460,22 +18407,211 @@ async def _action_start_ev_charging_dynamic_locked(
     # command by a poll interval, so the not-yet-settled aftermath of our own
     # stop must never read back as evidence that the car is already charging.
     teardown_report: Dict[str, Any] = {}
-    await _action_stop_ev_charging_dynamic(
+    teardown_success = await _action_stop_ev_charging_dynamic(
         hass,
         config_entry,
         {
             "vehicle_id": vehicle_id,
             "_physical_stop_report": teardown_report,
             "_user_initiated": bool(params.get("_user_initiated")),
+            # Preserve an existing finite obligation while the old session is
+            # torn down.  A replacement obligation is persisted only after
+            # this matching stop has returned successfully.
+            "_preserve_quick_control_obligation": True,
         },
     )
+    quick_control_obligation = None
+    if params.get("quick_control") and params.get("expires_at"):
+        # Keep an already accepted finite obligation and its timer intact while
+        # the previous session is being torn down.  Only replace it after the
+        # matching old stop has returned successfully, immediately before the
+        # first positive actuator await below.
+        from .ev_ownership import (
+            async_begin_ev_quick_control_obligation,
+            get_ev_quick_control_obligation,
+        )
+
+        previous_obligation = get_ev_quick_control_obligation(
+            hass, config_entry, vehicle_id
+        )
+        if previous_obligation is not None and not teardown_success:
+            record_ev_command(
+                hass,
+                config_entry,
+                vehicle_id,
+                command=f"start_{owner_mode}",
+                success=False,
+                reason="previous finite EV cleanup could not be confirmed",
+            )
+            return False
+        if charger_type == "tesla":
+            # The predispatch crash window has no transport journal yet. Pin
+            # the configured pairing and every currently selected producer so
+            # reload cleanup cannot silently follow a rebounded alias/entity.
+            params["_quick_control_binding"] = await _tesla_quick_control_binding(
+                hass,
+                config_entry,
+                params,
+                vehicle_id,
+            )
+            # The binding helper may await native entity discovery. Recheck
+            # immediately after that await so a registry/config rebound is a
+            # known predispatch refusal rather than a stale cleanup pin.
+            if not _tesla_quick_control_binding_current(
+                hass, config_entry, params
+            ):
+                record_ev_command(
+                    hass,
+                    config_entry,
+                    vehicle_id,
+                    command=f"start_{owner_mode}",
+                    success=False,
+                    reason="Tesla finite EV producer binding changed before dispatch",
+                )
+                return False
+        quick_control_obligation = await async_begin_ev_quick_control_obligation(
+            hass,
+            config_entry,
+            vehicle_id,
+            params,
+            reason=params.get("reason") or "Manual EV charging",
+        )
+        if quick_control_obligation is None:
+            record_ev_command(
+                hass,
+                config_entry,
+                vehicle_id,
+                command=f"start_{owner_mode}",
+                success=False,
+                reason="finite EV cleanup obligation could not be persisted",
+            )
+            return False
+        if charger_type == "tesla" and not _tesla_quick_control_binding_current(
+            hass, config_entry, params
+        ):
+            from .ev_ownership import clear_ev_quick_control_obligation
+
+            clear_ev_quick_control_obligation(
+                hass,
+                config_entry,
+                vehicle_id,
+                expected_token=quick_control_obligation.get("obligation_id"),
+            )
+            record_ev_command(
+                hass,
+                config_entry,
+                vehicle_id,
+                command=f"start_{owner_mode}",
+                success=False,
+                reason="Tesla finite EV producer binding changed before dispatch",
+            )
+            return False
     self_stopped_during_teardown = bool(
         teardown_report.get("physical_stop_vehicle_ids")
     )
+    registration_authority = (
+        _tesla_transport_authority(
+            hass,
+            config_entry,
+            {**params, "vehicle_vin": vehicle_id},
+            operation="start",
+        )
+        if charger_type == "tesla" else lambda: True
+    )
+
+    async def _compensate_late_positive_start() -> None:
+        """Contain a Start that completed after its owner was revoked."""
+        from .ev_ownership import (
+            async_begin_ev_quick_control_obligation,
+            clear_ev_quick_control_obligation,
+            get_ev_quick_control_obligation,
+        )
+
+        obligation = get_ev_quick_control_obligation(
+            hass, config_entry, vehicle_id
+        )
+        obligation_cancelled = False
+        if params.get("quick_control") and params.get("expires_at") and obligation is None:
+            # A synchronous priority Stop may have completed and cleared the
+            # original finite obligation while this opaque Start was awaiting
+            # its provider. Recreate the original deadline before compensating
+            # so an accepted late Start cannot escape cleanup on reload.
+            try:
+                obligation = await async_begin_ev_quick_control_obligation(
+                    hass,
+                    config_entry,
+                    vehicle_id,
+                    params,
+                    reason=params.get("reason") or "Late EV start compensation",
+                )
+            except asyncio.CancelledError:
+                # Persistence cancellation must not suppress the exact-owned
+                # compensating Stop.  Finish that cleanup below and preserve
+                # the original cancellation after the physical attempt.
+                obligation_cancelled = True
+            except Exception:
+                # A failed save is a durable admission failure, but the
+                # provider Start may already have been accepted.  Always run
+                # the exact cleanup path before returning the failure.
+                obligation = None
+        cleanup_params = {
+            **params,
+            "vehicle_id": vehicle_id,
+            "vehicle_vin": vehicle_id,
+            "_force_tesla_stop_request": True,
+            "_ev_cleanup_only": charger_type == "tesla",
+            "stop_untracked": True,
+            "manual_stop": True,
+            "stop_reason": "Start completed after EV authority was revoked",
+        }
+        try:
+            stop_coro = _action_stop_ev_charging(
+                hass, config_entry, cleanup_params
+            )
+            # If obligation persistence was itself cancelled, shield the
+            # compensating Stop so that cancellation cannot leave an accepted
+            # late Start uncontained.
+            stop_result = await (
+                asyncio.shield(stop_coro) if obligation_cancelled else stop_coro
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            stop_result = False
+
+        if obligation is None and params.get("quick_control") and params.get("expires_at"):
+            # The priority Stop may have cleared the old obligation.  Retry
+            # the original finite cleanup record after the physical
+            # compensation, without ever replaying positive work.  Failure
+            # leaves the command outcome unknown and is retried on reload by
+            # the normal durable journal path when persistence is available.
+            async def _retry_obligation() -> dict[str, Any] | None:
+                try:
+                    return await async_begin_ev_quick_control_obligation(
+                        hass,
+                        config_entry,
+                        vehicle_id,
+                        params,
+                        reason=params.get("reason") or "Late EV start compensation",
+                    )
+                except BaseException:
+                    return None
+
+            obligation = await asyncio.shield(_retry_obligation())
+        if stop_result is True and obligation is not None:
+            clear_ev_quick_control_obligation(
+                hass,
+                config_entry,
+                vehicle_id,
+                expected_token=obligation.get("obligation_id"),
+            )
+        if obligation_cancelled:
+            raise asyncio.CancelledError
 
     initial_battery_acceptance_learner: Dict[str, Any] = {}
     initial_amps_pre_set = False
     deferred_observed_amps: Optional[int] = None
+    transport_pending = False
 
     # The first physical command must respect the same measured site budget
     # as periodic dynamic updates.  Tesla needs a separate rate write before
@@ -13546,6 +18682,8 @@ async def _action_start_ev_charging_dynamic_locked(
             )
             if initial_amps_pre_set:
                 start_amps = _phase_applied_amps(params, start_amps)
+            elif params.get("_tesla_transport_recovery_pending"):
+                transport_pending = True
             else:
                 reason = f"could not pre-set the safe initial rate to {start_amps}A"
                 record_ev_command(
@@ -13561,7 +18699,9 @@ async def _action_start_ev_charging_dynamic_locked(
     # For battery_target mode, start EV charging immediately
     # For solar_surplus mode, we wait for sufficient surplus before starting
     if dynamic_mode == "battery_target":
-        if defer_battery_target_start:
+        if transport_pending:
+            start_success = None
+        elif defer_battery_target_start:
             start_success = True
             if not self_stopped_during_teardown:
                 observed_amps = await _observed_owned_charge_amps(
@@ -13678,7 +18818,10 @@ async def _action_start_ev_charging_dynamic_locked(
                     start_params,
                     context,
                 )
-            if not start_success:
+            if start_success is None and (start_params.get("_tesla_transport_recovery_pending")
+                    or start_params.get("_tesla_physical_confirmation_pending")):
+                transport_pending = True
+            elif not start_success:
                 _LOGGER.info("Dynamic EV: Could not start EV charging (vehicle may be disconnected)")
                 record_ev_command(
                     hass,
@@ -13690,9 +18833,45 @@ async def _action_start_ev_charging_dynamic_locked(
                 )
                 return False
 
+            # The native producer is selected in a copied Start parameter set.
+            # Carry its exact entity and registry binding into the cleanup
+            # context even if the owner was revoked during the await.
+            for key in (
+                "_tesla_command_entity_id",
+                "_tesla_native_command_identity",
+            ):
+                if start_params.get(key):
+                    params[key] = start_params[key]
+
+            # A priority Stop can revoke the captured owner while this Start
+            # is awaiting a provider response. Do not apply a rate/limit or
+            # register a new session after that late completion; contain the
+            # exact vehicle first and leave any unknown outcome fail-closed.
+            if not registration_authority():
+                await _compensate_late_positive_start()
+                record_ev_command(
+                    hass,
+                    config_entry,
+                    vehicle_id,
+                    command=f"start_{owner_mode}",
+                    success=False,
+                    reason="physical start completed after EV authority was revoked",
+                )
+                return False
+
+            if quick_control_obligation:
+                from .ev_ownership import update_ev_quick_control_obligation
+
+                update_ev_quick_control_obligation(
+                    hass,
+                    config_entry,
+                    vehicle_id,
+                    params,
+                )
+
             # Set initial amps through the charger abstraction so OCPP and generic
             # chargers do not fall back to the Tesla-only amperage path.
-            if not initial_amps_pre_set:
+            if not initial_amps_pre_set and not transport_pending:
                 amps_success = await _set_vehicle_amps(
                     hass, config_entry, vehicle_id, start_amps, params
                 )
@@ -13703,7 +18882,7 @@ async def _action_start_ev_charging_dynamic_locked(
                     # This is expected - Tesla reports lower max amps until charging actually starts
                     _LOGGER.debug(f"Dynamic EV: Could not set initial amps to {start_amps}A (will adjust once charging starts)")
 
-            if require_physical_confirmation:
+            if (require_physical_confirmation or start_params.get("_tesla_start_live_read_required")) and not transport_pending:
                 if already_physically_charging:
                     confirmed = True
                     evidence = ", ".join(
@@ -13714,11 +18893,13 @@ async def _action_start_ev_charging_dynamic_locked(
                         hass,
                         config_entry,
                         vehicle_id,
-                        params,
+                        start_params,
                         confirmation_baseline or {},
                         command_started_at or datetime.now().astimezone(),
                     )
-                if not confirmed:
+                if not confirmed and start_params.get("_tesla_allow_plan_recovery"):
+                    transport_pending = True
+                elif not confirmed:
                     stop_success = await _action_stop_ev_charging(
                         hass,
                         config_entry,
@@ -13759,11 +18940,12 @@ async def _action_start_ev_charging_dynamic_locked(
                         reason=reason,
                     )
                     return False
-                _LOGGER.info(
-                    "Dynamic EV: Confirmed physical Tesla charging for %s (%s)",
-                    vehicle_id,
-                    evidence,
-                )
+                if confirmed:
+                    _LOGGER.info(
+                        "Dynamic EV: Confirmed physical Tesla charging for %s (%s)",
+                        vehicle_id,
+                        evidence,
+                    )
                 still_allowed, _lease_id, _lease, block_reason = (
                     can_claim_ev_ownership(
                         hass,
@@ -13808,6 +18990,9 @@ async def _action_start_ev_charging_dynamic_locked(
                 reason=block_reason or "ownership changed during Generic start confirmation",
             )
             return False
+
+    if not registration_authority():
+        return False
 
     # Create the periodic update callback for this vehicle
     async def periodic_update(now) -> None:
@@ -13884,7 +19069,16 @@ async def _action_start_ev_charging_dynamic_locked(
             params.get("phase_load_management_required")
         ),
         "phase_requested_amps": params.get("phase_requested_amps"),
+        "require_physical_start_confirmation": params.get("require_physical_start_confirmation", False),
     }
+    if "_boost_start_deadline" in params:
+        full_params["_boost_start_deadline"] = params["_boost_start_deadline"]
+    if "expires_at" in params:
+        full_params["expires_at"] = params["expires_at"]
+    if "quick_control" in params:
+        full_params["quick_control"] = params["quick_control"]
+    if "duration_minutes" in params:
+        full_params["duration_minutes"] = params["duration_minutes"]
     full_params = _with_sigenergy_charger_capabilities(config_entry, full_params, hass)
 
     # Initialize entry-level state dict if needed
@@ -13936,6 +19130,16 @@ async def _action_start_ev_charging_dynamic_locked(
                 full_params,
             )
         )
+        if full_params.pop("_tesla_native_resume_rejected", False):
+            record_ev_command(
+                hass,
+                config_entry,
+                vehicle_id,
+                command=f"start_{owner_mode}",
+                success=False,
+                reason="persisted native Solar producer identity is unavailable",
+            )
+            return False
     initial_current_amps = (
         recovered_continuation_amps
         if recovered_continuation_amps is not None
@@ -13957,9 +19161,9 @@ async def _action_start_ev_charging_dynamic_locked(
         "paused": False,
         "paused_reason": None,
         "charging_started": (
-            recovered_continuation
+            not transport_pending and (recovered_continuation
             or deferred_observed_amps is not None
-            or (dynamic_mode == "battery_target" and not defer_battery_target_start)
+            or (dynamic_mode == "battery_target" and not defer_battery_target_start))
         ),
         "external_start_detection_armed": (
             dynamic_mode == "solar_surplus" and not recovered_continuation
@@ -13976,8 +19180,30 @@ async def _action_start_ev_charging_dynamic_locked(
         "vehicle_name": full_params.get("vehicle_name"),
         "session_id": None,  # Will be set when session tracking starts
     }
+    if transport_pending:
+        _mark_tesla_plan_pending(_dynamic_ev_state[entry_id][vehicle_id], start_amps)
+        _dynamic_ev_state[entry_id][vehicle_id]["last_physical_restart_attempt_at"] = datetime.now().astimezone()
+    if quick_control_obligation:
+        obligation_timer = hass.data.get(DOMAIN, {}).get(entry_id, {}).get(
+            "_ev_quick_control_timers", {}
+        ).get(vehicle_id)
+        if obligation_timer is not None:
+            _dynamic_ev_state[entry_id][vehicle_id]["quick_stop_timer"] = obligation_timer
+    registered_state = _dynamic_ev_state[entry_id][vehicle_id]
+
+    def registration_is_current():
+        return (_dynamic_ev_state.get(entry_id, {}).get(vehicle_id) is registered_state
+                and registered_state.get("active") and registration_authority())
+
+    def discard_registration():
+        if callable(cancel_timer):
+            cancel_timer()
+        if _dynamic_ev_state.get(entry_id, {}).get(vehicle_id) is registered_state:
+            registered_state["active"] = False
+            _dynamic_ev_state[entry_id].pop(vehicle_id, None)
 
     # Start charging session tracking
+    session_manager = None
     try:
         from .ev_charging_session import get_session_manager
         session_manager = get_session_manager()
@@ -13985,6 +19211,9 @@ async def _action_start_ev_charging_dynamic_locked(
             # Get initial SoC if available
             initial_soc = None
             live_status = await _get_tesla_live_status(hass, config_entry)
+            if not registration_is_current():
+                discard_registration()
+                return False
             if live_status:
                 initial_soc = live_status.get("battery_soc")
 
@@ -13993,13 +19222,39 @@ async def _action_start_ev_charging_dynamic_locked(
                 mode=owner_mode,
                 start_soc=int(initial_soc) if initial_soc else None,
             )
-            _dynamic_ev_state[entry_id][vehicle_id]["session_id"] = session.id
+            if not registration_is_current():
+                discard_registration()
+                return False
+            registered_state["session_id"] = session.id
             _LOGGER.info(f"📊 Started charging session {session.id}")
+    except asyncio.CancelledError:
+        discard_registration()
+        raise
     except Exception as e:
         _LOGGER.debug(f"Could not start session tracking: {e}")
 
-    session_id = _dynamic_ev_state[entry_id][vehicle_id].get("session_id")
-    _dynamic_ev_state[entry_id][vehicle_id]["ownership"] = claim_ev_ownership(
+    async def _end_registered_session(reason: str) -> None:
+        tracked_session_id = registered_state.get("session_id")
+        if session_manager is None or not tracked_session_id:
+            return
+        try:
+            await session_manager.end_session(
+                vehicle_id=vehicle_id,
+                reason=reason,
+                expected_session_id=tracked_session_id,
+            )
+        except Exception as err:
+            _LOGGER.debug(
+                "Dynamic EV: could not end rejected session %s: %s",
+                tracked_session_id,
+                err,
+            )
+
+    if not registration_is_current():
+        discard_registration()
+        return False
+    session_id = registered_state.get("session_id")
+    ownership = claim_ev_ownership(
         hass,
         config_entry,
         vehicle_id,
@@ -14011,6 +19266,7 @@ async def _action_start_ev_charging_dynamic_locked(
             if recovered_continuation
             else f"start_{owner_mode}"
         ),
+        success=not transport_pending,
         extra={
             "charger_type": charger_type,
             # A fresh physical observation is runtime truth, not a command.
@@ -14022,8 +19278,93 @@ async def _action_start_ev_charging_dynamic_locked(
                 if deferred_observed_amps is not None
                 else initial_current_amps
             ),
+            "quick_control": full_params.get("quick_control"),
+            "duration_minutes": full_params.get("duration_minutes"),
+            "expires_at": full_params.get("expires_at"),
         },
     )
+    _dynamic_ev_state[entry_id][vehicle_id]["ownership"] = ownership
+
+    async def _rollback_registered_session(reason: str) -> None:
+        # End only the session created by this registration.  The active
+        # session manager and ownership lease may have been replaced while the
+        # native route handoff awaited provider I/O.
+        await _end_registered_session(reason)
+        _lease_id, current_ownership = get_ev_ownership(
+            hass, config_entry, vehicle_id
+        )
+        if (
+            _dynamic_ev_state.get(entry_id, {}).get(vehicle_id) is not registered_state
+            or current_ownership is not ownership
+        ):
+            return
+        discard_registration()
+        release_ev_ownership(
+            hass,
+            config_entry,
+            vehicle_id,
+            reason=reason,
+        )
+
+    # A restored Solar session may have a valid physical charge but a native
+    # route still pinned to the pre-reload ownership lease. Rebind that exact
+    # producer before the periodic controller can issue a positive Rate. This
+    # is deliberately separate from the normal post-Start bind: no new native
+    # Start occurred in the recovered continuation path.
+    native_resume_route = full_params.pop("_tesla_native_resume_route", None)
+    if recovered_continuation and isinstance(native_resume_route, Mapping):
+        from ..tesla_ev_recovery import async_rebind_native_session_route
+
+        try:
+            native_bound = await async_rebind_native_session_route(
+                hass,
+                config_entry,
+                vehicle_id,
+                entity_id=native_resume_route.get("entity_id"),
+                expected_identity=native_resume_route.get("entity_identity"),
+                mode="positive_resume",
+            )
+        except asyncio.CancelledError:
+            await asyncio.shield(
+                _rollback_registered_session("Solar native route handoff cancelled")
+            )
+            raise
+        except Exception:
+            native_bound = False
+        if not native_bound:
+            await _rollback_registered_session("Solar native route handoff rejected")
+            record_ev_command(
+                hass,
+                config_entry,
+                vehicle_id,
+                command=f"start_{owner_mode}",
+                success=False,
+                reason="persisted native Solar producer could not be rebound",
+            )
+            return False
+
+    # Ownership is intentionally claimed after the provider Start and initial
+    # rate write. If Start used a native Fleet/Teslemetry entity, persist that
+    # exact producer now that the session lease exists. A failed handoff keeps
+    # the session on the recovery path instead of allowing a later tick to
+    # select BLE as a competing writer.
+    native_entity = params.get("_tesla_command_entity_id")
+    if charger_type == "tesla" and native_entity:
+        from ..tesla_ev_recovery import async_bind_native_session_route
+
+        native_bound = await async_bind_native_session_route(
+            hass,
+            config_entry,
+            vehicle_id,
+            native_entity,
+            expected_identity=params.get("_tesla_native_command_identity"),
+        )
+        if not native_bound:
+            transport_pending = True
+            _mark_tesla_plan_pending(
+                _dynamic_ev_state[entry_id][vehicle_id],
+                initial_current_amps,
+            )
 
     # Also store in hass.data for access from other places (for API endpoints)
     if DOMAIN in hass.data and entry_id in hass.data[DOMAIN]:
@@ -14036,7 +19377,7 @@ async def _action_start_ev_charging_dynamic_locked(
     # For solar_surplus mode, skip the immediate notification — a notification will be
     # sent when charging actually starts (after conditions are met) in _dynamic_ev_update
     notify_on_start = params.get("notify_on_start", True)
-    if notify_on_start and dynamic_mode != "solar_surplus":
+    if notify_on_start and dynamic_mode != "solar_surplus" and not transport_pending:
         try:
             # Look up vehicle name from VIN, fallback to param or truncated VIN
             vehicle_name = params.get("vehicle_name")
@@ -14086,6 +19427,36 @@ async def _action_stop_ev_charging_dynamic(
                 "vehicle_vin": canonical_vehicle_id,
             }
             vehicle_id = canonical_vehicle_id
+
+    quick_obligation_token = params.get("_quick_control_obligation_id")
+    if quick_obligation_token:
+        from .ev_ownership import get_ev_quick_control_obligation
+
+        current_obligation = get_ev_quick_control_obligation(
+            hass,
+            config_entry,
+            vehicle_id,
+        )
+        if (
+            current_obligation is None
+            or current_obligation.get("obligation_id") != quick_obligation_token
+        ):
+            _LOGGER.info(
+                "Skipping stale finite EV cleanup for %s; a newer obligation owns the vehicle",
+                vehicle_id,
+            )
+            return True
+        if str(params.get("charger_type") or "tesla").lower() == "tesla" and not _tesla_quick_control_binding_current(
+            hass,
+            config_entry,
+            current_obligation.get("params") or params,
+        ):
+            _LOGGER.warning(
+                "Blocking finite Tesla cleanup for %s because its original "
+                "pairing/producer binding changed",
+                vehicle_id,
+            )
+            return False
 
     if params.get("_expected_state") is None:
         pending_starts = hass.data.get(DOMAIN, {}).get(entry_id, {}).get(
@@ -14299,7 +19670,16 @@ async def _action_stop_ev_charging_dynamic(
                     "no stopped notification was sent",
                     vid_to_stop,
                 )
-            elif (
+            elif not params.get("_preserve_quick_control_obligation"):
+                from .ev_ownership import clear_ev_quick_control_obligation
+
+                clear_ev_quick_control_obligation(
+                    hass,
+                    config_entry,
+                    vid_to_stop,
+                    expected_token=quick_obligation_token,
+                )
+            if stop_success and (
                 notify_after_physical_stop.get(vid_to_stop, {}).get(
                     "notify_on_complete", True
                 )

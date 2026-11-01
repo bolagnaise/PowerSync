@@ -11,7 +11,9 @@ from datetime import datetime, timedelta, timezone
 from functools import wraps
 from inspect import signature
 import logging
+import math
 from pathlib import Path
+import re
 from types import MethodType, SimpleNamespace
 from uuid import uuid4
 
@@ -24,11 +26,15 @@ ROOT = Path(__file__).resolve().parents[1] / "custom_components/power_sync"
 INIT = ROOT / "__init__.py"
 VIN_A = "5YJ3E1EA0KF000001"
 VIN_B = "5YJ3E1EA0KF000002"
+BLE_A = "ble_car_a"
+BLE_B = "ble_car_b"
 own = load_power_sync_submodule(
     "automations.ev_ownership", package="boost_timer_actual"
 )
 mapping = load_power_sync_submodule("tesla_ble_mapping", package="boost_timer_actual")
 ev_load = load_power_sync_submodule("ev_load", package="boost_timer_actual")
+solar = load_power_sync_submodule("teslemetry_solar", package="boost_timer_actual")
+recovery = load_power_sync_submodule("tesla_ev_recovery", package="boost_timer_actual")
 
 
 class Store:
@@ -95,9 +101,8 @@ class BoostHarness:
         self.observation_overrides = {}
         self.start_pause = None
         self.gate_requested = asyncio.Event()
-        self.gate = SimpleNamespace(
-            lock=asyncio.Lock(), owner=None, blocked=lambda _vin: False
-        )
+        self.gate = solar.SolarOwnership(self.store)
+        self.gate.blocked = lambda _vin: False
 
         async def load():
             pass
@@ -115,6 +120,7 @@ class BoostHarness:
                 "asyncio": asyncio,
                 "ownership": ownership,
                 "_ev_submission_scope": lambda *_args: nullcontext(),
+                "_EV_CLEANUP_CONTEXT": solar._EV_CLEANUP_CONTEXT,
             },
         )
         self.canonical = compile_node(
@@ -128,7 +134,24 @@ class BoostHarness:
             _dynamic_ev_state=self.states,
             _canonical_dynamic_tesla_vehicle_id=self.canonical,
         )
-        self.apply = self.guard(self._apply)
+        # Model the real action boundaries: the gate grants the separate
+        # cleanup lane only to explicitly named Stop entry points.
+        async def _action_start_ev_charging_dynamic(hass, config_entry, params):
+            return await self._apply(hass, config_entry, params)
+
+        async def _action_stop_ev_charging_dynamic(hass, config_entry, params):
+            return await self._apply(hass, config_entry, params)
+
+        async def _action_set_ev_charge_limit(hass, config_entry, params):
+            return await self._apply(hass, config_entry, params)
+
+        self.apply = {
+            "start_ev_charging_dynamic": self.guard(_action_start_ev_charging_dynamic),
+            "stop_ev_charging_dynamic": self.guard(_action_stop_ev_charging_dynamic),
+            "set_ev_charge_limit": self.guard(_action_set_ev_charge_limit),
+        }
+        async def no_native_cleanup(*_args, **_kwargs):
+            return None
         namespace = {
             "execute_actions": self.execute,
             "ev_actions": self.ev_actions,
@@ -143,7 +166,19 @@ class BoostHarness:
             "datetime": datetime,
             "uuid4": uuid4,
             "deepcopy": deepcopy,
+            "re": re,
+            "math": math,
+            "CONF_EV_PROVIDER": mapping.CONF_EV_PROVIDER,
+            "EV_PROVIDER_FLEET_API": "fleet_api",
+            "EV_PROVIDER_BOTH": "both",
+            "EV_PROVIDER_TESLA_BLE": mapping.EV_PROVIDER_TESLA_BLE,
+            "configured_ble_prefixes": mapping.configured_ble_prefixes,
             "persist_ev_runtime_state": own.persist_ev_runtime_state,
+            "get_vehicle_route": recovery.get_vehicle_route,
+            "async_rebind_native_session_route": recovery.async_rebind_native_session_route,
+            "_compatible": recovery._compatible,
+            "independent_tesla_source_binding": lambda *_args, **_kwargs: None,
+            "async_read_stopped_tesla_cleanup": no_native_cleanup,
             "is_current_ev_power_observation": ev_load.is_current_ev_power_observation,
             "_get_ev_vehicles_status": lambda *_args, **_kwargs: self.observations(),
             "_LOGGER": logging.getLogger(__name__),
@@ -151,6 +186,10 @@ class BoostHarness:
                 json_response=lambda body, **kwargs: SimpleNamespace(body=body, **kwargs)
             ),
         }
+        namespace["_passive_ev_cleanup_observation"] = compile_node(
+            StripImports().visit(source_node(INIT, "_passive_ev_cleanup_observation")),
+            namespace,
+        )
         for name in (
             "claim_ev_ownership", "get_active_ev_owner_mode", "get_ev_ownership",
             "owner_family", "record_ev_command", "release_ev_ownership",
@@ -161,13 +200,21 @@ class BoostHarness:
             StripImports().visit(source_node(INIT, "post", parent="ChargingBoostView")),
             namespace,
         )
-        for name in ("_boost_pairing_identity", "_boost_observation", "_save_boost_state",
+        for name in ("_boost_pairing_identity", "_is_valid_boost_vehicle_id",
+                     "_boost_observation", "_independent_boost_stopped", "_save_boost_state",
                      "_arm_boost_stop", "restore_boost_sessions", "_start_finite_boost"):
             method = compile_node(
                 StripImports().visit(source_node(INIT, name, parent="ChargingBoostView")),
                 namespace,
             )
             setattr(self.view, name, MethodType(method, self.view))
+
+    def configure_ble(self, *prefixes, provider=None):
+        """Configure the harness with the requested Tesla BLE identities."""
+        self.entry.options = {
+            mapping.CONF_EV_PROVIDER: provider or mapping.EV_PROVIDER_TESLA_BLE,
+            mapping.CONF_TESLA_BLE_ENTITY_PREFIX: ",".join(prefixes),
+        }
 
     def observations(self):
         return [{"vehicle_id": vin, "is_charging": charging,
@@ -268,7 +315,7 @@ class BoostHarness:
     async def execute(self, hass, config_entry, actions):
         results = []
         for action in actions:
-            results.append(await self.apply(
+            results.append(await self.apply[action["action_type"]](
                 hass, config_entry,
                 {**action["parameters"], "_kind": action["action_type"]},
             ))
@@ -345,6 +392,40 @@ async def test_two_vins_keep_original_distinct_deadlines_and_both_expire():
 
 
 @pytest.mark.asyncio
+async def test_recovering_boost_keeps_deadline_and_does_not_report_physical_start():
+    h = BoostHarness()
+    healthy = await h.start(VIN_B, 3)
+    healthy_state, healthy_owner = h.states["entry"][VIN_B], h.owner(VIN_B)
+    healthy_timer = h.runtime["ev_boost_timers"][VIN_B]
+    h.start_hook = lambda vin, _params: h.states["entry"].setdefault(vin, {}).update(
+        transport_recovery_pending=True, charging_started=False)
+
+    pending = await h.start(VIN_A, 1)
+
+    assert pending["success"] is True
+    assert pending["charging_confirmed"] is False
+    assert pending["recovery_pending"] is True
+    assert "waiting for charging recovery" in pending["message"]
+    record = h.runtime["ev_boost_sessions"][VIN_A]
+    assert record["status"] == "recovering"
+    assert record["unknown_start_outcome"] is True
+    assert record["expires_at"] == pending["stops_at"]
+    assert h.owner(VIN_A)["last_command"]["success"] is False
+    h.now = datetime.fromisoformat(pending["stops_at"])
+    await h.due()
+    assert h.stops() == [VIN_A]
+    assert h.states["entry"][VIN_B] is healthy_state
+    assert h.owner(VIN_B) is healthy_owner
+    assert h.runtime["ev_boost_timers"][VIN_B] is healthy_timer
+    assert record["expires_at"] < healthy["stops_at"]
+
+    h.now += timedelta(minutes=3)
+    await h.due()
+    assert h.stops() == [VIN_A, VIN_B]
+    assert h.states["entry"] == {} and h.runtime["ev_boost_timers"] == {}
+
+
+@pytest.mark.asyncio
 async def test_stopped_vin_expiry_leaves_other_vehicle_timer_and_owner():
     h = BoostHarness()
     await h.start(VIN_A)
@@ -382,7 +463,7 @@ async def test_same_vin_replacement_cancels_only_old_timer_and_stale_callback_is
 
 
 @pytest.mark.asyncio
-async def test_expiry_waiting_on_ev_gate_rechecks_replacement_lease_and_timer():
+async def test_stale_expiry_is_inert_while_replacement_awaits_provider():
     h = BoostHarness()
     await h.start(VIN_A)
     old_timer = h.timers[0]
@@ -393,13 +474,36 @@ async def test_expiry_waiting_on_ev_gate_rechecks_replacement_lease_and_timer():
     h.gate_requested.clear()
     expiry_task = asyncio.create_task(old_timer.callback(h.now + timedelta(minutes=1)))
     await asyncio.wait_for(h.gate_requested.wait(), timeout=1)
-    assert not expiry_task.done()
+    await asyncio.wait_for(expiry_task, timeout=1)
+    assert h.stops() == []
+    assert not replacement_task.done()
     release.set()
     assert (await asyncio.wait_for(replacement_task, timeout=1))["success"]
     lease, record = h.owner(VIN_A), h.runtime["ev_boost_timers"][VIN_A]
-    await asyncio.wait_for(expiry_task, timeout=1)
+    await old_timer.callback(h.now + timedelta(minutes=1))
     assert h.stops() == []
     assert h.owner(VIN_A) is lease and h.runtime["ev_boost_timers"][VIN_A] is record
+
+
+@pytest.mark.asyncio
+async def test_boost_expiry_stops_exact_car_while_other_car_start_awaits_provider():
+    h = BoostHarness()
+    await h.start(VIN_A)
+    entered, release = asyncio.Event(), asyncio.Event()
+    h.start_pause = (entered, release)
+    other_start = asyncio.create_task(h.start(VIN_B, 3))
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    h.now += timedelta(minutes=1)
+    try:
+        await asyncio.wait_for(h.due(), timeout=0.5)
+        assert h.stops() == [VIN_A]
+        assert h.physical[VIN_A] is False
+        assert not other_start.done()
+        assert VIN_A not in h.runtime["ev_boost_sessions"]
+    finally:
+        release.set()
+        assert (await asyncio.wait_for(other_start, timeout=1))["success"]
+    assert h.physical[VIN_B] is True
 
 
 @pytest.mark.asyncio
@@ -457,6 +561,124 @@ async def test_ble_alias_and_physical_vin_share_one_boost_timer():
     await h.due()
     assert h.stops() == [VIN_A]
     assert h.calls[-1][2]["vehicle_vin"] == VIN_A
+
+
+@pytest.mark.asyncio
+async def test_ble_only_configured_ids_keep_independent_deadlines_and_exact_stop_targets():
+    h = BoostHarness()
+    h.configure_ble("car_a", "car_b")
+    first = await h.start(BLE_A, 1)
+    h.now += timedelta(seconds=20)
+    second = await h.start(BLE_B, 3)
+    assert first["success"] and second["success"]
+    assert set(h.runtime["ev_boost_timers"]) == {BLE_A, BLE_B}
+    assert datetime.fromisoformat(first["stops_at"]) == h.timers[0].deadline
+    assert datetime.fromisoformat(second["stops_at"]) == h.timers[1].deadline
+
+    h.now = h.timers[0].deadline
+    await h.due()
+    assert h.stops() == [BLE_A]
+    assert h.calls[-1][2]["vehicle_vin"] == BLE_A
+    assert BLE_B in h.runtime["ev_boost_timers"]
+
+    h.now = h.timers[1].deadline
+    await h.due()
+    assert h.stops() == [BLE_A, BLE_B]
+    assert h.calls[-1][2]["vehicle_vin"] == BLE_B
+
+
+@pytest.mark.asyncio
+async def test_ble_only_reload_keeps_original_deadline_with_fresh_exact_observation():
+    h = BoostHarness()
+    h.configure_ble("car_a")
+    response = await h.start(BLE_A, 2)
+    original_deadline = response["stops_at"]
+
+    restored = await h.reload(at=h.now + timedelta(seconds=20))
+    assert restored.calls == []
+    assert restored.owner(BLE_A)["owner_mode"] == "boost"
+    assert restored.runtime["ev_boost_sessions"][BLE_A]["expires_at"] == original_deadline
+    assert restored.runtime["ev_boost_timers"][BLE_A]["stops_at"].isoformat() == original_deadline
+
+    restored.now = datetime.fromisoformat(original_deadline)
+    await restored.due()
+    assert restored.stops() == [BLE_A]
+    assert restored.calls[-1][2]["vehicle_vin"] == BLE_A
+
+
+@pytest.mark.asyncio
+async def test_ble_only_invalid_or_unconfigured_ids_fail_without_actions():
+    h = BoostHarness()
+    h.configure_ble("car_a")
+    for vehicle_id in ("ble_car_b", "ble_bad-prefix", "ble_", "alias", "_default", 12345):
+        response = await h.start(vehicle_id)
+        assert response["success"] is False
+    assert h.calls == []
+    assert h.runtime.get("ev_boost_timers", {}) == {}
+    assert h.runtime.get("ev_boost_sessions", {}) == {}
+
+
+@pytest.mark.asyncio
+async def test_both_mode_unmapped_ble_alias_stays_rejected_without_actions():
+    h = BoostHarness()
+    h.configure_ble("car_a", provider=mapping.EV_PROVIDER_BOTH)
+    response = await h.start(BLE_A)
+    assert response["success"] is False
+    assert h.calls == []
+    assert h.runtime.get("ev_boost_timers", {}) == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["provider", "prefix"])
+async def test_ble_recovery_pairing_provider_or_prefix_change_blocks_stop(change):
+    h = BoostHarness()
+    h.configure_ble("car_a")
+    await h.start(BLE_A)
+    if change == "provider":
+        h.entry.options[mapping.CONF_EV_PROVIDER] = mapping.EV_PROVIDER_BOTH
+    else:
+        h.entry.options[mapping.CONF_TESLA_BLE_ENTITY_PREFIX] = "car_b"
+    h.now = h.timers[0].deadline
+    await h.timers[0].callback(h.now)
+    assert h.stops() == []
+    assert h.runtime["ev_boost_sessions"][BLE_A]["status"] == "blocked_pairing_changed"
+
+
+@pytest.mark.asyncio
+async def test_ble_restore_rejects_unconfigured_identity_without_actions():
+    h = BoostHarness()
+    h.configure_ble("car_a")
+    await h.start(BLE_A)
+    invalid = deepcopy(h.runtime["ev_boost_sessions"][BLE_A])
+    invalid["vehicle_id"] = BLE_B
+    invalid["stop_params"]["vehicle_vin"] = BLE_B
+    h.unload_timers()
+    h.runtime["ev_boost_sessions"] = {}
+    h.calls.clear()
+    await h.view.restore_boost_sessions({BLE_B: invalid})
+    assert h.calls == []
+    assert h.runtime["ev_boost_recovery_status"] == "blocked_invalid_identity_or_deadline"
+    assert h.runtime.get("ev_boost_timers", {}) == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["provider", "prefix"])
+async def test_ble_restore_rejects_provider_or_prefix_change_without_actions(change):
+    h = BoostHarness()
+    h.configure_ble("car_a")
+    await h.start(BLE_A)
+    record = deepcopy(h.runtime["ev_boost_sessions"][BLE_A])
+    h.unload_timers()
+    h.runtime["ev_boost_sessions"] = {}
+    h.calls.clear()
+    if change == "provider":
+        h.entry.options[mapping.CONF_EV_PROVIDER] = mapping.EV_PROVIDER_BOTH
+    else:
+        h.entry.options[mapping.CONF_TESLA_BLE_ENTITY_PREFIX] = "car_b"
+    await h.view.restore_boost_sessions({BLE_A: record})
+    assert h.calls == []
+    assert h.runtime["ev_boost_recovery_status"] == "blocked_invalid_identity_or_deadline"
+    assert h.runtime.get("ev_boost_timers", {}) == {}
 
 
 @pytest.mark.asyncio
@@ -1255,3 +1477,46 @@ async def test_restart_from_pre_reply_disk_snapshot_recovers_crashed_start_witho
     restored.now = datetime.fromisoformat(intent["expires_at"]) + timedelta(seconds=31)
     await restored.due()
     assert restored.stops() == [VIN_A] and not restored.runtime["ev_boost_sessions"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("producer_rebound", [False, True])
+async def test_native_boost_reload_rebinds_only_exact_producer_for_stop(monkeypatch, producer_rebound):
+    entity_id = "switch.native_car_a_charger"
+    registration = SimpleNamespace(
+        entity_id=entity_id, platform="tesla_fleet", config_entry_id="fleet-a",
+        device_id="native-device-a", unique_id=f"{VIN_A}_charger", disabled_by=None,
+    )
+    registry = SimpleNamespace(async_get=lambda entity: registration if entity == entity_id else None)
+    monkeypatch.setattr(recovery, "_registry", lambda _hass: registry)
+    handoffs = []
+    original_rebind = recovery.async_rebind_native_session_route
+
+    async def rebind(hass, entry, vehicle_id, **kwargs):
+        result = await original_rebind(hass, entry, vehicle_id, **kwargs)
+        ledger = hass.data["power_sync"][entry.entry_id][recovery.RECOVERY_KEY]["vehicles"][vehicle_id]
+        handoffs.append((kwargs["mode"], result, deepcopy(ledger["route"])))
+        return result
+
+    monkeypatch.setattr(recovery, "async_rebind_native_session_route", rebind)
+    h = BoostHarness()
+    response = await h.start(VIN_A)
+    ticket = await recovery.async_begin_attempt(
+        h.hass, h.entry, VIN_A, {"kind": "ha", "entity_id": entity_id}, "start", entity_id,
+    )
+    assert ticket is not None
+    assert await recovery.async_finish_attempt(ticket, "confirmed")
+    if producer_rebound:
+        registration.device_id = "replacement-device"
+    restored = await h.reload(at=datetime.fromisoformat(response["stops_at"]) + timedelta(seconds=1))
+    assert [mode for mode, _result, _route in handoffs] == ["cleanup_stop"]
+    if producer_rebound:
+        assert handoffs[0][1] is False
+        assert restored.calls == []
+        assert restored.runtime["ev_boost_sessions"][VIN_A]["expires_at"] == response["stops_at"]
+    else:
+        assert handoffs[0][1] is True
+        assert handoffs[0][2]["cleanup_only"] is True
+        assert restored.stops() == [VIN_A]
+        assert [kind for kind, _vin, _params in restored.calls] == ["stop_ev_charging_dynamic"]
+        assert restored.runtime["ev_boost_sessions"] == {}

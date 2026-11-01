@@ -49,6 +49,78 @@ TESLA_TOU_READBACK_EXACT = "exact"
 TESLA_TOU_READBACK_ZERO_NORMALIZED = "tesla_zero_normalized"
 
 
+async def _async_prepare_ev_recovery_lifecycle(hass, entry, automation_store) -> bool:
+    """Hydrate authoritative EV recovery before exposing control callbacks."""
+    from .automations.ev_ownership import (
+        hydrate_ev_recovery_projection,
+        restore_ev_recovery_obligations,
+    )
+    from .tesla_ev_recovery import (
+        async_load_recovery_state,
+        async_update_recovery_obligations,
+        recovery_sidecar_snapshot,
+    )
+
+    runtime = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    if not isinstance(runtime, dict):
+        return False
+    runtime["_ev_recovery_lifecycle_prepared"] = True
+    runtime["_tesla_ev_recovery_sidecar_hold"] = "sidecar_hydration_pending"
+    hydrate_ev_recovery_projection(hass, entry, automation_store)
+    if runtime.get("_tesla_ev_recovery_sidecar_hold") == "legacy_runtime_malformed":
+        return False
+    enrolled = entry.data.get("_tesla_ev_recovery_enrolled") is True
+    try:
+        # A first enrollment must be allowed to create its sidecar before any
+        # established marker is set. A previously enrolled missing Store is a
+        # hold, even when the automation serializer contains an empty journal.
+        ready = await async_load_recovery_state(hass, entry, enrolled=enrolled)
+        if hass.data.get(DOMAIN, {}).get(entry.entry_id) is not runtime:
+            return False
+        if not ready:
+            return False
+        # The loader has established its journal, but finite cleanup and the
+        # durable enrollment marker are still being hydrated. Keep old routed
+        # callbacks fail-closed across the remaining setup awaits too.
+        runtime["_tesla_ev_recovery_sidecar_hold"] = "lifecycle_obligations_hydrating"
+        if not enrolled:
+            runtime["_skip_reload"] = True
+            hass.config_entries.async_update_entry(
+                entry, data={**entry.data, "_tesla_ev_recovery_enrolled": True}
+            )
+            if entry.data.get("_tesla_ev_recovery_enrolled") is not True:
+                runtime["_tesla_ev_recovery_sidecar_hold"] = "enrollment_marker_save_failed"
+                return False
+        snapshot = recovery_sidecar_snapshot(hass, entry)
+        obligations = snapshot.get("obligations") if isinstance(snapshot, Mapping) else None
+        if not isinstance(obligations, Mapping):
+            runtime["_tesla_ev_recovery_sidecar_hold"] = "finite_obligations_malformed"
+            return False
+        # Missing families can import surviving legacy facts once. An existing
+        # empty family is authoritative and must not resurrect an older lease.
+        missing = {
+            key: copy.deepcopy(runtime.get(key, {}))
+            for key in ("ev_boost_sessions", "ev_quick_control_obligations")
+            if key not in obligations
+        }
+        if missing and not await async_update_recovery_obligations(hass, entry, missing):
+            runtime["_tesla_ev_recovery_sidecar_hold"] = "finite_obligations_import_failed"
+            return False
+        if hass.data.get(DOMAIN, {}).get(entry.entry_id) is not runtime:
+            return False
+        ready = restore_ev_recovery_obligations(hass, entry)
+        if ready and runtime.get("_tesla_ev_recovery_sidecar_hold") == "lifecycle_obligations_hydrating":
+            runtime.pop("_tesla_ev_recovery_sidecar_hold", None)
+        return ready
+    except asyncio.CancelledError:
+        runtime["_tesla_ev_recovery_sidecar_hold"] = "sidecar_hydration_cancelled"
+        raise
+    except Exception:
+        runtime["_tesla_ev_recovery_sidecar_hold"] = "sidecar_hydration_failed"
+        _LOGGER.exception("EV recovery hydration failed; positive vehicle control remains blocked")
+        return False
+
+
 async def _tesla_grid_export_write_result(
     response: Any,
 ) -> tuple[bool, str | None]:
@@ -1728,6 +1800,8 @@ def _get_ev_vehicle_status(hass, entry) -> dict:
     Returns:
         Dict with ev_power_kw (float) and ev_soc (int or None).
     """
+    from .tesla_ev_recovery import ble_quarantined
+
     ev_power_kw = 0.0
     ev_soc = None
 
@@ -1814,6 +1888,7 @@ def _get_ev_vehicle_status(hass, entry) -> dict:
             float(generic_observation.get("ev_power_kw") or 0.0),
         )
 
+    ble_power_by_vehicle_id: dict[str, tuple[float, datetime | None]] = {}
     # Check Tesla BLE sensors (all configured prefixes)
     for prefix in ble_prefixes:
         # Read SoC first so we can validate charging state
@@ -1853,12 +1928,14 @@ def _get_ev_vehicle_status(hass, entry) -> dict:
             and ble_charging_state.state.lower() == "charging"
             and (ble_soc_value is None or ble_soc_value < 100)
             and not fleet_away_is_newer
+            and not ble_quarantined(hass, prefix)
         )
 
         if is_ble_charging and ble_state and ble_state.state not in ("unknown", "unavailable"):
             val = _kw_from_power_state(ble_state)
             if val > 0:
-                ev_power_kw = max(ev_power_kw, val)
+                vehicle_key = _vehicle_identity_key(paired_ble_prefixes.get(prefix)) or f"ble_{prefix}"
+                ble_power_by_vehicle_id[vehicle_key] = (val, ble_presence_observed_at)
 
     # Check Teslemetry Bluetooth sensors
     tbt_prefix = _resolve_teslemetry_bt_prefix(hass)
@@ -1997,6 +2074,7 @@ def _get_ev_vehicle_status(hass, entry) -> dict:
 
             # Read battery level (e.g. sensor.primary_ev_battery_level)
             if ev_soc is None and "battery" in eid and "range" not in eid and "heater" not in eid:
+                cleanup_owner_current = False
                 try:
                     val = float(state.state)
                     if 0 <= val <= 100:
@@ -2040,10 +2118,20 @@ def _get_ev_vehicle_status(hass, entry) -> dict:
                     existing_observed_at,
                 )
 
-    if fleet_power_by_vehicle_id:
+    power_by_vehicle_id = dict(ble_power_by_vehicle_id)
+    for vehicle_key, (power_kw, observed_at) in fleet_power_by_vehicle_id.items():
+        previous = power_by_vehicle_id.get(vehicle_key)
+        if previous is None or (
+            observed_at is not None
+            and (previous[1] is None or observed_at >= previous[1])
+        ):
+            power_by_vehicle_id[vehicle_key] = (power_kw, observed_at)
+        elif observed_at is None and previous[1] is None:
+            power_by_vehicle_id[vehicle_key] = (max(power_kw, previous[0]), None)
+    if power_by_vehicle_id:
         ev_power_kw = max(
             ev_power_kw,
-            *(power_kw for power_kw, _ in fleet_power_by_vehicle_id.values()),
+            *(power_kw for power_kw, _ in power_by_vehicle_id.values()),
         )
 
     if generic_ev_soc is not None:
@@ -2068,6 +2156,7 @@ def _get_ev_vehicles_status(hass, entry, *, include_control_evidence=False) -> l
         is_current_ev_power_observation,
         is_ev_power_contradicted_by_state,
     )
+    from .tesla_ev_recovery import ble_quarantined
 
     # Only explicit settled states prove stopped. Plug/zero-power semantics
     # (including Starting, Connected and No Power) grant no cleanup authority.
@@ -2640,6 +2729,23 @@ def _get_ev_vehicles_status(hass, entry, *, include_control_evidence=False) -> l
             }
         if current_amps is not None:
             ble_observation["current_amps"] = current_amps
+        if ble_quarantined(hass, prefix):
+            # Retain the car/plug/SOC for the home picture, but do not present
+            # retained measurements as physical charging after containment.
+            ble_observation.update({
+                "ev_power_kw": 0.0,
+                "power_available": False,
+                "is_charging": False,
+                "_power_activity_unknown": True,
+                "_observed_at": None,
+                "_charging_observed_at": None,
+                "transport_quarantined": True,
+            })
+            ble_observation.pop("current_amps", None)
+            if include_control_evidence:
+                ble_observation["_boost_charging_state_evidence"] = {
+                    "known": False, "charging": None, "observed_at": None,
+                }
         if ble_site_presence is not None:
             ble_observation["site_presence"] = ble_site_presence
             ble_observation["_site_presence_observed_at"] = (
@@ -15596,25 +15702,84 @@ class EVVehiclesView(HomeAssistantView):
             return {**entries[0].data, **entries[0].options}
         return {}
 
+    def _ble_connection_usable(self, prefix: str) -> bool:
+        """Return whether an optional exact BLE connection control is usable.
+
+        Older ESPHome bridge YAMLs have no connection switch or registry row;
+        preserve that shape.  Once the entity exists, only an active ``on``
+        state from an enabled registry row proves that BLE is available.  The
+        generic BLE status sensor is vehicle/session telemetry and cannot
+        override an explicitly disabled connection control.
+        """
+        radio_entity = f"switch.{prefix}_ble_connection"
+        state = self._hass.states.get(radio_entity)
+        try:
+            registry = er.async_get(self._hass)
+            lookup = getattr(registry, "async_get", None)
+            if callable(lookup):
+                registration = lookup(radio_entity)
+            else:
+                registration = getattr(registry, "entities", {}).get(radio_entity)
+        except Exception:
+            registration = None
+        if state is None and registration is None:
+            return True
+        if registration is not None and getattr(registration, "disabled_by", None):
+            return False
+        return (
+            state is not None
+            and str(getattr(state, "state", "") or "").strip().lower() == "on"
+        )
+
     @staticmethod
     def _supplement_fleet_with_ble(fleet_v: dict, ble_v: dict) -> None:
         """Supplement a Fleet API vehicle dict with fresher BLE data in-place."""
+        if ble_v.get("transport_quarantined"):
+            fleet_v["ble_connected"] = False
+            return
+        # A present, explicitly unusable connection control fences every BLE
+        # overlay.  Keep the native fields intact, including a definitive
+        # charge-flap reading that would otherwise force ``Disconnected``.
+        # Legacy bridges omit this marker and retain their historical merge.
+        if ble_v.get("connection_usable") is False:
+            fleet_v["ble_connected"] = False
+            return
+
+        def observed(vehicle: dict, field: str) -> datetime | None:
+            value = vehicle.get(f"{field}_updated_at", vehicle.get("data_updated_at"))
+            if isinstance(value, str):
+                try:
+                    value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                except ValueError:
+                    return None
+            return _ev_observed_at(value)
+
+        def newer(field: str, *, fleet_field: str | None = None) -> bool:
+            ble_at = observed(ble_v, field)
+            fleet_at = observed(fleet_v, fleet_field or field)
+            return fleet_at is None or (ble_at is not None and ble_at > fleet_at)
+
         ble_online = ble_v.get("is_online", False)
-        if ble_v.get("battery_level") is not None:
+        if ble_v.get("battery_level") is not None and newer("battery_level"):
             fleet_v["battery_level"] = ble_v["battery_level"]
         ble_cs = ble_v.get("charging_state")
-        if ble_cs and ble_cs not in ("Unknown", "Asleep"):
+        if ble_cs and ble_cs not in ("Unknown", "Asleep") and newer("charging_state"):
             fleet_v["charging_state"] = ble_cs
-        if ble_v.get("charge_limit_soc") is not None:
+        if ble_v.get("charge_limit_soc") is not None and newer("charge_limit_soc"):
             fleet_v["charge_limit_soc"] = ble_v["charge_limit_soc"]
         # Sync is_plugged_in from BLE when it has a definitive
         # reading (charge_flap is "on" or "off", not "unavailable").
-        if ble_v.get("plugged_in_definitive"):
+        if ble_v.get("plugged_in_definitive") and newer("is_plugged_in"):
             fleet_v["is_plugged_in"] = ble_v["is_plugged_in"]
             if not ble_v["is_plugged_in"]:
                 fleet_v["charging_state"] = "Disconnected"
         # Sync charger_power from BLE (more real-time than Fleet API)
-        if ble_v.get("charger_power") is not None:
+        if (
+            ble_v.get("charger_power") is not None
+            and newer("charger_power")
+            and newer("charger_power", fleet_field="charging_state")
+            and str(fleet_v.get("charging_state") or "").lower() == "charging"
+        ):
             fleet_v["charger_power"] = ble_v["charger_power"]
         # Use BLE timestamp if it's fresher than Fleet API
         ble_ts = ble_v.get("data_updated_at", "")
@@ -15625,6 +15790,9 @@ class EVVehiclesView(HomeAssistantView):
 
     def _get_tesla_ble_vehicle(self, prefix: str, vehicle_index: int = 1) -> dict | None:
         """Get vehicle data from Tesla BLE entities."""
+        from .tesla_ev_recovery import ble_quarantined
+
+        quarantined = ble_quarantined(self._hass, prefix)
         # Accept either the optional ESPHome node status or Tesla BLE status.
         status_state = get_tesla_ble_status_state(self._hass, prefix)
 
@@ -15700,6 +15868,7 @@ class EVVehiclesView(HomeAssistantView):
 
         # Get charge power (only trust it if vehicle is actively charging)
         charger_power = None
+        charge_power_state = None
         is_ble_charging = (
             charging_state and charging_state.lower() == "charging"
         )
@@ -15712,7 +15881,20 @@ class EVVehiclesView(HomeAssistantView):
                     pass
 
         # Check BLE connection status
-        is_online = status_state.state == "on"
+        # A stale generic Status/BLE Status entity must not override an
+        # explicitly disabled or unavailable connection switch.
+        connection_usable = self._ble_connection_usable(prefix)
+        is_online = status_state.state == "on" and connection_usable
+        if not connection_usable:
+            # A known-disabled radio cannot provide current charge evidence,
+            # even when the generic status entity is stale and still ``on``.
+            charging_state = "Unknown"
+            charger_power = None
+            charge_power_state = None
+        if quarantined:
+            charging_state = "Unknown"
+            charger_power = None
+            is_online = False
 
         # Use the most recent entity update time for data freshness
         data_updated_at = status_state.last_updated if hasattr(status_state, 'last_updated') else None
@@ -15741,9 +15923,25 @@ class EVVehiclesView(HomeAssistantView):
             "plugged_in_definitive": plugged_in_definitive,
             "charger_power": charger_power,
             "is_online": is_online,
+            "connection_usable": connection_usable,
             "data_updated_at": data_updated_at.isoformat() if data_updated_at else dt_util.now().isoformat(),
             "source": "tesla_ble",
             "brand": "tesla",
+            "transport_quarantined": quarantined,
+            **{
+                f"{field}_updated_at": (
+                    observed.isoformat() if (observed := _ev_observed_at(
+                        getattr(value, "last_updated", None)
+                    )) is not None else None
+                )
+                for field, value in (
+                    ("charging_state", charging_state_state),
+                    ("charger_power", charge_power_state),
+                    ("battery_level", charge_level_state),
+                    ("charge_limit_soc", charge_limit_state),
+                    ("is_plugged_in", charge_flap_state),
+                )
+            },
         }
 
     def _merge_tesla_ble_vehicles(
@@ -16004,6 +16202,7 @@ class EVVehiclesView(HomeAssistantView):
                     charger_power_rank = None
                     provider_battery_capacity_kwh = None
                     latest_entity_update = None
+                    field_observed_at: dict[str, datetime | None] = {}
 
                     device_entities = []
                     sensor_entities = []
@@ -16050,6 +16249,7 @@ class EVVehiclesView(HomeAssistantView):
                                     val = float(state.state)
                                     if 0 <= val <= 100 and battery_level is None:
                                         battery_level = int(val)
+                                        field_observed_at["battery_level"] = _ev_power_observed_at(state)
                                 except (ValueError, TypeError):
                                     pass
 
@@ -16060,16 +16260,28 @@ class EVVehiclesView(HomeAssistantView):
                             "power" not in entity_id_lower):
                             if state.state in ("unknown", "unavailable") and charging_state is None:
                                 charging_state = "Asleep"
-                            elif state.state not in ("unknown", "unavailable") and charging_state is None:
+                            elif state.state not in ("unknown", "unavailable") and (
+                                charging_state is None
+                                or charging_state == "Asleep"
+                                or (
+                                    (candidate_at := _ev_power_observed_at(state)) is not None
+                                    and (
+                                        field_observed_at.get("charging_state") is None
+                                        or candidate_at > field_observed_at["charging_state"]
+                                    )
+                                )
+                            ):
                                 # Capitalize first letter to match app's expected format
                                 # Tesla Fleet: charging, complete, stopped, etc.
                                 # App expects: Charging, Complete, Stopped, etc.
                                 charging_state = state.state.capitalize()
+                                field_observed_at["charging_state"] = _ev_power_observed_at(state)
 
                         if "charge_limit" in entity_id_lower or "charge_limit_soc" in entity_id_lower:
                             if state.state not in ("unknown", "unavailable"):
                                 try:
                                     charge_limit = int(float(state.state))
+                                    field_observed_at["charge_limit_soc"] = _ev_power_observed_at(state)
                                 except (ValueError, TypeError):
                                     pass
 
@@ -16078,6 +16290,7 @@ class EVVehiclesView(HomeAssistantView):
                             "charger_connected" in entity_id_lower):
                             if state.state in ("on", "true", "connected"):
                                 is_plugged_in = True
+                                field_observed_at["is_plugged_in"] = _ev_power_observed_at(state)
 
                         power_candidate = self._fleet_charger_power_candidate(
                             entity.entity_id, state, at=power_observed_now
@@ -16087,6 +16300,7 @@ class EVVehiclesView(HomeAssistantView):
                             if charger_power_rank is None or rank > charger_power_rank:
                                 charger_power_rank = rank
                                 charger_power = power_kw
+                                field_observed_at["charger_power"] = rank[1]
 
                         # Track most recent entity update for data freshness
                         if hasattr(state, 'last_updated') and state.last_updated:
@@ -16116,6 +16330,10 @@ class EVVehiclesView(HomeAssistantView):
                         "data_updated_at": fleet_updated_at,
                         "source": "fleet_api",
                         "brand": "tesla",
+                        **{
+                            f"{field}_updated_at": stamp.isoformat() if stamp else None
+                            for field, stamp in field_observed_at.items()
+                        },
                     })
 
             # Get/supplement with Tesla BLE data (supports multiple BLE prefixes)
@@ -16561,6 +16779,12 @@ class EVVehicleCommandView(HomeAssistantView):
 
     async def _wake_vehicle(self, vehicle_vin: str | None = None) -> bool:
         """Wake up a Tesla vehicle and wait for it to be awake."""
+        from .automations.actions import (
+            _is_ble_available,
+            _resolve_ble_prefix_for_vehicle,
+            _wake_tesla_ble,
+        )
+
         config = self._get_powersync_config()
         ev_provider = config.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API)
 
@@ -16569,32 +16793,32 @@ class EVVehicleCommandView(HomeAssistantView):
             _LOGGER.debug("Teslemetry BT handles wake internally, skipping")
             return True
 
+        if ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
+            entry = self._get_powersync_entry()
+            if entry is None:
+                return False
+            ble_prefix = _resolve_ble_prefix_for_vehicle(
+                self._hass, entry, vehicle_vin
+            )
+            if ble_prefix and _is_ble_available(self._hass, ble_prefix):
+                # Use the same exact-car wake/readback contract as charging.
+                # Unknown native status must not report "awake" without a
+                # wake, and an explicit request bypasses automatic backoff.
+                return await _wake_tesla_ble(
+                    self._hass, ble_prefix, wait_timeout=120,
+                    allow_backoff=False,
+                )
+            if ev_provider == EV_PROVIDER_TESLA_BLE:
+                return False
+
         # Check if already awake
         if not await self._is_vehicle_asleep(vehicle_vin):
             _LOGGER.debug("Vehicle is already awake")
             return True
 
         _LOGGER.info("Vehicle is asleep, sending wake command...")
-        ble_prefix = _ble_prefix_for_vehicle(self._hass, config, vehicle_vin)
 
         wake_sent = False
-
-        if (
-            ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH)
-            and ble_prefix
-        ):
-            wake_entity = TESLA_BLE_BUTTON_WAKE_UP.format(prefix=ble_prefix)
-            if self._hass.states.get(wake_entity):
-                try:
-                    await self._hass.services.async_call(
-                        "button", "press",
-                        {"entity_id": wake_entity},
-                        blocking=True,
-                    )
-                    _LOGGER.info(f"Sent wake command via BLE: {wake_entity}")
-                    wake_sent = True
-                except Exception as e:
-                    _LOGGER.warning(f"BLE wake failed: {e}")
 
         # Try Fleet API
         if not wake_sent and ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH):
@@ -17085,6 +17309,54 @@ class EVVehicleCommandView(HomeAssistantView):
         )
         return None if allowed else reason
 
+    def _record_manual_stop_hold(
+        self,
+        vehicle_vin: str | None,
+        reason: str,
+    ) -> str | None:
+        """Revoke positive EV authority before waiting for a manual stop."""
+        entry = self._get_powersync_entry()
+        if entry is None:
+            return None
+        hold_vehicle_id = vehicle_vin
+        if vehicle_vin in (None, "", "_default"):
+            # A default/mobile stop can still have an exact active loadpoint.
+            # Scope the synchronous hold to that VIN before the serialized
+            # action starts; never let an anonymous multi-car stop create a
+            # default hold that suppresses every vehicle.
+            from .automations import actions as ev_actions
+
+            runtime_states = ev_actions._dynamic_ev_state.get(entry.entry_id, {})
+            active_vehicle_ids = [
+                str(vehicle_id)
+                for vehicle_id, state in runtime_states.items()
+                if str(vehicle_id) != "_default"
+                and isinstance(state, dict)
+                and state.get("active")
+            ]
+            if len(active_vehicle_ids) == 1:
+                hold_vehicle_id = active_vehicle_ids[0]
+            elif len(active_vehicle_ids) > 1:
+                return None
+            else:
+                default_state = runtime_states.get("_default")
+                if not isinstance(default_state, dict) or not default_state.get("active"):
+                    # There is no exact loadpoint to fence synchronously.
+                    # The serialized stop action may add its own hold after it
+                    # resolves a single configured vehicle; guessing here
+                    # would block unrelated cars during an in-flight request.
+                    return None
+                hold_vehicle_id = "_default"
+        from .automations.ev_ownership import record_manual_stop_hold
+
+        record_manual_stop_hold(
+            self._hass,
+            entry,
+            hold_vehicle_id,
+            reason=reason,
+        )
+        return hold_vehicle_id
+
     async def _loadpoint_ready_for_manual_start(
         self,
         vehicle_vin: str | None,
@@ -17129,7 +17401,10 @@ class EVVehicleCommandView(HomeAssistantView):
         """Persist and arm a finite manual EV session at an absolute deadline."""
 
         from .automations import actions as ev_actions
-        from .automations.ev_ownership import claim_ev_ownership
+        from .automations.ev_ownership import (
+            claim_ev_ownership,
+            get_ev_quick_control_timer,
+        )
 
         loadpoint_id = self._manual_loadpoint_id(vehicle_vin)
         state = ev_actions._dynamic_ev_state.get(entry.entry_id, {}).get(loadpoint_id)
@@ -17142,11 +17417,21 @@ class EVVehicleCommandView(HomeAssistantView):
         params["duration_minutes"] = duration_minutes
         params["expires_at"] = stops_at.isoformat()
 
+        # A durable obligation owns the timer created before positive dispatch.
+        # Capture it before touching the transient state slot so adoption does
+        # not cancel the very timer that must survive this view completion.
+        obligation_timer = get_ev_quick_control_timer(
+            self._hass,
+            entry,
+            vehicle_vin,
+        )
+
         # Use a dedicated slot: "cancel_timer" holds the dynamic controller's
         # periodic update, which a phase-managed manual session needs to keep
         # running for the whole quick-charge window.
         if quick_stop_timer := state.get("quick_stop_timer"):
-            quick_stop_timer()
+            if quick_stop_timer is not obligation_timer:
+                quick_stop_timer()
             state["quick_stop_timer"] = None
 
         state["ownership"] = claim_ev_ownership(
@@ -17179,6 +17464,10 @@ class EVVehicleCommandView(HomeAssistantView):
             },
         )
 
+        if obligation_timer is not None:
+            state["quick_stop_timer"] = obligation_timer
+            return params["expires_at"]
+
         async def _stop_manual_quick_charge(_now) -> None:
             entry_state = ev_actions._dynamic_ev_state.get(entry.entry_id, {}).get(loadpoint_id)
             entry_params = (entry_state or {}).get("params") or {}
@@ -17209,6 +17498,7 @@ class EVVehicleCommandView(HomeAssistantView):
         vehicle_vin: str | None,
         duration_minutes: int | None,
         source_mode: str | None,
+        stops_at: datetime | None = None,
     ) -> str | None:
         """Attach quick-control metadata and optional auto-stop timer."""
         entry = self._get_powersync_entry()
@@ -17227,10 +17517,15 @@ class EVVehicleCommandView(HomeAssistantView):
                 params.pop("expires_at", None)
             return None
 
+        if stops_at is None:
+            stops_at = dt_util.utcnow() + timedelta(minutes=duration_minutes)
+        elif stops_at.tzinfo is None:
+            stops_at = stops_at.replace(tzinfo=dt_util.UTC)
+
         return self._arm_manual_quick_stop(
             entry,
             vehicle_vin,
-            dt_util.utcnow() + timedelta(minutes=duration_minutes),
+            stops_at,
             duration_minutes,
             source_mode or "standard",
         )
@@ -17242,7 +17537,22 @@ class EVVehicleCommandView(HomeAssistantView):
         expired: dict[str, dict],
     ) -> None:
         """Resume finite manual timers without resending their start command."""
-        from .automations.actions import record_manual_ev_charging_session
+        from .automations.actions import (
+            _tesla_quick_control_binding_current,
+            record_manual_ev_charging_session,
+        )
+        from .automations.ev_ownership import (
+            async_reconcile_quick_control_stopped,
+            claim_ev_ownership,
+            clear_ev_quick_control_obligation,
+            get_ev_quick_control_obligation,
+            get_ev_ownership,
+            release_ev_ownership,
+        )
+        from .tesla_ev_recovery import (
+            async_rebind_native_session_route,
+            get_vehicle_route,
+        )
 
         for loadpoint_id, lease in {**resumable, **expired}.items():
             resume_params = dict(lease.get("resume_params") or {})
@@ -17250,6 +17560,128 @@ class EVVehicleCommandView(HomeAssistantView):
             if loadpoint_id == "_default":
                 vehicle_vin = None
             current_params = self._manual_action_params(vehicle_vin)
+            obligation = None
+            obligation_params: dict[str, Any] = {}
+            native_restore_route: dict[str, Any] | None = None
+            if (
+                vehicle_vin
+                and bool(
+                    resume_params.get("quick_control")
+                    or lease.get("quick_control")
+                )
+                and str(current_params.get("charger_type") or "tesla").lower()
+                == "tesla"
+            ):
+                # A saved finite Tesla lease must remain tied to the exact
+                # producer/pairing captured before its positive dispatch. Do
+                # not rebuild a future manual session from current aliases
+                # after a VIN/prefix/entity rebind; retain the durable
+                # obligation for its fail-closed cleanup path instead.
+                obligation = get_ev_quick_control_obligation(
+                    self._hass, entry, vehicle_vin
+                )
+                obligation_params = (
+                    dict(obligation.get("params") or {})
+                    if isinstance(obligation, Mapping)
+                    else {}
+                )
+                obligation_params.setdefault("vehicle_vin", vehicle_vin)
+                obligation_params.setdefault("vehicle_id", vehicle_vin)
+                if not _tesla_quick_control_binding_current(
+                    self._hass, entry, obligation_params
+                ):
+                    _LOGGER.warning(
+                        "Not restoring finite Tesla EV session for %s because its original producer binding is unavailable or rebound",
+                        vehicle_vin,
+                    )
+                    continue
+                # ``restore_ev_runtime_state`` deliberately starts with no
+                # active owner lease.  A persisted native route therefore
+                # reports ``route_identity_changed`` until the restored
+                # manual lease is claimed again.  Carry only that exact
+                # producer identity into the recorder; never rediscover a
+                # native entity from the current vehicle configuration.
+                persisted_route = get_vehicle_route(
+                    self._hass, entry, vehicle_vin
+                )
+                if isinstance(persisted_route, Mapping):
+                    route_kind = persisted_route.get("kind")
+                    if route_kind == "ha":
+                        native_restore_route = dict(persisted_route)
+                    elif (
+                        route_kind == "blocked"
+                        and persisted_route.get("reason")
+                        == "route_identity_changed"
+                    ):
+                        native_restore_route = {
+                            "kind": "ha",
+                            "entity_id": persisted_route.get("entity_id"),
+                            "entity_identity": copy.deepcopy(
+                                persisted_route.get("entity_identity")
+                            ),
+                        }
+                    if native_restore_route is not None:
+                        route_entity = native_restore_route.get("entity_id")
+                        route_identity = native_restore_route.get(
+                            "entity_identity"
+                        )
+                        expected_entity = obligation_params.get(
+                            "_tesla_command_entity_id"
+                        )
+                        expected_identity = obligation_params.get(
+                            "_tesla_native_command_identity"
+                        )
+                        if (
+                            not isinstance(route_entity, str)
+                            or not isinstance(route_identity, Mapping)
+                            or (
+                                expected_entity is not None
+                                and str(expected_entity) != route_entity
+                            )
+                            or (
+                                isinstance(expected_identity, Mapping)
+                                and dict(expected_identity) != dict(route_identity)
+                            )
+                        ):
+                            _LOGGER.warning(
+                                "Not restoring finite Tesla EV session for %s because its persisted native producer identity changed",
+                                vehicle_vin,
+                            )
+                            continue
+                    if (
+                        native_restore_route is None
+                        and (
+                            obligation_params.get("_tesla_command_entity_id")
+                            or obligation_params.get(
+                                "_tesla_native_command_identity"
+                            )
+                        )
+                    ):
+                        _LOGGER.warning(
+                            "Not restoring finite Tesla EV session for %s because its persisted native route is blocked",
+                            vehicle_vin,
+                        )
+                        continue
+                elif (
+                    obligation_params.get("_tesla_command_entity_id")
+                    or obligation_params.get("_tesla_native_command_identity")
+                ):
+                    # The obligation says a native producer was selected, but
+                    # its durable route is gone or malformed.  A current
+                    # config lookup could select another car, so refuse the
+                    # positive restore and retain the cleanup obligation.
+                    _LOGGER.warning(
+                        "Not restoring finite Tesla EV session for %s because its persisted native route is unavailable",
+                        vehicle_vin,
+                    )
+                    continue
+            try:
+                stops_at = datetime.fromisoformat(str(lease.get("expires_at")))
+                if stops_at.tzinfo is None:
+                    stops_at = stops_at.replace(tzinfo=dt_util.UTC)
+                duration_minutes = int(lease.get("duration_minutes") or 1)
+            except (TypeError, ValueError):
+                continue
             switch_entity = str(
                 current_params.get("charger_switch_entity")
                 or resume_params.get("charger_switch_entity")
@@ -17267,22 +17699,207 @@ class EVVehicleCommandView(HomeAssistantView):
                 continue
 
             if loadpoint_id in expired:
-                await self._execute_manual_ev_action_for_entry(
-                    entry,
-                    "stop_ev_charging",
-                    vehicle_vin,
-                    {"source_mode": lease.get("source_mode") or "standard"},
-                    "Quick EV charge expired during Home Assistant restart",
+                if isinstance(obligation, Mapping):
+                    reconciled = await async_reconcile_quick_control_stopped(
+                        self._hass, entry, vehicle_vin, obligation)
+                    if reconciled is not False:
+                        continue
+                # Keep the completion decision tied to the runtime and the
+                # durable obligation that were loaded for this restore pass.
+                # A successful cleanup may release its temporary owner before
+                # returning, so owner absence is valid; a replacement owner,
+                # runtime, or obligation must still prevent clearing it.
+                cleanup_runtime_entry = self._hass.data.get(DOMAIN, {}).get(
+                    entry.entry_id
                 )
+                cleanup_runtime_store = (
+                    cleanup_runtime_entry.get("automation_store")
+                    if isinstance(cleanup_runtime_entry, Mapping)
+                    else None
+                )
+                cleanup_obligation_token = (
+                    obligation.get("obligation_id")
+                    if isinstance(obligation, Mapping)
+                    else None
+                )
+                stop_extra = {
+                    "source_mode": lease.get("source_mode") or "standard",
+                }
+                if obligation_params:
+                    stop_extra.update(
+                        {
+                            "_quick_control_binding": copy.deepcopy(
+                                obligation_params.get("_quick_control_binding")
+                            ),
+                            "_boost_start_deadline": obligation.get(
+                                "_boost_start_deadline"
+                            )
+                            if isinstance(obligation, Mapping)
+                            else None,
+                            "_quick_control_obligation_id": obligation.get(
+                                "obligation_id"
+                            )
+                            if isinstance(obligation, Mapping)
+                            else None,
+                            "_ev_cleanup_only": True,
+                        }
+                    )
+                cleanup_lease = None
+                native_cleanup_bound = True
+
+                def cleanup_completion_is_current() -> bool:
+                    current_runtime_entry = self._hass.data.get(DOMAIN, {}).get(
+                        entry.entry_id
+                    )
+                    if (
+                        current_runtime_entry is not cleanup_runtime_entry
+                        or not isinstance(current_runtime_entry, Mapping)
+                        or current_runtime_entry.get("automation_store")
+                        is not cleanup_runtime_store
+                        or not cleanup_obligation_token
+                    ):
+                        return False
+                    current_obligation = get_ev_quick_control_obligation(
+                        self._hass, entry, vehicle_vin
+                    )
+                    if (
+                        not isinstance(current_obligation, Mapping)
+                        or current_obligation.get("obligation_id")
+                        != cleanup_obligation_token
+                    ):
+                        return False
+                    _lease_id, current_lease = get_ev_ownership(
+                        self._hass, entry, vehicle_vin
+                    )
+                    return current_lease is None or current_lease is cleanup_lease
+
+                def cleanup_lease_is_current() -> bool:
+                    if cleanup_lease is None:
+                        return False
+                    _lease_id, current_lease = get_ev_ownership(
+                        self._hass, entry, vehicle_vin
+                    )
+                    return current_lease is cleanup_lease
+
+                def release_cleanup_lease_if_owned(reason: str) -> None:
+                    if cleanup_lease_is_current():
+                        release_ev_ownership(
+                            self._hass,
+                            entry,
+                            vehicle_vin,
+                            reason=reason,
+                        )
+
+                if native_restore_route is not None:
+                    # Runtime restore intentionally clears active leases. A
+                    # stop-only native handoff therefore needs a short-lived
+                    # exact-VIN cleanup owner before it can rebind the old
+                    # producer scope; never fall through to discovery.
+                    cleanup_lease = claim_ev_ownership(
+                        self._hass,
+                        entry,
+                        vehicle_vin,
+                        owner_mode="manual",
+                        session_id=lease.get("session_id"),
+                        reason="Expired restored manual EV cleanup",
+                        extra={
+                            "charger_type": "tesla",
+                            "expires_at": lease.get("expires_at"),
+                            "quick_control": True,
+                        },
+                    )
+                    try:
+                        native_cleanup_bound = await async_rebind_native_session_route(
+                            self._hass,
+                            entry,
+                            vehicle_vin,
+                            entity_id=native_restore_route.get("entity_id"),
+                            expected_identity=native_restore_route.get("entity_identity"),
+                            mode="cleanup_stop",
+                        )
+                    except asyncio.CancelledError:
+                        release_cleanup_lease_if_owned(
+                            "Expired restored manual EV cleanup cancelled"
+                        )
+                        raise
+                    except Exception:
+                        native_cleanup_bound = False
+                try:
+                    if native_cleanup_bound:
+                        stop_success, _stop_message = await self._execute_manual_ev_action_for_entry(
+                            entry,
+                            "stop_ev_charging",
+                            vehicle_vin,
+                            stop_extra,
+                            "Quick EV charge expired during Home Assistant restart",
+                        )
+                    else:
+                        stop_success = False
+                        _LOGGER.warning(
+                            "Retaining expired Tesla EV cleanup for %s because its native producer handoff failed",
+                            vehicle_vin,
+                        )
+                finally:
+                    cleanup_owner_current = cleanup_completion_is_current()
+                    release_cleanup_lease_if_owned(
+                        "Expired restored manual EV cleanup finished"
+                    )
+                if stop_success and cleanup_owner_current:
+                    clear_ev_quick_control_obligation(
+                        self._hass,
+                        entry,
+                        vehicle_vin,
+                        expected_token=cleanup_obligation_token,
+                    )
                 continue
 
-            try:
-                stops_at = datetime.fromisoformat(str(lease.get("expires_at")))
-                if stops_at.tzinfo is None:
-                    stops_at = stops_at.replace(tzinfo=dt_util.UTC)
-                duration_minutes = int(lease.get("duration_minutes") or 1)
-            except (TypeError, ValueError):
-                continue
+            runtime_entry = self._hass.data.get(DOMAIN, {}).get(entry.entry_id)
+            runtime_store = (
+                runtime_entry.get("automation_store")
+                if isinstance(runtime_entry, Mapping)
+                else None
+            )
+            obligation_token = (
+                obligation.get("obligation_id")
+                if isinstance(obligation, Mapping)
+                else None
+            )
+
+            def restore_authority(
+                runtime_entry_snapshot=runtime_entry,
+                runtime_store_snapshot=runtime_store,
+                vehicle_id_snapshot=vehicle_vin,
+                stops_at_snapshot=stops_at,
+                obligation_params_snapshot=copy.deepcopy(obligation_params),
+                obligation_token_snapshot=obligation_token,
+            ) -> bool:
+                current_entry = self._hass.data.get(DOMAIN, {}).get(entry.entry_id)
+                if (
+                    current_entry is not runtime_entry_snapshot
+                    or not isinstance(current_entry, Mapping)
+                    or current_entry.get("automation_store") is not runtime_store_snapshot
+                    or dt_util.utcnow() >= stops_at_snapshot
+                ):
+                    return False
+                if vehicle_id_snapshot and obligation_params_snapshot:
+                    check_params = dict(obligation_params_snapshot)
+                    check_params.setdefault("vehicle_vin", vehicle_id_snapshot)
+                    check_params.setdefault("vehicle_id", vehicle_id_snapshot)
+                    if not _tesla_quick_control_binding_current(
+                        self._hass, entry, check_params
+                    ):
+                        return False
+                if obligation_token_snapshot:
+                    current_obligation = get_ev_quick_control_obligation(
+                        self._hass, entry, vehicle_id_snapshot
+                    )
+                    if (
+                        not isinstance(current_obligation, Mapping)
+                        or current_obligation.get("obligation_id")
+                        != obligation_token_snapshot
+                    ):
+                        return False
+                return True
 
             restored_params = {
                 **current_params,
@@ -17290,14 +17907,68 @@ class EVVehicleCommandView(HomeAssistantView):
                 "source_mode": lease.get("source_mode") or "standard",
                 "duration_minutes": duration_minutes,
                 "expires_at": stops_at.isoformat(),
+                "_manual_restore_authority": restore_authority,
             }
-            await record_manual_ev_charging_session(
+            if obligation_params:
+                restored_params.update(
+                    {
+                        "_quick_control_binding": copy.deepcopy(
+                            obligation_params.get("_quick_control_binding")
+                        ),
+                        "_boost_start_deadline": (
+                            obligation.get("_boost_start_deadline")
+                            if isinstance(obligation, Mapping)
+                            else None
+                        ),
+                        "_quick_control_obligation_id": obligation_token,
+                    }
+                )
+                for key in (
+                    "_tesla_command_entity_id",
+                    "_tesla_native_command_identity",
+                ):
+                    if key in obligation_params:
+                        restored_params[key] = copy.deepcopy(
+                            obligation_params[key]
+                        )
+                if native_restore_route is not None:
+                    restored_params["_tesla_restored_native_route"] = copy.deepcopy(
+                        native_restore_route
+                    )
+            registration = await record_manual_ev_charging_session(
                 self._hass,
                 entry,
                 loadpoint_id,
                 restored_params,
                 reason="Restored finite manual EV session after Home Assistant restart",
             )
+            if (
+                native_restore_route is not None
+                and not restored_params.get("_manual_restore_native_route_bound")
+            ):
+                _LOGGER.warning(
+                    "Not adopting restored finite Tesla EV session for %s because its native producer handoff failed",
+                    vehicle_vin,
+                )
+                continue
+            # The recorder can await teardown, telemetry, and session setup.
+            # Recheck the original runtime/binding/deadline before adopting a
+            # timer or ownership state from the current configuration.
+            if not restore_authority():
+                _LOGGER.warning(
+                    "Not adopting restored finite Tesla EV session for %s after its producer authority changed",
+                    vehicle_vin,
+                )
+                rollback = (
+                    registration.get("rollback")
+                    if isinstance(registration, Mapping)
+                    else None
+                )
+                if callable(rollback):
+                    await rollback(
+                        "Restored finite EV producer authority changed"
+                    )
+                continue
             self._arm_manual_quick_stop(
                 entry,
                 vehicle_vin,
@@ -17311,11 +17982,33 @@ class EVVehicleCommandView(HomeAssistantView):
                 stops_at.isoformat(),
             )
 
+    def restore_ev_quick_control_obligations(
+        self,
+        entry: ConfigEntry,
+        obligations: dict[str, dict],
+    ) -> None:
+        """Re-arm finite cleanup obligations before any restored Start path."""
+        from .automations.ev_ownership import arm_ev_quick_control_obligation
+
+        if not isinstance(obligations, Mapping):
+            # Hydration retains malformed evidence and its admission hold.
+            return
+        for vehicle_id, record in obligations.items():
+            if not isinstance(record, dict):
+                continue
+            arm_ev_quick_control_obligation(
+                self._hass,
+                entry,
+                vehicle_id,
+                record,
+            )
+
     def _schedule_policy_quick_stop(
         self,
         vehicle_vin: str | None,
         duration_minutes: int,
         source_mode: str,
+        stops_at: datetime | None = None,
     ) -> str | None:
         """Attach dashboard policy metadata and stop dynamic sessions on expiry."""
         entry = self._get_powersync_entry()
@@ -17323,7 +18016,10 @@ class EVVehicleCommandView(HomeAssistantView):
             return None
 
         from .automations import actions as ev_actions
-        from .automations.ev_ownership import get_ev_ownership
+        from .automations.ev_ownership import (
+            get_ev_ownership,
+            get_ev_quick_control_timer,
+        )
 
         loadpoint_id = self._manual_loadpoint_id(vehicle_vin)
         state = ev_actions._dynamic_ev_state.get(entry.entry_id, {}).get(loadpoint_id)
@@ -17335,11 +18031,23 @@ class EVVehicleCommandView(HomeAssistantView):
         params["source_mode"] = source_mode
         params["duration_minutes"] = duration_minutes
 
+        # Preserve the persisted timer created by dynamic Start. It must be
+        # read before the state slot is cancelled/adopted below.
+        obligation_timer = get_ev_quick_control_timer(
+            self._hass,
+            entry,
+            vehicle_vin,
+        )
+
         if quick_stop_timer := state.get("quick_stop_timer"):
-            quick_stop_timer()
+            if quick_stop_timer is not obligation_timer:
+                quick_stop_timer()
             state["quick_stop_timer"] = None
 
-        stops_at = dt_util.utcnow() + timedelta(minutes=duration_minutes)
+        if stops_at is None:
+            stops_at = dt_util.utcnow() + timedelta(minutes=duration_minutes)
+        elif stops_at.tzinfo is None:
+            stops_at = stops_at.replace(tzinfo=dt_util.UTC)
         params["expires_at"] = stops_at.isoformat()
 
         _lease_id, lease = get_ev_ownership(self._hass, entry, loadpoint_id)
@@ -17351,6 +18059,10 @@ class EVVehicleCommandView(HomeAssistantView):
                 "expires_at": params["expires_at"],
             })
             state["ownership"] = lease
+
+        if obligation_timer is not None:
+            state["quick_stop_timer"] = obligation_timer
+            return params["expires_at"]
 
         async def _stop_policy_quick_charge(_now) -> None:
             entry_state = ev_actions._dynamic_ev_state.get(entry.entry_id, {}).get(loadpoint_id)
@@ -17392,12 +18104,14 @@ class EVVehicleCommandView(HomeAssistantView):
 
         action = build_ev_policy_action(policy, duration_minutes)
         duration = action.params["duration_minutes"]
+        stops_at = dt_util.utcnow() + timedelta(minutes=duration)
 
         if action.action_type == "start_ev_charging":
             return await self._start_charging(
                 vehicle_vin,
                 duration,
                 action.params.get("source_mode"),
+                stops_at=stops_at,
             )
 
         owner_message = self._active_non_manual_owner_message(vehicle_vin)
@@ -17409,10 +18123,15 @@ class EVVehicleCommandView(HomeAssistantView):
         if not ready:
             return False, message
 
+        action_params = {
+            **action.params,
+            "expires_at": stops_at.isoformat(),
+            "_boost_start_deadline": stops_at.timestamp(),
+        }
         success, failure_message = await self._execute_manual_ev_action(
             action.action_type,
             vehicle_vin,
-            action.params,
+            action_params,
             "Manual EV policy start from HA dashboard",
         )
         if success:
@@ -17420,7 +18139,10 @@ class EVVehicleCommandView(HomeAssistantView):
                 vehicle_vin,
                 duration,
                 action.params.get("source_mode") or str(policy),
+                stops_at=stops_at,
             )
+            if dt_util.utcnow() >= stops_at:
+                return False, "EV charge request expired before completion"
             if expires_at:
                 _LOGGER.info(
                     "Dashboard EV policy charge for %s expires at %s",
@@ -17436,8 +18158,11 @@ class EVVehicleCommandView(HomeAssistantView):
         vehicle_vin: str | None = None,
         duration_minutes: int | None = None,
         source_mode: str | None = None,
+        stops_at: datetime | None = None,
     ) -> tuple[bool, str]:
         """Start charging. Returns (success, message)."""
+        if stops_at is None and duration_minutes is not None:
+            stops_at = dt_util.utcnow() + timedelta(minutes=int(duration_minutes))
         params = self._manual_action_params(vehicle_vin)
         charger_type = params.get("charger_type", "tesla")
         owner_message = self._active_non_manual_owner_message(vehicle_vin)
@@ -17448,14 +18173,20 @@ class EVVehicleCommandView(HomeAssistantView):
         if not ready:
             return False, message
 
+        action_params = {
+            "duration_minutes": duration_minutes,
+            "source_mode": source_mode or "standard",
+            "quick_control": True,
+        }
+        if stops_at is not None:
+            action_params.update(
+                expires_at=stops_at.isoformat(),
+                _boost_start_deadline=stops_at.timestamp(),
+            )
         success, failure_message = await self._execute_manual_ev_action(
             "start_ev_charging",
             vehicle_vin,
-            {
-                "duration_minutes": duration_minutes,
-                "source_mode": source_mode or "standard",
-                "quick_control": True,
-            },
+            action_params,
             "Manual start from mobile",
         )
         if success:
@@ -17463,7 +18194,10 @@ class EVVehicleCommandView(HomeAssistantView):
                 vehicle_vin,
                 duration_minutes,
                 source_mode,
+                stops_at=stops_at,
             )
+            if stops_at is not None and dt_util.utcnow() >= stops_at:
+                return False, "EV charge request expired before completion"
             duration_text = f" for {duration_minutes} minutes" if duration_minutes else ""
             if expires_at:
                 _LOGGER.info("Quick EV charge for %s expires at %s", self._manual_loadpoint_id(vehicle_vin), expires_at)
@@ -17478,13 +18212,29 @@ class EVVehicleCommandView(HomeAssistantView):
     async def _stop_charging(self, vehicle_vin: str | None = None) -> tuple[bool, str]:
         """Stop charging. Returns (success, message)."""
         charger_type = self._manual_action_params(vehicle_vin).get("charger_type", "tesla")
+        hold_vehicle_id = self._record_manual_stop_hold(
+            vehicle_vin,
+            "Manual stop from mobile",
+        )
         success, failure_message = await self._execute_manual_ev_action(
             "stop_ev_charging",
             vehicle_vin,
-            None,
+            # _record_manual_stop_hold above synchronously revoked positive
+            # authority.  Allow the physical cleanup to enter the dedicated
+            # Stop lane even while an unrelated native Start is awaiting I/O.
+            {"_ev_cleanup_only": True},
             "Manual stop from mobile",
         )
         if success:
+            entry = self._get_powersync_entry()
+            if entry is not None:
+                from .automations.ev_ownership import clear_ev_quick_control_obligation
+
+                clear_ev_quick_control_obligation(
+                    self._hass,
+                    entry,
+                    hold_vehicle_id or vehicle_vin,
+                )
             if charger_type == "zaptec":
                 return True, "Charging stopped via Zaptec"
             if charger_type == "sigenergy":
@@ -19299,6 +20049,41 @@ class SurplusForecastView(HomeAssistantView):
             }, status=500)
 
 
+def _passive_ev_cleanup_observation(hass, entry, vehicle_id: str, after: str | None = None) -> str | None:
+    from .ev_load import is_current_ev_power_observation
+
+    observations = [item for item in _get_ev_vehicles_status(
+                        hass, entry, include_control_evidence=True)
+                    if item.get("vehicle_id") == vehicle_id]
+    if len(observations) != 1:
+        return None
+    observation = observations[0]
+    evidence = observation.get("_boost_charging_state_evidence")
+    stopped = observation.get("is_charging") is False
+    if stopped:
+        if (not isinstance(evidence, dict) or evidence.get("known") is not True
+                or evidence.get("charging") is not False):
+            return None
+        observed_at = evidence.get("observed_at")
+    else:
+        observed_at = observation.get("_charging_observed_at")
+    if not is_current_ev_power_observation(observed_at, at=dt_util.utcnow()):
+        return None
+    if after:
+        try:
+            if observed_at <= datetime.fromisoformat(after):
+                return None
+        except (TypeError, ValueError):
+            return None
+    if stopped:
+        return "stopped"
+    if observation.get("site_presence") == "away":
+        return None
+    if observation.get("is_charging") is True and observation.get("is_connected") is True:
+        return "charging"
+    return None
+
+
 class ChargingBoostView(HomeAssistantView):
     """HTTP view to trigger immediate boost charge."""
 
@@ -19321,39 +20106,35 @@ class ChargingBoostView(HomeAssistantView):
             "tesla_energy_site_id", "powerwall_local_energy_site_id",
         )})
 
-    def _boost_observation(self, vehicle_id: str, after: str | None = None) -> str | None:
-        from .ev_load import is_current_ev_power_observation
+    def _is_valid_boost_vehicle_id(self, vehicle_id: object) -> bool:
+        """Accept a canonical VIN or a configured standalone BLE identity."""
+        if not isinstance(vehicle_id, str):
+            return False
+        if (len(vehicle_id) == 17 and vehicle_id.isalnum()
+                and not vehicle_id.isdigit()):
+            return True
 
-        observations = [item for item in _get_ev_vehicles_status(
-                            self._hass, self._config_entry, include_control_evidence=True)
-                        if item.get("vehicle_id") == vehicle_id]
-        if len(observations) != 1:
-            return None
-        observation = observations[0]
-        evidence = observation.get("_boost_charging_state_evidence")
-        stopped = observation.get("is_charging") is False
-        if stopped:
-            if (not isinstance(evidence, dict) or evidence.get("known") is not True
-                    or evidence.get("charging") is not False):
-                return None
-            observed_at = evidence.get("observed_at")
-        else:
-            observed_at = observation.get("_charging_observed_at")
-        if not is_current_ev_power_observation(observed_at, at=dt_util.utcnow()):
-            return None
-        if after:
-            try:
-                if observed_at <= datetime.fromisoformat(after):
-                    return None
-            except (TypeError, ValueError):
-                return None
-        if stopped:
-            return "stopped"
-        if observation.get("site_presence") == "away":
-            return None
-        if observation.get("is_charging") is True and observation.get("is_connected") is True:
-            return "charging"
-        return None
+        config = {**self._config_entry.data, **self._config_entry.options}
+        if config.get(CONF_EV_PROVIDER) != EV_PROVIDER_TESLA_BLE:
+            return False
+        if not vehicle_id.startswith("ble_"):
+            return False
+        prefix = vehicle_id[4:]
+        if (not prefix or prefix == "_default"
+                or re.fullmatch(r"[a-z0-9_]+", prefix) is None):
+            return False
+        from .tesla_ble_mapping import configured_ble_prefixes
+
+        return prefix in configured_ble_prefixes(config)
+
+    def _boost_observation(self, vehicle_id: str, after: str | None = None) -> str | None:
+        return _passive_ev_cleanup_observation(self._hass, self._config_entry, vehicle_id, after)
+
+    async def _independent_boost_stopped(self, vehicle_id, after, *, authorize):
+        from .tesla_ev_observation import async_read_stopped_tesla_cleanup
+
+        return await async_read_stopped_tesla_cleanup(
+            self._hass, self._config_entry, vehicle_id, after, authorize=authorize)
 
     async def _save_boost_state(self, record: dict) -> bool:
         from .automations.ev_ownership import persist_ev_runtime_state
@@ -19378,6 +20159,10 @@ class ChargingBoostView(HomeAssistantView):
         from .automations.ev_ownership import (
             claim_ev_ownership, get_ev_ownership, record_ev_command, release_ev_ownership,
             reconcile_boost_supersession, boost_recovery_observation_after,
+        )
+        from .tesla_ev_recovery import (
+            async_rebind_native_session_route,
+            get_vehicle_route,
         )
         from .teslemetry_solar import guard_ev_control
 
@@ -19414,14 +20199,41 @@ class ChargingBoostView(HomeAssistantView):
                 self._arm_boost_stop(vehicle_id, record, state, lease,
                                      at=dt_util.utcnow() + timedelta(seconds=30))
 
-        async def retire(state, lease):
-            # Only fresh exact-VIN stopped telemetry retires the obligation.
-            runtime["ev_boost_sessions"].pop(vehicle_id)
+        async def retire(state, lease, *, evidence_current=None):
+            # Keep the obligation durable through the awaited proof checkpoint.
+            # A changed proof must never require rolling back a durable removal.
             if not await self._save_boost_state(record):
+                retry(state, lease if lease is boost_ownership else None)
+                return
+            if (not current() or self._boost_pairing_identity() != original_pairing
+                    or ev_actions._dynamic_ev_state.get(self._config_entry.entry_id, {}).get(vehicle_id) is not state
+                    or get_ev_ownership(self._hass, self._config_entry, vehicle_id)[1] is not lease
+                    or (evidence_current is not None and (
+                        record.get("superseded") or not evidence_current()))):
+                retry(state, lease if lease is boost_ownership else None)
+                return
+            # This is the retirement commit point: the stopped proof and its
+            # owner/source fences survived persistence. Later source changes
+            # cannot invalidate that accepted historical observation.
+            runtime["ev_boost_sessions"].pop(vehicle_id)
+            save_task = asyncio.create_task(self._save_boost_state(record))
+            cancelled = False
+            while not save_task.done():
+                try:
+                    await asyncio.shield(save_task)
+                except asyncio.CancelledError:
+                    cancelled = True
+            try:
+                saved = save_task.result()
+            except asyncio.CancelledError:
+                saved, cancelled = False, True
+            if not saved:
                 if (self._hass.data.get(DOMAIN, {}).get(self._config_entry.entry_id) is runtime
                         and vehicle_id not in runtime["ev_boost_sessions"]):
                     runtime["ev_boost_sessions"][vehicle_id] = record
                     retry(state, lease if lease is boost_ownership else None)
+                if cancelled:
+                    raise asyncio.CancelledError
                 return
             if (self._hass.data.get(DOMAIN, {}).get(self._config_entry.entry_id) is runtime
                     and runtime.get("ev_boost_timers", {}).get(vehicle_id) is timer
@@ -19431,9 +20243,60 @@ class ChargingBoostView(HomeAssistantView):
                 if current_lease is boost_ownership and current_lease is not None:
                     release_ev_ownership(self._hass, self._config_entry, vehicle_id,
                                          reason="Fresh stopped Boost observation")
+            if cancelled:
+                raise asyncio.CancelledError
+
+        async def rebind_native_cleanup_route() -> bool:
+            """Rebind a restored native producer as stop-only before cleanup."""
+            if stop_params.get("charger_type", "tesla") != "tesla":
+                return True
+            try:
+                route = get_vehicle_route(self._hass, self._config_entry, vehicle_id)
+            except Exception:
+                # A malformed journal is a retained cleanup obligation. Do not
+                # fall through to a newly discovered same-VIN native entity.
+                return False
+            if not isinstance(route, dict):
+                return True
+            route_kind = route.get("kind")
+            route_entity = str(route.get("entity_id") or "").strip()
+            route_identity = route.get("entity_identity")
+            native_hint = (
+                route_kind == "ha"
+                or (
+                    route_kind == "blocked"
+                    and not route.get("prefix")
+                    and (
+                        bool(route_entity)
+                        or route.get("reason") in {
+                            "route_identity_changed",
+                            "malformed_recovery",
+                        }
+                    )
+                )
+            )
+            if not native_hint:
+                # A BLE route or a clean journal follows the existing exact
+                # Tesla stop path; do not manufacture a native handoff.
+                return True
+            if not route_entity or not isinstance(route_identity, dict):
+                return False
+            try:
+                return bool(await async_rebind_native_session_route(
+                    self._hass,
+                    self._config_entry,
+                    vehicle_id,
+                    entity_id=route_entity,
+                    expected_identity=route_identity,
+                    mode="cleanup_stop",
+                ))
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                return False
 
         @guard_ev_control
-        async def check(hass, config_entry, params):
+        async def _action_stop_ev_boost_cleanup(hass, config_entry, params):
             nonlocal boost_state, boost_ownership
             if not current():
                 return
@@ -19479,6 +20342,25 @@ class ChargingBoostView(HomeAssistantView):
             if observation == "stopped":
                 await retire(state, lease)
                 return
+            if (observation is None and not record.get("superseded")
+                    and not record.get("start_in_flight")
+                    and (dt_util.utcnow() >= deadline or record.get("stop_required"))
+                    and (boost_state is None or state is boost_state)
+                    and (lease is None or lease is boost_ownership)):
+                def read_current():
+                    return (current() and self._boost_pairing_identity() == original_pairing
+                            and not record.get("superseded") and not record.get("start_in_flight")
+                            and ev_actions._dynamic_ev_state.get(config_entry.entry_id, {}).get(vehicle_id) is state
+                            and get_ev_ownership(hass, config_entry, vehicle_id)[1] is lease)
+
+                stopped_fence = await self._independent_boost_stopped(
+                    vehicle_id, max(deadline, datetime.fromisoformat(observation_after)).isoformat()
+                    if observation_after else deadline.isoformat(), authorize=read_current)
+                if not read_current():
+                    return
+                if stopped_fence is not None:
+                    await retire(state, lease, evidence_current=stopped_fence)
+                    return
             if record.get("superseded"):
                 record["status"] = "superseded"
                 await self._save_boost_state(record)
@@ -19527,11 +20409,18 @@ class ChargingBoostView(HomeAssistantView):
             if current_lease is not boost_ownership:
                 retry()
                 return
+            if not await rebind_native_cleanup_route():
+                record["status"] = "blocked_native_route_handoff"
+                await self._save_boost_state(record)
+                retry(boost_state, boost_ownership)
+                return
             success = await execute_actions(hass, config_entry, [{
                 "action_type": "stop_ev_charging_dynamic",
                 "parameters": {
                     **stop_params, "vehicle_id": vehicle_id,
                     "vehicle_vin": vehicle_id, "owner_mode": "boost",
+                    "_ev_cleanup_only": True,
+                    "_ev_cleanup_respect_native_hold": True,
                     "_expected_state": state, "stop_untracked": state is None,
                     "_user_initiated": True,
                     "stop_charging": True, "stop_reason": "Boost duration elapsed",
@@ -19561,8 +20450,17 @@ class ChargingBoostView(HomeAssistantView):
 
         async def elapsed(_now):
             try:
-                await check(self._hass, self._config_entry,
-                            {"vehicle_id": vehicle_id, "vehicle_vin": vehicle_id})
+                await _action_stop_ev_boost_cleanup(
+                    self._hass,
+                    self._config_entry,
+                    {
+                        "vehicle_id": vehicle_id,
+                        "vehicle_vin": vehicle_id,
+                        "charger_type": stop_params.get("charger_type", "tesla"),
+                        "_ev_cleanup_only": True,
+                        "_ev_cleanup_respect_native_hold": True,
+                    },
+                )
             finally:
                 # A denied gate or unavailable observation must not consume
                 # the only expiry callback or grant new control authority.
@@ -19588,8 +20486,8 @@ class ChargingBoostView(HomeAssistantView):
                 deadline = datetime.fromisoformat(record["expires_at"])
                 valid = (record["entry_id"] == self._config_entry.entry_id
                          and record["vehicle_id"] == vehicle_id
-                         and len(vehicle_id) == 17 and vehicle_id.isalnum()
-                         and not vehicle_id.isdigit() and deadline.tzinfo is not None
+                         and self._is_valid_boost_vehicle_id(vehicle_id)
+                         and deadline.tzinfo is not None
                          and isinstance(record.get("generation"), str) and bool(record["generation"])
                          and type(record.get("duration_minutes")) is int
                          and 1 <= record["duration_minutes"] <= 1440
@@ -19724,6 +20622,7 @@ class ChargingBoostView(HomeAssistantView):
                 return {"success": False, "message": "Failed to start boost charge",
                         "stops_at": original_deadline, "recovery_pending": True}
             state = ev_actions._dynamic_ev_state.get(self._config_entry.entry_id, {}).get(vehicle_id)
+            recovering = bool((state or {}).get("transport_recovery_pending"))
             _, lease = get_ev_ownership(self._hass, self._config_entry, vehicle_id)
             if (lease is not None and lease.get("owner_mode") != "boost"):
                 return {"success": False, "error": "Boost was superseded"}
@@ -19732,12 +20631,17 @@ class ChargingBoostView(HomeAssistantView):
             records[vehicle_id] = record
             ownership = claim_ev_ownership(
                 self._hass, self._config_entry, vehicle_id, owner_mode="boost",
-                command="start_boost", reason=f"Boost charge for {duration_minutes} minutes",
+                command="start_boost",
+                reason=("Boost plan waiting for charging recovery" if recovering
+                        else f"Boost charge for {duration_minutes} minutes"),
+                success=not recovering,
                 extra={"duration_minutes": duration_minutes, "expires_at": original_deadline,
-                       "target_soc": target_soc})
+                       "target_soc": target_soc, "recovery_pending": recovering})
             if state is not None:
                 state["ownership"] = ownership
-            record.update(status="active", session_id=(state or {}).get("session_id"),
+            record.update(status="recovering" if recovering else "active",
+                          unknown_start_outcome=recovering,
+                          session_id=(state or {}).get("session_id"),
                           ownership_generation=ownership["ownership_generation"])
             saved = await self._save_boost_state(record)
             if not current():
@@ -19763,7 +20667,10 @@ class ChargingBoostView(HomeAssistantView):
             applied_amps = int((state or {}).get("current_amps", 32) or 0)
             if applied_amps < 32:
                 warnings.append(f"Boost limited to {applied_amps}A by per-phase load management")
-            return {"success": True, "message": "Boost charge started",
+            return {"success": True,
+                    "message": ("Boost plan accepted; waiting for charging recovery"
+                                if recovering else "Boost charge started"),
+                    "charging_confirmed": not recovering, "recovery_pending": recovering,
                     "duration_minutes": duration_minutes, "target_soc": target_soc,
                     "stops_at": original_deadline, "warnings": warnings}
         except asyncio.CancelledError:
@@ -19901,10 +20808,9 @@ class ChargingBoostView(HomeAssistantView):
                     boost_vehicle_id = candidates.pop()
                 boost_vehicle_id = ev_actions._canonical_dynamic_tesla_vehicle_id(
                     self._hass, self._config_entry, boost_vehicle_id)
-                if (not isinstance(boost_vehicle_id, str) or len(boost_vehicle_id) != 17
-                        or not boost_vehicle_id.isalnum() or boost_vehicle_id.isdigit()):
+                if not self._is_valid_boost_vehicle_id(boost_vehicle_id):
                     return web.json_response({"success": False,
-                        "error": "Finite Boost requires an exact canonical VIN"}, status=400)
+                        "error": "Finite Boost requires an exact configured vehicle ID"}, status=400)
                 action_params["vehicle_vin"] = boost_vehicle_id
 
             # The absolute request deadline also fences time spent waiting for
@@ -22347,6 +23253,12 @@ def _sync_covau_withdrawn_plan_issue(
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up PowerSync from a config entry."""
+    # Retained HTTP/service callbacks can address this entry during provider
+    # startup. Hold positive EV writes before the first setup await; ordinary
+    # bootstrap lookups must not gain authority before durable facts hydrate.
+    hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})[
+        "_tesla_ev_recovery_sidecar_hold"
+    ] = "sidecar_setup_pending"
     from .licensing.manager import async_get_manager
     await async_get_manager(hass)
     from .native_rate_budget import budget_for as _prepare_native_rate_budget
@@ -25284,6 +26196,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "_calibration_check_unsub": None,
         "native_max_startup_pending": True,
     }
+
+    # The automation store is only a legacy projection. Load its surviving
+    # recovery facts into this new runtime, then hydrate the authoritative
+    # sidecar before native-rate admission or any new callbacks/tasks.
+    ev_recovery_runtime = hass.data[DOMAIN][entry.entry_id]
+    await _async_prepare_ev_recovery_lifecycle(hass, entry, automation_store)
+    if hass.data.get(DOMAIN, {}).get(entry.entry_id) is not ev_recovery_runtime:
+        return False
 
     from .tesla_native_rate import async_prepare as _prepare_tesla_native_rate
     await _prepare_tesla_native_rate(hass, entry)
@@ -34855,12 +35775,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         journal = await _native_max_store.async_load()
         recovery_direction = (journal or {}).get("baseline", {}).get("direction", "charge")
+
+        async def reconcile_managed(reconcile_site):
+            if reconcile_site != site:
+                return False
+            from .native_rate_admission import reconcile_managed_for_native_max
+            return await reconcile_managed_for_native_max(hass, budget, site)
+
         adapter = NativeMaxChargeAdapter(client=client, identity=identity,
             current_identity=_native_max_identity, policy=permitted, config=_local_powerwall_dispatch_config,
             read_tariff=read_tariff, upload=upload, restorable=_select_restorable_tesla_tariff,
             forcing_tariff={}, budget=budget, entry_id=entry.entry_id, site=site,
             tariff_matches=_tesla_tariff_matches_readback, direction=recovery_direction,
-            read_export_rule=read_export_rule, write_export_rule=write_export_rule)
+            read_export_rule=read_export_rule, write_export_rule=write_export_rule,
+            reconcile_managed=reconcile_managed)
         current = NativeMaxChargeSession(adapter, _native_max_store, changed=changed)
         await current.load()
         if not _local_powerwall_generation_current():
@@ -35053,7 +35981,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             controller.adapter.direction = direction
             controller.adapter.startup_kick = large_site
             controller.adapter.planning_request = targetless
-            if await controller.adapter.guard() is not True:
+            # Admission may prepare a tighter export cap under its durable
+            # restore owner. The session must verify that cap before granting
+            # coexistence or submitting any battery/tariff forcing command.
+            initial_guard = {"preparing": True} if direction == "discharge" else {}
+            if await controller.adapter.guard(**initial_guard) is not True:
                 if targetless or large_site:
                     reason = getattr(controller.adapter, "guard_denial_reason", None) or "native_max_policy_denied"
                     _LOGGER.warning("Native Powerwall %s admission refused: %s", direction, reason)
@@ -39442,9 +40374,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         context = call.context
         source = _control_call_source(call)
         confirm_restore = bool(call.data.get("_confirm_restore"))
+        # HA's public response request does not make the restore synchronous:
+        # only the private confirmation flag requires completed restoration.
+        response_requested = bool(getattr(call, "return_response", False))
 
         def _restore_not_completed(reason: str) -> dict[str, Any] | None:
-            return {"success": False, "error": reason} if confirm_restore else None
+            return {"success": False, "error": reason} if confirm_restore or response_requested else None
 
         expected_tesla_restore_generation = call.data.get(
             "_tesla_restore_generation"
@@ -39477,7 +40412,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     return _restore_not_completed("restoration superseded")
                 # The owning stop workflow completed; this response does not
                 # assert independent physical telemetry confirmation.
-                return {"success": True, "error": None} if confirm_restore else None
+                return {"success": True, "error": None} if confirm_restore or response_requested else None
         except NativeMaxRestorePending:
             # A manual click requests restoration; the session watcher retains
             # ownership and finishes physical verification in the background.
@@ -39488,6 +40423,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "Restore normal is in progress: Native Max settings restored; "
                 "awaiting physical settling"
             )
+            if response_requested:
+                return {"success": True, "error": None, "pending": True,
+                        "physical_effect_confirmed": False}
             return
         if _restore_request_superseded():
             return _restore_not_completed("restoration superseded")
@@ -40699,6 +41637,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.info("Restore normal: no force mode active and no saved state — nothing to restore")
             if confirm_restore:
                 return {"success": False, "error": "nothing to restore"}
+            if response_requested:
+                return {"success": True, "error": None, "noop": True}
             return
 
         try:
@@ -40816,14 +41756,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     "Tesla Hold SoC cleanup verified at %d%%",
                     normalized_saved_reserve,
                 )
-                return {"success": True, "error": None} if confirm_restore else None
+                return {"success": True, "error": None} if confirm_restore or response_requested else None
 
             # Get Tesla gateway config
             if not site_configs:
                 _LOGGER.error("Missing Tesla site ID or token for restore normal")
-                if confirm_restore:
-                    return {"success": False, "error": "Tesla site configuration unavailable"}
-                return
+                return _restore_not_completed("Tesla site configuration unavailable")
 
             session = async_get_clientsession(hass)
 
@@ -41293,12 +42231,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     return _restore_not_completed("restoration superseded")
                 if _schedule_tesla_restore_retry("one or more Tesla restore writes failed"):
                     await persist_force_mode_state()
-                if confirm_restore:
-                    return {
-                        "success": False,
-                        "error": "one or more Tesla restore writes failed",
-                    }
-                return
+                return _restore_not_completed("one or more Tesla restore writes failed")
 
             if not await _update_powerwall_store(
                 store, {"force_mode_state": None, "pending_tesla_restore": None},
@@ -41382,12 +42315,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             })
 
 
-            if confirm_restore:
+            if confirm_restore or response_requested:
                 return {"success": True, "error": None}
 
         except Exception as e:
             _LOGGER.error(f"Error in restore normal: {e}", exc_info=True)
-            if confirm_restore:
+            if confirm_restore or response_requested:
                 return {"success": False, "error": str(e)}
 
     # Per-brand capability matrix for Hold SoC. "supported=True" means the
@@ -44432,6 +45365,40 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     handle_force_discharge = _serialized_force_discharge
 
+    async def handle_recover_ev_transport(call: ServiceCall) -> dict[str, Any]:
+        """Run the scoped recovery coordinator for one selected physical VIN."""
+        from .tesla_ev_observation import _canonical_vin
+        from .tesla_ev_recovery import recovery_sidecar_snapshot
+        from .tesla_ev_stock_recovery import async_recover_vehicle_transport
+
+        vin = _canonical_vin(call.data.get("vin"))
+        incident_id = call.data.get("incident_id")
+        if vin is None:
+            return {"success": False, "error": "invalid_vin", "recovery": None}
+        if incident_id is not None and (
+            not isinstance(incident_id, str) or not incident_id.strip()
+        ):
+            return {"success": False, "vin": vin, "error": "invalid_incident_id", "recovery": None}
+        if not isinstance(hass.data.get(DOMAIN, {}).get(entry.entry_id), dict):
+            return {"success": False, "vin": vin, "error": "entry_unavailable", "recovery": None}
+        try:
+            success = await async_recover_vehicle_transport(
+                hass, entry, vin, incident_id=incident_id
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _LOGGER.exception("EV transport recovery remains held")
+            return {
+                "success": False, "vin": vin, "error": "recovery_failed",
+                "recovery": recovery_sidecar_snapshot(hass, entry),
+            }
+        return {
+            "success": success is True,
+            "vin": vin,
+            "recovery": recovery_sidecar_snapshot(hass, entry),
+        }
+
     from .licensing.entry_routing import register_handlers, routed_handler
     if amber_smartshift_coordinator:
         from .amber_smartshift.controls import handlers as amber_handlers
@@ -44475,6 +45442,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         'hold_battery_soc': handle_hold_battery_soc,
         'resume_powerwall_settings': handle_resume_powerwall_settings,
         'recover_max_backup': handle_recover_max_backup,
+        'recover_ev_transport': handle_recover_ev_transport,
         'set_operation_mode': handle_set_operation_mode,
         'set_grid_charging': handle_set_grid_charging,
         'set_grid_export': handle_set_grid_export,
@@ -44487,6 +45455,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.services.async_register(
         DOMAIN, "resume_powerwall_settings",
         routed_handler(hass, entry.entry_id, "resume_powerwall_settings", handle_resume_powerwall_settings),
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+    hass.services.async_register(
+        DOMAIN, "recover_ev_transport",
+        routed_handler(hass, entry.entry_id, "recover_ev_transport", handle_recover_ev_transport),
         supports_response=SupportsResponse.OPTIONAL,
     )
     hass.services.async_register(
@@ -47093,6 +48066,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     try:
         from .automations.ev_ownership import restore_ev_runtime_state
         restored_ev_runtime = restore_ev_runtime_state(hass, entry, automation_store)
+        quick_control_obligations = restored_ev_runtime.get(
+            "ev_quick_control_obligations", {}
+        )
+        ev_command_view = hass.data[DOMAIN][entry.entry_id].get(
+            "ev_vehicle_command_view"
+        )
+        if ev_command_view is not None and quick_control_obligations:
+            ev_command_view.restore_ev_quick_control_obligations(
+                entry,
+                quick_control_obligations,
+            )
+        # Arm finite EV cleanup before awaiting any unrelated Boost restore.
+        # A slow/failing Boost restore must not leave an already-expired
+        # positive-session obligation without its independent Stop callback.
         if boost_sessions := restored_ev_runtime.get("boost_sessions"):
             await ChargingBoostView(hass, entry).restore_boost_sessions(boost_sessions)
         if (
@@ -47111,9 +48098,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             "expired_manual_sessions", {}
         )
         if resumable_manual_sessions or expired_manual_sessions:
-            ev_command_view = hass.data[DOMAIN][entry.entry_id].get(
-                "ev_vehicle_command_view"
-            )
             if ev_command_view is not None:
                 await ev_command_view.restore_manual_quick_sessions(
                     entry,
@@ -50743,6 +51727,24 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             await persist_ev_runtime_state(hass, entry, automation_store)
     except Exception as err:
         _LOGGER.debug("EV runtime persist on unload failed: %s", err)
+
+    # Retire this recovery generation and drain durable writes while its
+    # runtime is still installed. Provider/obligation cleanup above must save
+    # first; a late old Store task must not overwrite the replacement setup.
+    if entry_data.get("_ev_recovery_lifecycle_prepared") is True:
+        try:
+            from .tesla_ev_recovery import async_shutdown_recovery_state
+
+            if not await async_shutdown_recovery_state(hass, entry, entry_data):
+                # The shutdown API has drained its Store tasks and retired
+                # this generation even when its final save failed. Keep it
+                # retired; a new setup must hydrate the durable state or hold.
+                _LOGGER.error("EV recovery shutdown persistence remains pending; retired runtime is unloading")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _LOGGER.exception("EV recovery shutdown remains pending; integration unload withheld")
+            return False
 
     # Invalidate this entry's dynamic EV callbacks after persistence and
     # before the hass.data mirror is removed.  The cleanup is command-neutral:

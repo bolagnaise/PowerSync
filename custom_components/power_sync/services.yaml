@@ -32,6 +32,29 @@ set_connected_ev:
       selector:
         text:
 
+recover_ev_transport:
+  name: Recover Tesla BLE control
+  description: Recover an uncertain command on a supported stock BLE bridge. Verifies a bridge restart and fresh independent vehicle settings before allowing new charging commands. Existing charging limits and session deadlines are preserved.
+  fields:
+    vin:
+      name: Vehicle VIN
+      description: Exact 17-character VIN paired to the BLE bridge.
+      required: true
+      selector:
+        text:
+    incident_id:
+      name: Recovery incident
+      description: Optional existing incident ID. Missing historical records require confirmed producer scope before recovery can proceed.
+      required: false
+      selector:
+        text:
+    entry_id:
+      name: Entry ID
+      description: Optional PowerSync configuration entry ID.
+      required: false
+      selector:
+        text:
+
 preview_history_relink:
   name: Preview History Relink
   description: Preview Sungrow mkaiser-to-PowerSync entity relinks without changing entities.

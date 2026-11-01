@@ -1597,6 +1597,234 @@ def test_mobile_ble_telemetry_merges_by_vin_mapping_not_prefix_order():
     assert vehicles[1]["battery_level"] == 41
 
 
+@pytest.mark.parametrize("quarantined", [False, True])
+def test_mobile_newer_fleet_stop_survives_retained_ble_charging(quarantined):
+    power_sync = _power_sync_module()
+    now = datetime.now(timezone.utc)
+    old = now - timedelta(minutes=3)
+    fleet = {
+        "charging_state": "Stopped", "charger_power": 0.0,
+        "is_plugged_in": True, "data_updated_at": now.isoformat(),
+        "charging_state_updated_at": now.isoformat(),
+    }
+    ble = {
+        "charging_state": "Charging", "charger_power": 2.0,
+        "is_plugged_in": True, "plugged_in_definitive": True,
+        "is_online": True, "transport_quarantined": quarantined,
+        # A recent bridge/status/SoC report cannot renew old charge data.
+        "data_updated_at": (now + timedelta(seconds=1)).isoformat(),
+        "charging_state_updated_at": old.isoformat(),
+        "charger_power_updated_at": old.isoformat(),
+    }
+
+    power_sync.EVVehiclesView._supplement_fleet_with_ble(fleet, ble)
+
+    assert fleet["charging_state"] == "Stopped"
+    assert fleet["charger_power"] == 0.0
+    assert fleet["ble_connected"] is (not quarantined)
+
+
+def test_mobile_fresher_ble_charging_still_replaces_older_fleet_stop():
+    power_sync = _power_sync_module()
+    now = datetime.now(timezone.utc)
+    fleet = {"charging_state": "Stopped", "charger_power": 0.0,
+             "data_updated_at": (now - timedelta(minutes=3)).isoformat()}
+    ble = {"charging_state": "Charging", "charger_power": 2.0,
+           "is_online": True, "data_updated_at": now.isoformat(),
+           "charging_state_updated_at": now.isoformat(),
+           "charger_power_updated_at": now.isoformat()}
+
+    power_sync.EVVehiclesView._supplement_fleet_with_ble(fleet, ble)
+
+    assert fleet["charging_state"] == "Charging"
+    assert fleet["charger_power"] == 2.0
+
+
+@pytest.mark.parametrize("radio_state", ["off", "unknown", "unavailable", "connecting"])
+def test_mobile_known_ble_radio_state_blocks_stale_charge_override(radio_state):
+    """A stale generic BLE status cannot make a disabled radio current."""
+    power_sync = _power_sync_module()
+    now = datetime.now(timezone.utc)
+    hass = _Hass([
+        # This is the stale entity observed on the live bridge.
+        _State("binary_sensor.car_status", "on", last_updated=now - timedelta(minutes=2)),
+        _State("switch.car_ble_connection", radio_state, last_updated=now),
+        _State("sensor.car_charging_state", "Charging", last_updated=now),
+        _State(
+            "sensor.car_charge_power",
+            "2.0",
+            {"unit_of_measurement": "kW"},
+            last_updated=now,
+        ),
+    ])
+
+    vehicle = power_sync.EVVehiclesView(hass)._get_tesla_ble_vehicle("car")
+
+    assert vehicle["is_online"] is False
+    assert vehicle.get("ble_connected") is not True
+    assert vehicle["charging_state"] == "Unknown"
+    assert vehicle["charger_power"] is None
+
+
+def test_mobile_disabled_ble_radio_cannot_override_fleet_charge_state():
+    """An unusable known radio cannot replace a newer native stopped report."""
+    power_sync = _power_sync_module()
+    now = datetime.now(timezone.utc)
+    fleet = {
+        "charging_state": "Stopped",
+        "charger_power": 0.0,
+        "data_updated_at": now.isoformat(),
+        "charging_state_updated_at": now.isoformat(),
+    }
+    ble = {
+        "charging_state": "Charging",
+        "charger_power": 2.0,
+        "is_online": False,
+        "connection_usable": False,
+        "data_updated_at": (now + timedelta(seconds=1)).isoformat(),
+        "charging_state_updated_at": (now + timedelta(seconds=1)).isoformat(),
+        "charger_power_updated_at": (now + timedelta(seconds=1)).isoformat(),
+    }
+
+    power_sync.EVVehiclesView._supplement_fleet_with_ble(fleet, ble)
+
+    assert fleet["charging_state"] == "Stopped"
+    assert fleet["charger_power"] == 0.0
+    assert fleet["ble_connected"] is False
+
+
+def test_mobile_disabled_ble_radio_preserves_fleet_flap_and_charge_fields():
+    """A newer BLE flap-off sample cannot turn native charging into Disconnected."""
+    power_sync = _power_sync_module()
+    now = datetime.now(timezone.utc)
+    hass = _Hass([
+        # The generic status remains stale/on while the explicit radio is off.
+        _State("binary_sensor.car_status", "on", last_updated=now - timedelta(minutes=2)),
+        _State("switch.car_ble_connection", "off", last_updated=now),
+        _State("sensor.car_charging_state", "Charging", last_updated=now),
+        _State("sensor.car_charge_power", "2.0", last_updated=now),
+        _State("binary_sensor.car_charge_flap", "off", last_updated=now),
+    ])
+    ble_vehicle = power_sync.EVVehiclesView(hass)._get_tesla_ble_vehicle("car")
+    fleet = {
+        "charging_state": "Charging",
+        "charger_power": 2.0,
+        "is_plugged_in": True,
+        "data_updated_at": (now - timedelta(minutes=1)).isoformat(),
+        "charging_state_updated_at": (now - timedelta(minutes=1)).isoformat(),
+        "charger_power_updated_at": (now - timedelta(minutes=1)).isoformat(),
+        "is_plugged_in_updated_at": (now - timedelta(minutes=1)).isoformat(),
+    }
+
+    power_sync.EVVehiclesView._supplement_fleet_with_ble(fleet, ble_vehicle)
+
+    assert ble_vehicle["connection_usable"] is False
+    assert ble_vehicle["charging_state"] == "Unknown"
+    assert fleet["charging_state"] == "Charging"
+    assert fleet["charger_power"] == 2.0
+    assert fleet["is_plugged_in"] is True
+    assert fleet["ble_connected"] is False
+
+
+def test_mobile_disabled_ble_registry_row_blocks_radio_even_when_switch_is_on():
+    """A disabled registry row is unusable despite its retained ON state."""
+    power_sync = _power_sync_module()
+    now = datetime.now(timezone.utc)
+    radio = SimpleNamespace(
+        entity_id="switch.car_ble_connection",
+        disabled_by="user",
+    )
+    hass = _Hass(
+        [
+            _State("binary_sensor.car_status", "on", last_updated=now),
+            _State("switch.car_ble_connection", "on", last_updated=now),
+            _State("sensor.car_charging_state", "Charging", last_updated=now),
+            _State("sensor.car_charge_power", "2.0", last_updated=now),
+        ],
+        registry_entities={radio.entity_id: radio},
+    )
+
+    vehicle = power_sync.EVVehiclesView(hass)._get_tesla_ble_vehicle("car")
+
+    assert vehicle["is_online"] is False
+    assert vehicle["charger_power"] is None
+
+
+def test_mobile_legacy_ble_without_radio_entity_remains_usable():
+    """Older bridges without a connection switch keep their status behavior."""
+    power_sync = _power_sync_module()
+    now = datetime.now(timezone.utc)
+    hass = _Hass([
+        _State("binary_sensor.car_status", "on", last_updated=now),
+        _State("sensor.car_charging_state", "Charging", last_updated=now),
+        _State("sensor.car_charge_power", "2.0", last_updated=now),
+    ])
+
+    vehicle = power_sync.EVVehiclesView(hass)._get_tesla_ble_vehicle("car")
+
+    assert vehicle["is_online"] is True
+    assert vehicle["charger_power"] == 2.0
+
+
+def test_mobile_quarantined_ble_reports_unknown_power_and_keeps_vehicle():
+    power_sync = _power_sync_module()
+    now = datetime.now(timezone.utc)
+    hass = _Hass([
+        _State("binary_sensor.car_status", "on", last_updated=now),
+        _State("sensor.car_charging_state", "Charging", last_updated=now),
+        _State("sensor.car_charge_power", "2.0", {"unit_of_measurement": "kW"}, last_updated=now),
+        _State("sensor.car_charge_level", "73", last_updated=now),
+        _State("binary_sensor.car_charge_flap", "on", last_updated=now),
+    ])
+    hass.data["power_sync"]["entry-1"]["ev_transport_recovery"] = {
+        "vehicles": {"VIN": {"route": {"kind": "ble", "prefix": "car"},
+            "attempts": {"attempt": {"outcome": "sent_unknown",
+                "route": {"kind": "ble", "prefix": "car"}}}, "hazards": {}}}}
+
+    vehicle = power_sync.EVVehiclesView(hass)._get_tesla_ble_vehicle("car")
+
+    assert vehicle["transport_quarantined"] is True
+    assert vehicle["charging_state"] == "Unknown"
+    assert vehicle["charger_power"] is None
+    assert vehicle["is_online"] is False
+    assert vehicle["battery_level"] == 73
+    assert vehicle["is_plugged_in"] is True
+
+    entry = SimpleNamespace(entry_id="entry-1", data={}, options={
+        "ev_provider": "tesla_ble", "tesla_ble_entity_prefix": "car",
+    })
+    status = power_sync._get_ev_vehicles_status(hass, entry, include_control_evidence=True)
+    assert len(status) == 1
+    assert status[0]["is_connected"] is True
+    assert status[0]["is_charging"] is False
+    assert status[0]["power_available"] is False
+    assert status[0]["_boost_charging_state_evidence"]["known"] is False
+
+
+@pytest.mark.parametrize("quarantined", [False, True])
+def test_aggregate_newer_native_stop_cannot_retain_ble_charging_power(quarantined):
+    power_sync = _power_sync_module()
+    now = datetime.now(timezone.utc)
+    old = now - timedelta(minutes=3)
+    hass = _tesla_hass([
+        _State("sensor.primary_ev_charging", "stopped", last_updated=now),
+        _State("sensor.primary_ev_charger_power", "0", {"unit_of_measurement": "kW"}, last_updated=now),
+        _State("sensor.car_charging_state", "Charging", last_updated=old),
+        _State("sensor.car_charge_power", "2", {"unit_of_measurement": "kW"}, last_updated=old),
+    ])
+    entry = SimpleNamespace(entry_id="entry-1", data={}, options={
+        "ev_provider": "both", "tesla_ble_entity_prefix": "car",
+        "tesla_ble_vehicle_mapping": "5YJTEST0000000001=car",
+    })
+    if quarantined:
+        hass.data["power_sync"]["entry-1"]["ev_transport_recovery"] = {
+            "vehicles": {"VIN": {"route": {"kind": "ble", "prefix": "car"},
+                "attempts": {"attempt": {"outcome": "sent_unknown",
+                    "route": {"kind": "ble", "prefix": "car"}}}, "hazards": {}}}}
+
+    assert power_sync._get_ev_vehicle_status(hass, entry)["ev_power_kw"] == 0.0
+
+
 def test_external_tesla_power_uses_coalesced_charging_vehicle():
     power_sync = _power_sync_module()
     hass = _tesla_hass([

@@ -1128,6 +1128,7 @@ class AutomationEngine:
     async def _async_get_ev_state(self) -> Dict[str, Any]:
         """Get EV state from Tesla Fleet or other EV integrations."""
         import re
+        from ..tesla_ev_recovery import ble_quarantined
 
         ev_state = {
             "is_plugged_in": False,
@@ -1198,6 +1199,8 @@ class AutomationEngine:
                     )
                     is not None
                 )
+                if targetable_rank and ble_quarantined(self._hass, candidate_prefix):
+                    continue
                 if signal in (
                     "charge_power",
                     "charger_power",

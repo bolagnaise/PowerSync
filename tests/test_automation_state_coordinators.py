@@ -579,6 +579,36 @@ def test_automation_ev_state_prefers_active_second_ble_vehicle():
     assert state["vehicle_id"] == "ble_tesla_flinn"
 
 
+def test_automation_ev_state_ignores_quarantined_first_car_without_hiding_second():
+    values = {}
+    for prefix in ("tesla_old", "tesla_current"):
+        for suffix, value, domain in (
+            ("charging_state", "Charging", "sensor"),
+            ("charge_flap", "on", "binary_sensor"),
+            ("ble_status", "on", "binary_sensor"),
+        ):
+            entity_id = f"{domain}.{prefix}_{suffix}"
+            values[entity_id] = SimpleNamespace(entity_id=entity_id, state=value)
+    engine_class = _load_engine_method("_async_get_ev_state", {
+        "Any": Any, "Dict": Dict, "_LOGGER": logging.getLogger(__name__),
+        "__package__": "power_sync.automations",
+    })
+    engine = object.__new__(engine_class)
+    engine._hass = SimpleNamespace(
+        states=SimpleNamespace(async_all=lambda: list(values.values()), get=values.get),
+        config_entries=SimpleNamespace(async_entries=lambda _domain: []),
+        data={"power_sync": {"entry-1": {"ev_transport_recovery": {
+            "vehicles": {"VIN": {"route": {"kind": "ble", "prefix": "tesla_old"},
+                "attempts": {"old": {"outcome": "sent_unknown", "route": {
+                    "kind": "ble", "prefix": "tesla_old"}}}, "hazards": {}}}}}}},
+    )
+
+    state = asyncio.run(engine._async_get_ev_state())
+
+    assert state["vehicle_id"] == "ble_tesla_current"
+    assert state["is_charging"] is True
+
+
 def test_automation_ev_state_prefers_fresh_power_only_second_ble_vehicle():
     """A fresh power reading must beat another bridge's disconnected state."""
 

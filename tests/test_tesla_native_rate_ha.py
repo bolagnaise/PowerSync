@@ -24,7 +24,8 @@ def adapter(monkeypatch):
     m = importlib.import_module(package+'.tesla_native_rate')
     solar = importlib.import_module(package+'.teslemetry_solar')
     monkeypatch.setattr(m.time, 'time', lambda: NOW)
-    gate = SimpleNamespace(lock=asyncio.Lock(), owner=None, blocked=lambda _: False)
+    gate = solar.SolarOwnership(None)
+    gate.blocked = lambda _: False
     async def load(): pass
     gate.load = load
     async def ownership(*_): return gate
@@ -109,6 +110,68 @@ async def test_exact_current_only_write_requires_fresh_report(adapter):
     a = adapter
     assert await a.m._write_current(a.hass, a.entry, VIN, a.observed, 10, lambda: True)
     assert a.calls == [('number','set_value',{'entity_id':'number.car_charge_current','value':10})]
+
+
+@pytest.mark.asyncio
+async def test_native_rate_permission_accepts_exact_live_discharge_proof(live_adapter, monkeypatch):
+    a = live_adapter
+    a.state.state = '10'
+    observed = await a.ports.read(VIN)
+    assert observed is not None and observed.current_amps == 10
+    a.ports.controller.sessions[VIN] = {'baseline_amps': 32}
+    a.runtime['optimization_coordinator']._enabled = True
+    a.runtime['optimization_coordinator']._monitoring_mode_active = lambda: False
+    a.budget.entries = {'native_max:one': {'site': 'site', 'native_max': {
+        'entry_id': 'one', 'token': 'native-generation', 'expires_at': NOW + 60,
+        'direction': 'discharge', 'ev_coexistence': True}}}
+    proof = ('native_max_coexistence', 'site', 'one', 'discharge',
+             'native-generation', 'native-identity', 'native-identity', 'site', ())
+    flex = importlib.import_module(a.m.__package__ + '.native_battery_flexibility')
+    monkeypatch.setattr(flex, 'native_max_coexistence_proof', lambda *args: proof)
+    assert a.ports.permitted(VIN, None, False)
+
+
+@pytest.mark.asyncio
+async def test_native_rate_read_uses_entry_aware_vehicle_report(live_adapter, monkeypatch):
+    a = live_adapter
+    telemetry = importlib.import_module(a.m.__package__ + '.native_rate_telemetry')
+    monkeypatch.setattr(telemetry, 'vehicle_report_for_entry',
+                        lambda hass, entry, vin: a.data)
+    monkeypatch.setattr(telemetry, 'vehicle_report',
+                        lambda *_: (_ for _ in ()).throw(AssertionError('cloud-only report used')))
+    observed = await a.ports.read(VIN)
+    assert observed is not None and observed.measured_ev_amps == 10
+
+
+@pytest.mark.asyncio
+async def test_idle_native_rate_tick_reconciles_managed_records_without_enabled_vins(
+    live_adapter, monkeypatch,
+):
+    a = live_adapter
+    calls = []
+    admission = ModuleType(a.m.__package__ + '.native_rate_admission')
+
+    async def refresh(hass, budget, **kwargs):
+        calls.append((hass, budget, kwargs))
+
+    admission.refresh_managed_records = refresh
+    monkeypatch.setitem(sys.modules, admission.__name__, admission)
+
+    event = ModuleType('homeassistant.helpers.event')
+    callbacks = []
+    event.async_track_time_interval = lambda hass, callback, interval: callbacks.append(callback) or (lambda: None)
+    monkeypatch.setitem(sys.modules, event.__name__, event)
+    a.ports.setting.rate_vins = frozenset()
+    controller = SimpleNamespace(ports=a.ports, tick=lambda: asyncio.sleep(0))
+    a.runtime[a.m.RUNTIME_KEY] = controller
+    a.hass.data['power_sync'][a.entry.entry_id] = a.runtime
+    a.hass.async_create_task = lambda coro: asyncio.create_task(coro)
+
+    await a.m.async_start(a.hass, a.entry)
+    await asyncio.sleep(0)
+    assert callbacks
+    await callbacks[0](None)
+    assert calls and calls[-1][1] is a.budget
 
 
 @pytest.mark.asyncio

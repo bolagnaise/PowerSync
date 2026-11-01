@@ -77,6 +77,204 @@ async def test_ownership_waits_for_inflight_action_then_blocks(monkeypatch):
     assert len(calls) == 1
     assert await action(None, entry, {'vehicle_vin': '5YJ3E1EA7KF000002'})
 
+
+@pytest.mark.asyncio
+async def test_cleanup_stop_enters_while_positive_gate_is_blocked(monkeypatch):
+    """A revoked Tesla Stop uses cleanup serialization, not the positive lock."""
+    gate = m.SolarOwnership(Store())
+    await gate.load()
+    gate.holds = {VIN: {'status': 'unconfirmed'}}
+
+    async def ownership(*args):
+        return gate
+
+    monkeypatch.setattr(m, 'ownership', ownership)
+    entered = asyncio.Event()
+    finish = asyncio.Event()
+    calls = []
+
+    @m.guard_ev_control
+    async def _action_stop_ev_charging(hass, config_entry, params):
+        calls.append(params)
+        entered.set()
+        await finish.wait()
+        return True
+
+    entry = SimpleNamespace(entry_id='one')
+    # Simulate a positive native request that has not released the ordinary
+    # lock yet. The cleanup Stop must still enter after its synchronous hold.
+    await gate.lock.acquire()
+    cleanup = asyncio.create_task(_action_stop_ev_charging(
+        None,
+        entry,
+        {
+            'vehicle_vin': VIN,
+            'charger_type': 'tesla',
+            '_ev_cleanup_only': True,
+        },
+    ))
+    await asyncio.wait_for(entered.wait(), timeout=0.2)
+    assert calls
+
+    other = asyncio.create_task(_action_stop_ev_charging(
+        None,
+        entry,
+        {'vehicle_vin': '5YJ3E1EA7KF000002', 'charger_type': 'tesla'},
+    ))
+    await asyncio.sleep(0)
+    assert not other.done()
+    finish.set()
+    assert await cleanup
+    gate.lock.release()
+    assert await other
+
+
+@pytest.mark.asyncio
+async def test_cleanup_stops_for_two_vins_use_independent_serializers(monkeypatch):
+    """A hung cleanup for one VIN must not strand another VIN's expiry Stop."""
+    vin_b = '5YJ3E1EA7KF000002'
+    gate = m.SolarOwnership(Store())
+    await gate.load()
+    gate.holds = {VIN: {'status': 'unconfirmed'}, vin_b: {'status': 'unconfirmed'}}
+    monkeypatch.setattr(m, 'ownership', lambda *args: asyncio.sleep(0, result=gate))
+    entered = {VIN: asyncio.Event(), vin_b: asyncio.Event()}
+    release_a = asyncio.Event()
+
+    @m.guard_ev_control
+    async def _action_stop_ev_charging_dynamic(hass, config_entry, params):
+        vehicle_id = params['vehicle_vin']
+        entered[vehicle_id].set()
+        if vehicle_id == VIN:
+            await release_a.wait()
+        return True
+
+    entry = SimpleNamespace(entry_id='one')
+    cleanup_a = asyncio.create_task(_action_stop_ev_charging_dynamic(
+        None, entry, {'vehicle_vin': VIN, 'charger_type': 'tesla', '_ev_cleanup_only': True}
+    ))
+    await asyncio.wait_for(entered[VIN].wait(), timeout=0.2)
+    cleanup_b = asyncio.create_task(_action_stop_ev_charging_dynamic(
+        None, entry, {'vehicle_vin': vin_b, 'charger_type': 'tesla', '_ev_cleanup_only': True}
+    ))
+    await asyncio.wait_for(entered[vin_b].wait(), timeout=0.2)
+    assert not cleanup_a.done()
+    assert await cleanup_b
+    release_a.set()
+    assert await cleanup_a
+
+
+@pytest.mark.asyncio
+async def test_same_vin_positive_admission_waits_for_priority_cleanup(monkeypatch):
+    """A revoked VIN cannot reacquire positive ownership during its Stop."""
+    gate = m.SolarOwnership(Store())
+    await gate.load()
+    monkeypatch.setattr(m, 'ownership', lambda *args: asyncio.sleep(0, result=gate))
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    positive_calls = []
+
+    @m.guard_ev_control
+    async def _action_stop_ev_charging_dynamic(hass, config_entry, params):
+        entered.set()
+        await release.wait()
+        return True
+
+    @m.guard_ev_control
+    async def _action_start_ev_charging_dynamic(hass, config_entry, params):
+        positive_calls.append(params)
+        return True
+
+    entry = SimpleNamespace(entry_id='one')
+    cleanup = asyncio.create_task(_action_stop_ev_charging_dynamic(
+        None, entry,
+        {'vehicle_vin': VIN, 'charger_type': 'tesla', '_ev_cleanup_only': True},
+    ))
+    await asyncio.wait_for(entered.wait(), timeout=0.2)
+    assert await _action_start_ev_charging_dynamic(
+        None, entry, {'vehicle_vin': VIN, 'charger_type': 'tesla'}
+    ) is False
+    assert positive_calls == []
+    release.set()
+    assert await cleanup
+    assert await _action_start_ev_charging_dynamic(
+        None, entry, {'vehicle_vin': VIN, 'charger_type': 'tesla'}
+    ) is True
+
+
+@pytest.mark.asyncio
+async def test_same_vin_admission_stays_blocked_for_queued_cleanup(monkeypatch):
+    """A queued second cleanup keeps the VIN fenced after the first finishes."""
+    gate = m.SolarOwnership(Store())
+    await gate.load()
+    monkeypatch.setattr(m, 'ownership', lambda *args: asyncio.sleep(0, result=gate))
+    entered_a = asyncio.Event()
+    entered_b = asyncio.Event()
+    release_a = asyncio.Event()
+    release_b = asyncio.Event()
+    cleanup_calls = 0
+    positive_calls = []
+
+    @m.guard_ev_control
+    async def _action_stop_ev_charging_dynamic(hass, config_entry, params):
+        nonlocal cleanup_calls
+        cleanup_calls += 1
+        if cleanup_calls == 1:
+            entered_a.set()
+            await release_a.wait()
+        else:
+            entered_b.set()
+            await release_b.wait()
+        return True
+
+    @m.guard_ev_control
+    async def _action_start_ev_charging_dynamic(hass, config_entry, params):
+        positive_calls.append(params)
+        return True
+
+    entry = SimpleNamespace(entry_id='one')
+    cleanup_a = asyncio.create_task(_action_stop_ev_charging_dynamic(
+        None, entry,
+        {'vehicle_vin': VIN, 'charger_type': 'tesla', '_ev_cleanup_only': True},
+    ))
+    await asyncio.wait_for(entered_a.wait(), timeout=0.2)
+    cleanup_b = asyncio.create_task(_action_stop_ev_charging_dynamic(
+        None, entry,
+        {'vehicle_vin': VIN, 'charger_type': 'tesla', '_ev_cleanup_only': True},
+    ))
+    await asyncio.sleep(0)
+    release_a.set()
+    await asyncio.wait_for(entered_b.wait(), timeout=0.2)
+    assert await _action_start_ev_charging_dynamic(
+        None, entry, {'vehicle_vin': VIN, 'charger_type': 'tesla'}
+    ) is False
+    assert positive_calls == []
+    release_b.set()
+    assert await cleanup_a
+    assert await cleanup_b
+
+
+@pytest.mark.asyncio
+async def test_metadata_only_teardown_remains_allowed_under_native_hold(monkeypatch):
+    """Bookkeeping teardown keeps its pre-existing stop_charging=False exemption."""
+    gate = m.SolarOwnership(Store())
+    await gate.load()
+    gate.holds = {VIN: {'status': 'unconfirmed'}}
+    monkeypatch.setattr(m, 'ownership', lambda *args: asyncio.sleep(0, result=gate))
+    calls = []
+
+    @m.guard_ev_control
+    async def _action_stop_ev_charging_dynamic(hass, config_entry, params):
+        calls.append(params)
+        return True
+
+    result = await _action_stop_ev_charging_dynamic(
+        None,
+        SimpleNamespace(entry_id='one'),
+        {'vehicle_vin': VIN, 'stop_charging': False},
+    )
+    assert result is True
+    assert calls
+
 @pytest.mark.asyncio
 async def test_service_provider_monitoring_handover_and_readback(monkeypatch):
     import sys

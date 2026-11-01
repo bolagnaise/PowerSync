@@ -14,6 +14,7 @@ import re
 import time
 
 _EV_SUBMISSION_CONTEXT = ContextVar("power_sync_ev_submission", default=None)
+_EV_CLEANUP_CONTEXT = ContextVar("power_sync_ev_cleanup", default=False)
 
 
 def ev_owner_snapshot(hass, entry, vin):
@@ -124,9 +125,23 @@ class SolarOwnership:
     def __init__(self, store):
         self.store = store
         self.lock = asyncio.Lock()
+        # Cleanup Stop must not be stranded behind an unrelated positive
+        # provider request. It is serialized separately after the caller has
+        # synchronously revoked positive authority.
+        self.cleanup_locks = {}
+        # A same-VIN positive admission must not race a priority cleanup that
+        # has already revoked the previous session. This marker is set before
+        # waiting on the per-VIN serializer and is checked under the ordinary
+        # gate lock; other VINs retain independent cleanup admission.
+        self.cleanup_active = {}
         self.owner = None
         self.holds = None
         self.requests = {}
+
+    def cleanup_lock_for(self, vehicle_id):
+        """Return the cleanup serializer for one exact loadpoint."""
+        key = str(vehicle_id or "_default").strip().upper()
+        return self.cleanup_locks.setdefault(key, asyncio.Lock())
 
     async def load(self):
         if self.holds is None:
@@ -182,20 +197,63 @@ def guard_ev_control(func):
                     # Explicit stop actions remain available throughout.
                     return False
         gate = await ownership(hass, entry.entry_id)
-        if gate.owner is asyncio.current_task():
-            params = bound.get("params") or {}
-            vin = params.get("vehicle_vin") or params.get("vehicle_id") or bound.get("vehicle_id")
-            cleanup_only = params.get("stop_charging") is False and func.__name__ == "_action_stop_ev_charging_dynamic"
-            if gate.blocked(vin) and not cleanup_only:
+        params = bound.get("params") or {}
+        vin = params.get("vehicle_vin") or params.get("vehicle_id") or bound.get("vehicle_id")
+        if params.get("_ev_cleanup_respect_native_hold") and gate.blocked(vin):
+            # Automatic finite cleanup retains the native solar ownership
+            # fence. An explicit user Stop has separate cleanup authority.
+            return False
+        stop_functions = {
+            "_action_stop_ev_charging",
+            "_action_stop_ev_charging_dynamic",
+            "_action_stop_ev_boost_cleanup",
+        }
+        cleanup_only = bool(
+            params.get("_ev_cleanup_only")
+            and str(params.get("charger_type") or "tesla").lower() == "tesla"
+            and func.__name__ in stop_functions
+        )
+        legacy_cleanup_only = bool(
+            params.get("stop_charging") is False
+            and func.__name__ == "_action_stop_ev_charging_dynamic"
+        )
+        cleanup_allowed = cleanup_only or legacy_cleanup_only
+        nested_cleanup = bool(_EV_CLEANUP_CONTEXT.get() and func.__name__ in stop_functions)
+        cleanup_key = str(vin or "_default").strip().upper()
+        if nested_cleanup or gate.owner is asyncio.current_task():
+            if (
+                not cleanup_allowed
+                and gate.cleanup_active.get(cleanup_key, 0) > 0
+            ):
+                return False
+            if gate.blocked(vin) and not cleanup_allowed:
                 return False
             with _ev_submission_scope(hass, entry, vin, params):
                 return await func(*args, **kwargs)
+        if cleanup_only:
+            gate.cleanup_active[cleanup_key] = gate.cleanup_active.get(cleanup_key, 0) + 1
+            try:
+                async with gate.cleanup_lock_for(vin):
+                    token = _EV_CLEANUP_CONTEXT.set(True)
+                    try:
+                        with _ev_submission_scope(hass, entry, vin, params):
+                            return await func(*args, **kwargs)
+                    finally:
+                        _EV_CLEANUP_CONTEXT.reset(token)
+            finally:
+                remaining = gate.cleanup_active.get(cleanup_key, 0) - 1
+                if remaining > 0:
+                    gate.cleanup_active[cleanup_key] = remaining
+                else:
+                    gate.cleanup_active.pop(cleanup_key, None)
         async with gate.lock:
             await gate.load()
-            params = bound.get("params") or {}
-            vin = params.get("vehicle_vin") or params.get("vehicle_id") or bound.get("vehicle_id")
-            cleanup_only = params.get("stop_charging") is False and func.__name__ == "_action_stop_ev_charging_dynamic"
-            if gate.blocked(vin) and not cleanup_only:
+            if (
+                not cleanup_allowed
+                and gate.cleanup_active.get(cleanup_key, 0) > 0
+            ):
+                return False
+            if gate.blocked(vin) and not legacy_cleanup_only:
                 return False
             gate.owner = asyncio.current_task()
             try:

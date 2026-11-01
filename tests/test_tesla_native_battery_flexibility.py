@@ -11,6 +11,8 @@ from test_tesla_native_rate_ha import adapter, live_adapter
 
 
 def qualify(a):
+    for key in ('force_charge_state', 'force_discharge_state', 'hold_soc_state', 'self_consumption_state'):
+        a.runtime[key] = {'active': False, 'saved_tariff': None, 'expires_at': None}
     a.entry.data.update(powerwall_local_paired=True, powerwall_local_din='DIN',
         powerwall_local_energy_site_id='site', powerwall_local_public_key_der='public')
     a.runtime['entry'] = a.entry
@@ -48,6 +50,225 @@ async def test_verified_native_charge_yields_to_manual_ev_without_future_dischar
     assert evidence['native_flexible_battery_w'] == 10000
     assert evidence['battery_generation'] is None
     assert evidence['borrowable_battery_w'] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('phase,expected', [('active', 10000), ('applying', 0)])
+async def test_active_capable_native_charge_can_lend_measured_power(admission, phase, expected):
+    a = qualify(admission)
+    a.budget.armed_sites.clear()
+    assert await a.budget.claim_native_max(
+        'one', 'site', 'native-generation', NOW + 60,
+        direction='charge', ev_coexistence=True)
+    adapter = NS(entry_id='one', token='native-generation', identity='native-identity',
+        current_identity=lambda: 'native-identity', authority=lambda: True, site='site',
+        direction='charge', ev_coexistence=True)
+    session = NS(adapter=adapter, status=lambda: {
+        'phase': phase, 'direction': 'charge', 'active': phase == 'active',
+        'id': 'native-generation', 'expires_at': NOW + 60},
+        record={'id': 'native-generation', 'phase': phase, 'expires_at': NOW + 60,
+        'baseline': {'direction': 'charge'}})
+    a.runtime['powerwall_native_max_charge'] = session
+    a.runtime['force_charge_state'].update(
+        active=True, native_max_charge=True, native_tariff_force=True,
+        power_target_basis='native_tariff', command_status='accepted' if phase == 'active' else 'pending')
+    evidence = a.m._site_evidence(a.hass, a.entry, a.runtime, VIN, {})
+    assert evidence['native_flexible_battery_w'] == expected
+
+
+def _native_session(a, *, direction='charge', phase='active', token='native-generation'):
+    adapter = NS(entry_id='one', token=token, identity='native-identity',
+        current_identity=lambda: 'native-identity', authority=lambda: True, site='site',
+        direction=direction, ev_coexistence=True)
+    record = {'id': token, 'phase': phase, 'expires_at': NOW + 60,
+              'baseline': {'direction': direction}}
+    return NS(adapter=adapter, pending=True,
+        status=lambda: {'phase': phase, 'direction': direction,
+            'active': phase == 'active', 'id': token,
+            'expires_at': NOW + 60}, record=record)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('direction', ['charge', 'discharge'])
+async def test_native_max_coexistence_proof_requires_exact_active_direction(admission, direction):
+    from managed_admission_probe.native_battery_flexibility import native_max_coexistence_proof
+
+    a = qualify(admission)
+    a.budget.armed_sites.clear()
+    assert await a.budget.claim_native_max(
+        'one', 'site', 'native-generation', NOW + 60,
+        direction=direction, ev_coexistence=True)
+    a.runtime['powerwall_native_max_charge'] = _native_session(a, direction=direction)
+    if direction == 'discharge':
+        a.runtime['force_discharge_state'].update(
+            active=True, native_tariff_force=True, power_target_basis='native_tariff',
+            command_status='accepted')
+    proof = native_max_coexistence_proof(a.hass, a.entry, a.runtime, 'site', a.budget)
+    assert proof and proof[3] == direction
+    assert proof == native_max_coexistence_proof(a.hass, a.entry, a.runtime, 'site', a.budget)
+    if direction == 'discharge':
+        assert a.m._site_evidence(a.hass, a.entry, a.runtime, VIN, {})['native_flexible_battery_w'] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('phase', ['prepared', 'applying', 'restoring', 'settling'])
+async def test_native_max_coexistence_proof_denies_non_active_phase(admission, phase):
+    from managed_admission_probe.native_battery_flexibility import native_max_coexistence_proof
+
+    a = qualify(admission)
+    a.budget.armed_sites.clear()
+    assert await a.budget.claim_native_max(
+        'one', 'site', 'native-generation', NOW + 60,
+        direction='charge', ev_coexistence=True)
+    a.runtime['powerwall_native_max_charge'] = _native_session(a, phase=phase)
+    a.runtime['force_charge_state'].update(
+        active=True, native_max_charge=True, native_tariff_force=True,
+        power_target_basis='native_tariff', command_status='pending')
+    assert native_max_coexistence_proof(a.hass, a.entry, a.runtime, 'site', a.budget) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('missing', ['session', 'stale_config', 'owner'])
+async def test_native_max_coexistence_proof_denies_missing_stale_or_foreign_authority(admission, missing):
+    from managed_admission_probe.native_battery_flexibility import native_max_coexistence_proof
+
+    a = qualify(admission)
+    a.budget.armed_sites.clear()
+    assert await a.budget.claim_native_max(
+        'one', 'site', 'native-generation', NOW + 60,
+        direction='charge', ev_coexistence=True)
+    a.runtime['powerwall_native_max_charge'] = _native_session(a)
+    if missing == 'session':
+        a.runtime.pop('powerwall_native_max_charge')
+    elif missing == 'stale_config':
+        a.snapshot.config_observed_monotonic -= 16
+    else:
+        other = NS(entry_id='two', data={'tesla_energy_site_id': 'site'}, options={})
+        a.hass.data['power_sync']['two'] = {
+            'entry': other, 'powerwall_site_control': NS(site_id='site')}
+    assert native_max_coexistence_proof(a.hass, a.entry, a.runtime, 'site', a.budget) is None
+
+
+@pytest.mark.asyncio
+async def test_native_max_proof_survives_new_normal_samples_without_timestamp_identity(admission):
+    from managed_admission_probe.native_battery_flexibility import native_max_coexistence_proof
+
+    a = qualify(admission)
+    a.budget.armed_sites.clear()
+    assert await a.budget.claim_native_max(
+        'one', 'site', 'native-generation', NOW + 60,
+        direction='charge', ev_coexistence=True)
+    a.runtime['powerwall_native_max_charge'] = _native_session(a)
+    before = native_max_coexistence_proof(a.hass, a.entry, a.runtime, 'site', a.budget)
+    a.snapshot.observed_monotonic = time.monotonic() - 1
+    a.snapshot.config_observed_monotonic = a.snapshot.observed_monotonic
+    a.runtime['powerwall_local']['coordinator'].last_success_ts = NOW - 1
+    assert native_max_coexistence_proof(a.hass, a.entry, a.runtime, 'site', a.budget) == before
+
+
+@pytest.mark.asyncio
+async def test_native_max_capability_without_live_session_denies_increase_before_ticket(admission):
+    a = qualify(admission)
+    a.budget.armed_sites.clear()
+    assert await a.budget.claim_native_max(
+        'one', 'site', 'native-generation', NOW + 60,
+        direction='charge', ev_coexistence=True)
+    with pytest.raises(a.m.SiteImportAdmissionDenied, match='coexistence authority'):
+        await a.m.prepare_ev_submission(
+            a.hass, a.state.entity_id, operation='rate', amps=20)
+    assert not a.budget.managed
+
+
+@pytest.mark.asyncio
+async def test_native_max_capability_does_not_block_rate_reduction_without_live_session(admission):
+    a = qualify(admission)
+    a.budget.armed_sites.clear()
+    assert await a.budget.claim_native_max(
+        'one', 'site', 'native-generation', NOW + 60,
+        direction='charge', ev_coexistence=True)
+    assert await a.m.prepare_ev_submission(
+        a.hass, a.state.entity_id, operation='rate', amps=5)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('operation,amps', [('start', None), ('rate', 20)])
+async def test_native_max_discharge_coexistence_allows_ev_demand_without_battery_credit(
+    admission, operation, amps,
+):
+    a = qualify(admission)
+    a.budget.armed_sites.clear()
+    assert await a.budget.claim_native_max(
+        'one', 'site', 'native-generation', NOW + 60,
+        direction='discharge', ev_coexistence=True)
+    a.runtime['powerwall_native_max_charge'] = _native_session(a, direction='discharge')
+    a.runtime['force_discharge_state'].update(
+        active=True, native_tariff_force=True, power_target_basis='native_tariff',
+        command_status='accepted')
+    a.snapshot.grid_w = 6000
+    assert await a.m.prepare_ev_submission(
+        a.hass, a.state.entity_id, operation=operation, amps=amps)
+    assert a.m._site_evidence(a.hass, a.entry, a.runtime, VIN, {})[
+        'native_flexible_battery_w'] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('operation,amps', [('start', None), ('rate', 20)])
+async def test_native_max_discharge_proof_change_after_ticket_denies_submission(
+    admission, monkeypatch, operation, amps,
+):
+    a = qualify(admission)
+    a.budget.armed_sites.clear()
+    assert await a.budget.claim_native_max(
+        'one', 'site', 'native-generation', NOW + 60,
+        direction='discharge', ev_coexistence=True)
+    a.runtime['powerwall_native_max_charge'] = _native_session(a, direction='discharge')
+    a.runtime['force_discharge_state'].update(
+        active=True, native_tariff_force=True, power_target_basis='native_tariff',
+        command_status='accepted')
+    a.snapshot.grid_w = 6000
+    original = a.budget.admit_managed
+
+    async def interleave(*args, **kwargs):
+        ticket = await original(*args, **kwargs)
+        a.runtime['powerwall_native_max_charge'].adapter.token = 'replacement'
+        return ticket
+
+    monkeypatch.setattr(a.budget, 'admit_managed', interleave)
+    with pytest.raises(a.m.SiteImportAdmissionDenied):
+        await a.m.prepare_ev_submission(
+            a.hass, a.state.entity_id, operation=operation, amps=amps)
+    assert not a.budget.managed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('conflict', ['plain_force', 'other_token', 'settings_pending', 'backup_zero'])
+async def test_native_charge_exception_preserves_real_control_conflicts(admission, conflict):
+    a = qualify(admission)
+    a.budget.armed_sites.clear()
+    assert await a.budget.claim_native_max('one', 'site', 'native-generation', NOW + 60,
+                                         direction='charge', ev_coexistence=True)
+    a.runtime['powerwall_native_max_charge'] = NS(
+        pending=True, adapter=NS(entry_id='one', token='native-generation'),
+        status=lambda: {'phase': 'active', 'direction': 'charge', 'active': True})
+    a.runtime['force_charge_state'].update(
+        active=True, native_max_charge=True, native_tariff_force=True,
+        power_target_basis='native_tariff', command_status='accepted')
+    if conflict == 'plain_force':
+        a.runtime['force_charge_state']['native_max_charge'] = False
+    elif conflict == 'other_token':
+        a.runtime['powerwall_native_max_charge'].adapter.token = 'other-generation'
+    elif conflict == 'settings_pending':
+        a.runtime['powerwall_settings_pending'] = {'site_id': 'site', 'id': 'unresolved-write'}
+    else:
+        a.runtime['max_backup_saved_reserve'] = 0
+    assert a.m._site_evidence(a.hass, a.entry, a.runtime, VIN, {})['native_flexible_battery_w'] == 0
+
+
+@pytest.mark.asyncio
+async def test_closed_native_controller_does_not_block_normal_site_flexibility(admission):
+    a = qualify(admission)
+    a.runtime['powerwall_native_max_charge'] = NS(pending=False, status=lambda: {})
+    assert a.m._site_evidence(a.hass, a.entry, a.runtime, VIN, {})['native_flexible_battery_w'] == 10000
 
 
 @pytest.mark.asyncio
