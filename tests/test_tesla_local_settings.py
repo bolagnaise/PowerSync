@@ -2162,3 +2162,75 @@ async def test_tariff_preparation_and_complete_restore_never_access_signed_setti
     lookup.assert_not_called()
     assert not runtime.get("powerwall_settings_pending")
     assert saved["force_mode_state"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tail", ["slow_final_read", "clipped_final_poll"])
+@pytest.mark.parametrize("readback", ["omitted", "contrary", "invalid"])
+async def test_grid_toggle_preserves_readback_outcome_before_dispatch_timeout(
+    monkeypatch, tail, readback,
+):
+    """Replay the 60s toggle through the real dispatcher and cloud verifier."""
+    grid = load_power_sync_submodule("tesla_grid_control", "grid_toggle_deadline_probe")
+    ns, runtime = settings_context(paired=False)
+    clock = SimpleNamespace(now=100.0)
+    loop = asyncio.get_running_loop()
+    monkeypatch.setattr(loop, "time", lambda: clock.now)
+
+    async def advance(delay):
+        clock.now += delay
+        # Let scheduled timeout callbacks run, including the dispatcher's
+        # enclosing cancellation, without waiting a minute in wall time.
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    omitted = {"components": {"solar": True}, "default_real_mode": "self_consumption"}
+    payload = {
+        "omitted": omitted,
+        "contrary": {"components": {"disallow_charge_from_grid_with_solar_installed": True}},
+        "invalid": {"components": {"disallow_charge_from_grid_with_solar_installed": "invalid"}},
+    }[readback]
+    reads = []
+
+    class Reply(HttpReply):
+        async def __aenter__(self):
+            if tail == "slow_final_read" and clock.now >= 159.0:
+                await advance(self.timeout + .01)
+                raise asyncio.TimeoutError
+            return await super().__aenter__()
+
+    def post(*args, **kwargs):
+        if tail == "clipped_final_poll" and not reads:
+            clock.now += 2.0
+        return HttpReply({"response": {"result": True}})
+
+    def get(*args, **kwargs):
+        reads.append(clock.now)
+        reply = Reply({"response": payload})
+        reply.timeout = kwargs["timeout"].total
+        return reply
+
+    async def confirm(*args, **kwargs):
+        return await grid.async_set_tesla_grid_charging_confirmed(
+            *args, **kwargs, sleep=advance, monotonic=lambda: clock.now,
+        )
+
+    ns.update(
+        time=SimpleNamespace(monotonic=lambda: clock.now),
+        _command_generation=[1], _tesla_charge_kick_generation=[1],
+        _record_tesla_settings_submission=AsyncMock(),
+        async_get_clientsession=lambda h: SimpleNamespace(post=post, get=get),
+        get_tesla_api_base_url=lambda *a: "https://tesla.test",
+        CONF_FLEET_API_BASE_URL="base",
+        GRID_CONFIRMATION_POLL_OFFSETS=grid.GRID_CONFIRMATION_POLL_OFFSETS,
+        TeslaGridWriteStatus=grid.TeslaGridWriteStatus,
+        async_set_tesla_grid_charging_confirmed=confirm,
+    )
+    apply = load_function(ROOT / "__init__.py", "_tesla_force_apply_grid_charging", ns,
+                          strip_imports=True)
+    result = await apply([("site", "token", "fleet")], True, reason="set grid charging")
+    assert len(reads) >= 2
+    assert result["confirmed_sites"] == []  # Omission is acceptance, not readback.
+    assert result["field_absent_sites"] == (["site"] if readback == "omitted" else [])
+    assert result["failed_sites"] == ([] if readback == "omitted" else ["site"])
+    assert not runtime.get("powerwall_settings_pending")

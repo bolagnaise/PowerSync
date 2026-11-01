@@ -354,7 +354,11 @@ async def async_set_tesla_grid_charging_confirmed(
     accepted_at = monotonic()
     deadline_at = accepted_at + max(0.0, confirmation_deadline)
     if operation_deadline is not None:
-        deadline_at = min(deadline_at, operation_deadline)
+        # The settings dispatcher cancels the entire cloud call at the shared
+        # operation deadline. Finish polling just before it so a final slow
+        # read or clipped sleep cannot discard the readback evidence collected
+        # so far, including the supported field-omission outcome.
+        deadline_at = min(deadline_at, operation_deadline - 0.1)
     resent = False
     read_attempts = 0
     valid_site_info_reads = 0
@@ -389,7 +393,9 @@ async def async_set_tesla_grid_charging_confirmed(
             )
 
         read_attempts += 1
-        request_timeout = max(0.1, min(3.0, deadline_at - monotonic()))
+        request_timeout = min(3.0, deadline_at - monotonic())
+        if request_timeout <= 0:
+            break
         try:
             async with session.get(
                 read_url,
