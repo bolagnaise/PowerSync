@@ -15702,10 +15702,46 @@ class EVVehiclesView(HomeAssistantView):
             return {**entries[0].data, **entries[0].options}
         return {}
 
+    def _ble_connection_usable(self, prefix: str) -> bool:
+        """Return whether an optional exact BLE connection control is usable.
+
+        Older ESPHome bridge YAMLs have no connection switch or registry row;
+        preserve that shape.  Once the entity exists, only an active ``on``
+        state from an enabled registry row proves that BLE is available.  The
+        generic BLE status sensor is vehicle/session telemetry and cannot
+        override an explicitly disabled connection control.
+        """
+        radio_entity = f"switch.{prefix}_ble_connection"
+        state = self._hass.states.get(radio_entity)
+        try:
+            registry = er.async_get(self._hass)
+            lookup = getattr(registry, "async_get", None)
+            if callable(lookup):
+                registration = lookup(radio_entity)
+            else:
+                registration = getattr(registry, "entities", {}).get(radio_entity)
+        except Exception:
+            registration = None
+        if state is None and registration is None:
+            return True
+        if registration is not None and getattr(registration, "disabled_by", None):
+            return False
+        return (
+            state is not None
+            and str(getattr(state, "state", "") or "").strip().lower() == "on"
+        )
+
     @staticmethod
     def _supplement_fleet_with_ble(fleet_v: dict, ble_v: dict) -> None:
         """Supplement a Fleet API vehicle dict with fresher BLE data in-place."""
         if ble_v.get("transport_quarantined"):
+            fleet_v["ble_connected"] = False
+            return
+        # A present, explicitly unusable connection control fences every BLE
+        # overlay.  Keep the native fields intact, including a definitive
+        # charge-flap reading that would otherwise force ``Disconnected``.
+        # Legacy bridges omit this marker and retain their historical merge.
+        if ble_v.get("connection_usable") is False:
             fleet_v["ble_connected"] = False
             return
 
@@ -15845,7 +15881,16 @@ class EVVehiclesView(HomeAssistantView):
                     pass
 
         # Check BLE connection status
-        is_online = status_state.state == "on"
+        # A stale generic Status/BLE Status entity must not override an
+        # explicitly disabled or unavailable connection switch.
+        connection_usable = self._ble_connection_usable(prefix)
+        is_online = status_state.state == "on" and connection_usable
+        if not connection_usable:
+            # A known-disabled radio cannot provide current charge evidence,
+            # even when the generic status entity is stale and still ``on``.
+            charging_state = "Unknown"
+            charger_power = None
+            charge_power_state = None
         if quarantined:
             charging_state = "Unknown"
             charger_power = None
@@ -15878,6 +15923,7 @@ class EVVehiclesView(HomeAssistantView):
             "plugged_in_definitive": plugged_in_definitive,
             "charger_power": charger_power,
             "is_online": is_online,
+            "connection_usable": connection_usable,
             "data_updated_at": data_updated_at.isoformat() if data_updated_at else dt_util.now().isoformat(),
             "source": "tesla_ble",
             "brand": "tesla",
