@@ -4870,6 +4870,43 @@ def test_persistent_provenance_discharge_reduces_energy_and_grid_cost_proportion
     ) == pytest.approx(0.30)
 
 
+def test_persistent_provenance_defers_unchanged_soc_until_catchup(opt_module):
+    """Do not reconcile a measured interval against a stale SOC snapshot."""
+    coordinator = _provenance_coordinator(opt_module)
+    coordinator._battery_provenance_available = True
+    coordinator._battery_provenance_solar_kwh = 4.0
+    coordinator._battery_provenance_grid_kwh = 4.0
+    coordinator._battery_provenance_grid_cost = 2.0
+    coordinator._battery_provenance_unknown_kwh = 0.0
+    coordinator._battery_provenance_last_soc = 0.8
+    coordinator._battery_provenance_last_capacity_wh = 10_000
+
+    # Power has already moved 2 kWh, but SOC is still the prior 80% sample.
+    coordinator._record_battery_provenance_interval(
+        solar_charge_kwh=0.0,
+        grid_charge_kwh=0.0,
+        grid_charge_cost=0.0,
+        discharge_kwh=2.0,
+        current_soc=0.8,
+        capacity_wh=10_000,
+        telemetry_gap=False,
+    )
+    assert coordinator._battery_provenance_total_kwh() == pytest.approx(6.0)
+    assert coordinator._battery_provenance_unknown_kwh == pytest.approx(0.0)
+    assert coordinator._battery_provenance_reconciliation == (
+        "deferred_unchanged_soc:measured_interval"
+    )
+
+    # When SOC catches up, the authoritative value matches the measured ledger
+    # without a synthetic unknown addition or proportional loss of known origin.
+    coordinator._reconcile_battery_provenance(0.6, 10_000, reason="optimizer_run")
+    assert coordinator._battery_provenance_total_kwh() == pytest.approx(6.0)
+    assert coordinator._battery_provenance_solar_kwh == pytest.approx(3.0)
+    assert coordinator._battery_provenance_grid_kwh == pytest.approx(3.0)
+    assert coordinator._battery_provenance_grid_cost == pytest.approx(1.5)
+    assert coordinator._battery_provenance_unknown_kwh == pytest.approx(0.0)
+
+
 def test_persistent_provenance_reconciles_soc_capacity_and_gaps_as_unknown(
     opt_module,
 ):
