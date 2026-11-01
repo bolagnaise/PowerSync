@@ -317,7 +317,20 @@ def newer_schedule_report(hass, vin, cached_at):
 
 def charging_unit_w(charge, profile):
     """Use explicit electrical metadata; missing phases cannot mean one phase."""
-    voltage = charge.get("charger_voltage") or profile.get("voltage")
+    reported_voltage = charge.get("charger_voltage")
+    voltage = reported_voltage or profile.get("voltage")
+    # A stopped Tesla can report a small standby voltage before the EVSE is
+    # energized. Use the explicit configured electrical bound for prospective
+    # demand only with a fresh, independently zero-effect charge document.
+    # Invalid active readings must never gain measured power or headroom.
+    if (type(reported_voltage) in (int, float) and 0 < reported_voltage < 90
+            and "voltage" in profile and "phases" in profile
+            and str(charge.get("charging_state", "")).lower() in {
+                "stopped", "complete", "disconnected", "nopower", "no_power"}
+            and all(type(charge.get(field)) in (int, float) and charge[field] == 0
+                    for field in ("charger_actual_current", "charger_power"))
+            and 0 <= time.time() - _timestamp(charge.get("timestamp")) <= 15):
+        voltage = profile["voltage"]
     phases = profile.get("phases", charge.get("charger_phases"))
     if isinstance(voltage, bool) or isinstance(phases, bool):
         return 0.0

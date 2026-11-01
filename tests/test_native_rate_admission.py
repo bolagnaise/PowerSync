@@ -1190,3 +1190,50 @@ async def test_native_max_reconciles_recovered_ble_record_using_two_exact_native
     assert VIN not in a.budget.managed
     assert calls.count(source_domain) == 2
     assert calls.count('meter') == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('domain', ['tesla_fleet', 'teslemetry'])
+async def test_armed_start_uses_configured_voltage_for_fresh_zero_effect_standby(admission, domain):
+    a = admission
+    registry = sys.modules['homeassistant.helpers.entity_registry'].async_get(a.hass)
+    for registration in registry.entities.values():
+        registration.platform = domain
+    a.provider.runtime_data.vehicles[0].device.identifiers = {(domain, VIN)}
+    a.hass.config_entries.async_entries = lambda requested: [a.provider] if requested == domain else []
+    a.m._EV_SUBMISSION_CONTEXT.get()['params'].update(voltage=240, phases=1)
+    a.charge.update(charger_voltage=2, charging_state='Stopped',
+                    charger_actual_current=0, charger_power=0)
+    assert await a.m.prepare_ev_submission(a.hass, 'switch.car_charge', operation='start')
+    assert a.budget.managed[VIN]['watts_per_amp'] == 240
+    assert a.budget.managed[VIN]['reserved_w'] == 2400
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('case', [
+    'charging', 'starting', 'unknown', 'current', 'power', 'missing_current',
+    'missing_power', 'stale', 'future', 'missing_voltage', 'bad_voltage',
+    'missing_phases', 'bad_phases', 'phase_conflict', 'negative_voltage',
+])
+async def test_standby_voltage_fallback_keeps_unproven_armed_start_closed(admission, case):
+    a = admission
+    profile = a.m._EV_SUBMISSION_CONTEXT.get()['params']
+    profile.update(voltage=240, phases=1)
+    a.charge.update(charger_voltage=2, charging_state='Stopped',
+                    charger_actual_current=0, charger_power=0)
+    if case in {'charging', 'starting', 'unknown'}:
+        a.charge['charging_state'] = case
+    elif case == 'current': a.charge['charger_actual_current'] = 1
+    elif case == 'power': a.charge['charger_power'] = 1
+    elif case == 'missing_current': a.charge.pop('charger_actual_current')
+    elif case == 'missing_power': a.charge.pop('charger_power')
+    elif case == 'stale': a.charge['timestamp'] = NOW - 16
+    elif case == 'future': a.charge['timestamp'] = NOW + 1
+    elif case == 'missing_voltage': profile.pop('voltage')
+    elif case == 'bad_voltage': profile['voltage'] = 500
+    elif case == 'missing_phases': profile.pop('phases')
+    elif case == 'bad_phases': profile['phases'] = 2
+    elif case == 'phase_conflict': a.charge['charger_phases'] = 3
+    elif case == 'negative_voltage': a.charge['charger_voltage'] = -2
+    assert not await a.m.prepare_ev_submission(a.hass, 'switch.car_charge', operation='start')
+    assert not a.budget.managed
