@@ -3773,6 +3773,21 @@ def _tesla_ble_mark_mutation_prewrite() -> None:
         phase["phase"] = "prewrite"
 
 
+def _tesla_submission_mark_prewrite_rejection() -> None:
+    """Retire a handoff only after HA proves a mutation was rejected prewrite."""
+    handoff = _tesla_submission_handoff.get()
+    if not isinstance(handoff, dict):
+        return
+    # ``_tesla_call_service`` marks the child handed off immediately before
+    # entering Home Assistant.  Structured number validation is the one
+    # documented exception that proves HA rejected the value before any
+    # provider mutation.  Keep this marker explicit so a later refused retry
+    # can finish the original ticket as not_sent without hiding a real write.
+    if handoff.get("handed_off") is True:
+        handoff["handed_off"] = False
+        handoff["handoff_retired"] = True
+
+
 def _tesla_ble_effect_bound_is_valid(
     operation: str, effect_bound: Mapping[str, Any] | object
 ) -> bool:
@@ -4322,7 +4337,18 @@ async def _set_ev_charging_amps_ble(
         if getattr(e, "site_import_admission_denied", False):
             raise
         fallback_amps = None
-        if _is_number_range_error(str(e)):
+        # Only Home Assistant's structured number validation proves that the
+        # first service call was rejected before the provider saw it.  A
+        # range-looking RuntimeError may be raised after handoff and must stay
+        # unknown; retrying it could duplicate a mutation.
+        if _tesla_native_verified_range_rejection(
+            e,
+            "rate",
+            amps_entity,
+            {"entity_id": amps_entity, "value": capped_amps},
+        ):
+            _tesla_submission_mark_prewrite_rejection()
+            command_dispatched = False
             fallback_amps = _tesla_entity_max_fallback_amps(
                 capped_amps,
                 entity_min,
@@ -4383,6 +4409,17 @@ async def _set_ev_charging_amps_ble(
             except Exception as fallback_error:
                 if getattr(fallback_error, "site_import_admission_denied", False):
                     raise
+                if _tesla_native_verified_range_rejection(
+                    fallback_error,
+                    "rate",
+                    amps_entity,
+                    {"entity_id": amps_entity, "value": fallback_amps},
+                ):
+                    # The fallback was also rejected by HA before provider
+                    # handoff.  The first structured rejection already
+                    # retired its handoff; retire this distinct retry too.
+                    _tesla_submission_mark_prewrite_rejection()
+                    command_dispatched = False
                 _LOGGER.error(
                     "Failed Tesla BLE entity range fallback to %dA: %s",
                     fallback_amps,
@@ -4779,7 +4816,16 @@ async def _set_ev_charging_amps_teslemetry_bt(
         if getattr(e, "site_import_admission_denied", False):
             raise
         fallback_amps = None
-        if _is_number_range_error(str(e)):
+        # Text such as "outside valid range" is not a safe prewrite proof.
+        # Only HA's structured number validation may authorize the bounded
+        # lower-value retry.
+        if _tesla_native_verified_range_rejection(
+            e,
+            "rate",
+            entity_id,
+            {"entity_id": entity_id, "value": capped},
+        ):
+            _tesla_submission_mark_prewrite_rejection()
             fallback_amps = _tesla_entity_max_fallback_amps(
                 capped,
                 min_val,
@@ -4812,6 +4858,13 @@ async def _set_ev_charging_amps_teslemetry_bt(
             except Exception as fallback_error:
                 if getattr(fallback_error, "site_import_admission_denied", False):
                     raise
+                if _tesla_native_verified_range_rejection(
+                    fallback_error,
+                    "rate",
+                    entity_id,
+                    {"entity_id": entity_id, "value": fallback_amps},
+                ):
+                    _tesla_submission_mark_prewrite_rejection()
                 _LOGGER.error(
                     "Failed Teslemetry BT entity range fallback to %dA: %s",
                     fallback_amps,
@@ -5262,12 +5315,25 @@ async def _run_ble_transport_command(
             # Admission can reject before the helper reaches any HA service write.
             # Keep that known refusal out of the sent-unknown/quarantine path while
             # preserving propagation to the caller's fail-closed handling.
-            outcome = "not_sent" if (
-                getattr(err, "site_import_admission_denied", False)
-                or (handoff["attempted"] and not handoff["handed_off"])
-            ) else "sent_unknown"
+            outcome = (
+                "sent_unknown"
+                if handoff["handed_off"]
+                else "not_sent"
+                if (
+                    getattr(err, "site_import_admission_denied", False)
+                    or (handoff["attempted"] and not handoff["handed_off"])
+                )
+                else "sent_unknown"
+            )
             await async_finish_attempt(ticket, outcome)
             raise
+        if result is False and handoff["handed_off"]:
+            # A helper may return False after a prior service handoff (for
+            # example, an unstructured range exception followed by a refused
+            # retry).  The request is then ambiguous and cannot retire its
+            # journal ticket as not_sent.  Continue through the ordinary
+            # unknown-result path so Both-mode isolation/fallback still runs.
+            result = None
         no_write_satisfied = result is True and params.get(
             "_tesla_ble_native_satisfied"
         ) is not None
@@ -5492,12 +5558,22 @@ async def _run_teslemetry_bt_transport_command(
             ))
             raise
         except Exception as err:
-            outcome = "not_sent" if (
-                getattr(err, "site_import_admission_denied", False)
-                or (handoff["attempted"] and not handoff["handed_off"])
-            ) else "sent_unknown"
+            outcome = (
+                "sent_unknown"
+                if handoff["handed_off"]
+                else "not_sent"
+                if (
+                    getattr(err, "site_import_admission_denied", False)
+                    or (handoff["attempted"] and not handoff["handed_off"])
+                )
+                else "sent_unknown"
+            )
             await async_finish_attempt(ticket, outcome)
             raise
+        if result is False and handoff["handed_off"]:
+            # Preserve the normal unknown-result handling below, including
+            # its recovery marker and provider policy.
+            result = None
         await async_finish_attempt(
             ticket,
             "accepted_unconfirmed" if result is True

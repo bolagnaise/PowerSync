@@ -16318,6 +16318,8 @@ def test_legacy_transport_rechecks_authority_before_write(
 @pytest.mark.parametrize("helper", ["ble", "tbt"])
 def test_legacy_rate_range_retry_rechecks_authority(monkeypatch, helper):
     """A range retry cannot write after authority is revoked by the first write."""
+    import homeassistant.exceptions as exceptions
+
     prefix = "car" if helper == "ble" else "lrw3f7fs1nc484342"
     number_entity = (
         f"number.{prefix}_charging_amps"
@@ -16348,9 +16350,26 @@ def test_legacy_rate_range_retry_rechecks_authority(monkeypatch, helper):
     monkeypatch.setattr(actions, "_wake_tesla_ble", awake)
     monkeypatch.setattr(actions, "prepare_ev_submission", AsyncMock(return_value=True))
 
+    class StructuredRangeError(Exception):
+        translation_domain = "number"
+        translation_key = "out_of_range"
+
+        def __init__(self):
+            super().__init__("structured range rejection")
+            self.translation_placeholders = {
+                "entity_id": number_entity,
+                "value": "32",
+                "min_value": "1",
+                "max_value": "16",
+            }
+
+    monkeypatch.setattr(
+        exceptions, "ServiceValidationError", StructuredRangeError, raising=False
+    )
+
     async def first_write(*_args, **_kwargs):
         authorized["value"] = False
-        raise ValueError("value outside valid range")
+        raise StructuredRangeError()
 
     hass.services.async_call = AsyncMock(side_effect=first_write)
     kwargs = {

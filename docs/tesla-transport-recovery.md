@@ -69,7 +69,10 @@ BLE current and charge-limit attempts also persist their exact registry target
 and bounded possible setting values before dispatch. The final service value
 must remain inside that saved range after readiness and journal writes; a
 changing entity range cannot enlarge an already recorded effect. A structured
-current-range retry is covered by the same saved bound. Older attempts without
+current-range retry is covered by the same saved bound. Only HA's exact
+structured prewrite range rejection permits that retry; range-like error text
+alone leaves the first submission uncertain. A later refusal or admission
+exception cannot remove an earlier possible handoff. Older attempts without
 these values remain uncertain; today's requested current cannot reconstruct
 what an earlier command submitted.
 

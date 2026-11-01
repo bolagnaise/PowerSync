@@ -318,9 +318,25 @@ async def test_each_esp_home_helper_marks_mutation_before_service_cancellation(
 
 
 @pytest.mark.asyncio
-async def test_ble_range_fallback_cancellation_keeps_prior_submitted_hazard(monkeypatch):
+async def test_ble_unstructured_range_error_does_not_retry_and_keeps_prior_submitted_hazard(
+    monkeypatch,
+):
     hass = _ble_hass()
-    finished = _journal_mocks(monkeypatch)
+    runtime = hass.data["power_sync"]["entry-1"]
+    runtime.update({"setup_generation": 1, "runtime_generation": 1})
+    entry = _Entry()
+    import importlib
+
+    recovery = importlib.import_module("power_sync.tesla_ev_recovery")
+    monkeypatch.setattr(recovery, "_registry", lambda _hass: hass.entity_registry)
+    entry.options = {"ev_provider": actions.EV_PROVIDER_BOTH}
+    isolated = []
+
+    async def isolate(ticket, **_kwargs):
+        isolated.append(ticket.attempt_id)
+        return True
+
+    monkeypatch.setattr(recovery, "async_isolate_ble", isolate)
     _patch_ble_scope(monkeypatch)
 
     async def prepare(*_args, **kwargs):
@@ -336,8 +352,6 @@ async def test_ble_range_fallback_cancellation_keeps_prior_submitted_hazard(monk
     async def submit(*_args, **_kwargs):
         nonlocal submission_calls
         submission_calls += 1
-        if submission_calls == 2:
-            raise asyncio.CancelledError
         return True
 
     monkeypatch.setattr(actions, "prepare_ev_submission", submit)
@@ -347,25 +361,392 @@ async def test_ble_range_fallback_cancellation_keeps_prior_submitted_hazard(monk
         raise RuntimeError("outside valid range")
 
     hass.services.async_call = range_error
-    with pytest.raises(asyncio.CancelledError):
+    result = await actions._run_ble_transport_command(
+        hass,
+        entry,
+        {"vehicle_vin": VIN},
+        "bridge",
+        "rate",
+        lambda: actions._set_ev_charging_amps_ble(
+            hass,
+            "bridge",
+            40,
+            allow_stale_entity_max_override=True,
+            configured_max_amps=40,
+        ),
+    )
+
+    assert result == (None, True)
+    assert submission_calls == 1
+    assert len(hass.services.calls) == 1
+    assert len(isolated) == 1
+    ledger = runtime[recovery.RECOVERY_KEY]["vehicles"][VIN]
+    attempt = next(iter(ledger["attempts"].values()))
+    assert attempt["outcome"] == "sent_unknown"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("second_rejection", [False, True])
+async def test_ble_structured_range_rejection_handles_bounded_retry(
+    monkeypatch, second_rejection,
+):
+    hass = _ble_hass()
+    finished = _journal_mocks(monkeypatch)
+    _patch_ble_scope(monkeypatch)
+    import homeassistant.exceptions as exceptions
+
+    monkeypatch.setattr(actions, "_tesla_ble_prepare_mutation", _prepare_for_test)
+    monkeypatch.setattr(
+        actions,
+        "_tesla_ble_scope_current",
+        lambda *_args, **_kwargs: _true_async(),
+    )
+    monkeypatch.setattr(
+        actions,
+        "_tesla_ble_charge_data_binding",
+        lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        actions,
+        "_wait_for_ble_command_readback",
+        lambda *_args, **_kwargs: _true_async(),
+    )
+    monkeypatch.setattr(
+        actions,
+        "prepare_ev_submission",
+        lambda *_args, **_kwargs: _true_async(),
+    )
+
+    class StructuredRangeError(Exception):
+        translation_domain = "number"
+        translation_key = "out_of_range"
+
+        def __init__(self, value):
+            super().__init__("structured range rejection")
+            self.translation_placeholders = {
+                "entity_id": "number.bridge_charging_amps",
+                "value": str(value),
+                "min_value": "1",
+                "max_value": "16",
+            }
+
+    monkeypatch.setattr(
+        exceptions, "ServiceValidationError", StructuredRangeError, raising=False
+    )
+    service_calls = []
+
+    async def service(domain, service_name, data, blocking=True):
+        service_calls.append((domain, service_name, data))
+        if len(service_calls) == 1 or second_rejection:
+            raise StructuredRangeError(data["value"])
+
+    hass.services.async_call = service
+    bound = actions._tesla_ble_rate_effect_bound(
+        hass,
+        "number.bridge_charging_amps",
+        40,
+        allow_stale_entity_max_override=True,
+        configured_max_amps=40,
+    )
+
+    result = await actions._run_ble_transport_command(
+        hass,
+        _Entry(),
+        {"vehicle_vin": VIN},
+        "bridge",
+        "rate",
+        lambda: actions._set_ev_charging_amps_ble(
+            hass,
+            "bridge",
+            40,
+            allow_stale_entity_max_override=True,
+            configured_max_amps=40,
+        ),
+        effect_bound=bound,
+    )
+
+    assert result == ((False, False) if second_rejection else (True, False))
+    assert finished == (["not_sent"] if second_rejection else ["confirmed"])
+    assert len(service_calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_ble_admission_exception_after_service_handoff_keeps_real_journal_hazard(
+    monkeypatch,
+):
+    hass = _ble_hass()
+    runtime = hass.data["power_sync"]["entry-1"]
+    runtime.update({"setup_generation": 1, "runtime_generation": 1})
+    entry = _Entry()
+    import importlib
+
+    recovery = importlib.import_module("power_sync.tesla_ev_recovery")
+    monkeypatch.setattr(recovery, "_registry", lambda _hass: hass.entity_registry)
+    _patch_ble_scope(monkeypatch)
+    monkeypatch.setattr(actions, "_tesla_ble_prepare_mutation", _prepare_for_test)
+    monkeypatch.setattr(
+        actions,
+        "_tesla_ble_scope_current",
+        lambda *_args, **_kwargs: _true_async(),
+    )
+    monkeypatch.setattr(
+        actions,
+        "_tesla_ble_charge_data_binding",
+        lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        actions,
+        "prepare_ev_submission",
+        lambda *_args, **_kwargs: _true_async(),
+    )
+
+    service_calls = []
+
+    async def service(*args, **kwargs):
+        service_calls.append((args, kwargs))
+        error = RuntimeError("site import admission denied after handoff")
+        error.site_import_admission_denied = True
+        raise error
+
+    hass.services.async_call = service
+    with pytest.raises(RuntimeError, match="after handoff"):
         await actions._run_ble_transport_command(
             hass,
-            _Entry(),
+            entry,
             {"vehicle_vin": VIN},
             "bridge",
             "rate",
-            lambda: actions._set_ev_charging_amps_ble(
-                hass,
-                "bridge",
-                40,
-                allow_stale_entity_max_override=True,
-                configured_max_amps=40,
-            ),
+            lambda: actions._set_ev_charging_amps_ble(hass, "bridge", 16),
         )
 
-    assert finished == ["sent_unknown"]
-    assert submission_calls == 2
-    assert len(hass.services.calls) == 1
+    ledger = runtime[recovery.RECOVERY_KEY]["vehicles"][VIN]
+    attempt = next(iter(ledger["attempts"].values()))
+    assert attempt["outcome"] == "sent_unknown"
+    assert len(service_calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_kind", ["unstructured", "structured"])
+async def test_teslemetry_bt_range_outcome_preserves_handoff(
+    monkeypatch, error_kind,
+):
+    prefix = "lrw3f7fs1nc484342"
+    number_entity = f"number.{prefix}_charge_current_request"
+    import test_ev_ocpp_actions as ev_actions
+    import homeassistant.exceptions as exceptions
+
+    registry = ev_actions._legacy_teslemetry_bt_registry((prefix,))
+    registry[number_entity] = SimpleNamespace(
+        entity_id=number_entity,
+        platform="tesla_bluetooth",
+        config_entry_id="tesla-bt-entry",
+        device_id="tesla-bt-device",
+        unique_id=number_entity,
+        disabled_by=None,
+    )
+    hass = _Hass(
+        [
+            _State(number_entity, "16", {"min": 1, "max": 16}),
+            _State(f"sensor.{prefix}_charging_state", "Stopped"),
+            _State(f"switch.{prefix}_charge", "off"),
+        ],
+        registry,
+    )
+    finished = _journal_mocks(monkeypatch)
+    _patch_ble_scope(monkeypatch)
+    prepare_calls = 0
+
+    async def prepare(*_args, **_kwargs):
+        nonlocal prepare_calls
+        prepare_calls += 1
+        return True
+
+    monkeypatch.setattr(actions, "prepare_ev_submission", prepare)
+
+    class StructuredRangeError(Exception):
+        translation_domain = "number"
+        translation_key = "out_of_range"
+
+        def __init__(self, value):
+            super().__init__("structured range rejection")
+            self.translation_placeholders = {
+                "entity_id": number_entity,
+                "value": str(value),
+                "min_value": "1",
+                "max_value": "16",
+            }
+
+    monkeypatch.setattr(
+        exceptions, "ServiceValidationError", StructuredRangeError, raising=False
+    )
+
+    async def range_error(domain, service, data, blocking=True):
+        hass.services.calls.append((domain, service, data))
+        if error_kind == "structured":
+            raise StructuredRangeError(data["value"])
+        raise RuntimeError("outside valid range")
+
+    hass.services.async_call = range_error
+    result = await actions._run_teslemetry_bt_transport_command(
+        hass,
+        _Entry(),
+        {"vehicle_vin": prefix.upper()},
+        prefix,
+        "rate",
+        lambda: actions._set_ev_charging_amps_teslemetry_bt(
+            hass,
+            prefix,
+            40,
+            allow_stale_entity_max_override=True,
+            configured_max_amps=40,
+        ),
+    )
+
+    structured = error_kind == "structured"
+    assert result == ((False, False) if structured else (None, False))
+    assert finished == (["not_sent"] if structured else ["sent_unknown"])
+    assert prepare_calls == (2 if structured else 1)
+    assert len(hass.services.calls) == (2 if structured else 1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transport", ["ble", "teslemetry_bt"])
+async def test_structured_range_retry_cancellation_after_provider_handoff_is_unknown(
+    monkeypatch, transport,
+):
+    """A second fallback call that reaches HA cannot be retired as not_sent."""
+    import homeassistant.exceptions as exceptions
+    import importlib
+    import test_ev_ocpp_actions as ev_actions
+
+    if transport == "ble":
+        hass = _ble_hass()
+        prefix = "bridge"
+        number_entity = "number.bridge_charging_amps"
+        vehicle = VIN
+    else:
+        prefix = "lrw3f7fs1nc484342"
+        number_entity = f"number.{prefix}_charge_current_request"
+        registry = ev_actions._legacy_teslemetry_bt_registry((prefix,))
+        registry[number_entity] = SimpleNamespace(
+            entity_id=number_entity,
+            platform="tesla_bluetooth",
+            config_entry_id="tesla-bt-entry",
+            device_id="tesla-bt-device",
+            unique_id=number_entity,
+            disabled_by=None,
+        )
+        hass = _Hass(
+            [
+                _State(number_entity, "16", {"min": 1, "max": 16}),
+                _State(f"sensor.{prefix}_charging_state", "Stopped"),
+                _State(f"switch.{prefix}_charge", "off"),
+            ],
+            registry,
+        )
+        vehicle = prefix.upper()
+
+    runtime = hass.data["power_sync"]["entry-1"]
+    runtime.update({"setup_generation": 1, "runtime_generation": 1})
+    entry = _Entry()
+    recovery = importlib.import_module("power_sync.tesla_ev_recovery")
+    monkeypatch.setattr(recovery, "_registry", lambda _hass: hass.entity_registry)
+    _patch_ble_scope(monkeypatch)
+
+    if transport == "ble":
+        monkeypatch.setattr(actions, "_tesla_ble_prepare_mutation", _prepare_for_test)
+        monkeypatch.setattr(
+            actions,
+            "_tesla_ble_scope_current",
+            lambda *_args, **_kwargs: _true_async(),
+        )
+        monkeypatch.setattr(
+            actions,
+            "_tesla_ble_charge_data_binding",
+            lambda *_args, **_kwargs: object(),
+        )
+
+    monkeypatch.setattr(
+        actions,
+        "prepare_ev_submission",
+        lambda *_args, **_kwargs: _true_async(),
+    )
+
+    class StructuredRangeError(Exception):
+        translation_domain = "number"
+        translation_key = "out_of_range"
+
+        def __init__(self, value):
+            super().__init__("structured range rejection")
+            self.translation_placeholders = {
+                "entity_id": number_entity,
+                "value": str(value),
+                "min_value": "1",
+                "max_value": "16",
+            }
+
+    monkeypatch.setattr(
+        exceptions, "ServiceValidationError", StructuredRangeError, raising=False
+    )
+    service_calls = []
+
+    async def service(domain, service_name, data, blocking=True):
+        service_calls.append((domain, service_name, data))
+        if len(service_calls) == 1:
+            raise StructuredRangeError(data["value"])
+        raise asyncio.CancelledError
+
+    hass.services.async_call = service
+    if transport == "ble":
+        bound = actions._tesla_ble_rate_effect_bound(
+            hass,
+            number_entity,
+            40,
+            allow_stale_entity_max_override=True,
+            configured_max_amps=40,
+        )
+        send = lambda: actions._set_ev_charging_amps_ble(
+            hass,
+            prefix,
+            40,
+            allow_stale_entity_max_override=True,
+            configured_max_amps=40,
+        )
+    else:
+        bound = None
+        send = lambda: actions._set_ev_charging_amps_teslemetry_bt(
+            hass,
+            prefix,
+            40,
+            allow_stale_entity_max_override=True,
+            configured_max_amps=40,
+        )
+
+    with pytest.raises(asyncio.CancelledError):
+        if transport == "ble":
+            await actions._run_ble_transport_command(
+                hass,
+                entry,
+                {"vehicle_vin": vehicle},
+                prefix,
+                "rate",
+                send,
+                effect_bound=bound,
+            )
+        else:
+            await actions._run_teslemetry_bt_transport_command(
+                hass,
+                entry,
+                {"vehicle_vin": vehicle},
+                prefix,
+                "rate",
+                send,
+            )
+
+    assert [call[2]["value"] for call in service_calls] == [40, 32 if transport == "ble" else 16]
+    ledger = runtime[recovery.RECOVERY_KEY]["vehicles"][vehicle]
+    attempt = next(iter(ledger["attempts"].values()))
+    assert attempt["outcome"] == "sent_unknown"
 
 
 async def _true_async():
