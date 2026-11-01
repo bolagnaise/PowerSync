@@ -258,10 +258,54 @@ async def test_ble_first_start_under_native_max_uses_only_its_durable_native_fal
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('report_case', ['missing_current', 'stale_timestamp', 'missing_timestamp'])
+async def test_fresh_ble_setting_without_fresh_draw_uses_pinned_native_read(admission, monkeypatch, report_case):
+    a = qualify(admission)
+    a.budget.armed_sites.clear()
+    assert await a.budget.claim_native_max('one', 'site', 'native-generation', NOW+60,
+                                           direction='charge', ev_coexistence=True)
+    a.runtime['powerwall_native_max_charge'] = _native_session(a)
+    ticket, local, _registry = await ble_attempt(a, monkeypatch)
+    local.last_reported = datetime.fromtimestamp(NOW, timezone.utc)
+    captured = telemetry().native_charge_setting(a.hass, VIN, 'switch.car_charge')
+    captured['explicit_read'] = True
+    report = deepcopy(a.charge)
+    # A recent projected current setting is independent of the timestamped
+    # actual-current document needed for prospective site admission.
+    if report_case == 'missing_current':
+        report.pop('charger_actual_current')
+    elif report_case == 'stale_timestamp':
+        report['timestamp'] = NOW-1200
+    else:
+        report.pop('timestamp')
+    a.charge['timestamp'] = NOW-1200
+    monkeypatch.setattr(telemetry(), 'vehicle_report_for_entry', lambda *_: {'charge_state': report})
+    calls = []
+
+    async def native_read(hass, entry, vin, entity_id, *, authorize, **kwargs):
+        assert authorize()
+        calls.append(entity_id)
+        # Keep the returned independent document separate from its unchanged
+        # stale HA coordinator, matching the existing native-read contract.
+        return captured
+
+    monkeypatch.setattr(telemetry(), 'async_refresh_native_charge_setting', native_read)
+    assert await a.m.prepare_ev_submission(a.hass, 'switch.bridge_charger', operation='start')
+    assert calls == ['switch.car_charge']
+    assert a.budget.managed[VIN]['native_max_ev_coexistence'] is True
+    assert ticket.route['kind'] == 'ble'
+    assert local.last_reported.timestamp() == NOW
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize('change', ['attempt', 'provider', 'fallback', 'vin', 'pairing', 'hold'])
-async def test_ble_stale_setting_cannot_borrow_another_native_producer(admission, monkeypatch, change):
+@pytest.mark.parametrize('fresh_setting', [False, True])
+async def test_ble_stale_setting_cannot_borrow_another_native_producer(admission, monkeypatch, change, fresh_setting):
     a = admission
-    ticket, _local, registry = await ble_attempt(a, monkeypatch)
+    ticket, local, registry = await ble_attempt(a, monkeypatch)
+    if fresh_setting:
+        local.last_reported = datetime.fromtimestamp(NOW, timezone.utc)
+        monkeypatch.setattr(telemetry(), 'vehicle_report_for_entry', lambda *_: None)
     marker = a.m._EV_SUBMISSION_CONTEXT.get()['params']['_tesla_ble_native_observation_target']
     if change == 'attempt': marker['attempt_id'] = 'different'
     if change == 'provider': a.entry.options['ev_provider'] = 'tesla_ble'
@@ -269,8 +313,31 @@ async def test_ble_stale_setting_cannot_borrow_another_native_producer(admission
     if change == 'vin': a.provider.runtime_data.vehicles[0].vin = '5YJ3E1EA7KF000002'
     if change == 'pairing': a.entry.options['tesla_ble_vehicle_mapping'] = {VIN: 'replacement'}
     if change == 'hold': a.runtime['_tesla_ev_recovery_sidecar_hold'] = 'held'
-    assert not await a.m.prepare_ev_submission(a.hass, 'switch.bridge_charger', operation='start')
+    try:
+        allowed = await a.m.prepare_ev_submission(a.hass, 'switch.bridge_charger', operation='start')
+    except a.m.SiteImportAdmissionDenied:
+        allowed = False
+    assert allowed is False
     assert not a.budget.managed
+
+
+@pytest.mark.asyncio
+async def test_fresh_ble_setting_and_draw_keep_local_admission_without_native_refresh(admission, monkeypatch):
+    a = qualify(admission)
+    a.budget.armed_sites.clear()
+    assert await a.budget.claim_native_max('one', 'site', 'native-generation', NOW+60,
+                                           direction='charge', ev_coexistence=True)
+    a.runtime['powerwall_native_max_charge'] = _native_session(a)
+    ticket, local, _registry = await ble_attempt(a, monkeypatch)
+    local.last_reported = datetime.fromtimestamp(NOW, timezone.utc)
+
+    async def unexpected_read(*args, **kwargs):
+        pytest.fail('A fresh local draw report must not spend a native refresh')
+
+    monkeypatch.setattr(telemetry(), 'async_refresh_native_charge_setting', unexpected_read)
+    assert await a.m.prepare_ev_submission(a.hass, 'switch.bridge_charger', operation='start')
+    assert a.budget.managed[VIN]['native_max_ev_coexistence'] is True
+    assert ticket.route['kind'] == 'ble'
 
 
 @pytest.mark.asyncio

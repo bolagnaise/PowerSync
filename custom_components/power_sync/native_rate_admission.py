@@ -718,9 +718,19 @@ async def _prepare_ev_submission(hass, entity_id, *, operation, amps, committed)
     state = _current_setting(hass, registry, registration, entity_id, operation)
     current = _number(getattr(state, "state", None))
     known_setting = math.isfinite(current) and current.is_integer() and 0 <= current <= 80 and 0 <= time.time()-_fresh_at(state) <= 90
+    known_draw = False
+    if not native_producer and known_setting and (budget.site_armed(site) or budget.native_max_claim(site)):
+        # The projected setting can be recent while the independent actual
+        # draw report is absent or stale. It cannot substitute for that report
+        # when deciding whether this BLE attempt needs its pinned native read.
+        draw = _site_evidence(hass, entry, runtime, vin, context.get("params") or {})
+        values = [draw.get(key) for key in ("actual_ev_w", "unit_w", "vehicle_at")]
+        known_draw = (all(type(value) in (int, float) and math.isfinite(value) for value in values)
+                      and draw["actual_ev_w"] >= 0 and draw["unit_w"] > 0
+                      and 0 <= time.time()-draw["vehicle_at"] <= 15)
     if native_producer:
         native_entity_id = entity_id
-    elif not known_setting and (budget.site_armed(site) or budget.native_max_claim(site)):
+    elif (not known_setting or not known_draw) and (budget.site_armed(site) or budget.native_max_claim(site)):
         from .native_rate_telemetry import ble_native_setting_target
         ble_target = ble_native_setting_target(
             hass, entry, vin, entity_id, context.get("params") or {})
