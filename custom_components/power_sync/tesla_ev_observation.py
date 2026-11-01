@@ -775,6 +775,8 @@ async def async_wake_independent_tesla_vehicle(
             and current_contract is not None
             and current_contract[0] is api
             and current_contract[1] is debouncer
+            and not getattr(source.coordinator, "_shutdown_requested", False)
+            and not getattr(debouncer, "_shutdown_requested", False)
             and independent_tesla_source_binding(
                 hass, canonical, preferred_entity_id=preferred_entity_id,
             ) == binding

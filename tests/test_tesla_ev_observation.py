@@ -1185,6 +1185,68 @@ async def test_independent_cloud_wake_rejects_source_rebind_after_post(independe
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("shutdown_target", ["coordinator", "debouncer"])
+async def test_independent_cloud_wake_rejects_shutdown_at_entry(
+    independent_source, shutdown_target,
+):
+    hass, _entry, _vehicle, coordinator = independent_source("teslemetry")
+    binding = observation.independent_tesla_source_binding(hass, VIN_A)
+    assert binding is not None
+    target = coordinator if shutdown_target == "coordinator" else coordinator._debounced_refresh
+    target._shutdown_requested = True
+
+    assert not await observation.async_wake_independent_tesla_vehicle(
+        hass, VIN_A, expected_binding=binding, authorize=lambda: True,
+    )
+    assert coordinator.api.wake_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shutdown_target", ["coordinator", "debouncer"])
+async def test_independent_cloud_wake_rechecks_shutdown_after_lock_wait(
+    independent_source, shutdown_target,
+):
+    hass, _entry, _vehicle, coordinator = independent_source("teslemetry")
+    binding = observation.independent_tesla_source_binding(hass, VIN_A)
+    assert binding is not None
+    await coordinator.lock.acquire()
+    task = asyncio.create_task(observation.async_wake_independent_tesla_vehicle(
+        hass, VIN_A, expected_binding=binding, authorize=lambda: True,
+    ))
+    await asyncio.sleep(0)
+    target = coordinator if shutdown_target == "coordinator" else coordinator._debounced_refresh
+    target._shutdown_requested = True
+    coordinator.lock.release()
+
+    assert await asyncio.wait_for(task, 1) is False
+    assert coordinator.api.wake_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shutdown_target", ["coordinator", "debouncer"])
+async def test_independent_cloud_wake_rechecks_shutdown_before_readiness_poll(
+    independent_source, monkeypatch, shutdown_target,
+):
+    hass, _entry, _vehicle, coordinator = independent_source("teslemetry")
+    binding = observation.independent_tesla_source_binding(hass, VIN_A)
+    assert binding is not None
+    target = coordinator if shutdown_target == "coordinator" else coordinator._debounced_refresh
+
+    async def shutdown_wake(self, *, wait=False, timeout=60):
+        self.wake_calls.append((wait, timeout))
+        target._shutdown_requested = True
+        return {"response": {"state": "asleep"}}
+
+    monkeypatch.setattr(type(coordinator.api), "wake_up", shutdown_wake)
+    coordinator.api.vehicle_responses = [{"response": {"state": "online"}}]
+    assert not await observation.async_wake_independent_tesla_vehicle(
+        hass, VIN_A, expected_binding=binding, authorize=lambda: True,
+    )
+    assert coordinator.api.wake_calls == [(False, 60.0)]
+    assert len(coordinator.api.vehicle_responses) == 1
+
+
+@pytest.mark.asyncio
 async def test_independent_cloud_wake_is_exact_vin_scoped(independent_source):
     hass, entry, vehicle_a, coordinator_a = independent_source("teslemetry")
     coordinator_b = type(coordinator_a)()
