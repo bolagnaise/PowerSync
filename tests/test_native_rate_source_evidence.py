@@ -19,7 +19,7 @@ def telemetry():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('domain', ['tesla_fleet', 'teslemetry'])
-@pytest.mark.parametrize('route_kind', [None, 'ble'])
+@pytest.mark.parametrize('route_kind', [None, 'ble', 'cleanup'])
 @pytest.mark.parametrize('case', ['exact', 'ambiguous', 'disabled', 'wrong_vin',
                                 'wrong_entry', 'wrong_device', 'ble_only', 'hold',
                                 'blocked', 'remembered_rebound', 'rebound_during_read'])
@@ -39,8 +39,19 @@ async def test_native_max_settles_ble_only_record_through_unique_exact_native_re
     a.provider.runtime_data.vehicles[0].device.identifiers = {(domain, VIN)}
     a.hass.config_entries.async_entries = lambda requested: [a.provider] if requested == domain else []
     recovery = importlib.import_module(a.m.__package__ + '.tesla_ev_recovery')
-    monkeypatch.setattr(recovery, 'get_vehicle_route', lambda *_: (
-        {'kind': route_kind, 'entity_id': switch.entity_id} if route_kind else None))
+    route = {'kind': route_kind, 'entity_id': switch.entity_id} if route_kind else None
+    if route_kind == 'cleanup':
+        native_switch = NS(**vars(number))
+        native_switch.entity_id = 'switch.native_charge'
+        native_switch.unique_id = 'native_switch'
+        registry.entities[native_switch.entity_id] = native_switch
+        route = {'kind': 'ha', 'cleanup_only': True, 'entity_id': native_switch.entity_id,
+                 'vehicle_id': VIN,
+                 'entity_identity': recovery._identity(a.hass, native_switch.entity_id)}
+        route['pairing_digest'] = recovery._pairing_digest(
+            a.entry, route, identity=route['entity_identity'])
+        assert recovery._compatible(a.hass, a.entry, a.runtime, VIN, route)
+    monkeypatch.setattr(recovery, 'get_vehicle_route', lambda *_: deepcopy(route))
     a.budget.armed_sites.clear()
     await a.budget.admit_managed(VIN, {
         'entry_id': 'one', 'site': 'site', 'identity': a.m._identity(switch),
@@ -68,6 +79,11 @@ async def test_native_max_settles_ble_only_record_through_unique_exact_native_re
     if case == 'remembered_rebound':
         a.budget.managed[VIN]['identities'].append(a.m._identity(number))
         number.unique_id = 'replacement'
+    if case == 'cleanup_identity': native_switch.unique_id = 'replacement'
+    if case == 'cleanup_disabled': native_switch.disabled_by = 'user'
+    if case == 'cleanup_pairing': route['pairing_digest'] = 'changed'
+    if case == 'cleanup_vin': route['vehicle_id'] = '5YJ3E1EA7KF000002'
+    if case == 'cleanup_scope': route['session_scope'] = {'owner': 'foreign'}
     module = importlib.import_module(a.m.__package__ + '.tesla_ev_observation')
     reads = []
     async def ordinary(*args, **kwargs): return None
@@ -77,6 +93,7 @@ async def test_native_max_settles_ble_only_record_through_unique_exact_native_re
         reads.append(now[0])
         if case == 'rebound_during_read':
             a.provider.runtime_data = NS(vehicles=[])
+        if case == 'cleanup_changed_during_read': route['pairing_digest'] = 'changed'
         return replace(observation, source_charge_timestamp=now[0],
                        raw_charge_state=dict(observation.raw_charge_state, timestamp=now[0]),
                        origin='native_cloud')
@@ -91,14 +108,24 @@ async def test_native_max_settles_ble_only_record_through_unique_exact_native_re
         assert not result
         assert a.budget.managed[VIN]['reserved_w'] == 19200
         assert a.budget.managed[VIN]['uncertain'] is True
-        assert reads == ([NOW] if case == 'rebound_during_read' else [])
+        assert reads == ([NOW] if case in {'rebound_during_read', 'cleanup_changed_during_read'} else [])
         return
     assert result
     assert reads == [NOW, NOW+3]
     assert VIN not in a.budget.managed
     assert a.charge['timestamp'] == NOW-1200
-    assert recovery.get_vehicle_route(a.hass, a.entry, VIN) == (
-        {'kind': route_kind, 'entity_id': switch.entity_id} if route_kind else None)
+    assert recovery.get_vehicle_route(a.hass, a.entry, VIN) == route
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('domain', ['tesla_fleet', 'teslemetry'])
+@pytest.mark.parametrize('case', ['cleanup_identity', 'cleanup_disabled', 'cleanup_pairing',
+                                'cleanup_vin', 'cleanup_scope', 'cleanup_changed_during_read'])
+async def test_ble_only_settlement_cannot_borrow_a_replaced_cleanup_route(
+    admission, monkeypatch, domain, case,
+):
+    await test_native_max_settles_ble_only_record_through_unique_exact_native_read(
+        admission, monkeypatch, domain, 'cleanup', case)
 
 
 @pytest.mark.parametrize('field,value', [

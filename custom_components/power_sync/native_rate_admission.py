@@ -313,7 +313,7 @@ def _site_evidence(hass, entry, runtime, vin, profile, *, native_entity_id=None,
 
 def _managed_native_entity(hass, entry, runtime, vin, record, registration):
     """Bind read-only settlement to remembered or unique exact native evidence."""
-    from .tesla_ev_recovery import get_vehicle_route
+    from .tesla_ev_recovery import get_vehicle_route, _compatible
     from .native_rate_budget import managed_devices, provider_device
     from homeassistant.helpers import entity_registry as er
 
@@ -327,7 +327,20 @@ def _managed_native_entity(hass, entry, runtime, vin, record, registration):
     if getattr(registration, "platform", None) not in {
             "esphome", "tesla_bluetooth", "teslemetry_bluetooth"}:
         return None
-    if route is None or route.get("kind") == "ble":
+    cleanup_registration = None
+    if route is not None and route.get("kind") == "ha" and route.get("cleanup_only") is True:
+        cleanup_registration = er.async_get(hass).async_get(route.get("entity_id"))
+        if (getattr(cleanup_registration, "platform", None) not in {"tesla_fleet", "teslemetry"}
+                or getattr(cleanup_registration, "disabled_by", None) is not None
+                or not _compatible(hass, entry, runtime, vin, route)):
+            return None
+
+    def matches_cleanup(candidate):
+        return cleanup_registration is None or all(
+            getattr(candidate, field, None) == getattr(cleanup_registration, field, None)
+            for field in ("platform", "config_entry_id", "device_id"))
+
+    if route is None or route.get("kind") == "ble" or cleanup_registration is not None:
         # Cleanup may release its route or keep BLE selected with an old
         # setting sample. Durable demand still remembers its exact former
         # native producer; that identity supplies read-only proof, never new
@@ -337,7 +350,7 @@ def _managed_native_entity(hass, entry, runtime, vin, record, registration):
                       if getattr(candidate, "platform", None) in {"tesla_fleet", "teslemetry"}
                       and getattr(candidate, "disabled_by", None) is None
                       and str(getattr(candidate, "entity_id", "")).startswith("number.")
-                      and _identity(candidate) in remembered]
+                      and _identity(candidate) in remembered and matches_cleanup(candidate)]
         if candidates:
             return candidates[0].entity_id if len(candidates) == 1 else None
         if any(str(identity).split(":", 1)[0] in {"tesla_fleet", "teslemetry"}
@@ -356,6 +369,7 @@ def _managed_native_entity(hass, entry, runtime, vin, record, registration):
         candidates = [candidate for candidate in er.async_get(hass).entities.values()
                       if re.search(r"^number\..*(charging_amps|charge_current)(?:_\d+)?$",
                                    str(getattr(candidate, "entity_id", "")))
+                      and matches_cleanup(candidate)
                       and _native_charge_source(hass, vin, candidate.entity_id) is not None]
         return candidates[0].entity_id if len(candidates) == 1 else None
     if route.get("kind") != "ha":
