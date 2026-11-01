@@ -42,7 +42,7 @@ def vehicle_reports(hass, vin):
 def _native_charge_source(hass, vin, entity_id):
     """Pin the native entry/runtime/device which owns one registered entity."""
     from homeassistant.helpers import entity_registry as er
-    from .tesla_ev_observation import _identifiers, _provider_identifiers
+    from .tesla_ev_observation import _device_identity, _identifiers, _provider_identifiers
 
     registration = er.async_get(hass).async_get(entity_id)
     domain = getattr(registration, "platform", None)
@@ -57,7 +57,7 @@ def _native_charge_source(hass, vin, entity_id):
     matching = [source for source in vehicle_sources(hass, normalized)
                 if source[0] == domain
                 and getattr(source[1], "entry_id", None) == entry_id
-                and getattr(getattr(source[2], "device", None), "id", None) == device_id]
+                and _device_identity(hass, source[2], domain, normalized)[0] == device_id]
     if len(matching) != 1:
         return None
     _domain, entry, vehicle, coordinator = matching[0]

@@ -288,3 +288,64 @@ async def test_ble_native_setting_scope_is_rechecked_after_budget_save(admission
     with pytest.raises(a.m.SiteImportAdmissionDenied):
         await a.m.prepare_ev_submission(a.hass, 'switch.bridge_charger', operation='start')
     assert not a.budget.managed
+
+
+def use_native_device_info(a, domain):
+    """Match HA's Fleet/Teslemetry models: DeviceInfo is a dict without id."""
+    registry = sys.modules['homeassistant.helpers.entity_registry'].async_get(a.hass)
+    for registration in registry.entities.values():
+        registration.platform = domain
+    vehicle = a.provider.runtime_data.vehicles[0]
+    vehicle.device = {'identifiers': {(domain, VIN)}, 'manufacturer': 'Tesla'}
+    registered = NS(id='car', identifiers={(domain, VIN)}, config_entries={'provider'})
+    a.hass.device_registry = NS(devices={'car': registered}, async_get=lambda key: registered if key == 'car' else None)
+    a.hass.config_entries.async_entries = lambda requested: [a.provider] if requested == domain else []
+    return vehicle, registered
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('domain', ['tesla_fleet', 'teslemetry'])
+async def test_real_device_info_and_flat_coordinator_support_current_setting_and_armed_start(admission, domain):
+    a = admission
+    vehicle, registered = use_native_device_info(a, domain)
+    a.charge.update(charging_state='Stopped', charger_actual_current=0, charger_power=0)
+    vehicle.coordinator.data = {'vin': VIN, **{'charge_state_' + key: value for key, value in a.charge.items()}}
+    native = telemetry().native_charge_setting(a.hass, VIN, a.state.entity_id)
+    assert native is not None
+    assert native['source'][2] == registered.id
+    assert native['amps'] == 10
+    assert telemetry().native_charge_setting_current(a.hass, VIN, a.state.entity_id, native)
+    assert await a.m.prepare_ev_submission(a.hass, 'switch.car_charge', operation='start')
+    assert a.budget.managed[VIN]['target_amps'] == 10
+    assert a.budget.managed[VIN]['reserved_w'] == 2300
+
+
+@pytest.mark.parametrize('domain', ['tesla_fleet', 'teslemetry'])
+@pytest.mark.parametrize('case', [
+    'missing_registry', 'wrong_registry_device', 'wrong_entry', 'wrong_provider_vin',
+    'multiple_provider_vins', 'duplicate_runtime_vehicle',
+])
+def test_device_info_source_binding_rejects_missing_wrong_or_ambiguous_identity(admission, domain, case):
+    a = admission
+    vehicle, registered = use_native_device_info(a, domain)
+    if case == 'missing_registry': a.hass.device_registry = None
+    elif case == 'wrong_registry_device': registered.id = 'other'
+    elif case == 'wrong_entry': a.provider.entry_id = 'other'
+    elif case == 'wrong_provider_vin': vehicle.device['identifiers'] = {(domain, '5YJ3E1EA7KF000002')}
+    elif case == 'multiple_provider_vins': vehicle.device['identifiers'].add((domain, '5YJ3E1EA7KF000002'))
+    elif case == 'duplicate_runtime_vehicle': a.provider.runtime_data.vehicles.append(NS(**vars(vehicle)))
+    assert telemetry().native_charge_setting(a.hass, VIN, a.state.entity_id) is None
+
+
+@pytest.mark.parametrize('domain', ['tesla_fleet', 'teslemetry'])
+@pytest.mark.parametrize('change', ['registry_id', 'device_info', 'runtime', 'coordinator'])
+def test_device_info_captured_source_cannot_rebind_after_read(admission, domain, change):
+    a = admission
+    vehicle, registered = use_native_device_info(a, domain)
+    native = telemetry().native_charge_setting(a.hass, VIN, a.state.entity_id)
+    assert native is not None
+    if change == 'registry_id': registered.id = 'replacement'
+    elif change == 'device_info': vehicle.device = dict(vehicle.device)
+    elif change == 'runtime': a.provider.runtime_data = NS(vehicles=[vehicle])
+    else: vehicle.coordinator = NS(last_update_success=True, data={'charge_state': a.charge})
+    assert not telemetry().native_charge_setting_current(a.hass, VIN, a.state.entity_id, native)

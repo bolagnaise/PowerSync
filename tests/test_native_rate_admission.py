@@ -1126,8 +1126,9 @@ async def test_later_ble_setting_cannot_reconcile_from_ambiguous_or_stale_entity
 @pytest.mark.asyncio
 @pytest.mark.parametrize('source_domain', ['tesla_fleet', 'teslemetry'])
 @pytest.mark.parametrize('route_kind', [None, 'ha', 'ble'])
+@pytest.mark.parametrize('device_info', [False, True])
 async def test_native_max_reconciles_recovered_ble_record_using_two_exact_native_reads(
-    admission, monkeypatch, source_domain, route_kind,
+    admission, monkeypatch, source_domain, route_kind, device_info,
 ):
     a = admission
     now = [NOW]
@@ -1138,6 +1139,13 @@ async def test_native_max_reconciles_recovered_ble_record_using_two_exact_native
     switch = registry.entities['switch.car_charge']
     switch.platform = 'esphome'
     a.provider.runtime_data.vehicles[0].device.identifiers = {(source_domain, VIN)}
+    if device_info:
+        vehicle = a.provider.runtime_data.vehicles[0]
+        vehicle.device = {'identifiers': {(source_domain, VIN)}, 'manufacturer': 'Tesla'}
+        registered = SimpleNamespace(id='car', identifiers={(source_domain, VIN)})
+        a.hass.device_registry = SimpleNamespace(devices={'car': registered})
+        vehicle.coordinator.data = {'vin': VIN, **{
+            'charge_state_' + key: value for key, value in a.charge.items()}}
     a.hass.config_entries.async_entries = lambda domain: [a.provider] if domain == source_domain else []
     recovery = importlib.import_module(a.m.__package__ + '.tesla_ev_recovery')
     monkeypatch.setattr(recovery, 'get_vehicle_route', lambda *_: (
@@ -1173,6 +1181,9 @@ async def test_native_max_reconciles_recovered_ble_record_using_two_exact_native
         now[0] += 1
         a.charge.update(timestamp=now[0], charging_state='Stopped', charger_actual_current=0,
                         charger_power=0, charge_current_request=10)
+        if device_info:
+            a.provider.runtime_data.vehicles[0].coordinator.data = {'vin': VIN, **{
+                'charge_state_' + key: value for key, value in a.charge.items()}}
 
     async def meter_refresh():
         calls.append('meter')
