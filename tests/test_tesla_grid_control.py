@@ -151,6 +151,26 @@ def test_confirmation_after_deadline_is_not_accepted():
     assert not result.applied
 
 
+def test_deadline_crossed_during_currency_check_never_starts_an_unbounded_read():
+    clock = _Clock()
+    session = _Session(
+        posts=[_Response(200, {"response": {"result": True}})],
+        gets=[_site_info(True)],
+    )
+    checks = 0
+
+    def current():
+        nonlocal checks
+        checks += 1
+        if checks == 3:  # The currency check immediately before the first GET.
+            clock.now = 4.0
+        return True
+
+    result = asyncio.run(_set(session, clock, is_current=current))
+    assert not result.applied
+    assert not session.get_calls
+
+
 def test_rejected_resend_does_not_confirm_the_original_accepted_write():
     clock = _Clock()
 
