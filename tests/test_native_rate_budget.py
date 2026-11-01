@@ -313,6 +313,68 @@ async def test_managed_demand_reconciles_only_after_two_fresh_settled_reports():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('replacement', [False, True])
+async def test_managed_reconciliation_rechecks_source_after_store_and_preserves_current_records(replacement):
+    class PausingStore(Store):
+        hook = None
+        async def async_save(self, data):
+            if self.hook:
+                hook, self.hook = self.hook, None
+                hook()
+                await asyncio.sleep(0)
+            await super().async_save(data)
+
+    now = [NOW]
+    store = PausingStore()
+    budget = m.SharedRateBudget(store, clock=lambda: now[0])
+    record = {'site': 'site', 'identity': 'provider:car', 'entry_id': 'one',
+              'target_amps': 20, 'target_w': 4600, 'reserved_w': 7360,
+              'submitted_at': NOW-10, 'uncertain': True}
+    await budget.admit_managed('VIN', record, {}, lambda: True)
+    original = budget.managed['VIN']
+    scope = [True]
+    def sample():
+        return dict(identity='provider:car', amps=20, vehicle_at=now[0], meter_at=now[0],
+            setting_at=now[0], actual_w=0, charging=False, owner_active=False,
+            source_identity=('native', 'original'))
+    await budget.reconcile_managed('VIN', sample(), is_current=lambda: scope[0])
+    now[0] += 4
+    other = dict(original, identity='other:device', reserved_w=5000)
+    latest = dict(original, attempt_id='newer', reserved_w=8000)
+    def revoke():
+        scope[0] = False
+        budget.managed['OTHER'] = other
+        if replacement: budget.managed['VIN'] = latest
+    store.hook = revoke
+    await budget.reconcile_managed('VIN', sample(), is_current=lambda: scope[0])
+    assert budget.managed['VIN'] is (latest if replacement else original)
+    assert budget.managed['OTHER'] is other
+    assert store.data['managed'] == budget.managed
+    assert store.data['managed']['VIN']['reserved_w'] == (8000 if replacement else 7360)
+
+
+@pytest.mark.asyncio
+async def test_managed_reconciliation_does_not_combine_samples_from_replaced_native_source():
+    now = [NOW]
+    budget = m.SharedRateBudget(Store(), clock=lambda: now[0])
+    record = {'site': 'site', 'identity': 'provider:car', 'entry_id': 'one',
+              'target_amps': 20, 'target_w': 4600, 'reserved_w': 7360,
+              'submitted_at': NOW-10, 'uncertain': True}
+    await budget.admit_managed('VIN', record, {}, lambda: True)
+    def sample(source):
+        return dict(identity='provider:car', amps=20, vehicle_at=now[0], meter_at=now[0],
+                    setting_at=now[0], actual_w=0, charging=False, owner_active=False,
+                    source_identity=source)
+    await budget.reconcile_managed('VIN', sample(('native', 'old')))
+    now[0] += 4
+    await budget.reconcile_managed('VIN', sample(('native', 'replacement')))
+    assert 'VIN' in budget.managed
+    now[0] += 4
+    await budget.reconcile_managed('VIN', sample(('native', 'replacement')))
+    assert 'VIN' not in budget.managed
+
+
+@pytest.mark.asyncio
 async def test_inflight_managed_provider_task_prevents_releasing_its_reservation():
     now = [NOW]
     budget = m.SharedRateBudget(Store(), clock=lambda: now[0])

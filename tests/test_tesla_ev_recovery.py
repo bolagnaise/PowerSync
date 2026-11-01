@@ -1989,6 +1989,105 @@ async def test_terminal_finish_removal_survives_stale_projection_and_reload(
 
 
 @pytest.mark.asyncio
+async def test_terminal_stop_proof_clears_retained_cleanup_route_and_allows_ble_retry(
+    harness,
+):
+    """A proven old cleanup Stop must release its stale native route on reload."""
+    hass, entry, store, _, _ = _sidecar_harness(harness)
+    assert await recovery.async_load_recovery_state(hass, entry)
+    route = {
+        "kind": "ha",
+        "entity_id": "switch.fallback",
+        "cleanup_only": True,
+        "cleanup_obligation_id": "old-obligation",
+    }
+    ticket = await recovery.async_begin_attempt(
+        hass, entry, VIN_A, route, "stop", route["entity_id"],
+    )
+    assert ticket is not None
+    pending = deepcopy(
+        store.value["recovery"]["vehicles"][VIN_A]["attempts"][ticket.attempt_id]
+    )
+
+    # Finish on a replacement runtime so the durable sidecar contains the
+    # exact terminal proof while a late legacy projection still has the old
+    # cleanup-only route and pending attempt.
+    restored = _Hass({})
+    restored.entity_registry = hass.entity_registry
+    restored_runtime = {
+        "automation_store": object(),
+        recovery.RECOVERY_KEY: deepcopy(
+            hass.data["power_sync"][entry.entry_id][recovery.RECOVERY_KEY]
+        ),
+        "_tesla_ev_recovery_enrolled": True,
+        "_tesla_ev_recovery_sidecar_established": True,
+        recovery._SIDECAR_STORE_KEY: store,
+    }
+    restored.data["power_sync"][entry.entry_id] = restored_runtime
+    assert await recovery.async_load_recovery_state(restored, entry)
+    loaded_record = restored_runtime[recovery.RECOVERY_KEY]["vehicles"][VIN_A]["attempts"][ticket.attempt_id]
+    loaded_ticket = recovery.RecoveryTicket(
+        restored, entry, VIN_A, ticket.attempt_id,
+        deepcopy(loaded_record["route"]), restored_runtime,
+    )
+    assert await recovery.async_finish_attempt(loaded_ticket, "accepted_unconfirmed")
+    assert store.value["recovery"]["terminal_removals"][VIN_A][ticket.attempt_id]
+
+    stale = deepcopy(restored_runtime[recovery.RECOVERY_KEY])
+    stale_ledger = stale["vehicles"][VIN_A]
+    stale_ledger["route"] = deepcopy(pending["route"])
+    stale_ledger["attempts"][ticket.attempt_id] = pending
+    reloaded = _Hass({})
+    reloaded.entity_registry = hass.entity_registry
+    reloaded_runtime = {
+        "automation_store": object(),
+        recovery.RECOVERY_KEY: stale,
+        "_tesla_ev_recovery_enrolled": True,
+        "_tesla_ev_recovery_sidecar_established": True,
+        recovery._SIDECAR_STORE_KEY: store,
+    }
+    reloaded.data["power_sync"][entry.entry_id] = reloaded_runtime
+    assert await recovery.async_load_recovery_state(reloaded, entry)
+    ledger = reloaded_runtime[recovery.RECOVERY_KEY]["vehicles"][VIN_A]
+    assert ledger["attempts"] == {}
+    assert ledger["route"] is None
+
+    # A later startup can see the terminal proof again after an earlier merge
+    # already removed the attempt, while a stale cleanup-only route remains in
+    # the projected root.  The exact proof must clear that route idempotently;
+    # an absent attempt alone must never do so.
+    post_proof = deepcopy(stale)
+    post_proof["vehicles"][VIN_A]["attempts"].pop(ticket.attempt_id, None)
+    post_proof_runtime_hass = _Hass({})
+    post_proof_runtime_hass.entity_registry = hass.entity_registry
+    post_proof_runtime = {
+        "automation_store": object(),
+        recovery.RECOVERY_KEY: post_proof,
+        "_tesla_ev_recovery_enrolled": True,
+        "_tesla_ev_recovery_sidecar_established": True,
+        recovery._SIDECAR_STORE_KEY: store,
+    }
+    post_proof_runtime_hass.data["power_sync"][entry.entry_id] = post_proof_runtime
+    assert await recovery.async_load_recovery_state(
+        post_proof_runtime_hass, entry
+    )
+    assert (
+        post_proof_runtime[recovery.RECOVERY_KEY]["vehicles"][VIN_A]["route"]
+        is None
+    )
+
+    fresh = await recovery.async_begin_attempt(
+        reloaded,
+        entry,
+        VIN_A,
+        {"kind": "ble", "prefix": "bridge_a", "entity_id": "switch.car_a_charger"},
+        "start",
+        "switch.car_a_charger",
+    )
+    assert fresh is not None
+
+
+@pytest.mark.asyncio
 async def test_expired_scoped_not_sent_finish_survives_owner_revocation_and_reload(harness):
     hass, entry, store, _, owners = _sidecar_harness(harness)
     assert await recovery.async_load_recovery_state(hass, entry)

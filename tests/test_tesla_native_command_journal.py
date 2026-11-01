@@ -19,6 +19,8 @@ LIMIT_ENTITY = "number.car_charge_limit"
 
 
 def _native_hass(monkeypatch, platform: str, entity_id=ENTITY):
+    import importlib
+
     registration = SimpleNamespace(
         entity_id=entity_id,
         platform=platform,
@@ -37,8 +39,37 @@ def _native_hass(monkeypatch, platform: str, entity_id=ENTITY):
         {entity_id: registration},
         {registration.device_id: device},
     )
-    monkeypatch.setattr(actions.er, "async_get", lambda _hass: hass.entity_registry)
-    monkeypatch.setattr(actions.dr, "async_get", lambda _hass: hass.device_registry)
+    # Several full-collection fixtures replace the Home Assistant registry
+    # modules in ``sys.modules``.  Replacing the action module's lookup
+    # objects as well as their method keeps every lazy identity read in this
+    # harness bound to its own fake registries.
+    monkeypatch.setattr(
+        actions,
+        "er",
+        SimpleNamespace(async_get=lambda _hass: hass.entity_registry),
+    )
+    monkeypatch.setattr(
+        actions,
+        "dr",
+        SimpleNamespace(async_get=lambda _hass: hass.device_registry),
+    )
+    # ``teslemetry_bluetooth_commands`` resolves the registry lazily through
+    # Home Assistant imports.  Collection fixtures can leave those import
+    # views pointing at another fake registry even though the action module
+    # has been rebound above.
+    command_module = importlib.import_module(
+        "power_sync.teslemetry_bluetooth_commands"
+    )
+    monkeypatch.setattr(
+        command_module,
+        "_registry",
+        lambda _hass: hass.entity_registry,
+    )
+    monkeypatch.setattr(
+        command_module,
+        "_device_for",
+        lambda _hass, device_id: hass.device_registry.async_get(device_id),
+    )
     return hass
 
 

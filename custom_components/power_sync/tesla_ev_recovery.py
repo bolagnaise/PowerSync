@@ -941,6 +941,14 @@ def _merge_recovery_roots(
     # only finish-specific proofs that match the complete immutable record;
     # malformed proofs and unknown outcomes remain untouched.
     removals = result.get(_TERMINAL_REMOVALS_KEY, {})
+    # A cleanup-only native route is a stop fence, not a permanent provider
+    # preference.  The exact terminal-removal proof is the only authority
+    # that may clear one during projection merge: an obligation disappearing
+    # by itself is insufficient because the physical Stop could still be
+    # unknown.  Track only routes whose matching Stop record was removed and
+    # settle them after all proofs have been applied, so another unresolved
+    # attempt/hazard keeps the vehicle fail-closed.
+    terminal_cleanup_routes: set[str] = set()
     if isinstance(removals, Mapping):
         for vid, proofs in removals.items():
             if not isinstance(proofs, Mapping):
@@ -954,7 +962,55 @@ def _merge_recovery_roots(
             for attempt_id, proof in proofs.items():
                 existing = attempts.get(attempt_id)
                 if _terminal_removal_matches(existing, proof):
+                    ledger_route = ledger.get("route")
+                    if (
+                        isinstance(ledger_route, Mapping)
+                        and ledger_route.get("cleanup_only") is True
+                        and proof.get("operation") == "stop"
+                        and dict(ledger_route) == dict(proof.get("route", {}))
+                    ):
+                        terminal_cleanup_routes.add(str(vid))
                     attempts.pop(attempt_id, None)
+                elif (
+                    # A previous merge may already have applied this exact
+                    # terminal proof and removed the attempt while a stale
+                    # legacy projection kept the cleanup-only route.  The
+                    # proof itself is durable, schema-validated evidence;
+                    # permit the idempotent route clear only when its complete
+                    # route matches, never merely because the attempt is
+                    # absent.
+                    existing is None
+                    and _terminal_removals_valid({
+                        str(vid): {str(attempt_id): proof}
+                    })
+                    and isinstance(ledger.get("route"), Mapping)
+                    and ledger["route"].get("cleanup_only") is True
+                    and proof.get("operation") == "stop"
+                    and dict(ledger["route"]) == dict(proof.get("route", {}))
+                ):
+                    terminal_cleanup_routes.add(str(vid))
+    for vid in terminal_cleanup_routes:
+        ledger = vehicles.get(vid)
+        if not isinstance(ledger, dict):
+            continue
+        remaining_attempts = ledger.get("attempts", {})
+        if any(
+            isinstance(record, Mapping)
+            and not record.get("recovery_retired")
+            and record.get("outcome", "pending") in ("pending", "sent_unknown")
+            for record in remaining_attempts.values()
+        ) if isinstance(remaining_attempts, Mapping) else True:
+            continue
+        remaining_hazards = ledger.get("hazards", {})
+        if any(
+            isinstance(hazard, Mapping)
+            and not hazard.get("recovery_retired")
+            and hazard.get("state") in ("pending", "isolated")
+            for hazard in remaining_hazards.values()
+        ) if isinstance(remaining_hazards, Mapping) else True:
+            continue
+        if isinstance(ledger.get("route"), Mapping) and ledger["route"].get("cleanup_only") is True:
+            ledger["route"] = None
     return result
 
 

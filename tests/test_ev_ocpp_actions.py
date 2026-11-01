@@ -2673,6 +2673,67 @@ def test_tesla_stop_accepts_numbered_teslemetry_charge_switch(monkeypatch):
     ]
 
 
+def test_cleanup_only_native_route_retries_exact_unavailable_stop(monkeypatch):
+    """A retained exact route may retry Stop while its HA state is unavailable."""
+    from power_sync import tesla_ev_recovery
+
+    vin = "LRWYHCEKXTC687964"
+    entity_id = "switch.charge_2"
+    device = SimpleNamespace(
+        id="device-yf88",
+        name="",
+        identifiers={("teslemetry", vin)},
+    )
+    hass = _Hass(
+        [_State(entity_id, "unavailable")],
+        registry_entities={
+            entity_id: SimpleNamespace(entity_id=entity_id, device_id=device.id),
+        },
+        registry_devices={device.id: device},
+    )
+    _install_native_ha_writer(hass, vin, entity_id, platform="teslemetry")
+    expected_identity = {
+        key: getattr(hass.entity_registry.entities[entity_id], key, None)
+        for key in (
+            "entity_id",
+            "platform",
+            "config_entry_id",
+            "device_id",
+            "unique_id",
+            "disabled_by",
+        )
+    }
+    route = {
+        "kind": "ha",
+        "entity_id": entity_id,
+        "cleanup_only": True,
+        "cleanup_obligation_id": "old-obligation",
+        "entity_identity": expected_identity,
+    }
+    monkeypatch.setattr(
+        tesla_ev_recovery,
+        "get_vehicle_route",
+        lambda *_args: route,
+    )
+    entry = _tesla_entry()
+    params = {"vehicle_vin": vin}
+
+    # Exact identity is enough to reach provider wake/settlement for Stop;
+    # the stale unavailable state cannot veto the negative cleanup retry.
+    assert asyncio.run(
+        actions._tesla_ha_command_entity(hass, entry, params, "stop")
+    ) == entity_id
+    # The same stop-only route cannot authorize a positive mutation.
+    assert asyncio.run(
+        actions._tesla_ha_command_entity(hass, entry, params, "start")
+    ) is None
+
+    hass.entity_registry.entities[entity_id].unique_id = "rebound-producer"
+    assert asyncio.run(
+        actions._tesla_ha_command_entity(hass, entry, params, "stop")
+    ) is None
+
+
 
 @pytest.mark.parametrize("cached_state", ["Stopped", "Complete"])
 @pytest.mark.parametrize(
@@ -13870,6 +13931,9 @@ def test_first_unknown_ble_command_requires_producer_fence_before_ha_fallback(mo
     hass = _Hass(states)
     native = hass.entity_registry.entities["switch.exact_car_charge"]
     native.platform, native.config_entry_id, native.device_id = "tesla_fleet", "fleet", "native-car"
+    hass.device_registry.devices["native-car"] = SimpleNamespace(
+        id="native-car", identifiers={("tesla_fleet", vin)},
+    )
     monkeypatch.setattr(actions, "_get_tesla_ev_entity", AsyncMock(return_value=native.entity_id))
     calls = []
     async def isolate(domain, service, data, **kwargs):
@@ -13887,8 +13951,9 @@ def test_first_unknown_ble_command_requires_producer_fence_before_ha_fallback(mo
                 "sensor.car_transport_fence", json.dumps(stopped), last_reported=now)
     hass.services.async_call = isolate
 
+    params = {"vehicle_vin": vin}
     result = asyncio.run(actions._run_ble_transport_command(
-        hass, entry, {"vehicle_vin": vin}, "car", "start", AsyncMock(return_value=None)))
+        hass, entry, params, "car", "start", AsyncMock(return_value=None)))
 
     assert result == (None, producer_fence)
     route = recovery.get_vehicle_route(hass, entry, vin)
@@ -13901,6 +13966,9 @@ def test_first_unknown_ble_command_requires_producer_fence_before_ha_fallback(mo
     assert len(calls) == (2 if producer_fence else 1)
     if producer_fence:
         assert calls[1][:2] == ("text", "set_value")
+        observation_target = params["_tesla_ble_native_observation_target"]
+        assert observation_target["attempt_id"]
+        assert observation_target["identity"]["device_id"] == "native-car"
     assert recovery.ble_quarantined(hass, "car")
 
 

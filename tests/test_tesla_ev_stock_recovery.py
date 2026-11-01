@@ -426,6 +426,66 @@ async def test_two_independent_native_observations_converge_requested_state(harn
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("missing_reads", "halt"), [
+    (1, None), (2, None), (3, None), (1, "source_rebind"), (1, "deadline"),
+])
+async def test_recovery_waits_boundedly_for_advancing_second_cloud_read(
+    harness, monkeypatch, missing_reads, halt,
+):
+    """A cached second response cannot turn a completed reboot into a hold."""
+    hass, entry = harness
+    bridge = _bridge(hass, entry, VIN_B)
+    snapshot = hass.data["power_sync"][entry.entry_id]["_tesla_ev_recovery_sidecar"]
+    snapshot["incidents"] = {
+        "incident": {"incident_id": "incident", "phase": "held",
+                     "current_candidate_vehicles": [VIN_B],
+                     "current_candidate_producers": [bridge.identity]},
+    }
+    binding = {"vin": VIN_B, "domain": "teslemetry", "config_entry_id": "ble-config",
+               "device_id": "native-b", "producer_identity": "native:b"}
+    active_binding = dict(binding)
+    observation_module = importlib.import_module("power_sync.tesla_ev_observation")
+    reads = []
+    pauses = []
+    first_stamp = time.time()
+    clock = [time.monotonic()]
+    monkeypatch.setattr(stock, "time", types.SimpleNamespace(
+        time=time.time, monotonic=lambda: clock[0],
+    ))
+
+    async def read(_hass, vin, *, updated_after=None, **_kwargs):
+        reads.append(updated_after)
+        if updated_after is not None and len(reads) <= missing_reads + 1:
+            return None
+        return _observation(vin, domain="teslemetry", stamp=first_stamp + len(reads),
+                            producer="native:b", device="native-b")
+
+    async def recover(_hass, _entry, *, observe, reconcile, **_kwargs):
+        first = await observe(VIN_B)
+        return first is not None and await reconcile({VIN_B: first})
+
+    async def pause(delay):
+        nonlocal active_binding
+        pauses.append(delay)
+        clock[0] += delay
+        if len(reads) >= 2:
+            if halt == "source_rebind":
+                active_binding = {**binding, "config_entry_id": "replacement-entry"}
+            elif halt == "deadline":
+                clock[0] += 100
+
+    monkeypatch.setattr(observation_module, "async_read_independent_tesla_vehicle", read)
+    monkeypatch.setattr(observation_module, "independent_tesla_source_binding", lambda *_: active_binding)
+    monkeypatch.setattr(recovery, "async_recover_stock", recover)
+    monkeypatch.setattr(stock.asyncio, "sleep", pause)
+    assert await stock.async_recover_vehicle_transport(hass, entry, VIN_B) is (missing_reads < 3 and halt is None)
+    assert len(reads) == (2 if halt else min(missing_reads + 2, 4))
+    assert all(stamp == first_stamp + 1 for stamp in reads[1:])
+    assert all(delay > 0 for delay in pauses)
+    assert not any(call[1] in {"turn_on", "set_value"} for call in hass.services.calls)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("provider", "paid_expected"),
     [("both", True), ("tesla_ble", False)],

@@ -5735,6 +5735,21 @@ async def _run_ble_transport_command(
             ticket = err
         else:
             raise
+    # The native observation target is only an alternate read source for this
+    # exact BLE attempt.  Carry the durable attempt ID before any provider
+    # helper can inspect or use it, so a stale native report cannot satisfy a
+    # different pending BLE attempt after reload/replacement.
+    observation_target = params.get("_tesla_ble_native_observation_target")
+    attempt_id = getattr(ticket, "attempt_id", None)
+    if (
+        isinstance(observation_target, Mapping)
+        and isinstance(attempt_id, str)
+        and attempt_id
+    ):
+        params["_tesla_ble_native_observation_target"] = {
+            **observation_target,
+            "attempt_id": attempt_id,
+        }
     entity_identity_unchanged = (
         _tesla_legacy_entity_identity(hass, (entity,)) == pinned_entity_identity
     )
@@ -7148,6 +7163,38 @@ async def _tesla_ha_command_entity(hass, entry, params, operation):
     route = get_vehicle_route(hass, entry, vehicle)
     if route and route.get("kind") == "ha":
         entity_id = route.get("entity_id")
+        # A durable cleanup-only route is an exact negative producer fence.
+        # Its native entity may be ``unavailable`` while the integration is
+        # waking/reloading, which makes the normal command resolver reject it
+        # before the provider-specific wake/read can run.  Permit only the
+        # persisted switch identity for Stop; positive operations must still
+        # require an available native command entity and may never inherit a
+        # stop-only route.
+        if (
+            operation == "stop"
+            and route.get("cleanup_only") is True
+            and isinstance(entity_id, str)
+            and entity_id.startswith("switch.")
+        ):
+            binding = _tesla_native_binding(hass, entity_id, vehicle)
+            expected_identity = route.get("entity_identity")
+            current_identity = _tesla_native_binding_identity(binding)
+            if (
+                binding is not None
+                and isinstance(expected_identity, Mapping)
+                and current_identity == {
+                    key: expected_identity.get(key)
+                    for key in (
+                        "entity_id",
+                        "platform",
+                        "config_entry_id",
+                        "device_id",
+                        "unique_id",
+                        "disabled_by",
+                    )
+                }
+            ):
+                return entity_id
         return native_command_entity(hass, entity_id, operation) if entity_id else None
     if route is None:
         if params.get("_tesla_command_entity_id"):

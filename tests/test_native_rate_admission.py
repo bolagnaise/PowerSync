@@ -50,8 +50,10 @@ def admission(monkeypatch):
                          ('homeassistant.helpers.entity_registry',er)]:
         monkeypatch.setitem(sys.modules, name, module)
     charge = {'timestamp': NOW, 'charger_voltage': 230, 'charger_phases': 1,
+              'charge_current_request': 10, 'charger_power': 2.3,
               'charger_actual_current': 10, 'charging_state': 'Charging'}
-    provider = SimpleNamespace(runtime_data=SimpleNamespace(vehicles=[SimpleNamespace(vin=VIN,
+    provider = SimpleNamespace(entry_id='provider', runtime_data=SimpleNamespace(vehicles=[SimpleNamespace(vin=VIN,
+        device=SimpleNamespace(id='car', identifiers={('tesla_fleet', VIN)}),
         coordinator=SimpleNamespace(last_update_success=True, data={'charge_state': charge}))]))
     snapshot = SimpleNamespace(grid_w=6000, load_w=5000, solar_w=0, battery_w=-1000,
         raw={'config': {'site_info': {'max_site_meter_power_ac': 15, 'min_site_meter_power_ac': -10}}})
@@ -70,6 +72,55 @@ def admission(monkeypatch):
                           snapshot=snapshot, charge=charge, budget=budget, store=store,
                           provider=provider, local=local)
     m._EV_SUBMISSION_CONTEXT.reset(token)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('platform', ['tesla_fleet', 'teslemetry'])
+async def test_native_start_uses_charge_acquisition_time_not_equal_ha_number(admission, platform):
+    a = admission
+    registry = sys.modules['homeassistant.helpers.entity_registry'].async_get(a.hass)
+    for registration in registry.entities.values():
+        registration.platform = platform
+    a.provider.runtime_data.vehicles[0].device.identifiers = {(platform, VIN)}
+    a.hass.config_entries.async_entries = lambda domain: [a.provider] if domain == platform else []
+    a.state.last_reported = datetime.fromtimestamp(NOW - 300, timezone.utc)
+    a.charge.update(charger_actual_current=0, charger_power=0, charging_state='Stopped')
+
+    assert await a.m.prepare_ev_submission(a.hass, 'switch.car_charge', operation='start')
+    assert a.budget.managed[VIN]['target_amps'] == 10
+    assert a.state.last_reported.timestamp() == NOW - 300
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('platform', ['tesla_fleet', 'teslemetry'])
+async def test_native_stopped_reconciliation_uses_two_fresh_charge_documents(admission, monkeypatch, platform):
+    a = admission
+    now = [NOW]
+    monkeypatch.setattr(a.m.time, 'time', lambda: now[0])
+    a.budget.clock = lambda: now[0]
+    registry = sys.modules['homeassistant.helpers.entity_registry'].async_get(a.hass)
+    for registration in registry.entities.values():
+        registration.platform = platform
+    a.provider.runtime_data.vehicles[0].device.identifiers = {(platform, VIN)}
+    a.hass.config_entries.async_entries = lambda domain: [a.provider] if domain == platform else []
+    a.state.last_reported = datetime.fromtimestamp(NOW - 300, timezone.utc)
+    a.budget.armed_sites.clear()
+    await a.budget.admit_managed(VIN, {
+        'entry_id': 'one', 'site': 'site', 'identity': f'{platform}:provider:car:amps',
+        'entity_id': a.state.entity_id, 'setting_entity_id': a.state.entity_id,
+        'target_amps': 5, 'target_w': 4500, 'reserved_w': 28800,
+        'submitted_at': NOW - 100, 'operation': 'rate', 'uncertain': True,
+    }, {}, lambda: True)
+    a.charge.update(charger_actual_current=0, charger_power=0, charging_state='Stopped',
+                    charge_current_request=15)
+    await a.m.refresh_managed_records(a.hass, a.budget)
+    assert a.budget.managed[VIN]['reserved_w'] == 28800
+    now[0] += 4
+    a.charge['timestamp'] = now[0]
+    a.local.last_success_ts = now[0]
+    await a.m.refresh_managed_records(a.hass, a.budget)
+    assert VIN not in a.budget.managed
+    assert a.state.last_reported.timestamp() == NOW - 300
 
 
 @pytest.mark.asyncio
@@ -121,7 +172,8 @@ async def test_native_max_reconcile_refreshes_exact_provider_and_meter_twice(
     async def provider_refresh():
         refreshes.append(source_domain)
         now[0] += 1
-        a.charge.update(timestamp=now[0], charging_state='Stopped', charger_actual_current=0)
+        a.charge.update(timestamp=now[0], charging_state='Stopped', charger_actual_current=0,
+                        charger_power=0)
         a.state.last_reported = a.stamp(now[0]) if hasattr(a, 'stamp') else datetime.fromtimestamp(now[0], timezone.utc)
         a.local.last_success_ts = now[0]
 
@@ -137,12 +189,16 @@ async def test_native_max_reconcile_refreshes_exact_provider_and_meter_twice(
     a.hass.config_entries.async_entries = lambda domain: (
         [a.provider] if domain == source_domain else []
     )
+    registry = sys.modules['homeassistant.helpers.entity_registry'].async_get(a.hass)
+    for registration in registry.entities.values():
+        registration.platform = source_domain
+    a.provider.runtime_data.vehicles[0].device.identifiers = {(source_domain, VIN)}
     async def advance(seconds):
         now[0] += seconds
     monkeypatch.setattr(a.m.asyncio, 'sleep', advance)
     a.budget.armed_sites.clear()
     await a.budget.admit_managed(VIN, {
-        'entry_id': 'one', 'site': 'site', 'identity': 'tesla_fleet:provider:car:amps',
+        'entry_id': 'one', 'site': 'site', 'identity': f'{source_domain}:provider:car:amps',
         'entity_id': a.state.entity_id, 'setting_entity_id': a.state.entity_id,
         'target_amps': 15, 'target_w': 3450, 'reserved_w': 4600,
         'submitted_at': NOW - 10, 'operation': 'rate', 'uncertain': True,
@@ -313,6 +369,7 @@ async def test_legacy_start_without_current_does_not_poison_later_commands(
     a.hass.states.get = get_state
     a.budget.armed_sites.clear()
     a.state.state = 'unavailable'
+    a.charge.pop('charge_current_request')
     assert await a.m.prepare_ev_submission(a.hass, 'switch.car_charge', operation='start')
     assert a.budget.managed[VIN]['setting_entity_id'] is None
     reserved = a.budget.managed[VIN]['reserved_w']
@@ -327,6 +384,7 @@ async def test_legacy_start_without_current_does_not_poison_later_commands(
     await a.m.refresh_managed_records(a.hass, a.budget)
     assert a.budget.managed[VIN]['reserved_w'] == reserved
     a.state.state = '10'
+    a.charge['charge_current_request'] = 10
     assert await a.m.prepare_ev_submission(
         a.hass,
         'switch.car_charge' if operation == 'start' else a.state.entity_id,
@@ -341,6 +399,7 @@ async def test_start_cannot_energize_unknown_or_zero_programmed_current(admissio
     a = admission
     for setting in ('unknown', '0'):
         a.state.state = setting
+        a.charge['charge_current_request'] = setting
         assert not await a.m.prepare_ev_submission(a.hass, 'switch.car_charge', operation='start')
     assert not a.budget.managed
 
@@ -354,6 +413,10 @@ async def test_increase_rejects_missing_headroom_and_unverified_evidence(admissi
     if failure == 'missing_limit': a.snapshot.raw['config']['site_info'].pop('max_site_meter_power_ac')
     if failure == 'pending_battery':
         a.runtime['powerwall_battery_dispatch'] = SimpleNamespace(charge_generation=None, _last_watts=-10000)
+    if failure == 'stale_car':
+        assert not await a.m.prepare_ev_submission(a.hass, a.state.entity_id, operation='rate', amps=20)
+        assert not a.budget.managed
+        return
     with pytest.raises(a.m.SiteImportAdmissionDenied):
         await a.m.prepare_ev_submission(a.hass, a.state.entity_id, operation='rate', amps=20)
     assert not a.budget.managed

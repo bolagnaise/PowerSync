@@ -18,6 +18,8 @@ DOMAIN = "power_sync"
 _LOGGER = logging.getLogger(__name__)
 RESET_TIMEOUT = 180.0
 POLL_SECONDS = 0.1
+RECONCILE_READ_TIMEOUT = 40.0
+RECONCILE_RETRY_SECONDS = 5.0
 
 # Supported source profiles, rather than an arbitrary project-name heuristic.
 # These profiles use ordinary supported stock-device trust, not binary
@@ -528,9 +530,11 @@ async def async_recover_vehicle_transport(
         async def read_observation(
             vehicle: str, *, updated_after: Any | None = None,
             allow_paid_refresh: bool | None = None,
+            deadline: float | None = None,
         ) -> Any:
             """Read only while the exact recovery binding and policy remain current."""
-            if vehicle != str(vin) or not source_current():
+            if (vehicle != str(vin) or not source_current()
+                    or deadline is not None and time.monotonic() >= deadline):
                 return None
             paid = cloud_wake_allowed() if allow_paid_refresh is None else bool(
                 allow_paid_refresh
@@ -538,11 +542,13 @@ async def async_recover_vehicle_transport(
             if paid and not cloud_wake_allowed():
                 return None
             return await async_read_independent_tesla_vehicle(
-                hass, vehicle, timeout=20, updated_after=updated_after,
+                hass, vehicle,
+                timeout=min(20, max(0.001, deadline - time.monotonic())) if deadline is not None else 20,
+                updated_after=updated_after,
                 allow_paid_refresh=paid,
                 authorize=lambda: source_current() and (
                     not paid or cloud_wake_allowed()
-                ),
+                ) and (deadline is None or time.monotonic() < deadline),
             )
 
         async def observe(vehicle: str) -> dict[str, Any] | None:
@@ -590,12 +596,29 @@ async def async_recover_vehicle_transport(
             # measurements. This is operational convergence, not a claim that
             # higher counters or a Stop cancelled an old signed message.
             for vehicle, first in first_observations.items():
+                deadline = time.monotonic() + RECONCILE_READ_TIMEOUT
                 await asyncio.sleep(1)
                 if not source_current():
                     return False
-                second = await read_observation(
-                    vehicle, updated_after=first.source_charge_timestamp,
-                )
+                second = None
+                for attempt in range(3):
+                    if not source_current() or time.monotonic() >= deadline:
+                        return False
+                    second = await read_observation(
+                        vehicle, updated_after=first.source_charge_timestamp,
+                        deadline=deadline,
+                    )
+                    if second is not None:
+                        break
+                    # Native providers may return the same charge document
+                    # briefly after an independent read. Wait for acquisition
+                    # to advance; neither an equal timestamp nor a cached HA
+                    # delivery can certify the second observation.
+                    if attempt < 2:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            return False
+                        await asyncio.sleep(min(RECONCILE_RETRY_SECONDS, remaining))
                 if (not source_current() or not observation_matches(second)
                         or second.origin != "native_cloud" or second.vin != vehicle
                         or second.producer_identity != first.producer_identity

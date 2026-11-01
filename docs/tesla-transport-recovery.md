@@ -151,6 +151,10 @@ field provenance. Two advancing observations must agree on requested settings
 and settled charging state. Recovery does not issue Start or change a limit to
 manufacture convergence. The original delivery outcome stays unknown, while
 separate retirement and present-state evidence allow future ordinary control.
+If the second read has not acquired a newer document yet, recovery may retry
+it twice with five-second pauses within a 40-second total budget. Every read
+keeps the same source and policy fences. An actual changed setting or charging
+state still refuses reconciliation immediately.
 
 If that independent read is unavailable because the car is asleep, recovery
 first uses the ordinary bounded BLE Wake and reads again. When the configured
@@ -218,6 +222,17 @@ refresh when needed. This works with automatic Fleet polling disabled and
 does not introduce recurring paid idle polling. An unchanged provider source
 timestamp is not a fresh observation. Such explicit reads and permitted Fleet
 fallback can incur provider charges.
+
+Native requested-current evidence comes from one exact provider's charge-state
+document and its source acquisition time. An unchanged HA number entity does
+not make a fresh native document stale. Explicit admission can refresh that
+source when needed, while routine telemetry remains passive. A BLE command may
+use this observation only through its own durable attempt's pinned native
+fallback; the command itself remains on BLE. Old power reservations still need
+two advancing, aligned observations and no live owner or submission task before
+release. Stopped retirement additionally requires an explicit settled state,
+zero measured current and zero power. A provider or runtime rebind during
+persistence retains the original reservation.
 
 Before a Fleet mutation, PowerSync refreshes the exact registered provider
 vehicle once. This prevents a cached Online state from suppressing the Fleet
@@ -315,6 +330,23 @@ Core check/startup, command acceptance, fresh vehicle/settings readback and
 physical power. Both ESPHome bridges, native HA Tesla Fleet and native
 Teslemetry are installed. Neither legacy nor modern Teslemetry Bluetooth is
 installed here; those adapter contracts have software coverage only.
+
+The 1 November 07:53 UTC checkpoint has private 2.12.1584.dev4 installed from
+803959b0, with all 272 package hashes matching and configuration/startup checks
+passing. Its startup completed the prior W3RT1E native cleanup Stop. TESSY woke
+over BLE in eight seconds, but subsequent live checks exposed a retained
+cleanup-only route and stale requested-current reservation handling. Repairs
+and regressions are being validated. The dev4 full suite produced 10,908 passes
+and two failures in the new finite-cleanup fixture; that is not a full pass.
+
+During testing the Powerwall gateway stopped accepting local connections.
+Its forcing tariff was released, and later cloud physical telemetry showed
+battery discharge into house load with zero import. Cloud restoration commands
+were acknowledged, but subsequent mode readbacks differed, so final restoration
+and the required native coexistence checks remain unconfirmed. W3RT1E's BLE
+cleanup also required stock recovery; an unchanged second cloud timestamp held
+that recovery and requested its BLE radio off. TESSY's radio remains on. No
+public release or final physical-verification claim is made at this checkpoint.
 
 At the 1 November 07:15 UTC checkpoint, private 2.12.1584.dev3 matched source
 2429f79a across all 272 package files, with existing storage preserved. Its

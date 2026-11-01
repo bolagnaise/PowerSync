@@ -440,18 +440,20 @@ class SharedRateBudget:
                 self.managed_tasks[vin] = ticket["previous_task"]
             self.revision += 1
 
-    async def reconcile_managed(self, vin, sample):
+    async def reconcile_managed(self, vin, sample, *, is_current=None):
         """Narrow/release only after the provider task and two settled reports."""
-        task = asyncio.create_task(self._reconcile_managed(vin, deepcopy(sample)))
+        task = asyncio.create_task(self._reconcile_managed(vin, deepcopy(sample), is_current=is_current))
         self.storage_tasks.add(task)
         task.add_done_callback(self.storage_tasks.discard)
         await asyncio.shield(task)
 
-    async def _reconcile_managed(self, vin, sample):
+    async def _reconcile_managed(self, vin, sample, *, is_current=None):
         async with self.lock:
             record = self.managed.get(vin)
             task = self.managed_tasks.get(vin)
             if record is None or (task is not None and not task.done()):
+                return
+            if is_current is not None and is_current() is not True:
                 return
             now = self.clock()
             stamps = [sample.get(k) for k in ("vehicle_at", "meter_at", "setting_at")]
@@ -465,7 +467,8 @@ class SharedRateBudget:
                     or not math.isfinite(sample["actual_w"])):
                 return
             self.observe(vin, watts=sample["actual_w"], at=sample["vehicle_at"], meter_at=sample["meter_at"])
-            state = (sample["amps"], sample.get("charging"), sample.get("owner_active"))
+            state = (sample["amps"], sample.get("charging"), sample.get("owner_active"),
+                     sample.get("source_identity"))
             first = self.managed_settle.get(vin)
             if first is None or first[1] != state:
                 self.managed_settle[vin] = (min(stamps), state)
@@ -484,7 +487,15 @@ class SharedRateBudget:
                 return
             if managed == self.managed:
                 return
+            if self.managed.get(vin) is not record or (is_current is not None and is_current() is not True):
+                return
             await self.store.async_save({"entries": self.entries, "managed": managed})
+            if self.managed.get(vin) is not record or (is_current is not None and is_current() is not True):
+                # The save may have yielded to a runtime/provider replacement.
+                # Keep the current map, including every other VIN, and restore
+                # that conservative projection durably before releasing lock.
+                await self.store.async_save({"entries": self.entries, "managed": self.managed})
+                return
             self.managed = managed
             self.revision += 1
 
