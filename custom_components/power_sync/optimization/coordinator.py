@@ -21538,6 +21538,23 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 getattr(self, "_last_planned_solar_forecast", None),
                 getattr(self, "_last_solar_curtailment_forecast", None),
             )
+            # A greedy fallback has usable input forecasts but no LP
+            # curtailment proof. Keep the forecast chart available without
+            # presenting these inputs as proven planned generation.
+            solar = getattr(self, "_last_solar_forecast", None)
+            load = self._last_load_forecast
+            if (
+                getattr(self, "_has_solar_forecast", False)
+                and solar is not None
+                and load is not None
+                and len(solar) == len(load) == n_sched
+            ):
+                data["forecast_series"] = {
+                    "timestamps": list(api_response["timestamps"]),
+                    "interval_minutes": self._config.interval_minutes,
+                    "solar_forecast_values_kw": list(solar),
+                    "load_forecast_values_kw": list(load),
+                }
             if all(value is not None for value in provenance):
                 raw, planned, curtailed = provenance
                 load = self._last_load_forecast
