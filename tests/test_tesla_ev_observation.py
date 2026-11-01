@@ -1142,7 +1142,62 @@ async def test_command_recovery_pinned_fleet_never_refreshes_other_teslemetry_so
 
     probe.fleet.refresh = cached
     assert await probe.read(probe.hass, probe.control, VIN_A, probe.params) is None
-    assert len(probe.fleet.api.calls) == 1 and probe.fleet.api.refresh_calls == []
+    assert len(probe.fleet.api.calls) == 2 and probe.fleet.api.refresh_calls == []
+    assert probe.coordinator.api.calls == probe.coordinator.api.refresh_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('provider,mutation', [
+    ('both', None), ('fleet_api', None), ('tesla_ble', None),
+    *[('both', item) for item in ('provider', 'deadline', 'deadline_extended', 'runtime',
+                                 'generation', 'registry', 'client', 'anchor', 'owner')],
+])
+async def test_command_recovery_pinned_fleet_uses_one_qualified_independent_read(
+    command_recovery_read, monkeypatch, provider, mutation,
+):
+    probe = command_recovery_read
+    probe.control.options['ev_provider'] = provider
+    probe.registration.platform = 'tesla_fleet'
+    probe.registration.config_entry_id = probe.fleet_entry.entry_id
+    probe.registration.device_id = 'fleet-device'
+    client = probe.fleet.api
+    client.response = {'vin': VIN_A, **_charge(probe.clock['now']-30, current=0, power=0)}
+    probe.fleet.data = deepcopy(client.response)
+    async def refresh_stale_coordinator(coord):
+        coord.data = deepcopy((await type(client).vehicle_data(client, endpoints=['charge_state']))['response'])
+        # The exact cloud source advances while HA's coordinator still holds
+        # the older stopped document. No cross-provider read may fill the gap.
+        client.response = {'vin': VIN_A, **_charge(probe.clock['now']+0.25, state='Charging', current=5, power=1.2)}
+    probe.fleet.refresh = refresh_stale_coordinator
+    async def revoke():
+        if len(client.calls) != 2: return
+        if mutation == 'provider': probe.control.options['ev_provider'] = 'tesla_ble'
+        if mutation == 'deadline': probe.clock['now'] += 31
+        if mutation == 'deadline_extended': probe.params['_boost_start_deadline'] += 60
+        if mutation == 'runtime': probe.hass.data['power_sync'][probe.control.entry_id] = {'entry': probe.control}
+        if mutation == 'generation': probe.runtime['_tesla_ev_recovery_sidecar']['generations'][VIN_A] = 1
+        if mutation == 'registry': probe.registration.unique_id = 'replacement'
+        if mutation == 'client': probe.fleet.api = object()
+        if mutation == 'anchor': probe.params['_tesla_command_entity_id'] = 'switch.other_charge'
+        if mutation == 'owner': probe.runtime['ev_ownership'][VIN_A] = {'owner': 'powersync', 'owner_mode': 'manual'}
+    client.before_return = revoke
+    real_read = observation.async_read_independent_tesla_vehicle
+    reads = []
+    async def independent(*args, **kwargs):
+        assert kwargs['preferred_entity_id'] == probe.entity
+        assert kwargs['allow_paid_refresh'] is False
+        assert kwargs['authorize']()
+        reads.append(True)
+        return await real_read(*args, **kwargs)
+    monkeypatch.setattr(observation, 'async_read_independent_tesla_vehicle', independent)
+    result = await probe.read(probe.hass, probe.control, VIN_A, probe.params)
+    assert (result is not None) is (provider != 'tesla_ble' and mutation is None)
+    if result is not None:
+        assert result.domain == 'tesla_fleet' and result.origin == 'native_cloud'
+        assert result.charge_state == 'Charging' and result.charger_actual_current == 5
+    assert len(reads) == int(provider != 'tesla_ble')
+    assert len(client.calls) == 1+int(provider != 'tesla_ble')
+    assert client.refresh_calls == []
     assert probe.coordinator.api.calls == probe.coordinator.api.refresh_calls == []
 
 

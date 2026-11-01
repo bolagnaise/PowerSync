@@ -1777,11 +1777,20 @@ async def _wait_for_tesla_physical_start(
     canonical = canonical_tesla_vehicle_id(config, str(vehicle_vin or ""))
     while True:
         direct = params.get("_tesla_start_observation")
+        cached = get_tesla_vehicle_observation(hass, canonical,
+            preferred_entity_id=params.get("_tesla_command_entity_id"),
+            updated_after=command_started_at.timestamp())
         if not isinstance(direct, TeslaVehicleObservation):
-            direct = get_tesla_vehicle_observation(hass, canonical,
-                preferred_entity_id=params.get("_tesla_command_entity_id"),
-                updated_after=command_started_at.timestamp())
+            direct = cached
+        elif (isinstance(cached, TeslaVehicleObservation)
+                and cached.source_charge_timestamp > direct.source_charge_timestamp
+                and all(getattr(cached, field) == getattr(direct, field) for field in (
+                    "vin", "domain", "config_entry_id", "device_id", "producer_identity"))):
+            # An early live read can still show stopped while charging ramps.
+            # Recheck the same producer's newer cache without more provider I/O.
+            direct = cached
         if (isinstance(direct, TeslaVehicleObservation)
+                and direct.vin == canonical
                 and command_started_at.timestamp() < direct.source_charge_timestamp
                 and 0 <= datetime.now(dt_timezone.utc).timestamp() - direct.source_charge_timestamp <= 90
                 and _tesla_observed_command_state(direct) == "charging"):
@@ -6873,11 +6882,11 @@ async def _fresh_tesla_command_observation(hass, entry, vehicle, params, *, time
             return min(timeout, max(0.001, original_deadline-datetime.now(dt_timezone.utc).timestamp()))
         return timeout
 
-    def paid_refresh_allowed():
+    def independent_read_allowed():
         current_config = {**entry.data, **entry.options}
         return (scope_current()
                 and source_binding is not None
-                and source_binding.get("domain") == "teslemetry"
+                and source_binding.get("domain") in {"tesla_fleet", "teslemetry"}
                 and current_config.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API) in (
                     EV_PROVIDER_BOTH, EV_PROVIDER_FLEET_API,
                 ))
@@ -6888,17 +6897,17 @@ async def _fresh_tesla_command_observation(hass, entry, vehicle, params, *, time
         preferred_entity_id=preferred_entity, timeout=remaining_timeout())
     if not scope_current():
         return None
-    if observation is not None or not paid_refresh_allowed():
+    if observation is not None or not independent_read_allowed():
         return observation
-    # Native Teslemetry's default coordinator refresh can return its classic
-    # cache. This command-recovery path may request one explicit paid refresh;
-    # routine observations and BLE-only policy never acquire that permission.
+    # A native coordinator refresh can retain its old vehicle document. This
+    # explicit command-recovery read stays on the exact cloud source. Only
+    # Teslemetry needs paid refresh; routine observations never poll here.
     observation = await async_read_independent_tesla_vehicle(
         hass, canonical, preferred_entity_id=preferred_entity,
-        timeout=remaining_timeout(), allow_paid_refresh=True,
-        authorize=paid_refresh_allowed,
+        timeout=remaining_timeout(), allow_paid_refresh=source_binding.get("domain") == "teslemetry",
+        authorize=independent_read_allowed,
     )
-    return observation if paid_refresh_allowed() else None
+    return observation if independent_read_allowed() else None
 
 
 def _tesla_observed_command_state(observation):

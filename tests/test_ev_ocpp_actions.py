@@ -1624,6 +1624,71 @@ def test_tesla_physical_start_requires_fresh_state_and_measured_draw():
     assert "15.0A" in confirmed[1]
 
 
+@pytest.mark.parametrize('case', [
+    'newer_charging', 'newer_stopped', 'older_stopped', 'missing_cache',
+    'wrong_vin', 'wrong_provider', 'wrong_entry', 'wrong_device', 'wrong_producer',
+    'stale', 'future', 'pre_command', 'same_timestamp', 'no_draw',
+])
+def test_tesla_start_rechecks_same_source_cache_after_an_early_live_read(monkeypatch, case):
+    from dataclasses import replace
+    observation_module = importlib.import_module('power_sync.tesla_ev_observation')
+    observation_type = observation_module.TeslaVehicleObservation
+    hass, vin, other_vin = _tesla_confirmation_hass()
+    now = datetime.now(timezone.utc)
+    command_at = now - timedelta(seconds=10)
+    captured = observation_type(
+        vin=vin, domain='teslemetry', config_entry_id='native-entry', device_id='native-car',
+        producer_identity='teslemetry:native-entry:native-car',
+        source_charge_timestamp=(now-timedelta(seconds=8)).timestamp(),
+        charge_state='Stopped', charger_actual_current=0, charger_power=0,
+        charge_limit_soc=80, requested_current=5, origin='native_cloud',
+    )
+    cached = replace(captured, source_charge_timestamp=(now-timedelta(seconds=1)).timestamp(),
+                     charge_state='Charging', charger_actual_current=5, charger_power=1.2,
+                     origin='native_coordinator')
+    if case in {'newer_stopped', 'older_stopped', 'missing_cache'}:
+        captured = replace(captured, charge_state='Charging', charger_actual_current=5, charger_power=1.2)
+        cached = replace(cached, charge_state='Stopped', charger_actual_current=0, charger_power=0)
+    if case == 'older_stopped':
+        captured = replace(captured, source_charge_timestamp=(now-timedelta(seconds=1)).timestamp())
+        cached = replace(cached, source_charge_timestamp=(now-timedelta(seconds=8)).timestamp())
+    if case == 'missing_cache': cached = None
+    if case == 'wrong_vin': cached = replace(cached, vin=other_vin)
+    if case == 'wrong_provider': cached = replace(cached, domain='tesla_fleet')
+    if case == 'wrong_entry': cached = replace(cached, config_entry_id='other')
+    if case == 'wrong_device': cached = replace(cached, device_id='other')
+    if case == 'wrong_producer': cached = replace(cached, producer_identity='other')
+    if case == 'stale': cached = replace(cached, source_charge_timestamp=(now-timedelta(seconds=100)).timestamp())
+    if case == 'future': cached = replace(cached, source_charge_timestamp=(now+timedelta(seconds=5)).timestamp())
+    if case == 'pre_command': cached = replace(cached, source_charge_timestamp=command_at.timestamp()-1)
+    if case == 'same_timestamp': cached = replace(cached, source_charge_timestamp=captured.source_charge_timestamp)
+    if case == 'no_draw': cached = replace(cached, charger_actual_current=0, charger_power=0)
+    elapsed = [0.0]
+    reads = []
+    class Clock:
+        def time(self): return elapsed[0]
+    async def advance(seconds): elapsed[0] += seconds
+    def read_cache(_hass, vehicle, **kwargs):
+        assert _hass is hass and vehicle == vin
+        assert kwargs['preferred_entity_id'] == 'switch.native_charge'
+        assert kwargs['updated_after'] == command_at.timestamp()
+        reads.append(elapsed[0])
+        return cached if case != 'newer_charging' or elapsed[0] > 0 else captured
+    monkeypatch.setattr(actions.asyncio, 'get_running_loop', lambda: Clock())
+    monkeypatch.setattr(actions.asyncio, 'sleep', advance)
+    monkeypatch.setattr(observation_module, 'get_tesla_vehicle_observation', read_cache)
+    paid_read = AsyncMock(side_effect=AssertionError('cached recheck must not perform provider I/O'))
+    monkeypatch.setattr(actions, '_fresh_tesla_command_observation', paid_read)
+    # HA entity projections remain stopped/zero throughout this test.
+    baseline = actions._tesla_physical_charging_snapshot(hass, _Entry(), vin, {})
+    confirmed, _ = asyncio.run(actions._wait_for_tesla_physical_start(
+        hass, _Entry(), vin,
+        {'_tesla_command_entity_id': 'switch.native_charge', '_tesla_start_observation': captured},
+        baseline, command_at, timeout_seconds=3))
+    assert confirmed is (case in {'newer_charging', 'older_stopped', 'missing_cache'})
+    paid_read.assert_not_awaited()
+
+
 def test_tesla_physical_start_allows_delayed_cloud_draw(monkeypatch):
     """A real start must not be cancelled at the former 90-second boundary."""
     hass, vin_a, _vin_b = _tesla_confirmation_hass()
