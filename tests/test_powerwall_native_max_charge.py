@@ -422,3 +422,30 @@ def test_restore_service_reports_manual_settling_without_releasing_owner(source,
         finally:
             await session._cancel_watch()
     asyncio.run(run())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('change', ['deadline', 'generation', 'identity', 'authority', 'cancel'])
+async def test_read_only_admission_rechecks_request_before_capture_or_writes(change):
+    s, a, store, clock = setup()
+    calls = []
+
+    async def prepare_admission():
+        calls.append('read')
+        if change == 'deadline':
+            clock.now += 120
+        elif change == 'generation':
+            s.revoke()
+        elif change == 'identity':
+            a.identity = 'replacement-site'
+        elif change == 'authority':
+            a.permitted = False
+        else:
+            raise asyncio.CancelledError
+
+    a.prepare_admission = prepare_admission
+    expected = asyncio.CancelledError if change == 'cancel' else m.NativeMaxChargeError
+    with pytest.raises(expected):
+        await s.start(120)
+    assert calls == ['read']
+    assert not a.events and not store.writes and not s.pending

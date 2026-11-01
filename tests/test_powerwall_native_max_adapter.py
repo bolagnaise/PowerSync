@@ -1099,6 +1099,38 @@ async def test_native_guard_offers_bounded_managed_reconciliation_before_policy(
 
 
 @pytest.mark.asyncio
+async def test_explicit_charge_start_reconciles_retained_ev_even_with_verified_coexistence(setup):
+    s = setup
+    await s.budget.admit_managed(
+        'VIN', {'site': 'site', 'identity': 'provider:car', 'reserved_w': 72000},
+        {}, lambda: True,
+    )
+    offered = []
+
+    async def reconcile(site):
+        offered.append(site)
+        # The real callback owns the two-sample/owner/identity fences. This
+        # integration regression proves that an eligible native session offers
+        # it a read opportunity before native writes, rather than skipping it.
+        assert not s.state.events
+        return False  # Active or unproven records must not block coexistence.
+
+    s.adapter.reconcile_managed = reconcile
+    assert await s.adapter.guard()
+    assert offered == []
+    try:
+        assert (await s.session.start(120))['active']
+        assert offered == ['site']
+        assert 'VIN' in s.budget.managed
+        assert await s.adapter.guard()
+        assert await s.adapter.guard()
+        assert offered == ['site']  # Writer/watch guards never add paid reads.
+    finally:
+        await s.session.stop()
+    assert offered == ['site']
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize('age', [6, None])
 async def test_stale_or_missing_config_provenance_cannot_grant_ev_coexistence(setup, age):
     s = setup
@@ -2681,3 +2713,65 @@ async def test_native_omission_does_not_hide_explicit_unknown_permission_before_
     s.state.config['site_info'].pop(field)  # The external invalid value is preserved.
     assert (s.state.config,s.state.tariff) == original
     assert not s.session.pending and s.store.data is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('failure', ['exception', 'timeout', 'policy_changed'])
+async def test_explicit_charge_reconciliation_failure_never_bypasses_current_policy(setup, failure):
+    s = setup
+    await s.budget.admit_managed(
+        'VIN', {'site': 'site', 'identity': 'provider:car', 'reserved_w': 72000},
+        {}, lambda: True,
+    )
+    offered = []
+
+    async def reconcile(site):
+        offered.append(site)
+        if failure == 'policy_changed':
+            s.state.policy = False
+        elif failure == 'timeout':
+            await asyncio.Event().wait()
+        else:
+            raise OSError('provider unavailable')
+
+    s.adapter.reconcile_managed = reconcile
+    s.adapter.reconcile_timeout = .01
+    try:
+        if failure == 'policy_changed':
+            with pytest.raises(s.m.NativeMaxChargeError, match='policy denied'):
+                await s.session.start(120)
+            assert not s.state.events and not s.session.pending
+        else:
+            # A read failure leaves the reservation intact. Independently
+            # verified native site limits can still admit battery coexistence.
+            assert (await s.session.start(120))['active']
+        assert offered == ['site']
+        assert 'VIN' in s.budget.managed
+    finally:
+        if s.session.pending:
+            s.state.policy = True
+            await s.session.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('case', ['discharge', 'foreign_site', 'no_records', 'no_authority'])
+async def test_explicit_admission_does_not_read_ineligible_managed_records(setup, case):
+    s = setup
+    if case != 'no_records':
+        await s.budget.admit_managed(
+            'VIN', {'site': 'elsewhere' if case == 'foreign_site' else 'site',
+                    'identity': 'provider:car', 'reserved_w': 4600},
+            {}, lambda: True,
+        )
+    if case == 'discharge':
+        s.adapter.direction = 'discharge'
+    if case == 'no_authority':
+        s.state.policy = False
+    offered = []
+
+    async def reconcile(site):
+        offered.append(site)
+
+    s.adapter.reconcile_managed = reconcile
+    await s.adapter.prepare_admission()
+    assert offered == []

@@ -448,6 +448,25 @@ class NativeMaxChargeAdapter:
                 and type(configured) in (int, float) and math.isfinite(configured)
                 and configured > 0 and native_limit > configured)
 
+    async def prepare_admission(self):
+        """Offer retained EVs fresh proof once per explicit charge acquisition.
+
+        Verified native limits can permit coexistence before old EV demand has
+        settled. That permission must not skip the read-only reconciliation.
+        Keep these provider reads out of recurring policy and writer guards;
+        the callback retains its own owner, task and two-sample fences.
+        """
+        reconcile = self.reconcile_managed
+        if self.direction != "charge" or not callable(reconcile) or not self.authority():
+            return
+        await self.budget.load()
+        if not any(record.get("site") == self.site for record in self.budget.managed.values()):
+            return
+        try:
+            await asyncio.wait_for(reconcile(self.site), timeout=self.reconcile_timeout)
+        except Exception:
+            _LOGGER.warning("Native Powerwall managed EV reconciliation unavailable")
+
     async def guard(self, *, native_config=None, preparing=False):
         self.guard_denial_reason = "native_max_control_not_permitted"
         if not self.authority():

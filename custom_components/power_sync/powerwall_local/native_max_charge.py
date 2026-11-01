@@ -275,6 +275,15 @@ class NativeMaxChargeSession:
             preparation = (getattr(self.adapter, "direction", "charge") == "discharge")
             if self.adapter.authority() is not True:
                 raise NativeMaxChargeError("Native Max current policy denied charging")
+            admission_identity = self.adapter.identity
+            prepare_admission = getattr(self.adapter, "prepare_admission", None)
+            if callable(prepare_admission):
+                await prepare_admission()
+                if (generation != self._generation or self.clock() >= deadline
+                        or self.adapter.identity != admission_identity):
+                    raise NativeMaxChargeError("Native Max request expired or changed before acquisition")
+                if self.adapter.authority() is not True:
+                    raise NativeMaxChargeError("Native Max current policy denied charging")
             initial_guard = ({"preparing": True} if preparation else {})
             if await self.adapter.guard(**initial_guard) is not True:
                 raise NativeMaxChargeError("Native Max current policy denied charging")
