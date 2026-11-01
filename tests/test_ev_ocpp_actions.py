@@ -16604,9 +16604,17 @@ def test_qualified_stock_sparse_charge_response_admits_health_only(
         project_version=project_version,
         esphome_version=esphome_version,
     )
+    config_entry = hass.config_entries.async_get_entry("ble-test-entry")
+    source_token = actions._tesla_ble_stock_last_update_source_token(
+        hass, "car", "switch.car_charger"
+    )
+    _advance_stock_sparse_last_update(hass, config_entry)
 
     assert actions._tesla_ble_has_fresh_charge_snapshot(
-        hass, "car", target_entity="switch.car_charger"
+        hass,
+        "car",
+        target_entity="switch.car_charger",
+        stock_source_token=source_token,
     ) is True
 
 
@@ -16623,8 +16631,13 @@ def test_qualified_stock_sparse_response_admits_existing_prepare_path(monkeypatc
         _State("sensor.car_range", "318.6", {"unit_of_measurement": "mi"}, last_updated=now),
     ])
     _add_ble_charge_registry(hass)
-    _qualify_stock_sparse_fixture(hass)
-    monkeypatch.setattr(actions, "_wake_tesla_ble", AsyncMock(return_value=True))
+    config_entry = _qualify_stock_sparse_fixture(hass)
+
+    async def wake_and_advance(*_args, **_kwargs):
+        _advance_stock_sparse_last_update(hass, config_entry)
+        return True
+
+    monkeypatch.setattr(actions, "_wake_tesla_ble", wake_and_advance)
 
     assert asyncio.run(actions._tesla_ble_prepare_mutation(
         hass,
@@ -16640,20 +16653,79 @@ def test_qualified_stock_sparse_response_admits_existing_prepare_path(monkeypatc
 
 
 def _qualify_stock_sparse_fixture(hass, *, project_version="2026.2.0", esphome_version="2026.1.5"):
-    config_entry = SimpleNamespace(
-        runtime_data=SimpleNamespace(
-            client=object(),
-            device_info=SimpleNamespace(
-                project_name="PedroKTFC.esphome-tesla-ble",
-                project_version=project_version,
-                esphome_version=esphome_version,
-            ),
-        )
+    baseline = (datetime.now() - timedelta(minutes=5)).strftime(
+        "%a %b %d %H:%M:%S %Y"
     )
+
+    class TextSensorState:
+        pass
+
+    class TextSensorInfo:
+        pass
+
+    TextSensorState.__module__ = "aioesphomeapi.model"
+    TextSensorInfo.__module__ = "aioesphomeapi.model"
+    source_state = SimpleNamespace(
+        key=7,
+        device_id=0,
+        state=baseline,
+        missing_state=False,
+    )
+    source_info = SimpleNamespace(
+        key=7,
+        device_id=0,
+        object_id="last_update",
+        name="Last update",
+    )
+    runtime_data = SimpleNamespace(
+        client=SimpleNamespace(
+            _connection=SimpleNamespace(is_connected=True),
+        ),
+        device_info=SimpleNamespace(
+            project_name="PedroKTFC.esphome-tesla-ble",
+            project_version=project_version,
+            esphome_version=esphome_version,
+        ),
+        state={TextSensorState: {(0, 7): source_state}},
+        info={TextSensorInfo: {(0, 7): source_info}},
+        stale_state=set(),
+    )
+    config_entry = SimpleNamespace(
+        runtime_data=runtime_data,
+    )
+    for target_id in (
+        "switch.car_charger",
+        "number.car_charging_amps",
+        "number.car_charging_limit",
+    ):
+        target_registration = hass.entity_registry.entities.get(target_id)
+        if target_registration is not None:
+            target_domain = target_id.split(".", 1)[0]
+            target_registration.unique_id = (
+                f"aabbccddeeff/0/{target_domain}/Tesla {target_domain}"
+            )
+    registration = hass.entity_registry.entities.get("sensor.car_last_update")
+    if registration is not None:
+        # ESPHome's HA unique-id identifies the native device index and the
+        # TextSensorInfo name.  Sparse health must not select another virtual
+        # device's ``last_update`` state by entity_id alone.
+        registration.unique_id = "aabbccddeeff/0/text_sensor/Last update"
     hass.config_entries = SimpleNamespace(
         async_get_entry=lambda entry_id: config_entry,
     )
     return config_entry
+
+
+def _advance_stock_sparse_last_update(hass, config_entry):
+    runtime_data = config_entry.runtime_data
+    state_type, state_by_key = next(iter(runtime_data.state.items()))
+    source_state = next(iter(state_by_key.values()))
+    source_state.state = datetime.now().strftime("%a %b %d %H:%M:%S %Y")
+    last_update = hass.states.get("sensor.car_last_update")
+    if last_update is not None:
+        now = datetime.now(timezone.utc)
+        last_update.last_updated = now
+        last_update.last_reported = now
 
 
 def test_sparse_health_does_not_qualify_an_unsupported_bridge_during_probe(monkeypatch):
@@ -16855,7 +16927,7 @@ def test_sparse_stock_token_is_rechecked_after_prepare(monkeypatch, operation):
 
 
 def test_sparse_stock_token_is_rechecked_during_tracker_persistence(monkeypatch):
-    """A producer reload while submission metadata saves cannot reach HA."""
+    """A producer connection replacement while metadata saves cannot reach HA."""
     from power_sync import tesla_ev_recovery as recovery
 
     hass, config_entry = _stock_sparse_mutation_hass("number.car_charging_amps")
@@ -16869,10 +16941,7 @@ def test_sparse_stock_token_is_rechecked_during_tracker_persistence(monkeypatch)
 
     async def tracked(_hass, _entry, submit, *_args, **_kwargs):
         runtime = config_entry.runtime_data
-        config_entry.runtime_data = SimpleNamespace(
-            client=runtime.client,
-            device_info=runtime.device_info,
-        )
+        runtime.client._connection = SimpleNamespace(is_connected=True)
         await asyncio.sleep(0)
         return await submit()
 
@@ -16926,7 +16995,7 @@ def test_sparse_stock_token_survives_rate_native_preflight_wait(monkeypatch):
     assert hass.services.calls == []
 
 
-def test_sparse_response_requires_charge_exclusive_field():
+def test_sparse_response_accepts_advancing_last_update_without_charge_field():
     now = datetime.now(timezone.utc)
     old = now - timedelta(minutes=5)
     hass = _Hass([
@@ -16935,11 +17004,109 @@ def test_sparse_response_requires_charge_exclusive_field():
         _State("sensor.car_last_update", "Sat Nov 1 05:49:48 2026", last_updated=now),
     ])
     _add_ble_charge_registry(hass)
-    _qualify_stock_sparse_fixture(hass)
+    config_entry = _qualify_stock_sparse_fixture(hass)
+    source_token = actions._tesla_ble_stock_last_update_source_token(
+        hass, "car", "switch.car_charger"
+    )
+    _advance_stock_sparse_last_update(hass, config_entry)
 
     assert actions._tesla_ble_has_fresh_charge_snapshot(
-        hass, "car", target_entity="switch.car_charger"
+        hass,
+        "car",
+        target_entity="switch.car_charger",
+        stock_source_token=source_token,
+    ) is True
+
+
+def test_sparse_response_rejects_ha_republish_without_native_source_advance():
+    """A newer HA timestamp alone cannot certify a cached bridge response."""
+    now = datetime.now(timezone.utc)
+    old = now - timedelta(minutes=5)
+    hass = _Hass([
+        _State("switch.car_charger", "off"),
+        _State("sensor.car_charging_state", "Stopped", last_updated=old),
+        _State("sensor.car_last_update", "Sat Nov 1 05:49:48 2026", last_updated=old),
+    ])
+    _add_ble_charge_registry(hass)
+    _qualify_stock_sparse_fixture(hass)
+    source_token = actions._tesla_ble_stock_last_update_source_token(
+        hass, "car", "switch.car_charger"
+    )
+    last_update = hass.states.get("sensor.car_last_update")
+    last_update.last_updated = datetime.now(timezone.utc)
+    last_update.last_reported = last_update.last_updated
+
+    assert actions._tesla_ble_has_fresh_charge_snapshot(
+        hass,
+        "car",
+        target_entity="switch.car_charger",
+        stock_source_token=source_token,
     ) is False
+
+
+def test_sparse_response_rejects_native_connection_epoch_replacement():
+    """A fresh value from a reconnected client cannot satisfy the old probe."""
+    now = datetime.now(timezone.utc)
+    old = now - timedelta(minutes=5)
+    hass = _Hass([
+        _State("switch.car_charger", "off"),
+        _State("sensor.car_charging_state", "Stopped", last_updated=old),
+        _State("sensor.car_last_update", "Sat Nov 1 05:49:48 2026", last_updated=now),
+    ])
+    _add_ble_charge_registry(hass)
+    config_entry = _qualify_stock_sparse_fixture(hass)
+    source_token = actions._tesla_ble_stock_last_update_source_token(
+        hass, "car", "switch.car_charger"
+    )
+    config_entry.runtime_data.client._connection = SimpleNamespace(is_connected=True)
+    _advance_stock_sparse_last_update(hass, config_entry)
+
+    assert actions._tesla_ble_has_fresh_charge_snapshot(
+        hass,
+        "car",
+        target_entity="switch.car_charger",
+        stock_source_token=source_token,
+    ) is False
+
+
+@pytest.mark.parametrize(
+    "variant", ["wrong_unique_id", "wrong_native_mac", "duplicate_native_info"]
+)
+def test_sparse_response_rejects_wrong_or_duplicate_native_last_update(variant):
+    """The HA entity must bind to exactly one native LastUpdate source."""
+    now = datetime.now(timezone.utc)
+    old = now - timedelta(minutes=5)
+    hass = _Hass([
+        _State("switch.car_charger", "off"),
+        _State("sensor.car_charging_state", "Stopped", last_updated=old),
+        _State("sensor.car_last_update", "Sat Nov 1 05:49:48 2026", last_updated=now),
+    ])
+    _add_ble_charge_registry(hass)
+    config_entry = _qualify_stock_sparse_fixture(hass)
+    if variant == "wrong_unique_id":
+        hass.entity_registry.entities["sensor.car_last_update"].unique_id = (
+            "aabbccddeeff/1/text_sensor/Last update"
+        )
+    elif variant == "wrong_native_mac":
+        hass.entity_registry.entities["sensor.car_last_update"].unique_id = (
+            "112233445566/0/text_sensor/Last update"
+        )
+    else:
+        runtime = config_entry.runtime_data
+        duplicate_type = type("TextSensorInfo", (), {})
+        duplicate_type.__module__ = "aioesphomeapi.model"
+        runtime.info[duplicate_type] = {
+            (0, 7): SimpleNamespace(
+                key=7,
+                device_id=0,
+                object_id="last_update",
+                name="Last update",
+            )
+        }
+
+    assert actions._tesla_ble_stock_last_update_source_token(
+        hass, "car", "switch.car_charger"
+    ) is None
 
 
 def test_sparse_response_rejects_unknown_stock_profile():
@@ -17016,8 +17183,13 @@ def test_sparse_stock_health_allows_ble_write_but_keeps_readback_strict(monkeypa
         _State("sensor.car_range", "318.6", {"unit_of_measurement": "mi"}, last_updated=now),
     ])
     _add_ble_charge_registry(hass)
-    _qualify_stock_sparse_fixture(hass)
-    monkeypatch.setattr(actions, "_wake_tesla_ble", AsyncMock(return_value=True))
+    config_entry = _qualify_stock_sparse_fixture(hass)
+
+    async def wake_and_advance(*_args, **_kwargs):
+        _advance_stock_sparse_last_update(hass, config_entry)
+        return True
+
+    monkeypatch.setattr(actions, "_wake_tesla_ble", wake_and_advance)
     monkeypatch.setattr(actions, "_TESLA_BLE_COMMAND_CONFIRMATION_SECONDS", 0)
 
     result = asyncio.run(actions._set_ev_charging_amps_ble(hass, "car", 5))

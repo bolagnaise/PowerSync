@@ -46,14 +46,21 @@ by independent vehicle reconciliation. A bridge's advertisement/presence sensor
 cannot supply either proof. A successful service call or reconnect alone is
 also insufficient.
 
-Before a new BLE mutation, the exact bridge must provide fresh vehicle data.
-A known charging state with measured current or power supplies this evidence;
-zero is valid. Qualified stock bridge versions also support sparse charge
-responses: a fresh LastUpdate plus fresh finite charge energy or range from the
-same bound device proves transport health even when current, power or state
-were omitted. LastUpdate alone is insufficient because drive and climate
-responses update it too. This health evidence never refreshes retained charging
-power or confirms a command's physical effect. Wake status alone remains
+Before a new BLE mutation, the exact bridge must demonstrate a live vehicle
+session. A known charging state with fresh measured current or power supplies
+this evidence; zero is valid. Qualified stock bridges may instead establish
+transport health from an advancing LastUpdate source value after a bounded
+probe in the same established API connection. The original native subscription
+must already have a non-stale baseline, and registry, producer, radio and
+connection identities remain pinned across every wait. A reconnect or a cached
+value receiving a new HA delivery timestamp cannot qualify.
+
+For these qualified versions, LastUpdate is published after processing an
+authenticated CarServer vehicle-data response. Unchanged charge fields need
+not be republished to establish transport health. Its text has no timezone;
+source-value advancement is checked without pretending that it is UTC. This
+health evidence never refreshes retained charging power, confirms a command,
+or replaces site admission. Wake advertisement/presence alone remains
 insufficient. A bounded wake/data-refresh failure is a known pre-dispatch
 failure, so Both mode can use the exact configured native fallback without
 creating a queued BLE mutation. Fleet data cannot certify BLE session health.
@@ -309,24 +316,33 @@ physical power. Both ESPHome bridges, native HA Tesla Fleet and native
 Teslemetry are installed. Neither legacy nor modern Teslemetry Bluetooth is
 installed here; those adapter contracts have software coverage only.
 
-At the 1 November 06:22 UTC checkpoint, private 2.12.1584.dev2 matched source
-86d0e204 across all 272 package files. Its audited complete suite passed 10,874
-tests without skips. Both cars had completed qualified stock-bridge recovery
-with independent fresh native charge observations; firmware and pairing were
-unchanged. W3RT1E remained stopped with its 80% limit and 10 A request. TESSY's
-native rate and limit commands were acknowledged and subsequently confirmed by
-BLE, but its finite Start expired before any Start submission.
+At the 1 November 07:15 UTC checkpoint, private 2.12.1584.dev3 matched source
+2429f79a across all 272 package files, with existing storage preserved. Its
+audited complete suite passed 10,903 tests without skips. Both cars completed
+qualified stock-bridge recovery with independent fresh native charge
+observations; firmware and pairing were unchanged. TESSY's original 70% limit
+and 15 A request were independently confirmed. W3RT1E retained its 80% limit
+and 10 A request.
 
-That live sequence exposed sparse charge-response health rejection and
-completed attempts reappearing as pending during sidecar synchronization.
-Expiry cleanup turned TESSY's BLE connection off; W3RT1E's remained on. TESSY's
-original 70% limit and 15 A request were restored through its exact native
-controls, with independent vehicle confirmation still pending. The new fixes
-must be installed and TESSY must complete qualified recovery before further
-positive tests. Historical pending records are preserved rather than deleted.
+A finite W3RT1E request physically charged at about 2 kW through native Fleet,
+but it first waited two minutes for unchanged BLE status, and its expiry Stop
+was refused before dispatch when the charging lease was revoked. The vehicle
+was stopped through its exact native HA control and independently confirmed
+at zero current and power. The new readiness and native cleanup handoff fixes
+require installation and live retest. Their cleanup authority is bound to the
+original finite obligation, runtime and exact native producer; it cannot
+start charging, switch providers or take over a replacement owner.
 
-Earlier candidates exercised individual BLE/Fleet/Teslemetry starts and stops,
-the two-car dashboard and native battery charge/export. Those results do not
-validate the final candidate. The required two-car allocation, independent
-Stop, Boost expiry/reload and active-EV native battery coexistence matrix must
-complete on the final implementation before release.
+Three older TESSY native attempts were falsely retained as pending by the
+previous persistence defect. Captured direct action results and the expiry
+Stop's in-process success receipt establish accepted command completion.
+Any one-time reconciliation must add exact digest-bound completion proofs
+with those receipts retained; unknown attempts and BLE hazards are never
+blanket-cleared. A provider acknowledgement remains separate from physical
+readback.
+
+Earlier candidates exercised individual routes, the two-car dashboard and
+native battery charge/export. Those observations do not validate the final
+candidate. The required two-car allocation, independent Stop, Boost
+expiry/reload and active-EV native battery coexistence matrix must complete
+on the final implementation before release.

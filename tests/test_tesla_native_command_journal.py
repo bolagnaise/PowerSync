@@ -938,6 +938,227 @@ async def test_native_unknown_survives_reload_and_stop_without_another_start(mon
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("replace_runtime", [False, True])
+async def test_expired_native_finite_session_rebinds_exact_cleanup_stop_only(
+    monkeypatch, replace_runtime,
+):
+    """Expiry revokes positive ownership but still submits its native Stop."""
+    import importlib
+
+    from power_sync.automations import ev_ownership
+
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={"ev_provider": actions.EV_PROVIDER_FLEET_API},
+    )
+    hass = _native_hass(monkeypatch, "tesla_fleet")
+    from power_sync import teslemetry_solar
+
+    solar_store = SimpleNamespace(
+        async_load=AsyncMock(return_value={"vehicles": {}, "requests": {}}),
+        async_save=AsyncMock(return_value=None),
+    )
+    hass.data["power_sync_native_solar"] = {
+        "entry-1": teslemetry_solar.SolarOwnership(solar_store),
+    }
+    hass.data["power_sync_native_solar"]["entry-1"].holds = {}
+    hass.entity_registry.entities[AMPS_ENTITY] = SimpleNamespace(
+        entity_id=AMPS_ENTITY,
+        platform="tesla_fleet",
+        config_entry_id="tesla_fleet-entry",
+        device_id="tesla_fleet-device",
+        unique_id=f"{VIN}-amps",
+        disabled_by=None,
+    )
+    hass.states._states[AMPS_ENTITY] = _State(AMPS_ENTITY, "10")
+    recovery = importlib.import_module("power_sync.tesla_ev_recovery")
+    monkeypatch.setattr(recovery, "_registry", lambda h: h.entity_registry)
+
+    async def persist(_hass, _entry, _runtime):
+        return True
+
+    monkeypatch.setattr(recovery, "_persist", persist)
+    owner = ev_ownership.claim_ev_ownership(
+        hass,
+        entry,
+        VIN,
+        owner_mode="manual",
+        session_id="finite-session",
+    )
+    assert owner["owner"] == "powersync"
+
+    # The real native Start and Rate establish the durable session route.
+    start = await actions._run_native_tesla_service_command(
+        hass,
+        entry,
+        {"vehicle_vin": VIN},
+        "start",
+        ENTITY,
+        "switch",
+        "turn_on",
+        {"entity_id": ENTITY},
+        actions._tesla_transport_authority(
+            hass, entry, {"vehicle_vin": VIN}, operation="start"
+        ),
+    )
+    assert start.outcome == "accepted_unconfirmed"
+    rate = await actions._run_native_tesla_service_command(
+        hass,
+        entry,
+        {"vehicle_vin": VIN},
+        "rate",
+        AMPS_ENTITY,
+        "number",
+        "set_value",
+        {"entity_id": AMPS_ENTITY, "value": 10},
+        actions._tesla_transport_authority(
+            hass, entry, {"vehicle_vin": VIN}, operation="rate"
+        ),
+    )
+    assert rate.outcome == "accepted_unconfirmed"
+    assert recovery.get_vehicle_route(hass, entry, VIN)["kind"] == "ha"
+
+    binding = await actions._tesla_quick_control_binding(
+        hass, entry, {"vehicle_vin": VIN}, VIN
+    )
+    token = "finite-obligation"
+    hass.data["power_sync"][entry.entry_id][
+        ev_ownership.EV_QUICK_OBLIGATIONS_KEY
+    ] = {
+        VIN: {
+            "obligation_id": token,
+            "expires_at": "2099-01-01T00:00:00+00:00",
+            "params": {
+                "vehicle_vin": VIN,
+                "charger_type": "tesla",
+                "_quick_control_obligation_id": token,
+                "_quick_control_binding": binding,
+            },
+        }
+    }
+    ev_ownership.release_ev_ownership(
+        hass, entry, VIN, reason="finite deadline elapsed", command="stop", success=False
+    )
+    blocked = recovery.get_vehicle_route(hass, entry, VIN)
+    assert blocked["kind"] == "blocked"
+    assert blocked["reason"] == "route_identity_changed"
+
+    if replace_runtime:
+        replacement_holder = {}
+
+        async def replace_during_save(_hass, _entry, _runtime):
+            old_runtime = hass.data["power_sync"][entry.entry_id]
+            replacement_runtime = dict(old_runtime)
+            for key in (
+                "ev_ownership",
+                "ev_last_command",
+                "ev_boost_sessions",
+                ev_ownership.EV_QUICK_OBLIGATIONS_KEY,
+                "ev_transport_recovery",
+            ):
+                if key in old_runtime:
+                    replacement_runtime[key] = deepcopy(old_runtime[key])
+            hass.data["power_sync"][entry.entry_id] = replacement_runtime
+            replacement_holder["runtime"] = replacement_runtime
+            return True
+
+        monkeypatch.setattr(recovery, "_persist", replace_during_save)
+        cleanup_params = {
+            "vehicle_vin": VIN,
+            "vehicle_id": VIN,
+            "_ev_cleanup_only": True,
+            "_quick_control_obligation_id": token,
+        }
+        assert await actions._tesla_prepare_native_cleanup_handoff(
+            hass, entry, cleanup_params
+        ) is False
+        replacement_runtime = replacement_holder["runtime"]
+        assert hass.data["power_sync"][entry.entry_id] is replacement_runtime
+        replacement_lease = ev_ownership.get_ev_ownership(
+            hass, entry, VIN
+        )[1]
+        assert replacement_lease is not None
+        assert replacement_lease.get("owner_mode") == "tesla_cleanup"
+        assert hass.services.calls == [
+            ("switch", "turn_on", {"entity_id": ENTITY}),
+            ("number", "set_value", {"entity_id": AMPS_ENTITY, "value": 10}),
+        ]
+        return
+
+    stop_started = asyncio.Event()
+    release_stop = asyncio.Event()
+    original_call = hass.services.async_call
+
+    async def service_call(domain, service, data, **kwargs):
+        if service == "turn_off":
+            stop_started.set()
+            await release_stop.wait()
+        return await original_call(domain, service, data, **kwargs)
+
+    hass.services.async_call = service_call
+    stop_params = {
+        "charger_type": "tesla",
+        "vehicle_vin": VIN,
+        "vehicle_id": VIN,
+        "stop_charging": True,
+        "stop_untracked": True,
+        "manual_stop": True,
+        "_force_tesla_stop_request": True,
+        "_ev_cleanup_only": True,
+        "_quick_control_obligation_id": token,
+    }
+    stop_task = asyncio.create_task(
+        actions.execute_actions(
+            hass,
+            entry,
+            [{
+                "action_type": "stop_ev_charging_dynamic",
+                "parameters": stop_params,
+            }],
+        )
+    )
+    await asyncio.wait_for(stop_started.wait(), 2)
+    _cleanup_lease_id, cleanup_lease = ev_ownership.get_ev_ownership(
+        hass, entry, VIN
+    )
+    assert cleanup_lease is not None
+    assert cleanup_lease.get("owner_mode") == "tesla_cleanup"
+
+    # The temporary route is persisted stop-only while the provider call is
+    # in flight.  A positive request must still be denied without a service.
+    positive_call_count = len(
+        [call for call in hass.services.calls if call[1] == "turn_on"]
+    )
+    positive = await actions._run_native_tesla_service_command(
+        hass,
+        entry,
+        {"vehicle_vin": VIN},
+        "start",
+        ENTITY,
+        "switch",
+        "turn_on",
+        {"entity_id": ENTITY},
+        actions._tesla_transport_authority(
+            hass, entry, {"vehicle_vin": VIN}, operation="start"
+        ),
+    )
+    assert positive.outcome == "not_sent"
+    assert len(
+        [call for call in hass.services.calls if call[1] == "turn_on"]
+    ) == positive_call_count
+
+    release_stop.set()
+    assert await stop_task is True
+    assert hass.services.calls[-1] == (
+        "switch",
+        "turn_off",
+        {"entity_id": ENTITY},
+    )
+    assert ev_ownership.get_ev_ownership(hass, entry, VIN)[1] is None
+
+
+@pytest.mark.asyncio
 async def test_native_service_domain_mismatch_cannot_reach_a_provider(monkeypatch):
     hass = _native_hass(monkeypatch, "tesla_fleet", AMPS_ENTITY)
     finished = _journal_mocks(monkeypatch)
