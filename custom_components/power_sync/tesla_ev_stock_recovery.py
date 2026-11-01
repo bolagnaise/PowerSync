@@ -344,8 +344,11 @@ async def async_recover_vehicle_transport(
     hass: Any, entry: Any, vin: str, *, incident_id: str | None = None,
 ) -> bool:
     """Recover one exact stock producer without changing charging settings."""
+    from .const import CONF_EV_PROVIDER, EV_PROVIDER_BOTH, EV_PROVIDER_FLEET_API
     from .tesla_ev_observation import (
-        async_read_independent_tesla_vehicle, independent_tesla_source_binding,
+        async_read_independent_tesla_vehicle,
+        async_wake_independent_tesla_vehicle,
+        independent_tesla_source_binding,
     )
     from .tesla_ev_recovery import (
         async_confirm_recovery_scope, async_record_evidence_loss, async_recover_stock,
@@ -421,6 +424,12 @@ async def async_recover_vehicle_transport(
             transaction.generation = current_vehicle_generation(hass, entry, str(vin))
             return source_current()
 
+        def cloud_wake_allowed() -> bool:
+            config = {**getattr(entry, "data", {}), **getattr(entry, "options", {})}
+            return config.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API) in (
+                EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH,
+            )
+
         async def observe(vehicle: str) -> dict[str, Any] | None:
             if vehicle != str(vin) or not source_current():
                 return None
@@ -437,6 +446,23 @@ async def async_recover_vehicle_transport(
                 if not source_current():
                     return None
                 observation = await async_read_independent_tesla_vehicle(hass, vehicle, timeout=20)
+            if observation is None and source_current() and cloud_wake_allowed():
+                # BLE remains the primary recovery path. Only after its
+                # bounded wake/read attempt has produced no exact cloud
+                # charge-state response may the independent native cloud
+                # client request one wake. A wake acknowledgement is not
+                # reconciliation evidence; the following fresh read is.
+                cloud_wake = await async_wake_independent_tesla_vehicle(
+                    hass, vehicle, expected_binding=source_binding,
+                    authorize=lambda: source_current() and cloud_wake_allowed(),
+                    timeout=60,
+                )
+                if not source_current():
+                    return None
+                if cloud_wake:
+                    observation = await async_read_independent_tesla_vehicle(
+                        hass, vehicle, timeout=20,
+                    )
             if (not source_current() or not observation_matches(observation)):
                 return None
             evidence = reconciliation_evidence(observation)

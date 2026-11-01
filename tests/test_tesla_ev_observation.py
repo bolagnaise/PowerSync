@@ -838,12 +838,24 @@ def independent_source(monkeypatch):
             self.response = {"vin": VIN_A, **_charge(now)}
             self.calls = []
             self.before_return = None
+            self.wake_response = {"response": {"state": "online"}}
+            self.vehicle_responses = []
+            self.wake_calls = []
 
         async def vehicle_data(self, *, endpoints):
             self.calls.append(endpoints)
             if self.before_return is not None:
                 await self.before_return()
             return {"response": deepcopy(self.response)}
+
+        async def wake_up(self, *, wait=False, timeout=60):
+            self.wake_calls.append((wait, timeout))
+            return deepcopy(self.wake_response)
+
+        async def vehicle(self):
+            if self.vehicle_responses:
+                return deepcopy(self.vehicle_responses.pop(0))
+            return {"response": {"state": "online"}}
 
     class NativeCoordinator(_Coordinator):
         def __init__(self):
@@ -1117,3 +1129,102 @@ def test_independent_binding_pins_runtime_without_provider_calls(independent_sou
     assert coordinator.api.calls == []
     vehicle.vin = VIN_B
     assert observation.independent_tesla_source_binding(hass, VIN_A) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("domain", ["tesla_fleet", "teslemetry"])
+async def test_independent_cloud_wake_uses_exact_api_class_and_waits_for_online(
+    independent_source, domain, monkeypatch,
+):
+    hass, _entry, _vehicle, coordinator = independent_source(domain)
+    binding = observation.independent_tesla_source_binding(hass, VIN_A)
+    assert binding is not None
+
+    async def immediate_sleep(_delay):
+        return None
+
+    monkeypatch.setattr(observation.asyncio, "sleep", immediate_sleep)
+    coordinator.api.wake_response = {"response": {"state": "asleep"}}
+    coordinator.api.vehicle_responses = [{"response": {"state": "online"}}]
+
+    assert await observation.async_wake_independent_tesla_vehicle(
+        hass, VIN_A, expected_binding=binding, authorize=lambda: True, timeout=1,
+    )
+    assert coordinator.api.wake_calls == [(False, 1.0)]
+    assert len(coordinator.api.vehicle_responses) == 0
+    assert coordinator.api.calls == []
+
+
+@pytest.mark.asyncio
+async def test_independent_cloud_wake_rejects_binding_mismatch_before_post(independent_source):
+    hass, _entry, _vehicle, coordinator = independent_source("teslemetry")
+    binding = observation.independent_tesla_source_binding(hass, VIN_A)
+    assert binding is not None
+    mismatched = {**binding, "device_id": "other-device"}
+
+    assert not await observation.async_wake_independent_tesla_vehicle(
+        hass, VIN_A, expected_binding=mismatched, authorize=lambda: True,
+    )
+    assert coordinator.api.wake_calls == []
+
+
+@pytest.mark.asyncio
+async def test_independent_cloud_wake_rejects_source_rebind_after_post(independent_source, monkeypatch):
+    hass, _entry, _vehicle, coordinator = independent_source("tesla_fleet")
+
+    async def replace_client(self, *, wait=False, timeout=60):
+        coordinator.api = type(self)()
+        return {"response": {"state": "online"}}
+
+    monkeypatch.setattr(type(coordinator.api), "wake_up", replace_client)
+    binding = observation.independent_tesla_source_binding(hass, VIN_A)
+    assert binding is not None
+    assert not await observation.async_wake_independent_tesla_vehicle(
+        hass, VIN_A, expected_binding=binding, authorize=lambda: True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_independent_cloud_wake_is_exact_vin_scoped(independent_source):
+    hass, entry, vehicle_a, coordinator_a = independent_source("teslemetry")
+    coordinator_b = type(coordinator_a)()
+    coordinator_b.api.response["vin"] = VIN_B
+    entry.runtime_data.vehicles.append(
+        type(vehicle_a)(vin=VIN_B, coordinator=coordinator_b,
+                        device=types.SimpleNamespace(
+                            id="device-b", identifiers={("teslemetry", VIN_B)}))
+    )
+    binding_b = observation.independent_tesla_source_binding(hass, VIN_B)
+    assert binding_b is not None
+
+    assert await observation.async_wake_independent_tesla_vehicle(
+        hass, VIN_B, expected_binding=binding_b, authorize=lambda: True,
+    )
+    assert coordinator_a.api.wake_calls == []
+    assert coordinator_b.api.wake_calls == [(False, 60.0)]
+
+
+@pytest.mark.asyncio
+async def test_independent_cloud_wake_cancellation_does_not_release_as_success(
+    independent_source, monkeypatch,
+):
+    hass, _entry, _vehicle, coordinator = independent_source("teslemetry")
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocked_wake(self, *, wait=False, timeout=60):
+        entered.set()
+        await release.wait()
+        return {"response": {"state": "online"}}
+
+    monkeypatch.setattr(type(coordinator.api), "wake_up", blocked_wake)
+    binding = observation.independent_tesla_source_binding(hass, VIN_A)
+    assert binding is not None
+    task = asyncio.create_task(observation.async_wake_independent_tesla_vehicle(
+        hass, VIN_A, expected_binding=binding, authorize=lambda: True,
+    ))
+    await asyncio.wait_for(entered.wait(), 1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    release.set()

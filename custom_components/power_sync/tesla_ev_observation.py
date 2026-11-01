@@ -5,10 +5,11 @@ import asyncio
 from copy import deepcopy
 from dataclasses import dataclass, field
 from importlib import import_module
+import inspect
 import math
 import re
 import time
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 
 VIN_PATTERN = re.compile(r"[A-HJ-NPR-Z0-9]{17}")
@@ -720,6 +721,128 @@ def independent_tesla_source_binding(
     }
 
 
+async def async_wake_independent_tesla_vehicle(
+    hass: Any,
+    vin: str,
+    *,
+    preferred_entity_id: str | None = None,
+    expected_binding: Mapping[str, Any] | None = None,
+    authorize: Callable[[], bool] | None = None,
+    timeout: float = 60,
+) -> bool:
+    """Request one exact native-cloud vehicle wake.
+
+    This is deliberately separate from the command router.  Teslemetry's
+    vehicle wrapper can route commands through its BLE adapter, so resolving
+    the configured coordinator's concrete cloud API class and calling its
+    class method is required for an independent wake.  The wake acknowledgement
+    is only a provider request; callers must perform a later independent read
+    before releasing a recovery incident.
+    """
+    canonical = _canonical_vin(vin)
+    timeout_value = _finite(timeout, minimum=0)
+    if (canonical is None or timeout_value is None or timeout_value <= 0
+            or timeout_value > 60):
+        return False
+    source = _select_source(hass, canonical, preferred_entity_id)
+    if source is None:
+        return False
+    contract = _cloud_contract(source)
+    binding = independent_tesla_source_binding(
+        hass, canonical, preferred_entity_id=preferred_entity_id,
+    )
+    if contract is None or binding is None:
+        return False
+    if expected_binding is not None and dict(expected_binding) != binding:
+        return False
+    api, debouncer, _endpoint = contract
+    wake_up = getattr(type(api), "wake_up", None)
+    if not callable(wake_up):
+        return False
+
+    def current() -> bool:
+        if authorize is not None:
+            try:
+                if not authorize():
+                    return False
+            except Exception:
+                return False
+        current_source = _select_source(hass, canonical, preferred_entity_id)
+        current_contract = _cloud_contract(current_source) if current_source else None
+        return bool(
+            current_source is not None
+            and current_source.key() == source.key()
+            and current_contract is not None
+            and current_contract[0] is api
+            and current_contract[1] is debouncer
+            and independent_tesla_source_binding(
+                hass, canonical, preferred_entity_id=preferred_entity_id,
+            ) == binding
+        )
+
+    async def wake() -> Any:
+        async with debouncer.async_lock():
+            if not current():
+                return None
+            result = wake_up(api, wait=False, timeout=timeout_value)
+            if inspect.isawaitable(result):
+                result = await result
+            return result
+
+    async def wait_until_online(response: Any) -> bool:
+        """Poll only the exact cloud vehicle-info endpoint after POST wake."""
+        vehicle = getattr(type(api), "vehicle", None)
+        if not callable(vehicle):
+            return False
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_value
+
+        def online(value: Any) -> bool:
+            if not isinstance(value, Mapping):
+                return False
+            payload = value.get("response")
+            if not isinstance(payload, Mapping):
+                return False
+            return str(payload.get("state", "")).strip().lower() == "online"
+
+        while True:
+            if online(response):
+                return current()
+            remaining = deadline - loop.time()
+            if remaining <= 0 or not current():
+                return False
+            await asyncio.sleep(min(5.0, remaining))
+            if not current():
+                return False
+            async with debouncer.async_lock():
+                if not current():
+                    return False
+                response = vehicle(api)
+                if inspect.isawaitable(response):
+                    response = await response
+            if not current():
+                return False
+
+    try:
+        async def wake_and_wait() -> bool:
+            result = await wake()
+            return (
+                result is not None
+                and result is not False
+                and await wait_until_online(result)
+            )
+
+        if not await asyncio.wait_for(wake_and_wait(), timeout=timeout_value):
+            return False
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        return False
+    if not current():
+        return False
+    return True
+
+
 async def async_read_independent_tesla_vehicle(
     hass: Any,
     vin: str,
@@ -883,6 +1006,7 @@ __all__ = [
     "async_prepare_tesla_fleet_command",
     "async_read_tesla_vehicle",
     "async_read_independent_tesla_vehicle",
+    "async_wake_independent_tesla_vehicle",
     "independent_tesla_source_binding",
     "get_tesla_vehicle_observation",
 ]

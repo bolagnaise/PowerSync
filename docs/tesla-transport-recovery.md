@@ -128,6 +128,16 @@ and settled charging state. Recovery does not issue Start or change a limit to
 manufacture convergence. The original delivery outcome stays unknown, while
 separate retirement and present-state evidence allow future ordinary control.
 
+If that independent read is unavailable because the car is asleep, recovery
+first uses the ordinary bounded BLE Wake and reads again. When the configured
+provider permits cloud fallback, a remaining failure can request one Wake on
+the exact native cloud client and wait up to 60 seconds using its vehicle-info
+endpoint. It then requires fresh independent charge-state observations; Wake
+acceptance alone never releases the incident. This fallback bypasses the
+Teslemetry command router, keeps the same VIN and provider binding, and does
+not change charging settings or extend an existing session deadline. BLE-only
+configuration does not enable the paid cloud Wake fallback.
+
 The recovery sidecar (`power_sync.ev_transport_recovery.<entry_id>`) is
 independent of the automation store's legacy projection. It retains incidents,
 generations, attempts, liabilities and essential finite stop obligations.
