@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 from collections.abc import Mapping
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
@@ -34,6 +35,36 @@ MANUAL_STOP_HOLD_SECONDS = 15 * 60
 RECOVERED_OWNERSHIP_MAX_AGE_SECONDS = 15 * 60
 EXTERNAL_COMMAND_SETTLE_SECONDS = 90
 POWERSYNC_STOP_CONFIRM_SECONDS = 15 * 60
+EV_QUICK_OBLIGATIONS_KEY = "ev_quick_control_obligations"
+_EV_QUICK_TIMERS_KEY = "_ev_quick_control_timers"
+_EV_QUICK_PARAM_KEYS = frozenset(
+    {
+        "charger_type",
+        "charger_switch_entity",
+        "charger_amps_entity",
+        "charger_status_entity",
+        "charger_power_entity",
+        "ocpp_charger_id",
+        "sigenergy_charger_host",
+        "sigenergy_charger_port",
+        "sigenergy_charger_slave_id",
+        "sigenergy_charger_type",
+        "vehicle_id",
+        "vehicle_vin",
+        "source_mode",
+        "dynamic_mode",
+        "owner_mode",
+        "quick_control",
+        "duration_minutes",
+        "expires_at",
+        "_boost_start_deadline",
+        "_quick_control_obligation_id",
+        "_tesla_command_entity_id",
+        "_tesla_native_command_identity",
+        "_quick_control_binding",
+        "prefer_vin_scoped_current_control",
+    }
+)
 
 
 def owner_family(owner_mode: Any = None) -> str:
@@ -495,6 +526,9 @@ def _runtime_snapshot(hass: Any, config_entry: Any) -> dict[str, Any]:
     # any nonempty malformed record for the recovery layer to reject safely.
     if transport_recovery is missing_transport_recovery or transport_recovery == {}:
         transport_recovery = {"vehicles": {}}
+    quick_control_obligations = entry.get(EV_QUICK_OBLIGATIONS_KEY, {})
+    if not isinstance(quick_control_obligations, dict):
+        quick_control_obligations = {}
     return {
         "active_ownership": dict(get_ev_ownerships(hass, config_entry)),
         "last_commands": dict(get_ev_last_commands(hass, config_entry)),
@@ -510,6 +544,9 @@ def _runtime_snapshot(hass: Any, config_entry: Any) -> dict[str, Any]:
         # Provider uncertainty survives a session/lease replacement. Reload
         # restores evidence for observation and cleanup, never Start authority.
         "transport_recovery": deepcopy(transport_recovery),
+        # Finite manual starts persist their absolute cleanup obligation before
+        # the positive command is allowed to reach a charger.
+        EV_QUICK_OBLIGATIONS_KEY: deepcopy(quick_control_obligations),
         "saved_at": _now_iso(),
     }
 
@@ -556,6 +593,344 @@ def _schedule_runtime_save(hass: Any, config_entry: Any) -> None:
     create_task(persist_ev_runtime_state(hass, config_entry, entry.get("automation_store")))
 
 
+def _quick_control_params(params: Mapping[str, Any]) -> dict[str, Any]:
+    """Keep only identity and cleanup-safe fields in a durable obligation."""
+    result: dict[str, Any] = {}
+    for key in _EV_QUICK_PARAM_KEYS:
+        value = params.get(key)
+        if value is None:
+            continue
+        try:
+            result[key] = deepcopy(value)
+        except Exception:
+            continue
+    return result
+
+
+def _quick_control_timer_entry(hass: Any, config_entry: Any) -> dict[str, Any]:
+    entry = _entry_data(hass, config_entry.entry_id)
+    timers = entry.get(_EV_QUICK_TIMERS_KEY)
+    if not isinstance(timers, dict):
+        timers = entry[_EV_QUICK_TIMERS_KEY] = {}
+    return timers
+
+
+def get_ev_quick_control_obligation(
+    hass: Any,
+    config_entry: Any,
+    vehicle_id: Any,
+) -> dict[str, Any] | None:
+    """Return one finite EV cleanup obligation without exposing its timer."""
+    entry = _entry_data(hass, config_entry.entry_id)
+    obligations = entry.get(EV_QUICK_OBLIGATIONS_KEY)
+    if not isinstance(obligations, dict):
+        return None
+    vid = _ownership_loadpoint_id(hass, config_entry, vehicle_id)
+    record = obligations.get(vid)
+    return deepcopy(record) if isinstance(record, Mapping) else None
+
+
+def update_ev_quick_control_obligation(
+    hass: Any,
+    config_entry: Any,
+    vehicle_id: Any,
+    params: Mapping[str, Any],
+) -> bool:
+    """Refresh cleanup identity after a native Start selects its producer."""
+    entry = _entry_data(hass, config_entry.entry_id)
+    obligations = entry.get(EV_QUICK_OBLIGATIONS_KEY)
+    if not isinstance(obligations, dict):
+        return False
+    vid = _ownership_loadpoint_id(hass, config_entry, vehicle_id)
+    record = obligations.get(vid)
+    if not isinstance(record, dict):
+        return False
+    updated_params = _quick_control_params(params)
+    # Native Start may add producer identity, but must preserve the exact
+    # finite-session generation used by an already armed expiry callback.
+    updated_params["_quick_control_obligation_id"] = record.get(
+        "obligation_id"
+    )
+    record["params"] = updated_params
+    record["updated_at"] = _now_iso()
+    _schedule_runtime_save(hass, config_entry)
+    return True
+
+
+def _cancel_ev_quick_control_timer(
+    hass: Any,
+    config_entry: Any,
+    vehicle_id: Any,
+) -> None:
+    timers = _quick_control_timer_entry(hass, config_entry)
+    vid = _ownership_loadpoint_id(hass, config_entry, vehicle_id)
+    timer = timers.pop(vid, None)
+    if callable(timer):
+        try:
+            timer()
+        except Exception:
+            pass
+
+
+def clear_ev_quick_control_obligation(
+    hass: Any,
+    config_entry: Any,
+    vehicle_id: Any,
+    *,
+    expected_token: str | None = None,
+) -> bool:
+    """Clear a finite cleanup obligation after terminal stop handling."""
+    entry = _entry_data(hass, config_entry.entry_id)
+    obligations = entry.get(EV_QUICK_OBLIGATIONS_KEY)
+    if not isinstance(obligations, dict):
+        return False
+    vid = _ownership_loadpoint_id(hass, config_entry, vehicle_id)
+    current = obligations.get(vid)
+    if (
+        expected_token is not None
+        and (
+            not isinstance(current, Mapping)
+            or current.get("obligation_id") != expected_token
+        )
+    ):
+        return False
+    _cancel_ev_quick_control_timer(hass, config_entry, vehicle_id)
+    removed = obligations.pop(vid, None)
+    if removed is not None:
+        _schedule_runtime_save(hass, config_entry)
+    return removed is not None
+
+
+def arm_ev_quick_control_obligation(
+    hass: Any,
+    config_entry: Any,
+    vehicle_id: Any,
+    record: Mapping[str, Any],
+    *,
+    schedule_at: datetime | None = None,
+) -> Any:
+    """Arm one absolute expiry callback for a persisted cleanup obligation."""
+    if not isinstance(record, Mapping):
+        return None
+    # Preserve malformed evidence for diagnosis, but never turn a missing or
+    # non-mapping parameter payload into an executable cleanup request.
+    params = record.get("params")
+    if not isinstance(params, Mapping) or not params:
+        return None
+    token = record.get("obligation_id")
+    if token is not None and not isinstance(token, str):
+        return None
+    expiry = _as_utc_datetime(record.get("expires_at"))
+    if expiry is None:
+        return None
+    if not record.get("obligation_id"):
+        # Obligations were introduced with a generation token.  Give a
+        # hand-written/partially migrated record one before arming so a stale
+        # callback can never target a later session by VIN alone.
+        if not isinstance(record, dict):
+            return None
+        record["obligation_id"] = uuid4().hex
+        params = record.setdefault("params", {})
+        params["_quick_control_obligation_id"] = record["obligation_id"]
+        _schedule_runtime_save(hass, config_entry)
+    from homeassistant.helpers.event import async_track_point_in_utc_time
+
+    vid = _ownership_loadpoint_id(hass, config_entry, vehicle_id)
+    runtime_entry = _entry_data(hass, config_entry.entry_id)
+    runtime_store = runtime_entry.get("automation_store")
+
+    def _runtime_scope_current() -> bool:
+        current_entry = _entry_data(hass, config_entry.entry_id)
+        return (
+            current_entry is runtime_entry
+            and current_entry.get("automation_store") is runtime_store
+        )
+
+    _cancel_ev_quick_control_timer(hass, config_entry, vid)
+
+    async def _expire(_now: Any) -> None:
+        # Import lazily so ownership restore does not create an actions cycle.
+        from .actions import _action_stop_ev_charging_dynamic
+
+        # Revoke positive ownership before entering the cleanup-only guard.
+        # A superseded callback must not hold or stop the replacement session.
+        if not _runtime_scope_current():
+            return
+        current = get_ev_quick_control_obligation(hass, config_entry, vid)
+        token = record.get("obligation_id")
+        if (
+            current is None
+            or token is None
+            or current.get("obligation_id") != token
+        ):
+            return
+        record_manual_stop_hold(
+            hass,
+            config_entry,
+            vid,
+            reason="Quick EV charge duration elapsed",
+        )
+
+        cleanup_params = dict(record.get("params") or {})
+        charger_type = cleanup_params.get("charger_type", "tesla")
+        cleanup_params.update(
+            {
+                "vehicle_id": vid,
+                "vehicle_vin": vid if charger_type == "tesla" else None,
+                "stop_charging": True,
+                "stop_untracked": True,
+                "manual_stop": True,
+                "quick_control": True,
+                "_force_tesla_stop_request": charger_type == "tesla",
+                "stop_reason": "Quick EV charge duration elapsed",
+                "_quick_control_obligation_id": record.get("obligation_id"),
+                "_ev_cleanup_only": True,
+            }
+        )
+        try:
+            result = await _action_stop_ev_charging_dynamic(
+                hass,
+                config_entry,
+                cleanup_params,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            result = False
+        if not _runtime_scope_current():
+            return
+        if result is True:
+            clear_ev_quick_control_obligation(
+                hass,
+                config_entry,
+                vid,
+                expected_token=record.get("obligation_id"),
+            )
+            return
+
+        # A failed/unknown stop keeps the persisted obligation. Retry a small
+        # bounded number of times without moving the original expiry; reload
+        # can retry the retained obligation after this in-memory budget.
+        current = get_ev_quick_control_obligation(hass, config_entry, vid)
+        if not _runtime_scope_current():
+            return
+        token = record.get("obligation_id")
+        if (
+            current is None
+            or token is None
+            or current.get("obligation_id") != token
+        ):
+            return
+        retry_count = int(record.get("retry_count", 0) or 0)
+        if retry_count >= 3:
+            return
+        record["retry_count"] = retry_count + 1
+        record["updated_at"] = _now_iso()
+        _schedule_runtime_save(hass, config_entry)
+        arm_ev_quick_control_obligation(
+            hass,
+            config_entry,
+            vid,
+            record,
+            schedule_at=datetime.now(timezone.utc)
+            + timedelta(seconds=min(60, 15 * (2**retry_count))),
+        )
+
+    timer = async_track_point_in_utc_time(
+        hass,
+        _expire,
+        schedule_at if schedule_at is not None else expiry,
+    )
+    _quick_control_timer_entry(hass, config_entry)[vid] = timer
+    return timer
+
+
+def get_ev_quick_control_timer(
+    hass: Any,
+    config_entry: Any,
+    vehicle_id: Any,
+) -> Any:
+    """Return the transient timer already armed for one obligation."""
+    timers = _quick_control_timer_entry(hass, config_entry)
+    vid = _ownership_loadpoint_id(hass, config_entry, vehicle_id)
+    return timers.get(vid)
+
+
+async def async_begin_ev_quick_control_obligation(
+    hass: Any,
+    config_entry: Any,
+    vehicle_id: Any,
+    params: Mapping[str, Any],
+    *,
+    reason: str = "Manual EV charging",
+) -> dict[str, Any] | None:
+    """Persist and arm a finite cleanup before positive EV dispatch."""
+    expires_at = _as_utc_datetime(params.get("expires_at"))
+    deadline = params.get("_boost_start_deadline")
+    if expires_at is None or type(deadline) not in (int, float) or not math.isfinite(deadline):
+        return None
+    entry = _entry_data(hass, config_entry.entry_id)
+    obligations = entry.setdefault(EV_QUICK_OBLIGATIONS_KEY, {})
+    if not isinstance(obligations, dict):
+        return None
+    vid = _ownership_loadpoint_id(hass, config_entry, vehicle_id)
+    record = {
+        "vehicle_id": vid,
+        "obligation_id": uuid4().hex,
+        "expires_at": expires_at.isoformat(),
+        "_boost_start_deadline": float(deadline),
+        "created_at": _now_iso(),
+        "updated_at": _now_iso(),
+        "reason": reason,
+        "status": "pending",
+        "retry_count": 0,
+        "params": _quick_control_params(params),
+    }
+    record["params"]["_quick_control_obligation_id"] = record["obligation_id"]
+    previous = obligations.get(vid)
+    previous_snapshot = deepcopy(previous) if isinstance(previous, Mapping) else previous
+    obligations[vid] = record
+    async def _restore_previous() -> None:
+        if previous_snapshot is None:
+            obligations.pop(vid, None)
+        else:
+            obligations[vid] = deepcopy(previous_snapshot)
+            # A failed replacement arm may have cancelled the old transient
+            # timer. Restore it before returning the persistence error.
+            if arm_ev_quick_control_obligation(
+                hass,
+                config_entry,
+                vid,
+                obligations[vid],
+            ) is None:
+                _cancel_ev_quick_control_timer(hass, config_entry, vid)
+        try:
+            await persist_ev_runtime_state(hass, config_entry)
+        except BaseException:
+            # The original durable record was already persisted before this
+            # replacement attempt. Keep the in-memory old obligation and let
+            # the caller retain the original failure/cancellation outcome.
+            pass
+
+    try:
+        persisted = await persist_ev_runtime_state(hass, config_entry)
+    except BaseException:
+        await _restore_previous()
+        raise
+    if not persisted:
+        await _restore_previous()
+        return None
+    try:
+        timer = arm_ev_quick_control_obligation(hass, config_entry, vid, record)
+    except BaseException:
+        await _restore_previous()
+        raise
+    if timer is None:
+        await _restore_previous()
+        return None
+    return deepcopy(record)
+
+
 def restore_ev_runtime_state(
     hass: Any,
     config_entry: Any,
@@ -579,6 +954,9 @@ def restore_ev_runtime_state(
     stored_transport_recovery = runtime_state.get(
         "transport_recovery", missing_transport_recovery
     )
+    stored_quick_control_obligations = runtime_state.get(
+        EV_QUICK_OBLIGATIONS_KEY, {}
+    )
     # Older persisted runtime state had no recovery journal, or serialized an
     # empty dict.  Both are valid empty journals under the current schema;
     # retain every nonempty footprint unchanged so recovery can fail closed.
@@ -588,6 +966,11 @@ def restore_ev_runtime_state(
     ):
         stored_transport_recovery = {"vehicles": {}}
     entry["ev_transport_recovery"] = deepcopy(stored_transport_recovery)
+    entry[EV_QUICK_OBLIGATIONS_KEY] = (
+        deepcopy(stored_quick_control_obligations)
+        if isinstance(stored_quick_control_obligations, dict)
+        else {}
+    )
     # Retain malformed records for diagnosis, without treating them as control
     # authority. The Boost restore path validates identity and the deadline.
     entry["ev_boost_sessions"] = deepcopy(stored_boost_sessions)
@@ -673,6 +1056,7 @@ def restore_ev_runtime_state(
         "resumable_manual_sessions": resumable_manual_sessions,
         "expired_manual_sessions": expired_manual_sessions,
         "boost_sessions": entry["ev_boost_sessions"],
+        EV_QUICK_OBLIGATIONS_KEY: deepcopy(entry[EV_QUICK_OBLIGATIONS_KEY]),
     }
 
 

@@ -74,7 +74,7 @@ class _Services:
 
 
 class _Hass:
-    __slots__ = ("data", "states_by_id", "states", "entity_registry", "services", "persist_ok", "persisted")
+    __slots__ = ("data", "states_by_id", "states", "entity_registry", "services", "persist_ok", "persisted", "config_entries")
 
     def __init__(self, registrations):
         self.data = {"power_sync": {"entry-1": {"automation_store": object()}}}
@@ -89,6 +89,7 @@ class _Hass:
         self.persist_ok = True
         self.persisted = []
         self.services = _Services(self)
+        self.config_entries = None
 
 
 class _Entry:
@@ -783,3 +784,569 @@ async def test_cancelled_persist_is_drained_and_rollback_is_saved(harness, monke
         await task
     assert recovery.RECOVERY_KEY not in hass.data["power_sync"][entry.entry_id]
     assert hass.persisted and hass.persisted[-1] is None
+
+
+@pytest.mark.asyncio
+async def test_native_session_route_carries_rate_limit_and_stop_per_vehicle(harness):
+    hass, entry, _, _ = harness
+    native_a = {"kind": "ha", "entity_id": "switch.fallback"}
+    native_b = {"kind": "ha", "entity_id": "switch.fallback_b"}
+
+    start_a = await recovery.async_begin_attempt(
+        hass, entry, VIN_A, native_a, "start", native_a["entity_id"]
+    )
+    start_b = await recovery.async_begin_attempt(
+        hass, entry, VIN_B, native_b, "start", native_b["entity_id"]
+    )
+    assert start_a is not None and start_b is not None
+    assert await recovery.async_finish_attempt(start_a, "accepted_unconfirmed")
+    assert await recovery.async_finish_attempt(start_b, "accepted_unconfirmed")
+
+    routes = hass.data["power_sync"][entry.entry_id][recovery.RECOVERY_KEY]["vehicles"]
+    assert routes[VIN_A]["route"]["session_scope"]["session_id"] == "sa"
+    assert routes[VIN_B]["route"]["session_scope"]["session_id"] == "sb"
+
+    rate_a = await recovery.async_begin_attempt(
+        hass, entry, VIN_A, native_a, "rate", native_a["entity_id"]
+    )
+    assert rate_a is not None
+    assert await recovery.async_finish_attempt(rate_a, "accepted_unconfirmed")
+    assert recovery.get_vehicle_route(hass, entry, VIN_A)["kind"] == "ha"
+    assert recovery.get_vehicle_route(hass, entry, VIN_B)["kind"] == "ha"
+
+    stop_a = await recovery.async_begin_attempt(
+        hass, entry, VIN_A, native_a, "stop", native_a["entity_id"]
+    )
+    assert stop_a is not None
+    assert await recovery.async_finish_attempt(stop_a, "confirmed")
+    assert recovery.get_vehicle_route(hass, entry, VIN_A) is None
+    assert recovery.get_vehicle_route(hass, entry, VIN_B)["kind"] == "ha"
+
+    # The completed session no longer pins native transport; a later session
+    # can use its configured BLE producer again.
+    later_ble = await recovery.async_begin_attempt(
+        hass, entry, VIN_A, _route("bridge_a", "switch.car_a_charger", "switch.fallback"),
+        "start", "switch.car_a_charger",
+    )
+    assert later_ble is not None
+
+
+@pytest.mark.asyncio
+async def test_native_session_route_carries_across_operation_entities(harness):
+    hass, entry, registrations, _ = harness
+    for entity_id in ("number.fallback_current", "number.fallback_limit"):
+        registrations[entity_id] = _Entity(
+            entity_id,
+            device="native-device",
+            entry="native-entry",
+            platform="teslemetry",
+        )
+    start_route = {"kind": "ha", "entity_id": "switch.fallback"}
+    start = await recovery.async_begin_attempt(
+        hass, entry, VIN_A, start_route, "start", "switch.fallback"
+    )
+    assert start is not None
+    assert await recovery.async_finish_attempt(start, "accepted_unconfirmed")
+    current = recovery.get_vehicle_route(hass, entry, VIN_A)
+    assert current["session_anchor"]["entity_id"] == "switch.fallback"
+
+    rate = await recovery.async_begin_attempt(
+        hass,
+        entry,
+        VIN_A,
+        {"kind": "ha", "entity_id": "number.fallback_current"},
+        "rate",
+        "number.fallback_current",
+    )
+    assert rate is not None
+    assert rate.route["entity_id"] == "number.fallback_current"
+    assert rate.route["session_anchor"]["entity_id"] == "switch.fallback"
+    assert await recovery.async_finish_attempt(rate, "accepted_unconfirmed")
+
+    limit = await recovery.async_begin_attempt(
+        hass,
+        entry,
+        VIN_A,
+        {"kind": "ha", "entity_id": "number.fallback_limit"},
+        "limit",
+        "number.fallback_limit",
+    )
+    assert limit is not None
+    assert await recovery.async_finish_attempt(limit, "accepted_unconfirmed")
+
+    stop = await recovery.async_begin_attempt(
+        hass,
+        entry,
+        VIN_A,
+        {"kind": "ha", "entity_id": "switch.fallback"},
+        "stop",
+        "switch.fallback",
+    )
+    assert stop is not None
+    assert await recovery.async_finish_attempt(stop, "confirmed")
+    assert recovery.get_vehicle_route(hass, entry, VIN_A) is None
+
+
+@pytest.mark.asyncio
+async def test_native_session_route_rejects_other_provider_operation_entity(harness):
+    hass, entry, registrations, _ = harness
+    registrations["number.other_current"] = _Entity(
+        "number.other_current",
+        device="other-native-device",
+        entry="other-native-entry",
+        platform="tesla_fleet",
+    )
+    start = await recovery.async_begin_attempt(
+        hass,
+        entry,
+        VIN_A,
+        {"kind": "ha", "entity_id": "switch.fallback"},
+        "start",
+        "switch.fallback",
+    )
+    assert start is not None
+    assert await recovery.async_finish_attempt(start, "accepted_unconfirmed")
+    assert await recovery.async_begin_attempt(
+        hass,
+        entry,
+        VIN_A,
+        {"kind": "ha", "entity_id": "number.other_current"},
+        "rate",
+        "number.other_current",
+    ) is None
+    route = recovery.get_vehicle_route(hass, entry, VIN_A)
+    assert route["entity_id"] == "switch.fallback"
+    assert route["session_anchor"]["entity_id"] == "switch.fallback"
+
+
+@pytest.mark.asyncio
+async def test_native_session_route_survives_reload_but_rebind_or_lease_change_blocks(harness):
+    hass, entry, registrations, owners = harness
+    native = {"kind": "ha", "entity_id": "switch.fallback"}
+    start = await recovery.async_begin_attempt(
+        hass, entry, VIN_A, native, "start", native["entity_id"]
+    )
+    assert start is not None
+    assert await recovery.async_finish_attempt(start, "accepted_unconfirmed")
+
+    restored = _Hass({})
+    restored.data["power_sync"][entry.entry_id] = deepcopy(
+        hass.data["power_sync"][entry.entry_id]
+    )
+    restored.entity_registry = hass.entity_registry
+    assert recovery.get_vehicle_route(restored, entry, VIN_A)["kind"] == "ha"
+
+    owners[VIN_A]["ownership_generation"] = 2
+    assert recovery.get_vehicle_route(restored, entry, VIN_A)["kind"] == "blocked"
+    owners[VIN_A]["ownership_generation"] = 1
+    registrations["switch.fallback"].device_id = "rebound-native-device"
+    assert recovery.get_vehicle_route(restored, entry, VIN_A)["kind"] == "blocked"
+
+
+@pytest.mark.asyncio
+async def test_native_rate_without_active_start_does_not_pin_future_ble(harness):
+    hass, entry, _, _ = harness
+    native = {"kind": "ha", "entity_id": "switch.fallback"}
+    rate = await recovery.async_begin_attempt(
+        hass, entry, VIN_A, native, "rate", native["entity_id"]
+    )
+    assert rate is not None
+    assert await recovery.async_finish_attempt(rate, "accepted_unconfirmed")
+    assert recovery.get_vehicle_route(hass, entry, VIN_A) is None
+
+
+@pytest.mark.asyncio
+async def test_native_session_handoff_binds_after_start_lease_is_claimed(harness):
+    hass, entry, _, owners = harness
+    native = {"kind": "ha", "entity_id": "switch.fallback"}
+    owners.pop(VIN_A)
+    start = await recovery.async_begin_attempt(
+        hass, entry, VIN_A, native, "start", native["entity_id"]
+    )
+    assert start is not None
+    assert await recovery.async_finish_attempt(start, "accepted_unconfirmed")
+    assert recovery.get_vehicle_route(hass, entry, VIN_A) is None
+
+    owners[VIN_A] = {
+        "owner": "powersync",
+        "owner_mode": "manual",
+        "session_id": "claimed-after-start",
+        "ownership_generation": 3,
+    }
+    registration = hass.entity_registry.async_get(native["entity_id"])
+    expected_identity = {
+        key: getattr(registration, key)
+        for key in ("entity_id", "platform", "config_entry_id", "device_id", "unique_id")
+    }
+    assert await recovery.async_bind_native_session_route(
+        hass,
+        entry,
+        VIN_A,
+        native["entity_id"],
+        expected_identity=expected_identity,
+    )
+    assert recovery.get_vehicle_route(hass, entry, VIN_A)["kind"] == "ha"
+    assert (
+        recovery.get_vehicle_route(hass, entry, VIN_A)["session_scope"]["session_id"]
+        == "claimed-after-start"
+    )
+
+
+@pytest.mark.asyncio
+async def test_native_restore_handoff_reuses_exact_producer_for_rate_limit_stop(harness):
+    hass, entry, registrations, owners = harness
+    for entity_id in ("number.fallback_current", "number.fallback_limit"):
+        registrations[entity_id] = _Entity(
+            entity_id,
+            device="native-device",
+            entry="native-entry",
+            platform="teslemetry",
+        )
+    start = await recovery.async_begin_attempt(
+        hass,
+        entry,
+        VIN_A,
+        {"kind": "ha", "entity_id": "switch.fallback"},
+        "start",
+        "switch.fallback",
+    )
+    assert start is not None
+    assert await recovery.async_finish_attempt(start, "accepted_unconfirmed")
+    persisted_route = deepcopy(recovery.get_vehicle_route(hass, entry, VIN_A))
+    assert persisted_route["kind"] == "ha"
+
+    # A restored manual session has a new ownership lease, while the registry
+    # and pairing remain the exact producer captured by the old Start.
+    restored = _Hass({})
+    restored.data["power_sync"][entry.entry_id] = deepcopy(
+        hass.data["power_sync"][entry.entry_id]
+    )
+    restored.entity_registry = hass.entity_registry
+    owners[VIN_A] = {
+        "owner": "powersync",
+        "owner_mode": "manual",
+        "session_id": "restored-session",
+        "ownership_generation": 2,
+    }
+    assert recovery.get_vehicle_route(restored, entry, VIN_A)["kind"] == "blocked"
+    assert await recovery.async_rebind_native_session_route(
+        restored,
+        entry,
+        VIN_A,
+        entity_id="switch.fallback",
+        expected_identity=persisted_route["entity_identity"],
+        mode="positive_resume",
+    )
+    rebound = recovery.get_vehicle_route(restored, entry, VIN_A)
+    assert rebound["kind"] == "ha"
+    assert rebound["entity_id"] == persisted_route["entity_id"]
+    assert rebound["entity_identity"] == persisted_route["entity_identity"]
+    assert rebound["vehicle_id"] == VIN_A
+    assert rebound["producer_identity"] == persisted_route["producer_identity"]
+    assert rebound["session_scope"]["session_id"] == "restored-session"
+
+    # Operation-specific native entities inherit only the recovered session
+    # route; the handoff itself does not create another Start attempt.
+    rate = await recovery.async_begin_attempt(
+        restored,
+        entry,
+        VIN_A,
+        {"kind": "ha", "entity_id": "number.fallback_current"},
+        "rate",
+        "number.fallback_current",
+    )
+    assert rate is not None
+    assert rate.route["session_anchor"]["entity_id"] == "switch.fallback"
+    assert await recovery.async_finish_attempt(rate, "accepted_unconfirmed")
+    limit = await recovery.async_begin_attempt(
+        restored,
+        entry,
+        VIN_A,
+        {"kind": "ha", "entity_id": "number.fallback_limit"},
+        "limit",
+        "number.fallback_limit",
+    )
+    assert limit is not None
+    assert await recovery.async_finish_attempt(limit, "accepted_unconfirmed")
+    stop = await recovery.async_begin_attempt(
+        restored,
+        entry,
+        VIN_A,
+        {"kind": "ha", "entity_id": "switch.fallback"},
+        "stop",
+        "switch.fallback",
+    )
+    assert stop is not None
+    assert await recovery.async_finish_attempt(stop, "confirmed")
+    assert recovery.get_vehicle_route(restored, entry, VIN_A) is None
+    records = restored.data["power_sync"][entry.entry_id][recovery.RECOVERY_KEY]["vehicles"]
+    assert records[VIN_A]["attempts"] == {}
+
+
+@pytest.mark.asyncio
+async def test_native_restore_resume_allows_isolated_ble_hazard(harness, monkeypatch):
+    hass, entry, registrations, owners = harness
+    registrations["number.fallback_current"] = _Entity(
+        "number.fallback_current",
+        device="native-device",
+        entry="native-entry",
+        platform="teslemetry",
+    )
+    ble_route = _route("bridge_a", "switch.car_a_charger", "switch.fallback")
+    ble = await recovery.async_begin_attempt(
+        hass, entry, VIN_A, ble_route, "start", ble_route["entity_id"]
+    )
+    assert ble is not None
+    assert await recovery.async_finish_attempt(ble, "sent_unknown")
+    _old_bridge_states(hass)
+    hass.services.update_states = True
+    monkeypatch.setattr(recovery, "BLE_ISOLATION_TIMEOUT", 0.2)
+    assert await recovery.async_isolate_ble(ble, authorize=True)
+
+    native = {"kind": "ha", "entity_id": "switch.fallback"}
+    native_start = await recovery.async_begin_attempt(
+        hass, entry, VIN_A, native, "start", native["entity_id"]
+    )
+    assert native_start is not None
+    assert await recovery.async_finish_attempt(native_start, "accepted_unconfirmed")
+    old_route = deepcopy(recovery.get_vehicle_route(hass, entry, VIN_A))
+    assert old_route["kind"] == "ha"
+
+    restored = _Hass({})
+    restored.data["power_sync"][entry.entry_id] = deepcopy(
+        hass.data["power_sync"][entry.entry_id]
+    )
+    restored.entity_registry = hass.entity_registry
+    restored.states_by_id = hass.states_by_id
+    restored.states = types.SimpleNamespace(get=restored.states_by_id.get)
+    owners[VIN_A] = {
+        "owner": "powersync",
+        "owner_mode": "manual",
+        "session_id": "restored-session",
+        "ownership_generation": 2,
+    }
+    assert await recovery.async_rebind_native_session_route(
+        restored,
+        entry,
+        VIN_A,
+        entity_id=native["entity_id"],
+        expected_identity=old_route["entity_identity"],
+        mode="positive_resume",
+    )
+    rate = await recovery.async_begin_attempt(
+        restored,
+        entry,
+        VIN_A,
+        {"kind": "ha", "entity_id": "number.fallback_current"},
+        "rate",
+        "number.fallback_current",
+    )
+    assert rate is not None
+    assert await recovery.async_finish_attempt(rate, "accepted_unconfirmed")
+    ledger = restored.data["power_sync"][entry.entry_id][recovery.RECOVERY_KEY]["vehicles"][VIN_A]
+    assert ble.attempt_id in ledger["attempts"]
+    assert ledger["attempts"][ble.attempt_id]["outcome"] == "sent_unknown"
+
+
+@pytest.mark.asyncio
+async def test_native_restore_handoff_rejects_provider_rebind(harness):
+    hass, entry, _, owners = harness
+    native = {"kind": "ha", "entity_id": "switch.fallback"}
+    start = await recovery.async_begin_attempt(
+        hass, entry, VIN_A, native, "start", native["entity_id"]
+    )
+    assert start is not None
+    assert await recovery.async_finish_attempt(start, "accepted_unconfirmed")
+    old_route = deepcopy(recovery.get_vehicle_route(hass, entry, VIN_A))
+    restored = _Hass({})
+    restored.data["power_sync"][entry.entry_id] = deepcopy(
+        hass.data["power_sync"][entry.entry_id]
+    )
+    restored.entity_registry = hass.entity_registry
+    owners[VIN_A] = {
+        "owner": "powersync",
+        "owner_mode": "manual",
+        "session_id": "restored-session",
+        "ownership_generation": 2,
+    }
+    entry.options["ev_provider"] = "another-native-provider"
+    assert not await recovery.async_rebind_native_session_route(
+        restored,
+        entry,
+        VIN_A,
+        entity_id=native["entity_id"],
+        expected_identity=old_route["entity_identity"],
+        mode="positive_resume",
+    )
+    assert restored.data["power_sync"][entry.entry_id][recovery.RECOVERY_KEY]["vehicles"][VIN_A]["route"] == old_route
+
+
+@pytest.mark.asyncio
+async def test_native_restore_handoff_rolls_back_pairing_change_during_persist(
+    harness, monkeypatch
+):
+    hass, entry, _, owners = harness
+    native = {"kind": "ha", "entity_id": "switch.fallback"}
+    start = await recovery.async_begin_attempt(
+        hass, entry, VIN_A, native, "start", native["entity_id"]
+    )
+    assert start is not None
+    assert await recovery.async_finish_attempt(start, "accepted_unconfirmed")
+    old_route = deepcopy(recovery.get_vehicle_route(hass, entry, VIN_A))
+    restored = _Hass({})
+    restored.data["power_sync"][entry.entry_id] = deepcopy(
+        hass.data["power_sync"][entry.entry_id]
+    )
+    restored.entity_registry = hass.entity_registry
+    owners[VIN_A] = {
+        "owner": "powersync",
+        "owner_mode": "manual",
+        "session_id": "restored-session",
+        "ownership_generation": 2,
+    }
+
+    fake = sys.modules["power_sync.automations.ev_ownership"]
+    original_persist = fake.persist_ev_runtime_state
+    changed = False
+
+    async def persist_then_rebind(*args, **kwargs):
+        nonlocal changed
+        result = await original_persist(*args, **kwargs)
+        if not changed:
+            changed = True
+            entry.options["ev_provider"] = "replacement-provider"
+        return result
+
+    monkeypatch.setattr(fake, "persist_ev_runtime_state", persist_then_rebind)
+    assert not await recovery.async_rebind_native_session_route(
+        restored,
+        entry,
+        VIN_A,
+        entity_id=native["entity_id"],
+        expected_identity=old_route["entity_identity"],
+        mode="positive_resume",
+    )
+    ledger = restored.data["power_sync"][entry.entry_id][recovery.RECOVERY_KEY]["vehicles"][VIN_A]
+    assert ledger["route"] == old_route
+
+
+@pytest.mark.asyncio
+async def test_native_cleanup_handoff_preserves_unknown_hazard(harness):
+    hass, entry, _, owners = harness
+    native = {"kind": "ha", "entity_id": "switch.fallback"}
+    start = await recovery.async_begin_attempt(
+        hass, entry, VIN_A, native, "start", native["entity_id"]
+    )
+    assert start is not None
+    assert await recovery.async_finish_attempt(start, "accepted_unconfirmed")
+    unknown = await recovery.async_begin_attempt(
+        hass, entry, VIN_A, native, "rate", native["entity_id"]
+    )
+    assert unknown is not None
+    assert await recovery.async_finish_attempt(unknown, "sent_unknown")
+    before = deepcopy(
+        hass.data["power_sync"][entry.entry_id][recovery.RECOVERY_KEY]["vehicles"][VIN_A]
+    )
+
+    restored = _Hass({})
+    restored.data["power_sync"][entry.entry_id] = deepcopy(
+        hass.data["power_sync"][entry.entry_id]
+    )
+    restored.entity_registry = hass.entity_registry
+    owners[VIN_A] = {
+        "owner": "powersync",
+        "owner_mode": "manual",
+        "session_id": "cleanup-session",
+        "ownership_generation": 3,
+    }
+    expected_identity = before["route"]["entity_identity"]
+    assert not await recovery.async_rebind_native_session_route(
+        restored,
+        entry,
+        VIN_A,
+        entity_id=native["entity_id"],
+        expected_identity=expected_identity,
+        mode="positive_resume",
+    )
+    assert await recovery.async_rebind_native_session_route(
+        restored,
+        entry,
+        VIN_A,
+        entity_id=native["entity_id"],
+        expected_identity=expected_identity,
+        mode="cleanup_stop",
+    )
+    ledger = restored.data["power_sync"][entry.entry_id][recovery.RECOVERY_KEY]["vehicles"][VIN_A]
+    assert ledger["attempts"][unknown.attempt_id]["outcome"] == "sent_unknown"
+    assert ledger["route"]["session_scope"]["session_id"] == "cleanup-session"
+
+    stop = await recovery.async_begin_attempt(
+        restored, entry, VIN_A, native, "stop", native["entity_id"]
+    )
+    assert stop is not None
+    assert await recovery.async_finish_attempt(stop, "confirmed")
+    ledger = restored.data["power_sync"][entry.entry_id][recovery.RECOVERY_KEY]["vehicles"][VIN_A]
+    assert unknown.attempt_id in ledger["attempts"]
+    assert ledger["attempts"][unknown.attempt_id]["outcome"] == "sent_unknown"
+
+
+@pytest.mark.asyncio
+async def test_cleanup_handoff_is_stop_only_until_cleanup_finishes(harness):
+    hass, entry, registrations, owners = harness
+    for entity_id in ("number.fallback_current", "number.fallback_limit"):
+        registrations[entity_id] = _Entity(
+            entity_id,
+            device="native-device",
+            entry="native-entry",
+            platform="teslemetry",
+        )
+    native = {"kind": "ha", "entity_id": "switch.fallback"}
+    start = await recovery.async_begin_attempt(
+        hass, entry, VIN_A, native, "start", native["entity_id"]
+    )
+    assert start is not None
+    assert await recovery.async_finish_attempt(start, "accepted_unconfirmed")
+    old_route = deepcopy(recovery.get_vehicle_route(hass, entry, VIN_A))
+
+    restored = _Hass({})
+    restored.data["power_sync"][entry.entry_id] = deepcopy(
+        hass.data["power_sync"][entry.entry_id]
+    )
+    restored.entity_registry = hass.entity_registry
+    owners[VIN_A] = {
+        "owner": "powersync",
+        "owner_mode": "boost",
+        "session_id": "cleanup-session",
+        "ownership_generation": 4,
+    }
+    assert await recovery.async_rebind_native_session_route(
+        restored,
+        entry,
+        VIN_A,
+        entity_id=native["entity_id"],
+        expected_identity=old_route["entity_identity"],
+        mode="cleanup_stop",
+    )
+    rebound = recovery.get_vehicle_route(restored, entry, VIN_A)
+    assert rebound["cleanup_only"] is True
+
+    for operation, entity_id in (
+        ("start", "switch.fallback"),
+        ("rate", "number.fallback_current"),
+        ("limit", "number.fallback_limit"),
+    ):
+        assert await recovery.async_begin_attempt(
+            restored,
+            entry,
+            VIN_A,
+            {"kind": "ha", "entity_id": entity_id},
+            operation,
+            entity_id,
+        ) is None
+
+    stop = await recovery.async_begin_attempt(
+        restored, entry, VIN_A, native, "stop", native["entity_id"]
+    )
+    assert stop is not None
+    assert await recovery.async_finish_attempt(stop, "confirmed")
+    assert recovery.get_vehicle_route(restored, entry, VIN_A) is None

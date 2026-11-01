@@ -473,6 +473,7 @@ class ChargingSessionManager:
         vehicle_id: str,
         reason: str,
         end_soc: Optional[int] = None,
+        expected_session_id: Optional[str] = None,
     ) -> Optional[ChargingSession]:
         """End a charging session and persist to storage.
 
@@ -480,11 +481,17 @@ class ChargingSessionManager:
             vehicle_id: Vehicle identifier
             reason: Why the session ended
             end_soc: Ending state of charge (%)
+            expected_session_id: If provided, end only this exact active
+                session.  A replacement session is left untouched.
 
         Returns:
             Completed session or None if no active session
         """
         async with self._session_lock:
+            if expected_session_id is not None:
+                current = self.active_sessions.get(vehicle_id)
+                if current is None or current.id != expected_session_id:
+                    return None
             return await self._end_session_unlocked(vehicle_id, reason, end_soc)
 
     async def _end_session_unlocked(

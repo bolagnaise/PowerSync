@@ -19,6 +19,15 @@ Restoring those records grants observation, isolation and cleanup authority;
 it never replays a saved Start. An unresolved earlier attempt cannot be
 overwritten by a later Stop, a successful read or a replacement lease.
 
+Finite manual requests capture their absolute deadline before readiness or
+provider awaits. The cleanup obligation is persisted and armed before positive
+dispatch, with a generation token and original producer/pairing binding.
+Cleanup uses a separate per-vehicle lane, so a stalled positive request or
+another car's Stop cannot strand expiry. A late accepted Start receives tracked
+compensating cleanup and cannot restore charging authority or extend its timer.
+Automatic Boost cleanup retains native solar ownership holds; the separate
+lane does not permit it to take over a foreign controller.
+
 ## Transport selection and evidence
 
 Configured ESPHome BLE remains first. A proven pre-dispatch failure permits
@@ -32,8 +41,9 @@ turns off that bridge's BLE connection and requires fresh OFF observations
 from the control plus an explicit producer-fence receipt. The common legacy
 `ble_status` sensor reports advertisement presence; neither ON nor OFF proves
 GATT connection state or that queued commands have stopped. A replaced alternate
-entity, missing OFF observation or changed pairing prevents handoff. No
-firmware reboot, key change or arbitrary queue-expiry timer proves isolation.
+entity, missing OFF observation or changed pairing prevents handoff. An accepted
+restart request, key change or arbitrary queue-expiry timer alone proves no
+producer isolation or vehicle outcome.
 The failed bridge stays quarantined; PowerSync does not automatically turn
 its radio back on while its old attempt remains unresolved.
 
@@ -43,9 +53,12 @@ alone is insufficient. A bounded wake/data-refresh failure is a known
 pre-dispatch failure, so Both mode can use the exact Fleet fallback without
 creating a queued BLE mutation. Fleet data cannot certify BLE session health.
 
-BLE wake sends one request and allows up to 120 seconds for a fresh vehicle
-awake or charge-data response before considering fallback. It does not repeatedly
-queue wake requests. Ownership, registry identity and the original charging
+BLE wake allows up to 120 seconds for a fresh vehicle awake or charge-data
+response before considering fallback. If the same registered bridge freshly
+reports the car still asleep after the first request, it may retry Wake once
+within that original timeout. This handles a stock bridge discarding a Wake
+queued before its GATT connection exists. Advertisement presence alone cannot
+trigger the retry. Ownership, registry identity and the original charging
 deadline remain effective during the wait; cancellation or expiry cannot turn
 a late wake into a new Start. The charge-data health check still precedes every
 mutation. This timing and route selection are PowerSync software behaviour and
@@ -82,6 +95,18 @@ and rollback artifact are needed before changing bridge firmware; their absence
 does not require rebuilding or pairing a bridge that can communicate normally.
 No bridge firmware has been flashed during this investigation.
 
+The reviewed stock bridge source keeps its command/read/write queues in RAM.
+A verified real node restart can reset that producer without a firmware update;
+it cannot undo an action already accepted by the vehicle. A software recovery
+path must separately verify the exact node's reboot, prevent host replay, obtain
+fresh independent vehicle state and account for any remaining possible command
+effect. Automatic stock-restart reconciliation is not enabled in this
+checkpoint; its unused prototype was excluded because node qualification and
+vehicle reconciliation were incomplete. The nonce receipt is the currently
+implemented automatic isolation proof. Missing original build files do not
+prevent ordinary Wake,
+healthy BLE control, prewrite fallback or an operational restart.
+
 Fleet and native Teslemetry recovery use an explicit exact-vehicle coordinator
 refresh when needed. This works with automatic Fleet polling disabled and
 does not introduce recurring paid idle polling. An unchanged provider source
@@ -100,10 +125,28 @@ Native Fleet and Teslemetry service writes also save their intent before
 submission. An ambiguous response or cancellation preserves the exact producer
 and original cleanup obligation across reload. A successful service return is
 provider acknowledgement, with physical charging confirmed separately. A
-completed native fallback returns future requests to the configured BLE
-preference when no outstanding attempt or isolation hazard needs the native
-route. Only a structured HA number validation known to precede the provider
-permits the bounded current-range retry.
+completed native fallback retains its exact producer through the active session,
+including initial current changes, later limits and Stop. The session anchor
+stays separate from each switch/number mutation identity. Later sessions return
+to the configured BLE preference when no outstanding attempt or isolation hazard
+needs the native route. After reload, resuming Manual or Solar rate control
+requires an explicit handoff of that same producer to the restored owner.
+Expired Manual and Boost recovery uses a stop-only handoff, which cannot
+authorize Start, Rate or Limit commands. Neither handoff replays Start or clears
+an unresolved attempt. Only a structured HA number validation known to precede
+the provider permits the bounded current-range retry.
+
+Before a redundant BLE current setter, a fresh exact native requested-current
+report may establish that the capped target already holds. This is an observed
+no-op, recorded as no BLE submission, without Wake, paid polling or a new
+uncertain site reservation. Actual draw, writable-number polling and a generic
+bridge update cannot establish that requested-current setting.
+
+The vehicle list merges charging fields using their own timestamps; a bridge
+status/SoC update does not refresh retained Charging or power. Quarantined BLE
+data cannot override a newer native stopped report or drive automation charging
+triggers. The car's identity/SOC/plug metadata remains available separately from
+unknown charging power.
 
 Legacy `tesla_bluetooth`, modern `teslemetry_bluetooth` command-only entities,
 native Teslemetry and HA Tesla Fleet are distinct adapters. Registry platform,
@@ -177,3 +220,20 @@ an automatic producer-isolation contract or continuous connection reliability.
 The local connection remained intermittent, including a measured TESSY signal
 around -86 dBm. Required two-car, Boost/reload and active-EV coexistence checks
 remain incomplete; the release is still held for those physical checks.
+
+The later private dev6 test physically started W3RT1E through BLE, then stopped
+it through Fleet with fresh stopped/zero-current/zero-power vehicle data. An
+unchanged requested-current write was classified uncertain and remains recorded.
+TESSY started and stopped through native Teslemetry after BLE preflight failed;
+that test exposed repeated BLE waits within the native session and a quick-stop
+deadline that started too late. Those software repairs require a new candidate
+and live retest.
+
+A separate ten-minute TESSY-only Wake observation queued Wake at 22:56:17 UTC,
+first connected GATT at 23:05:52 at -86 dBm, received an asleep status at
+23:06:03, and disconnected at 23:06:26. No Wake execution or charging telemetry
+was logged. A subsequent five-minute BLE reconnect test did not establish a
+connection. This does not measure asleep-to-awake latency: connection delay and
+an unexecuted queued Wake prevent that conclusion. W3RT1E was excluded from
+all further commands when its owner needed to drive; two-car testing awaits
+its availability.

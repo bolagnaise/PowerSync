@@ -254,6 +254,27 @@ def _owner_snapshot(hass: Any, entry: Any, vid: str) -> dict[str, Any]:
         return {}
 
 
+def _session_scope(snapshot: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """Return a lease identity that can keep a native route session-scoped.
+
+    A native command issued without an active ownership lease must remain
+    ephemeral.  An owner, lease key, or generation is sufficient evidence that
+    the caller has a live session to carry the exact producer into subsequent
+    rate/limit commands; the full snapshot is retained so a reload or lease
+    replacement cannot silently adopt that producer.
+    """
+    if not isinstance(snapshot, Mapping):
+        return None
+    if not any(snapshot.get(key) is not None for key in (
+        "owner", "lease_id", "session_id", "ownership_generation",
+    )):
+        return None
+    return {
+        key: snapshot.get(key)
+        for key in ("owner", "owner_mode", "session_id", "ownership_generation", "lease_id")
+    }
+
+
 def _registry(hass: Any) -> Any | None:
     try:
         from homeassistant.helpers import entity_registry as er
@@ -294,6 +315,7 @@ def _pin(hass: Any, entry: Any, runtime: dict[str, Any], vid: str,
     pinned = dict(route)
     pinned.update({
         "kind": kind, "entity_id": entity_id, "entity_identity": identity,
+        "vehicle_id": vid,
         "runtime_digest": _runtime_digest(runtime, entry),
         "setup_digest": _setup_digest(runtime, entry),
         "pairing_digest": _pairing_digest(entry, route, identity=identity),
@@ -369,8 +391,36 @@ def _compatible(hass: Any, entry: Any, runtime: dict[str, Any], vid: str,
     identity = _identity(hass, str(route.get("entity_id") or ""))
     if identity is None or identity != route.get("entity_identity"):
         return False
+    if route.get("vehicle_id") not in (None, vid):
+        return False
+    session_anchor = route.get("session_anchor")
+    if session_anchor is not None:
+        if not isinstance(session_anchor, Mapping):
+            return False
+        anchor_entity = session_anchor.get("entity_id")
+        anchor_identity = session_anchor.get("entity_identity")
+        current_anchor = _identity(hass, str(anchor_entity or ""))
+        if (current_anchor is None or current_anchor != anchor_identity
+                or not isinstance(anchor_identity, Mapping)):
+            return False
+        # Start, Rate, Limit, and Stop use different HA entities on the same
+        # native provider.  Carrying a session is safe only across the exact
+        # provider config/device; unique IDs are entity-specific.
+        if any(identity.get(field) != anchor_identity.get(field)
+               for field in ("platform", "config_entry_id", "device_id")):
+            return False
     expected = _pairing_digest(entry, route, identity=identity)
-    return route.get("pairing_digest") == expected
+    if route.get("pairing_digest") != expected:
+        return False
+    # A native route retained for a charging session is valid only while the
+    # same ownership lease still exists. Check this after the exact provider,
+    # config-entry, device, and unique-id binding above.
+    scope = route.get("session_scope")
+    if scope is None:
+        return True
+    return isinstance(scope, Mapping) and dict(scope) == _session_scope(
+        _owner_snapshot(hass, entry, vid)
+    )
 
 
 def _record_compatible(hass: Any, entry: Any, runtime: dict[str, Any], vid: str,
@@ -445,19 +495,95 @@ async def async_begin_attempt(
     vid = str(vehicle_id or "")
     if runtime is None or not vid or not isinstance(route, Mapping) or not isinstance(operation, str) or not operation:
         return None
-    pinned = _pin(hass, entry, runtime, vid, route, entity_id)
-    if pinned is None:
-        return None
+    operation_name = operation.strip().lower()
+    route_for_pin = dict(route)
+    # Only a native Start can establish a new session route. A standalone
+    # native Rate/Limit command must remain ephemeral for the next session.
+    if route_for_pin.get("kind") == "ha" and operation_name == "start":
+        scope = _session_scope(_owner_snapshot(hass, entry, vid))
+        if scope is not None:
+            route_for_pin["session_scope"] = scope
     async with _journal_lock(runtime):
         before = _snapshot_recovery(runtime)
         ledger = _ledger(runtime, vid, create=True)
         if ledger is None:
             return None
+        # Carry an existing native session pin into Rate/Limit/Stop attempts
+        # across the provider's operation-specific entities. The exact
+        # provider config/device and the original Start entity are retained as
+        # a separate session anchor; a same-VIN entity from another provider
+        # or device cannot inherit the session.
+        existing_route = ledger.get("route")
+        if (isinstance(existing_route, Mapping)
+                and existing_route.get("cleanup_only") is True
+                and operation_name != "stop"):
+            # A cleanup handoff is deliberately narrower than a resumed
+            # charging session.  Do this before any operation-specific entity
+            # pinning so Rate, Limit, Start, and alternate-provider routes
+            # cannot escape the persisted stop-only fence.
+            return None
+        if (
+            route_for_pin.get("kind") == "ha"
+            and isinstance(existing_route, Mapping)
+            and existing_route.get("kind") == "ha"
+            and isinstance(existing_route.get("session_scope"), Mapping)
+            and "session_scope" not in route_for_pin
+        ):
+            old_identity = existing_route.get("entity_identity")
+            new_identity = _identity(hass, entity_id)
+            anchor = existing_route.get("session_anchor")
+            if not isinstance(anchor, Mapping):
+                anchor = {
+                    "entity_id": existing_route.get("entity_id"),
+                    "entity_identity": old_identity,
+                }
+            anchor_identity = anchor.get("entity_identity")
+            old_anchor_current = _identity(
+                hass, str(anchor.get("entity_id") or "")
+            )
+            same_provider_device = (
+                isinstance(old_identity, Mapping)
+                and isinstance(new_identity, Mapping)
+                and all(old_identity.get(field) == new_identity.get(field)
+                        for field in ("platform", "config_entry_id", "device_id"))
+                and isinstance(anchor_identity, Mapping)
+                and isinstance(old_anchor_current, Mapping)
+                and dict(old_anchor_current) == dict(anchor_identity)
+                and existing_route.get("vehicle_id") in (None, vid)
+            )
+            if same_provider_device and _compatible(
+                hass, entry, runtime, vid, existing_route
+            ):
+                route_for_pin["session_scope"] = deepcopy(
+                    existing_route["session_scope"]
+                )
+                route_for_pin["session_anchor"] = deepcopy(anchor)
+                if existing_route.get("cleanup_only") is True:
+                    route_for_pin["cleanup_only"] = True
+            elif route_for_pin.get("kind") == "ha":
+                # An active native session cannot be adopted by a different
+                # provider/config/device, even when it exposes the same VIN.
+                return None
+        if (
+            route_for_pin.get("kind") == "ha"
+            and operation_name == "start"
+            and isinstance(route_for_pin.get("session_scope"), Mapping)
+            and "session_anchor" not in route_for_pin
+        ):
+            start_identity = _identity(hass, entity_id)
+            if start_identity is not None:
+                route_for_pin["session_anchor"] = {
+                    "entity_id": entity_id,
+                    "entity_identity": deepcopy(start_identity),
+                }
+        pinned = _pin(hass, entry, runtime, vid, route_for_pin, entity_id)
+        if pinned is None:
+            return None
         unresolved = _unresolved_routes(ledger)
         # A prior unknown Start must never veto a compensating Stop.  The
         # caller still supplies the current route and performs its own
         # provider/authority checks; this journal only records the intent.
-        if unresolved and operation.strip().lower() != "stop":
+        if unresolved and operation_name != "stop":
             # BLE can move to the native HA route only after its radio has
             # been independently isolated.  Teslemetry command-only routes
             # have no equivalent producer fence, so physical readback alone
@@ -501,12 +627,19 @@ async def async_finish_attempt(ticket: RecoveryTicket, outcome: Any) -> bool:
         before = _snapshot_recovery(runtime)
         if normalized in ("not_sent", "accepted_unconfirmed", "confirmed", "rejected"):
             attempts.pop(ticket.attempt_id, None)
+            session_route_retained = (
+                normalized in ("accepted_unconfirmed", "confirmed")
+                and str(record.get("operation") or "").strip().lower() != "stop"
+                and isinstance(record.get("route"), Mapping)
+                and isinstance(record["route"].get("session_scope"), Mapping)
+            )
             if (
                 record.get("route", {}).get("kind") == "ha"
                 and isinstance(ledger.get("route"), Mapping)
                 and ledger["route"].get("kind") == "ha"
                 and not attempts
                 and not ledger.get("hazards")
+                and not session_route_retained
             ):
                 # A completed native fallback has no outstanding producer to
                 # pin. Let the next request try its configured BLE preference.
@@ -522,6 +655,222 @@ async def async_finish_attempt(ticket: RecoveryTicket, outcome: Any) -> bool:
         except asyncio.CancelledError:
             await _restore_after_cancel(ticket.hass, ticket.entry, runtime, before)
             raise
+        return True
+
+
+async def async_bind_native_session_route(
+    hass: Any,
+    entry: Any,
+    vehicle_id: Any,
+    entity_id: str,
+    *,
+    expected_identity: Mapping[str, Any] | None = None,
+) -> bool:
+    """Persist an accepted native Start as the current session producer.
+
+    Dynamic EV ownership is claimed after the physical Start and initial-rate
+    steps. This explicit handoff bridges that ordering without allowing a
+    standalone native Rate/Limit operation to create a durable route. The
+    caller may provide the mutation-time registry identity so a rebind between
+    Start and ownership claim cannot pin a different provider device.
+    """
+    runtime = _runtime(hass, entry)
+    vid = str(vehicle_id or "")
+    entity = str(entity_id or "")
+    if runtime is None or not vid or not entity:
+        return False
+    scope = _session_scope(_owner_snapshot(hass, entry, vid))
+    if scope is None:
+        return False
+    current_identity = _identity(hass, entity)
+    if current_identity is None:
+        return False
+    if isinstance(expected_identity, Mapping):
+        if any(current_identity.get(key) != expected_identity.get(key) for key in (
+            "entity_id", "platform", "config_entry_id", "device_id", "unique_id",
+        )):
+            return False
+    route = {"kind": "ha", "entity_id": entity, "session_scope": scope}
+    async with _journal_lock(runtime):
+        before = _snapshot_recovery(runtime)
+        ledger = _ledger(runtime, vid, create=True)
+        if ledger is None:
+            return False
+        unresolved = _unresolved_routes(ledger)
+        if unresolved and (
+            any(item.get("kind") != "ble" for item in unresolved)
+            or not _ha_fallback_allowed(hass, ledger, route)
+        ):
+            return False
+        pinned = _pin(hass, entry, runtime, vid, route, entity)
+        if pinned is None:
+            return False
+        ledger["route"] = pinned
+        try:
+            if not await _persist(hass, entry, runtime):
+                _restore_recovery(runtime, before)
+                return False
+        except asyncio.CancelledError:
+            await _restore_after_cancel(hass, entry, runtime, before)
+            raise
+        return True
+
+
+async def async_rebind_native_session_route(
+    hass: Any,
+    entry: Any,
+    vehicle_id: Any,
+    *,
+    entity_id: str | None = None,
+    expected_identity: Mapping[str, Any] | None = None,
+    mode: str = "positive_resume",
+) -> bool:
+    """Rebind a persisted native producer to a recovered ownership lease.
+
+    A native route is scoped to the ownership lease that created it.  Runtime
+    restore creates a new lease, so the old route cannot be used for a resumed
+    Rate/Limit or a cleanup Stop until this handoff has durably established the
+    new lease as the owner of the *same* producer.  The caller must supply the
+    exact entity identity captured with the recovered obligation when it has
+    one; omitting it still requires the persisted route identity to be current.
+
+    ``positive_resume`` refuses every unresolved transport attempt.  It is the
+    only mode that can authorize subsequent positive mutations.  The
+    ``cleanup_stop`` mode may rebind while an older attempt remains unknown,
+    but it never removes or rewrites that hazard.  Neither mode creates a new
+    attempt or changes the vehicle VIN binding.
+    """
+    if mode not in {"positive_resume", "cleanup_stop"}:
+        return False
+    runtime = _runtime(hass, entry)
+    vid = str(vehicle_id or "")
+    if runtime is None or not vid:
+        return False
+
+    current_scope = _session_scope(_owner_snapshot(hass, entry, vid))
+    # A handoff without a current ownership lease would turn old producer
+    # evidence into a general native fallback.  Cleanup callers must establish
+    # their own stop authority before requesting this route repair.
+    if current_scope is None:
+        return False
+
+    async with _journal_lock(runtime):
+        before = _snapshot_recovery(runtime)
+        ledger = _ledger(runtime, vid, create=False)
+        if ledger is None or not isinstance(ledger.get("route"), Mapping):
+            return False
+        old_route = ledger["route"]
+        if old_route.get("kind") != "ha":
+            return False
+        if old_route.get("vehicle_id") != vid:
+            return False
+        old_entity = str(old_route.get("entity_id") or "")
+        entity = old_entity if entity_id is None else str(entity_id or "")
+        if not entity or entity != old_entity:
+            return False
+
+        old_identity = old_route.get("entity_identity")
+        current_identity = _identity(hass, entity)
+        if current_identity is None or not isinstance(old_identity, Mapping):
+            return False
+
+        # Require every producer registry field.  ``disabled_by`` was added to
+        # newer persisted routes; an omitted value in a caller-supplied
+        # expected identity means "enabled", never a wildcard.
+        identity_fields = (
+            "entity_id", "platform", "config_entry_id", "device_id", "unique_id",
+        )
+        if any(old_identity.get(key) != current_identity.get(key)
+               for key in identity_fields):
+            return False
+        if old_identity.get("disabled_by") is not None:
+            return False
+        if isinstance(expected_identity, Mapping):
+            if any(expected_identity.get(key) != current_identity.get(key)
+                   for key in identity_fields):
+                return False
+            if expected_identity.get("disabled_by") is not None:
+                return False
+
+        # Validate the persisted producer binding while ignoring only its old
+        # lease scope.  This catches a provider/config/device rebind and a
+        # changed pairing before the new ownership lease is written.
+        binding_route = deepcopy(old_route)
+        binding_route.pop("session_scope", None)
+        if not _compatible(hass, entry, runtime, vid, binding_route):
+            return False
+        if old_route.get("producer_identity") != _producer_identity(
+            old_route, current_identity
+        ):
+            return False
+
+        unresolved = _unresolved_routes(ledger)
+        if unresolved and mode == "positive_resume":
+            # A native session may continue after a prior BLE producer has
+            # been independently fenced.  The existing handoff rule permits
+            # that exact HA producer only when every unresolved item is BLE
+            # and the fresh bridge isolation proof still validates.  Any
+            # unresolved native/other-provider attempt remains a hard stop.
+            if (
+                any(item.get("kind") != "ble" for item in unresolved)
+                or not _ha_fallback_allowed(hass, ledger, old_route)
+            ):
+                return False
+
+        # Keep the exact producer anchor and VIN.  Only the ownership lease
+        # changes; _pin refreshes runtime diagnostics and recomputes the same
+        # pairing digest after the binding checks above.
+        rebound = deepcopy(old_route)
+        rebound["session_scope"] = deepcopy(current_scope)
+        rebound["owner_snapshot"] = _owner_snapshot(hass, entry, vid)
+        if mode == "cleanup_stop":
+            rebound["cleanup_only"] = True
+        else:
+            # A fully validated positive resume replaces, rather than
+            # inherits, a prior cleanup-only handoff.  In practice this mode
+            # only succeeds once no unresolved hazard remains.
+            rebound.pop("cleanup_only", None)
+        if not isinstance(rebound.get("session_anchor"), Mapping):
+            rebound["session_anchor"] = {
+                "entity_id": old_entity,
+                "entity_identity": deepcopy(old_identity),
+            }
+        pinned = _pin(hass, entry, runtime, vid, rebound, entity)
+        if pinned is None:
+            return False
+        ledger["route"] = pinned
+        try:
+            if not await _persist(hass, entry, runtime):
+                _restore_recovery(runtime, before)
+                return False
+        except asyncio.CancelledError:
+            await _restore_after_cancel(hass, entry, runtime, before)
+            raise
+
+        # Persistence yields to HA.  Recheck both sides of the binding before
+        # the caller is allowed to dispatch a mutation; a concurrent lease or
+        # registry replacement invalidates the handoff and is rolled back.
+        post_identity = _identity(hass, entity)
+        post_scope = _session_scope(_owner_snapshot(hass, entry, vid))
+        post_route = ledger.get("route")
+        post_compatible = (
+            isinstance(post_route, Mapping)
+            and _compatible(hass, entry, runtime, vid, post_route)
+        )
+        if (
+            post_identity != current_identity
+            or post_scope != current_scope
+            or not post_compatible
+            or bool(post_route.get("cleanup_only", False))
+            != (mode == "cleanup_stop")
+        ):
+            _restore_recovery(runtime, before)
+            try:
+                await _persist(hass, entry, runtime)
+            except asyncio.CancelledError:
+                await _restore_after_cancel(hass, entry, runtime, before)
+                raise
+            return False
         return True
 
 
@@ -632,7 +981,8 @@ def _hazards(ledger: Mapping[str, Any]) -> list[Mapping[str, Any]]:
 def _blocked(vid: str, route: Mapping[str, Any] | None, reason: str) -> dict[str, Any]:
     return {"kind": "blocked", "vehicle_id": vid, "reason": reason,
             "prefix": route.get("prefix") if isinstance(route, Mapping) else None,
-            "entity_id": route.get("entity_id") if isinstance(route, Mapping) else None}
+            "entity_id": route.get("entity_id") if isinstance(route, Mapping) else None,
+            "entity_identity": route.get("entity_identity") if isinstance(route, Mapping) else None}
 
 
 def _isolation_valid(hass: Any, hazard: Mapping[str, Any]) -> bool:

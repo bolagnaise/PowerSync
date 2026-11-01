@@ -187,6 +187,37 @@ def test_tesla_number_lookup_ignores_modern_command_only_entity():
     assert result == native_entity
 
 
+def test_finite_tesla_binding_rejects_registry_rebind_before_dispatch():
+    """A saved finite session cannot follow a rebound BLE entity on reload."""
+    vin = "LRW3F7FS1NC484342"
+    prefix = "car"
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={
+            "ev_provider": "tesla_ble",
+            "tesla_ble_entity_prefix": prefix,
+            "tesla_ble_vehicle_mapping": f"{vin}={prefix}",
+        },
+    )
+    hass = _Hass(
+        [
+            _State("switch.car_charger", "off"),
+            _State("number.car_charging_amps", "10"),
+            _State("number.car_charging_limit", "70"),
+        ]
+    )
+    params = {"vehicle_vin": vin, "charger_type": "tesla"}
+    binding = asyncio.run(
+        actions._tesla_quick_control_binding(hass, entry, params, vin)
+    )
+    params["_quick_control_binding"] = binding
+    assert actions._tesla_quick_control_binding_current(hass, entry, params)
+
+    hass.entity_registry.entities["switch.car_charger"].unique_id = "other-car"
+    assert not actions._tesla_quick_control_binding_current(hass, entry, params)
+
+
 @pytest.mark.parametrize('matched', [True, False])
 def test_tesla_discovery_masks_vins_on_child_logger_without_parent_filter(matched):
     vin = 'LRW3F7FS1NC484342'
@@ -6946,6 +6977,174 @@ def test_solar_surplus_restart_reclaims_exact_recovered_session(monkeypatch):
     assert state["low_surplus_start"] is not None
 
 
+@pytest.mark.parametrize("handoff_mode", ["reject", "cancel", "replace"])
+def test_solar_native_resume_rejection_ends_new_session(monkeypatch, handoff_mode):
+    """A rejected native resume cannot leave a tracked Solar session alive."""
+    vehicle_id = "5YJTEST0000000001"
+    current_entity = "number.car_charge_current"
+    charging_entity = "sensor.car_charging"
+    native_entity = "switch.native_car_charge"
+    identity = {
+        "entity_id": native_entity,
+        "platform": "tesla_fleet",
+        "config_entry_id": "tesla_fleet-entry",
+        "device_id": "native-car",
+        "unique_id": "native-car-charge",
+        "disabled_by": None,
+    }
+    route = {
+        "kind": "blocked",
+        "reason": "route_identity_changed",
+        "entity_id": native_entity,
+        "entity_identity": identity,
+    }
+    ev_planner = types.ModuleType("power_sync.automations.ev_charging_planner")
+
+    async def plugged_in(*args, **kwargs):
+        return True
+
+    async def ev_soc(*args, **kwargs):
+        return 50.0
+
+    async def at_home(*args, **kwargs):
+        return "home"
+
+    ev_planner.is_ev_plugged_in = plugged_in
+    ev_planner.get_ev_battery_level = ev_soc
+    ev_planner.get_ev_location = at_home
+    monkeypatch.setitem(
+        sys.modules,
+        "power_sync.automations.ev_charging_planner",
+        ev_planner,
+    )
+
+    ended_sessions = []
+
+    class _SessionManager:
+        async def start_session(self, **kwargs):
+            return SimpleNamespace(id="new-solar-session")
+
+        async def end_session(self, **kwargs):
+            ended_sessions.append(kwargs)
+
+    ev_session = types.ModuleType("power_sync.automations.ev_charging_session")
+    ev_session.get_session_manager = lambda: _SessionManager()
+    monkeypatch.setitem(
+        sys.modules,
+        "power_sync.automations.ev_charging_session",
+        ev_session,
+    )
+
+    async def active_charger(*args, **kwargs):
+        return {
+            "max_charge_amps": 32,
+            "max_charge_amps_source": "active_charger",
+            "voltage": 240,
+            "phases": 1,
+            "association_known": True,
+            "capability_known": True,
+        }
+
+    async def charge_current(*args, **kwargs):
+        return current_entity
+
+    async def tesla_entity(hass, pattern, *args, **kwargs):
+        if "charging_state|charging" in pattern:
+            return charging_entity
+        return current_entity
+
+    async def live_status(*args, **kwargs):
+        return {"battery_soc": 50}
+
+    async def reject_resume(_hass, _entry, vehicle_id, **kwargs):
+        if handoff_mode == "cancel":
+            raise asyncio.CancelledError
+        if handoff_mode == "replace":
+            from power_sync.automations.ev_ownership import claim_ev_ownership
+
+            actions._dynamic_ev_state["entry-1"][vehicle_id] = {
+                "active": True,
+                "params": {"owner_mode": "boost", "charger_type": "tesla"},
+                "session_id": "replacement-session",
+            }
+            claim_ev_ownership(
+                _hass,
+                _entry,
+                vehicle_id,
+                owner_mode="boost",
+                session_id="replacement-session",
+                reason="replacement during restore",
+            )
+        return False
+
+    monkeypatch.setattr(actions, "_resolve_tesla_active_charger_capability", active_charger)
+    monkeypatch.setattr(actions, "_resolve_tesla_charge_current_entity", charge_current)
+    monkeypatch.setattr(actions, "_get_tesla_ev_entity", tesla_entity)
+    monkeypatch.setattr(actions, "_get_tesla_live_status", live_status)
+    recovery = importlib.import_module("power_sync.tesla_ev_recovery")
+    monkeypatch.setattr(recovery, "get_vehicle_route", lambda *_args: route)
+    monkeypatch.setattr(recovery, "async_rebind_native_session_route", reject_resume)
+
+    hass = _Hass([
+        _State(current_entity, "1", {"min": 0, "max": 32}),
+        _State(charging_entity, "charging"),
+    ])
+    hass.data["power_sync"]["entry-1"].update(
+        {
+            "ev_recovered_ownership": {
+                vehicle_id: {
+                    "owner": "powersync",
+                    "owner_mode": "solar_surplus",
+                    "charger_type": "tesla",
+                    "session_id": "pre-restart-session",
+                    "last_commanded_amps": 1,
+                }
+            },
+            "ev_recovered_ownership_saved_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    actions._dynamic_ev_state.clear()
+    entry = _Entry()
+
+    action = actions._action_start_ev_charging_dynamic(
+        hass,
+        entry,
+        {
+            "vehicle_vin": vehicle_id,
+            "dynamic_mode": "solar_surplus",
+            "owner_mode": "solar_surplus",
+            "charger_type": "tesla",
+            "min_charge_amps": 1,
+            "max_charge_amps": 32,
+            "tesla_charge_current_entity": current_entity,
+            "tesla_charging_state_entity": charging_entity,
+        },
+        context=None,
+    )
+    if handoff_mode == "cancel":
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(action)
+    else:
+        result = asyncio.run(action)
+        assert result is False
+
+    assert ended_sessions == [{
+        "vehicle_id": vehicle_id,
+        "reason": (
+            "Solar native route handoff cancelled"
+            if handoff_mode == "cancel"
+            else "Solar native route handoff rejected"
+        ),
+        "expected_session_id": "new-solar-session",
+    }]
+    if handoff_mode == "replace":
+        assert actions._dynamic_ev_state["entry-1"][vehicle_id]["active"] is True
+        assert hass.data["power_sync"]["entry-1"]["ev_ownership"][vehicle_id][
+            "owner_mode"
+        ] == "boost"
+    else:
+        assert vehicle_id not in actions._dynamic_ev_state.get("entry-1", {})
+
 def test_solar_surplus_restart_rejects_changed_charge_current():
     vehicle_id = "5YJTEST0000000001"
     current_entity = "number.car_charge_current"
@@ -6983,6 +7182,65 @@ def test_solar_surplus_restart_rejects_changed_charge_current():
 
     assert recovered_amps is None
     assert hass.data["power_sync"]["entry-1"]["ev_recovered_ownership"] == {}
+
+
+def test_solar_surplus_restart_preserves_exact_native_route_for_handoff(monkeypatch):
+    """A restored native producer is carried by identity, never rediscovered."""
+    vehicle_id = "5YJTEST0000000001"
+    current_entity = "number.car_charge_current"
+    charging_entity = "sensor.car_charging"
+    native_entity = "switch.native_car_charge"
+    identity = {
+        "entity_id": native_entity,
+        "platform": "tesla_fleet",
+        "config_entry_id": "tesla_fleet-entry",
+        "device_id": "native-car",
+        "unique_id": "native-car-charge",
+        "disabled_by": None,
+    }
+    hass = _Hass([
+        _State(current_entity, "7", {"min": 0, "max": 32}),
+        _State(charging_entity, "charging"),
+    ])
+    hass.data["power_sync"]["entry-1"].update(
+        {
+            "ev_recovered_ownership": {
+                vehicle_id: {
+                    "owner": "powersync",
+                    "owner_mode": "solar_surplus",
+                    "charger_type": "tesla",
+                    "session_id": "pre-restart-session",
+                    "last_commanded_amps": 7,
+                }
+            },
+            "ev_recovered_ownership_saved_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    route = {
+        "kind": "blocked",
+        "reason": "route_identity_changed",
+        "entity_id": native_entity,
+        "entity_identity": identity,
+    }
+    recovery = importlib.import_module("power_sync.tesla_ev_recovery")
+    monkeypatch.setattr(recovery, "get_vehicle_route", lambda *_args: route)
+    params = {
+        "charger_type": "tesla",
+        "max_charge_amps": 32,
+        "tesla_charge_current_entity": current_entity,
+        "tesla_charging_state_entity": charging_entity,
+    }
+
+    recovered_amps = actions._consume_recovered_solar_surplus_continuation_amps(
+        hass, _Entry(), vehicle_id, params
+    )
+
+    assert recovered_amps == 7
+    assert params["_tesla_native_resume_route"] == {
+        "entity_id": native_entity,
+        "entity_identity": identity,
+    }
+    assert "_tesla_command_entity_id" not in params
 
 
 def test_app_solar_surplus_start_rechecks_disabled_persisted_toggle():
@@ -10210,6 +10468,183 @@ def test_manual_session_records_quick_control_metadata():
     assert ownership["quick_control"] is True
 
 
+def test_session_end_expected_id_preserves_replacement_session():
+    """Rollback must not end a newer session that reused the same vehicle."""
+    from power_sync.automations.ev_charging_session import ChargingSessionManager
+
+    manager = object.__new__(ChargingSessionManager)
+    manager._session_lock = asyncio.Lock()
+    replacement = SimpleNamespace(id="replacement-session")
+    manager.active_sessions = {"VIN-A": replacement}
+    calls = []
+
+    async def end_unlocked(vehicle_id, reason, end_soc=None):
+        calls.append((vehicle_id, reason, end_soc))
+        return replacement
+
+    manager._end_session_unlocked = end_unlocked
+
+    assert asyncio.run(
+        manager.end_session(
+            "VIN-A",
+            "restore rollback",
+            expected_session_id="old-session",
+        )
+    ) is None
+    assert calls == []
+    assert asyncio.run(
+        manager.end_session(
+            "VIN-A",
+            "restore rollback",
+            expected_session_id="replacement-session",
+        )
+    ) is replacement
+    assert calls == [("VIN-A", "restore rollback", None)]
+
+
+@pytest.mark.parametrize("handoff_ok", [True, False, "cancel", "replace"])
+def test_restored_native_manual_session_handoffs_exact_route_before_rate(
+    monkeypatch, handoff_ok
+):
+    """Reloaded native sessions cannot rate until their old producer is rebound."""
+    vin = "5YJTEST00000000A1"
+    entity = "switch.car_charge"
+    hass = _Hass([_State(entity, "on")])
+    _install_native_ha_writer(hass, vin, entity)
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={"ev_provider": "tesla_fleet"},
+    )
+    identity = {
+        "entity_id": entity,
+        "platform": "tesla_fleet",
+        "config_entry_id": "tesla_fleet-entry",
+        "device_id": f"native-tesla_fleet-{vin[-4:]}",
+        "unique_id": f"{vin}-charge",
+        "disabled_by": None,
+    }
+    persisted_route = {
+        "kind": "blocked",
+        "reason": "route_identity_changed",
+        "entity_id": entity,
+        "entity_identity": identity,
+    }
+    recovery = importlib.import_module("power_sync.tesla_ev_recovery")
+    events = []
+
+    async def bind(
+        _hass,
+        _entry,
+        vehicle_id,
+        *,
+        entity_id=None,
+        expected_identity=None,
+        mode=None,
+    ):
+        events.append(("bind", vehicle_id, entity_id, expected_identity))
+        if handoff_ok == "cancel":
+            raise asyncio.CancelledError
+        if handoff_ok == "replace":
+            from power_sync.automations.ev_ownership import claim_ev_ownership
+
+            actions._dynamic_ev_state["entry-1"][vehicle_id] = {
+                "active": True,
+                "params": {"owner_mode": "boost", "charger_type": "tesla"},
+                "session_id": "replacement-session",
+            }
+            claim_ev_ownership(
+                _hass,
+                _entry,
+                vehicle_id,
+                owner_mode="boost",
+                session_id="replacement-session",
+                reason="replacement during restore",
+            )
+            return False
+        return handoff_ok
+
+    monkeypatch.setattr(recovery, "get_vehicle_route", lambda *_args: persisted_route)
+    monkeypatch.setattr(recovery, "async_rebind_native_session_route", bind)
+    monkeypatch.setattr(actions, "_phase_load_management_applies", lambda *_args: True)
+    ended_sessions = []
+
+    class _SessionManager:
+        async def start_session(self, **kwargs):
+            return SimpleNamespace(id="restored-session")
+
+        async def end_session(self, **kwargs):
+            ended_sessions.append(kwargs)
+
+    ev_session = types.ModuleType("power_sync.automations.ev_charging_session")
+    ev_session.get_session_manager = lambda: _SessionManager()
+    monkeypatch.setitem(sys.modules, "power_sync.automations.ev_charging_session", ev_session)
+
+    async def reconcile(*_args):
+        events.append(("rate",))
+
+    monkeypatch.setattr(actions, "_dynamic_ev_update", reconcile)
+    actions._dynamic_ev_state.clear()
+
+    params = {
+        "charger_type": "tesla",
+        "quick_control": True,
+        "duration_minutes": 10,
+        "expires_at": "2026-11-01T23:10:00+00:00",
+        "_tesla_restored_native_route": persisted_route,
+        "_tesla_command_entity_id": entity,
+        "_tesla_native_command_identity": identity,
+    }
+    if handoff_ok == "cancel":
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(
+                actions.record_manual_ev_charging_session(
+                    hass,
+                    entry,
+                    vin,
+                    params,
+                    reason="reload",
+                )
+            )
+    else:
+        asyncio.run(
+            actions.record_manual_ev_charging_session(
+                hass,
+                entry,
+                vin,
+                params,
+                reason="reload",
+            )
+        )
+
+    assert events[0][0] == "bind"
+    if handoff_ok is True:
+        assert [event[0] for event in events] == ["bind", "rate"]
+        assert actions._dynamic_ev_state["entry-1"][vin]["active"] is True
+        assert params["_manual_restore_native_route_bound"] is True
+    else:
+        assert [event[0] for event in events] == ["bind"]
+        if handoff_ok == "replace":
+            assert actions._dynamic_ev_state["entry-1"][vin]["active"] is True
+            assert hass.data["power_sync"]["entry-1"]["ev_ownership"][vin][
+                "owner_mode"
+            ] == "boost"
+        else:
+            assert vin not in actions._dynamic_ev_state["entry-1"]
+        if handoff_ok is False:
+            assert params["_manual_restore_native_route_bound"] is False
+            reason = "restored native producer handoff failed"
+        elif handoff_ok == "cancel":
+            reason = "restored native producer handoff cancelled"
+        else:
+            reason = "restored native producer handoff failed"
+        assert ended_sessions == [{
+            "vehicle_id": vin,
+            "reason": reason,
+            "expected_session_id": "restored-session",
+        }]
+
+
 def test_solar_surplus_stop_delay_reduces_to_minimum_on_first_low_sample(monkeypatch):
     hass = _Hass([])
     vehicle_id = "VIN123"
@@ -12232,6 +12667,111 @@ def test_dynamic_stop_notification_requires_physical_confirmation(
         assert events.index(pushes[0]) > events.index("physical_stop")
 
 
+def test_stale_finite_cleanup_token_cannot_stop_replacement_session(monkeypatch):
+    """An expiry callback from session A must not stop session B for the VIN."""
+    from power_sync.automations import ev_ownership
+
+    vehicle_id = "5YJTEST00000000A1"
+    hass = _Hass([])
+    hass.data["power_sync"]["entry-1"][
+        ev_ownership.EV_QUICK_OBLIGATIONS_KEY
+    ] = {
+        vehicle_id: {
+            "obligation_id": "session-b",
+            "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=2)).isoformat(),
+            "params": {"vehicle_vin": vehicle_id, "charger_type": "tesla"},
+        }
+    }
+    physical_stops = []
+
+    async def physical_stop(*_args, **_kwargs):
+        physical_stops.append(True)
+        return True
+
+    monkeypatch.setattr(actions, "_action_stop_ev_charging", physical_stop)
+    actions._dynamic_ev_state.clear()
+    actions._dynamic_ev_state["entry-1"] = {
+        vehicle_id: {
+            "active": True,
+            "params": {
+                "owner_mode": "manual",
+                "dynamic_mode": "battery_target",
+                "charger_type": "tesla",
+                "vehicle_vin": vehicle_id,
+            },
+        }
+    }
+
+    result = asyncio.run(
+        actions._action_stop_ev_charging_dynamic(
+            hass,
+            _Entry(),
+            {
+                "vehicle_id": vehicle_id,
+                "stop_charging": True,
+                "stop_untracked": True,
+                "_quick_control_obligation_id": "session-a",
+            },
+        )
+    )
+
+    assert result is True
+    assert physical_stops == []
+    assert vehicle_id in actions._dynamic_ev_state["entry-1"]
+    assert ev_ownership.get_ev_quick_control_obligation(
+        hass, _Entry(), vehicle_id
+    )["obligation_id"] == "session-b"
+
+
+def test_replacement_teardown_preserves_new_finite_obligation(monkeypatch):
+    """A successful old-session teardown must not clear the replacement timer."""
+    from power_sync.automations import ev_ownership
+
+    vehicle_id = "5YJTEST00000000A1"
+    hass = _Hass([])
+    hass.data["power_sync"]["entry-1"][
+        ev_ownership.EV_QUICK_OBLIGATIONS_KEY
+    ] = {
+        vehicle_id: {
+            "obligation_id": "session-b",
+            "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=2)).isoformat(),
+            "params": {"vehicle_vin": vehicle_id, "charger_type": "tesla"},
+        }
+    }
+
+    async def physical_stop(*_args, **_kwargs):
+        return True
+
+    monkeypatch.setattr(actions, "_action_stop_ev_charging", physical_stop)
+    actions._dynamic_ev_state.clear()
+    actions._dynamic_ev_state["entry-1"] = {
+        vehicle_id: {
+            "active": True,
+            "params": {
+                "owner_mode": "manual",
+                "dynamic_mode": "battery_target",
+                "charger_type": "tesla",
+                "vehicle_vin": vehicle_id,
+            },
+        }
+    }
+
+    assert asyncio.run(
+        actions._action_stop_ev_charging_dynamic(
+            hass,
+            _Entry(),
+            {
+                "vehicle_id": vehicle_id,
+                "stop_charging": True,
+                "_preserve_quick_control_obligation": True,
+            },
+        )
+    ) is True
+    assert ev_ownership.get_ev_quick_control_obligation(
+        hass, _Entry(), vehicle_id
+    )["obligation_id"] == "session-b"
+
+
 def _install_away_location_module(monkeypatch, location: str = "work") -> None:
     planner = types.ModuleType("power_sync.automations.ev_charging_planner")
 
@@ -12688,6 +13228,100 @@ def test_handover_after_self_stop_still_issues_a_physical_start(monkeypatch):
     assert len(start_calls) == 1
     assert len(timer_calls) == 1
     assert actions._dynamic_ev_state["entry-1"][vin]["active"] is True
+
+
+def test_late_dynamic_start_compensates_after_priority_authority_revoke(
+    monkeypatch,
+):
+    """A Start accepted after a priority Stop gets an exact compensating Stop."""
+    vin = "LRW3F7FS1NC484342"
+    start_calls: list[tuple] = []
+    stop_calls: list[dict] = []
+    allowed = {"value": True}
+    runtime_refs: dict[str, object] = {}
+    from power_sync.automations import ev_ownership
+    actions._dynamic_ev_state.clear()
+    actions._dynamic_ev_state["entry-1"] = {
+        vin: _solar_surplus_state(current_amps=26)
+    }
+
+    _patch_handover_start(
+        monkeypatch,
+        start_calls=start_calls,
+        stop_calls=stop_calls,
+        wait_result=(True, "sensor.n3bula_charger_current=26.0A"),
+    )
+
+    async def late_start(*args, **kwargs):
+        start_calls.append((args, kwargs))
+        # Model the priority Stop revoking the captured owner while the
+        # provider Start await is in flight.
+        allowed["value"] = False
+        ev_ownership.clear_ev_quick_control_obligation(
+            runtime_refs["hass"], runtime_refs["entry"], vin
+        )
+        return True
+
+    monkeypatch.setattr(actions, "_action_start_ev_charging", late_start)
+    monkeypatch.setattr(
+        actions,
+        "_tesla_transport_authority",
+        lambda *_args, **_kwargs: lambda: allowed["value"],
+    )
+    monkeypatch.setattr(
+        actions,
+        "async_track_time_interval",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        sys.modules["homeassistant.helpers.event"],
+        "async_track_point_in_utc_time",
+        lambda *_args, **_kwargs: (lambda: None),
+        raising=False,
+    )
+    hass = _Hass([])
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={"ev_provider": "both"},
+    )
+    runtime_refs.update(hass=hass, entry=entry)
+    original_begin = ev_ownership.async_begin_ev_quick_control_obligation
+    begin_calls = {"count": 0}
+
+    async def fail_compensation_persist(*args, **kwargs):
+        begin_calls["count"] += 1
+        if begin_calls["count"] >= 2:
+            raise RuntimeError("simulated compensation save failure")
+        return await original_begin(*args, **kwargs)
+
+    monkeypatch.setattr(
+        ev_ownership,
+        "async_begin_ev_quick_control_obligation",
+        fail_compensation_persist,
+    )
+    deadline = datetime.now(timezone.utc) + timedelta(minutes=3)
+    params = {
+        **_handover_start_params(vin),
+        "quick_control": True,
+        "duration_minutes": 3,
+        "expires_at": deadline.isoformat(),
+        "_boost_start_deadline": deadline.timestamp(),
+    }
+
+    result = asyncio.run(
+        actions._action_start_ev_charging_dynamic(
+            hass, entry, params
+        )
+    )
+
+    assert result is False
+    assert len(start_calls) == 1
+    # One teardown Stop and one exact compensating Stop; no post-Start rate
+    # update or ownership registration is allowed after authority is revoked.
+    assert len(stop_calls) == 2
+    assert all(call["vehicle_vin"] == vin for call in stop_calls)
+    assert vin not in actions._dynamic_ev_state.get("entry-1", {})
 
 
 def test_handover_start_that_is_never_confirmed_creates_no_session_or_lease(
@@ -14302,6 +14936,123 @@ def test_ble_wake_times_out_after_two_minutes_without_requeue(monkeypatch):
     assert hass.services.calls == [
         ("button", "press", {"entity_id": "button.car_wake_up"})
     ]
+
+
+def test_ble_wake_retries_once_when_late_connection_reports_car_still_asleep(monkeypatch):
+    """Stock bridges discard a Wake queued before their GATT link exists."""
+    asleep = _State("binary_sensor.car_asleep", "on")
+    hass = _Hass([_State("button.car_wake_up", "unknown"), asleep])
+    elapsed = [0.0]
+    clock = SimpleNamespace(time=lambda: elapsed[0])
+
+    async def advance(seconds):
+        elapsed[0] += seconds
+        if elapsed[0] >= 40:
+            asleep.last_updated = datetime.now(timezone.utc)
+        if len(hass.services.calls) == 2 and elapsed[0] >= 80:
+            asleep.state = "off"
+
+    monkeypatch.setattr(actions.asyncio, "get_running_loop", lambda: clock)
+    monkeypatch.setattr(actions.asyncio, "sleep", advance)
+
+    assert asyncio.run(actions._wake_tesla_ble(hass, "car")) is True
+    assert elapsed[0] == 82
+    assert hass.services.calls == [
+        ("button", "press", {"entity_id": "button.car_wake_up"}),
+        ("button", "press", {"entity_id": "button.car_wake_up"}),
+    ]
+
+
+@pytest.mark.parametrize("evidence", ["stale", "different_device", "revoked"])
+def test_ble_wake_does_not_retry_from_unbound_or_stale_asleep_state(monkeypatch, evidence):
+    asleep = _State("binary_sensor.car_asleep", "on")
+    hass = _Hass([_State("button.car_wake_up", "unknown"), asleep])
+    elapsed = [0.0]
+    clock = SimpleNamespace(time=lambda: elapsed[0])
+
+    async def advance(seconds):
+        elapsed[0] += seconds
+        if evidence != "stale" and elapsed[0] >= 40:
+            asleep.last_updated = datetime.now(timezone.utc)
+            if evidence == "different_device":
+                hass.entity_registry.entities[asleep.entity_id].device_id = "other-car"
+
+    monkeypatch.setattr(actions.asyncio, "get_running_loop", lambda: clock)
+    monkeypatch.setattr(actions.asyncio, "sleep", advance)
+
+    assert asyncio.run(actions._wake_tesla_ble(
+        hass, "car", authorize=lambda: evidence != "revoked" or elapsed[0] < 40,
+    )) is False
+    assert len(hass.services.calls) == 1
+
+
+def test_ble_wake_retry_keeps_original_timeout_when_car_stays_asleep(monkeypatch):
+    asleep = _State("binary_sensor.car_asleep", "on")
+    hass = _Hass([_State("button.car_wake_up", "unknown"), asleep])
+    elapsed = [0.0]
+    clock = SimpleNamespace(time=lambda: elapsed[0])
+
+    async def advance(seconds):
+        elapsed[0] += seconds
+        if elapsed[0] >= 40:
+            asleep.last_updated = datetime.now(timezone.utc)
+
+    monkeypatch.setattr(actions.asyncio, "get_running_loop", lambda: clock)
+    monkeypatch.setattr(actions.asyncio, "sleep", advance)
+
+    assert asyncio.run(actions._wake_tesla_ble(hass, "car")) is False
+    assert elapsed[0] == 120
+    assert len(hass.services.calls) == 2
+
+
+@pytest.mark.parametrize("change", ["deadline", "asleep_binding", "asleep_state"])
+def test_ble_wake_retry_rechecks_response_after_awaited_authority(monkeypatch, change):
+    asleep = _State("binary_sensor.car_asleep", "on")
+    hass = _Hass([_State("button.car_wake_up", "unknown"), asleep])
+    elapsed = [0.0]
+    authority_calls = [0]
+    clock = SimpleNamespace(time=lambda: elapsed[0])
+
+    async def advance(seconds):
+        elapsed[0] += seconds
+        asleep.last_updated = datetime.now(timezone.utc)
+
+    async def authorize():
+        authority_calls[0] += 1
+        if authority_calls[0] == 4:
+            if change == "deadline":
+                elapsed[0] = 120
+            elif change == "asleep_binding":
+                hass.entity_registry.entities[asleep.entity_id].device_id = "other-car"
+            else:
+                asleep.state = "unknown"
+        return True
+
+    monkeypatch.setattr(actions.asyncio, "get_running_loop", lambda: clock)
+    monkeypatch.setattr(actions.asyncio, "sleep", advance)
+
+    assert asyncio.run(actions._wake_tesla_ble(hass, "car", authorize=authorize)) is False
+    assert elapsed[0] == 120
+    assert len(hass.services.calls) == 1
+
+
+def test_ble_wake_does_not_retry_on_first_asleep_report_at_timeout(monkeypatch):
+    asleep = _State("binary_sensor.car_asleep", "on")
+    hass = _Hass([_State("button.car_wake_up", "unknown"), asleep])
+    elapsed = [0.0]
+    clock = SimpleNamespace(time=lambda: elapsed[0])
+
+    async def advance(seconds):
+        elapsed[0] += seconds
+        if elapsed[0] >= 120:
+            asleep.last_updated = datetime.now(timezone.utc)
+
+    monkeypatch.setattr(actions.asyncio, "get_running_loop", lambda: clock)
+    monkeypatch.setattr(actions.asyncio, "sleep", advance)
+
+    assert asyncio.run(actions._wake_tesla_ble(hass, "car")) is False
+    assert elapsed[0] == 120
+    assert len(hass.services.calls) == 1
 
 
 @pytest.mark.parametrize("invalidate", ["authority", "wake_binding", "target_binding"])

@@ -453,6 +453,105 @@ async def prepare_ev_submission(hass, entity_id, *, operation, amps=None):
         raise
 
 
+async def validate_ev_submission(hass, entity_id, *, operation, amps=None):
+    """Validate an already-reserved submission without creating a ticket.
+
+    A cached native observation can make a BLE write unnecessary.  Such a
+    no-op still needs the current site/authority fence, but it must not call
+    ``admit_managed``: doing so would create a new uncertain reservation for a
+    command that is deliberately not being submitted.
+    """
+    context = _EV_SUBMISSION_CONTEXT.get()
+    params = context.get("params", {}) if context is not None else {}
+    deadline = params.get("_boost_start_deadline")
+    finite_start = (
+        "_boost_start_deadline" in params
+        and operation in ("start", "rate")
+        and not (operation == "rate" and type(amps) in (int, float) and amps <= 0)
+    )
+    if finite_start and (
+        type(deadline) not in (int, float) or not math.isfinite(deadline)
+        or time.time() >= deadline
+    ):
+        return False
+    budget = hass.data.get(RUNTIME_KEY)
+    if context is None or budget is None:
+        # Preserve the legacy no-budget path.  A native-Max claim without the
+        # request context cannot be safely attributed to this observation.
+        if budget is not None:
+            await budget.load()
+            if any(entry.get("native_max") for entry in budget.entries.values()):
+                return False
+        return True
+    await budget.load()
+    if finite_start and (
+        type(deadline) not in (int, float) or not math.isfinite(deadline)
+        or time.time() >= deadline
+    ):
+        return False
+    entry = context.get("entry")
+    runtime = context.get("runtime")
+    site = site_identity(entry) if entry is not None else None
+    vin = str(context.get("vin") or "").upper()
+    if (entry is None or not re.fullmatch(r"[A-HJ-NPR-Z0-9]{17}", vin)
+            or site is None or not isinstance(runtime, dict)
+            or hass.data.get("power_sync", {}).get(entry.entry_id) is not runtime):
+        return False if budget.armed_sites else True
+    if runtime.get("powerwall_local_dispatch_stopping"):
+        return False
+
+    owners = context.get("owner_snapshot")
+    if owners is None:
+        owners = ev_owner_snapshot(hass, entry, vin)
+    if tuple(ev_owner_snapshot(hass, entry, vin)) != tuple(owners or ()):
+        return False
+    automated = False
+    for owner in owners or ():
+        if isinstance(owner, (tuple, list)) and len(owner) >= 4:
+            mode = str(owner[3] or "").lower()
+            automated = bool(mode and not mode.startswith(("manual", "boost")))
+            if automated:
+                break
+    if automated:
+        config = {**entry.data, **entry.options}
+        optimizer = runtime.get("optimization_coordinator")
+        manager = hass.data.get("power_sync_license_manager")
+        if (config.get("monitoring_mode", False)
+                or getattr(optimizer, "_monitoring_mode_active", lambda: False)()
+                or (manager is not None and not manager.permits(entry.entry_id))):
+            return False
+
+    maximum = budget.native_max_claim(site)
+    if not budget.site_armed(site) and not maximum:
+        return True
+    record = budget.managed.get(vin)
+    if not isinstance(record, dict):
+        return False
+    try:
+        requested = float(amps)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    if (isinstance(amps, bool) or not math.isfinite(requested)
+            or requested != float(record.get("target_amps"))):
+        return False
+    from homeassistant.helpers import entity_registry as er
+    # The observation anchor may belong to a different producer entity than
+    # the existing reservation (for example, BLE Start reserves its charger
+    # switch while the follow-up native observation is Fleet/Teslemetry).
+    # Validate the reservation's own durable entity binding instead of
+    # requiring those unrelated operation entities to share a unique ID.
+    record_entity_id = record.get("entity_id")
+    if (record.get("entry_id") != entry.entry_id
+            or not isinstance(record_entity_id, str) or not record_entity_id):
+        return False
+    registration = er.async_get(hass).async_get(record_entity_id)
+    if _identity(registration) != record.get("identity"):
+        return False
+    if maximum and not record.get("native_max_ev_coexistence"):
+        return False
+    return True
+
+
 async def _prepare_ev_submission(hass, entity_id, *, operation, amps, committed):
     """Return False only for unavailable provider metadata, before submission.
 
