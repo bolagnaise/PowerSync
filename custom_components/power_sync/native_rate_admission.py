@@ -327,10 +327,11 @@ def _managed_native_entity(hass, entry, runtime, vin, record, registration):
     if getattr(registration, "platform", None) not in {
             "esphome", "tesla_bluetooth", "teslemetry_bluetooth"}:
         return None
-    if route is None:
-        # Completed cleanup intentionally releases its command route. The
-        # durable demand still remembers its exact former native producer;
-        # that identity may supply read-only proof, never new command authority.
+    if route is None or route.get("kind") == "ble":
+        # Cleanup may release its route or keep BLE selected with an old
+        # setting sample. Durable demand still remembers its exact former
+        # native producer; that identity supplies read-only proof, never new
+        # command authority or a provider change for subsequent EV controls.
         remembered = record.get("identities", [record["identity"]])
         candidates = [candidate for candidate in er.async_get(hass).entities.values()
                       if getattr(candidate, "platform", None) in {"tesla_fleet", "teslemetry"}

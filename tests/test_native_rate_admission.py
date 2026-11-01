@@ -1000,8 +1000,9 @@ async def test_boost_expiry_keeps_zero_current_cleanup_available(admission):
     'route_changed_during_save', 'provider_changed_during_save',
     'cleared_route_recovered', 'cleared_route_ambiguous',
 ])
+@pytest.mark.parametrize('selected_route', ['ha', 'ble'])
 async def test_ble_retained_demand_uses_only_exact_recovered_native_proof(
-    admission, monkeypatch, case,
+    admission, monkeypatch, case, selected_route,
 ):
     a = admission
     now = [NOW]
@@ -1011,7 +1012,7 @@ async def test_ble_retained_demand_uses_only_exact_recovered_native_proof(
     switch = registry.entities['switch.car_charge']
     switch.platform = 'esphome'
     native = registry.entities[a.state.entity_id]
-    route = {'kind': 'ha', 'entity_id': native.entity_id}
+    route = {'kind': selected_route, 'entity_id': native.entity_id}
     recovery = importlib.import_module(a.m.__package__ + '.tesla_ev_recovery')
     monkeypatch.setattr(recovery, 'get_vehicle_route', lambda *_: (
         None if route.get('kind') == 'cleared' else dict(route)))
@@ -1124,9 +1125,9 @@ async def test_later_ble_setting_cannot_reconcile_from_ambiguous_or_stale_entity
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('source_domain', ['tesla_fleet', 'teslemetry'])
-@pytest.mark.parametrize('route_present', [False, True])
+@pytest.mark.parametrize('route_kind', [None, 'ha', 'ble'])
 async def test_native_max_reconciles_recovered_ble_record_using_two_exact_native_reads(
-    admission, monkeypatch, source_domain, route_present,
+    admission, monkeypatch, source_domain, route_kind,
 ):
     a = admission
     now = [NOW]
@@ -1140,7 +1141,8 @@ async def test_native_max_reconciles_recovered_ble_record_using_two_exact_native
     a.hass.config_entries.async_entries = lambda domain: [a.provider] if domain == source_domain else []
     recovery = importlib.import_module(a.m.__package__ + '.tesla_ev_recovery')
     monkeypatch.setattr(recovery, 'get_vehicle_route', lambda *_: (
-        {'kind': 'ha', 'entity_id': number.entity_id} if route_present else None))
+        ({'kind': route_kind, 'entity_id': switch.entity_id if route_kind == 'ble' else number.entity_id}
+         if route_kind else None)))
     record = {
         'entry_id': 'one', 'site': 'site', 'identity': a.m._identity(switch),
         'entity_id': switch.entity_id, 'setting_entity_id': None,
@@ -1148,6 +1150,16 @@ async def test_native_max_reconciles_recovered_ble_record_using_two_exact_native
         'submitted_at': NOW - 10, 'operation': 'start', 'uncertain': True,
         'identities': [a.m._identity(switch), a.m._identity(number)],
     }
+    if route_kind == 'ble':
+        ble_number = SimpleNamespace(entity_id='number.ble_charging_amps', unique_id='ble_amps',
+            device_id=switch.device_id, platform='esphome', config_entry_id=switch.config_entry_id,
+            disabled_by=None)
+        registry.entities[ble_number.entity_id] = ble_number
+        record['setting_entity_id'] = ble_number.entity_id
+        ble_setting = SimpleNamespace(entity_id=ble_number.entity_id, state='10',
+            last_reported=datetime.fromtimestamp(NOW - 300, timezone.utc))
+        states = {a.state.entity_id: a.state, ble_number.entity_id: ble_setting}
+        a.hass.states.get = states.get
     a.store.data = {'entries': {}, 'managed': {VIN: record}}
     a.budget = a.b.SharedRateBudget(a.store, clock=lambda: now[0])
     await a.budget.load()
