@@ -130,21 +130,29 @@ def _resolve_entity(
     registry = _registry(hass)
     if registry is None:
         return None
+    config_entries = _config_entries(hass, config_domain)
+    config_entry_ids = {
+        str(entry.entry_id)
+        for entry in config_entries
+        if isinstance(getattr(entry, "entry_id", None), str)
+    }
     matches = tuple(
         entity for entity in _registry_entities(registry)
-        if getattr(entity, "unique_id", None) == unique_id
+        if (
+            getattr(entity, "unique_id", None) == unique_id
+            and _entity_domain(entity) == domain
+            and getattr(entity, "platform", None) == platform
+            and isinstance(getattr(entity, "config_entry_id", None), str)
+            and getattr(entity, "config_entry_id") in config_entry_ids
+        )
     )
     if len(matches) != 1:
         return None
     entity = matches[0]
     entry_id = getattr(entity, "config_entry_id", None)
     if (
-        _entity_domain(entity) != domain
-        or getattr(entity, "platform", None) != platform
+        not isinstance(entry_id, str)
         or getattr(entity, "disabled_by", None) is not None
-        or not isinstance(entry_id, str)
-        or not any(str(entry.entry_id) == entry_id
-                   for entry in _config_entries(hass, config_domain))
         or not _state_available(hass, entity.entity_id)
     ):
         return None
@@ -176,7 +184,12 @@ def resolve_command(hass, vin: object, operation: object) -> BluetoothCommandTar
 
 
 def _native_matches(
-    hass, vin: str, *, operation: str = "rate", device_id: str | None = None
+    hass,
+    vin: str,
+    *,
+    operation: str = "rate",
+    device_id: str | None = None,
+    config_entry_id: str | None = None,
 ) -> list[tuple[object, tuple[str, ...]]]:
     registry = _registry(hass)
     if registry is None:
@@ -185,18 +198,30 @@ def _native_matches(
     if key is None:
         return []
     unique_id = f"{vin}-{key}"
+    native_domain = "switch" if operation in ("start", "stop") else "number"
+    # Fleet and Teslemetry intentionally publish the same VIN-derived unique
+    # IDs.  Scope to the concrete native provider and any known anchor before
+    # applying uniqueness; a duplicate from another provider must not mask the
+    # exact Teslemetry target, while two candidates in the same scope remain
+    # fail-closed.
     matches = tuple(
         entity for entity in _registry_entities(registry)
-        if getattr(entity, "unique_id", None) == unique_id
+        if (
+            getattr(entity, "unique_id", None) == unique_id
+            and _entity_domain(entity) == native_domain
+            and getattr(entity, "platform", None) == TESLEMETRY_DOMAIN
+            and (device_id is None or getattr(entity, "device_id", None) == device_id)
+            and (
+                config_entry_id is None
+                or getattr(entity, "config_entry_id", None) == config_entry_id
+            )
+        )
     )
     if len(matches) != 1:
         return []
     entity = matches[0]
-    native_domain = "switch" if operation in ("start", "stop") else "number"
     if (
-        _entity_domain(entity) != native_domain
-        or getattr(entity, "platform", None) != TESLEMETRY_DOMAIN
-        or (device_id is not None and getattr(entity, "device_id", None) != device_id)
+        not isinstance(getattr(entity, "config_entry_id", None), str)
         or getattr(entity, "disabled_by", None) is not None
         or not _state_available(hass, entity.entity_id)
     ):
@@ -229,7 +254,15 @@ def native_current_entity(hass, target_or_command_entity_id) -> str | None:
         return None
     matches = [
         (entity, ids) for entity, ids in _native_matches(
-            hass, target.vin, operation="rate", device_id=target.device_id
+            hass,
+            target.vin,
+            operation="rate",
+            device_id=target.device_id,
+            config_entry_id=(
+                target.native_config_entry_ids[0]
+                if len(target.native_config_entry_ids) == 1
+                else None
+            ),
         ) if getattr(entity, "config_entry_id", None) in target.native_config_entry_ids
     ]
     return matches[0][0].entity_id if len(matches) == 1 else None
@@ -313,8 +346,11 @@ def _native_entity_for_anchor(hass, anchor, operation: str) -> str | None:
             return None
         matches = [
             entity for entity, ids in _native_matches(
-                hass, vin, operation=operation,
+                hass,
+                vin,
+                operation=operation,
                 device_id=str(getattr(anchor, "device_id", "")),
+                config_entry_id=getattr(anchor, "config_entry_id", None),
             )
             if getattr(entity, "config_entry_id", None)
             == getattr(anchor, "config_entry_id", None)

@@ -327,3 +327,76 @@ def test_native_command_entity_resolves_exact_provider_anchor_for_all_operations
     assert MODULE.native_command_entity(harness.hass, "number.fleet_charge_current", "rate") == "number.fleet_charge_current"
     assert MODULE.native_command_entity(harness.hass, "number.fleet_charge_limit", "limit") == "number.fleet_charge_limit"
     assert MODULE.native_command_entity(harness.hass, "number.native_current_0001", "rate") == "number.native_current_0001"
+
+
+@pytest.mark.parametrize(
+    ("operation", "anchor", "expected"),
+    (
+        ("start", "switch.native_charging_state_0001", "switch.native_charging_state_0001"),
+        ("stop", "switch.native_charging_state_0001", "switch.native_charging_state_0001"),
+        ("rate", "number.native_current_0001", "number.native_current_0001"),
+        ("limit", "number.native_charge_limit_0001", "number.native_charge_limit_0001"),
+    ),
+)
+def test_same_vin_fleet_unique_ids_do_not_mask_teslemetry_anchor(
+    harness, operation, anchor, expected
+):
+    """Provider-scoped native identity survives Fleet+Teslemetry duplicates."""
+    fleet_entry = SimpleNamespace(entry_id="fleet-a", domain="tesla_fleet")
+    harness.hass.config_entries._entries.append(fleet_entry)
+    harness.devices["fleet-device"] = SimpleNamespace(
+        identifiers={("tesla_fleet", VIN_A)}, config_entries={"fleet-a"}
+    )
+    native_key = MODULE._NATIVE_OPERATION_KEYS[operation]
+    fleet_entity_id = {
+        "start": "switch.fleet_charge_same_vin",
+        "stop": "switch.fleet_charge_same_vin",
+        "rate": "number.fleet_current_same_vin",
+        "limit": "number.fleet_limit_same_vin",
+    }[operation]
+    fleet_entity = Entity(
+        fleet_entity_id,
+        f"{VIN_A}-{native_key}",
+        "tesla_fleet",
+        "fleet-a",
+        "fleet-device",
+    )
+    harness.entities.append(fleet_entity)
+    harness.registry.entities[fleet_entity.entity_id] = fleet_entity
+    harness.states[fleet_entity.entity_id] = "off" if operation in {"start", "stop"} else "70"
+    harness.hass.states._values[fleet_entity.entity_id] = State(
+        harness.states[fleet_entity.entity_id]
+    )
+
+    if operation == "rate":
+        assert MODULE.resolve_native_current(harness.hass, VIN_A) is not None
+        command = MODULE.resolve_command(harness.hass, VIN_A, "rate")
+        assert command is not None
+        assert MODULE.native_current_entity(harness.hass, command) == expected
+    assert MODULE.native_command_entity(harness.hass, anchor, operation) == expected
+    harness.hass.states._values[anchor].state = "unavailable"
+    assert MODULE.native_command_entity(harness.hass, anchor, operation) is None
+
+
+def test_same_vin_native_duplicate_in_other_device_remains_fail_closed(harness):
+    """A second Teslemetry candidate in a different device is ambiguous."""
+    source = next(
+        entity for entity in harness.entities
+        if entity.unique_id == f"{VIN_A}-charge_state_charge_current_request"
+    )
+    harness.entities.append(
+        Entity(
+            "number.native_current_other_device",
+            source.unique_id,
+            MODULE.TESLEMETRY_DOMAIN,
+            "native-b",
+            "device-b",
+        )
+    )
+    harness.registry.entities[harness.entities[-1].entity_id] = harness.entities[-1]
+    harness.states[harness.entities[-1].entity_id] = "80"
+    harness.hass.states._values[harness.entities[-1].entity_id] = State("80")
+    assert MODULE.resolve_native_current(harness.hass, VIN_A) is None
+    assert MODULE.native_command_entity(
+        harness.hass, "number.native_current_0001", "rate"
+    ) == "number.native_current_0001"
