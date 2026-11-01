@@ -852,6 +852,8 @@ async def async_read_independent_tesla_vehicle(
     preferred_entity_id: str | None = None,
     timeout: float = 10,
     updated_after: Any | None = None,
+    allow_paid_refresh: bool = False,
+    authorize: Callable[[], bool] | None = None,
 ) -> TeslaVehicleObservation | None:
     """Read one exact cloud charge-state response using the native HA client.
 
@@ -861,7 +863,12 @@ async def async_read_independent_tesla_vehicle(
     and its native timestamp. Requested current, limit, state, actual current
     and power must all be present; pilot/draw never substitute for requested
     current. Each completed read must advance the last independent timestamp.
-    It does not wake, command, publish coordinator data, or change provider.
+    Teslemetry's ordinary endpoint may return a cached document. An explicitly
+    authorized paid refresh uses its concrete cloud SDK method once, then
+    validates that response or reads the refreshed document. The freshness
+    boundary precedes the refresh, never its later cache read. Ordinary reads
+    do not request this refresh. Neither path wakes, commands, publishes
+    coordinator data, nor changes provider.
     """
     canonical = _canonical_vin(vin)
     cutoff = None if updated_after is None else _timestamp(updated_after)
@@ -879,15 +886,30 @@ async def async_read_independent_tesla_vehicle(
     if contract is None or identity is None:
         return None
     api, debouncer, endpoint = contract
+    paid_refresh = allow_paid_refresh is True and source.domain == "teslemetry"
+    refresh = getattr(type(api), "data_refresh", None) if paid_refresh else None
+    if paid_refresh and (not callable(refresh) or not callable(authorize)):
+        return None
+    native_runtime = getattr(source.entry, "runtime_data", None)
     state = _read_state(hass)
     key = (*source.key(), id(api), id(debouncer))
+    # Authorization belongs to a recovery request. Never let a paid task
+    # inherit a default cache read or another request's policy callback.
+    in_flight_key = (*key, paid_refresh, id(authorize) if authorize is not None else None)
 
     def current() -> bool:
+        if authorize is not None:
+            try:
+                if authorize() is not True:
+                    return False
+            except Exception:
+                return False
         current_contract = _cloud_contract(source)
         return (
             current_contract is not None
             and current_contract[0] is api
             and current_contract[1] is debouncer
+            and getattr(source.entry, "runtime_data", None) is native_runtime
             and not getattr(source.coordinator, "_shutdown_requested", False)
             and not getattr(debouncer, "_shutdown_requested", False)
             and _independent_identity(hass, source, preferred_entity_id) == identity
@@ -895,54 +917,75 @@ async def async_read_independent_tesla_vehicle(
 
     async def read_cloud() -> TeslaVehicleObservation | None:
         async def locked_read() -> TeslaVehicleObservation | None:
+            if not current():
+                return None
             async with debouncer.async_lock():
                 if not current():
                     return None
                 before = _source_charge_timestamp(getattr(source.coordinator, "data", None))
                 previous = state.independent_timestamps.get(key)
                 started = time.time()
-                # Call the known cloud class method on the existing client;
-                # an instance command router override is never selected.
-                response = await type(api).vehicle_data(api, endpoints=[endpoint])
-                if not current() or not isinstance(response, Mapping):
+
+                def parse(response: Any) -> TeslaVehicleObservation | None:
+                    if not isinstance(response, Mapping):
+                        return None
+                    data = response.get("response")
+                    if not isinstance(data, Mapping) or _canonical_vin(data.get("vin")) != canonical:
+                        return None
+                    charge = _charge_state(deepcopy(data))
+                    stamp = _timestamp(charge.get("timestamp"))
+                    now = time.time()
+                    if (stamp is None or stamp < math.floor(started)
+                            or stamp > now + 5 or now - stamp > MAX_SOURCE_AGE_SECONDS
+                            or (before is not None and stamp <= before)
+                            or (previous is not None and stamp <= previous)
+                            or (cutoff is not None and stamp <= cutoff)):
+                        return None
+                    result = _observation(source, charge, stamp)
+                    if (result is None or result.charge_state.lower() not in {
+                                "charging", "stopped", "complete", "disconnected", "starting", "nopower"}
+                            or result.requested_current is None
+                            or result.charge_limit_soc is None or result.charge_limit_soc > 100
+                            or result.charger_actual_current is None or result.charger_power is None):
+                        return None
+                    requested_key = "charge_current_request" if charge.get("charge_current_request") is not None else "charger_current_request"
+                    return TeslaVehicleObservation(
+                        vin=result.vin, domain=result.domain,
+                        config_entry_id=result.config_entry_id, device_id=result.device_id,
+                        producer_identity=result.producer_identity,
+                        source_charge_timestamp=stamp, charge_state=result.charge_state,
+                        charger_actual_current=result.charger_actual_current,
+                        charger_power=result.charger_power, charge_limit_soc=result.charge_limit_soc,
+                        requested_current=result.requested_current, raw_charge_state=charge,
+                        origin="native_cloud",
+                        field_provenance={
+                            "charge_state": "charge_state.charging_state",
+                            "requested_current": f"charge_state.{requested_key}",
+                            "charge_limit_soc": "charge_state.charge_limit_soc",
+                            "charger_actual_current": "charge_state.charger_actual_current",
+                            "charger_power": "charge_state.charger_power",
+                        },
+                    )
+
+                result = None
+                if paid_refresh:
+                    response = await refresh(api)
+                    if not current():
+                        return None
+                    result = parse(response)
+                if result is None:
+                    if not current():
+                        return None
+                    # Call the known cloud class method on the existing client;
+                    # an instance command router override is never selected.
+                    response = await type(api).vehicle_data(api, endpoints=[endpoint])
+                    if not current():
+                        return None
+                    result = parse(response)
+                if result is None or not current():
                     return None
-                data = response.get("response")
-                if not isinstance(data, Mapping) or _canonical_vin(data.get("vin")) != canonical:
-                    return None
-                charge = _charge_state(deepcopy(data))
-                stamp = _timestamp(charge.get("timestamp"))
-                now = time.time()
-                if (stamp is None or stamp < math.floor(started)
-                        or stamp > now + 5 or now - stamp > MAX_SOURCE_AGE_SECONDS
-                        or (before is not None and stamp <= before)
-                        or (previous is not None and stamp <= previous)):
-                    return None
-                result = _observation(source, charge, stamp)
-                if (result is None or result.charge_state.lower() not in {
-                            "charging", "stopped", "complete", "disconnected", "starting", "nopower"}
-                        or result.requested_current is None
-                        or result.charge_limit_soc is None or result.charge_limit_soc > 100
-                        or result.charger_actual_current is None or result.charger_power is None):
-                    return None
-                requested_key = "charge_current_request" if charge.get("charge_current_request") is not None else "charger_current_request"
-                state.independent_timestamps[key] = stamp
-                return TeslaVehicleObservation(
-                    vin=result.vin, domain=result.domain,
-                    config_entry_id=result.config_entry_id, device_id=result.device_id,
-                    producer_identity=result.producer_identity,
-                    source_charge_timestamp=stamp, charge_state=result.charge_state,
-                    charger_actual_current=result.charger_actual_current,
-                    charger_power=result.charger_power, charge_limit_soc=result.charge_limit_soc,
-                    requested_current=result.requested_current, raw_charge_state=charge,
-                    origin="native_cloud",
-                    field_provenance={
-                        "charge_state": "charge_state.charging_state",
-                        "requested_current": f"charge_state.{requested_key}",
-                        "charge_limit_soc": "charge_state.charge_limit_soc",
-                        "charger_actual_current": "charge_state.charger_actual_current",
-                        "charger_power": "charge_state.charger_power",
-                    },
-                )
+                state.independent_timestamps[key] = result.source_charge_timestamp
+                return result
         try:
             return await asyncio.wait_for(locked_read(), timeout=timeout_value)
         except asyncio.CancelledError:
@@ -950,14 +993,14 @@ async def async_read_independent_tesla_vehicle(
         except Exception:
             return None
 
-    task = state.independent_in_flight.get(key)
+    task = state.independent_in_flight.get(in_flight_key)
     if task is None or task.done():
         task = asyncio.create_task(read_cloud())
-        state.independent_in_flight[key] = task
+        state.independent_in_flight[in_flight_key] = task
 
         def cleanup(completed: asyncio.Task[TeslaVehicleObservation | None]) -> None:
-            if state.independent_in_flight.get(key) is completed:
-                state.independent_in_flight.pop(key, None)
+            if state.independent_in_flight.get(in_flight_key) is completed:
+                state.independent_in_flight.pop(in_flight_key, None)
             try:
                 completed.exception()
             except BaseException:

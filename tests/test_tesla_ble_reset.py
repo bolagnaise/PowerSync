@@ -89,6 +89,24 @@ async def test_stock_reset_requires_disconnect_fresh_restart_and_advancing_uptim
                      "identity", "uptime", "uptime", "identity"]
 
 
+@pytest.mark.asyncio
+async def test_stock_reset_rejects_stale_pre_reset_uptime_before_restart():
+    callbacks = _callbacks(uptimes=[
+        {"uptime": 100, "observed_at": 0, "fresh": False},
+        {"uptime": 2, "observed_at": 20, "fresh": True},
+        {"uptime": 3, "observed_at": 21, "fresh": True},
+    ])
+    with pytest.raises(StockResetUnsupported, match="not fresh before"):
+        await async_execute_stock_reset(
+            profile=PROFILE, identity=IDENTITY,
+            restart=callbacks[0], wait_disconnected=callbacks[1],
+            wait_connected=callbacks[2], read_identity=callbacks[3],
+            read_uptime=callbacks[4], sleep=lambda _delay: _completed(),
+            now=itertools.count(1).__next__,
+        )
+    assert "restart" not in callbacks[-1]
+
+
 async def _completed():
     return None
 

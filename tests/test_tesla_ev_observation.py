@@ -841,12 +841,21 @@ def independent_source(monkeypatch):
             self.wake_response = {"response": {"state": "online"}}
             self.vehicle_responses = []
             self.wake_calls = []
+            self.refresh_calls = []
+            self.refresh_response = {"response": True}
+            self.before_refresh_return = None
 
         async def vehicle_data(self, *, endpoints):
             self.calls.append(endpoints)
             if self.before_return is not None:
                 await self.before_return()
             return {"response": deepcopy(self.response)}
+
+        async def data_refresh(self):
+            self.refresh_calls.append(True)
+            if self.before_refresh_return is not None:
+                await self.before_refresh_return()
+            return deepcopy(self.refresh_response)
 
         async def wake_up(self, *, wait=False, timeout=60):
             self.wake_calls.append((wait, timeout))
@@ -942,6 +951,286 @@ async def test_independent_reads_require_advancement_between_reconciliation_read
     later = await observation.async_read_independent_tesla_vehicle(hass, VIN_A, updated_after=first.source_charge_timestamp)
     assert later is not None
     assert later.source_charge_timestamp > first.source_charge_timestamp
+
+
+@pytest.mark.asyncio
+async def test_paid_teslemetry_refresh_produces_two_advancing_documents_from_stale_cache(independent_source):
+    hass, _entry, _vehicle, coordinator = independent_source("teslemetry")
+    client = coordinator.api
+    client.response["charge_state"]["timestamp"] = 1_999_999_970_767
+    # A cloud-origin SDK response is still cached; a one-second retry does
+    # not make its source timestamp fresh or advance the returned settings.
+    assert await observation.async_read_independent_tesla_vehicle(hass, VIN_A) is None
+    assert await observation.async_read_independent_tesla_vehicle(hass, VIN_A) is None
+    assert client.refresh_calls == []
+
+    async def fresh_document():
+        client.refresh_response = {"response": {"vin": VIN_A,
+            **_charge(2_000_000_000 + len(client.refresh_calls), current=0, power=0,
+                      requested=15, limit=70)}}
+
+    client.before_refresh_return = fresh_document
+    allowed = lambda: True
+    first = await observation.async_read_independent_tesla_vehicle(
+        hass, VIN_A, allow_paid_refresh=True, authorize=allowed)
+    second = await observation.async_read_independent_tesla_vehicle(
+        hass, VIN_A, allow_paid_refresh=True, authorize=allowed,
+        updated_after=first.source_charge_timestamp)
+    assert first is not None and second is not None
+    assert second.source_charge_timestamp > first.source_charge_timestamp
+    assert first.requested_current == second.requested_current == 15
+    assert first.charge_limit_soc == second.charge_limit_soc == 70
+    assert len(client.refresh_calls) == 2
+    assert len(client.calls) == 2  # Only the two initial default cached reads.
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("domain,paid", [("teslemetry", False), ("tesla_fleet", False), ("tesla_fleet", True)])
+async def test_default_and_fleet_reads_never_request_paid_refresh(independent_source, domain, paid):
+    hass, _entry, _vehicle, coordinator = independent_source(domain)
+    result = await observation.async_read_independent_tesla_vehicle(
+        hass, VIN_A, allow_paid_refresh=paid, authorize=lambda: True)
+    assert result is not None
+    assert coordinator.api.refresh_calls == []
+    assert len(coordinator.api.calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("policy", [None, False, "raises"])
+async def test_paid_refresh_requires_current_explicit_authorization(independent_source, policy):
+    hass, _entry, _vehicle, coordinator = independent_source("teslemetry")
+
+    def authorize():
+        if policy == "raises":
+            raise RuntimeError("policy unavailable")
+        return policy
+
+    assert await observation.async_read_independent_tesla_vehicle(
+        hass, VIN_A, allow_paid_refresh=True,
+        authorize=None if policy is None else authorize) is None
+    assert coordinator.api.refresh_calls == coordinator.api.calls == []
+
+
+@pytest.mark.asyncio
+async def test_paid_refresh_rechecks_authorization_after_native_lock_wait(independent_source):
+    hass, _entry, _vehicle, coordinator = independent_source("teslemetry")
+    allowed = True
+    await coordinator.lock.acquire()
+    task = asyncio.create_task(observation.async_read_independent_tesla_vehicle(
+        hass, VIN_A, allow_paid_refresh=True, authorize=lambda: allowed))
+    await asyncio.sleep(0)
+    assert not task.done()
+    allowed = False
+    coordinator.lock.release()
+    assert await asyncio.wait_for(task, 1) is None
+    assert coordinator.api.refresh_calls == coordinator.api.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mutation", ["policy", "runtime", "client", "shutdown", "device"])
+async def test_paid_refresh_rechecks_identity_and_policy_before_cache_fallback(independent_source, mutation):
+    hass, entry, vehicle, coordinator = independent_source("teslemetry")
+    client = coordinator.api
+    allowed = True
+
+    async def invalidate():
+        nonlocal allowed
+        if mutation == "policy":
+            allowed = False
+        elif mutation == "runtime":
+            entry.runtime_data = types.SimpleNamespace(vehicles=[vehicle])
+        elif mutation == "client":
+            coordinator.api = object()
+        elif mutation == "shutdown":
+            coordinator._shutdown_requested = True
+        else:
+            vehicle.device.identifiers = {("teslemetry", VIN_B)}
+
+    client.before_refresh_return = invalidate
+    assert await observation.async_read_independent_tesla_vehicle(
+        hass, VIN_A, allow_paid_refresh=True, authorize=lambda: allowed) is None
+    assert client.refresh_calls == [True]
+    assert client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_refresh_cache_fallback_uses_original_pre_refresh_time_and_class_method(independent_source, monkeypatch):
+    hass, _entry, _vehicle, coordinator = independent_source("teslemetry")
+    client = coordinator.api
+    clock = {"now": 2_000_000_000.0}
+    monkeypatch.setattr(observation, "time", types.SimpleNamespace(time=lambda: clock["now"]))
+
+    async def refresh_cache():
+        client.response = {"vin": VIN_A, **_charge(clock["now"] + 0.125, requested=15, limit=70)}
+        clock["now"] += 2.5
+
+    async def forbidden_instance_router(*_args, **_kwargs):
+        raise AssertionError("instance command router was called")
+
+    client.before_refresh_return = refresh_cache
+    client.data_refresh = forbidden_instance_router
+    client.vehicle_data = forbidden_instance_router
+    result = await observation.async_read_independent_tesla_vehicle(
+        hass, VIN_A, allow_paid_refresh=True, authorize=lambda: True)
+    assert result is not None
+    assert result.source_charge_timestamp == 2_000_000_000.125
+    assert result.requested_current == 15 and result.charge_limit_soc == 70
+    assert client.refresh_calls == [True]
+    assert client.calls == [["charge_state"]]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reply", [None, True, {"response": True}, {"response": {"result": True}}, {"response": {"result": False}}])
+async def test_refresh_acknowledgement_never_qualifies_with_stale_cached_data(independent_source, reply):
+    hass, _entry, _vehicle, coordinator = independent_source("teslemetry")
+    client = coordinator.api
+    client.refresh_response = reply
+    client.response["charge_state"]["timestamp"] -= 30
+    assert await observation.async_read_independent_tesla_vehicle(
+        hass, VIN_A, allow_paid_refresh=True, authorize=lambda: True) is None
+    assert client.refresh_calls == [True]
+    assert client.calls == [["charge_state"]]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fault", ["wrong_vin", "missing_requested", "missing_limit", "missing_power", "missing_actual", "same_timestamp"])
+async def test_paid_refresh_requires_complete_exact_fresh_document(independent_source, fault):
+    hass, _entry, _vehicle, coordinator = independent_source("teslemetry")
+    client = coordinator.api
+    document = deepcopy(client.response)
+    if fault == "wrong_vin":
+        document["vin"] = VIN_B
+    elif fault == "same_timestamp":
+        document["charge_state"]["timestamp"] = 1_999_999_990
+    else:
+        document["charge_state"].pop({"missing_requested": "charge_current_request",
+            "missing_limit": "charge_limit_soc", "missing_power": "charger_power",
+            "missing_actual": "charger_actual_current"}[fault])
+    client.refresh_response = {"response": document}
+    client.response["charge_state"]["timestamp"] -= 30
+    assert await observation.async_read_independent_tesla_vehicle(
+        hass, VIN_A, allow_paid_refresh=True, authorize=lambda: True) is None
+    assert len(client.refresh_calls) == len(client.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_paid_refresh_rechecks_policy_after_fallback_read(independent_source):
+    hass, _entry, _vehicle, coordinator = independent_source("teslemetry")
+    allowed = True
+
+    async def revoke():
+        nonlocal allowed
+        allowed = False
+
+    coordinator.api.before_return = revoke
+    assert await observation.async_read_independent_tesla_vehicle(
+        hass, VIN_A, allow_paid_refresh=True, authorize=lambda: allowed) is None
+    assert coordinator.api.refresh_calls == [True]
+    assert len(coordinator.api.calls) == 1
+    assert not observation._read_state(hass).independent_timestamps
+
+
+@pytest.mark.asyncio
+async def test_paid_refresh_failure_does_not_retry_or_read_old_cache(independent_source):
+    hass, _entry, _vehicle, coordinator = independent_source("teslemetry")
+
+    async def failed():
+        raise RuntimeError("refresh refused")
+
+    coordinator.api.before_refresh_return = failed
+    assert await observation.async_read_independent_tesla_vehicle(
+        hass, VIN_A, allow_paid_refresh=True, authorize=lambda: True) is None
+    assert coordinator.api.refresh_calls == [True]
+    assert coordinator.api.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("same_authorization", [False, True])
+async def test_paid_refresh_coalesces_only_matching_authorization_scope(independent_source, same_authorization):
+    hass, _entry, _vehicle, coordinator = independent_source("teslemetry")
+    client = coordinator.api
+
+    async def fresh_document():
+        client.refresh_response = {"response": {"vin": VIN_A,
+            **_charge(2_000_000_000 + len(client.refresh_calls))}}
+
+    client.before_refresh_return = fresh_document
+    authorize = lambda: True
+    await coordinator.lock.acquire()
+    first = asyncio.create_task(observation.async_read_independent_tesla_vehicle(
+        hass, VIN_A, allow_paid_refresh=True, authorize=authorize))
+    second = asyncio.create_task(observation.async_read_independent_tesla_vehicle(
+        hass, VIN_A, allow_paid_refresh=True,
+        authorize=authorize if same_authorization else lambda: True))
+    await asyncio.sleep(0)
+    coordinator.lock.release()
+    results = await asyncio.wait_for(asyncio.gather(first, second), 1)
+    assert all(result is not None for result in results)
+    assert len(client.refresh_calls) == (1 if same_authorization else 2)
+    assert client.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("paid_first", [False, True])
+async def test_paid_and_default_in_flight_reads_are_separate_with_shared_freshness(independent_source, paid_first):
+    hass, _entry, _vehicle, coordinator = independent_source("teslemetry")
+    client = coordinator.api
+    client.response["charge_state"]["timestamp"] -= 30
+
+    async def refresh_cache():
+        client.response = {"vin": VIN_A, **_charge(2_000_000_001)}
+        client.refresh_response = {"response": deepcopy(client.response)}
+
+    client.before_refresh_return = refresh_cache
+    authorize = lambda: True
+    await coordinator.lock.acquire()
+    modes = [True, False] if paid_first else [False, True]
+    tasks = [asyncio.create_task(observation.async_read_independent_tesla_vehicle(
+        hass, VIN_A, allow_paid_refresh=paid, authorize=authorize)) for paid in modes]
+    await asyncio.sleep(0)
+    coordinator.lock.release()
+    results = await asyncio.wait_for(asyncio.gather(*tasks), 1)
+    by_mode = dict(zip(modes, results))
+    assert by_mode[True] is not None
+    assert by_mode[False] is None
+    assert client.refresh_calls == [True]
+    assert len(client.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_paid_refresh_unknown_sdk_method_refuses_without_provider_io(independent_source, monkeypatch):
+    hass, _entry, _vehicle, coordinator = independent_source("teslemetry")
+    monkeypatch.delattr(type(coordinator.api), "data_refresh")
+    assert await observation.async_read_independent_tesla_vehicle(
+        hass, VIN_A, allow_paid_refresh=True, authorize=lambda: True) is None
+    assert coordinator.api.refresh_calls == coordinator.api.calls == []
+
+
+@pytest.mark.asyncio
+async def test_paid_refresh_cancellation_preserves_other_authorized_waiter(independent_source):
+    hass, _entry, _vehicle, coordinator = independent_source("teslemetry")
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def hold():
+        entered.set()
+        await release.wait()
+        coordinator.api.refresh_response = {"response": deepcopy(coordinator.api.response)}
+
+    coordinator.api.before_refresh_return = hold
+    authorize = lambda: True
+    first = asyncio.create_task(observation.async_read_independent_tesla_vehicle(
+        hass, VIN_A, allow_paid_refresh=True, authorize=authorize))
+    await asyncio.wait_for(entered.wait(), 1)
+    second = asyncio.create_task(observation.async_read_independent_tesla_vehicle(
+        hass, VIN_A, allow_paid_refresh=True, authorize=authorize))
+    await asyncio.sleep(0)
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    release.set()
+    assert await asyncio.wait_for(second, 1) is not None
+    assert coordinator.api.refresh_calls == [True]
+    assert coordinator.api.calls == []
 
 
 @pytest.mark.asyncio

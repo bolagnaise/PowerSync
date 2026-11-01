@@ -227,6 +227,28 @@ async def test_disconnect_with_missing_uptime_keeps_identity_fence_distinct(harn
 
 
 @pytest.mark.asyncio
+async def test_pre_reset_uptime_waits_for_fresh_sample_before_continuing(harness, monkeypatch):
+    hass, entry = harness
+    bridge = _bridge(hass, entry, VIN_A)
+    transaction = stock.StockBridgeTransaction(hass, entry, bridge)
+    monkeypatch.setattr(stock, "POLL_SECONDS", 0.001)
+    uptime_id = "sensor.bridge_a_uptime"
+    hass.states_by_id[uptime_id] = _State(
+        uptime_id, 0.562, datetime.fromtimestamp(time.time() - 10, timezone.utc)
+    )
+
+    pending = asyncio.create_task(transaction.uptime())
+    await asyncio.sleep(0)
+    fresh_stamp = datetime.now(timezone.utc)
+    hass.states_by_id[uptime_id] = _State(uptime_id, 62.815, fresh_stamp)
+
+    result = await asyncio.wait_for(pending, 1)
+    assert result["uptime"] == pytest.approx(62.815)
+    assert result["observed_at"] == pytest.approx(fresh_stamp.timestamp())
+    assert transaction.last_uptime == result
+
+
+@pytest.mark.asyncio
 async def test_uptime_requires_fresh_low_sample_then_advancing_sample(harness):
     hass, entry = harness
     bridge = _bridge(hass, entry, VIN_A)
@@ -319,6 +341,110 @@ async def test_two_independent_native_observations_converge_requested_state(harn
     assert await run(VIN_A)
     assert await run(VIN_B)
     assert reads[VIN_A] >= 2 and reads[VIN_B] >= 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider", "paid_expected"),
+    [("both", True), ("tesla_ble", False)],
+)
+async def test_recovery_reader_paid_refresh_follows_provider_policy(
+    harness, monkeypatch, provider, paid_expected,
+):
+    hass, entry = harness
+    entry.data["ev_provider"] = provider
+    if provider == "tesla_ble":
+        entry.data["tesla_ble_entity_prefix"] = "bridge_a"
+        entry.data["tesla_ble_vehicle_mapping"] = f"{VIN_A}=bridge_a"
+    bridge = _bridge(hass, entry, VIN_A)
+    snapshot = hass.data["power_sync"][entry.entry_id]["_tesla_ev_recovery_sidecar"]
+    snapshot["incidents"] = {"incident": {
+        "incident_id": "incident", "phase": "held",
+        "current_candidate_vehicles": [VIN_A],
+        "current_candidate_producers": [bridge.identity],
+    }}
+    observation_module = importlib.import_module("power_sync.tesla_ev_observation")
+    actions_module = types.ModuleType("power_sync.automations.actions")
+    binding = {"vin": VIN_A, "domain": "teslemetry",
+               "config_entry_id": "native-entry", "device_id": "native-device",
+               "producer_identity": "native:producer"}
+    read_requests = []
+
+    async def read(*_args, **kwargs):
+        read_requests.append(kwargs)
+        assert kwargs["authorize"]() is True
+        return None
+
+    async def ble_wake(*_args, **_kwargs):
+        return False
+
+    async def cloud_wake(*_args, **_kwargs):
+        return False
+
+    actions_module._wake_tesla_ble = ble_wake
+    monkeypatch.setitem(sys.modules, "power_sync.automations.actions", actions_module)
+    monkeypatch.setattr(observation_module, "async_read_independent_tesla_vehicle", read)
+    monkeypatch.setattr(observation_module, "async_wake_independent_tesla_vehicle", cloud_wake)
+    monkeypatch.setattr(observation_module, "independent_tesla_source_binding",
+                        lambda _hass, _vin: binding)
+
+    async def fake_recover(_hass, _entry, *, observe, **_kwargs):
+        return await observe(VIN_A) is not None
+
+    monkeypatch.setattr(recovery, "async_recover_stock", fake_recover)
+    assert not await stock.async_recover_vehicle_transport(hass, entry, VIN_A)
+    assert read_requests
+    assert all(request["allow_paid_refresh"] is paid_expected
+               for request in read_requests)
+
+
+@pytest.mark.asyncio
+async def test_recovery_reader_paid_authorize_rejects_policy_revocation(
+    harness, monkeypatch,
+):
+    hass, entry = harness
+    entry.data["ev_provider"] = "both"
+    bridge = _bridge(hass, entry, VIN_A)
+    snapshot = hass.data["power_sync"][entry.entry_id]["_tesla_ev_recovery_sidecar"]
+    snapshot["incidents"] = {"incident": {
+        "incident_id": "incident", "phase": "held",
+        "current_candidate_vehicles": [VIN_A],
+        "current_candidate_producers": [bridge.identity],
+    }}
+    observation_module = importlib.import_module("power_sync.tesla_ev_observation")
+    actions_module = types.ModuleType("power_sync.automations.actions")
+    binding = {"vin": VIN_A, "domain": "teslemetry",
+               "config_entry_id": "native-entry", "device_id": "native-device",
+               "producer_identity": "native:producer"}
+    seen = []
+
+    async def read(*_args, **kwargs):
+        seen.append(kwargs)
+        entry.data["ev_provider"] = "tesla_ble"
+        assert kwargs["allow_paid_refresh"] is True
+        assert kwargs["authorize"]() is False
+        return None
+
+    async def ble_wake(*_args, **_kwargs):
+        return False
+
+    async def cloud_wake(*_args, **kwargs):
+        assert kwargs["authorize"]() is False
+        return False
+
+    actions_module._wake_tesla_ble = ble_wake
+    monkeypatch.setitem(sys.modules, "power_sync.automations.actions", actions_module)
+    monkeypatch.setattr(observation_module, "async_read_independent_tesla_vehicle", read)
+    monkeypatch.setattr(observation_module, "async_wake_independent_tesla_vehicle", cloud_wake)
+    monkeypatch.setattr(observation_module, "independent_tesla_source_binding",
+                        lambda _hass, _vin: binding)
+
+    async def fake_recover(_hass, _entry, *, observe, **_kwargs):
+        return await observe(VIN_A) is not None
+
+    monkeypatch.setattr(recovery, "async_recover_stock", fake_recover)
+    assert not await stock.async_recover_vehicle_transport(hass, entry, VIN_A)
+    assert seen
 
 
 @pytest.mark.asyncio

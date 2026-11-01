@@ -16369,3 +16369,178 @@ def test_legacy_rate_range_retry_rechecks_authority(monkeypatch, helper):
 
     assert result is False
     assert hass.services.async_call.await_count == 1
+
+
+@pytest.mark.parametrize(
+    "radio_state", ["off", "unknown", "unavailable", "connecting"]
+)
+def test_ble_positive_mutation_blocks_explicit_radio_unusable_with_fresh_cache(
+    radio_state,
+):
+    """Fresh cached vehicle data cannot bypass an explicitly disabled radio."""
+    hass = _Hass([
+        _State(
+            "number.car_charging_amps",
+            "5",
+            {"min": 1, "max": 32},
+        ),
+        _State("switch.car_ble_connection", radio_state),
+    ])
+    _add_ble_session_snapshot(hass, "car", charging_state="Charging", current="8")
+
+    result = asyncio.run(actions._set_ev_charging_amps_ble(hass, "car", 10))
+
+    assert result is False
+    assert not any(domain == "number" for domain, _service, _data in hass.services.calls)
+    assert not actions._is_ble_available(hass, "car")
+
+
+def test_ble_positive_mutation_blocks_registry_disabled_radio_even_when_on():
+    """A disabled HA registry row is not made usable by a cached ``on`` state."""
+    hass = _Hass([
+        _State(
+            "number.car_charging_amps",
+            "5",
+            {"min": 1, "max": 32},
+        ),
+        _State("switch.car_ble_connection", "on"),
+    ])
+    hass.entity_registry.entities["switch.car_ble_connection"].disabled_by = "user"
+    _add_ble_session_snapshot(hass, "car", charging_state="Charging", current="8")
+
+    result = asyncio.run(actions._set_ev_charging_amps_ble(hass, "car", 10))
+
+    assert result is False
+    assert not any(domain == "number" for domain, _service, _data in hass.services.calls)
+    assert not actions._is_ble_available(hass, "car")
+
+
+def test_ble_radio_block_reason_is_rate_limited():
+    """Repeated automatic checks explain a radio block once per interval."""
+    hass = _Hass([
+        _State("switch.car_charger", "off"),
+        _State("switch.car_ble_connection", "off"),
+    ])
+    stream, handler, logger, old_level, old_propagate = _captured_actions_logs(
+        logging.WARNING
+    )
+    try:
+        assert not actions._is_ble_available(hass, "car")
+        assert not actions._is_ble_available(hass, "car")
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(old_level)
+        logger.propagate = old_propagate
+
+    assert stream.getvalue().count("BLE connection control is off") == 1
+
+
+def test_ble_radio_disable_during_wake_blocks_followup_mutation(monkeypatch):
+    """A radio switch disabled while waking cannot reach the charger write."""
+    radio = _State("switch.car_ble_connection", "on")
+    hass = _Hass([
+        _State("switch.car_charger", "off"),
+        _State("button.car_wake_up", "unknown"),
+        _State("binary_sensor.car_asleep", "on"),
+        radio,
+    ])
+    _add_ble_force_data_update(hass, "car")
+
+    async def wake_then_disable(*_args, **_kwargs):
+        radio.state = "off"
+        return True
+
+    monkeypatch.setattr(actions, "_wake_tesla_ble", wake_then_disable)
+
+    result = asyncio.run(actions._start_ev_charging_ble(hass, "car"))
+
+    assert result is False
+    assert hass.services.calls == []
+
+
+def test_ble_radio_rebind_during_wake_blocks_followup_mutation(monkeypatch):
+    """A connection switch rebound during Wake cannot authorize the write."""
+    radio = _State("switch.car_ble_connection", "on")
+    hass = _Hass([
+        _State("switch.car_charger", "off"),
+        _State("button.car_wake_up", "unknown"),
+        _State("binary_sensor.car_asleep", "on"),
+        radio,
+    ])
+    _add_ble_force_data_update(hass, "car")
+
+    async def wake_then_rebind(*_args, **_kwargs):
+        hass.entity_registry.entities["switch.car_ble_connection"].unique_id = (
+            "other-producer"
+        )
+        return True
+
+    monkeypatch.setattr(actions, "_wake_tesla_ble", wake_then_rebind)
+
+    result = asyncio.run(actions._start_ev_charging_ble(hass, "car"))
+
+    assert result is False
+    assert hass.services.calls == []
+
+
+def test_ble_disconnected_gatt_status_does_not_block_wake():
+    """A disconnected status sensor is not proof that the radio is disabled."""
+    hass = _Hass([
+        _State("button.car_wake_up", "unknown"),
+        _State("binary_sensor.car_asleep", "on"),
+        _State("binary_sensor.car_ble_status", "off"),
+        _State("switch.car_ble_connection", "on"),
+    ])
+
+    assert asyncio.run(actions._wake_tesla_ble(hass, "car", wait_timeout=0)) is False
+    assert hass.services.calls == [
+        ("button", "press", {"entity_id": "button.car_wake_up"})
+    ]
+
+
+def test_ble_wake_rejects_radio_bound_to_different_producer():
+    """Standalone Wake must pin the radio to the exact ESPHome bridge."""
+    hass = _Hass([
+        _State("button.car_wake_up", "unknown"),
+        _State("binary_sensor.car_asleep", "on"),
+        _State("switch.car_ble_connection", "on"),
+    ])
+    hass.entity_registry.entities["switch.car_ble_connection"].device_id = (
+        "other-bridge"
+    )
+
+    assert asyncio.run(actions._wake_tesla_ble(hass, "car", wait_timeout=0)) is False
+    assert hass.services.calls == []
+
+
+def test_legacy_bridge_without_radio_entity_remains_available():
+    """Bridges predating the connection switch keep their existing route."""
+    hass = _Hass([_State("switch.car_charger", "off")])
+
+    assert actions._tesla_ble_radio_binding(hass, "car") is None
+    assert actions._is_ble_available(hass, "car") is True
+
+
+def test_owned_ble_stop_cleanup_remains_dispatchable_when_radio_is_off(monkeypatch):
+    """A negative cleanup Stop may use its existing exact scope when radio is off."""
+    monkeypatch.setattr(actions, "_TESLA_BLE_COMMAND_CONFIRMATION_SECONDS", 0)
+    hass = _Hass([
+        _State("switch.car_charger", "on"),
+        _State("switch.car_ble_connection", "off"),
+    ])
+
+    result = asyncio.run(
+        actions._stop_ev_charging_ble(
+            hass,
+            "car",
+            allow_backoff=False,
+            allow_cleanup_without_session=True,
+        )
+    )
+
+    assert result is None
+    assert (
+        "switch",
+        "turn_off",
+        {"entity_id": "switch.car_charger"},
+    ) in hass.services.calls

@@ -9,11 +9,13 @@ from __future__ import annotations
 import asyncio
 from copy import deepcopy
 from dataclasses import dataclass
+import logging
 import math
 import time
 from typing import Any, Mapping
 
 DOMAIN = "power_sync"
+_LOGGER = logging.getLogger(__name__)
 RESET_TIMEOUT = 180.0
 POLL_SECONDS = 0.1
 
@@ -208,11 +210,20 @@ class StockBridgeTransaction:
     async def uptime(self) -> dict[str, Any]:
         entity = self.bridge.identities["uptime"]["entity_id"]
         if self.reset_at is None:
-            value = _uptime(self.hass, entity)
-            if value is None or not self.current():
+            requested_at = time.time()
+
+            def fresh() -> bool:
+                value = _uptime(self.hass, entity)
+                if (value is None or value["observed_at"] <= requested_at
+                        or not self.current()):
+                    return False
+                self.last_uptime = value
+                return True
+
+            await self.wait(fresh)
+            if self.last_uptime is None:
                 raise RuntimeError("stock_bridge_uptime_unavailable")
-            self.last_uptime = value
-            return value
+            return dict(self.last_uptime)
         before = self.last_uptime
         def changed() -> bool:
             value = _uptime(self.hass, entity)
@@ -227,8 +238,15 @@ class StockBridgeTransaction:
 
     async def contain(self) -> None:
         if self.current():
+            entity_id = self.bridge.identities["radio"]["entity_id"]
             await self.hass.services.async_call("switch", "turn_off", {
-                "entity_id": self.bridge.identities["radio"]["entity_id"]}, blocking=True)
+                "entity_id": entity_id}, blocking=True)
+            _LOGGER.warning(
+                "Tesla transport recovery did not complete; requested BLE "
+                "Connection off for %s to contain the unresolved transport. "
+                "Charging commands remain held pending successful recovery",
+                entity_id,
+            )
 
 
 def reconciliation_evidence(observation: Any) -> dict[str, Any] | None:
@@ -430,10 +448,30 @@ async def async_recover_vehicle_transport(
                 EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH,
             )
 
+        async def read_observation(
+            vehicle: str, *, updated_after: Any | None = None,
+            allow_paid_refresh: bool | None = None,
+        ) -> Any:
+            """Read only while the exact recovery binding and policy remain current."""
+            if vehicle != str(vin) or not source_current():
+                return None
+            paid = cloud_wake_allowed() if allow_paid_refresh is None else bool(
+                allow_paid_refresh
+            )
+            if paid and not cloud_wake_allowed():
+                return None
+            return await async_read_independent_tesla_vehicle(
+                hass, vehicle, timeout=20, updated_after=updated_after,
+                allow_paid_refresh=paid,
+                authorize=lambda: source_current() and (
+                    not paid or cloud_wake_allowed()
+                ),
+            )
+
         async def observe(vehicle: str) -> dict[str, Any] | None:
             if vehicle != str(vin) or not source_current():
                 return None
-            observation = await async_read_independent_tesla_vehicle(hass, vehicle, timeout=20)
+            observation = await read_observation(vehicle)
             if observation is None and source_current():
                 # Wake is a separate non-charging operation. The old producer
                 # has already been retired; retain the recovery generation
@@ -445,7 +483,7 @@ async def async_recover_vehicle_transport(
                 )
                 if not source_current():
                     return None
-                observation = await async_read_independent_tesla_vehicle(hass, vehicle, timeout=20)
+                observation = await read_observation(vehicle)
             if observation is None and source_current() and cloud_wake_allowed():
                 # BLE remains the primary recovery path. Only after its
                 # bounded wake/read attempt has produced no exact cloud
@@ -460,8 +498,8 @@ async def async_recover_vehicle_transport(
                 if not source_current():
                     return None
                 if cloud_wake:
-                    observation = await async_read_independent_tesla_vehicle(
-                        hass, vehicle, timeout=20,
+                    observation = await read_observation(
+                        vehicle, allow_paid_refresh=True,
                     )
             if (not source_current() or not observation_matches(observation)):
                 return None
@@ -478,8 +516,8 @@ async def async_recover_vehicle_transport(
                 await asyncio.sleep(1)
                 if not source_current():
                     return False
-                second = await async_read_independent_tesla_vehicle(
-                    hass, vehicle, timeout=20, updated_after=first.source_charge_timestamp,
+                second = await read_observation(
+                    vehicle, updated_after=first.source_charge_timestamp,
                 )
                 if (not source_current() or not observation_matches(second)
                         or second.origin != "native_cloud" or second.vin != vehicle
@@ -491,6 +529,18 @@ async def async_recover_vehicle_transport(
                         or second.charge_limit_soc != first.charge_limit_soc
                         or second.charge_state != first.charge_state
                         or second.charge_state.lower() in {"starting", "unknown"}):
+                    differences = [
+                        field for field in (
+                            "origin", "vin", "producer_identity", "domain",
+                            "config_entry_id", "device_id", "requested_current",
+                            "charge_limit_soc", "charge_state",
+                        ) if getattr(second, field, None) != getattr(first, field, None)
+                    ]
+                    _LOGGER.warning(
+                        "Tesla transport recovery for %s did not converge: "
+                        "second independent observation present=%s; differing fields=%s",
+                        bridge.prefix, second is not None, differences,
+                    )
                     return False
                 _observations[vehicle]["converged_observation"] = reconciliation_evidence(second)
             return bool(first_observations)

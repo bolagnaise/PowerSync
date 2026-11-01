@@ -160,6 +160,8 @@ async def async_execute_stock_reset(
         raise StockResetUnsupported("producer identity changed before restart")
     before_raw = await _call(read_uptime, name="uptime observation")
     before = _uptime_sample(before_raw)
+    if not _fresh(before, started):
+        raise StockResetUnsupported("uptime sample is not fresh before restart")
 
     result = await _call(restart, name="restart")
     if result is False:

@@ -2680,8 +2680,136 @@ def _canonical_dynamic_tesla_vehicle_id(
         return normalized_id
 
 
+_TESLA_BLE_RADIO_SWITCH = "switch.{prefix}_ble_connection"
+_TESLA_BLE_RADIO_BLOCKED_STATES = frozenset({"off", "unknown", "unavailable"})
+
+
+def _tesla_ble_radio_binding(
+    hass: HomeAssistant,
+    ble_prefix: str,
+) -> tuple[tuple[tuple[Any, ...], ...] | None, str | None] | None:
+    """Snapshot the optional exact BLE connection-control entity.
+
+    Older ESPHome bridges do not expose a connection switch at all.  Preserve
+    that legacy shape as ``None`` while still pinning both the registry row and
+    state whenever the entity exists, so a row appearing or rebinding during
+    admission cannot silently become the producer for a command.
+    """
+    radio_entity = _TESLA_BLE_RADIO_SWITCH.format(prefix=ble_prefix)
+    state = hass.states.get(radio_entity)
+    try:
+        registration = er.async_get(hass).async_get(radio_entity)
+    except Exception:
+        registration = None
+    if state is None and registration is None:
+        return None
+    return (
+        _tesla_legacy_entity_identity(hass, (radio_entity,)),
+        None if state is None else str(getattr(state, "state", "")).strip().lower(),
+    )
+
+
+def _tesla_ble_radio_reason(
+    hass: HomeAssistant,
+    ble_prefix: str,
+) -> str | None:
+    """Return a fail-closed reason for an explicitly known radio problem."""
+    radio_entity = _TESLA_BLE_RADIO_SWITCH.format(prefix=ble_prefix)
+    state = hass.states.get(radio_entity)
+    try:
+        registration = er.async_get(hass).async_get(radio_entity)
+    except Exception:
+        registration = None
+
+    # No state and no registry row is the legacy bridge shape.  There is no
+    # radio control to inspect, so do not turn absence into a false failure.
+    if state is None and registration is None:
+        return None
+    if registration is not None and getattr(registration, "disabled_by", None):
+        return "registry_disabled"
+    if state is None:
+        return "unavailable"
+    normalized = str(getattr(state, "state", "") or "").strip().lower()
+    if normalized != "on":
+        if normalized in _TESLA_BLE_RADIO_BLOCKED_STATES or not normalized:
+            return normalized or "unavailable"
+        return "invalid_state"
+    return None
+
+
+def _tesla_ble_radio_available(
+    hass: HomeAssistant,
+    ble_prefix: str,
+    *,
+    report: bool = True,
+) -> bool:
+    """Check an optional exact BLE radio control without using GATT presence."""
+    reason = _tesla_ble_radio_reason(hass, ble_prefix)
+    if reason is None:
+        return True
+    if report and _ble_block_report_due(hass, ble_prefix, f"radio_{reason}"):
+        _LOGGER.warning(
+            "Tesla BLE %s: BLE connection control is %s; BLE wake or positive "
+            "mutation was not sent",
+            ble_prefix,
+            reason.replace("_", " "),
+        )
+    return False
+
+
+def _tesla_ble_radio_matches_target(
+    hass: HomeAssistant,
+    ble_prefix: str,
+    target_entity: str | None,
+) -> bool:
+    """Keep a present radio switch on the same ESPHome producer as the target."""
+    if not target_entity:
+        return True
+    radio_entity = _TESLA_BLE_RADIO_SWITCH.format(prefix=ble_prefix)
+    try:
+        registry = er.async_get(hass)
+        radio = registry.async_get(radio_entity)
+        target = registry.async_get(target_entity)
+    except Exception:
+        return True
+    # An old bridge can expose state without registry rows.  The ordinary
+    # target/charge binding remains the authority in that compatibility case.
+    if radio is None or target is None:
+        return True
+    radio_platform = str(getattr(radio, "platform", "") or "").lower()
+    target_platform = str(getattr(target, "platform", "") or "").lower()
+    if radio_platform != "esphome" or target_platform != "esphome":
+        return False
+    return all(
+        getattr(radio, field, None) == getattr(target, field, None)
+        and getattr(radio, field, None)
+        for field in ("config_entry_id", "device_id")
+    )
+
+
+def _tesla_ble_radio_scope_current(
+    hass: HomeAssistant,
+    ble_prefix: str,
+    expected_binding: tuple[tuple[tuple[Any, ...], ...] | None, str | None] | None,
+    *,
+    target_entity: str | None = None,
+) -> bool:
+    """Require the optional radio control to remain available and unchanged."""
+    if not _tesla_ble_radio_available(hass, ble_prefix):
+        return False
+    if not _tesla_ble_radio_matches_target(hass, ble_prefix, target_entity):
+        if _ble_block_report_due(hass, ble_prefix, "radio_binding"):
+            _LOGGER.warning(
+                "Tesla BLE %s: BLE connection control is bound to a different "
+                "producer; BLE mutation was not sent",
+                ble_prefix,
+            )
+        return False
+    return _tesla_ble_radio_binding(hass, ble_prefix) == expected_binding
+
+
 def _is_ble_available(hass: HomeAssistant, ble_prefix: str) -> bool:
-    """Check if Tesla BLE entities are available."""
+    """Check if Tesla BLE entities and an optional radio control are available."""
     from ..tesla_ev_recovery import ble_quarantined
     if ble_quarantined(hass, ble_prefix):
         return False
@@ -2691,7 +2819,11 @@ def _is_ble_available(hass: HomeAssistant, ble_prefix: str) -> bool:
     # bridge can still wake it and then issue the command.  ``unavailable`` is
     # different: Home Assistant cannot currently reach the control entity, so
     # Both mode must proceed directly to its Teslemetry/Fleet fallback.
-    return state is not None and state.state != "unavailable"
+    return (
+        state is not None
+        and state.state != "unavailable"
+        and _tesla_ble_radio_available(hass, ble_prefix)
+    )
 
 
 _TESLA_BLE_COMMAND_CONFIRMATION_SECONDS = 10
@@ -2949,11 +3081,18 @@ async def _wake_tesla_ble(
         return False
     wake_identity = _tesla_legacy_entity_identity(hass, (wake_entity,))
     asleep_identity = _tesla_legacy_entity_identity(hass, (asleep_entity,))
+    radio_binding = _tesla_ble_radio_binding(hass, ble_prefix)
 
     async def current() -> bool:
         return bool(
             await _tesla_legacy_transport_authorized(authorize)
             and _tesla_legacy_entity_identity(hass, (wake_entity,)) == wake_identity
+            and _tesla_ble_radio_scope_current(
+                hass,
+                ble_prefix,
+                radio_binding,
+                target_entity=wake_entity,
+            )
         )
 
     if not await current():
@@ -3323,31 +3462,37 @@ async def _tesla_ble_prepare_mutation(
         charge_binding_holder[:] = [charge_binding]
     if charge_binding is None:
         return False
-    if not await _tesla_ble_scope_current(
-        hass, target_entity, expected_identity, authorize
-    ):
+    radio_binding = _tesla_ble_radio_binding(hass, ble_prefix)
+
+    async def scope_current() -> bool:
+        if not await _tesla_ble_scope_current(
+            hass, target_entity, expected_identity, authorize
+        ):
+            return False
+        return _tesla_ble_radio_scope_current(
+            hass,
+            ble_prefix,
+            radio_binding,
+            target_entity=target_entity,
+        )
+
+    if not await scope_current():
         return False
     if not wake_first and _tesla_ble_has_fresh_charge_snapshot(hass, ble_prefix):
         return True
     if wake_first:
         if not await _wake_tesla_ble(
             hass, ble_prefix, allow_backoff=allow_backoff,
-            authorize=lambda: _tesla_ble_scope_current(
-                hass, target_entity, expected_identity, authorize
-            ),
+            authorize=scope_current,
         ):
             return False
     elif not _tesla_ble_has_fresh_charge_snapshot(hass, ble_prefix):
         if not await _wake_tesla_ble(
             hass, ble_prefix, allow_backoff=allow_backoff,
-            authorize=lambda: _tesla_ble_scope_current(
-                hass, target_entity, expected_identity, authorize
-            ),
+            authorize=scope_current,
         ):
             return False
-    if not await _tesla_ble_scope_current(
-        hass, target_entity, expected_identity, authorize
-    ):
+    if not await scope_current():
         return False
     charge_binding = _tesla_ble_charge_data_binding(
         hass, ble_prefix, target_entity, previous=charge_binding
@@ -3373,9 +3518,9 @@ async def _tesla_ble_prepare_mutation(
         return False
     force_entity, force_identity = binding
     refresh_started_at = datetime.now(dt_timezone.utc)
-    if not await _tesla_ble_scope_current(
-        hass, target_entity, expected_identity, authorize
-    ) or _tesla_legacy_entity_identity(hass, (force_entity,)) != force_identity:
+    if not await scope_current() or _tesla_legacy_entity_identity(
+        hass, (force_entity,)
+    ) != force_identity:
         return False
     charge_binding = _tesla_ble_charge_data_binding(
         hass, ble_prefix, target_entity, previous=charge_binding
@@ -3403,9 +3548,9 @@ async def _tesla_ble_prepare_mutation(
 
     deadline = asyncio.get_running_loop().time() + _TESLA_BLE_COMMAND_CONFIRMATION_SECONDS
     while True:
-        if not await _tesla_ble_scope_current(
-            hass, target_entity, expected_identity, authorize
-        ) or _tesla_legacy_entity_identity(hass, (force_entity,)) != force_identity:
+        if not await scope_current() or _tesla_legacy_entity_identity(
+            hass, (force_entity,)
+        ) != force_identity:
             return False
         charge_binding = _tesla_ble_charge_data_binding(
             hass, ble_prefix, target_entity, previous=charge_binding
@@ -4915,6 +5060,7 @@ async def _run_ble_transport_command(
     params.pop("_tesla_ble_native_satisfied", None)
     params.pop("_tesla_ble_native_observation_target", None)
     pinned_entity_identity = _tesla_legacy_entity_identity(hass, (entity,))
+    pinned_radio_binding = _tesla_ble_radio_binding(hass, prefix)
     authority = _tesla_transport_authority(
         hass,
         entry,
@@ -4938,6 +5084,13 @@ async def _run_ble_transport_command(
     if (
         effect_bound is not _TESLA_BLE_EFFECT_BOUND_UNSET
         and not _tesla_ble_effect_bound_is_valid(operation, effect_bound)
+    ):
+        return False, False
+    if operation != "stop" and not _tesla_ble_radio_scope_current(
+        hass,
+        prefix,
+        pinned_radio_binding,
+        target_entity=entity,
     ):
         return False, False
     config = {**entry.data, **entry.options}
@@ -5057,7 +5210,16 @@ async def _run_ble_transport_command(
         """Recheck authority and the exact legacy target after ticket save."""
         if not await _tesla_legacy_transport_authorized(authority):
             return False
-        return _tesla_legacy_entity_identity(hass, (entity,)) == pinned_entity_identity
+        if _tesla_legacy_entity_identity(hass, (entity,)) != pinned_entity_identity:
+            return False
+        if operation != "stop" and not _tesla_ble_radio_scope_current(
+            hass,
+            prefix,
+            pinned_radio_binding,
+            target_entity=entity,
+        ):
+            return False
+        return True
 
     async def track_submission(submit):
         handoff["attempted"] = True
@@ -9113,7 +9275,15 @@ async def _action_stop_ev_charging(
         strict_cleanup = (ev_provider == EV_PROVIDER_TESLA_BLE
             and route is not None and (local_control is None or local_control.state != "off")
             and hass.states.get(TESLA_BLE_SWITCH_CHARGER.format(prefix=ble_prefix)) is not None)
-        if _is_ble_available(hass, ble_prefix) or strict_cleanup:
+        # A known route/incident is also an owned negative cleanup scope.  It
+        # may use the exact charger Stop even when the optional connection
+        # switch is off or unavailable; positive wake/mutations remain gated.
+        owned_cleanup = (
+            route is not None
+            and hass.states.get(TESLA_BLE_SWITCH_CHARGER.format(prefix=ble_prefix))
+            is not None
+        )
+        if _is_ble_available(hass, ble_prefix) or strict_cleanup or owned_cleanup:
             # An explicit user stop must always attempt the wake: the shared
             # failed-bridge backoff is armed by the automatic surplus loop and
             # would otherwise discard the command before dispatch.

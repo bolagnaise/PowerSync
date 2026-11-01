@@ -106,6 +106,10 @@ disconnect/reconnect, newly published low uptime and a subsequent advancing
 uptime sample must all belong to that same producer. Missing uptime, an
 unsupported profile, a rebind or a failed save leaves recovery held. Failure
 also attempts to contain the radio; it does not claim containment succeeded.
+This requests the bridge's **BLE Connection** switch off and logs that reason.
+An off switch after a failed recovery is therefore a containment action, not
+evidence that the car failed to wake. A connected BLE status alone does not
+establish fresh vehicle charge data.
 Original YAML or a firmware rebuild is not required for this supported Restart
 operation.
 
@@ -137,6 +141,14 @@ acceptance alone never releases the incident. This fallback bypasses the
 Teslemetry command router, keeps the same VIN and provider binding, and does
 not change charging settings or extend an existing session deadline. BLE-only
 configuration does not enable the paid cloud Wake fallback.
+
+Teslemetry's ordinary `vehicle_data` response can come from its server cache.
+When cloud fallback is permitted, an independent recovery read may request one
+explicit native Teslemetry refresh. A returned acknowledgement is insufficient:
+the exact vehicle's charge-state document must still pass the source timestamp,
+requested-setting and convergence checks. The refresh can consume Teslemetry
+credits. This opt-in belongs to recovery; ordinary observation does not force
+refreshes, and BLE-only configuration does not enable them.
 
 The recovery sidecar (`power_sync.ev_transport_recovery.<entry_id>`) is
 independent of the automation store's legacy projection. It retains incidents,
