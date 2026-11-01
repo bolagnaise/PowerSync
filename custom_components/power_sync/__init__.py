@@ -17542,6 +17542,7 @@ class EVVehicleCommandView(HomeAssistantView):
             record_manual_ev_charging_session,
         )
         from .automations.ev_ownership import (
+            async_reconcile_quick_control_stopped,
             claim_ev_ownership,
             clear_ev_quick_control_obligation,
             get_ev_quick_control_obligation,
@@ -17698,6 +17699,11 @@ class EVVehicleCommandView(HomeAssistantView):
                 continue
 
             if loadpoint_id in expired:
+                if isinstance(obligation, Mapping):
+                    reconciled = await async_reconcile_quick_control_stopped(
+                        self._hass, entry, vehicle_vin, obligation)
+                    if reconciled is not False:
+                        continue
                 # Keep the completion decision tied to the runtime and the
                 # durable obligation that were loaded for this restore pass.
                 # A successful cleanup may release its temporary owner before
@@ -17984,6 +17990,9 @@ class EVVehicleCommandView(HomeAssistantView):
         """Re-arm finite cleanup obligations before any restored Start path."""
         from .automations.ev_ownership import arm_ev_quick_control_obligation
 
+        if not isinstance(obligations, Mapping):
+            # Hydration retains malformed evidence and its admission hold.
+            return
         for vehicle_id, record in obligations.items():
             if not isinstance(record, dict):
                 continue
@@ -20040,6 +20049,41 @@ class SurplusForecastView(HomeAssistantView):
             }, status=500)
 
 
+def _passive_ev_cleanup_observation(hass, entry, vehicle_id: str, after: str | None = None) -> str | None:
+    from .ev_load import is_current_ev_power_observation
+
+    observations = [item for item in _get_ev_vehicles_status(
+                        hass, entry, include_control_evidence=True)
+                    if item.get("vehicle_id") == vehicle_id]
+    if len(observations) != 1:
+        return None
+    observation = observations[0]
+    evidence = observation.get("_boost_charging_state_evidence")
+    stopped = observation.get("is_charging") is False
+    if stopped:
+        if (not isinstance(evidence, dict) or evidence.get("known") is not True
+                or evidence.get("charging") is not False):
+            return None
+        observed_at = evidence.get("observed_at")
+    else:
+        observed_at = observation.get("_charging_observed_at")
+    if not is_current_ev_power_observation(observed_at, at=dt_util.utcnow()):
+        return None
+    if after:
+        try:
+            if observed_at <= datetime.fromisoformat(after):
+                return None
+        except (TypeError, ValueError):
+            return None
+    if stopped:
+        return "stopped"
+    if observation.get("site_presence") == "away":
+        return None
+    if observation.get("is_charging") is True and observation.get("is_connected") is True:
+        return "charging"
+    return None
+
+
 class ChargingBoostView(HomeAssistantView):
     """HTTP view to trigger immediate boost charge."""
 
@@ -20084,113 +20128,13 @@ class ChargingBoostView(HomeAssistantView):
         return prefix in configured_ble_prefixes(config)
 
     def _boost_observation(self, vehicle_id: str, after: str | None = None) -> str | None:
-        from .ev_load import is_current_ev_power_observation
-
-        observations = [item for item in _get_ev_vehicles_status(
-                            self._hass, self._config_entry, include_control_evidence=True)
-                        if item.get("vehicle_id") == vehicle_id]
-        if len(observations) != 1:
-            return None
-        observation = observations[0]
-        evidence = observation.get("_boost_charging_state_evidence")
-        stopped = observation.get("is_charging") is False
-        if stopped:
-            if (not isinstance(evidence, dict) or evidence.get("known") is not True
-                    or evidence.get("charging") is not False):
-                return None
-            observed_at = evidence.get("observed_at")
-        else:
-            observed_at = observation.get("_charging_observed_at")
-        if not is_current_ev_power_observation(observed_at, at=dt_util.utcnow()):
-            return None
-        if after:
-            try:
-                if observed_at <= datetime.fromisoformat(after):
-                    return None
-            except (TypeError, ValueError):
-                return None
-        if stopped:
-            return "stopped"
-        if observation.get("site_presence") == "away":
-            return None
-        if observation.get("is_charging") is True and observation.get("is_connected") is True:
-            return "charging"
-        return None
+        return _passive_ev_cleanup_observation(self._hass, self._config_entry, vehicle_id, after)
 
     async def _independent_boost_stopped(self, vehicle_id, after, *, authorize):
-        """Return a source fence for one cleanup-only native stopped read."""
-        import math
-        from .tesla_ev_observation import (
-            independent_tesla_source_binding, async_read_independent_tesla_vehicle,
-        )
-        from .tesla_ev_recovery import get_vehicle_route, _compatible
+        from .tesla_ev_observation import async_read_stopped_tesla_cleanup
 
-        entry, hass = self._config_entry, self._hass
-        runtime = hass.data.get(DOMAIN, {}).get(entry.entry_id)
-        pairing = self._boost_pairing_identity()
-        try:
-            route = get_vehicle_route(hass, entry, vehicle_id)
-            if route is not None and route.get("kind") == "blocked":
-                return None
-            native_route = route if isinstance(route, dict) and route.get("kind") == "ha" else (
-                route.get("fallback") if isinstance(route, dict) else None)
-            preferred = None
-            if native_route is not None:
-                if (not isinstance(native_route, dict) or native_route.get("kind") != "ha"
-                        or not _compatible(hass, entry, runtime, vehicle_id, native_route)):
-                    return None
-                preferred = native_route.get("entity_id")
-            binding = independent_tesla_source_binding(
-                hass, vehicle_id, preferred_entity_id=preferred)
-            cutoff = datetime.fromisoformat(after).timestamp()
-        except (TypeError, ValueError, AttributeError):
-            return None
-        if binding is None:
-            return None
-
-        def source_current():
-            try:
-                config = {**entry.data, **entry.options}
-                return (hass.data.get(DOMAIN, {}).get(entry.entry_id) is runtime
-                        and not runtime.get("powerwall_local_dispatch_stopping")
-                        and self._boost_pairing_identity() == pairing
-                        and config.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API) in (
-                            EV_PROVIDER_BOTH, EV_PROVIDER_FLEET_API)
-                        and get_vehicle_route(hass, entry, vehicle_id) == route
-                        and independent_tesla_source_binding(
-                            hass, vehicle_id, preferred_entity_id=preferred) == binding)
-            except Exception:
-                return False
-
-        def allowed():
-            return authorize() is True and source_current()
-
-        try:
-            if not allowed():
-                return None
-            observation = await async_read_independent_tesla_vehicle(
-                hass, vehicle_id, preferred_entity_id=preferred, timeout=5,
-                updated_after=cutoff, allow_paid_refresh=binding.get("domain") == "teslemetry",
-                authorize=allowed)
-            if not allowed() or observation is None or observation.origin != "native_cloud":
-                return None
-            if any(getattr(observation, key) != binding.get(key) for key in (
-                    "vin", "domain", "config_entry_id", "device_id", "producer_identity")):
-                return None
-            stamp = observation.source_charge_timestamp
-            if (type(stamp) not in (int, float) or not math.isfinite(stamp)
-                    or not cutoff < stamp <= dt_util.utcnow().timestamp()
-                    or dt_util.utcnow().timestamp() - stamp > 90
-                    or observation.charge_state.lower() not in {
-                        "stopped", "complete", "disconnected", "nopower"}
-                    or any(type(value) not in (int, float) or value != 0 for value in (
-                        observation.charger_actual_current, observation.charger_power))):
-                return None
-            return source_current
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            return None
+        return await async_read_stopped_tesla_cleanup(
+            self._hass, self._config_entry, vehicle_id, after, authorize=authorize)
 
     async def _save_boost_state(self, record: dict) -> bool:
         from .automations.ev_ownership import persist_ev_runtime_state

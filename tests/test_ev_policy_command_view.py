@@ -773,6 +773,7 @@ def test_expired_manual_native_restore_rebinds_cleanup_stop_before_dispatch(
             ),
             "get_vehicle_route": lambda *_args: blocked_route if native_route else None,
             "async_rebind_native_session_route": rebind,
+            "async_reconcile_quick_control_stopped": AsyncMock(return_value=False),
             "_tesla_quick_control_binding_current": lambda *_args: True,
             "claim_ev_ownership": claim,
             "release_ev_ownership": release,

@@ -1046,3 +1046,173 @@ async def test_evidence_loss_two_incidents_preserves_inventory_and_cleanup_oblig
         for item in (incidents[ids[0]]["operator_scope_confirmation"],
                      incidents[ids[1]]["operator_scope_confirmation"])
     }
+
+
+@pytest.mark.asyncio
+async def test_stock_scope_rechecks_new_same_prefix_hazard_under_journal_lock(harness):
+    """A hazard created after the adapter snapshot is still covered exactly."""
+    hass, entry = harness
+    bridge = _bridge(hass, entry, VIN_A)
+    runtime = hass.data["power_sync"][entry.entry_id]
+    route = {
+        "kind": "ble", "prefix": bridge.prefix,
+        "entity_id": bridge.identities["charger"]["entity_id"],
+        "entity_identity": bridge.identities["charger"],
+        "producer_identity": bridge.producer,
+    }
+    recovery_state = runtime[recovery.RECOVERY_KEY]
+    recovery_state["vehicles"] = {VIN_A: {
+        "route": None,
+        "attempts": {"attempt-current": {
+            "attempt_id": "attempt-current", "vehicle_id": VIN_A,
+            "operation": "rate", "route": route, "outcome": "sent_unknown",
+        }},
+        "hazards": {"ble:bridge-a": {
+            "kind": "ble_quarantine", "state": "pending", "prefix": bridge.prefix,
+            "attempt_id": "hazard-current", "binding": {
+                "entities": {"charger": bridge.identities["charger"]},
+            }, "producer_identity": bridge.producer,
+        }},
+    }}
+    runtime["_tesla_ev_recovery_sidecar"]["recovery"] = deepcopy(recovery_state)
+    incident = await recovery.async_record_evidence_loss(
+        hass, entry, kind="command_uncertainty",
+        # The pre-lock snapshot saw only the attempt.  The stock scope forces
+        # the durable call to reselect the live attempt and hazard atomically.
+        covered_attempts=[{"vehicle_id": VIN_A, "attempt_id": "attempt-current"}],
+        candidate_producers=[bridge.identity], candidate_vehicles=[VIN_A],
+        stock_scope={"vehicle_id": VIN_A, "producer": bridge.identity},
+    )
+    assert incident is not None
+    refs = incident["liability_refs"]
+    assert {ref.get("attempt_id") for ref in refs if ref.get("operation")} == {"attempt-current"}
+    assert {ref.get("attempt_id") for ref in refs if ref.get("hazard_id")} == {"hazard-current"}
+    assert {ref.get("hazard_id") for ref in refs if ref.get("hazard_id")} == {"ble:bridge-a"}
+
+
+@pytest.mark.asyncio
+async def test_adapter_recovery_retires_current_hazard_preserves_other_vin_after_reload(
+    harness, monkeypatch,
+):
+    """The real adapter path must settle the current prefix generation only."""
+    hass, entry = harness
+    bridge_a = _bridge(hass, entry, VIN_A)
+    bridge_b = _bridge(hass, entry, VIN_B)
+    runtime = hass.data["power_sync"][entry.entry_id]
+    charger_a = bridge_a.identities["charger"]
+    charger_b = bridge_b.identities["charger"]
+
+    def route(bridge):
+        return {"kind": "ble", "prefix": bridge.prefix,
+                "entity_id": bridge.identities["charger"]["entity_id"],
+                "entity_identity": bridge.identities["charger"],
+                "producer_identity": bridge.producer}
+
+    old_hazard = {
+        "kind": "ble_quarantine", "state": "retired", "prefix": bridge_a.prefix,
+        "attempt_id": "old-hazard", "binding": {"entities": {"charger": charger_a}},
+        "producer_identity": bridge_a.producer,
+        "recovery_retired": {"incident_id": "old-incident"},
+    }
+    current_hazard = {
+        "kind": "ble_quarantine", "state": "pending", "prefix": bridge_a.prefix,
+        "attempt_id": "current-hazard", "binding": {"entities": {"charger": charger_a}},
+        "producer_identity": bridge_a.producer,
+    }
+    other_hazard = {
+        "kind": "ble_quarantine", "state": "pending", "prefix": bridge_b.prefix,
+        "attempt_id": "other-hazard", "binding": {"entities": {"charger": charger_b}},
+        "producer_identity": bridge_b.producer,
+    }
+    current_attempt = {
+        "attempt_id": "current-attempt", "vehicle_id": VIN_A,
+        "operation": "rate", "route": route(bridge_a), "outcome": "sent_unknown",
+    }
+    state = runtime["_tesla_ev_recovery_sidecar"]
+    # The adapter must discover and scope the incident itself.  The durable
+    # sidecar has the current unresolved attempt and the retired predecessor;
+    # the live projection has the newer same-prefix hazard.
+    state["incidents"] = {}
+    state["generations"] = {}
+    state["recovery"] = {"vehicles": {
+        VIN_A: {"route": None, "attempts": {"current-attempt": current_attempt},
+                "hazards": {"ble:bridge_a": old_hazard}},
+        VIN_B: {"route": None, "attempts": {}, "hazards": {"ble:bridge_b": other_hazard}},
+    }}
+    runtime[recovery.RECOVERY_KEY] = {"vehicles": {
+        VIN_A: {"route": None, "attempts": {"current-attempt": current_attempt},
+                "hazards": {"ble:bridge_a": current_hazard}},
+        VIN_B: {"route": None, "attempts": {}, "hazards": {"ble:bridge_b": other_hazard}},
+    }}
+    store = runtime["_tesla_ev_recovery_sidecar_store"]
+
+    class _Transaction:
+        def __init__(self, _hass, _entry, bridge):
+            self.bridge = bridge
+            self.generation = None
+
+        def current(self):
+            return True
+
+        def identity(self):
+            return self.bridge.identity
+
+        async def restart(self):
+            return True
+
+        async def disconnected(self):
+            return True
+
+        async def connected(self):
+            return True
+
+        async def uptime(self):
+            return {"uptime": 1, "observed_at": time.time(), "fresh": True}
+
+        async def contain(self):
+            return None
+
+    monkeypatch.setattr(stock, "StockBridgeTransaction", _Transaction)
+    reset_module = importlib.import_module("power_sync.tesla_ble_reset")
+
+    async def reset(**_kwargs):
+        return {"qualified_at": time.time(), "profile": {"queue_persistence": "ram_only"}}
+
+    monkeypatch.setattr(reset_module, "async_execute_stock_reset", reset)
+    observation_module = importlib.import_module("power_sync.tesla_ev_observation")
+    source_binding = {"vin": VIN_A, "domain": "teslemetry",
+                      "config_entry_id": "native-entry", "device_id": "native-device",
+                      "producer_identity": "native:producer"}
+    reads = 0
+
+    async def read(_hass, vin, **_kwargs):
+        nonlocal reads
+        reads += 1
+        return _observation(vin, stamp=time.time() + reads,
+                            config="native-entry", device="native-device",
+                            producer="native:producer")
+
+    monkeypatch.setattr(observation_module, "independent_tesla_source_binding",
+                        lambda _hass, vin: source_binding if vin == VIN_A else None)
+    monkeypatch.setattr(observation_module, "async_read_independent_tesla_vehicle", read)
+    monkeypatch.setattr(stock.asyncio, "sleep", _no_sleep)
+    assert await stock.async_recover_vehicle_transport(hass, entry, VIN_A)
+    incident = next(iter(state["incidents"].values()))
+    assert {
+        ref.get("attempt_id") for ref in incident["liability_refs"]
+        if ref.get("hazard_id")
+    } == {"current-hazard"}
+    assert recovery.get_vehicle_route(hass, entry, VIN_A) is None
+    assert not recovery.ble_quarantined(hass, bridge_a.prefix)
+    assert recovery.ble_quarantined(hass, bridge_b.prefix)
+
+    async def load():
+        return deepcopy(store.value)
+
+    store.async_load = load
+    restored = _Hass()
+    restored.data["power_sync"][entry.entry_id]["_tesla_ev_recovery_sidecar_store"] = store
+    assert await recovery.async_load_recovery_state(restored, entry)
+    assert recovery.get_vehicle_route(restored, entry, VIN_A) is None
+    assert not recovery.ble_quarantined(restored, bridge_a.prefix)
+    assert recovery.ble_quarantined(restored, bridge_b.prefix)

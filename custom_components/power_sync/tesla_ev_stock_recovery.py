@@ -377,7 +377,11 @@ def _covered_records(snapshot: Mapping[str, Any], bridge: StockBridge) -> list[d
                     and not hazard.get("recovery_retired")
                     and hazard.get("prefix") == bridge.prefix
                     and _same_producer(binding.get("charger"), bridge)):
-                covered.append({"vehicle_id": str(vin), "hazard_id": str(hazard_id)})
+                covered.append({
+                    "vehicle_id": str(vin), "hazard_id": str(hazard_id),
+                    "attempt_id": str(hazard.get("attempt_id"))
+                    if hazard.get("attempt_id") is not None else None,
+                })
     return covered
 
 
@@ -483,6 +487,7 @@ async def async_recover_vehicle_transport(
             incident = await async_record_evidence_loss(
                 hass, entry, kind="command_uncertainty", covered_attempts=covered,
                 candidate_producers=[bridge.identity], candidate_vehicles=affected,
+                stock_scope={"vehicle_id": str(vin), "producer": bridge.identity},
                 scope_basis={"kind": "recorded_binding_and_current_registry"},
             )
             if incident is None:

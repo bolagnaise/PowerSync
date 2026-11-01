@@ -31,8 +31,7 @@ def cloud_boost(independent_source, stub_native_vehicle_sources,
         h.observation_overrides[VIN_A] = {'_charging_observed_at': h.now-timedelta(minutes=5)}
         monkeypatch.setattr(observation, 'time', SimpleNamespace(time=lambda: h.now.timestamp()))
         namespace = h.view._independent_boost_stopped.__func__.__globals__
-        namespace['independent_tesla_source_binding'] = observation.independent_tesla_source_binding
-        namespace['async_read_independent_tesla_vehicle'] = observation.async_read_independent_tesla_vehicle
+        namespace['async_read_stopped_tesla_cleanup'] = observation.async_read_stopped_tesla_cleanup
 
         def fresh(state='Stopped', current=0, power=0, stamp=None):
             response = {'vin': VIN_A, **_charge(

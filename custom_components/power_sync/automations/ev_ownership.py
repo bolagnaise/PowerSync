@@ -854,6 +854,29 @@ def arm_ev_quick_control_obligation(
             or current.get("obligation_id") != token
         ):
             return
+        try:
+            reconciled = await async_reconcile_quick_control_stopped(
+                hass, config_entry, vid, record)
+        except asyncio.CancelledError:
+            current = get_ev_quick_control_obligation(hass, config_entry, vid)
+            if (_runtime_scope_current() and current is not None
+                    and current.get("obligation_id") == token):
+                arm_ev_quick_control_obligation(hass, config_entry, vid, record,
+                    schedule_at=datetime.now(timezone.utc)+timedelta(seconds=30))
+            raise
+        if reconciled is None:
+            current = get_ev_quick_control_obligation(hass, config_entry, vid)
+            if (_runtime_scope_current() and current is not None
+                    and current.get("obligation_id") == token):
+                arm_ev_quick_control_obligation(hass, config_entry, vid, record,
+                    schedule_at=datetime.now(timezone.utc)+timedelta(seconds=30))
+            return
+        if reconciled is not False:
+            return
+        current = get_ev_quick_control_obligation(hass, config_entry, vid)
+        if (not _runtime_scope_current() or current is None
+                or current.get("obligation_id") != token):
+            return
         record_manual_stop_hold(
             hass,
             config_entry,
@@ -944,6 +967,111 @@ def get_ev_quick_control_timer(
     timers = _quick_control_timer_entry(hass, config_entry)
     vid = _ownership_loadpoint_id(hass, config_entry, vehicle_id)
     return timers.get(vid)
+
+
+async def async_reconcile_quick_control_stopped(hass, config_entry, vehicle_id, saved_record) -> bool | None:
+    """True retires, False permits normal Stop, None retains changed scope."""
+    try:
+        from ..const import DOMAIN
+        from .actions import _dynamic_ev_state, _tesla_quick_control_binding_current
+        from .. import _passive_ev_cleanup_observation
+        from ..tesla_ev_observation import async_read_stopped_tesla_cleanup
+        from ..tesla_ev_recovery import get_vehicle_route
+    except ImportError:
+        return False
+    runtime = _entry_data(hass, config_entry.entry_id)
+    records = runtime.get(EV_QUICK_OBLIGATIONS_KEY)
+    record = records.get(vehicle_id) if isinstance(records, dict) else None
+    if (not isinstance(record, dict) or not isinstance(saved_record, Mapping)
+            or record.get("obligation_id") != saved_record.get("obligation_id")
+            or not record.get("obligation_id") or record.get("vehicle_id") != vehicle_id):
+        return False
+    snapshot = deepcopy(record)
+    params = deepcopy(record.get("params") or {})
+    deadline = _as_utc_datetime(record.get("expires_at"))
+    if (deadline is None or datetime.now(timezone.utc) < deadline
+            or type(record.get("_boost_start_deadline")) not in (int, float)
+            or record["_boost_start_deadline"] != deadline.timestamp()
+            or params.get("charger_type", "tesla") != "tesla"):
+        return False
+    store = runtime.get("automation_store")
+    state = _dynamic_ev_state.get(config_entry.entry_id, {}).get(vehicle_id)
+    owner = get_ev_ownership(hass, config_entry, vehicle_id)[1]
+    token = record["obligation_id"]
+    timer = get_ev_quick_control_timer(hass, config_entry, vehicle_id)
+    if (state is not None and (state.get("params") or {}).get("_quick_control_obligation_id") != token
+            or owner is not None and (state is None or state.get("ownership") is not owner)):
+        return None
+
+    def current():
+        return (hass.data.get(DOMAIN, {}).get(config_entry.entry_id) is runtime
+                and runtime.get("automation_store") is store
+                and not runtime.get("powerwall_local_dispatch_stopping")
+                and runtime.get(EV_QUICK_OBLIGATIONS_KEY) is records
+                and records.get(vehicle_id) is record and record == snapshot
+                and get_ev_quick_control_timer(hass, config_entry, vehicle_id) is timer
+                and _dynamic_ev_state.get(config_entry.entry_id, {}).get(vehicle_id) is state
+                and get_ev_ownership(hass, config_entry, vehicle_id)[1] is owner
+                and _tesla_quick_control_binding_current(hass, config_entry, params))
+
+    if not current():
+        return None
+    if (get_vehicle_route(hass, config_entry, vehicle_id) or {}).get("kind") == "blocked":
+        return False
+    after = deadline.isoformat()
+    if _passive_ev_cleanup_observation(hass, config_entry, vehicle_id) == "charging":
+        return False
+    passive = _passive_ev_cleanup_observation(hass, config_entry, vehicle_id, after)
+    if passive == "stopped":
+        evidence_current = lambda: _passive_ev_cleanup_observation(
+            hass, config_entry, vehicle_id, after) == "stopped"
+    else:
+        native = (params.get("_quick_control_binding") or {}).get("native_entity")
+        if not isinstance(native, Mapping) or not native.get("entity_id"):
+            return False
+        evidence_current = await async_read_stopped_tesla_cleanup(
+            hass, config_entry, vehicle_id, after, authorize=current,
+            preferred_entity_id=native["entity_id"])
+    if not current():
+        return None
+    if evidence_current is None:
+        return False
+    # Keep the obligation durable until the proof survives the awaited checkpoint.
+    try:
+        if await persist_ev_runtime_state(hass, config_entry, store) is not True:
+            return None
+    except Exception:
+        return None
+    if (not current() or not evidence_current()
+            or (get_vehicle_route(hass, config_entry, vehicle_id) or {}).get("kind") == "blocked"):
+        return None
+    clear_ev_quick_control_obligation(hass, config_entry, vehicle_id, expected_token=token)
+    save_task = asyncio.create_task(persist_ev_runtime_state(hass, config_entry, store))
+    cancelled = False
+    while not save_task.done():
+        try:
+            await asyncio.shield(save_task)
+        except asyncio.CancelledError:
+            cancelled = True
+    try:
+        saved = save_task.result() is True
+    except asyncio.CancelledError:
+        saved, cancelled = False, True
+    except Exception:
+        saved = False
+    if not saved:
+        if (hass.data.get(DOMAIN, {}).get(config_entry.entry_id) is runtime
+                and runtime.get(EV_QUICK_OBLIGATIONS_KEY) is records
+                and vehicle_id not in records
+                and get_ev_quick_control_timer(hass, config_entry, vehicle_id) is None):
+            records[vehicle_id] = record
+            arm_ev_quick_control_obligation(hass, config_entry, vehicle_id, record,
+                schedule_at=datetime.now(timezone.utc)+timedelta(seconds=30))
+    elif get_ev_ownership(hass, config_entry, vehicle_id)[1] is owner and owner is not None:
+        release_ev_ownership(hass, config_entry, vehicle_id, reason="Fresh stopped quick EV observation")
+    if cancelled:
+        raise asyncio.CancelledError
+    return True if saved else None
 
 
 async def async_begin_ev_quick_control_obligation(

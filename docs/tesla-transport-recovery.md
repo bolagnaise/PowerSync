@@ -32,7 +32,8 @@ compensating cleanup and cannot restore charging authority or extend its timer.
 Automatic Boost cleanup retains native solar ownership holds; the separate
 lane does not permit it to take over a foreign controller.
 
-When passive HA telemetry cannot confirm an expired Boost has stopped,
+When passive HA telemetry cannot confirm an expired Boost or finite manual
+session has stopped,
 cleanup may read its exact native Fleet or Teslemetry charge-state endpoint.
 This is available only when the configured provider policy permits that
 fallback. A source timestamp after the cleanup boundary, a stopped state,
@@ -40,6 +41,11 @@ zero actual current and zero power are all required. The read does not wake
 the vehicle, change a setting or extend the deadline. Runtime, provider,
 device, pairing, generation and ownership fences must remain current before
 the stopped proof can retire the cleanup obligation.
+The same observer serves both expiry timers and reload cleanup. Fresh passive
+charging evidence follows the ordinary BLE Stop path, while fresh passive
+stopped evidence needs no cloud request. Malformed persisted obligation
+families remain held and retained without arming callbacks or aborting the
+otherwise healthy integration setup.
 
 ## Transport selection and evidence
 
@@ -59,6 +65,13 @@ nonce-bound producer-fence receipt, or a qualified stock-node restart followed
 by independent vehicle reconciliation. A bridge's advertisement/presence sensor
 cannot supply either proof. A successful service call or reconnect alone is
 also insufficient.
+
+A quarantine belongs to its originating attempt and exact producer. Reusing
+a bridge prefix does not transfer a previous quarantine's retirement proof.
+Merges preserve distinct historical hazards and remain stable when the same
+projection is replayed. Stock recovery selects current liabilities for its
+exact VIN and producer under the journal lock; an old or incomplete hazard
+reference cannot retire a newer command's quarantine.
 
 Before a new BLE mutation, the exact bridge must demonstrate a live vehicle
 session. A known charging state with fresh measured current or power supplies
@@ -345,11 +358,12 @@ physical power. Both ESPHome bridges, native HA Tesla Fleet and native
 Teslemetry are installed. Neither legacy nor modern Teslemetry Bluetooth is
 installed here; those adapter contracts have software coverage only.
 
-At the 1 November 09:16 UTC checkpoint, private 2.12.1584.dev7 is installed
+At the 1 November 09:53 UTC checkpoint, private 2.12.1584.dev7 is installed
 from fc666795 with all 272 package hashes matching and configuration checks
-passing. That committed source passed the audited complete suite: 10,983
-tests with no skips. Subsequent Boost cleanup changes require their own
-validation and installation; this result does not cover those changes.
+passing. The subsequent committed Boost cleanup source e178beee passed the
+audited complete suite: 11,014 tests with no skips. The later shared finite
+cleanup and quarantine-identity repairs have focused regression proof but
+still require combined validation and installation.
 
 Independent Fleet charge documents confirmed both vehicles charging at
 09:09:55 UTC: TESSY at 15 A/about 4 kW and W3RT1E at 10 A/about 2 kW.
@@ -360,6 +374,19 @@ BLE Connection switch while retaining the unresolved attempt. At the original
 09:16:05 charge document confirmed zero current and power. W3RT1E reported
 disconnected before that deadline, so it is unavailable for further two-car
 checks at this checkpoint.
+
+TESSY's stock recovery released its recorded attempt, but its subsequent
+PowerSync limit requests were blocked until an integration-only reload.
+Tracing found that a retired same-prefix hazard in the saved projection could
+mask a newer pending quarantine during merging and recovery scope capture.
+The new regression reproduces that adapter sequence before the repair and
+checks recovery and reload without clearing the other VIN's hazard.
+
+Reload also replayed an expired manual cleanup Stop for already disconnected
+W3RT1E. Its unconfirmed BLE Stop was preserved and the BLE Connection switch
+was disabled for containment. The shared stopped-observation repair covers
+that timer and reload variant. W3RT1E remains contained pending installation
+and qualified recovery; TESSY's limit is restored to 70% and its radio is on.
 
 Both stock bridges have previously completed qualified recovery without a
 firmware flash or pairing change. Native Max charging with an already active

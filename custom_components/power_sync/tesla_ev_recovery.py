@@ -860,6 +860,88 @@ def _merge_recovery_roots(
     prefer_legacy_mutable: bool = False,
 ) -> dict[str, Any]:
     """Merge records while preserving immutable evidence and current outcomes."""
+
+    def hazard_identity_matches(existing: Mapping[str, Any], incoming: Mapping[str, Any]) -> bool:
+        """Return whether two stable-key hazards describe the same incident.
+
+        ``ble:<prefix>`` predates per-attempt hazard identity, so a later
+        projection can reuse that key for a new quarantine.  Mutable state
+        (especially ``recovery_retired``) must never cross that boundary.
+        A missing attempt or producer binding cannot certify that a retirement
+        belongs to the same quarantine. Legacy records are therefore kept as
+        history rather than allowed to transfer mutable state.
+        """
+        for field in ("attempt_id", "prefix"):
+            left = existing.get(field)
+            right = incoming.get(field)
+            if (left is None or right is None
+                    or str(left) != str(right)):
+                return False
+        left_producer = existing.get("producer_identity")
+        right_producer = incoming.get("producer_identity")
+        if ((left_producer is None) != (right_producer is None)
+                or (left_producer is not None
+                    and str(left_producer) != str(right_producer))):
+            return False
+        left_binding = existing.get("binding")
+        right_binding = incoming.get("binding")
+        if not isinstance(left_binding, Mapping) or not isinstance(right_binding, Mapping):
+            return False
+        left_entities = left_binding.get("entities")
+        right_entities = right_binding.get("entities")
+        left_charger = left_entities.get("charger") if isinstance(left_entities, Mapping) else None
+        right_charger = right_entities.get("charger") if isinstance(right_entities, Mapping) else None
+        if not isinstance(left_charger, Mapping) or not isinstance(right_charger, Mapping):
+            return False
+        for field in ("platform", "config_entry_id", "device_id", "unique_id"):
+            left_value = left_charger.get(field)
+            right_value = right_charger.get(field)
+            if (left_value is None or right_value is None
+                    or str(left_value) != str(right_value)):
+                return False
+        left_entity_id = left_charger.get("entity_id")
+        right_entity_id = right_charger.get("entity_id")
+        if ((left_entity_id is None) != (right_entity_id is None)
+                or (left_entity_id is not None
+                    and str(left_entity_id) != str(right_entity_id))):
+            return False
+        return True
+
+    def hazard_is_unresolved(item: Mapping[str, Any]) -> bool:
+        return (item.get("state") in ("pending", "isolated")
+                and not item.get("recovery_retired"))
+
+    def hazard_history_key(target: Mapping[str, Any], item_id: str,
+                           item: Mapping[str, Any]) -> str:
+        identity = {
+            field: deepcopy(item.get(field))
+            for field in ("attempt_id", "prefix", "producer_identity", "binding")
+        }
+        attempt_id = str(item.get("attempt_id") or "")
+        suffix = attempt_id or f"legacy-{_digest(identity)[:16]}"
+        base = f"{item_id}@{suffix}"
+        candidate = base
+        suffix = 2
+        while candidate in target:
+            existing = target.get(candidate)
+            existing_identity = {
+                field: deepcopy(existing.get(field))
+                for field in ("attempt_id", "prefix", "producer_identity", "binding")
+            } if isinstance(existing, Mapping) else None
+            if existing_identity is not None and _digest(existing_identity) == _digest(identity):
+                return candidate
+            candidate = f"{base}#{suffix}"
+            suffix += 1
+        return candidate
+
+    def preserve_hazard_history(target: dict[str, Any], item_id: str,
+                                item: Mapping[str, Any]) -> None:
+        history_id = hazard_history_key(target, item_id, item)
+        # A replayed projection is idempotent.  Never replace an existing
+        # historical proof with a weaker pending copy from a stale source.
+        if history_id not in target:
+            target[history_id] = deepcopy(item)
+
     result = deepcopy(dict(primary))
     vehicles = result.setdefault("vehicles", {})
     old_vehicles = legacy.get("vehicles", {}) if isinstance(legacy, Mapping) else {}
@@ -881,6 +963,22 @@ def _merge_recovery_roots(
                         existing = target.get(item_id)
                         if not isinstance(existing, Mapping):
                             target[item_id] = deepcopy(item)
+                            continue
+                        if (key == "hazards" and isinstance(item, Mapping)
+                                and not hazard_identity_matches(existing, item)):
+                            # A stable prefix key can legitimately represent a
+                            # new quarantine after the previous one retired.
+                            # Keep both immutable records.  The unresolved
+                            # record owns the stable key so all existing guards
+                            # continue to fail closed; the older record moves to
+                            # a deterministic history key and retains its proof.
+                            existing_unresolved = hazard_is_unresolved(existing)
+                            incoming_unresolved = hazard_is_unresolved(item)
+                            if existing_unresolved and not incoming_unresolved:
+                                preserve_hazard_history(target, str(item_id), item)
+                            else:
+                                preserve_hazard_history(target, str(item_id), existing)
+                                target[item_id] = deepcopy(item)
                             continue
                         if not prefer_legacy_mutable:
                             # The sidecar is authoritative during reload.  A
@@ -1523,6 +1621,10 @@ def _unresolved_liabilities(runtime: dict[str, Any]) -> list[dict[str, Any]]:
                     result.append({
                         "vehicle_id": str(vid),
                         "hazard_id": str(hazard_id),
+                        # Stable hazard IDs are retained for compatibility,
+                        # while attempt_id binds retirement to this exact
+                        # quarantine when a prefix is reused.
+                        "attempt_id": hazard.get("attempt_id"),
                         "kind": hazard.get("kind"),
                         "state": hazard.get("state"),
                         "prefix": hazard.get("prefix"),
@@ -1543,6 +1645,14 @@ def _select_liability_refs(all_refs: list[dict[str, Any]], requested: Any) -> li
             if isinstance(candidate, Mapping):
                 if (candidate.get("vehicle_id") is not None
                         and str(candidate.get("vehicle_id")) != str(ref.get("vehicle_id"))):
+                    continue
+                # Hazard attempt_id is an identity binding for a quarantine,
+                # not an additional match for an attempt-only request.  In
+                # normal operation the two records may intentionally carry
+                # the same originating command ID.
+                if (candidate.get("attempt_id") is not None
+                        and candidate.get("hazard_id") is None
+                        and ref.get("hazard_id") is not None):
                     continue
                 if candidate.get("attempt_id") is not None and candidate.get("attempt_id") != ref.get("attempt_id"):
                     continue
@@ -1575,6 +1685,7 @@ async def async_record_evidence_loss(
     expected_revision: int | None = None,
     kind: str = "evidence_lost",
     covered_attempts: Any = None,
+    stock_scope: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Record uncertainty when a historical journal was genuinely lost."""
     runtime = _runtime(hass, entry)
@@ -1596,7 +1707,33 @@ async def async_record_evidence_loss(
                 and (not _candidate_list(candidate_producers) or not vehicles)):
             return None
         incident_id = uuid4().hex
-        liability_refs = _select_liability_refs(_unresolved_liabilities(runtime), covered_attempts)
+        all_refs = _unresolved_liabilities(runtime)
+        if stock_scope is not None:
+            # The adapter's pre-lock snapshot is only an admission hint.  A
+            # new BLE quarantine may be recorded between that snapshot and
+            # this journal lock, so reselect every currently unresolved record
+            # for the exact VIN and physical producer now.
+            if incident_kind != "command_uncertainty" or not isinstance(stock_scope, Mapping):
+                return None
+            stock_vehicle = stock_scope.get("vehicle_id")
+            stock_producer = stock_scope.get("producer")
+            if (stock_vehicle is None or not isinstance(stock_producer, Mapping)
+                    or not str(stock_vehicle).strip()
+                    or str(stock_vehicle) not in {str(item) for item in vehicles}):
+                return None
+            if not any(
+                _producer_scope_matches([candidate], stock_producer)
+                for candidate in _candidate_list(candidate_producers)
+            ):
+                return None
+            scoped_refs = [
+                ref for ref in all_refs
+                if str(ref.get("vehicle_id")) == str(stock_vehicle)
+                and _liability_matches_stock_scope(ref, stock_producer)
+            ]
+            liability_refs = _select_liability_refs(scoped_refs, None)
+        else:
+            liability_refs = _select_liability_refs(all_refs, covered_attempts)
         if liability_refs is None or (incident_kind == "command_uncertainty" and not liability_refs):
             return None
         generations = state.setdefault("generations", {})
@@ -2339,15 +2476,33 @@ def _retire_recovery_liabilities(
         if not isinstance(ledger, dict):
             continue
         attempt_id = ref.get("attempt_id")
-        if attempt_id is not None:
+        hazard_id = ref.get("hazard_id")
+        # A hazard reference may carry its originating attempt_id solely to
+        # bind the reusable hazard key.  It must not also retire that attempt;
+        # only a reference without hazard_id denotes an attempt record.
+        if attempt_id is not None and hazard_id is None:
             record = ledger.get("attempts", {}).get(str(attempt_id))
             if isinstance(record, dict):
                 record["recovery_retired"] = deepcopy(marker)
-        hazard_id = ref.get("hazard_id")
         if hazard_id is not None:
             hazard = ledger.get("hazards", {}).get(str(hazard_id))
             if isinstance(hazard, dict):
-                hazard["recovery_retired"] = deepcopy(marker)
+                # ``ble:<prefix>`` is a reusable key.  A late retirement for
+                # an older quarantine must not retire a newer hazard that has
+                # already replaced it in the live projection.
+                current_attempt_id = hazard.get("attempt_id")
+                referenced_attempt_id = ref.get("attempt_id")
+                if ((current_attempt_id is None) != (referenced_attempt_id is None)
+                        or (current_attempt_id is not None
+                            and str(current_attempt_id) != str(referenced_attempt_id))):
+                    continue
+                for field in ("prefix", "producer_identity"):
+                    expected = ref.get(field)
+                    actual = hazard.get(field)
+                    if expected is not None and actual is not None and str(expected) != str(actual):
+                        break
+                else:
+                    hazard["recovery_retired"] = deepcopy(marker)
 
 
 def _recovery_phase_current(

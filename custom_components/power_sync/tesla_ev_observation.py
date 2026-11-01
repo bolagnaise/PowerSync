@@ -1079,6 +1079,95 @@ async def async_read_independent_tesla_vehicle(
     return result
 
 
+async def async_read_stopped_tesla_cleanup(hass, entry, vehicle_id, after, *, authorize,
+                                         preferred_entity_id=None):
+    """Return a source fence for one cleanup-only native stopped read."""
+    from datetime import datetime
+    from .const import DOMAIN, CONF_EV_PROVIDER, EV_PROVIDER_BOTH, EV_PROVIDER_FLEET_API
+    from .tesla_ev_recovery import get_vehicle_route, _compatible
+
+    runtime = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    def pairing_identity():
+        config = {**entry.data, **entry.options}
+        return deepcopy({key: config.get(key) for key in (
+            "ev_provider", "tesla_ble_entity_prefix", "tesla_ble_vehicle_mapping",
+            "tesla_energy_site_id", "powerwall_local_energy_site_id")})
+
+    pairing = pairing_identity()
+    try:
+        route = get_vehicle_route(hass, entry, vehicle_id)
+        if route is not None and route.get("kind") == "blocked":
+            return None
+        native_route = route if isinstance(route, dict) and route.get("kind") == "ha" else (
+            route.get("fallback") if isinstance(route, dict) else None)
+        preferred = preferred_entity_id
+        if native_route is not None:
+            if (not isinstance(native_route, dict) or native_route.get("kind") != "ha"
+                    or not _compatible(hass, entry, runtime, vehicle_id, native_route)):
+                return None
+            preferred = preferred or native_route.get("entity_id")
+        binding = independent_tesla_source_binding(
+            hass, vehicle_id, preferred_entity_id=preferred)
+        cutoff = datetime.fromisoformat(after).timestamp()
+    except (TypeError, ValueError, AttributeError):
+        return None
+    if binding is None:
+        return None
+    if native_route is not None and any(
+            binding.get(field) != native_route["entity_identity"].get(identity_field)
+            for field, identity_field in (("domain", "platform"),
+                    ("config_entry_id", "config_entry_id"), ("device_id", "device_id"))):
+        return None
+
+    proof_at = None
+
+    def source_current():
+        try:
+            config = {**entry.data, **entry.options}
+            return (hass.data.get(DOMAIN, {}).get(entry.entry_id) is runtime
+                    and not runtime.get("powerwall_local_dispatch_stopping")
+                    and pairing_identity() == pairing
+                    and config.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API) in (
+                        EV_PROVIDER_BOTH, EV_PROVIDER_FLEET_API)
+                    and (proof_at is None or 0 <= time.time()-proof_at <= MAX_SOURCE_AGE_SECONDS)
+                    and get_vehicle_route(hass, entry, vehicle_id) == route
+                    and independent_tesla_source_binding(
+                        hass, vehicle_id, preferred_entity_id=preferred) == binding)
+        except Exception:
+            return False
+
+    def allowed():
+        return authorize() is True and source_current()
+
+    try:
+        if not allowed():
+            return None
+        observation = await async_read_independent_tesla_vehicle(
+            hass, vehicle_id, preferred_entity_id=preferred, timeout=5,
+            updated_after=cutoff, allow_paid_refresh=binding.get("domain") == "teslemetry",
+            authorize=allowed)
+        if not allowed() or observation is None or observation.origin != "native_cloud":
+            return None
+        if any(getattr(observation, key) != binding.get(key) for key in (
+                "vin", "domain", "config_entry_id", "device_id", "producer_identity")):
+            return None
+        stamp = observation.source_charge_timestamp
+        if (type(stamp) not in (int, float) or not math.isfinite(stamp)
+                or not cutoff < stamp <= time.time()
+                or time.time() - stamp > 90
+                or observation.charge_state.lower() not in {
+                    "stopped", "complete", "disconnected", "nopower"}
+                or any(type(value) not in (int, float) or value != 0 for value in (
+                    observation.charger_actual_current, observation.charger_power))):
+            return None
+        proof_at = stamp
+        return source_current
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        return None
+
+
 def get_tesla_vehicle_observation(
     hass: Any,
     vin: str,

@@ -2590,3 +2590,106 @@ async def test_stock_recovery_retires_covered_route_but_keeps_unknown_outcome(ha
     assert durable_attempt["outcome"] == "sent_unknown"
     assert durable_attempt["recovery_retired"]["historical_outcome"] == "unknown"
     assert recovery.get_vehicle_route(hass, entry, VIN_A) is None
+
+
+def test_hazard_projection_conflict_keeps_new_same_prefix_identity_unretired():
+    """A newer hazard must not inherit retirement from a stable-key predecessor."""
+    binding = {
+        "entities": {"charger": {
+            "platform": "esphome", "config_entry_id": "ble-entry",
+            "device_id": "bridge-a", "unique_id": "charger-a",
+        }}
+    }
+    old = {
+        "kind": "ble_quarantine", "state": "retired", "prefix": "bridge-a",
+        "attempt_id": "old-attempt", "binding": binding,
+        "producer_identity": "esphome:ble-entry:bridge-a:charger-a",
+        "recovery_retired": {"incident_id": "old-incident"},
+    }
+    new = {
+        "kind": "ble_quarantine", "state": "pending", "prefix": "bridge-a",
+        "attempt_id": "new-attempt", "binding": binding,
+        "producer_identity": "esphome:ble-entry:bridge-a:charger-a",
+    }
+    merged = recovery._merge_recovery_roots(
+        {"vehicles": {VIN_A: {"route": None, "attempts": {},
+                               "hazards": {"ble:bridge-a": old}}}},
+        {"vehicles": {VIN_A: {"route": None, "attempts": {},
+                               "hazards": {"ble:bridge-a": new}}}},
+        prefer_legacy_mutable=True,
+    )
+    hazards = merged["vehicles"][VIN_A]["hazards"]
+    assert hazards["ble:bridge-a"]["attempt_id"] == "new-attempt"
+    assert "recovery_retired" not in hazards["ble:bridge-a"]
+    assert any(
+        item.get("attempt_id") == "old-attempt"
+        and item.get("recovery_retired", {}).get("incident_id") == "old-incident"
+        for item in hazards.values()
+    )
+    repeated = recovery._merge_recovery_roots(merged, {
+        "vehicles": {VIN_A: {"route": None, "attempts": {},
+                               "hazards": {"ble:bridge-a": new}}}},
+        prefer_legacy_mutable=True,
+    )
+    assert sorted(repeated["vehicles"][VIN_A]["hazards"]) == sorted(hazards)
+
+
+def test_missing_hazard_attempt_identity_cannot_transfer_retirement_marker():
+    old = {
+        "kind": "ble_quarantine", "state": "retired", "prefix": "bridge-a",
+        "binding": {"entities": {"charger": {
+            "platform": "esphome", "config_entry_id": "ble-entry",
+            "device_id": "bridge-a", "unique_id": "charger-a",
+        }}}, "recovery_retired": {"incident_id": "old-incident"},
+    }
+    new = {**old, "state": "pending", "attempt_id": "new-attempt"}
+    new.pop("recovery_retired")
+    merged = recovery._merge_recovery_roots(
+        {"vehicles": {VIN_A: {"route": None, "attempts": {},
+                               "hazards": {"ble:bridge-a": old}}}},
+        {"vehicles": {VIN_A: {"route": None, "attempts": {},
+                               "hazards": {"ble:bridge-a": new}}}},
+        prefer_legacy_mutable=True,
+    )
+    assert "recovery_retired" not in merged["vehicles"][VIN_A]["hazards"]["ble:bridge-a"]
+    repeated = recovery._merge_recovery_roots(
+        merged,
+        {"vehicles": {VIN_A: {"route": None, "attempts": {},
+                               "hazards": {"ble:bridge-a": new}}}},
+        prefer_legacy_mutable=True,
+    )
+    assert sorted(repeated["vehicles"][VIN_A]["hazards"]) == sorted(
+        merged["vehicles"][VIN_A]["hazards"]
+    )
+    assert any(item.get("recovery_retired", {}).get("incident_id") == "old-incident"
+               for item in repeated["vehicles"][VIN_A]["hazards"].values())
+
+
+def test_late_retirement_for_old_hazard_cannot_retire_reused_prefix():
+    runtime = {recovery.RECOVERY_KEY: {"vehicles": {VIN_A: {
+        "route": None, "attempts": {"new-attempt": {"outcome": "sent_unknown"}}, "hazards": {
+            "ble:bridge-a": {
+                "kind": "ble_quarantine", "state": "pending",
+                "prefix": "bridge-a", "attempt_id": "new-attempt",
+                "producer_identity": "esphome:ble-entry:bridge-a:charger-a",
+            }
+        },
+    }}}}
+    recovery._retire_recovery_liabilities(
+        runtime, [{"vehicle_id": VIN_A, "hazard_id": "ble:bridge-a",
+                   "attempt_id": "old-attempt", "prefix": "bridge-a",
+                   "producer_identity": "esphome:ble-entry:bridge-a:charger-a"}],
+        "old-incident", {"operation": "stop"},
+    )
+    hazard = runtime[recovery.RECOVERY_KEY]["vehicles"][VIN_A]["hazards"]["ble:bridge-a"]
+    assert "recovery_retired" not in hazard
+    assert "recovery_retired" not in runtime[recovery.RECOVERY_KEY]["vehicles"][VIN_A]["attempts"]["new-attempt"]
+
+    legacy_ref_runtime = deepcopy(runtime)
+    recovery._retire_recovery_liabilities(
+        legacy_ref_runtime, [{"vehicle_id": VIN_A, "hazard_id": "ble:bridge-a",
+                              "prefix": "bridge-a",
+                              "producer_identity": "esphome:ble-entry:bridge-a:charger-a"}],
+        "legacy-incident", {"operation": "stop"},
+    )
+    assert "recovery_retired" not in legacy_ref_runtime[recovery.RECOVERY_KEY]["vehicles"][VIN_A]["hazards"]["ble:bridge-a"]

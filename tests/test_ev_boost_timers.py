@@ -150,6 +150,8 @@ class BoostHarness:
             "stop_ev_charging_dynamic": self.guard(_action_stop_ev_charging_dynamic),
             "set_ev_charge_limit": self.guard(_action_set_ev_charge_limit),
         }
+        async def no_native_cleanup(*_args, **_kwargs):
+            return None
         namespace = {
             "execute_actions": self.execute,
             "ev_actions": self.ev_actions,
@@ -176,6 +178,7 @@ class BoostHarness:
             "async_rebind_native_session_route": recovery.async_rebind_native_session_route,
             "_compatible": recovery._compatible,
             "independent_tesla_source_binding": lambda *_args, **_kwargs: None,
+            "async_read_stopped_tesla_cleanup": no_native_cleanup,
             "is_current_ev_power_observation": ev_load.is_current_ev_power_observation,
             "_get_ev_vehicles_status": lambda *_args, **_kwargs: self.observations(),
             "_LOGGER": logging.getLogger(__name__),
@@ -183,6 +186,10 @@ class BoostHarness:
                 json_response=lambda body, **kwargs: SimpleNamespace(body=body, **kwargs)
             ),
         }
+        namespace["_passive_ev_cleanup_observation"] = compile_node(
+            StripImports().visit(source_node(INIT, "_passive_ev_cleanup_observation")),
+            namespace,
+        )
         for name in (
             "claim_ev_ownership", "get_active_ev_owner_mode", "get_ev_ownership",
             "owner_family", "record_ev_command", "release_ev_ownership",
