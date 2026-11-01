@@ -1,0 +1,156 @@
+# Home Assistant core. Licensed under the Apache License, Version 2.0.
+# https://www.apache.org/licenses/LICENSE-2.0
+# Verbatim methods from Home Assistant core 2026.10.4 helpers/storage.py:
+# https://github.com/home-assistant/core/blob/2026.10.4/homeassistant/helpers/storage.py
+# Full upstream source SHA-256: 4d6b26e730eeea198196e2eb01ffc55432d9e79c06a65dca307ce664192e8025
+# Only imports, the class shell and initialization/I/O harness are supplied by tests.
+from __future__ import annotations
+
+
+class Store:
+    async def async_save(self, data: _T) -> None:
+        """Save data."""
+        self._data = {
+            "version": self.version,
+            "minor_version": self.minor_version,
+            "key": self.key,
+            "data": data,
+        }
+
+        if self.hass.state is CoreState.stopping:
+            self._async_ensure_final_write_listener()
+            return
+
+        await self._async_handle_write_data()
+
+
+    @callback
+    def async_delay_save(
+        self,
+        data_func: Callable[[], _T],
+        delay: float = 0,
+    ) -> None:
+        """Save data with an optional delay.
+
+        data_func: A function that returns the data to save. If serialize_in_event_loop
+        is True, it will be called from and the returned data will be serialized in the
+        in the event loop. If serialize_in_event_loop is False, it will be called from
+        and the returned data will be serialized by a separate thread.
+        """
+        self._data = {
+            "version": self.version,
+            "minor_version": self.minor_version,
+            "key": self.key,
+            "data_func": data_func,
+        }
+
+        next_when = self.hass.loop.time() + delay
+        if self._delay_handle and self._delay_handle.when() < next_when:
+            self._next_write_time = next_when
+            return
+
+        self._async_cleanup_delay_listener()
+        self._async_ensure_final_write_listener()
+
+        if self.hass.state is CoreState.stopping:
+            return
+
+        # We use call_later directly here to avoid a circular import
+        self._async_reschedule_delayed_write(next_when)
+
+
+    @callback
+    def _async_reschedule_delayed_write(self, when: float) -> None:
+        """Reschedule a delayed write."""
+        self._delay_handle = self.hass.loop.call_at(
+            when, self._async_schedule_callback_delayed_write
+        )
+
+
+    @callback
+    def _async_schedule_callback_delayed_write(self) -> None:
+        """Schedule the delayed write in a task."""
+        if self.hass.loop.time() < self._next_write_time:
+            # Timer fired too early because there were multiple
+            # calls to async_delay_save before the first one
+            # wrote. Reschedule the timer to the next write time.
+            self._async_reschedule_delayed_write(self._next_write_time)
+            return
+        self.hass.async_create_task_internal(
+            self._async_callback_delayed_write(), eager_start=True
+        )
+
+
+    @callback
+    def _async_ensure_final_write_listener(self) -> None:
+        """Ensure that we write if we quit before delay has passed."""
+        if self._unsub_final_write_listener is None:
+            self._unsub_final_write_listener = self.hass.bus.async_listen_once(
+                EVENT_HOMEASSISTANT_FINAL_WRITE,
+                self._async_callback_final_write,
+            )
+
+
+    @callback
+    def _async_cleanup_final_write_listener(self) -> None:
+        """Clean up a stop listener."""
+        if self._unsub_final_write_listener is not None:
+            self._unsub_final_write_listener()
+            self._unsub_final_write_listener = None
+
+
+    @callback
+    def _async_cleanup_delay_listener(self) -> None:
+        """Clean up a delay listener."""
+        if self._delay_handle is not None:
+            self._delay_handle.cancel()
+            self._delay_handle = None
+
+
+    async def _async_callback_delayed_write(self) -> None:
+        """Handle a delayed write callback."""
+        # catch the case where a call is scheduled and then we stop Home Assistant
+        if self.hass.state is CoreState.stopping:
+            self._async_ensure_final_write_listener()
+            return
+        await self._async_handle_write_data()
+
+
+    async def _async_callback_final_write(self, _event: Event) -> None:
+        """Handle a write because Home Assistant is in final write state."""
+        self._unsub_final_write_listener = None
+        await self._async_handle_write_data()
+
+
+    async def _async_handle_write_data(self, *_args):
+        """Handle writing the config."""
+        async with self._write_lock:
+            self._manager.async_invalidate(self.key)
+            self._async_cleanup_delay_listener()
+            self._async_cleanup_final_write_listener()
+
+            if self._data is None:
+                # Another write already consumed the data
+                return
+
+            data = self._data
+            self._data = None
+
+            if self._read_only:
+                return
+
+            try:
+                await self._async_write_data(data)
+            except (json_util.SerializationError, WriteError) as err:
+                _LOGGER.error("Error writing config for %s: %s", self.key, err)
+
+
+    async def async_remove(self) -> None:
+        """Remove all data."""
+        self._manager.async_invalidate(self.key)
+        self._async_cleanup_delay_listener()
+        self._async_cleanup_final_write_listener()
+
+        with suppress(FileNotFoundError):
+            await self.hass.async_add_executor_job(os.unlink, self.path)
+
