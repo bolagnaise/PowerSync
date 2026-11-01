@@ -43,6 +43,7 @@ from .cost_neutral import (
     CostNeutralPlan,
     elapsed_settlement_seconds,
 )
+from .coalescing_store import CoalescingStore
 from .export_policy import (
     battery_export_allowed_slots,
     export_price_allows_battery_export,
@@ -828,14 +829,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._baseline_zerocharge_period_key: str | None = None
         self._baseline_zerocharge_import_kwh_month = 0.0
         self._baseline_zerocharge_credit_value_month = 0.0
-        self._cost_store = Store(
+        self._cost_store = CoalescingStore(
             hass,
             COST_STORE_VERSION,
             f"power_sync.costs.{entry_id}",
         )
         # This inventory deliberately does not share the daily-cost Store:
         # energy acquired before midnight remains in the battery afterwards.
-        self._battery_provenance_store = Store(
+        self._battery_provenance_store = CoalescingStore(
             hass,
             BATTERY_PROVENANCE_STORE_VERSION,
             f"power_sync.battery_provenance.{entry_id}",
@@ -852,12 +853,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._battery_provenance_last_capacity_wh: float | None = None
         self._battery_provenance_last_observed_at: str | None = None
         self._battery_provenance_reconciliation = "uninitialized"
-        self._solar_forecast_learning_store = Store(
+        self._solar_forecast_learning_store = CoalescingStore(
             hass,
             SOLAR_FORECAST_LEARNING_STORE_VERSION,
             f"power_sync.solar_forecast_learning.{entry_id}",
         )
-        self._battery_efficiency_learning_store = Store(
+        self._battery_efficiency_learning_store = CoalescingStore(
             hass,
             BATTERY_EFFICIENCY_LEARNING_STORE_VERSION,
             f"power_sync.battery_efficiency_learning.{entry_id}",
