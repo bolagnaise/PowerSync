@@ -606,6 +606,7 @@ async def test_first_setup_await_holds_actual_legacy_bt_number_write(monkeypatch
         "_run_tesla_legacy_with_authority", "_set_ev_charging_amps_teslemetry_bt",
         "_tesla_call_service", "_tesla_charge_current_positive_floor",
         "_generic_charger_entity_bounds", "_coerce_positive_int", "_is_number_range_error",
+        "_tesla_native_verified_range_rejection",
         "_legacy_teslemetry_bt_identity", "_is_teslemetry_bt_available"}
     nodes = [node for node in ast.parse(source.read_text()).body if getattr(node, "name", None) in selected]
     action_ns = {**vars(constants), "__name__": f"{PACKAGE}.automations._setup_probe", "__spec__": None,
