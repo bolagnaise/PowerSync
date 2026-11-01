@@ -358,12 +358,12 @@ physical power. Both ESPHome bridges, native HA Tesla Fleet and native
 Teslemetry are installed. Neither legacy nor modern Teslemetry Bluetooth is
 installed here; those adapter contracts have software coverage only.
 
-At the 1 November 09:53 UTC checkpoint, private 2.12.1584.dev7 is installed
-from fc666795 with all 272 package hashes matching and configuration checks
-passing. The subsequent committed Boost cleanup source e178beee passed the
-audited complete suite: 11,014 tests with no skips. The later shared finite
-cleanup and quarantine-identity repairs have focused regression proof but
-still require combined validation and installation.
+At the 1 November 10:35 UTC checkpoint, private 2.12.1586.dev9 is installed
+from 4a339ee7 with all 272 package hashes matching, configuration checks
+passing, and PowerSync plus both native providers loaded. The later Native
+Max concurrent export-observation repair passed the audited complete suite
+at 8c6dc3f9: 11,051 tests with no skips. The final cleanup-route projection
+repair requires its own combined regression and installation proof.
 
 Independent Fleet charge documents confirmed both vehicles charging at
 09:09:55 UTC: TESSY at 15 A/about 4 kW and W3RT1E at 10 A/about 2 kW.
@@ -375,18 +375,31 @@ BLE Connection switch while retaining the unresolved attempt. At the original
 disconnected before that deadline, so it is unavailable for further two-car
 checks at this checkpoint.
 
-TESSY's stock recovery released its recorded attempt, but its subsequent
-PowerSync limit requests were blocked until an integration-only reload.
-Tracing found that a retired same-prefix hazard in the saved projection could
-mask a newer pending quarantine during merging and recovery scope capture.
-The new regression reproduces that adapter sequence before the repair and
-checks recovery and reload without clearing the other VIN's hazard.
+Tracing earlier blocked requests found that a retired same-prefix hazard
+could mask a newer pending quarantine during merging and recovery scope
+capture. Regression coverage reproduces that adapter sequence and checks
+recovery and reload without clearing the other VIN's hazard.
 
-Reload also replayed an expired manual cleanup Stop for already disconnected
-W3RT1E. Its unconfirmed BLE Stop was preserved and the BLE Connection switch
-was disabled for containment. The shared stopped-observation repair covers
-that timer and reload variant. W3RT1E remains contained pending installation
-and qualified recovery; TESSY's limit is restored to 70% and its radio is on.
+An earlier reload also replayed an expired manual cleanup Stop for already
+disconnected W3RT1E. Its unconfirmed BLE Stop was preserved with the radio
+disabled for containment. The shared stopped-observation repair covers the
+timer and reload variant. On private dev9, W3RT1E completed qualified recovery
+and its radio returned on without clearing another vehicle's liability.
+
+A three-minute TESSY Boost physically charged at 10 A/about 2 kW. Its Start
+remained unconfirmed in software and returned recovery pending. Reload at
+10:18:04 retained the original 10:18:40 deadline without a second Start.
+The expiry Stop was confirmed at 10:18:59, with independent native charge
+data showing zero current and power at 10:19:14. Ownership and Boost records
+cleared. Native services restored the original settings; independent data at
+10:21:36 confirmed TESSY stopped at 70%/15 A and W3RT1E at zero power with
+80%/10 A requested settings.
+
+Subsequent PowerSync setting requests exposed a separate convergence defect:
+the saved sidecar cleared the completed cleanup route, while the live legacy
+projection retained its stop-only fence. The repair must publish the exact
+persisted terminal Stop proof into the live projection before a new positive
+request selects its own route. Unresolved attempts and hazards remain held.
 
 Both stock bridges have previously completed qualified recovery without a
 firmware flash or pairing change. Native Max charging with an already active
@@ -395,8 +408,9 @@ export without an active EV was observed at the export cap. Restoration was
 confirmed after background cleanup; the local gateway is reachable again.
 These individual observations do not establish every coexistence ordering.
 
-The final installed implementation still requires independent vehicle Stop,
-successful Boost expiry/reload with the original deadline and no Start replay,
-the remaining active-EV native charge/export orderings, and final settings
-restoration. Public release remains pending those checks and matching trusted
-protected-main regression evidence.
+The remaining two-car Stop and arrival-order combinations, all active-EV
+native charge/export orderings, and every Teslemetry transport variant have
+not been verified on this hardware. Those limitations must remain explicit
+in the release handoff. Publication still requires matching trusted
+protected-main full-suite evidence; none of these individual observations
+substitutes for that gate or for later exact-artifact installation proof.

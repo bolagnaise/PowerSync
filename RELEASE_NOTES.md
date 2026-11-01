@@ -4,7 +4,7 @@
 
 Tesla charging now uses one controller per vehicle to coordinate schedules, Boost and manual commands. BLE remains the primary route when configured, with Fleet or Teslemetry fallback when allowed. Wake-up handling gives sleeping cars time to respond, and transport changes preserve each charging session's original deadline.
 
-Recovery now distinguishes old commands from new ones, preventing an earlier recovery from blocking later charging. Expired Boost and manual sessions can also finish cleanly when fresh vehicle data confirms charging has already stopped or the cable is disconnected. Supported stock BLE bridges use software recovery without a firmware update.
+Recovery now distinguishes old commands from new ones, preventing an earlier recovery from blocking later charging. Expired Boost and manual sessions can finish cleanly when fresh vehicle data confirms charging has already stopped or the cable is disconnected, and completed stop commands release their route for new controls. Supported stock BLE bridges use software recovery without a firmware update.
 
 ## Powerwall controls alongside EV charging
 

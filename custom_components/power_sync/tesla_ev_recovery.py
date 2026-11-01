@@ -730,6 +730,64 @@ def _terminal_removal_matches(
     return _attempt_record_digest(record) == proof.get("record_digest")
 
 
+def _cleanup_route_has_liabilities(ledger: Any) -> bool:
+    if not isinstance(ledger, Mapping):
+        return True
+    for key, field, unresolved in (
+        ("attempts", "outcome", ("pending", "sent_unknown")),
+        ("hazards", "state", ("pending", "isolated")),
+    ):
+        records = ledger.get(key, {})
+        if not isinstance(records, Mapping) or any(
+            not isinstance(record, Mapping)
+            or (not record.get("recovery_retired") and record.get(field, "pending") in unresolved)
+            for record in records.values()
+        ):
+            return True
+    return False
+
+
+def _terminal_cleanup_proof_matches_route(
+    recovery: Mapping[str, Any],
+    vehicle_id: Any,
+    route: Any,
+) -> bool:
+    """Whether a durable Stop proof authorizes clearing one stale route.
+
+    This is used only while copying an already-authoritative sidecar into the
+    legacy live projection.  The route must match the complete route captured
+    by the proof, so a different producer, pairing, or lease can never be
+    cleared merely because an older route was cleanup-only.
+    """
+    if not isinstance(route, Mapping) or route.get("cleanup_only") is not True:
+        return False
+    vehicles = recovery.get("vehicles", {})
+    if (not isinstance(vehicles, Mapping)
+            or _cleanup_route_has_liabilities(vehicles.get(str(vehicle_id)))):
+        return False
+    removals = recovery.get(_TERMINAL_REMOVALS_KEY)
+    if not isinstance(removals, Mapping):
+        return False
+    if not _terminal_removals_valid(removals):
+        return False
+    for proofs in removals.values():
+        if not isinstance(proofs, Mapping):
+            continue
+        for proof in proofs.values():
+            proof_route = proof.get("route") if isinstance(proof, Mapping) else None
+            if (
+                isinstance(proof, Mapping)
+                and proof.get("vehicle_id") == str(vehicle_id)
+                and proof.get("operation") == "stop"
+                and proof.get("outcome") in _TERMINAL_ATTEMPT_OUTCOMES
+                and isinstance(proof_route, Mapping)
+                and proof_route.get("cleanup_only") is True
+                and dict(proof_route) == dict(route)
+            ):
+                return True
+    return False
+
+
 def _sidecar_valid(value: Any) -> bool:
     if not isinstance(value, dict):
         return False
@@ -1027,9 +1085,20 @@ def _merge_recovery_roots(
                             if "recovery_retired" in item:
                                 merged["recovery_retired"] = deepcopy(item["recovery_retired"])
                         target[item_id] = merged
-            if prefer_legacy_mutable and "route" in old_ledger:
+            if (
+                prefer_legacy_mutable
+                and "route" in old_ledger
+                and not (
+                    current.get("route") is None
+                    and _terminal_cleanup_proof_matches_route(
+                        result, vid, old_ledger.get("route")
+                    )
+                )
+            ):
                 # A live B completion clears a retired BLE route by writing None;
-                # setdefault would resurrect that route from the sidecar.
+                # setdefault would resurrect that route from the sidecar.  The
+                # exception above is a sidecar-authorized terminal Stop clear;
+                # it must propagate into the legacy projection instead.
                 current["route"] = deepcopy(old_ledger.get("route"))
             elif not had_primary_ledger and old_ledger.get("route") is not None:
                 current["route"] = deepcopy(old_ledger.get("route"))
@@ -1306,6 +1375,21 @@ async def _persist_recovery_sidecar(
         raise
     if not saved:
         _restore_sidecar_state(state, before)
+    elif (_runtime(hass, entry) is runtime
+            and runtime.get(_SIDECAR_STATE_KEY) is state):
+        # Publish only the exact terminal Stop route clear. Other live journal
+        # objects retain their identity and every unresolved liability.
+        live = _recovery(runtime, create=False)
+        live_vehicles = live.get("vehicles", {}) if isinstance(live, Mapping) else {}
+        saved_vehicles = state["recovery"]["vehicles"]
+        for vid, ledger in live_vehicles.items():
+            saved_ledger = saved_vehicles.get(vid)
+            if (isinstance(ledger, dict) and isinstance(saved_ledger, Mapping)
+                    and saved_ledger.get("route") is None
+                    and not _cleanup_route_has_liabilities(ledger)
+                    and _terminal_cleanup_proof_matches_route(
+                        state["recovery"], vid, ledger.get("route"))):
+                ledger["route"] = None
     return saved
 
 
@@ -3138,6 +3222,15 @@ async def async_finish_attempt(ticket: RecoveryTicket, outcome: Any) -> bool:
                 # write is refused.  Keep the marker internal to this lock so
                 # monkeypatched legacy persistence remains compatible.
             attempts.pop(ticket.attempt_id, None)
+            stop_route_cleared = (
+                str(record.get("operation") or "").strip().lower() == "stop"
+                and isinstance(record.get("route"), Mapping)
+                and record["route"].get("cleanup_only") is True
+                and isinstance(ledger.get("route"), Mapping)
+                and dict(ledger["route"]) == dict(record["route"])
+                and not attempts
+                and not ledger.get("hazards")
+            )
             session_route_retained = (
                 normalized in ("accepted_unconfirmed", "confirmed")
                 and str(record.get("operation") or "").strip().lower() != "stop"
@@ -3156,6 +3249,12 @@ async def async_finish_attempt(ticket: RecoveryTicket, outcome: Any) -> bool:
                 # pin. Let the next request try its configured BLE preference.
                 # Retain HA routing when an older attempt or isolation hazard
                 # still requires that exact producer.
+                ledger["route"] = None
+            elif stop_route_cleared:
+                # A terminal cleanup Stop releases the negative-only route for
+                # every exact producer kind. Full route equality and empty
+                # liabilities prevent a replacement route or hazard from
+                # inheriting the old Stop proof.
                 ledger["route"] = None
         else:
             record["outcome"] = normalized

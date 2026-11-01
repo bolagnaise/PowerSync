@@ -1989,18 +1989,63 @@ async def test_terminal_finish_removal_survives_stale_projection_and_reload(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('kind,outcome,retired_history', [
+    ('ha', 'accepted_unconfirmed', False),
+    ('ble', 'confirmed', False),
+    ('ble', 'confirmed', True),
+])
 async def test_terminal_stop_proof_clears_retained_cleanup_route_and_allows_ble_retry(
-    harness,
+    harness, kind, outcome, retired_history,
 ):
-    """A proven old cleanup Stop must release its stale native route on reload."""
+    """An exact terminal Stop releases only its stale producer cleanup route."""
     hass, entry, store, _, _ = _sidecar_harness(harness)
     assert await recovery.async_load_recovery_state(hass, entry)
+    runtime = hass.data['power_sync'][entry.entry_id]
+    history = None
+    if retired_history:
+        old_route = _route('bridge_a', 'switch.car_a_charger', 'switch.fallback')
+        old = await recovery.async_begin_attempt(
+            hass, entry, VIN_A, old_route, 'start', old_route['entity_id'])
+        assert old and await recovery.async_finish_attempt(old, 'sent_unknown')
+        # Create a real pending quarantine, then retire it and its unknown
+        # attempt through the normal stock-recovery evidence pipeline.
+        assert not await recovery.async_isolate_ble(old, authorize=lambda: False)
+        producer = dict(old.route['entity_identity'], vin=VIN_A, prefix='bridge_a',
+                        producer_identity=old.route['producer_identity'])
+        incident = await recovery.async_record_evidence_loss(
+            hass, entry, kind='command_uncertainty', candidate_producers=[producer],
+            candidate_vehicles=[VIN_A])
+        state = runtime['_tesla_ev_recovery_sidecar']
+        assert incident and await recovery.async_confirm_recovery_scope(
+            hass, entry, incident['incident_id'], expected_revision=state['revision'],
+            candidate_producers=[producer], candidate_vehicles=[VIN_A],
+            operator_confirmation=True)
+        uptimes = iter((100., 1., 2.))
+        async def uptime():
+            return {'uptime':next(uptimes), 'observed_at':time.time()+1, 'fresh':True}
+        async def observe(_vin):
+            return {'requested_current':10, 'charge_limit':80, 'charging':False, 'power':0,
+                    'observed_at':time.time()+1, 'fresh':True,
+                    'provenance':{'requested_current':'native', 'charge_limit':'native',
+                                  'charging':'vehicle', 'power':'vehicle'}}
+        assert await recovery.async_recover_stock(
+            hass, entry, incident_id=incident['incident_id'], profile={
+                'queue_persistence':'ram_only', 'host_replay':'none', 'exercised':True},
+            identity=producer, restart=lambda:True, wait_disconnected=lambda:True,
+            wait_connected=lambda:True, read_identity=lambda:producer,
+            read_uptime=uptime, observe=observe)
+        history = deepcopy(runtime[recovery.RECOVERY_KEY]['vehicles'][VIN_A])
+        assert history['attempts'][old.attempt_id]['outcome']=='sent_unknown'
+        assert history['attempts'][old.attempt_id]['recovery_retired']['historical_outcome']=='unknown'
+        assert history['hazards']['ble:bridge_a']['recovery_retired']['historical_outcome']=='unknown'
     route = {
-        "kind": "ha",
-        "entity_id": "switch.fallback",
+        "kind": kind,
+        "entity_id": "switch.car_a_charger" if kind=='ble' else "switch.fallback",
         "cleanup_only": True,
         "cleanup_obligation_id": "old-obligation",
     }
+    if kind=='ble':
+        route['prefix']='bridge_a'
     ticket = await recovery.async_begin_attempt(
         hass, entry, VIN_A, route, "stop", route["entity_id"],
     )
@@ -2030,8 +2075,9 @@ async def test_terminal_stop_proof_clears_retained_cleanup_route_and_allows_ble_
         restored, entry, VIN_A, ticket.attempt_id,
         deepcopy(loaded_record["route"]), restored_runtime,
     )
-    assert await recovery.async_finish_attempt(loaded_ticket, "accepted_unconfirmed")
+    assert await recovery.async_finish_attempt(loaded_ticket, outcome)
     assert store.value["recovery"]["terminal_removals"][VIN_A][ticket.attempt_id]
+    assert restored_runtime[recovery.RECOVERY_KEY]["vehicles"][VIN_A]["route"] is None
 
     stale = deepcopy(restored_runtime[recovery.RECOVERY_KEY])
     stale_ledger = stale["vehicles"][VIN_A]
@@ -2049,7 +2095,9 @@ async def test_terminal_stop_proof_clears_retained_cleanup_route_and_allows_ble_
     reloaded.data["power_sync"][entry.entry_id] = reloaded_runtime
     assert await recovery.async_load_recovery_state(reloaded, entry)
     ledger = reloaded_runtime[recovery.RECOVERY_KEY]["vehicles"][VIN_A]
-    assert ledger["attempts"] == {}
+    assert ledger["attempts"] == (history['attempts'] if history else {})
+    if history:
+        assert ledger['hazards']==history['hazards']
     assert ledger["route"] is None
 
     # A later startup can see the terminal proof again after an earlier merge
@@ -2076,8 +2124,29 @@ async def test_terminal_stop_proof_clears_retained_cleanup_route_and_allows_ble_
         is None
     )
 
+    # A sidecar-only terminal reconciliation can run while the legacy runtime
+    # projection still carries the old cleanup route.  The next ordinary
+    # persistence pass must copy the already-validated clear into that live
+    # projection instead of resurrecting the stop-only route.
+    post_proof_runtime[recovery.RECOVERY_KEY]["vehicles"][VIN_A]["route"] = deepcopy(
+        stale["vehicles"][VIN_A]["route"]
+    )
+    projection_ref=post_proof_runtime[recovery.RECOVERY_KEY]
+    ledger_ref=projection_ref['vehicles'][VIN_A]
+    attempts_ref,hazards_ref=ledger_ref['attempts'],ledger_ref['hazards']
+    assert await recovery.async_persist_recovery_state(
+        post_proof_runtime_hass, entry
+    )
+    assert post_proof_runtime[recovery.RECOVERY_KEY] is projection_ref
+    assert projection_ref['vehicles'][VIN_A] is ledger_ref
+    assert ledger_ref['attempts'] is attempts_ref and ledger_ref['hazards'] is hazards_ref
+    assert (
+        post_proof_runtime[recovery.RECOVERY_KEY]["vehicles"][VIN_A]["route"]
+        is None
+    )
+
     fresh = await recovery.async_begin_attempt(
-        reloaded,
+        post_proof_runtime_hass,
         entry,
         VIN_A,
         {"kind": "ble", "prefix": "bridge_a", "entity_id": "switch.car_a_charger"},
@@ -2085,6 +2154,73 @@ async def test_terminal_stop_proof_clears_retained_cleanup_route_and_allows_ble_
         "switch.car_a_charger",
     )
     assert fresh is not None
+    if history:
+        live_history=post_proof_runtime[recovery.RECOVERY_KEY]['vehicles'][VIN_A]
+        for attempt_id,record in history['attempts'].items():
+            assert live_history['attempts'][attempt_id]==record
+        assert live_history['hazards']==history['hazards']
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('case',['failed','cancelled','pending','hazard','other_vin'])
+async def test_terminal_cleanup_projection_clear_requires_saved_proof_and_no_new_liability(harness,case):
+    hass,entry,store,_,_=_sidecar_harness(harness)
+    assert await recovery.async_load_recovery_state(hass,entry)
+    route={'kind':'ble','prefix':'bridge_a','entity_id':'switch.car_a_charger',
+           'cleanup_only':True,'cleanup_obligation_id':'old-cleanup'}
+    ticket=await recovery.async_begin_attempt(hass,entry,VIN_A,route,'stop',route['entity_id'])
+    assert ticket and await recovery.async_finish_attempt(ticket,'confirmed')
+    runtime=hass.data['power_sync'][entry.entry_id]
+    if case in ('pending','hazard'):
+        new=await recovery.async_begin_attempt(hass,entry,VIN_A,route,'stop',route['entity_id'])
+        assert new
+        if case=='hazard':
+            assert not await recovery.async_isolate_ble(new,authorize=lambda:False)
+            assert await recovery.async_finish_attempt(new,'not_sent')
+    if case=='other_vin':
+        other_route=_route('bridge_b','switch.car_b_charger','switch.fallback_b')
+        other=await recovery.async_begin_attempt(hass,entry,VIN_B,other_route,'start',other_route['entity_id'])
+        assert other and await recovery.async_finish_attempt(other,'sent_unknown')
+    projection=runtime[recovery.RECOVERY_KEY]
+    ledger=projection['vehicles'][VIN_A]
+    ledger['route']=deepcopy(ticket.route)
+    other_ledger=projection['vehicles'].get(VIN_B)
+    other_before=deepcopy(other_ledger)
+    retained_route=ledger['route']
+    if case=='failed':
+        store.fail=True
+        assert not await recovery.async_persist_recovery_state(hass,entry)
+    elif case=='cancelled':
+        entered,release=asyncio.Event(),asyncio.Event()
+        save=store.async_save
+        async def paused(value):
+            entered.set()
+            await release.wait()
+            return await save(value)
+        store.async_save=paused
+        task=asyncio.create_task(recovery.async_persist_recovery_state(hass,entry))
+        await asyncio.wait_for(entered.wait(),1)
+        task.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        store.async_save=save
+    else:
+        assert await recovery.async_persist_recovery_state(hass,entry)
+    assert runtime[recovery.RECOVERY_KEY] is projection
+    assert projection['vehicles'][VIN_A] is ledger
+    if case=='other_vin':
+        assert ledger['route'] is None
+        assert projection['vehicles'][VIN_B] is other_ledger
+        assert other_ledger==other_before
+    else:
+        assert ledger['route'] is retained_route
+        assert await recovery.async_begin_attempt(
+            hass,entry,VIN_A,route,'start',route['entity_id']) is None
+    if case in ('failed','cancelled'):
+        store.fail=False
+        assert await recovery.async_persist_recovery_state(hass,entry)
+        assert ledger['route'] is None
 
 
 @pytest.mark.asyncio
