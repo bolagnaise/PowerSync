@@ -2832,7 +2832,11 @@ _TESLA_BLE_WAKE_FRESHNESS_SECONDS = 120
 # exact entity separate from the broad Tesla button resolver: a force-update
 # request is a read-only session probe and must never land on another vehicle.
 _TESLA_BLE_BUTTON_FORCE_DATA_UPDATE = "button.{prefix}_force_data_update"
+_TESLA_BLE_SENSOR_LAST_UPDATE = "sensor.{prefix}_last_update"
+_TESLA_BLE_SENSOR_CHARGE_ENERGY_ADDED = "sensor.{prefix}_charge_energy_added"
+_TESLA_BLE_SENSOR_RANGE = "sensor.{prefix}_range"
 _TESLA_BLE_BINDING_UNSET = object()
+_TESLA_BLE_STOCK_TOKEN_UNSET = object()
 _tesla_ble_cleanup_without_session: ContextVar[bool] = ContextVar(
     "tesla_ble_cleanup_without_session", default=False
 )
@@ -2870,6 +2874,9 @@ def _tesla_ble_charge_data_entity_ids(
             TESLA_BLE_SENSOR_CHARGER_CURRENT.format(prefix=ble_prefix),
             TESLA_BLE_SENSOR_CHARGE_POWER.format(prefix=ble_prefix),
             TESLA_BLE_SENSOR_CHARGER_POWER.format(prefix=ble_prefix),
+            _TESLA_BLE_SENSOR_LAST_UPDATE.format(prefix=ble_prefix),
+            _TESLA_BLE_SENSOR_CHARGE_ENERGY_ADDED.format(prefix=ble_prefix),
+            _TESLA_BLE_SENSOR_RANGE.format(prefix=ble_prefix),
         ),
         target_entity,
     )
@@ -2955,6 +2962,145 @@ def _tesla_ble_charge_data_binding(
             return None
         current.append((entity_id, identity))
     return tuple(current)
+
+
+def _tesla_ble_stock_profile_token(
+    hass: HomeAssistant, target_entity: str | None,
+) -> tuple[Any, Any, Any, Any, Any, tuple[str, str, str], bool] | None:
+    """Capture the cached stock producer identity before an await."""
+    if not target_entity:
+        return None
+    try:
+        registry = er.async_get(hass)
+        target = registry.async_get(target_entity)
+        if target is None or getattr(target, "disabled_by", None) is not None:
+            return None
+        if str(getattr(target, "platform", "")).lower() != "esphome":
+            return None
+        entry_id = getattr(target, "config_entry_id", None)
+        if not entry_id:
+            return None
+        config_entries = getattr(hass, "config_entries", None)
+        getter = getattr(config_entries, "async_get_entry", None)
+        config_entry = getter(entry_id) if callable(getter) else None
+        runtime_data = getattr(config_entry, "runtime_data", None)
+        info = getattr(runtime_data, "device_info", None)
+        metadata = tuple(
+            str(getattr(info, field, ""))
+            for field in ("project_name", "project_version", "esphome_version")
+        )
+        from ..tesla_ev_stock_recovery import STOCK_PROFILES
+
+        client = getattr(runtime_data, "client", None)
+        return (
+            entry_id,
+            config_entry,
+            runtime_data,
+            client,
+            info,
+            metadata,
+            bool(metadata in STOCK_PROFILES and client is not None),
+        )
+    except Exception:
+        return None
+
+
+def _tesla_ble_stock_profile_token_current(
+    hass: HomeAssistant,
+    target_entity: str | None,
+    token: tuple[Any, Any, Any, Any, Any, tuple[str, str, str], bool] | None,
+) -> bool:
+    """Check that the same qualified stock producer still owns the target."""
+    if token is None or not token[-1]:
+        return False
+    current = _tesla_ble_stock_profile_token(hass, target_entity)
+    if current is None or not current[-1]:
+        return False
+    return (
+        current[0] == token[0]
+        and current[1] is token[1]
+        and current[2] is token[2]
+        and current[3] is token[3]
+        and current[4] is token[4]
+        and current[5] == token[5]
+        and current[6] == token[6]
+    )
+
+
+def _tesla_ble_stock_profile_qualified(
+    hass: HomeAssistant, target_entity: str | None,
+) -> bool:
+    """Require the cached config-entry metadata for a supported stock bridge."""
+    token = _tesla_ble_stock_profile_token(hass, target_entity)
+    return bool(token is not None and token[-1])
+
+
+def _tesla_ble_has_fresh_stock_charge_response(
+    hass: HomeAssistant,
+    ble_prefix: str,
+    target_entity: str | None,
+    *,
+    since: datetime,
+    charge_binding: tuple[tuple[str, tuple[Any, ...]], ...] | None = None,
+    stock_token: tuple[Any, Any, Any, Any, Any, tuple[str, str, str], bool]
+    | None
+    | object = _TESLA_BLE_STOCK_TOKEN_UNSET,
+) -> bool:
+    """Recognize a fresh sparse charge response for a qualified stock bridge.
+
+    Stock Tesla responses may omit unchanged current, power, and state fields.
+    LastUpdate is emitted for several vehicle-data sections, so it must be
+    paired with a fresh finite charge-state-only field and exact producer
+    identity.  This is transport/session health, never physical confirmation.
+    """
+    if stock_token is _TESLA_BLE_STOCK_TOKEN_UNSET:
+        stock_token = _tesla_ble_stock_profile_token(hass, target_entity)
+    if not _tesla_ble_stock_profile_token_current(hass, target_entity, stock_token):
+        return False
+    binding = _tesla_ble_charge_data_binding(
+        hass, ble_prefix, target_entity or "", previous=charge_binding
+    )
+    if binding is None:
+        return False
+    bound_ids = {entity_id for entity_id, _identity in binding}
+    last_update_id = _TESLA_BLE_SENSOR_LAST_UPDATE.format(prefix=ble_prefix)
+    if last_update_id not in bound_ids:
+        return False
+    last_update = hass.states.get(last_update_id)
+    if last_update is None or not _tesla_ble_charge_state_is_present(last_update):
+        return False
+    if not _ble_state_observed_after(last_update, since, hass=hass):
+        return False
+
+    known_state = False
+    for entity_id in (
+        TESLA_BLE_SENSOR_CHARGING_STATE.format(prefix=ble_prefix),
+        TESLA_BLE_SENSOR_CHARGING.format(prefix=ble_prefix),
+    ):
+        state = hass.states.get(entity_id)
+        value = str(getattr(state, "state", "") or "").strip().lower()
+        if state is not None and value in _TESLA_BLE_SUPPORTED_CHARGING_STATES:
+            known_state = True
+            break
+    if not known_state:
+        return False
+
+    for entity_id in (
+        _TESLA_BLE_SENSOR_CHARGE_ENERGY_ADDED.format(prefix=ble_prefix),
+        _TESLA_BLE_SENSOR_RANGE.format(prefix=ble_prefix),
+    ):
+        if entity_id not in bound_ids:
+            continue
+        state = hass.states.get(entity_id)
+        if state is None or not _ble_state_observed_after(state, since, hass=hass):
+            continue
+        try:
+            value = float(state.state)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(value) and value >= 0:
+            return True
+    return False
 
 
 async def _wait_for_ble_command_readback(
@@ -3054,6 +3200,10 @@ async def _wake_tesla_ble(
     ble_prefix: str,
     wait_timeout: int = 120,
     *,
+    target_entity: str | None = None,
+    stock_token: tuple[Any, Any, Any, Any, Any, tuple[str, str, str], bool]
+    | None
+    | object = _TESLA_BLE_STOCK_TOKEN_UNSET,
     allow_backoff: bool = True,
     authorize: Optional[Callable[[], Any]] = None,
 ) -> bool:
@@ -3074,6 +3224,7 @@ async def _wake_tesla_ble(
 
     wake_entity = TESLA_BLE_BUTTON_WAKE_UP.format(prefix=ble_prefix)
     asleep_entity = TESLA_BLE_BINARY_ASLEEP.format(prefix=ble_prefix)
+    charge_target = target_entity or TESLA_BLE_SWITCH_CHARGER.format(prefix=ble_prefix)
 
     state = hass.states.get(wake_entity)
     if state is None or str(state.state).lower() == "unavailable":
@@ -3082,6 +3233,16 @@ async def _wake_tesla_ble(
     wake_identity = _tesla_legacy_entity_identity(hass, (wake_entity,))
     asleep_identity = _tesla_legacy_entity_identity(hass, (asleep_entity,))
     radio_binding = _tesla_ble_radio_binding(hass, ble_prefix)
+    charge_binding = None
+    if hass.states.get(charge_target) is not None:
+        charge_binding = _tesla_ble_charge_data_binding(
+            hass, ble_prefix, charge_target
+        )
+    # Capture the producer before the first await.  Passing an explicit None
+    # to sparse health keeps an initially unsupported bridge from becoming a
+    # qualified stock producer during Wake.
+    if stock_token is _TESLA_BLE_STOCK_TOKEN_UNSET:
+        stock_token = _tesla_ble_stock_profile_token(hass, charge_target)
 
     async def current() -> bool:
         return bool(
@@ -3092,6 +3253,20 @@ async def _wake_tesla_ble(
                 ble_prefix,
                 radio_binding,
                 target_entity=wake_entity,
+            )
+            and (
+                charge_binding is None
+                or _tesla_ble_charge_data_binding(
+                    hass, ble_prefix, charge_target, previous=charge_binding
+                )
+                is not None
+            )
+            and (
+                stock_token is None
+                or not stock_token[-1]
+                or _tesla_ble_stock_profile_token_current(
+                    hass, charge_target, stock_token
+                )
             )
         )
 
@@ -3184,7 +3359,12 @@ async def _wake_tesla_ble(
                     and _ble_state_observed_after(asleep_state, wake_started_at, hass=hass)
                 )
                 or _tesla_ble_has_fresh_charge_snapshot(
-                    hass, ble_prefix, since=wake_started_at
+                    hass,
+                    ble_prefix,
+                    since=wake_started_at,
+                    target_entity=charge_target,
+                    charge_binding=charge_binding,
+                    stock_token=stock_token,
                 )
             ):
                 _LOGGER.info(f"Tesla BLE: Car is now awake after {int(asyncio.get_running_loop().time() - start_time)}s")
@@ -3300,6 +3480,11 @@ def _tesla_ble_has_fresh_charge_snapshot(
     ble_prefix: str,
     *,
     since: datetime | None = None,
+    target_entity: str | None = None,
+    charge_binding: tuple[tuple[str, tuple[Any, ...]], ...] | None = None,
+    stock_token: tuple[Any, Any, Any, Any, Any, tuple[str, str, str], bool]
+    | None
+    | object = _TESLA_BLE_STOCK_TOKEN_UNSET,
 ) -> bool:
     """Require a recent, vehicle-originated charge snapshot for this bridge.
 
@@ -3321,6 +3506,7 @@ def _tesla_ble_has_fresh_charge_snapshot(
     from ..tesla_ble import get_tesla_ble_observed_at
 
     known_states = []
+    known_state_any = False
     for entity_id in (
         TESLA_BLE_SENSOR_CHARGING_STATE.format(prefix=ble_prefix),
         TESLA_BLE_SENSOR_CHARGING.format(prefix=ble_prefix),
@@ -3330,43 +3516,54 @@ def _tesla_ble_has_fresh_charge_snapshot(
         if (
             state is not None
             and value in _TESLA_BLE_SUPPORTED_CHARGING_STATES
-            and _ble_state_observed_after(state, cutoff, hass=hass)
         ):
-            known_states.append(state)
-    if not known_states:
+            known_state_any = True
+            if _ble_state_observed_after(state, cutoff, hass=hass):
+                known_states.append(state)
+    if not known_state_any:
         return False
 
-    current = get_tesla_ble_charge_current_state(hass, ble_prefix)
-    power = get_tesla_ble_charge_power_state(hass, ble_prefix)
-    for measured in (current, power):
-        if measured is None or not _ble_state_observed_after(
-            measured, cutoff, hass=hass
-        ):
-            continue
-        try:
-            value = float(measured.state)
-            if (
-                measured is power
-                and measured.attributes.get("unit_of_measurement") == "kW"
-            ):
-                value *= 1000
-        except (TypeError, ValueError):
-            continue
-        if math.isfinite(value):
-            measured_at = get_tesla_ble_observed_at(hass, measured)
-            if measured_at is None:
-                continue
-            # A newer explicit stopped/completed state must not be hidden by
-            # a replayed positive measurement from the same bridge.
-            if value > 0 and any(
-                str(status.state).strip().lower() in _TESLA_NON_CHARGING_STATES
-                and (status_at := get_tesla_ble_observed_at(hass, status)) is not None
-                and status_at > measured_at
-                for status in known_states
+    if known_states:
+        current = get_tesla_ble_charge_current_state(hass, ble_prefix)
+        power = get_tesla_ble_charge_power_state(hass, ble_prefix)
+        for measured in (current, power):
+            if measured is None or not _ble_state_observed_after(
+                measured, cutoff, hass=hass
             ):
                 continue
-            if value >= 0:
-                return True
+            try:
+                value = float(measured.state)
+                if (
+                    measured is power
+                    and measured.attributes.get("unit_of_measurement") == "kW"
+                ):
+                    value *= 1000
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(value):
+                measured_at = get_tesla_ble_observed_at(hass, measured)
+                if measured_at is None:
+                    continue
+                # A newer explicit stopped/completed state must not be hidden by
+                # a replayed positive measurement from the same bridge.
+                if value > 0 and any(
+                    str(status.state).strip().lower() in _TESLA_NON_CHARGING_STATES
+                    and (status_at := get_tesla_ble_observed_at(hass, status)) is not None
+                    and status_at > measured_at
+                    for status in known_states
+                ):
+                    continue
+                if value >= 0:
+                    return True
+    if target_entity and known_state_any:
+        return _tesla_ble_has_fresh_stock_charge_response(
+            hass,
+            ble_prefix,
+            target_entity,
+            since=cutoff,
+            charge_binding=charge_binding,
+            stock_token=stock_token,
+        )
     return False
 
 
@@ -3425,6 +3622,8 @@ async def _tesla_ble_scope_current(
     target_entity: str,
     expected_identity: tuple[tuple[Any, ...], ...] | None,
     authorize: Optional[Callable[[], Any]],
+    stock_token: tuple[Any, Any, Any, Any, Any, tuple[str, str, str], bool]
+    | None = None,
 ) -> bool:
     """Check route authority and the target registry binding after an await."""
     if not await _tesla_legacy_transport_authorized(authorize):
@@ -3432,6 +3631,10 @@ async def _tesla_ble_scope_current(
     if expected_identity is not None and _tesla_legacy_entity_identity(
         hass, (target_entity,)
     ) != expected_identity:
+        return False
+    if stock_token is not None and stock_token[-1] and not _tesla_ble_stock_profile_token_current(
+        hass, target_entity, stock_token
+    ):
         return False
     return True
 
@@ -3446,6 +3649,9 @@ async def _tesla_ble_prepare_mutation(
     wake_first: bool,
     expected_identity: tuple[tuple[Any, ...], ...] | None,
     charge_binding_holder: list | None = None,
+    stock_token: tuple[Any, Any, Any, Any, Any, tuple[str, str, str], bool]
+    | None
+    | object = _TESLA_BLE_STOCK_TOKEN_UNSET,
 ) -> bool:
     """Establish a fresh vehicle session before any BLE mutation.
 
@@ -3463,32 +3669,62 @@ async def _tesla_ble_prepare_mutation(
     if charge_binding is None:
         return False
     radio_binding = _tesla_ble_radio_binding(hass, ble_prefix)
+    # Capture the stock producer before the first await.  An explicit None is
+    # passed to sparse health checks so an unsupported/missing producer cannot
+    # become qualified halfway through this mutation's probe.
+    if stock_token is _TESLA_BLE_STOCK_TOKEN_UNSET:
+        stock_token = _tesla_ble_stock_profile_token(hass, target_entity)
 
     async def scope_current() -> bool:
         if not await _tesla_ble_scope_current(
             hass, target_entity, expected_identity, authorize
         ):
             return False
-        return _tesla_ble_radio_scope_current(
+        if not _tesla_ble_radio_scope_current(
             hass,
             ble_prefix,
             radio_binding,
             target_entity=target_entity,
-        )
+        ):
+            return False
+        # Strict full snapshots keep the legacy path available when no stock
+        # producer is present.  Once a qualified stock token was captured,
+        # however, every awaited handover must remain on that exact producer.
+        if stock_token is not None and stock_token[-1]:
+            return _tesla_ble_stock_profile_token_current(
+                hass, target_entity, stock_token
+            )
+        return True
 
     if not await scope_current():
         return False
-    if not wake_first and _tesla_ble_has_fresh_charge_snapshot(hass, ble_prefix):
+    if not wake_first and _tesla_ble_has_fresh_charge_snapshot(
+        hass,
+        ble_prefix,
+        target_entity=target_entity,
+        charge_binding=charge_binding,
+        stock_token=stock_token,
+    ):
         return True
     if wake_first:
         if not await _wake_tesla_ble(
             hass, ble_prefix, allow_backoff=allow_backoff,
+            target_entity=target_entity,
+            stock_token=stock_token,
             authorize=scope_current,
         ):
             return False
-    elif not _tesla_ble_has_fresh_charge_snapshot(hass, ble_prefix):
+    elif not _tesla_ble_has_fresh_charge_snapshot(
+        hass,
+        ble_prefix,
+        target_entity=target_entity,
+        charge_binding=charge_binding,
+        stock_token=stock_token,
+    ):
         if not await _wake_tesla_ble(
             hass, ble_prefix, allow_backoff=allow_backoff,
+            target_entity=target_entity,
+            stock_token=stock_token,
             authorize=scope_current,
         ):
             return False
@@ -3503,7 +3739,13 @@ async def _tesla_ble_prepare_mutation(
         return False
     if charge_binding_holder is not None:
         charge_binding_holder[:] = [charge_binding]
-    if _tesla_ble_has_fresh_charge_snapshot(hass, ble_prefix):
+    if _tesla_ble_has_fresh_charge_snapshot(
+        hass,
+        ble_prefix,
+        target_entity=target_entity,
+        charge_binding=charge_binding,
+        stock_token=stock_token,
+    ):
         return True
 
     binding = _tesla_ble_force_data_update_binding(
@@ -3562,7 +3804,12 @@ async def _tesla_ble_prepare_mutation(
         if charge_binding_holder is not None:
             charge_binding_holder[:] = [charge_binding]
         if _tesla_ble_has_fresh_charge_snapshot(
-            hass, ble_prefix, since=refresh_started_at
+            hass,
+            ble_prefix,
+            since=refresh_started_at,
+            target_entity=target_entity,
+            charge_binding=charge_binding,
+            stock_token=stock_token,
         ):
             return True
         remaining = deadline - asyncio.get_running_loop().time()
@@ -3595,6 +3842,26 @@ _tesla_submission_handoff: ContextVar[dict[str, bool] | None] = ContextVar(
 _tesla_submission_guard: ContextVar[Optional[Callable[[], Any]] | None] = ContextVar(
     "tesla_submission_guard", default=None
 )
+_tesla_ble_stock_submission_scope: ContextVar[Any] = ContextVar(
+    "tesla_ble_stock_submission_scope", default=None
+)
+
+
+def _tesla_ble_stock_submission_scope_current(hass: HomeAssistant) -> bool:
+    """Recheck a captured stock producer at the final provider handoff."""
+    scope = _tesla_ble_stock_submission_scope.get()
+    if scope is None:
+        return True
+    if not isinstance(scope, tuple) or len(scope) != 2:
+        return False
+    target_entity, stock_token = scope
+    if stock_token is None or not isinstance(stock_token, tuple):
+        return True
+    if len(stock_token) < 7 or not stock_token[-1]:
+        return True
+    return _tesla_ble_stock_profile_token_current(
+        hass, target_entity, stock_token
+    )
 
 
 def _tesla_cleanup_route_metadata(params: Mapping[str, Any]) -> dict[str, Any]:
@@ -3737,6 +4004,14 @@ async def _tesla_call_service(
     guard = _tesla_submission_guard.get()
 
     async def _submit() -> Any:
+        if not _tesla_ble_stock_submission_scope_current(hass):
+            from ..tesla_ev_recovery import RecoverySubmissionDenied
+
+            refusal = RecoverySubmissionDenied(
+                "Tesla stock BLE producer changed before provider handover"
+            )
+            refusal.tesla_stock_producer_changed_before_handoff = True
+            raise refusal
         if guard is not None:
             result = guard()
             if inspect.isawaitable(result):
@@ -3960,6 +4235,7 @@ async def _start_ev_charging_ble(
         return False
 
     expected_identity = _tesla_legacy_entity_identity(hass, (charger_entity,))
+    stock_token = _tesla_ble_stock_profile_token(hass, charger_entity)
     charge_binding_holder: list = []
     command_dispatched = False
     _tesla_ble_mark_mutation_prewrite()
@@ -3973,16 +4249,17 @@ async def _start_ev_charging_ble(
             wake_first=True,
             expected_identity=expected_identity,
             charge_binding_holder=charge_binding_holder,
+            stock_token=stock_token,
         ):
             return False
         if not await _tesla_ble_scope_current(
-            hass, charger_entity, expected_identity, authorize
+            hass, charger_entity, expected_identity, authorize, stock_token
         ):
             return False
         if not await prepare_ev_submission(hass, charger_entity, operation="start"):
             return False
         if not await _tesla_ble_scope_current(
-            hass, charger_entity, expected_identity, authorize
+            hass, charger_entity, expected_identity, authorize, stock_token
         ):
             return False
         charge_binding = (
@@ -4001,13 +4278,19 @@ async def _start_ev_charging_ble(
         hass.data.setdefault(DOMAIN, {}).setdefault("_ev_ble_start_dispatched_at", {})[ble_prefix] = command_started_at
         command_dispatched = True
         _tesla_ble_mark_mutation_submitted()
-        await _tesla_call_service(
-            hass,
-            "switch",
-            "turn_on",
-            {"entity_id": charger_entity},
-            blocking=True,
+        stock_submission_token = _tesla_ble_stock_submission_scope.set(
+            (charger_entity, stock_token)
         )
+        try:
+            await _tesla_call_service(
+                hass,
+                "switch",
+                "turn_on",
+                {"entity_id": charger_entity},
+                blocking=True,
+            )
+        finally:
+            _tesla_ble_stock_submission_scope.reset(stock_submission_token)
         confirmed = await _wait_for_ble_command_readback(
             hass, (
                 TESLA_BLE_SENSOR_CHARGING_STATE.format(prefix=ble_prefix),
@@ -4022,6 +4305,9 @@ async def _start_ev_charging_ble(
     except Exception as e:
         if getattr(e, "site_import_admission_denied", False):
             raise
+        if getattr(e, "tesla_stock_producer_changed_before_handoff", False):
+            command_dispatched = False
+            return False
         err_str = str(e).lower()
         if "complete" in err_str:
             _LOGGER.info(f"EV charging is complete (at target SOC) via BLE — skipping start")
@@ -4154,6 +4440,7 @@ async def _set_ev_charge_limit_ble(
         return False
 
     expected_identity = _tesla_legacy_entity_identity(hass, (limit_entity,))
+    stock_token = _tesla_ble_stock_profile_token(hass, limit_entity)
     charge_binding_holder: list = []
     command_dispatched = False
     _tesla_ble_mark_mutation_prewrite()
@@ -4167,10 +4454,11 @@ async def _set_ev_charge_limit_ble(
             wake_first=True,
             expected_identity=expected_identity,
             charge_binding_holder=charge_binding_holder,
+            stock_token=stock_token,
         ):
             return False
         if not await _tesla_ble_scope_current(
-            hass, limit_entity, expected_identity, authorize
+            hass, limit_entity, expected_identity, authorize, stock_token
         ):
             return False
         charge_binding = (
@@ -4190,13 +4478,19 @@ async def _set_ev_charge_limit_ble(
         command_started_at = datetime.now(dt_timezone.utc)
         command_dispatched = True
         _tesla_ble_mark_mutation_submitted()
-        await _tesla_call_service(
-            hass,
-            "number",
-            "set_value",
-            {"entity_id": limit_entity, "value": percent},
-            blocking=True,
+        stock_submission_token = _tesla_ble_stock_submission_scope.set(
+            (limit_entity, stock_token)
         )
+        try:
+            await _tesla_call_service(
+                hass,
+                "number",
+                "set_value",
+                {"entity_id": limit_entity, "value": percent},
+                blocking=True,
+            )
+        finally:
+            _tesla_ble_stock_submission_scope.reset(stock_submission_token)
         confirmed = await _wait_for_ble_command_readback(
             hass,
             limit_entity,
@@ -4208,6 +4502,9 @@ async def _set_ev_charge_limit_ble(
         )
         return True if confirmed else None
     except Exception as e:
+        if getattr(e, "tesla_stock_producer_changed_before_handoff", False):
+            command_dispatched = False
+            return False
         _LOGGER.error(f"Failed to set EV charge limit via BLE: {e}")
         if type(e).__name__ in {"ServiceNotFound", "ServiceValidationError"}:
             return False
@@ -4233,6 +4530,7 @@ async def _set_ev_charging_amps_ble(
         _LOGGER.error(f"Tesla BLE charging amps entity not found: {amps_entity}")
         return False
     expected_identity = _tesla_legacy_entity_identity(hass, (amps_entity,))
+    stock_token = _tesla_ble_stock_profile_token(hass, amps_entity)
 
     # Cap amps to entity's min/max range. Tesla integrations can report a stale
     # 16A max while idle, so solar-surplus callers may opt into the configured
@@ -4287,16 +4585,17 @@ async def _set_ev_charging_amps_ble(
             wake_first=False,
             expected_identity=expected_identity,
             charge_binding_holder=charge_binding_holder,
+            stock_token=stock_token,
         ):
             return False
         if not await _tesla_ble_scope_current(
-            hass, amps_entity, expected_identity, authorize
+            hass, amps_entity, expected_identity, authorize, stock_token
         ):
             return False
         if not await prepare_ev_submission(hass, amps_entity, operation="rate", amps=capped_amps):
             return False
         if not await _tesla_ble_scope_current(
-            hass, amps_entity, expected_identity, authorize
+            hass, amps_entity, expected_identity, authorize, stock_token
         ):
             return False
         charge_binding = (
@@ -4316,13 +4615,19 @@ async def _set_ev_charging_amps_ble(
         command_started_at = datetime.now(dt_timezone.utc)
         command_dispatched = True
         _tesla_ble_mark_mutation_submitted()
-        await _tesla_call_service(
-            hass,
-            "number",
-            "set_value",
-            {"entity_id": amps_entity, "value": capped_amps},
-            blocking=True,
+        stock_submission_token = _tesla_ble_stock_submission_scope.set(
+            (amps_entity, stock_token)
         )
+        try:
+            await _tesla_call_service(
+                hass,
+                "number",
+                "set_value",
+                {"entity_id": amps_entity, "value": capped_amps},
+                blocking=True,
+            )
+        finally:
+            _tesla_ble_stock_submission_scope.reset(stock_submission_token)
         confirmed = await _wait_for_ble_command_readback(
             hass,
             amps_entity,
@@ -4336,6 +4641,9 @@ async def _set_ev_charging_amps_ble(
     except Exception as e:
         if getattr(e, "site_import_admission_denied", False):
             raise
+        if getattr(e, "tesla_stock_producer_changed_before_handoff", False):
+            command_dispatched = False
+            return False
         fallback_amps = None
         # Only Home Assistant's structured number validation proves that the
         # first service call was rejected before the provider saw it.  A
@@ -4362,7 +4670,7 @@ async def _set_ev_charging_amps_ble(
                 if not await prepare_ev_submission(hass, amps_entity, operation="rate", amps=fallback_amps):
                     return False
                 if not await _tesla_ble_scope_current(
-                    hass, amps_entity, expected_identity, authorize
+                    hass, amps_entity, expected_identity, authorize, stock_token
                 ):
                     return False
                 charge_binding = (
@@ -4380,13 +4688,19 @@ async def _set_ev_charging_amps_ble(
                 if not _tesla_ble_effect_bound_allows_submission("rate", fallback_amps):
                     return False
                 _tesla_ble_mark_mutation_submitted()
-                await _tesla_call_service(
-                    hass,
-                    "number",
-                    "set_value",
-                    {"entity_id": amps_entity, "value": fallback_amps},
-                    blocking=True,
+                stock_submission_token = _tesla_ble_stock_submission_scope.set(
+                    (amps_entity, stock_token)
                 )
+                try:
+                    await _tesla_call_service(
+                        hass,
+                        "number",
+                        "set_value",
+                        {"entity_id": amps_entity, "value": fallback_amps},
+                        blocking=True,
+                    )
+                finally:
+                    _tesla_ble_stock_submission_scope.reset(stock_submission_token)
                 _LOGGER.info(
                     "Set EV charging amps to %dA via Tesla BLE after entity range fallback: %s",
                     fallback_amps,
@@ -5270,6 +5584,10 @@ async def _run_ble_transport_command(
             prefix,
             pinned_radio_binding,
             target_entity=entity,
+        ):
+            return False
+        if operation != "stop" and not _tesla_ble_stock_submission_scope_current(
+            hass
         ):
             return False
         return True

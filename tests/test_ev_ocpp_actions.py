@@ -14883,7 +14883,16 @@ def _failing_wake(monkeypatch):
     """Stub the wake so a blocked case asserts the gate, not a 30s timeout."""
     attempts = []
 
-    async def _wake(hass, prefix, wait_timeout=120, *, allow_backoff=True, authorize=None):
+    async def _wake(
+        hass,
+        prefix,
+        wait_timeout=120,
+        *,
+        target_entity=None,
+        stock_token=None,
+        allow_backoff=True,
+        authorize=None,
+    ):
         attempts.append(prefix)
         return False
 
@@ -15637,6 +15646,9 @@ def _add_ble_charge_registry(hass, prefix="car"):
         f"sensor.{prefix}_charger_current",
         f"sensor.{prefix}_charge_power",
         f"sensor.{prefix}_charger_power",
+        f"sensor.{prefix}_last_update",
+        f"sensor.{prefix}_charge_energy_added",
+        f"sensor.{prefix}_range",
     ):
         hass.entity_registry.entities.setdefault(
             entity_id,
@@ -15714,6 +15726,9 @@ def _tesla_ble_charge_entity_ids_for_test(prefix):
         f"sensor.{prefix}_charger_current",
         f"sensor.{prefix}_charge_power",
         f"sensor.{prefix}_charger_power",
+        f"sensor.{prefix}_last_update",
+        f"sensor.{prefix}_charge_energy_added",
+        f"sensor.{prefix}_range",
     )
 
 
@@ -16563,3 +16578,485 @@ def test_owned_ble_stop_cleanup_remains_dispatchable_when_radio_is_off(monkeypat
         "turn_off",
         {"entity_id": "switch.car_charger"},
     ) in hass.services.calls
+
+
+@pytest.mark.parametrize(
+    "project_version,esphome_version",
+    [("2026.2.0", "2026.1.5"), ("2026.8.0", "2026.6.5")],
+)
+def test_qualified_stock_sparse_charge_response_admits_health_only(
+    project_version, esphome_version
+):
+    """A fresh charge response can omit unchanged current/power/state fields."""
+    now = datetime.now(timezone.utc)
+    old = now - timedelta(minutes=5)
+    hass = _Hass([
+        _State("switch.car_charger", "off"),
+        _State("sensor.car_charging_state", "Stopped", last_updated=old),
+        _State("sensor.car_charge_current", "0", {"unit_of_measurement": "A"}, last_updated=old),
+        _State("sensor.car_charge_power", "0", {"unit_of_measurement": "W"}, last_updated=old),
+        _State("sensor.car_last_update", "Sat Nov 1 05:49:48 2026", last_updated=now),
+        _State("sensor.car_range", "318.6", {"unit_of_measurement": "mi"}, last_updated=now),
+    ])
+    _add_ble_charge_registry(hass)
+    _qualify_stock_sparse_fixture(
+        hass,
+        project_version=project_version,
+        esphome_version=esphome_version,
+    )
+
+    assert actions._tesla_ble_has_fresh_charge_snapshot(
+        hass, "car", target_entity="switch.car_charger"
+    ) is True
+
+
+def test_qualified_stock_sparse_response_admits_existing_prepare_path(monkeypatch):
+    """Sparse health can admit preparation without weakening command readback."""
+    now = datetime.now(timezone.utc)
+    old = now - timedelta(minutes=5)
+    hass = _Hass([
+        _State("switch.car_charger", "off"),
+        _State("sensor.car_charging_state", "Stopped", last_updated=old),
+        _State("sensor.car_charge_current", "0", {"unit_of_measurement": "A"}, last_updated=old),
+        _State("sensor.car_charge_power", "0", {"unit_of_measurement": "W"}, last_updated=old),
+        _State("sensor.car_last_update", "Sat Nov 1 05:49:48 2026", last_updated=now),
+        _State("sensor.car_range", "318.6", {"unit_of_measurement": "mi"}, last_updated=now),
+    ])
+    _add_ble_charge_registry(hass)
+    _qualify_stock_sparse_fixture(hass)
+    monkeypatch.setattr(actions, "_wake_tesla_ble", AsyncMock(return_value=True))
+
+    assert asyncio.run(actions._tesla_ble_prepare_mutation(
+        hass,
+        "car",
+        "switch.car_charger",
+        allow_backoff=False,
+        authorize=None,
+        wake_first=False,
+        expected_identity=actions._tesla_legacy_entity_identity(
+            hass, ("switch.car_charger",)
+        ),
+    )) is True
+
+
+def _qualify_stock_sparse_fixture(hass, *, project_version="2026.2.0", esphome_version="2026.1.5"):
+    config_entry = SimpleNamespace(
+        runtime_data=SimpleNamespace(
+            client=object(),
+            device_info=SimpleNamespace(
+                project_name="PedroKTFC.esphome-tesla-ble",
+                project_version=project_version,
+                esphome_version=esphome_version,
+            ),
+        )
+    )
+    hass.config_entries = SimpleNamespace(
+        async_get_entry=lambda entry_id: config_entry,
+    )
+    return config_entry
+
+
+def test_sparse_health_does_not_qualify_an_unsupported_bridge_during_probe(monkeypatch):
+    """A producer unsupported at admission cannot become sparse-qualified mid-await."""
+    now = datetime.now(timezone.utc)
+    old = now - timedelta(minutes=5)
+    hass = _Hass([
+        _State("switch.car_charger", "off"),
+        _State("sensor.car_charging_state", "Stopped", last_updated=old),
+        _State("sensor.car_charge_current", "0", {"unit_of_measurement": "A"}, last_updated=old),
+        _State("sensor.car_charge_power", "0", {"unit_of_measurement": "W"}, last_updated=old),
+        _State("sensor.car_last_update", "Sat Nov 1 05:49:48 2026", last_updated=now),
+        _State("sensor.car_range", "318.6", {"unit_of_measurement": "mi"}, last_updated=now),
+    ])
+    _add_ble_charge_registry(hass)
+    config_entry = _qualify_stock_sparse_fixture(hass, project_version="unsupported")
+
+    async def wake_then_upgrade(*_args, **_kwargs):
+        config_entry.runtime_data.device_info.project_version = "2026.2.0"
+        return True
+
+    monkeypatch.setattr(actions, "_wake_tesla_ble", wake_then_upgrade)
+    assert asyncio.run(actions._tesla_ble_prepare_mutation(
+        hass,
+        "car",
+        "switch.car_charger",
+        allow_backoff=False,
+        authorize=None,
+        wake_first=True,
+        expected_identity=actions._tesla_legacy_entity_identity(
+            hass, ("switch.car_charger",)
+        ),
+    )) is False
+    assert hass.services.calls == []
+
+
+@pytest.mark.parametrize(
+    "replacement", ["config_entry", "runtime", "client", "device_info"]
+)
+def test_sparse_health_rejects_stock_producer_replacement_during_wake(
+    monkeypatch, replacement
+):
+    """Fresh sparse fields cannot authorize a reloaded stock producer."""
+    now = datetime.now(timezone.utc)
+    old = now - timedelta(minutes=5)
+    hass = _Hass([
+        _State("switch.car_charger", "off"),
+        _State("sensor.car_charging_state", "Stopped", last_updated=old),
+        _State("sensor.car_charge_current", "0", {"unit_of_measurement": "A"}, last_updated=old),
+        _State("sensor.car_charge_power", "0", {"unit_of_measurement": "W"}, last_updated=old),
+        _State("sensor.car_last_update", "Sat Nov 1 05:49:48 2026", last_updated=now),
+        _State("sensor.car_range", "318.6", {"unit_of_measurement": "mi"}, last_updated=now),
+    ])
+    _add_ble_charge_registry(hass)
+    config_entry = _qualify_stock_sparse_fixture(hass)
+
+    async def wake_then_replace(*_args, **_kwargs):
+        runtime = config_entry.runtime_data
+        if replacement == "config_entry":
+            hass.config_entries = SimpleNamespace(
+                async_get_entry=lambda _entry_id: SimpleNamespace(
+                    runtime_data=runtime,
+                ),
+            )
+        elif replacement == "runtime":
+            config_entry.runtime_data = SimpleNamespace(
+                client=runtime.client,
+                device_info=runtime.device_info,
+            )
+        elif replacement == "client":
+            runtime.client = object()
+        else:
+            runtime.device_info = SimpleNamespace(
+                project_name=runtime.device_info.project_name,
+                project_version=runtime.device_info.project_version,
+                esphome_version=runtime.device_info.esphome_version,
+            )
+        return True
+
+    monkeypatch.setattr(actions, "_wake_tesla_ble", wake_then_replace)
+    assert asyncio.run(actions._tesla_ble_prepare_mutation(
+        hass,
+        "car",
+        "switch.car_charger",
+        allow_backoff=False,
+        authorize=None,
+        wake_first=True,
+        expected_identity=actions._tesla_legacy_entity_identity(
+            hass, ("switch.car_charger",)
+        ),
+    )) is False
+    assert hass.services.calls == []
+
+
+def test_sparse_health_pins_received_companion_identity():
+    """A fresh range receipt from another producer cannot freshen this bridge."""
+    now = datetime.now(timezone.utc)
+    old = now - timedelta(minutes=5)
+    hass = _Hass([
+        _State("switch.car_charger", "off"),
+        _State("sensor.car_charging_state", "Stopped", last_updated=old),
+        _State("sensor.car_last_update", "Sat Nov 1 05:49:48 2026", last_updated=now),
+        _State("sensor.car_range", "318.6", {"unit_of_measurement": "mi"}, last_updated=now),
+        _State("sensor.car_range_received", now.isoformat(), last_updated=now),
+    ])
+    _add_ble_charge_registry(hass)
+    hass.entity_registry.entities["sensor.car_range_received"] = SimpleNamespace(
+        entity_id="sensor.car_range_received",
+        platform="esphome",
+        config_entry_id="ble-test-entry",
+        device_id="other-device",
+        unique_id="sensor.car_range_received",
+        disabled_by=None,
+    )
+    _qualify_stock_sparse_fixture(hass)
+
+    assert actions._tesla_ble_has_fresh_charge_snapshot(
+        hass, "car", target_entity="switch.car_charger"
+    ) is False
+
+
+def _stock_sparse_mutation_hass(target_entity):
+    now = datetime.now(timezone.utc)
+    old = now - timedelta(minutes=5)
+    states = [
+        _State("switch.car_charger", "off"),
+        _State("sensor.car_charging_state", "Stopped", last_updated=old),
+        _State("sensor.car_charge_current", "0", {"unit_of_measurement": "A"}, last_updated=old),
+        _State("sensor.car_charge_power", "0", {"unit_of_measurement": "W"}, last_updated=old),
+        _State("sensor.car_last_update", "Sat Nov 1 05:49:48 2026", last_updated=now),
+        _State("sensor.car_range", "318.6", {"unit_of_measurement": "mi"}, last_updated=now),
+    ]
+    if target_entity.endswith("charging_amps"):
+        states.append(_State(target_entity, "15", {"min": 1, "max": 32}))
+    elif target_entity.endswith("charging_limit"):
+        states.append(_State(target_entity, "70", {"min": 50, "max": 100}))
+    hass = _Hass(states)
+    _add_ble_charge_registry(hass)
+    config_entry = _qualify_stock_sparse_fixture(hass)
+    return hass, config_entry
+
+
+@pytest.mark.parametrize("operation", ["start", "rate"])
+def test_sparse_stock_token_is_rechecked_after_actual_admission_wait(
+    monkeypatch, operation
+):
+    """A producer reload during admission cannot receive sparse-health writes."""
+    target = "switch.car_charger" if operation == "start" else "number.car_charging_amps"
+    hass, config_entry = _stock_sparse_mutation_hass(target)
+    monkeypatch.setattr(actions, "_wake_tesla_ble", AsyncMock(return_value=True))
+
+    async def admission_then_reload(*_args, **_kwargs):
+        runtime = config_entry.runtime_data
+        config_entry.runtime_data = SimpleNamespace(
+            client=runtime.client,
+            device_info=runtime.device_info,
+        )
+        return True
+
+    monkeypatch.setattr(actions, "prepare_ev_submission", admission_then_reload)
+    if operation == "start":
+        result = asyncio.run(actions._start_ev_charging_ble(hass, "car"))
+    else:
+        result = asyncio.run(actions._set_ev_charging_amps_ble(hass, "car", 5))
+
+    assert result is False
+    assert hass.services.calls == []
+
+
+@pytest.mark.parametrize("operation", ["limit", "rate"])
+def test_sparse_stock_token_is_rechecked_after_prepare(monkeypatch, operation):
+    """Limit and rate handoff reject a stock runtime replacement after preparation."""
+    target = (
+        "number.car_charging_limit"
+        if operation == "limit"
+        else "number.car_charging_amps"
+    )
+    hass, config_entry = _stock_sparse_mutation_hass(target)
+    monkeypatch.setattr(actions, "_wake_tesla_ble", AsyncMock(return_value=True))
+    original_prepare = actions._tesla_ble_prepare_mutation
+
+    async def prepare_then_reload(*args, **kwargs):
+        result = await original_prepare(*args, **kwargs)
+        runtime = config_entry.runtime_data
+        config_entry.runtime_data = SimpleNamespace(
+            client=runtime.client,
+            device_info=runtime.device_info,
+        )
+        return result
+
+    monkeypatch.setattr(actions, "_tesla_ble_prepare_mutation", prepare_then_reload)
+    if operation == "limit":
+        result = asyncio.run(actions._set_ev_charge_limit_ble(hass, "car", 72))
+    else:
+        result = asyncio.run(actions._set_ev_charging_amps_ble(hass, "car", 5))
+
+    assert result is False
+    assert hass.services.calls == []
+
+
+def test_sparse_stock_token_is_rechecked_during_tracker_persistence(monkeypatch):
+    """A producer reload while submission metadata saves cannot reach HA."""
+    from power_sync import tesla_ev_recovery as recovery
+
+    hass, config_entry = _stock_sparse_mutation_hass("number.car_charging_amps")
+    outcomes = []
+
+    async def begin(*_args, **_kwargs):
+        return object()
+
+    async def finish(_ticket, outcome):
+        outcomes.append(outcome)
+
+    async def tracked(_hass, _entry, submit, *_args, **_kwargs):
+        runtime = config_entry.runtime_data
+        config_entry.runtime_data = SimpleNamespace(
+            client=runtime.client,
+            device_info=runtime.device_info,
+        )
+        await asyncio.sleep(0)
+        return await submit()
+
+    monkeypatch.setattr(recovery, "async_begin_attempt", begin)
+    monkeypatch.setattr(recovery, "async_finish_attempt", finish)
+    monkeypatch.setattr(recovery, "async_track_submission", tracked)
+    monkeypatch.setattr(actions, "prepare_ev_submission", AsyncMock(return_value=True))
+
+    params = {"vehicle_vin": "5YJTEST0000000001"}
+
+    async def send():
+        return await actions._set_ev_charging_amps_ble(
+            hass, "car", 5, params=params
+        )
+
+    result = asyncio.run(actions._run_ble_transport_command(
+        hass,
+        _Entry(),
+        params,
+        "car",
+        "rate",
+        send,
+    ))
+
+    assert result == (False, False)
+    assert outcomes == ["not_sent"]
+    assert hass.services.calls == []
+
+
+def test_sparse_stock_token_survives_rate_native_preflight_wait(monkeypatch):
+    """An unsupported entry token cannot qualify during the native no-write probe."""
+    hass, config_entry = _stock_sparse_mutation_hass("number.car_charging_amps")
+    config_entry.runtime_data.device_info.project_version = "unsupported"
+    monkeypatch.setattr(actions, "_wake_tesla_ble", AsyncMock(return_value=True))
+
+    async def native_preflight_then_upgrade(*_args, **_kwargs):
+        config_entry.runtime_data.device_info.project_version = "2026.2.0"
+        return False
+
+    monkeypatch.setattr(
+        actions, "_tesla_ble_native_current_satisfied", native_preflight_then_upgrade
+    )
+    result = asyncio.run(actions._set_ev_charging_amps_ble(
+        hass,
+        "car",
+        5,
+        params={"vehicle_vin": "5YJTEST0000000001"},
+    ))
+
+    assert result is False
+    assert hass.services.calls == []
+
+
+def test_sparse_response_requires_charge_exclusive_field():
+    now = datetime.now(timezone.utc)
+    old = now - timedelta(minutes=5)
+    hass = _Hass([
+        _State("switch.car_charger", "off"),
+        _State("sensor.car_charging_state", "Stopped", last_updated=old),
+        _State("sensor.car_last_update", "Sat Nov 1 05:49:48 2026", last_updated=now),
+    ])
+    _add_ble_charge_registry(hass)
+    _qualify_stock_sparse_fixture(hass)
+
+    assert actions._tesla_ble_has_fresh_charge_snapshot(
+        hass, "car", target_entity="switch.car_charger"
+    ) is False
+
+
+def test_sparse_response_rejects_unknown_stock_profile():
+    now = datetime.now(timezone.utc)
+    old = now - timedelta(minutes=5)
+    hass = _Hass([
+        _State("switch.car_charger", "off"),
+        _State("sensor.car_charging_state", "Stopped", last_updated=old),
+        _State("sensor.car_last_update", "Sat Nov 1 05:49:48 2026", last_updated=now),
+        _State("sensor.car_range", "318.6", {"unit_of_measurement": "mi"}, last_updated=now),
+    ])
+    _add_ble_charge_registry(hass)
+    _qualify_stock_sparse_fixture(hass, project_version="unknown")
+
+    assert actions._tesla_ble_has_fresh_charge_snapshot(
+        hass, "car", target_entity="switch.car_charger"
+    ) is False
+
+
+def test_sparse_response_rejects_future_charge_receipt():
+    now = datetime.now(timezone.utc)
+    old = now - timedelta(minutes=5)
+    hass = _Hass([
+        _State("switch.car_charger", "off"),
+        _State("sensor.car_charging_state", "Stopped", last_updated=old),
+        _State("sensor.car_last_update", "Sat Nov 1 05:49:48 2026", last_updated=now),
+        _State("sensor.car_range", "318.6", {"unit_of_measurement": "mi"}, last_updated=now),
+        _State("sensor.car_range_received", (now + timedelta(minutes=5)).isoformat(), last_updated=now),
+    ])
+    _add_ble_charge_registry(hass)
+    hass.entity_registry.entities["sensor.car_range_received"] = SimpleNamespace(
+        entity_id="sensor.car_range_received",
+        platform="esphome",
+        config_entry_id="ble-test-entry",
+        device_id="ble-test-device",
+        unique_id="sensor.car_range_received",
+        disabled_by=None,
+    )
+    _qualify_stock_sparse_fixture(hass)
+
+    assert actions._tesla_ble_has_fresh_charge_snapshot(
+        hass, "car", target_entity="switch.car_charger"
+    ) is False
+
+
+def test_sparse_response_rejects_charge_field_rebound():
+    now = datetime.now(timezone.utc)
+    old = now - timedelta(minutes=5)
+    hass = _Hass([
+        _State("switch.car_charger", "off"),
+        _State("sensor.car_charging_state", "Stopped", last_updated=old),
+        _State("sensor.car_last_update", "Sat Nov 1 05:49:48 2026", last_updated=now),
+        _State("sensor.car_range", "318.6", {"unit_of_measurement": "mi"}, last_updated=now),
+    ])
+    _add_ble_charge_registry(hass)
+    _qualify_stock_sparse_fixture(hass)
+    hass.entity_registry.entities["sensor.car_range"].device_id = "other-device"
+
+    assert actions._tesla_ble_has_fresh_charge_snapshot(
+        hass, "car", target_entity="switch.car_charger"
+    ) is False
+
+
+def test_sparse_stock_health_allows_ble_write_but_keeps_readback_strict(monkeypatch):
+    now = datetime.now(timezone.utc)
+    old = now - timedelta(minutes=5)
+    hass = _Hass([
+        _State("switch.car_charger", "off"),
+        _State("number.car_charging_amps", "15", {"min": 1, "max": 32}),
+        _State("sensor.car_charging_state", "Stopped", last_updated=old),
+        _State("sensor.car_charge_current", "0", {"unit_of_measurement": "A"}, last_updated=old),
+        _State("sensor.car_charge_power", "0", {"unit_of_measurement": "W"}, last_updated=old),
+        _State("sensor.car_last_update", "Sat Nov 1 05:49:48 2026", last_updated=now),
+        _State("sensor.car_range", "318.6", {"unit_of_measurement": "mi"}, last_updated=now),
+    ])
+    _add_ble_charge_registry(hass)
+    _qualify_stock_sparse_fixture(hass)
+    monkeypatch.setattr(actions, "_wake_tesla_ble", AsyncMock(return_value=True))
+    monkeypatch.setattr(actions, "_TESLA_BLE_COMMAND_CONFIRMATION_SECONDS", 0)
+
+    result = asyncio.run(actions._set_ev_charging_amps_ble(hass, "car", 5))
+
+    assert result is None
+    assert hass.services.calls == [
+        ("number", "set_value", {"entity_id": "number.car_charging_amps", "value": 5})
+    ]
+
+
+@pytest.mark.parametrize("mutation", ["rebind", "disable"])
+def test_ble_wake_rejects_charge_evidence_binding_change(monkeypatch, mutation):
+    now = datetime.now(timezone.utc)
+    old = now - timedelta(minutes=5)
+    hass = _Hass([
+        _State("switch.car_charger", "off"),
+        _State("button.car_wake_up", "unknown"),
+        _State("binary_sensor.car_asleep", "on", last_updated=old),
+        _State("sensor.car_charging_state", "Stopped", last_updated=old),
+        _State("sensor.car_charge_current", "0", {"unit_of_measurement": "A"}, last_updated=old),
+        _State("sensor.car_charge_power", "0", {"unit_of_measurement": "W"}, last_updated=old),
+        _State("sensor.car_last_update", "Sat Nov 1 05:49:48 2026", last_updated=old),
+        _State("sensor.car_range", "318.6", {"unit_of_measurement": "mi"}, last_updated=old),
+    ])
+    _add_ble_charge_registry(hass)
+    _qualify_stock_sparse_fixture(hass)
+    original_call = hass.services.async_call
+
+    async def mutate_after_wake(domain, service, data, **kwargs):
+        await original_call(domain, service, data, **kwargs)
+        if domain == "button" and service == "press":
+            registration = hass.entity_registry.entities["sensor.car_range"]
+            if mutation == "rebind":
+                registration.device_id = "other-device"
+            else:
+                registration.disabled_by = "user"
+
+    hass.services.async_call = mutate_after_wake
+    assert asyncio.run(actions._wake_tesla_ble(hass, "car", wait_timeout=2)) is False
+    assert hass.services.calls == [
+        ("button", "press", {"entity_id": "button.car_wake_up"})
+    ]

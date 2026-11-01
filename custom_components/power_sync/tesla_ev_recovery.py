@@ -21,6 +21,10 @@ ROUTE_KINDS = frozenset({"ble", "teslemetry_bt", "teslemetry_bluetooth", "ha"})
 OUTCOMES = frozenset({
     "not_sent", "sent_unknown", "accepted_unconfirmed", "confirmed", "rejected"
 })
+_TERMINAL_ATTEMPT_OUTCOMES = frozenset({
+    "not_sent", "accepted_unconfirmed", "confirmed", "rejected",
+})
+_TERMINAL_REMOVALS_KEY = "terminal_removals"
 BLE_ISOLATION_TIMEOUT = 10.0
 RECOVERY_DRAIN_TIMEOUT = 30.0
 _MISSING = object()
@@ -34,6 +38,7 @@ _STORAGE_TASKS_KEY = "_tesla_ev_recovery_storage_tasks"
 _RECOVERY_EPOCH_KEY = "_tesla_ev_recovery_epoch"
 _RECOVERY_STOPPING_KEY = "_tesla_ev_recovery_stopping"
 _BEST_EFFORT_CLEANUP_KEY = "_tesla_ev_recovery_best_effort_cleanup"
+_TERMINAL_SIDECAR_BEFORE_KEY = "_tesla_ev_recovery_terminal_sidecar_before"
 SIDECAR_SCHEMA_VERSION = 1
 RECOVERY_PHASES = frozenset({"held", "quiescing", "reset_pending", "reconciling", "released"})
 POSITIVE_OPERATIONS = frozenset({"start", "rate", "limit", "set_current", "set_charge_limit"})
@@ -657,6 +662,74 @@ def _recovery_projection_valid(value: Any) -> bool:
     return True
 
 
+def _attempt_record_digest(record: Mapping[str, Any]) -> str:
+    """Digest the immutable portion of one attempt for terminal removal proof."""
+    return _digest({
+        key: record.get(key)
+        for key in (
+            "attempt_id", "vehicle_id", "operation", "entity_id", "target",
+            "route", "submitted_epoch", "original_deadline", "owner_snapshot",
+            "runtime_digest", "pairing_digest", "setup_digest",
+        )
+    })
+
+
+def _terminal_removals_valid(value: Any) -> bool:
+    """Validate sidecar proofs before they can remove a stale projection row."""
+    if value is None:
+        return True
+    if not isinstance(value, Mapping):
+        return False
+    for vehicle_id, records in value.items():
+        if not isinstance(vehicle_id, str) or not isinstance(records, Mapping):
+            return False
+        for attempt_id, proof in records.items():
+            if (not isinstance(attempt_id, str)
+                    or not isinstance(proof, Mapping)
+                    or proof.get("attempt_id") != attempt_id
+                    or proof.get("vehicle_id") != vehicle_id
+                    or proof.get("outcome") not in _TERMINAL_ATTEMPT_OUTCOMES
+                    or not isinstance(proof.get("operation"), str)
+                    or not proof.get("operation")
+                    or not isinstance(proof.get("entity_id"), str)
+                    or not proof.get("entity_id")
+                    or not isinstance(proof.get("route"), Mapping)
+                    or not isinstance(proof.get("record_digest"), str)
+                    or not proof.get("record_digest")
+                    or any(
+                        not isinstance(proof.get(key), str) or not proof.get(key)
+                        for key in ("runtime_digest", "pairing_digest", "setup_digest")
+                    )):
+                return False
+    return True
+
+
+def _terminal_removal_matches(
+    record: Mapping[str, Any] | None,
+    proof: Mapping[str, Any],
+) -> bool:
+    """Match a removal proof without ever deleting a durable unknown."""
+    if not isinstance(record, Mapping):
+        return False
+    if (record.get("attempt_id") != proof.get("attempt_id")
+            or record.get("vehicle_id") != proof.get("vehicle_id")
+            or record.get("outcome") == "sent_unknown"
+            or proof.get("outcome") not in _TERMINAL_ATTEMPT_OUTCOMES):
+        return False
+    existing_outcome = str(record.get("outcome") or "pending")
+    proof_outcome = str(proof.get("outcome") or "")
+    if existing_outcome not in {"pending", proof_outcome, "accepted_unconfirmed"}:
+        return False
+    if (existing_outcome == "accepted_unconfirmed"
+            and proof_outcome not in {"accepted_unconfirmed", "confirmed"}):
+        return False
+    if (proof.get("operation") != record.get("operation")
+            or proof.get("entity_id") != record.get("entity_id")
+            or proof.get("route") != record.get("route")):
+        return False
+    return _attempt_record_digest(record) == proof.get("record_digest")
+
+
 def _sidecar_valid(value: Any) -> bool:
     if not isinstance(value, dict):
         return False
@@ -674,7 +747,11 @@ def _sidecar_valid(value: Any) -> bool:
         if type(generation) is not int or generation < 0:
             return False
     recovery = value.get("recovery")
-    return _recovery_projection_valid(recovery)
+    return (_recovery_projection_valid(recovery)
+            and _terminal_removals_valid(
+                recovery.get(_TERMINAL_REMOVALS_KEY)
+                if isinstance(recovery, Mapping) else None
+            ))
 
 
 def _sidecar_store(hass: Any, entry: Any, runtime: dict[str, Any]) -> Any | None:
@@ -786,79 +863,98 @@ def _merge_recovery_roots(
     result = deepcopy(dict(primary))
     vehicles = result.setdefault("vehicles", {})
     old_vehicles = legacy.get("vehicles", {}) if isinstance(legacy, Mapping) else {}
-    if not isinstance(old_vehicles, Mapping):
-        return result
-    for vid, old_ledger in old_vehicles.items():
-        if not isinstance(old_ledger, Mapping):
-            continue
-        had_primary_ledger = vid in vehicles
-        current = vehicles.setdefault(vid, {"route": None, "attempts": {}, "hazards": {}})
-        if not isinstance(current, dict):
-            continue
-        for key in ("attempts", "hazards"):
-            source = old_ledger.get(key, {})
-            if not isinstance(source, Mapping):
+    if isinstance(old_vehicles, Mapping):
+        for vid, old_ledger in old_vehicles.items():
+            if not isinstance(old_ledger, Mapping):
                 continue
-            target = current.setdefault(key, {})
-            if isinstance(target, dict):
-                for item_id, item in source.items():
-                    existing = target.get(item_id)
-                    if not isinstance(existing, Mapping):
-                        target[item_id] = deepcopy(item)
-                        continue
-                    if not prefer_legacy_mutable:
-                        # The sidecar is authoritative during reload.  A
-                        # legacy snapshot may only contribute records absent
-                        # from it; it cannot roll back a known liability.
-                        continue
-                    merged = dict(existing)
-                    if key == "attempts":
-                        # Attempt identity, route, target, owner and deadline
-                        # are immutable.  Runtime completion and retirement
-                        # markers are the mutable projection fields.
-                        incoming_outcome = item.get("outcome")
-                        current_outcome = existing.get("outcome", "pending")
-                        if incoming_outcome is not None:
-                            # A live legacy projection can lag the durable
-                            # sidecar.  Treat sent_unknown as a real
-                            # unresolved state, so a stale pending projection
-                            # cannot erase that evidence.  Terminal outcomes
-                            # remain monotonic at the projection boundary.
-                            terminal = {"not_sent", "accepted_unconfirmed", "confirmed", "rejected"}
-                            outcome_rank = {
-                                "pending": 0,
-                                "sent_unknown": 1,
-                                "accepted_unconfirmed": 2,
-                                "not_sent": 3,
-                                "confirmed": 3,
-                                "rejected": 3,
-                            }
-                            current_rank = outcome_rank.get(str(current_outcome), 0)
-                            incoming_rank = outcome_rank.get(str(incoming_outcome), 0)
-                            if ((current_outcome in terminal
-                                 and incoming_outcome == current_outcome)
-                                    or (current_outcome not in terminal
-                                        and incoming_rank >= current_rank)):
-                                merged["outcome"] = incoming_outcome
-                        if "recovery_retired" in item:
-                            merged["recovery_retired"] = deepcopy(item["recovery_retired"])
-                    else:
-                        current_state = str(existing.get("state") or "pending")
-                        incoming_state = str(item.get("state") or "pending")
-                        rank = {"pending": 0, "isolated": 1, "retired": 2}
-                        if rank.get(incoming_state, 0) >= rank.get(current_state, 0):
-                            for field in ("state", "binding", "control_off_at", "status_off_at", "fence_proof"):
-                                if field in item:
-                                    merged[field] = deepcopy(item[field])
-                        if "recovery_retired" in item:
-                            merged["recovery_retired"] = deepcopy(item["recovery_retired"])
-                    target[item_id] = merged
-        if prefer_legacy_mutable and "route" in old_ledger:
-            # A live B completion clears a retired BLE route by writing None;
-            # setdefault would resurrect that route from the sidecar.
-            current["route"] = deepcopy(old_ledger.get("route"))
-        elif not had_primary_ledger and old_ledger.get("route") is not None:
-            current["route"] = deepcopy(old_ledger.get("route"))
+            had_primary_ledger = vid in vehicles
+            current = vehicles.setdefault(vid, {"route": None, "attempts": {}, "hazards": {}})
+            if not isinstance(current, dict):
+                continue
+            for key in ("attempts", "hazards"):
+                source = old_ledger.get(key, {})
+                if not isinstance(source, Mapping):
+                    continue
+                target = current.setdefault(key, {})
+                if isinstance(target, dict):
+                    for item_id, item in source.items():
+                        existing = target.get(item_id)
+                        if not isinstance(existing, Mapping):
+                            target[item_id] = deepcopy(item)
+                            continue
+                        if not prefer_legacy_mutable:
+                            # The sidecar is authoritative during reload.  A
+                            # legacy snapshot may only contribute records absent
+                            # from it; it cannot roll back a known liability.
+                            continue
+                        merged = dict(existing)
+                        if key == "attempts":
+                            # Attempt identity, route, target, owner and deadline
+                            # are immutable.  Runtime completion and retirement
+                            # markers are the mutable projection fields.
+                            incoming_outcome = item.get("outcome")
+                            current_outcome = existing.get("outcome", "pending")
+                            if incoming_outcome is not None:
+                                # A live legacy projection can lag the durable
+                                # sidecar.  Treat sent_unknown as a real
+                                # unresolved state, so a stale pending projection
+                                # cannot erase that evidence.  Terminal outcomes
+                                # remain monotonic at the projection boundary.
+                                terminal = _TERMINAL_ATTEMPT_OUTCOMES
+                                outcome_rank = {
+                                    "pending": 0,
+                                    "sent_unknown": 1,
+                                    "accepted_unconfirmed": 2,
+                                    "not_sent": 3,
+                                    "confirmed": 3,
+                                    "rejected": 3,
+                                }
+                                current_rank = outcome_rank.get(str(current_outcome), 0)
+                                incoming_rank = outcome_rank.get(str(incoming_outcome), 0)
+                                if ((current_outcome in terminal
+                                     and incoming_outcome == current_outcome)
+                                        or (current_outcome not in terminal
+                                            and incoming_rank >= current_rank)):
+                                    merged["outcome"] = incoming_outcome
+                            if "recovery_retired" in item:
+                                merged["recovery_retired"] = deepcopy(item["recovery_retired"])
+                        else:
+                            current_state = str(existing.get("state") or "pending")
+                            incoming_state = str(item.get("state") or "pending")
+                            rank = {"pending": 0, "isolated": 1, "retired": 2}
+                            if rank.get(incoming_state, 0) >= rank.get(current_state, 0):
+                                for field in ("state", "binding", "control_off_at", "status_off_at", "fence_proof"):
+                                    if field in item:
+                                        merged[field] = deepcopy(item[field])
+                            if "recovery_retired" in item:
+                                merged["recovery_retired"] = deepcopy(item["recovery_retired"])
+                        target[item_id] = merged
+            if prefer_legacy_mutable and "route" in old_ledger:
+                # A live B completion clears a retired BLE route by writing None;
+                # setdefault would resurrect that route from the sidecar.
+                current["route"] = deepcopy(old_ledger.get("route"))
+            elif not had_primary_ledger and old_ledger.get("route") is not None:
+                current["route"] = deepcopy(old_ledger.get("route"))
+
+    # The live automation projection is intentionally allowed to omit a
+    # terminal attempt, but omission alone is ambiguous after reload.  Apply
+    # only finish-specific proofs that match the complete immutable record;
+    # malformed proofs and unknown outcomes remain untouched.
+    removals = result.get(_TERMINAL_REMOVALS_KEY, {})
+    if isinstance(removals, Mapping):
+        for vid, proofs in removals.items():
+            if not isinstance(proofs, Mapping):
+                continue
+            ledger = vehicles.get(vid)
+            if not isinstance(ledger, dict):
+                continue
+            attempts = ledger.get("attempts")
+            if not isinstance(attempts, dict):
+                continue
+            for attempt_id, proof in proofs.items():
+                existing = attempts.get(attempt_id)
+                if _terminal_removal_matches(existing, proof):
+                    attempts.pop(attempt_id, None)
     return result
 
 
@@ -1039,7 +1135,11 @@ async def _persist_recovery_sidecar(
     if not _sidecar_ready(runtime):
         return False
     state = runtime[_SIDECAR_STATE_KEY]
-    before = deepcopy(state)
+    before_override = runtime.pop(_TERMINAL_SIDECAR_BEFORE_KEY, _MISSING)
+    before = (
+        deepcopy(before_override)
+        if isinstance(before_override, Mapping) else deepcopy(state)
+    )
     if not _sync_sidecar_projection(runtime, state):
         return False
     state["revision"] = int(state.get("revision", 0)) + 1
@@ -2497,6 +2597,87 @@ def _snapshot_recovery(runtime: dict[str, Any]) -> Any:
     return _MISSING if value is _MISSING else deepcopy(value)
 
 
+def _terminal_removal_proof(
+    hass: Any,
+    entry: Any,
+    runtime: dict[str, Any],
+    ticket: RecoveryTicket,
+    record: Mapping[str, Any],
+    outcome: str,
+) -> dict[str, Any] | None:
+    """Build a finish proof only for the current exact attempt generation."""
+    if outcome not in _TERMINAL_ATTEMPT_OUTCOMES:
+        return None
+    if ticket.runtime_ref is not None and runtime is not ticket.runtime_ref:
+        return None
+    if (record.get("attempt_id") != ticket.attempt_id
+            or record.get("vehicle_id") != ticket.vehicle_id
+            or not isinstance(record.get("route"), Mapping)
+            or dict(record.get("route", {})) != dict(ticket.route)
+            or record.get("outcome") == "sent_unknown"):
+        return None
+    # The ticket may be retained across an ownership/configuration change even
+    # while the runtime object remains alive.  Do not turn that stale ticket
+    # into durable evidence that an old physical attempt was terminal.
+    if (record.get("runtime_digest") != _runtime_digest(runtime, entry)
+            or record.get("setup_digest") != _setup_digest(runtime, entry)):
+        return None
+    identity = record.get("route", {}).get("entity_identity")
+    binding_route = dict(record["route"])
+    # Finish proof validates the exact physical entity/provider binding, while
+    # admission authority belongs to the original ticket.  A known not_sent
+    # result may arrive after its ownership lease or deadline has expired; a
+    # current owner check here would retain a proven-unsent row indefinitely.
+    binding_route.pop("session_scope", None)
+    if (record.get("pairing_digest") != _pairing_digest(
+            entry, record.get("route"), identity=identity
+    ) or not _compatible(hass, entry, runtime, ticket.vehicle_id, binding_route)):
+        return None
+    return {
+        "attempt_id": ticket.attempt_id,
+        "vehicle_id": ticket.vehicle_id,
+        "operation": str(record.get("operation") or ""),
+        "entity_id": str(record.get("entity_id") or ""),
+        "outcome": outcome,
+        "route": deepcopy(dict(record["route"])),
+        "record_digest": _attempt_record_digest(record),
+        "runtime_digest": str(record["runtime_digest"]),
+        "pairing_digest": str(record["pairing_digest"]),
+        "setup_digest": str(record["setup_digest"]),
+        "finished_at": time.time(),
+    }
+
+
+def _record_terminal_removal(
+    state: dict[str, Any], proof: Mapping[str, Any],
+) -> bool:
+    # Sidecar state is authoritative when enrolled.  Legacy-only runtimes
+    # still carry the same proof in their persisted recovery root so existing
+    # installs retain terminal-attempt semantics until the sidecar is created.
+    recovery = state.get("recovery") if "recovery" in state else state
+    if not isinstance(recovery, dict) or not _terminal_removals_valid(
+        recovery.get(_TERMINAL_REMOVALS_KEY)
+    ):
+        return False
+    removals = recovery.setdefault(_TERMINAL_REMOVALS_KEY, {})
+    if not isinstance(removals, dict):
+        return False
+    vehicle_id = proof.get("vehicle_id")
+    attempt_id = proof.get("attempt_id")
+    if not isinstance(vehicle_id, str) or not isinstance(attempt_id, str):
+        return False
+    vehicle_removals = removals.setdefault(vehicle_id, {})
+    if not isinstance(vehicle_removals, dict):
+        return False
+    existing = vehicle_removals.get(attempt_id)
+    if isinstance(existing, Mapping):
+        # The first exact terminal finish is the durable removal authority;
+        # never replace it with a later, weaker or contradictory proof.
+        return dict(existing) == dict(proof)
+    vehicle_removals[attempt_id] = deepcopy(dict(proof))
+    return True
+
+
 async def _restore_after_cancel(
     hass: Any, entry: Any, runtime: dict[str, Any], before: Any,
 ) -> None:
@@ -2723,6 +2904,28 @@ async def async_finish_attempt(ticket: RecoveryTicket, outcome: Any) -> bool:
             return False
         before = _snapshot_recovery(runtime)
         if normalized in ("not_sent", "accepted_unconfirmed", "confirmed", "rejected"):
+            state = runtime.get(_SIDECAR_STATE_KEY)
+            if not isinstance(state, dict):
+                state = _recovery(runtime, create=False)
+            sidecar_before = (
+                deepcopy(state)
+                if runtime.get(_SIDECAR_STATE_KEY) is state and isinstance(state, dict)
+                else None
+            )
+            proof = _terminal_removal_proof(
+                ticket.hass, ticket.entry, runtime, ticket, record, normalized,
+            )
+            if not isinstance(state, dict) or proof is None or not _record_terminal_removal(state, proof):
+                # A terminal result without a current exact ticket/runtime
+                # proof must remain pending so the durable journal cannot lose
+                # an unknown physical effect.
+                return False
+            if sidecar_before is not None:
+                runtime[_TERMINAL_SIDECAR_BEFORE_KEY] = sidecar_before
+                # The proof was added above; the sidecar writer must roll back
+                # to the state that existed before this finish if its Store
+                # write is refused.  Keep the marker internal to this lock so
+                # monkeypatched legacy persistence remains compatible.
             attempts.pop(ticket.attempt_id, None)
             session_route_retained = (
                 normalized in ("accepted_unconfirmed", "confirmed")
@@ -2752,6 +2955,8 @@ async def async_finish_attempt(ticket: RecoveryTicket, outcome: Any) -> bool:
         except asyncio.CancelledError:
             await _restore_after_cancel(ticket.hass, ticket.entry, runtime, before)
             raise
+        finally:
+            runtime.pop(_TERMINAL_SIDECAR_BEFORE_KEY, None)
         return True
 
 

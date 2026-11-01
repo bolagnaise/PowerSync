@@ -1912,6 +1912,228 @@ async def test_live_projection_updates_sidecar_and_reload_keeps_terminal_retirem
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ("accepted_unconfirmed", "not_sent", "confirmed"))
+async def test_terminal_finish_removal_survives_stale_projection_and_reload(
+    harness, outcome,
+):
+    hass, entry, store, registrations, owners = _sidecar_harness(harness)
+    registrations["number.fallback_limit"] = _Entity(
+        "number.fallback_limit", device="native-device", entry="native-entry",
+        platform="teslemetry",
+    )
+    owners.pop(VIN_A)
+    assert await recovery.async_load_recovery_state(hass, entry)
+    route = {"kind": "ha", "entity_id": "number.fallback_limit"}
+    ticket = await recovery.async_begin_attempt(
+        hass, entry, VIN_A, route, "limit", route["entity_id"],
+    )
+    assert ticket is not None
+    pending = deepcopy(
+        store.value["recovery"]["vehicles"][VIN_A]["attempts"][ticket.attempt_id]
+    )
+
+    # Finish the ticket only after loading its persisted pending record into a
+    # replacement runtime, matching the real reload path.
+    restored = _Hass({})
+    restored.entity_registry = hass.entity_registry
+    restored_runtime = {
+        "automation_store": object(),
+        recovery.RECOVERY_KEY: deepcopy(
+            hass.data["power_sync"][entry.entry_id][recovery.RECOVERY_KEY]
+        ),
+        "_tesla_ev_recovery_enrolled": True,
+        "_tesla_ev_recovery_sidecar_established": True,
+        recovery._SIDECAR_STORE_KEY: store,
+    }
+    restored.data["power_sync"][entry.entry_id] = restored_runtime
+    assert await recovery.async_load_recovery_state(restored, entry)
+    loaded_record = restored_runtime[recovery.RECOVERY_KEY]["vehicles"][VIN_A]["attempts"][ticket.attempt_id]
+    loaded_ticket = recovery.RecoveryTicket(
+        restored, entry, VIN_A, ticket.attempt_id,
+        deepcopy(loaded_record["route"]), restored_runtime,
+    )
+    assert await recovery.async_finish_attempt(loaded_ticket, outcome)
+    durable = store.value["recovery"]["vehicles"][VIN_A]
+    assert durable["attempts"] == {}
+    proof = store.value["recovery"]["terminal_removals"][VIN_A][loaded_ticket.attempt_id]
+    assert proof["outcome"] == outcome
+
+    # A late automation projection may still contain the pre-finish pending
+    # record.  The exact proof removes only that matching record.
+    live = restored_runtime[recovery.RECOVERY_KEY]
+    live["vehicles"][VIN_A]["attempts"][ticket.attempt_id] = pending
+    live["vehicles"][VIN_A]["route"] = None
+    assert await recovery.async_persist_recovery_state(restored, entry)
+    assert store.value["recovery"]["vehicles"][VIN_A]["attempts"] == {}
+
+    reloaded = _Hass({})
+    reloaded.entity_registry = hass.entity_registry
+    reloaded_runtime = {
+        "automation_store": object(),
+        recovery.RECOVERY_KEY: deepcopy(live),
+        "_tesla_ev_recovery_enrolled": True,
+        "_tesla_ev_recovery_sidecar_established": True,
+        recovery._SIDECAR_STORE_KEY: store,
+    }
+    reloaded.data["power_sync"][entry.entry_id] = reloaded_runtime
+    assert await recovery.async_load_recovery_state(reloaded, entry)
+    restored_ledger = reloaded_runtime[recovery.RECOVERY_KEY]["vehicles"][VIN_A]
+    assert restored_ledger["attempts"] == {}
+
+    # A later standalone native Limit is allowed; the completed ticket does
+    # not become a permanent route or unresolved hazard.
+    fresh = await recovery.async_begin_attempt(
+        reloaded, entry, VIN_A, route, "limit", route["entity_id"],
+    )
+    assert fresh is not None
+
+
+@pytest.mark.asyncio
+async def test_expired_scoped_not_sent_finish_survives_owner_revocation_and_reload(harness):
+    hass, entry, store, _, owners = _sidecar_harness(harness)
+    assert await recovery.async_load_recovery_state(hass, entry)
+    route = {"kind": "ha", "entity_id": "switch.fallback"}
+    ticket = await recovery.async_begin_attempt(
+        hass,
+        entry,
+        VIN_A,
+        route,
+        "start",
+        route["entity_id"],
+        deadline=time.time() - 1,
+    )
+    assert ticket is not None
+    assert ticket.route.get("session_scope")
+    pending = deepcopy(
+        store.value["recovery"]["vehicles"][VIN_A]["attempts"][ticket.attempt_id]
+    )
+    assert pending["original_deadline"] < time.time()
+
+    # The provider admission was never handed over.  The owner can disappear
+    # before the caller records that proven not_sent result; finish proof must
+    # use the exact ticket/provider binding rather than minting new authority.
+    owners.pop(VIN_A)
+    assert await recovery.async_finish_attempt(ticket, "not_sent")
+    live = hass.data["power_sync"][entry.entry_id][recovery.RECOVERY_KEY]
+    live["vehicles"][VIN_A]["attempts"][ticket.attempt_id] = pending
+    live["vehicles"][VIN_A]["route"] = None
+    assert await recovery.async_persist_recovery_state(hass, entry)
+    assert store.value["recovery"]["vehicles"][VIN_A]["attempts"] == {}
+
+    restored = _Hass({})
+    restored.entity_registry = hass.entity_registry
+    restored_runtime = {
+        "automation_store": object(),
+        recovery.RECOVERY_KEY: deepcopy(live),
+        "_tesla_ev_recovery_enrolled": True,
+        "_tesla_ev_recovery_sidecar_established": True,
+        recovery._SIDECAR_STORE_KEY: store,
+    }
+    restored.data["power_sync"][entry.entry_id] = restored_runtime
+    assert await recovery.async_load_recovery_state(restored, entry)
+    ledger = restored_runtime[recovery.RECOVERY_KEY]["vehicles"][VIN_A]
+    assert ledger["attempts"] == {}
+    assert recovery.get_vehicle_route(restored, entry, VIN_A) is None
+
+
+@pytest.mark.asyncio
+async def test_terminal_finish_store_failure_keeps_pending_and_retryable(harness):
+    hass, entry, store, registrations, owners = _sidecar_harness(harness)
+    registrations["number.fallback_limit"] = _Entity(
+        "number.fallback_limit", device="native-device", entry="native-entry",
+        platform="teslemetry",
+    )
+    owners.pop(VIN_A)
+    assert await recovery.async_load_recovery_state(hass, entry)
+    route = {"kind": "ha", "entity_id": "number.fallback_limit"}
+    ticket = await recovery.async_begin_attempt(
+        hass, entry, VIN_A, route, "limit", route["entity_id"],
+    )
+    assert ticket is not None
+    before = deepcopy(store.value)
+    store.fail = True
+    assert not await recovery.async_finish_attempt(ticket, "confirmed")
+    assert store.value == before
+    runtime_ledger = hass.data["power_sync"][entry.entry_id][recovery.RECOVERY_KEY]["vehicles"][VIN_A]
+    assert ticket.attempt_id in runtime_ledger["attempts"]
+    assert "terminal_removals" not in recovery._sidecar_recovery(
+        hass.data["power_sync"][entry.entry_id], before
+    )
+    store.fail = False
+    assert await recovery.async_finish_attempt(ticket, "confirmed")
+
+
+@pytest.mark.asyncio
+async def test_terminal_proof_does_not_remove_rebound_attempt_record(harness):
+    hass, entry, store, registrations, owners = _sidecar_harness(harness)
+    registrations["number.fallback_limit"] = _Entity(
+        "number.fallback_limit", device="native-device", entry="native-entry",
+        platform="teslemetry",
+    )
+    owners.pop(VIN_A)
+    assert await recovery.async_load_recovery_state(hass, entry)
+    route = {"kind": "ha", "entity_id": "number.fallback_limit"}
+    ticket = await recovery.async_begin_attempt(
+        hass, entry, VIN_A, route, "limit", route["entity_id"],
+    )
+    assert ticket is not None
+    pending = deepcopy(
+        store.value["recovery"]["vehicles"][VIN_A]["attempts"][ticket.attempt_id]
+    )
+    assert await recovery.async_finish_attempt(ticket, "confirmed")
+
+    # Reusing the ticket ID with a changed target is a new, unproven record;
+    # the old finish proof must not remove it or clear its route fence.
+    pending["target"] = {"percent": 99}
+    live = hass.data["power_sync"][entry.entry_id][recovery.RECOVERY_KEY]
+    live["vehicles"][VIN_A]["attempts"][ticket.attempt_id] = pending
+    assert await recovery.async_persist_recovery_state(hass, entry)
+    rebound = store.value["recovery"]["vehicles"][VIN_A]["attempts"]
+    assert rebound[ticket.attempt_id]["target"] == {"percent": 99}
+
+
+@pytest.mark.asyncio
+async def test_automation_store_failure_preserves_durable_unknown_finish(harness):
+    hass, entry, store, registrations, owners = _sidecar_harness(harness)
+    registrations["number.fallback_limit"] = _Entity(
+        "number.fallback_limit", device="native-device", entry="native-entry",
+        platform="teslemetry",
+    )
+    owners.pop(VIN_A)
+    assert await recovery.async_load_recovery_state(hass, entry)
+    route = {"kind": "ha", "entity_id": "number.fallback_limit"}
+    ticket = await recovery.async_begin_attempt(
+        hass, entry, VIN_A, route, "limit", route["entity_id"],
+    )
+    assert ticket is not None
+    hass.persist_ok = False
+    assert not await recovery.async_finish_attempt(ticket, "sent_unknown")
+    durable_record = store.value["recovery"]["vehicles"][VIN_A]["attempts"][ticket.attempt_id]
+    assert durable_record["outcome"] == "sent_unknown"
+    live_record = hass.data["power_sync"][entry.entry_id][recovery.RECOVERY_KEY]["vehicles"][VIN_A]["attempts"][ticket.attempt_id]
+    assert live_record["outcome"] == "pending"
+
+    restored = _Hass({})
+    restored.entity_registry = hass.entity_registry
+    restored_runtime = {
+        "automation_store": object(),
+        recovery.RECOVERY_KEY: deepcopy(
+            hass.data["power_sync"][entry.entry_id][recovery.RECOVERY_KEY]
+        ),
+        "_tesla_ev_recovery_enrolled": True,
+        "_tesla_ev_recovery_sidecar_established": True,
+        recovery._SIDECAR_STORE_KEY: store,
+    }
+    restored.data["power_sync"][entry.entry_id] = restored_runtime
+    assert await recovery.async_load_recovery_state(restored, entry)
+    restored_record = restored_runtime[recovery.RECOVERY_KEY]["vehicles"][VIN_A]["attempts"][ticket.attempt_id]
+    assert restored_record["outcome"] == "sent_unknown"
+    assert await recovery.async_begin_attempt(
+        restored, entry, VIN_A, route, "limit", route["entity_id"],
+    ) is None
+
+
+@pytest.mark.asyncio
 async def test_stock_recovery_cancellation_returns_retryable_held_phase(harness):
     hass, entry, _, _, _ = _sidecar_harness(harness)
     assert await recovery.async_load_recovery_state(hass, entry)
