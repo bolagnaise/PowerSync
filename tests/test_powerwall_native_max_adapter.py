@@ -471,6 +471,163 @@ async def test_native_omitted_export_uses_real_http_receipt_without_export_readb
 
 
 @pytest.mark.asyncio
+async def test_native_watch_refresh_cannot_erase_valid_export_proof_before_final_config_write(setup, monkeypatch):
+    s = setup
+    omitted_export_fallback(s)
+    watch_tick, read_entered, read_release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    session_module = sys.modules[type(s.session).__module__]
+    real_asyncio = session_module.asyncio
+
+    class WatchClock:
+        def __getattr__(self, name):
+            return getattr(real_asyncio, name)
+
+        async def sleep(self, delay):
+            if asyncio.current_task() is s.session._watch_task:
+                await watch_tick.wait()
+                watch_tick.clear()
+            else:
+                await real_asyncio.sleep(delay)
+
+    monkeypatch.setattr(session_module, 'asyncio', WatchClock())
+    read, write = s.adapter.read_export_rule, s.adapter.client._transport.write_config
+    block_next_read = False
+
+    async def cloud_read():
+        nonlocal block_next_read
+        if block_next_read:
+            block_next_read = False
+            read_entered.set()
+            await read_release.wait()
+        return await read()
+
+    async def config_write(din, updates, *, before_write, validate_config, before_submit):
+        async def submitted(until):
+            nonlocal block_next_read
+            await before_submit(until)
+            if updates.get('default_real_mode') == 'autonomous':
+                block_next_read = True
+                watch_tick.set()
+                await asyncio.wait_for(read_entered.wait(), 1)
+
+        try:
+            return await write(din, updates, before_write=before_write,
+                               validate_config=validate_config, before_submit=submitted)
+        finally:
+            read_release.set()
+
+    s.adapter.read_export_rule = cloud_read
+    monkeypatch.setattr(s.adapter.client._transport, 'write_config', config_write)
+    try:
+        assert (await s.session.start(120))['active']
+        assert read_entered.is_set()
+        assert await s.session.stop()
+    finally:
+        read_release.set()
+        watch_tick.set()
+        await s.session._cancel_watch()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('reply', ['restricted', 'invalid', 'failed'])
+async def test_completed_export_refresh_invalidates_prior_untracked_permission(setup, reply):
+    s = setup
+    omitted_export_fallback(s)
+    permissions = importlib.import_module('native_max_adapter_probe.tesla_export_permissions')
+    assert await s.adapter.guard()
+    s.adapter._export_untracked_ready = True
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def read():
+        entered.set()
+        await release.wait()
+        if reply == 'failed':
+            raise OSError('cloud unavailable')
+        return permissions.ExportRuleReading('never', 'known') if reply == 'restricted' else None
+
+    s.adapter.read_export_rule = read
+    task = asyncio.create_task(s.adapter._observe_export_rule(s.state.config))
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        assert s.adapter._forcing_permitted()
+        release.set()
+        await asyncio.wait_for(task, 1)
+        assert not s.adapter._forcing_permitted()
+    finally:
+        release.set()
+        await task
+
+
+@pytest.mark.asyncio
+async def test_superseded_export_read_cannot_restore_permission_after_newer_failure(setup):
+    s = setup
+    omitted_export_fallback(s)
+    assert await s.adapter.guard()
+    read = s.adapter.read_export_rule
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def delayed():
+        entered.set()
+        await release.wait()
+        return await read()
+
+    s.adapter.read_export_rule = delayed
+    task = asyncio.create_task(s.adapter._observe_export_rule(s.state.config))
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        s.adapter.read_export_rule = lambda: asyncio.sleep(0, result=None)
+        await s.adapter._observe_export_rule(s.state.config)
+        assert not s.adapter._can_prepare_untracked_export(s.state.config)
+        release.set()
+        await asyncio.wait_for(task, 1)
+        assert not s.adapter._can_prepare_untracked_export(s.state.config)
+    finally:
+        release.set()
+        await task
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('completion_order', ['latest_pending', 'latest_completed'])
+async def test_superseded_restrictive_export_reply_respects_completed_proof_order(setup, completion_order):
+    s = setup
+    omitted_export_fallback(s)
+    permissions = importlib.import_module('native_max_adapter_probe.tesla_export_permissions')
+    assert await s.adapter.guard()
+    s.adapter._export_untracked_ready = True
+    entered = [asyncio.Event(), asyncio.Event()]
+    release = [asyncio.Event(), asyncio.Event()]
+    reads = 0
+
+    async def read():
+        nonlocal reads
+        index = reads
+        reads += 1
+        entered[index].set()
+        await release[index].wait()
+        return permissions.ExportRuleReading('never' if index == 0 else 'battery_ok', 'known')
+
+    s.adapter.read_export_rule = read
+    old = asyncio.create_task(s.adapter._observe_export_rule(s.state.config))
+    await asyncio.wait_for(entered[0].wait(), 1)
+    latest = asyncio.create_task(s.adapter._observe_export_rule(s.state.config))
+    try:
+        await asyncio.wait_for(entered[1].wait(), 1)
+        if completion_order == 'latest_completed':
+            release[1].set()
+            await asyncio.wait_for(latest, 1)
+        release[0].set()
+        await asyncio.wait_for(old, 1)
+        assert s.adapter._forcing_permitted() is (completion_order == 'latest_completed')
+        release[1].set()
+        await asyncio.wait_for(latest, 1)
+        assert s.adapter._forcing_permitted()
+    finally:
+        for event in release:
+            event.set()
+        await asyncio.gather(old, latest)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize('change', ['identity', 'policy', 'expired'])
 async def test_cloud_export_read_cannot_outlive_native_authority(setup, change):
     s = setup

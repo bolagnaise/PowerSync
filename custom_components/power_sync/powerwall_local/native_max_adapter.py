@@ -75,6 +75,8 @@ class NativeMaxChargeAdapter:
         self.reconcile_managed = reconcile_managed
         self.reconcile_timeout = reconcile_timeout
         self._export_observation = None
+        self._export_refresh = 0
+        self._export_published_refresh = 0
         self._cloud_export_owned = False
         self._export_cloud_checked = False
         self._export_conflict = False
@@ -117,26 +119,41 @@ class NativeMaxChargeAdapter:
         return observed[0]
 
     async def _observe_export_rule(self, config, *, require_cloud=False):
-        self._export_cloud_checked = False
-        self._export_missing_at = None
+        self._export_refresh += 1
+        refresh = self._export_refresh
+
+        def publish(*, cloud_checked=False, missing_at=None, observation=None, adverse=False):
+            # A superseded result cannot grant permission. A completed adverse
+            # result still invalidates older proof while the newer read waits.
+            if (self._export_refresh != refresh
+                    and (not adverse or refresh <= self._export_published_refresh)):
+                return
+            # Watchdog and writer guards share the adapter. Keep a still-fresh
+            # completed proof until its replacement read actually settles.
+            self._export_cloud_checked = cloud_checked
+            self._export_missing_at = missing_at
+            self._export_observation = observation
+            self._export_published_refresh = refresh
+
         local = self._local_export_rule(config)
         if local is not None and not (require_cloud or self._cloud_export_owned):
-            self._export_observation = None
+            publish()
             return local
         info = config.get("site_info") if isinstance(config, dict) else None
         raw = info.get("customer_preferred_export_rule") if isinstance(info, dict) else None
-        self._export_observation = None
         if (raw is not None and raw not in EXPORT_RULES) or not callable(self.read_export_rule):
+            publish()
             return None
         started = self.monotonic()
-        self._export_cloud_checked = True
         try:
             reading = await asyncio.wait_for(self.read_export_rule(), timeout=3)
         except Exception:
+            publish(cloud_checked=True, adverse=True)
             return None
         if (self.current_identity() != self.identity
                 or not self.client.local_access_enabled
                 or not 0 <= self.monotonic() - started <= 5):
+            publish(cloud_checked=True, adverse=True)
             return None
         rule = reading.value if isinstance(reading, ExportRuleReading) else reading
         if rule not in EXPORT_RULES:
@@ -145,13 +162,20 @@ class NativeMaxChargeAdapter:
             # malformed and conflicting replies do not establish omission.
             if (isinstance(reading, ExportRuleReading) and reading.status in ("absent", "null")
                     and local is None and raw is None):
-                self._export_missing_at = started
+                publish(cloud_checked=True, missing_at=started)
+            else:
+                publish(cloud_checked=True, adverse=True)
+            return None
+        if self._export_refresh != refresh:
+            if rule != "battery_ok" or (local is not None and local != rule):
+                publish(cloud_checked=True, adverse=True)
             return None
         if local is not None:
             self._export_conflict = local != rule
         if self._export_conflict:
+            publish(cloud_checked=True)
             return None
-        self._export_observation = (rule, started)
+        publish(cloud_checked=True, observation=(rule, started))
         return rule
 
     async def _write_cloud_export(self, rule, before_write, write_intent, *, restoring=False,
