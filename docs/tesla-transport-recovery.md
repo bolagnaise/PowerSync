@@ -331,22 +331,23 @@ physical power. Both ESPHome bridges, native HA Tesla Fleet and native
 Teslemetry are installed. Neither legacy nor modern Teslemetry Bluetooth is
 installed here; those adapter contracts have software coverage only.
 
-The 1 November 07:53 UTC checkpoint has private 2.12.1584.dev4 installed from
-803959b0, with all 272 package hashes matching and configuration/startup checks
-passing. Its startup completed the prior W3RT1E native cleanup Stop. TESSY woke
-over BLE in eight seconds, but subsequent live checks exposed a retained
-cleanup-only route and stale requested-current reservation handling. Repairs
-and regressions are being validated. The dev4 full suite produced 10,908 passes
-and two failures in the new finite-cleanup fixture; that is not a full pass.
+The 1 November 08:16 UTC checkpoint has private 2.12.1584.dev5 installed from
+290397d2, with all 272 package hashes matching and configuration checks passing.
+Its audited complete suite passed 10,977 tests without skips. W3RT1E completed
+qualified stock recovery with two advancing exact native charge observations;
+its BLE radio is on. TESSY remains held with its radio off after simultaneous
+recovery confirmations raced on the shared record. A focused regression and
+repair now retry only an existing journal-backed command-uncertainty scope;
+evidence-loss incidents still require explicit inventory confirmation. This
+repair requires private installation and live retest.
 
 During testing the Powerwall gateway stopped accepting local connections.
 Its forcing tariff was released, and later cloud physical telemetry showed
 battery discharge into house load with zero import. Cloud restoration commands
 were acknowledged, but subsequent mode readbacks differed, so final restoration
-and the required native coexistence checks remain unconfirmed. W3RT1E's BLE
-cleanup also required stock recovery; an unchanged second cloud timestamp held
-that recovery and requested its BLE radio off. TESSY's radio remains on. No
-public release or final physical-verification claim is made at this checkpoint.
+and the required native coexistence checks remain unconfirmed. UniFi still
+reports the reserved local address and authorization, with a very weak Wi-Fi
+signal. No public release or final physical-verification claim is made.
 
 At the 1 November 07:15 UTC checkpoint, private 2.12.1584.dev3 matched source
 2429f79a across all 272 package files, with existing storage preserved. Its

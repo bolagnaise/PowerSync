@@ -495,6 +495,26 @@ async def async_recover_vehicle_transport(
             if not confirmed:
                 return False
             incident = confirmed
+        elif (isinstance(incident, Mapping)
+              and incident.get("kind") == "command_uncertainty"
+              and incident.get("scope_closed") is not True):
+            # A prior exact-scope confirmation may have lost a sidecar CAS
+            # race after recording the incident.  Retry only that narrow,
+            # journal-backed command uncertainty: evidence-loss incidents
+            # still require the operator, and a changed bridge/VIN is rejected
+            # by the confirmation inventory checks below.
+            retry_snapshot = recovery_sidecar_snapshot(hass, entry)
+            confirmed = await async_confirm_recovery_scope(
+                hass, entry, incident["incident_id"],
+                expected_revision=retry_snapshot["revision"],
+                candidate_producers=[bridge.identity],
+                candidate_vehicles=[str(vin)],
+                scope_basis=incident.get("scope_basis"),
+                automatic=True,
+            )
+            if not confirmed:
+                return False
+            incident = confirmed
         if (not isinstance(incident, Mapping)
                 or incident.get("current_candidate_vehicles") != [str(vin)]
                 or incident.get("current_candidate_producers") != [bridge.identity]):

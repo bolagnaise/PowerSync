@@ -838,6 +838,65 @@ async def test_known_command_uncertainty_selects_real_refs_and_uses_automatic_sc
     assert original_recover is not recovery.async_recover_stock
 
 
+@pytest.mark.asyncio
+async def test_existing_unconfirmed_command_uncertainty_retries_exact_scope_after_cas_race(
+    harness, monkeypatch,
+):
+    """A transient first confirmation race must not strand an exact incident."""
+    hass, entry = harness
+    bridge = _bridge(hass, entry, VIN_A)
+    state = hass.data["power_sync"][entry.entry_id]["_tesla_ev_recovery_sidecar"]
+    state["recovery"]["vehicles"] = {VIN_A: {
+        "route": None,
+        "attempts": {"attempt-1": {
+            "outcome": "sent_unknown", "route": {
+                "kind": "ble", "prefix": bridge.prefix,
+                "entity_identity": bridge.identities["charger"],
+            },
+        }},
+        "hazards": {},
+    }}
+    hass.data["power_sync"][entry.entry_id][recovery.RECOVERY_KEY] = deepcopy(
+        state["recovery"]
+    )
+    observation_module = importlib.import_module("power_sync.tesla_ev_observation")
+    monkeypatch.setattr(
+        observation_module,
+        "independent_tesla_source_binding",
+        lambda _hass, _vin: {"vin": VIN_A, "domain": "teslemetry",
+                             "config_entry_id": "native-config", "device_id": "native-device",
+                             "producer_identity": "native:producer"},
+    )
+    calls = {}
+
+    async def fake_recover(*args, **kwargs):
+        calls["recover"] = kwargs
+        return True
+
+    monkeypatch.setattr(recovery, "async_recover_stock", fake_recover)
+    real_confirm = recovery.async_confirm_recovery_scope
+    first = True
+
+    async def fail_initial_cas(*args, **kwargs):
+        nonlocal first
+        if first:
+            first = False
+            kwargs["expected_revision"] += 1
+        return await real_confirm(*args, **kwargs)
+
+    monkeypatch.setattr(recovery, "async_confirm_recovery_scope", fail_initial_cas)
+    assert not await stock.async_recover_vehicle_transport(hass, entry, VIN_A)
+    incident = next(iter(state["incidents"].values()))
+    assert incident["kind"] == "command_uncertainty"
+    assert incident["scope_closed"] is False
+    assert "recover" not in calls
+
+    assert await stock.async_recover_vehicle_transport(hass, entry, VIN_A)
+    assert incident["scope_closed"] is True
+    assert incident["operator_scope_confirmation"]["confirmed_by"] == "recorded_binding"
+    assert calls["recover"]["incident_id"] == incident["incident_id"]
+
+
 def test_rate_entity_unique_id_can_differ_from_charger_on_same_physical_node(harness):
     hass, entry = harness
     bridge = _bridge(hass, entry, VIN_A)
