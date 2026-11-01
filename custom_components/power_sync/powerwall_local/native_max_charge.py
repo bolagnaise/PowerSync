@@ -390,6 +390,19 @@ class NativeMaxChargeSession:
                 await self._save()
                 restore_fence()
             return restore_fence
+        revalidate = getattr(self.adapter, "restoration_tariff_current", None)
+        if self.record["phase"] in ("settling", "restored") and callable(revalidate):
+            current = await revalidate()
+            restore_fence()
+            if current is False:
+                # Older journals may have released a different temporary
+                # controller tariff. Reopen only that field for owned cleanup.
+                self.record["phase"] = "restoring"
+                self.record.setdefault("cleanup", {})["tariff_released"] = False
+                await self._save()
+                restore_fence()
+            elif current is not True:
+                raise NativeMaxRestorePending("Native Max tariff restoration readback is pending")
         if self.record["phase"] not in ("prepared", "settling", "restored"):
             self.record["phase"] = "restoring"
             await self._save()

@@ -572,6 +572,22 @@ def test_dynamic_readback_identifies_tesla_zero_normalized_negative_rates():
     assert status(expected, positive_mismatch) is None
 
 
+@pytest.mark.parametrize('direction', ['CHARGE', 'DISCHARGE'])
+@pytest.mark.parametrize('observed_code', [None, 'OTHER_SESSION', 'CHARGE_NATIVE_MAX_old', 'DISCHARGE_NATIVE_MAX_old'])
+def test_native_max_confirmation_requires_its_unique_code_even_with_identical_prices(direction, observed_code):
+    status = _readback_helpers()['_tesla_tariff_readback_status']
+    expected = {'code': direction + '_NATIVE_MAX_current',
+                'energy_charges': {'Summer': {'rates': {'PERIOD_01_00': 0}}},
+                'sell_tariff': {'energy_charges': {'Summer': {'rates': {'PERIOD_01_00': 0}}}}}
+    observed = copy.deepcopy(expected)
+    if observed_code is None:
+        observed.pop('code')
+    else:
+        observed['code'] = observed_code
+    assert status(expected, observed) is None
+    assert status(expected, expected) == 'exact'
+
+
 def test_static_manual_branch_uses_normalized_payload_only_for_tesla_upload():
     source = (COMPONENT_ROOT / "__init__.py").read_text()
     sync_start = source.index("async def _handle_sync_tou_internal")

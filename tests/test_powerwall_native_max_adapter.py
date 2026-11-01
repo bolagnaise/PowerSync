@@ -1223,12 +1223,118 @@ async def test_optimizer_discharge_admits_reported_capacity_after_reserve_cache_
 
 @pytest.mark.asyncio
 async def test_foreign_tariff_is_preserved_while_owned_mode_and_reserve_restore(setup):
-    s=setup;await s.session.start(120)
+    s=setup
+    s.adapter.restorable=lambda tariff: tariff.get('code') in {'REAL', 'FOREIGN'}
+    await s.session.start(120)
     s.state.tariff={'code':'FOREIGN','name':'new external tariff'}
     assert await s.session.stop()
     assert s.state.tariff['code']=='FOREIGN'
     assert s.state.config==s.original[0]
     assert not s.budget.native_max_claim('site')
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('direction', ['CHARGE', 'DISCHARGE'])
+async def test_another_temporary_native_tariff_cannot_release_cleanup(setup, direction):
+    s=setup
+    s.adapter.forcing_tariff={'name':'Force Charge', 'code':'CHARGE_NATIVE_MAX_current',
+        'energy_charges':{'Summer':{'rates':{'PERIOD_01_00':0}}}}
+    s.adapter.tariff_matches=lambda expected, observed: expected.get('energy_charges')==observed.get('energy_charges')
+    await s.session.start(120)
+    s.state.tariff=deepcopy(s.adapter.forcing_tariff)
+    s.state.tariff['code']=direction+'_NATIVE_MAX_previous'
+    with pytest.raises(s.m.NativeMaxChargeError):
+        await s.session.stop()
+    assert s.session.record is not None
+    assert not s.session.record.get('cleanup',{}).get('tariff_released')
+    assert s.budget.native_max_claim('site')
+    assert s.state.tariff['code']==direction+'_NATIVE_MAX_previous'
+    # Once the exact submitted attempt becomes visible, normal cleanup can
+    # restore its saved baseline and release the durable owner.
+    s.state.tariff=deepcopy(s.adapter.forcing_tariff)
+    assert await s.session.stop()
+    assert s.state.tariff==s.original[1]
+    assert not s.budget.native_max_claim('site')
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('phase', ['restoring', 'settling', 'restored'])
+@pytest.mark.parametrize('foreign', [False, True])
+async def test_persisted_tariff_release_is_reopened_for_a_visible_temporary_tariff(setup, phase, foreign):
+    s=setup
+    await s.session.start(120)
+    await s.session._cancel_watch()
+    s.store.data['phase']=phase
+    s.store.data['cleanup']={'mode_released':True,'reserve_released':True,'tariff_released':True}
+    s.state.config=deepcopy(s.original[0])
+    s.state.tariff=deepcopy(s.adapter.forcing_tariff)
+    if foreign:
+        s.state.tariff['code']='CHARGE_NATIVE_MAX_previous'
+    recovered=type(s.session)(s.adapter,s.store,clock=lambda:s.state.at,monotonic=lambda:s.state.at)
+    try:
+        if foreign:
+            with pytest.raises(s.m.NativeMaxChargeError):
+                await recovered.recover()
+            assert s.budget.native_max_claim('site')
+            assert not s.store.data['cleanup'].get('tariff_released')
+            assert s.state.tariff['code']=='CHARGE_NATIVE_MAX_previous'
+            s.state.tariff=deepcopy(s.original[1])
+        assert await recovered.recover()
+        assert s.state.tariff==s.original[1]
+        assert not s.budget.native_max_claim('site')
+    finally:
+        await recovered._cancel_watch()
+
+
+@pytest.mark.asyncio
+async def test_temporary_tariff_arriving_before_final_release_keeps_the_owner(setup):
+    s=setup
+    await s.session.start(120)
+    save=s.store.async_save
+    async def late_tariff(data):
+        await save(data)
+        if isinstance(data,dict) and data.get('phase')=='restored':
+            s.state.tariff={'code':'CHARGE_NATIVE_MAX_previous','name':'Force Charge'}
+    s.store.async_save=late_tariff
+    try:
+        with pytest.raises(s.m.NativeMaxChargeError):
+            await s.session.stop()
+        assert s.budget.native_max_claim('site')
+        assert s.session.record is not None
+    finally:
+        s.store.async_save=save
+        s.state.tariff=deepcopy(s.original[1])
+        await s.session.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('phase', ['settling', 'restored'])
+@pytest.mark.parametrize('unavailable', ['error', 'empty', 'identity'])
+async def test_saved_cleanup_with_unavailable_tariff_readback_keeps_ownership_without_writes(setup, phase, unavailable):
+    s=setup
+    await s.session.start(120)
+    await s.session._cancel_watch()
+    s.store.data['phase']=phase
+    s.store.data['cleanup']={'mode_released':True,'reserve_released':True,'tariff_released':True}
+    s.state.config=deepcopy(s.original[0]);s.state.tariff=deepcopy(s.original[1])
+    read=s.adapter.read_tariff
+    async def unavailable_read():
+        if unavailable=='error':raise OSError('readback unavailable')
+        if unavailable=='identity':s.state.identity='replacement'
+        return None if unavailable=='empty' else await read()
+    s.adapter.read_tariff=unavailable_read
+    recovered=type(s.session)(s.adapter,s.store,clock=lambda:s.state.at,monotonic=lambda:s.state.at)
+    events=deepcopy(s.state.events)
+    try:
+        with pytest.raises(s.m.NativeMaxChargeError,match='readback is pending'):
+            await recovered.recover()
+        assert s.state.events==events
+        assert s.budget.native_max_claim('site')
+        assert s.store.data['phase']==phase
+    finally:
+        s.adapter.read_tariff=read;s.state.identity='paired'
+        await recovered._cancel_watch()
+        assert await recovered.recover()
 
 
 @pytest.mark.asyncio

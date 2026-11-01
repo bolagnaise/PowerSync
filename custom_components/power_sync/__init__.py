@@ -6056,6 +6056,13 @@ def _tesla_tariff_readback_status(
     if not isinstance(observed, dict):
         return None
 
+    code = expected.get("code")
+    if (isinstance(code, str) and code.startswith(("CHARGE_NATIVE_MAX_", "DISCHARGE_NATIVE_MAX_"))
+            and observed.get("code") != code):
+        # Cleanup owns this exact attempt. Equal prices from an older native
+        # episode cannot prove that its replacement upload has arrived.
+        return None
+
     # Static custom payloads carry a stable marker and must verify every
     # non-empty buy and sell season. This prevents a correct All Year map from
     # masking a mismatched secondary season (or a missing sell map).

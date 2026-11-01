@@ -649,6 +649,8 @@ class NativeMaxChargeAdapter:
             ev_coexistence=self.ev_coexistence, preparing=preparing)
 
     async def release(self, token):
+        if await self.restoration_tariff_current() is not True:
+            return False
         result = await self.budget.release_native_max(self.entry_id, self.site, token)
         if result:
             self._export_limit_ready = False
@@ -657,6 +659,19 @@ class NativeMaxChargeAdapter:
             if self.token == token:
                 self.token = None
         return result
+
+    async def restoration_tariff_current(self):
+        """Revalidate saved cleanup progress without submitting any writes."""
+        if self.current_identity() != self.identity:
+            return None
+        try:
+            tariff = await self.read_tariff()
+        except Exception:
+            return None
+        if (self.current_identity() != self.identity
+                or not isinstance(tariff, dict) or not tariff):
+            return None
+        return bool(self.restorable(tariff))
 
     def _grid_value(self, config):
         reader = getattr(self.client, "native_grid_charging_reading", None)
@@ -1103,6 +1118,9 @@ class NativeMaxChargeAdapter:
             tariff = await self.read_tariff()
         except Exception:
             tariff = None
+        if (progress.get("tariff_released") and isinstance(tariff, dict) and tariff
+                and not self.restorable(tariff)):
+            await checkpoint(tariff_released=False)
         if pending_tariff:
             target = baseline["forcing_tariff"] if pending_tariff == "forcing" else baseline["tariff"]
             if self._matches(target, tariff):
@@ -1110,7 +1128,10 @@ class NativeMaxChargeAdapter:
                 # restoration, proves this one submitted attempt arrived.
                 await write_intent("tariff_confirmed")
                 pending_tariff = None
-        if not pending_tariff and isinstance(tariff, dict) and tariff and not self._matches(baseline["forcing_tariff"], tariff):
+        if (not pending_tariff and isinstance(tariff, dict) and tariff
+                and self.restorable(tariff) and not self._matches(baseline["forcing_tariff"], tariff)):
+            # A different temporary controller tariff is still unresolved;
+            # only a normal external tariff can release this cleanup owner.
             await checkpoint(tariff_released=True)
 
         if not progress.get("mode_released"):
@@ -1152,7 +1173,8 @@ class NativeMaxChargeAdapter:
                 pass
             try:
                 observed = await self.read_tariff()
-                if isinstance(observed, dict) and observed and not self._matches(baseline["forcing_tariff"], observed):
+                if (isinstance(observed, dict) and observed and self.restorable(observed)
+                        and not self._matches(baseline["forcing_tariff"], observed)):
                     await checkpoint(tariff_released=True)
             except Exception:
                 pass
