@@ -998,6 +998,7 @@ async def test_boost_expiry_keeps_zero_current_cleanup_available(admission):
     'blocked_route', 'sidecar_hold', 'stale_native', 'missing_native_setting',
     'charging', 'nonzero_power', 'active_owner', 'active_task',
     'route_changed_during_save', 'provider_changed_during_save',
+    'cleared_route_recovered', 'cleared_route_ambiguous',
 ])
 async def test_ble_retained_demand_uses_only_exact_recovered_native_proof(
     admission, monkeypatch, case,
@@ -1012,7 +1013,8 @@ async def test_ble_retained_demand_uses_only_exact_recovered_native_proof(
     native = registry.entities[a.state.entity_id]
     route = {'kind': 'ha', 'entity_id': native.entity_id}
     recovery = importlib.import_module(a.m.__package__ + '.tesla_ev_recovery')
-    monkeypatch.setattr(recovery, 'get_vehicle_route', lambda *_: dict(route))
+    monkeypatch.setattr(recovery, 'get_vehicle_route', lambda *_: (
+        None if route.get('kind') == 'cleared' else dict(route)))
     a.budget.armed_sites.clear()
     record = {
         'entry_id': 'one', 'site': 'site', 'identity': a.m._identity(switch),
@@ -1026,6 +1028,14 @@ async def test_ble_retained_demand_uses_only_exact_recovered_native_proof(
     a.budget = a.b.SharedRateBudget(a.store, clock=lambda: now[0])
     await a.budget.load()
     a.hass.data[a.b.RUNTIME_KEY] = a.budget
+    if case.startswith('cleared_route_'):
+        route['kind'] = 'cleared'
+    if case == 'cleared_route_ambiguous':
+        other = SimpleNamespace(**vars(native))
+        other.entity_id = 'number.other_charge_current'
+        other.unique_id = 'other_amps'
+        registry.entities[other.entity_id] = other
+        a.budget.managed[VIN]['identities'].append(a.m._identity(other))
     a.charge.update(charging_state='Stopped', charger_actual_current=0, charger_power=0)
     # The recovered native document, not an optimistic HA number, supplies proof.
     a.state.state = 'unavailable'
@@ -1066,8 +1076,9 @@ async def test_ble_retained_demand_uses_only_exact_recovered_native_proof(
             await a.m.refresh_managed_records(a.hass, a.budget)
             if index == 0:
                 assert VIN in a.budget.managed
-        assert (VIN not in a.budget.managed) is (case == 'recovered')
-        assert (VIN not in a.store.data['managed']) is (case == 'recovered')
+        retired = case in {'recovered', 'cleared_route_recovered'}
+        assert (VIN not in a.budget.managed) is retired
+        assert (VIN not in a.store.data['managed']) is retired
     finally:
         if pending is not None:
             pending.cancel()
@@ -1113,8 +1124,9 @@ async def test_later_ble_setting_cannot_reconcile_from_ambiguous_or_stale_entity
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('source_domain', ['tesla_fleet', 'teslemetry'])
+@pytest.mark.parametrize('route_present', [False, True])
 async def test_native_max_reconciles_recovered_ble_record_using_two_exact_native_reads(
-    admission, monkeypatch, source_domain,
+    admission, monkeypatch, source_domain, route_present,
 ):
     a = admission
     now = [NOW]
@@ -1127,7 +1139,8 @@ async def test_native_max_reconciles_recovered_ble_record_using_two_exact_native
     a.provider.runtime_data.vehicles[0].device.identifiers = {(source_domain, VIN)}
     a.hass.config_entries.async_entries = lambda domain: [a.provider] if domain == source_domain else []
     recovery = importlib.import_module(a.m.__package__ + '.tesla_ev_recovery')
-    monkeypatch.setattr(recovery, 'get_vehicle_route', lambda *_: {'kind': 'ha', 'entity_id': number.entity_id})
+    monkeypatch.setattr(recovery, 'get_vehicle_route', lambda *_: (
+        {'kind': 'ha', 'entity_id': number.entity_id} if route_present else None))
     record = {
         'entry_id': 'one', 'site': 'site', 'identity': a.m._identity(switch),
         'entity_id': switch.entity_id, 'setting_entity_id': None,

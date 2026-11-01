@@ -324,9 +324,21 @@ def _managed_native_entity(hass, entry, runtime, vin, record, registration):
         return None
     if getattr(registration, "platform", None) in {"tesla_fleet", "teslemetry"}:
         return record.get("entity_id")
-    if (getattr(registration, "platform", None) not in {
-            "esphome", "tesla_bluetooth", "teslemetry_bluetooth"}
-            or not route or route.get("kind") != "ha"):
+    if getattr(registration, "platform", None) not in {
+            "esphome", "tesla_bluetooth", "teslemetry_bluetooth"}:
+        return None
+    if route is None:
+        # Completed cleanup intentionally releases its command route. The
+        # durable demand still remembers its exact former native producer;
+        # that identity may supply read-only proof, never new command authority.
+        remembered = record.get("identities", [record["identity"]])
+        candidates = [candidate for candidate in er.async_get(hass).entities.values()
+                      if getattr(candidate, "platform", None) in {"tesla_fleet", "teslemetry"}
+                      and getattr(candidate, "disabled_by", None) is None
+                      and str(getattr(candidate, "entity_id", "")).startswith("number.")
+                      and _identity(candidate) in remembered]
+        return candidates[0].entity_id if len(candidates) == 1 else None
+    if route.get("kind") != "ha":
         return None
     entity_id = route.get("entity_id")
     native = er.async_get(hass).async_get(entity_id)
