@@ -159,7 +159,19 @@ class _Hass:
 def harness(monkeypatch):
     hass = _Hass()
     entry = _Entry()
-    monkeypatch.setitem(sys.modules, "homeassistant", types.ModuleType("homeassistant"))
+    # Other collected HA-style tests install module-level helper stubs.  The
+    # production resolver imports this registry lazily, so an earlier stub can
+    # otherwise return a detached registry and make every exact bridge look
+    # missing.  Bind the complete lazy import path to this harness.
+    ha = types.ModuleType("homeassistant")
+    helpers = types.ModuleType("homeassistant.helpers")
+    entity_registry = types.ModuleType("homeassistant.helpers.entity_registry")
+    entity_registry.async_get = lambda value: value.entity_registry
+    helpers.entity_registry = entity_registry
+    ha.helpers = helpers
+    monkeypatch.setitem(sys.modules, "homeassistant", ha)
+    monkeypatch.setitem(sys.modules, "homeassistant.helpers", helpers)
+    monkeypatch.setitem(sys.modules, "homeassistant.helpers.entity_registry", entity_registry)
     const = types.ModuleType("homeassistant.const")
     const.__version__ = "2026.10.4"
     monkeypatch.setitem(sys.modules, "homeassistant.const", const)
