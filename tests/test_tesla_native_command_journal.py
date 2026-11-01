@@ -1418,6 +1418,25 @@ async def test_ble_native_noop_validates_existing_rate_budget_without_new_ticket
     monkeypatch.setattr(
         registry_module, "async_get", lambda _hass: hass.entity_registry
     )
+    # Full collection can leave ``homeassistant.helpers.entity_registry`` on
+    # the parent package pointing at an older module than the one imported
+    # above.  Bind both import views and keep the fake registry's entity
+    # lookup interface intact for the duration of this test.
+    import sys
+    helpers_module = importlib.import_module("homeassistant.helpers")
+    monkeypatch.setitem(
+        sys.modules, "homeassistant.helpers.entity_registry", registry_module
+    )
+    monkeypatch.setattr(
+        helpers_module, "entity_registry", registry_module, raising=False
+    )
+    registry_entities = hass.entity_registry.entities
+    monkeypatch.setattr(
+        hass.entity_registry,
+        "async_get",
+        registry_entities.get,
+        raising=False,
+    )
     runtime = hass.data["power_sync"]["entry-1"]
     entry = SimpleNamespace(
         entry_id="entry-1",
