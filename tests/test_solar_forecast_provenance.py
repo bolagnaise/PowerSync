@@ -4,6 +4,10 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 import sys
+import ast
+from types import SimpleNamespace
+
+import pytest
 
 
 _MODULE_PATH = (
@@ -112,3 +116,60 @@ def test_api_contract_is_schedule_aligned_and_additive():
     # Stamped once every EV series is in the canonical snapshot (e3e10740).
     assert '"plan_snapshot_id": None' in api_source
     assert 'data["forecast_evidence"]["plan_snapshot_id"] = plan_snapshot_id' in api_source
+
+
+def _publish_forecast_series(solar, load, provenance=None, available=True):
+    """Execute the real API publication block with one completed plan snapshot."""
+    tree = ast.parse(_COORDINATOR_SOURCE)
+    method = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "get_api_data")
+    schedule_block = next(n for n in method.body if isinstance(n, ast.If)
+                          and ast.unparse(n.test) == "self._current_schedule")
+    start = next(i for i, n in enumerate(schedule_block.body)
+                 if isinstance(n, ast.Assign) and ast.unparse(n.targets[0]) == "snapshot_payload") + 1
+    end = next(i for i, n in enumerate(schedule_block.body)
+               if isinstance(n, ast.Assign) and ast.unparse(n.targets[0]) == "display_import")
+    raw, planned, curtailed = provenance or (None, None, None)
+    coordinator = SimpleNamespace(
+        _config=SimpleNamespace(interval_minutes=5),
+        _last_solar_forecast=solar, _last_load_forecast=load,
+        _has_solar_forecast=available,
+        _last_raw_solar_forecast=raw, _last_planned_solar_forecast=planned,
+        _last_solar_curtailment_forecast=curtailed,
+    )
+    namespace = dict(self=coordinator, data={}, n_sched=2,
+                     api_response={"timestamps": ["2026-11-01T06:40:00+00:00", "2026-11-01T06:45:00+00:00"]})
+    exec(compile(ast.Module(body=schedule_block.body[start:end], type_ignores=[]),
+                 "forecast_api", "exec"), namespace)
+    return namespace["data"]
+
+
+def test_greedy_plan_keeps_available_solar_chart_without_inventing_lp_evidence():
+    assert derive_solar_forecast_provenance([4, 2], [4, 2], [4, 2], None) is None
+    data = _publish_forecast_series([4.0, 2.0], [1.0, 1.5])
+    assert data["forecast_series"]["solar_forecast_values_kw"] == [4.0, 2.0]
+    assert data["forecast_series"]["load_forecast_values_kw"] == [1.0, 1.5]
+    assert len(data["forecast_series"]["timestamps"]) == 2
+    assert "planned_forecast_values_kw" not in data["forecast_series"]
+    assert "curtailment_values_kw" not in data["forecast_series"]
+    assert "forecast_evidence" not in data
+
+
+@pytest.mark.parametrize("solar,load,available", [
+    (None, [1, 1], True), ([4], [1, 1], True), ([4, 2], [1], True),
+    ([4, 2], [1, 1], False),
+])
+def test_input_forecast_chart_requires_available_aligned_inputs(solar, load, available):
+    assert "forecast_series" not in _publish_forecast_series(solar, load, available=available)
+
+
+def test_proven_lp_series_still_takes_precedence_over_input_forecast():
+    data = _publish_forecast_series([4, 2], [1, 1], ([4, 2], [3, 1], [1, 1]))
+    assert data["forecast_series"]["planned_forecast_values_kw"] == [3, 1]
+    assert "solar_forecast_values_kw" not in data["forecast_series"]
+    assert data["forecast_evidence"]["solar_forecast_values_kw"] == [3, 1]
+
+
+def test_available_zero_solar_forecast_is_not_treated_as_missing():
+    data = _publish_forecast_series([0.0, 0.0], [1.0, 1.0])
+    assert data["forecast_series"]["solar_forecast_values_kw"] == [0.0, 0.0]
+    assert "forecast_evidence" not in data

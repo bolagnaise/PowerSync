@@ -458,6 +458,26 @@ def test_chart_sampling_respects_steps_gaps_and_negative_values():
                        boundary=0, last=4, empty=None)
 
 
+def test_forecast_cards_show_greedy_inputs_without_claiming_planned_generation():
+    out = _run_board(r"""
+  const ts = [new Date(Date.now() + 300000).toISOString()];
+  T.psApiCache.set('power_sync/optimization', { data: {
+    forecast_series: { timestamps: ts, interval_minutes: 5,
+      solar_forecast_values_kw: [4], load_forecast_values_kw: [2] },
+  }});
+  const rendered = {};
+  for (const name of ['PsSolarLoadCard', 'PsLoadForecastCard']) {
+    const card = new T[name]();
+    card._hass = { states: {} }; card._config = { entities: {} };
+    card._render(); rendered[name] = card.innerHTML;
+  }
+  console.log(JSON.stringify(rendered));
+""")
+    assert 'aria-label="Solar and load forecast for 48 hours"' in out["PsSolarLoadCard"]
+    assert 'Solar, next 24 h' in out["PsLoadForecastCard"]
+    assert '0.3<small>kWh' in out["PsLoadForecastCard"]
+
+
 def test_every_small_chart_has_working_pointer_and_keyboard_tooltips():
     out = _run_board(r"""
   class El {

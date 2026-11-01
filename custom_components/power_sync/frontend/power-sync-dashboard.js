@@ -2716,7 +2716,8 @@ function psForecastSeries(data) {
   return {
     t,
     interval: Number(fs.interval_minutes) || 30,
-    solar: Array.isArray(fs.planned_forecast_values_kw) ? fs.planned_forecast_values_kw.map(Number) : [],
+    solar: Array.isArray(fs.planned_forecast_values_kw) ? fs.planned_forecast_values_kw.map(Number)
+      : (Array.isArray(fs.solar_forecast_values_kw) ? fs.solar_forecast_values_kw.map(Number) : []),
     load: Array.isArray(fs.load_forecast_values_kw) ? fs.load_forecast_values_kw.map(Number) : [],
   };
 }

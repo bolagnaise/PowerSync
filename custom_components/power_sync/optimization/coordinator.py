@@ -6592,6 +6592,29 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._battery_provenance_grid_kwh *= ratio
             self._battery_provenance_unknown_kwh *= ratio
             self._battery_provenance_grid_cost *= ratio
+
+        # A provider can refresh battery power more frequently than SOC.  If
+        # this measured interval changed the ledger but the SOC value is the
+        # same observation already reconciled, do not manufacture an unknown
+        # increase or trim known energy against that stale snapshot.  The next
+        # changed SOC (or an explicit gap/startup reconciliation) remains
+        # authoritative and settles the accumulated measured interval.
+        previous_soc = _nonnegative_finite_number(
+            getattr(self, "_battery_provenance_last_soc", None)
+        )
+        current_soc_value = _nonnegative_finite_number(current_soc)
+        unchanged_soc = (
+            previous_soc is not None
+            and current_soc_value is not None
+            and abs(previous_soc - min(1.0, current_soc_value)) <= 1e-6
+            and (solar_charge > 1e-9 or grid_charge > 1e-9 or discharge > 1e-9)
+        )
+        if unchanged_soc and not telemetry_gap:
+            self._battery_provenance_reconciliation = (
+                "deferred_unchanged_soc:measured_interval"
+            )
+            self._schedule_battery_provenance_save()
+            return
         self._reconcile_battery_provenance(
             current_soc, capacity_wh, reason="measured_interval"
         )
@@ -21515,6 +21538,23 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 getattr(self, "_last_planned_solar_forecast", None),
                 getattr(self, "_last_solar_curtailment_forecast", None),
             )
+            # A greedy fallback has usable input forecasts but no LP
+            # curtailment proof. Keep the forecast chart available without
+            # presenting these inputs as proven planned generation.
+            solar = getattr(self, "_last_solar_forecast", None)
+            load = self._last_load_forecast
+            if (
+                getattr(self, "_has_solar_forecast", False)
+                and solar is not None
+                and load is not None
+                and len(solar) == len(load) == n_sched
+            ):
+                data["forecast_series"] = {
+                    "timestamps": list(api_response["timestamps"]),
+                    "interval_minutes": self._config.interval_minutes,
+                    "solar_forecast_values_kw": list(solar),
+                    "load_forecast_values_kw": list(load),
+                }
             if all(value is not None for value in provenance):
                 raw, planned, curtailed = provenance
                 load = self._last_load_forecast
