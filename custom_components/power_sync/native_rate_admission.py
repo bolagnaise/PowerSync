@@ -311,6 +311,33 @@ def _site_evidence(hass, entry, runtime, vin, profile, *, native_entity_id=None,
             "unit_w": unit}
 
 
+def _managed_native_entity(hass, entry, runtime, vin, record, registration):
+    """Use only the original native producer or a remembered recovered one."""
+    from .tesla_ev_recovery import get_vehicle_route
+    from .native_rate_budget import managed_devices, provider_device
+    from homeassistant.helpers import entity_registry as er
+
+    if runtime.get("_tesla_ev_recovery_sidecar_hold") is not None:
+        return None
+    route = get_vehicle_route(hass, entry, vin)
+    if route is not None and route.get("kind") == "blocked":
+        return None
+    if getattr(registration, "platform", None) in {"tesla_fleet", "teslemetry"}:
+        return record.get("entity_id")
+    if (getattr(registration, "platform", None) not in {
+            "esphome", "tesla_bluetooth", "teslemetry_bluetooth"}
+            or not route or route.get("kind") != "ha"):
+        return None
+    entity_id = route.get("entity_id")
+    native = er.async_get(hass).async_get(entity_id)
+    identity = _identity(native)
+    if (getattr(native, "platform", None) in {"tesla_fleet", "teslemetry"}
+            and getattr(native, "disabled_by", None) is None and identity is not None
+            and provider_device(identity) in managed_devices(record)):
+        return entity_id
+    return None
+
+
 async def refresh_managed_records(hass, budget, *, vins=None, site=None, native_reports=None):
     """Observe each managed VIN independently; never infer it from a total."""
     if not budget.managed:
@@ -337,27 +364,43 @@ async def refresh_managed_records(hass, budget, *, vins=None, site=None, native_
         # unknown so reconciliation retains the uncertain reservation.
         entry = runtime.get("entry")
         native = None
+        from .tesla_ev_recovery import get_vehicle_route
+        if (runtime.get("_tesla_ev_recovery_sidecar_hold") is not None
+                or (get_vehicle_route(hass, entry, vin) or {}).get("kind") == "blocked"):
+            continue
+        native_entity_id = _managed_native_entity(hass, entry, runtime, vin, record, registration)
         native_producer = getattr(registration, "platform", None) in {"tesla_fleet", "teslemetry"}
-        if native_producer:
-            from .tesla_ev_recovery import get_vehicle_route
+        setting_identity = None
+        if native_entity_id is not None:
             from .native_rate_telemetry import native_charge_setting, native_charge_setting_current
-            if runtime.get("_tesla_ev_recovery_sidecar_hold") is not None:
-                continue
-            route = get_vehicle_route(hass, entry, vin)
-            if route is not None and route.get("kind") == "blocked":
-                continue
             native = (native_reports or {}).get(vin)
-            if native is not None and not native_charge_setting_current(hass, vin, record["entity_id"], native):
+            if native is not None and not native_charge_setting_current(hass, vin, native_entity_id, native):
                 continue
             if native is None:
-                native = native_charge_setting(hass, vin, record["entity_id"])
+                native = native_charge_setting(hass, vin, native_entity_id)
             if native is None:
                 continue
             charge = native["charge"]
             setting_amps, setting_at = native["amps"], native["at"]
+        elif native_producer:
+            continue
         else:
             setting_entity_id = record.get("setting_entity_id")
             state = hass.states.get(setting_entity_id) if setting_entity_id else None
+            if not setting_entity_id:
+                # An unavailable setting at Start must not remain permanently
+                # unavailable after this exact producer recovers. Do not bind
+                # another car/provider or persist a speculative setting ID.
+                state = _current_setting(hass, registry, registration, record["entity_id"],
+                                         record.get("operation", "start"))
+                recovered = registry.async_get(state.entity_id) if state is not None else None
+                if (recovered is None or _identity(recovered) is None
+                        or getattr(recovered, "disabled_by", None) is not None
+                        or any(getattr(recovered, key, None) != getattr(registration, key, None)
+                               for key in ("platform", "config_entry_id", "device_id"))):
+                    state = None
+                else:
+                    setting_entity_id, setting_identity = state.entity_id, _identity(recovered)
             setting_amps, setting_at = _number(getattr(state, "state", None)), _fresh_at(state)
             charge = _section(vehicle_report_for_entry(hass, entry, vin) or {}, "charge_state")
         current = _number(charge.get("charger_actual_current"))
@@ -371,7 +414,7 @@ async def refresh_managed_records(hass, budget, *, vins=None, site=None, native_
         owner = get_ev_ownership(hass, entry, vin)[1] if entry is not None else None
         charging_state = str(charge.get("charging_state", "")).lower()
         settled = charging_state in {"stopped", "complete", "disconnected", "nopower", "no_power"}
-        if native_producer and owner is None:
+        if native is not None and owner is None:
             power = native["observation"].charger_power
             if not settled or current != 0 or power != 0:
                 continue
@@ -382,18 +425,24 @@ async def refresh_managed_records(hass, budget, *, vins=None, site=None, native_
                 and budget.managed.get(vin) is record
                 and _identity(registry.async_get(record["entity_id"])) == record["identity"]
                 and (get_ev_ownership(hass, entry, vin)[1] if entry is not None else None) is owner
-                and (native is None or native_charge_setting_current(
-                    hass, vin, record["entity_id"], native))
-                and (not native_producer or (
-                    runtime.get("_tesla_ev_recovery_sidecar_hold") is None
-                    and (get_vehicle_route(hass, entry, vin) or {}).get("kind") != "blocked"))
+                and runtime.get("_tesla_ev_recovery_sidecar_hold") is None
+                and (get_vehicle_route(hass, entry, vin) or {}).get("kind") != "blocked"
+                and (native is None or (
+                    _managed_native_entity(hass, entry, runtime, vin, record, registration) == native_entity_id
+                    and native_charge_setting_current(hass, vin, native_entity_id, native)))
+                and (setting_identity is None or (
+                    _identity(registry.async_get(setting_entity_id)) == setting_identity
+                    and _current_setting(hass, registry, registration, record["entity_id"],
+                                         record.get("operation", "start")) is state
+                    and _number(getattr(state, "state", None)) == setting_amps
+                    and _fresh_at(state) >= setting_at))
             )
 
         await budget.reconcile_managed(vin, {"identity": record["identity"],
             "amps": setting_amps, "setting_at": setting_at,
             "vehicle_at": at, "meter_at": meter_at, "actual_w": current*unit,
             "charging": not settled, "owner_active": owner is not None,
-            "source_identity": native["source"] if native is not None else None},
+            "source_identity": native["source"] if native is not None else setting_identity},
             is_current=current_scope)
 
 
@@ -426,14 +475,18 @@ async def _refresh_managed_inputs(hass, budget, vin, record, *, timeout):
     local = (runtime.get("powerwall_local") or {}).get("coordinator")
     refresh = getattr(local, "async_request_refresh", None)
     registration = er.async_get(hass).async_get(record.get("entity_id"))
-    if getattr(registration, "platform", None) in {"tesla_fleet", "teslemetry"}:
+    native_entity_id = _managed_native_entity(
+        hass, runtime.get("entry"), runtime, vin, record, registration)
+    if native_entity_id is not None:
         def current():
             return (hass.data.get("power_sync", {}).get(record.get("entry_id")) is runtime
                     and budget.managed.get(vin) is record
                     and _managed_reconcile_allowed(hass, budget, vin, record)
-                    and _identity(er.async_get(hass).async_get(record.get("entity_id"))) == record.get("identity"))
+                    and _identity(er.async_get(hass).async_get(record.get("entity_id"))) == record.get("identity")
+                    and _managed_native_entity(hass, runtime.get("entry"), runtime,
+                                               vin, record, registration) == native_entity_id)
         tasks = [async_refresh_native_charge_setting(
-            hass, runtime.get("entry"), vin, record.get("entity_id"),
+            hass, runtime.get("entry"), vin, native_entity_id,
             authorize=current, timeout=timeout)]
     else:
         tasks = [refresh_vehicle_sources(hass, vin, timeout=timeout)]

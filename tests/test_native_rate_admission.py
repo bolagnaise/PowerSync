@@ -350,6 +350,55 @@ def test_site_evidence_uses_entry_aware_ble_report(admission, monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('restart', [False, True])
+async def test_ble_unknown_start_reconciles_when_exact_setting_later_recovers(
+    admission, monkeypatch, restart,
+):
+    a = admission
+    now = [NOW]
+    monkeypatch.setattr(a.m.time, 'time', lambda: now[0])
+    a.budget.clock = lambda: now[0]
+    registry = sys.modules['homeassistant.helpers.entity_registry'].async_get(a.hass)
+    for registration in registry.entities.values():
+        registration.platform = 'esphome'
+    a.budget.armed_sites.clear()
+    a.state.state = 'unavailable'
+    # A later request observes the original provider task as completed.
+    assert await asyncio.create_task(a.m.prepare_ev_submission(
+        a.hass, 'switch.car_charge', operation='start'))
+    assert a.budget.managed[VIN]['setting_entity_id'] is None
+    other = '5YJ3E1EA7KF000002'
+    other_record = {
+        'entry_id': 'one', 'site': 'site', 'identity': 'esphome:provider:other:amps',
+        'entity_id': 'number.other_charging_amps', 'setting_entity_id': None,
+        'target_amps': 10, 'target_w': 2300, 'reserved_w': 2300,
+        'submitted_at': NOW, 'operation': 'rate', 'uncertain': True,
+    }
+    assert await a.budget.admit_managed(other, other_record, {}, lambda: True)
+    before_other = deepcopy(a.budget.managed[other])
+    if restart:
+        a.budget = a.b.SharedRateBudget(a.store, clock=lambda: now[0])
+        await a.budget.load()
+        a.hass.data[a.b.RUNTIME_KEY] = a.budget
+
+    # The exact bridge's setting was unavailable at Start but is measured now.
+    # A fresh stopped report alone must still not retire the retained demand.
+    a.charge.update(charging_state='Stopped', charger_actual_current=0, charger_power=0)
+    for index in range(2):
+        now[0] += 4
+        a.charge['timestamp'] = now[0]
+        a.local.last_success_ts = now[0]
+        a.state.last_reported = datetime.fromtimestamp(now[0], timezone.utc)
+        a.state.state = '10'
+        await a.m.refresh_managed_records(a.hass, a.budget)
+        if index == 0:
+            assert VIN in a.budget.managed
+    assert VIN not in a.budget.managed
+    assert a.budget.managed[other] == before_other
+    assert a.store.data['managed'][other] == before_other
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize('platform', ['esphome', 'tesla_fleet'])
 @pytest.mark.parametrize('operation', ['start', 'rate'])
 @pytest.mark.parametrize('restart', [False, True])
@@ -941,3 +990,178 @@ async def test_boost_expiry_keeps_zero_current_cleanup_available(admission):
     assert await a.m.prepare_ev_submission(a.hass, a.state.entity_id, operation='rate', amps=0)
     a.hass.data.pop(a.b.RUNTIME_KEY)
     assert await a.m.prepare_ev_submission(a.hass, 'switch.car_charge', operation='stop')
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('case', [
+    'recovered', 'unremembered_source', 'wrong_device', 'wrong_entry', 'disabled',
+    'blocked_route', 'sidecar_hold', 'stale_native', 'missing_native_setting',
+    'charging', 'nonzero_power', 'active_owner', 'active_task',
+    'route_changed_during_save', 'provider_changed_during_save',
+])
+async def test_ble_retained_demand_uses_only_exact_recovered_native_proof(
+    admission, monkeypatch, case,
+):
+    a = admission
+    now = [NOW]
+    monkeypatch.setattr(a.m.time, 'time', lambda: now[0])
+    a.budget.clock = lambda: now[0]
+    registry = sys.modules['homeassistant.helpers.entity_registry'].async_get(a.hass)
+    switch = registry.entities['switch.car_charge']
+    switch.platform = 'esphome'
+    native = registry.entities[a.state.entity_id]
+    route = {'kind': 'ha', 'entity_id': native.entity_id}
+    recovery = importlib.import_module(a.m.__package__ + '.tesla_ev_recovery')
+    monkeypatch.setattr(recovery, 'get_vehicle_route', lambda *_: dict(route))
+    a.budget.armed_sites.clear()
+    record = {
+        'entry_id': 'one', 'site': 'site', 'identity': a.m._identity(switch),
+        'entity_id': switch.entity_id, 'setting_entity_id': None,
+        'target_amps': 80, 'target_w': 19200, 'reserved_w': 19200,
+        'submitted_at': NOW - 10, 'operation': 'start', 'uncertain': True,
+        'identities': [a.m._identity(switch), a.m._identity(native)],
+    }
+    # Load the durable history left by a BLE -> native recovery handoff.
+    a.store.data = {'entries': {}, 'managed': {VIN: deepcopy(record)}}
+    a.budget = a.b.SharedRateBudget(a.store, clock=lambda: now[0])
+    await a.budget.load()
+    a.hass.data[a.b.RUNTIME_KEY] = a.budget
+    a.charge.update(charging_state='Stopped', charger_actual_current=0, charger_power=0)
+    # The recovered native document, not an optimistic HA number, supplies proof.
+    a.state.state = 'unavailable'
+    a.state.last_reported = datetime.fromtimestamp(NOW - 300, timezone.utc)
+    if case == 'unremembered_source':
+        a.budget.managed[VIN]['identities'] = [a.m._identity(switch)]
+    elif case == 'wrong_device':
+        native.device_id = 'other'
+    elif case == 'wrong_entry':
+        native.config_entry_id = 'other'
+    elif case == 'disabled':
+        native.disabled_by = 'user'
+    elif case == 'blocked_route':
+        route['kind'] = 'blocked'
+    elif case == 'sidecar_hold':
+        a.runtime['_tesla_ev_recovery_sidecar_hold'] = object()
+    elif case == 'missing_native_setting':
+        a.charge.pop('charge_current_request')
+    elif case == 'charging':
+        a.charge['charging_state'] = 'Charging'
+    elif case == 'nonzero_power':
+        a.charge['charger_power'] = 1
+    elif case == 'active_owner':
+        a.runtime['ev_ownership'] = {VIN: {'owner': 'powersync'}}
+    pending = None
+    if case == 'active_task':
+        pending = asyncio.create_task(asyncio.Event().wait())
+        a.budget.managed_tasks[VIN] = pending
+    try:
+        for index in range(2):
+            now[0] += 4
+            a.charge['timestamp'] = now[0] - (30 if case == 'stale_native' else 0)
+            a.local.last_success_ts = now[0]
+            if index == 1 and case == 'route_changed_during_save':
+                a.store.hook = lambda: route.update(kind='blocked')
+            elif index == 1 and case == 'provider_changed_during_save':
+                a.store.hook = lambda: setattr(native, 'unique_id', 'replacement')
+            await a.m.refresh_managed_records(a.hass, a.budget)
+            if index == 0:
+                assert VIN in a.budget.managed
+        assert (VIN not in a.budget.managed) is (case == 'recovered')
+        assert (VIN not in a.store.data['managed']) is (case == 'recovered')
+    finally:
+        if pending is not None:
+            pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('case', ['missing', 'wrong_device', 'wrong_entry', 'wrong_platform', 'disabled', 'stale'])
+async def test_later_ble_setting_cannot_reconcile_from_ambiguous_or_stale_entity(
+    admission, monkeypatch, case,
+):
+    a = admission
+    now = [NOW]
+    monkeypatch.setattr(a.m.time, 'time', lambda: now[0])
+    a.budget.clock = lambda: now[0]
+    registry = sys.modules['homeassistant.helpers.entity_registry'].async_get(a.hass)
+    for registration in registry.entities.values():
+        registration.platform = 'esphome'
+    a.budget.armed_sites.clear()
+    a.state.state = 'unavailable'
+    assert await asyncio.create_task(a.m.prepare_ev_submission(
+        a.hass, 'switch.car_charge', operation='start'))
+    a.charge.update(charging_state='Stopped', charger_actual_current=0, charger_power=0)
+    number = registry.entities[a.state.entity_id]
+    if case == 'wrong_device':
+        number.device_id = 'other'
+    elif case == 'wrong_entry':
+        number.config_entry_id = 'other'
+    elif case == 'wrong_platform':
+        number.platform = 'teslemetry'
+    elif case == 'disabled':
+        number.disabled_by = 'user'
+    for _ in range(2):
+        now[0] += 4
+        a.charge['timestamp'] = now[0]
+        a.local.last_success_ts = now[0]
+        a.state.last_reported = datetime.fromtimestamp(now[0] - (30 if case == 'stale' else 0), timezone.utc)
+        a.state.state = 'unavailable' if case == 'missing' else '10'
+        await a.m.refresh_managed_records(a.hass, a.budget)
+    assert VIN in a.budget.managed
+    assert a.budget.managed[VIN]['uncertain'] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('source_domain', ['tesla_fleet', 'teslemetry'])
+async def test_native_max_reconciles_recovered_ble_record_using_two_exact_native_reads(
+    admission, monkeypatch, source_domain,
+):
+    a = admission
+    now = [NOW]
+    monkeypatch.setattr(a.m.time, 'time', lambda: now[0])
+    registry = sys.modules['homeassistant.helpers.entity_registry'].async_get(a.hass)
+    number = registry.entities[a.state.entity_id]
+    number.platform = source_domain
+    switch = registry.entities['switch.car_charge']
+    switch.platform = 'esphome'
+    a.provider.runtime_data.vehicles[0].device.identifiers = {(source_domain, VIN)}
+    a.hass.config_entries.async_entries = lambda domain: [a.provider] if domain == source_domain else []
+    recovery = importlib.import_module(a.m.__package__ + '.tesla_ev_recovery')
+    monkeypatch.setattr(recovery, 'get_vehicle_route', lambda *_: {'kind': 'ha', 'entity_id': number.entity_id})
+    record = {
+        'entry_id': 'one', 'site': 'site', 'identity': a.m._identity(switch),
+        'entity_id': switch.entity_id, 'setting_entity_id': None,
+        'target_amps': 80, 'target_w': 19200, 'reserved_w': 19200,
+        'submitted_at': NOW - 10, 'operation': 'start', 'uncertain': True,
+        'identities': [a.m._identity(switch), a.m._identity(number)],
+    }
+    a.store.data = {'entries': {}, 'managed': {VIN: record}}
+    a.budget = a.b.SharedRateBudget(a.store, clock=lambda: now[0])
+    await a.budget.load()
+    a.hass.data[a.b.RUNTIME_KEY] = a.budget
+    a.state.state = 'unavailable'
+    a.state.last_reported = datetime.fromtimestamp(NOW - 300, timezone.utc)
+    calls = []
+
+    async def provider_refresh():
+        calls.append(source_domain)
+        now[0] += 1
+        a.charge.update(timestamp=now[0], charging_state='Stopped', charger_actual_current=0,
+                        charger_power=0, charge_current_request=10)
+
+    async def meter_refresh():
+        calls.append('meter')
+        now[0] += 1
+        a.local.last_success_ts = now[0]
+
+    async def advance(seconds):
+        now[0] += seconds
+
+    monkeypatch.setattr(a.m.asyncio, 'sleep', advance)
+
+    a.provider.runtime_data.vehicles[0].coordinator.async_request_refresh = provider_refresh
+    a.local.async_request_refresh = meter_refresh
+    assert await a.m.reconcile_managed_for_native_max(a.hass, a.budget, 'site', settle_seconds=3)
+    assert VIN not in a.budget.managed
+    assert calls.count(source_domain) == 2
+    assert calls.count('meter') == 2
