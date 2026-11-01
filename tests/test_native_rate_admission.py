@@ -44,10 +44,14 @@ def admission(monkeypatch):
     registry = SimpleNamespace(entities={number.entity_id: number, switch.entity_id: switch})
     registry.async_get = registry.entities.get
     er = ModuleType('homeassistant.helpers.entity_registry'); er.async_get = lambda _: registry
+    dr = ModuleType('homeassistant.helpers.device_registry')
+    dr.async_get = lambda hass: getattr(hass, 'device_registry', None)
     ha = ModuleType('homeassistant'); helpers = ModuleType('homeassistant.helpers')
-    ha.__path__ = []; helpers.__path__ = []; ha.helpers = helpers; helpers.entity_registry = er
+    ha.__path__ = []; helpers.__path__ = []; ha.helpers = helpers
+    helpers.entity_registry = er; helpers.device_registry = dr
     for name, module in [('homeassistant',ha), ('homeassistant.helpers',helpers),
-                         ('homeassistant.helpers.entity_registry',er)]:
+                         ('homeassistant.helpers.entity_registry',er),
+                         ('homeassistant.helpers.device_registry',dr)]:
         monkeypatch.setitem(sys.modules, name, module)
     charge = {'timestamp': NOW, 'charger_voltage': 230, 'charger_phases': 1,
               'charge_current_request': 10, 'charger_power': 2.3,
@@ -1197,6 +1201,10 @@ async def test_native_max_reconciles_recovered_ble_record_using_two_exact_native
 
     a.provider.runtime_data.vehicles[0].coordinator.async_request_refresh = provider_refresh
     a.local.async_request_refresh = meter_refresh
+    if device_info:
+        telemetry = importlib.import_module(a.m.__package__ + '.native_rate_telemetry')
+        assert telemetry._native_charge_source(a.hass, VIN, number.entity_id) is not None
+        assert telemetry.native_charge_setting(a.hass, VIN, number.entity_id) is not None
     assert await a.m.reconcile_managed_for_native_max(a.hass, a.budget, 'site', settle_seconds=3)
     assert VIN not in a.budget.managed
     assert calls.count(source_domain) == 2
