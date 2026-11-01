@@ -241,6 +241,81 @@ def _begin(ticket):
 
 
 @pytest.mark.asyncio
+async def test_modern_cleanup_stop_writes_once_after_attempt_persist_refusal(monkeypatch):
+    hass, entry = _both_native_action_harness()
+    entry.options = {"ev_provider": actions.EV_PROVIDER_TESLEMETRY_BT}
+    _pin_registry_bindings(monkeypatch, hass)
+    commands = importlib.import_module("power_sync.teslemetry_bluetooth_commands")
+    dispatch = importlib.import_module("power_sync.tesla_ev_dispatch")
+    recovery = importlib.import_module("power_sync.tesla_ev_recovery")
+    target = _target("stop")
+    params = {
+        "vehicle_vin": VIN,
+        "_ev_cleanup_only": True,
+        "_quick_control_obligation_id": "modern-obligation",
+    }
+    shared_tracker_calls = []
+    monkeypatch.setattr(commands, "resolve_command", lambda *_: target)
+    monkeypatch.setattr(
+        actions,
+        "_tesla_transport_authority",
+        lambda *args, **kwargs: lambda: True,
+    )
+
+    async def refused(*_args, **_kwargs):
+        raise recovery.RecoveryPersistenceRefused(
+            "journal unavailable",
+            vehicle_id=VIN,
+            route={
+                "kind": "teslemetry_bluetooth",
+                "entity_id": target.entity_id,
+                "vehicle_id": VIN,
+                "cleanup_scope_valid": True,
+                "cleanup_obligation_id": "modern-obligation",
+            },
+        )
+
+    async def shared_tracker(
+        _hass, _entry, refusal, submit, *, vehicle_id, generation
+    ):
+        shared_tracker_calls.append((refusal, vehicle_id, generation))
+        return await submit()
+
+    monkeypatch.setattr(recovery, "async_begin_attempt", refused)
+    monkeypatch.setattr(recovery, "async_track_cleanup_submission", shared_tracker)
+
+    async def dispatch_command(_hass, resolved, **kwargs):
+        assert resolved == target
+        assert await kwargs["before_dispatch"]() is True
+
+        async def provider_call():
+            return await hass.services.async_call(
+                "button", "press", {"entity_id": target.entity_id}, blocking=True
+            )
+
+        await kwargs["submit"](provider_call)
+        return DispatchReceipt(
+            DispatchOutcome.ACCEPTED_UNCONFIRMED,
+            target,
+            submitted_at=time.time(),
+            reason="cleanup fallback",
+        )
+
+    monkeypatch.setattr(dispatch, "async_dispatch_bluetooth_command", dispatch_command)
+    result = await actions._run_modern_teslemetry_bluetooth(
+        hass, entry, params, "stop"
+    )
+
+    assert result == (True, None)
+    assert hass.services.calls == [
+        ("button", "press", {"entity_id": target.entity_id})
+    ]
+    assert len(shared_tracker_calls) == 1
+    assert isinstance(shared_tracker_calls[0][0], recovery.RecoveryPersistenceRefused)
+    assert params["_tesla_cleanup_fallback_consumed"] is True
+
+
+@pytest.mark.asyncio
 async def test_clean_not_sent_returns_false_without_recovery_pending(modern):
     hass, entry, params, _target_value, current, finished = modern
     current["outcome"] = DispatchOutcome.NOT_SENT
@@ -249,6 +324,48 @@ async def test_clean_not_sent_returns_false_without_recovery_pending(modern):
         hass, entry, params, "start") == (True, False)
     assert "_tesla_transport_recovery_pending" not in params
     assert [getattr(value, "value", value) for value in finished] == ["not_sent"]
+
+
+@pytest.mark.asyncio
+async def test_modern_submission_rechecks_deadline_after_ticket_persistence(
+    modern, monkeypatch
+):
+    """The command-only child cannot write after ticket-save authority changes."""
+    hass, entry, params, target, current, finished = modern
+    recovery = importlib.import_module("power_sync.tesla_ev_recovery")
+    dispatch = importlib.import_module("power_sync.tesla_ev_dispatch")
+    params["_boost_start_deadline"] = time.time() + 60
+
+    async def tracked(_hass, _entry, submit, *_args, **_kwargs):
+        params["_boost_start_deadline"] = time.time() - 1
+        return await submit()
+
+    monkeypatch.setattr(recovery, "async_track_submission", tracked)
+
+    async def dispatch_after_before(_hass, resolved, **kwargs):
+        assert resolved == target
+        assert await kwargs["before_dispatch"]() is True
+
+        async def provider_call():
+            return await hass.services.async_call(
+                "button", "press", {"entity_id": target.entity_id}, blocking=True
+            )
+
+        try:
+            await kwargs["submit"](provider_call)
+        except recovery.RecoverySubmissionDenied:
+            return DispatchReceipt(
+                DispatchOutcome.NOT_SENT, target, reason="authority_changed"
+            )
+        raise AssertionError("provider write should have been blocked")
+
+    monkeypatch.setattr(dispatch, "async_dispatch_bluetooth_command", dispatch_after_before)
+
+    assert await actions._run_modern_teslemetry_bluetooth(
+        hass, entry, params, "start"
+    ) == (True, False)
+    assert finished == ["not_sent"]
+    assert hass.services.calls == []
 
 
 @pytest.mark.asyncio

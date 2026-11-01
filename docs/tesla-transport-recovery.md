@@ -35,17 +35,12 @@ the next configured route. An uncertain dispatched command first gets an
 exact vehicle observation. Fresh Charging with measured draw can be adopted
 without another Start, while any outstanding producer hazard is retained.
 
-For ESPHome automatic fallback, PowerSync saves the exact alternate HA
-vehicle identity before dispatch. It durably quarantines the failed bridge,
-turns off that bridge's BLE connection and requires fresh OFF observations
-from the control plus an explicit producer-fence receipt. The common legacy
-`ble_status` sensor reports advertisement presence; neither ON nor OFF proves
-GATT connection state or that queued commands have stopped. A replaced alternate
-entity, missing OFF observation or changed pairing prevents handoff. An accepted
-restart request, key change or arbitrary queue-expiry timer alone proves no
-producer isolation or vehicle outcome.
-The failed bridge stays quarantined; PowerSync does not automatically turn
-its radio back on while its old attempt remains unresolved.
+For an uncertain ESPHome mutation, PowerSync retains the exact attempt and
+quarantines its producer. It supports two recovery mechanisms: an explicit
+nonce-bound producer-fence receipt, or a qualified stock-node restart followed
+by independent vehicle reconciliation. A bridge's advertisement/presence sensor
+cannot supply either proof. A successful service call or reconnect alone is
+also insufficient.
 
 Before a new BLE mutation, the exact bridge must provide fresh known charging
 state and measured current or power. Zero is valid health evidence. Wake status
@@ -78,7 +73,7 @@ current-range retry is covered by the same saved bound. Older attempts without
 these values remain uncertain; today's requested current cannot reconstruct
 what an earlier command submitted.
 
-An uncertain dispatched command is different. Automatic handoff requires an
+One supported isolation mechanism uses an
 ESPHome `sensor.<prefix>_transport_fence` on the same registry device/config
 entry as the command and BLE connection control. Protocol 1 reports `boot_id`,
 an echoed `request_id`, an integer `generation`, booleans `radio_enabled`, `connected` and
@@ -103,17 +98,74 @@ and rollback artifact are needed before changing bridge firmware; their absence
 does not require rebuilding or pairing a bridge that can communicate normally.
 No bridge firmware has been flashed during this investigation.
 
-The reviewed stock bridge source keeps its command/read/write queues in RAM.
-A verified real node restart can reset that producer without a firmware update;
-it cannot undo an action already accepted by the vehicle. A software recovery
-path must separately verify the exact node's reboot, prevent host replay, obtain
-fresh independent vehicle state and account for any remaining possible command
-effect. Automatic stock-restart reconciliation is not enabled in this
-checkpoint; its unused prototype was excluded because node qualification and
-vehicle reconciliation were incomplete. The nonce receipt is the currently
-implemented automatic isolation proof. Missing original build files do not
-prevent ordinary Wake,
-healthy BLE control, prewrite fallback or an operational restart.
+The supported stock restart path verifies the configured VIN, exact enabled
+registry entities, ESPHome runtime, inspected source profile and host submission
+contract. It revokes the old command generation, drains that vehicle's actual
+provider submission tasks, and records each phase before effects. A real node
+disconnect/reconnect, newly published low uptime and a subsequent advancing
+uptime sample must all belong to that same producer. Missing uptime, an
+unsupported profile, a rebind or a failed save leaves recovery held. Failure
+also attempts to contain the radio; it does not claim containment succeeded.
+Original YAML or a firmware rebuild is not required for this supported Restart
+operation.
+
+The initial stock profiles cover the two reviewed project/ESPHome pairs:
+`PedroKTFC.esphome-tesla-ble` 2026.2.0 / ESPHome 2026.1.5, and project 2026.8.0 /
+ESPHome 2026.6.5. Host submission qualification is currently HA 2026.10.4 with
+`aioesphomeapi` 46.6.0. These are supported source and runtime profiles, not a
+claim of cryptographic binary attestation. Other versions remain held unless
+another implemented producer-isolation mechanism qualifies. Profile expansion
+requires source review and the same runtime checks.
+
+A reboot retires RAM queues; it cannot undo a command already accepted by the
+car. Recovery separately reads the exact configured native Fleet or Teslemetry
+cloud charge-state endpoint using HA's existing authenticated client and refresh
+lock. It consumes the returned cloud document rather than the coordinator's
+mixed stream cache or the vehicle's command router. Requested amps, charge
+limit, charge state and measured power require native source timestamps and
+field provenance. Two advancing observations must agree on requested settings
+and settled charging state. Recovery does not issue Start or change a limit to
+manufacture convergence. The original delivery outcome stays unknown, while
+separate retirement and present-state evidence allow future ordinary control.
+
+The recovery sidecar (`power_sync.ev_transport_recovery.<entry_id>`) is
+independent of the automation store's legacy projection. It retains incidents,
+generations, attempts, liabilities and essential finite stop obligations.
+Startup hydrates it before charging callbacks. A durable enrollment marker
+prevents a missing established sidecar from looking like a first installation.
+A malformed store or persistence failure holds new positive control. If an
+older public build already removed the original journal, recovery records a
+new evidence-loss incident with surviving facts and missing fields; it never
+invents an old attempt ID or numerical target. That incident requires confirmed
+coverage of all plausible old producers before it can be reconciled.
+
+Automatic recovery preserves the existing controller, current plan allocation
+and absolute deadline. A request interrupted by recovery stays pending; the
+existing controller retries under fresh authority. Stop and expiry remain in
+their existing independent cleanup lanes. Every actual provider handover
+rechecks generation, owner, original deadline and registry binding after
+persistence. Cancellation of a waiter does not cancel or forget an already
+handed-over child service call. Reload never grants authority to replay a saved
+Start.
+
+If a new cleanup journal save fails, a narrowly scoped Stop can still use an
+existing exact durable cleanup obligation or unresolved producer liability. Its
+real service task remains tracked and shielded; a later fresh cleanup retry can
+proceed once that task finishes. Service acceptance retains the original stop
+obligation and uncertain outcomes until physical confirmation and durable
+cleanup. This exception cannot dispatch Start, Rate or Limit, select another
+producer, or replace a newer owner.
+
+The `power_sync.recover_ev_transport` service also exposes this qualified
+recovery for an exact VIN and optional existing incident. It does not clear a
+journal, confirm missing producer scope or bypass normal charging admission.
+
+Source qualification: [2026.2.0 queue declarations](https://github.com/PedroKTFC/esphome-tesla-ble/blob/3906351db4bba7e533ee7c7af13b460306ad5d65/components/tesla_ble_vehicle/tesla_ble_vehicle.h#L578),
+[2026.8.0 source](https://github.com/PedroKTFC/esphome-tesla-ble/tree/00ff23e74da1ec6beebca486898d48745862cd07),
+[HA Teslemetry cloud coordinator](https://github.com/home-assistant/core/blob/2026.10.4/homeassistant/components/teslemetry/coordinator.py),
+[HA Fleet cloud coordinator](https://github.com/home-assistant/core/blob/2026.10.4/homeassistant/components/tesla_fleet/coordinator.py).
+Physical results for this candidate are recorded separately; source and unit
+coverage do not certify the installed bridges or the complete local test matrix.
 
 Fleet and native Teslemetry recovery use an explicit exact-vehicle coordinator
 refresh when needed. This works with automatic Fleet polling disabled and

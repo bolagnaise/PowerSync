@@ -49,6 +49,78 @@ TESLA_TOU_READBACK_EXACT = "exact"
 TESLA_TOU_READBACK_ZERO_NORMALIZED = "tesla_zero_normalized"
 
 
+async def _async_prepare_ev_recovery_lifecycle(hass, entry, automation_store) -> bool:
+    """Hydrate authoritative EV recovery before exposing control callbacks."""
+    from .automations.ev_ownership import (
+        hydrate_ev_recovery_projection,
+        restore_ev_recovery_obligations,
+    )
+    from .tesla_ev_recovery import (
+        async_load_recovery_state,
+        async_update_recovery_obligations,
+        recovery_sidecar_snapshot,
+    )
+
+    runtime = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    if not isinstance(runtime, dict):
+        return False
+    runtime["_ev_recovery_lifecycle_prepared"] = True
+    runtime["_tesla_ev_recovery_sidecar_hold"] = "sidecar_hydration_pending"
+    hydrate_ev_recovery_projection(hass, entry, automation_store)
+    if runtime.get("_tesla_ev_recovery_sidecar_hold") == "legacy_runtime_malformed":
+        return False
+    enrolled = entry.data.get("_tesla_ev_recovery_enrolled") is True
+    try:
+        # A first enrollment must be allowed to create its sidecar before any
+        # established marker is set. A previously enrolled missing Store is a
+        # hold, even when the automation serializer contains an empty journal.
+        ready = await async_load_recovery_state(hass, entry, enrolled=enrolled)
+        if hass.data.get(DOMAIN, {}).get(entry.entry_id) is not runtime:
+            return False
+        if not ready:
+            return False
+        # The loader has established its journal, but finite cleanup and the
+        # durable enrollment marker are still being hydrated. Keep old routed
+        # callbacks fail-closed across the remaining setup awaits too.
+        runtime["_tesla_ev_recovery_sidecar_hold"] = "lifecycle_obligations_hydrating"
+        if not enrolled:
+            runtime["_skip_reload"] = True
+            hass.config_entries.async_update_entry(
+                entry, data={**entry.data, "_tesla_ev_recovery_enrolled": True}
+            )
+            if entry.data.get("_tesla_ev_recovery_enrolled") is not True:
+                runtime["_tesla_ev_recovery_sidecar_hold"] = "enrollment_marker_save_failed"
+                return False
+        snapshot = recovery_sidecar_snapshot(hass, entry)
+        obligations = snapshot.get("obligations") if isinstance(snapshot, Mapping) else None
+        if not isinstance(obligations, Mapping):
+            runtime["_tesla_ev_recovery_sidecar_hold"] = "finite_obligations_malformed"
+            return False
+        # Missing families can import surviving legacy facts once. An existing
+        # empty family is authoritative and must not resurrect an older lease.
+        missing = {
+            key: copy.deepcopy(runtime.get(key, {}))
+            for key in ("ev_boost_sessions", "ev_quick_control_obligations")
+            if key not in obligations
+        }
+        if missing and not await async_update_recovery_obligations(hass, entry, missing):
+            runtime["_tesla_ev_recovery_sidecar_hold"] = "finite_obligations_import_failed"
+            return False
+        if hass.data.get(DOMAIN, {}).get(entry.entry_id) is not runtime:
+            return False
+        ready = restore_ev_recovery_obligations(hass, entry)
+        if ready and runtime.get("_tesla_ev_recovery_sidecar_hold") == "lifecycle_obligations_hydrating":
+            runtime.pop("_tesla_ev_recovery_sidecar_hold", None)
+        return ready
+    except asyncio.CancelledError:
+        runtime["_tesla_ev_recovery_sidecar_hold"] = "sidecar_hydration_cancelled"
+        raise
+    except Exception:
+        runtime["_tesla_ev_recovery_sidecar_hold"] = "sidecar_hydration_failed"
+        _LOGGER.exception("EV recovery hydration failed; positive vehicle control remains blocked")
+        return False
+
+
 async def _tesla_grid_export_write_result(
     response: Any,
 ) -> tuple[bool, str | None]:
@@ -26006,6 +26078,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "native_max_startup_pending": True,
     }
 
+    # The automation store is only a legacy projection. Load its surviving
+    # recovery facts into this new runtime, then hydrate the authoritative
+    # sidecar before native-rate admission or any new callbacks/tasks.
+    ev_recovery_runtime = hass.data[DOMAIN][entry.entry_id]
+    await _async_prepare_ev_recovery_lifecycle(hass, entry, automation_store)
+    if hass.data.get(DOMAIN, {}).get(entry.entry_id) is not ev_recovery_runtime:
+        return False
+
     from .tesla_native_rate import async_prepare as _prepare_tesla_native_rate
     await _prepare_tesla_native_rate(hass, entry)
 
@@ -45166,6 +45246,40 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     handle_force_discharge = _serialized_force_discharge
 
+    async def handle_recover_ev_transport(call: ServiceCall) -> dict[str, Any]:
+        """Run the scoped recovery coordinator for one selected physical VIN."""
+        from .tesla_ev_observation import _canonical_vin
+        from .tesla_ev_recovery import recovery_sidecar_snapshot
+        from .tesla_ev_stock_recovery import async_recover_vehicle_transport
+
+        vin = _canonical_vin(call.data.get("vin"))
+        incident_id = call.data.get("incident_id")
+        if vin is None:
+            return {"success": False, "error": "invalid_vin", "recovery": None}
+        if incident_id is not None and (
+            not isinstance(incident_id, str) or not incident_id.strip()
+        ):
+            return {"success": False, "vin": vin, "error": "invalid_incident_id", "recovery": None}
+        if not isinstance(hass.data.get(DOMAIN, {}).get(entry.entry_id), dict):
+            return {"success": False, "vin": vin, "error": "entry_unavailable", "recovery": None}
+        try:
+            success = await async_recover_vehicle_transport(
+                hass, entry, vin, incident_id=incident_id
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _LOGGER.exception("EV transport recovery remains held")
+            return {
+                "success": False, "vin": vin, "error": "recovery_failed",
+                "recovery": recovery_sidecar_snapshot(hass, entry),
+            }
+        return {
+            "success": success is True,
+            "vin": vin,
+            "recovery": recovery_sidecar_snapshot(hass, entry),
+        }
+
     from .licensing.entry_routing import register_handlers, routed_handler
     if amber_smartshift_coordinator:
         from .amber_smartshift.controls import handlers as amber_handlers
@@ -45209,6 +45323,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         'hold_battery_soc': handle_hold_battery_soc,
         'resume_powerwall_settings': handle_resume_powerwall_settings,
         'recover_max_backup': handle_recover_max_backup,
+        'recover_ev_transport': handle_recover_ev_transport,
         'set_operation_mode': handle_set_operation_mode,
         'set_grid_charging': handle_set_grid_charging,
         'set_grid_export': handle_set_grid_export,
@@ -45221,6 +45336,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.services.async_register(
         DOMAIN, "resume_powerwall_settings",
         routed_handler(hass, entry.entry_id, "resume_powerwall_settings", handle_resume_powerwall_settings),
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+    hass.services.async_register(
+        DOMAIN, "recover_ev_transport",
+        routed_handler(hass, entry.entry_id, "recover_ev_transport", handle_recover_ev_transport),
         supports_response=SupportsResponse.OPTIONAL,
     )
     hass.services.async_register(
@@ -51488,6 +51608,24 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             await persist_ev_runtime_state(hass, entry, automation_store)
     except Exception as err:
         _LOGGER.debug("EV runtime persist on unload failed: %s", err)
+
+    # Retire this recovery generation and drain durable writes while its
+    # runtime is still installed. Provider/obligation cleanup above must save
+    # first; a late old Store task must not overwrite the replacement setup.
+    if entry_data.get("_ev_recovery_lifecycle_prepared") is True:
+        try:
+            from .tesla_ev_recovery import async_shutdown_recovery_state
+
+            if not await async_shutdown_recovery_state(hass, entry, entry_data):
+                # The shutdown API has drained its Store tasks and retired
+                # this generation even when its final save failed. Keep it
+                # retired; a new setup must hydrate the durable state or hold.
+                _LOGGER.error("EV recovery shutdown persistence remains pending; retired runtime is unloading")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _LOGGER.exception("EV recovery shutdown remains pending; integration unload withheld")
+            return False
 
     # Invalidate this entry's dynamic EV callbacks after persistence and
     # before the hass.data mirror is removed.  The cleanup is command-neutral:

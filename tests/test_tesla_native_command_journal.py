@@ -5,6 +5,7 @@ import asyncio
 from copy import deepcopy
 import time
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -14,6 +15,7 @@ from test_ev_ocpp_actions import _Entry, _Hass, _State, actions
 VIN = "5YJ3E1EA7NF0000A1"
 ENTITY = "switch.car_charge"
 AMPS_ENTITY = "number.car_charge_current"
+LIMIT_ENTITY = "number.car_charge_limit"
 
 
 def _native_hass(monkeypatch, platform: str, entity_id=ENTITY):
@@ -145,6 +147,47 @@ async def test_native_ack_is_journaled_without_physical_confirmation(monkeypatch
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("mutation", ["authority", "deadline", "registry"])
+async def test_native_submission_rechecks_scope_after_ticket_persistence(
+    monkeypatch, mutation
+):
+    """A scope change while the durable ticket saves must block the HA write."""
+    hass = _native_hass(monkeypatch, "tesla_fleet")
+    finished = _journal_mocks(monkeypatch)
+    import importlib
+
+    recovery = importlib.import_module("power_sync.tesla_ev_recovery")
+    authority_state = {"allowed": True}
+    params = {"vehicle_vin": VIN, "_boost_start_deadline": time.time() + 60}
+
+    async def tracked(_hass, _entry, submit, *_args, **_kwargs):
+        if mutation == "authority":
+            authority_state["allowed"] = False
+        elif mutation == "deadline":
+            params["_boost_start_deadline"] = time.time() - 1
+        else:
+            hass.entity_registry.entities[ENTITY].unique_id = "rebound-provider"
+        return await submit()
+
+    monkeypatch.setattr(recovery, "async_track_submission", tracked)
+    result = await actions._run_native_tesla_service_command(
+        hass,
+        _Entry(),
+        params,
+        "start",
+        ENTITY,
+        "switch",
+        "turn_on",
+        {"entity_id": ENTITY},
+        lambda: authority_state["allowed"],
+    )
+
+    assert result.outcome == "not_sent"
+    assert finished == ["not_sent"]
+    assert hass.services.calls == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("operation", "domain", "service", "data"),
     (
@@ -237,6 +280,341 @@ async def test_native_write_is_fenced_when_journal_persist_does_not_admit(monkey
     result = await actions._run_native_tesla_service_command(
         hass, _Entry(), params, "start", ENTITY, "switch", "turn_on",
         {"entity_id": ENTITY}, lambda: True,
+    )
+
+    assert result.outcome == "not_sent"
+    assert hass.services.calls == []
+
+
+@pytest.mark.asyncio
+async def test_owned_cleanup_stop_writes_once_when_attempt_persist_refused(monkeypatch):
+    """A typed cleanup refusal permits one exact Stop and remains unknown."""
+    hass = _native_hass(monkeypatch, "tesla_fleet")
+    import importlib
+
+    recovery = importlib.import_module("power_sync.tesla_ev_recovery")
+    finished = []
+    shared_tracker_calls = []
+
+    async def refused(*_args, **_kwargs):
+        raise recovery.RecoveryPersistenceRefused(
+            "journal unavailable",
+            vehicle_id=VIN,
+            route={
+                "kind": "ha",
+                "entity_id": ENTITY,
+                "vehicle_id": VIN,
+                "cleanup_scope_valid": True,
+                "cleanup_obligation_id": "obligation-1",
+            },
+        )
+
+    async def finish(*_args, **_kwargs):
+        finished.append(True)
+        return True
+
+    async def shared_tracker(
+        _hass, _entry, refusal, submit, *, vehicle_id, generation
+    ):
+        shared_tracker_calls.append((refusal, vehicle_id, generation))
+        return await submit()
+
+    monkeypatch.setattr(recovery, "async_begin_attempt", refused)
+    monkeypatch.setattr(recovery, "async_finish_attempt", finish)
+    monkeypatch.setattr(recovery, "async_track_cleanup_submission", shared_tracker)
+    params = {
+        "vehicle_vin": VIN,
+        "_ev_cleanup_only": True,
+        "_quick_control_obligation_id": "obligation-1",
+    }
+
+    result = await actions._run_native_tesla_service_command(
+        hass,
+        _Entry(),
+        params,
+        "stop",
+        ENTITY,
+        "switch",
+        "turn_off",
+        {"entity_id": ENTITY},
+        lambda: True,
+    )
+
+    assert result.outcome == "sent_unknown"
+    assert finished == []
+    assert hass.services.calls == [("switch", "turn_off", {"entity_id": ENTITY})]
+    assert len(shared_tracker_calls) == 1
+    assert isinstance(shared_tracker_calls[0][0], recovery.RecoveryPersistenceRefused)
+    assert params["_tesla_cleanup_fallback_consumed"] is True
+
+
+@pytest.mark.asyncio
+async def test_native_cleanup_handles_core_persistence_refusal_exception(monkeypatch):
+    """The production core raises its typed refusal, rather than a ticket."""
+    hass = _native_hass(monkeypatch, "tesla_fleet")
+    import importlib
+
+    recovery = importlib.import_module("power_sync.tesla_ev_recovery")
+    calls = []
+    shared_tracker_calls = []
+
+    async def refused(*_args, **kwargs):
+        assert kwargs["allow_persist_refused_cleanup"] is True
+        assert kwargs["cleanup_obligation_token"] == "obligation-exception"
+        raise recovery.RecoveryPersistenceRefused(
+            "journal unavailable",
+            vehicle_id=VIN,
+            route={
+                "kind": "ha",
+                "entity_id": ENTITY,
+                "cleanup_obligation_id": "obligation-exception",
+            },
+        )
+
+    async def service_call(*_args, **_kwargs):
+        calls.append(True)
+
+    async def shared_tracker(
+        _hass, _entry, refusal, submit, *, vehicle_id, generation
+    ):
+        shared_tracker_calls.append((refusal, vehicle_id, generation))
+        return await submit()
+
+    monkeypatch.setattr(recovery, "async_begin_attempt", refused)
+    monkeypatch.setattr(
+        recovery, "async_track_cleanup_submission", shared_tracker,
+        raising=False,
+    )
+    monkeypatch.setattr(hass.services, "async_call", service_call)
+    params = {
+        "vehicle_vin": VIN,
+        "_ev_cleanup_only": True,
+        "_quick_control_obligation_id": "obligation-exception",
+    }
+
+    result = await actions._run_native_tesla_service_command(
+        hass,
+        _Entry(),
+        params,
+        "stop",
+        ENTITY,
+        "switch",
+        "turn_off",
+        {"entity_id": ENTITY},
+        lambda: True,
+    )
+
+    assert result.outcome == "sent_unknown"
+    assert calls == [True]
+    assert len(shared_tracker_calls) == 1
+    assert shared_tracker_calls[0][1:] == (VIN, 0)
+    assert params["_tesla_cleanup_fallback_consumed"] is True
+
+
+@pytest.mark.asyncio
+async def test_legacy_ble_cleanup_stop_writes_once_when_attempt_persist_refused(monkeypatch):
+    hass = _Hass(
+        [_State("switch.ble_charge", "on")],
+        {
+            "switch.ble_charge": SimpleNamespace(
+                entity_id="switch.ble_charge",
+                platform="esphome",
+                config_entry_id="ble-entry",
+                device_id="ble-device",
+                unique_id="ble-charge",
+                disabled_by=None,
+            )
+        },
+        {
+            "ble-device": SimpleNamespace(
+                id="ble-device",
+                identifiers={("esphome", "ble-device")},
+                config_entries={"ble-entry"},
+            )
+        },
+    )
+    import importlib
+
+    recovery = importlib.import_module("power_sync.tesla_ev_recovery")
+    monkeypatch.setattr(actions.er, "async_get", lambda _hass: hass.entity_registry)
+    monkeypatch.setattr(actions.dr, "async_get", lambda _hass: hass.device_registry)
+    shared_tracker_calls = []
+
+    async def refused(*_args, **_kwargs):
+        raise recovery.RecoveryPersistenceRefused(
+            "journal unavailable",
+            vehicle_id=VIN,
+            route={
+                "kind": "ble",
+                "prefix": "ble",
+                "entity_id": "switch.ble_charge",
+                "vehicle_id": VIN,
+                "cleanup_scope_valid": True,
+                "cleanup_obligation_id": "obligation-ble",
+            },
+        )
+
+    async def shared_tracker(
+        _hass, _entry, refusal, submit, *, vehicle_id, generation
+    ):
+        shared_tracker_calls.append((refusal, vehicle_id, generation))
+        return await submit()
+
+    monkeypatch.setattr(recovery, "async_begin_attempt", refused)
+    monkeypatch.setattr(recovery, "async_track_cleanup_submission", shared_tracker)
+    monkeypatch.setattr(
+        actions,
+        "_tesla_transport_authority",
+        lambda *_args, **_kwargs: lambda: True,
+    )
+    params = {
+        "vehicle_vin": VIN,
+        "_ev_cleanup_only": True,
+        "_quick_control_obligation_id": "obligation-ble",
+    }
+
+    result = await actions._run_ble_transport_command(
+        hass,
+        _Entry(),
+        params,
+        "ble",
+        "stop",
+        lambda: actions._tesla_call_service(
+            hass,
+            "switch",
+            "turn_off",
+            {"entity_id": "switch.ble_charge"},
+        ),
+    )
+
+    assert result == (None, False)
+    assert hass.services.calls == [
+        ("switch", "turn_off", {"entity_id": "switch.ble_charge"})
+    ]
+    assert len(shared_tracker_calls) == 1
+    assert isinstance(shared_tracker_calls[0][0], recovery.RecoveryPersistenceRefused)
+    assert params["_tesla_cleanup_fallback_consumed"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "params,route",
+    [
+        (
+            {
+                "vehicle_vin": VIN,
+                "_ev_cleanup_only": True,
+                "_quick_control_obligation_id": "wrong-token",
+            },
+            {"cleanup_persistence_refused": True, "cleanup_obligation_id": "right-token"},
+        ),
+        (
+            {"vehicle_vin": VIN, "_ev_cleanup_only": True},
+            {"cleanup_persistence_refused": True},
+        ),
+    ],
+    ids=["wrong-obligation", "missing-exact-scope"],
+)
+async def test_cleanup_persistence_refusal_never_writes_without_matching_scope(
+    monkeypatch, params, route
+):
+    hass = _native_hass(monkeypatch, "tesla_fleet")
+    import importlib
+
+    recovery = importlib.import_module("power_sync.tesla_ev_recovery")
+    ticket = SimpleNamespace(cleanup_persistence_refused=True, route=route)
+
+    async def refused(*_args, **_kwargs):
+        return ticket
+
+    monkeypatch.setattr(recovery, "async_begin_attempt", refused)
+    result = await actions._run_native_tesla_service_command(
+        hass,
+        _Entry(),
+        params,
+        "stop",
+        ENTITY,
+        "switch",
+        "turn_off",
+        {"entity_id": ENTITY},
+        lambda: True,
+    )
+
+    assert result.outcome == "not_sent"
+    assert hass.services.calls == []
+
+
+@pytest.mark.asyncio
+async def test_cleanup_persistence_refusal_rejects_native_rebind_before_write(monkeypatch):
+    hass = _native_hass(monkeypatch, "tesla_fleet")
+    import importlib
+
+    recovery = importlib.import_module("power_sync.tesla_ev_recovery")
+    ticket = SimpleNamespace(
+        cleanup_persistence_refused=True,
+        route={
+            "cleanup_persistence_refused": True,
+            "cleanup_obligation_id": "obligation-1",
+        },
+    )
+
+    async def refused(*_args, **_kwargs):
+        hass.entity_registry.entities[ENTITY].unique_id = "replacement-provider"
+        return ticket
+
+    monkeypatch.setattr(recovery, "async_begin_attempt", refused)
+    result = await actions._run_native_tesla_service_command(
+        hass,
+        _Entry(),
+        {
+            "vehicle_vin": VIN,
+            "_ev_cleanup_only": True,
+            "_quick_control_obligation_id": "obligation-1",
+        },
+        "stop",
+        ENTITY,
+        "switch",
+        "turn_off",
+        {"entity_id": ENTITY},
+        lambda: True,
+    )
+
+    assert result.outcome == "not_sent"
+    assert hass.services.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation,service_data", [
+    ("start", {"entity_id": ENTITY}),
+    ("rate", {"entity_id": AMPS_ENTITY, "value": 8}),
+    ("limit", {"entity_id": LIMIT_ENTITY, "value": 80}),
+])
+async def test_cleanup_persistence_refusal_never_falls_back_to_positive_write(
+    monkeypatch, operation, service_data
+):
+    hass = _native_hass(monkeypatch, "tesla_fleet", service_data["entity_id"])
+    import importlib
+
+    recovery = importlib.import_module("power_sync.tesla_ev_recovery")
+    ticket = SimpleNamespace(
+        cleanup_persistence_refused=True,
+        route={"cleanup_persistence_refused": True, "cleanup_scope_valid": True},
+    )
+
+    async def refused(*_args, **_kwargs):
+        return ticket
+
+    monkeypatch.setattr(recovery, "async_begin_attempt", refused)
+    result = await actions._run_native_tesla_service_command(
+        hass,
+        _Entry(),
+        {"vehicle_vin": VIN, "_ev_cleanup_only": True},
+        operation,
+        service_data["entity_id"],
+        "switch" if operation == "start" else "number",
+        "turn_on" if operation == "start" else "set_value",
+        service_data,
+        lambda: True,
     )
 
     assert result.outcome == "not_sent"
@@ -800,6 +1178,110 @@ async def test_native_start_anchor_prevents_ble_branch_for_initial_rate(monkeypa
     assert await actions._action_set_ev_charging_amps.__wrapped__(
         hass, _Entry(), params
     ) is True
+
+
+@pytest.mark.asyncio
+async def test_stock_recovery_defers_old_positive_and_allows_fresh_route_retry(monkeypatch):
+    """A successful stock reset cannot reuse the old positive authority."""
+    import importlib
+
+    hass = _native_hass(monkeypatch, "tesla_fleet")
+    runtime = hass.data["power_sync"]["entry-1"]
+    runtime["_tesla_ev_recovery_sidecar_loaded"] = True
+    entry = _Entry()
+    recovery = importlib.import_module("power_sync.tesla_ev_recovery")
+    stock = importlib.import_module("power_sync.tesla_ev_stock_recovery")
+    routes = iter([
+        {"kind": "blocked", "vehicle_id": VIN, "reason": "ble_recovery"},
+        None,  # Route re-read after recovery; current request still defers.
+        None,  # A fresh controller request can select the new route.
+    ])
+    monkeypatch.setattr(recovery, "get_vehicle_route", lambda *_args: next(routes))
+    monkeypatch.setattr(recovery, "pending_ble_attempt", lambda *_args: SimpleNamespace(
+        attempt_id="attempt-1"
+    ))
+    monkeypatch.setattr(recovery, "async_isolate_ble", AsyncMock(return_value=False))
+    monkeypatch.setattr(recovery, "recovery_sidecar_snapshot", lambda *_args: {"incidents": {}})
+    monkeypatch.setattr(actions, "_tesla_transport_authority", lambda *_args, **_kwargs: lambda: True)
+    recover = AsyncMock(return_value=True)
+    monkeypatch.setattr(stock, "async_recover_vehicle_transport", recover)
+
+    params = {"vehicle_vin": VIN}
+    first = await actions._tesla_transport_route(hass, entry, params, "rate")
+
+    assert first["kind"] == "blocked"
+    assert first["reason"] == "ble_recovery"
+    assert params["_tesla_transport_recovery_pending"] is True
+    assert params["_tesla_stock_recovery_attempted"] is True
+    recover.assert_awaited_once_with(hass, entry, VIN, incident_id=None)
+    assert hass.services.calls == []
+
+    fresh_params = {"vehicle_vin": VIN}
+    assert await actions._tesla_transport_route(hass, entry, fresh_params, "rate") is None
+    assert recover.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_stock_recovery_failure_keeps_sidecar_incident_blocked_without_ledger(monkeypatch):
+    """A sidecar-only incident remains blocked when reset qualification fails."""
+    import importlib
+
+    hass = _native_hass(monkeypatch, "tesla_fleet")
+    hass.data["power_sync"]["entry-1"]["_tesla_ev_recovery_sidecar_loaded"] = True
+    entry = _Entry()
+    recovery = importlib.import_module("power_sync.tesla_ev_recovery")
+    stock = importlib.import_module("power_sync.tesla_ev_stock_recovery")
+    monkeypatch.setattr(recovery, "get_vehicle_route", lambda *_args: None)
+    monkeypatch.setattr(recovery, "pending_ble_attempt", lambda *_args: None)
+    monkeypatch.setattr(recovery, "recovery_sidecar_snapshot", lambda *_args: {
+        "incidents": {
+            "incident-1": {
+                "phase": "held",
+                "current_candidate_vehicles": [VIN],
+            },
+        },
+    })
+    monkeypatch.setattr(actions, "_tesla_transport_authority", lambda *_args, **_kwargs: lambda: True)
+    recover = AsyncMock(return_value=False)
+    monkeypatch.setattr(stock, "async_recover_vehicle_transport", recover)
+
+    params = {"vehicle_vin": VIN}
+    route = await actions._tesla_transport_route(hass, entry, params, "start")
+
+    assert route == {
+        "kind": "blocked", "vehicle_id": VIN, "reason": "stock_recovery_pending",
+    }
+    assert params["_tesla_transport_recovery_pending"] is True
+    assert params["_tesla_stock_recovery_attempted"] is True
+    recover.assert_awaited_once_with(hass, entry, VIN, incident_id="incident-1")
+    assert hass.services.calls == []
+
+
+@pytest.mark.asyncio
+async def test_unenrolled_fixture_never_invokes_stock_recovery(monkeypatch):
+    """Legacy fixtures without the production sidecar retain their old fence."""
+    import importlib
+
+    hass = _native_hass(monkeypatch, "tesla_fleet")
+    entry = _Entry()
+    recovery = importlib.import_module("power_sync.tesla_ev_recovery")
+    stock = importlib.import_module("power_sync.tesla_ev_stock_recovery")
+    blocked = {"kind": "blocked", "vehicle_id": VIN, "reason": "ble_recovery"}
+    monkeypatch.setattr(recovery, "get_vehicle_route", lambda *_args: blocked)
+    monkeypatch.setattr(recovery, "pending_ble_attempt", lambda *_args: SimpleNamespace(
+        attempt_id="attempt-1"
+    ))
+    monkeypatch.setattr(recovery, "async_isolate_ble", AsyncMock(return_value=False))
+    monkeypatch.setattr(recovery, "recovery_sidecar_snapshot", lambda *_args: {"incidents": {}})
+    monkeypatch.setattr(actions, "_tesla_transport_authority", lambda *_args, **_kwargs: lambda: True)
+    recover = AsyncMock(return_value=True)
+    monkeypatch.setattr(stock, "async_recover_vehicle_transport", recover)
+
+    params = {"vehicle_vin": VIN}
+    assert await actions._tesla_transport_route(hass, entry, params, "rate") == blocked
+    assert params["_tesla_transport_recovery_pending"] is True
+    recover.assert_not_awaited()
+    assert hass.services.calls == []
 
 
 async def _async_true(*_args, **_kwargs):

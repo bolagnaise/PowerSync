@@ -132,6 +132,56 @@ async def test_unknown_number_entity_is_still_dispatchable(harness):
 
 
 @pytest.mark.asyncio
+async def test_submission_hook_wraps_only_provider_write(harness):
+    """The caller can track the service handoff without wrapping readback."""
+    hass, current = harness
+    target = _target("rate")
+    current["target"] = target
+    current["observation"] = _observation("rate", 16)
+    handed_off = []
+
+    async def submit(provider_call):
+        handed_off.append(provider_call)
+        return await provider_call()
+
+    receipt = await dispatch.async_dispatch_bluetooth_command(
+        hass,
+        target,
+        value=16,
+        authorize=lambda: True,
+        before_dispatch=lambda: True,
+        submit=submit,
+    )
+
+    assert receipt.outcome is dispatch.DispatchOutcome.CONFIRMED
+    assert len(handed_off) == 1
+    assert len(hass.services.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_submission_guard_denial_is_not_sent_without_provider_call(harness):
+    hass, current = harness
+    target = _target("rate")
+    current["target"] = target
+    recovery = __import__("power_sync.tesla_ev_recovery", fromlist=["RecoverySubmissionDenied"])
+
+    async def submit(_provider_call):
+        raise recovery.RecoverySubmissionDenied("scope changed while ticket saved")
+
+    receipt = await dispatch.async_dispatch_bluetooth_command(
+        hass,
+        target,
+        value=16,
+        authorize=lambda: True,
+        before_dispatch=lambda: True,
+        submit=submit,
+    )
+
+    assert receipt.outcome is dispatch.DispatchOutcome.NOT_SENT
+    assert hass.services.calls == []
+
+
+@pytest.mark.asyncio
 async def test_rate_uses_live_car_maximum_above_upstream_fallback(harness):
     hass, current = harness
     target = _target("rate")

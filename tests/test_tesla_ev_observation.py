@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 from datetime import datetime, timezone
 import math
 from pathlib import Path
@@ -826,6 +827,232 @@ def test_invalid_vin_is_rejected_before_provider_discovery():
     assert asyncio.run(observation.async_read_tesla_vehicle(hass, "5YJINVALID")) is None
 
 
+@pytest.fixture
+def independent_source(monkeypatch):
+    """Model HA's separate native cloud coordinator and command router."""
+    now = 2_000_000_000.0
+    monkeypatch.setattr(observation, "time", types.SimpleNamespace(time=lambda: now))
+
+    class Cloud:
+        def __init__(self):
+            self.response = {"vin": VIN_A, **_charge(now)}
+            self.calls = []
+            self.before_return = None
+
+        async def vehicle_data(self, *, endpoints):
+            self.calls.append(endpoints)
+            if self.before_return is not None:
+                await self.before_return()
+            return {"response": deepcopy(self.response)}
+
+    class NativeCoordinator(_Coordinator):
+        def __init__(self):
+            super().__init__(_charge(now - 10))
+            self.api = Cloud()
+            self.lock = asyncio.Lock()
+            self._debounced_refresh = types.SimpleNamespace(async_lock=lambda: self.lock)
+
+    for domain, coordinator_name, api_module, api_name in (
+        ("tesla_fleet", "TeslaFleetVehicleDataCoordinator", "tesla_fleet_api.tesla", "VehicleFleet"),
+        ("teslemetry", "TeslemetryVehicleDataCoordinator", "tesla_fleet_api.teslemetry", "Vehicle"),
+    ):
+        module = types.ModuleType(f"homeassistant.components.{domain}.coordinator")
+        setattr(module, coordinator_name, NativeCoordinator)
+        monkeypatch.setitem(sys.modules, module.__name__, module)
+        module = types.ModuleType(api_module)
+        setattr(module, api_name, Cloud)
+        monkeypatch.setitem(sys.modules, module.__name__, module)
+    const = types.ModuleType("tesla_fleet_api.const")
+    const.VehicleDataEndpoint = types.SimpleNamespace(CHARGE_STATE="charge_state")
+    monkeypatch.setitem(sys.modules, const.__name__, const)
+
+    def make(domain="tesla_fleet"):
+        coordinator = NativeCoordinator()
+        vehicle = _vehicle(VIN_A, coordinator, "device-a", domain)
+        # Native Teslemetry commands can use a BLE/cloud router while the
+        # coordinator retains the separate cloud Vehicle client.
+        vehicle.api = object()
+        entry = _entry("native-entry", [vehicle])
+        hass = _Hass({domain: [entry]})
+        return hass, entry, vehicle, coordinator
+
+    return make
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("domain", ["tesla_fleet", "teslemetry"])
+async def test_independent_read_uses_exact_cloud_payload_not_published_stream(independent_source, domain):
+    hass, _entry, _vehicle, coordinator = independent_source(domain)
+
+    async def stream_race():
+        coordinator.data = _charge(2_000_000_001, requested=99, limit=100)
+
+    coordinator.api.before_return = stream_race
+    result = await observation.async_read_independent_tesla_vehicle(hass, VIN_A)
+
+    assert result is not None
+    assert result.origin == "native_cloud"
+    assert result.domain == domain
+    assert result.requested_current == 16
+    assert result.charge_limit_soc == 80
+    assert result.source_charge_timestamp == 2_000_000_000
+    assert result.field_provenance["requested_current"] == "charge_state.charge_current_request"
+    assert coordinator.api.calls == [["charge_state"]]
+    assert coordinator.refreshes == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fault", ["missing_requested", "actual_only", "missing_limit", "missing_power", "missing_actual", "stale", "wrong_vin"])
+async def test_independent_read_rejects_incomplete_or_wrong_source(independent_source, fault):
+    hass, _entry, _vehicle, coordinator = independent_source()
+    charge = coordinator.api.response["charge_state"]
+    if fault in {"missing_requested", "actual_only"}:
+        charge.pop("charge_current_request")
+        if fault == "actual_only":
+            charge["charger_actual_current"] = 16
+            charge["charger_pilot_current"] = 16
+    elif fault.startswith("missing_"):
+        charge.pop({"missing_limit": "charge_limit_soc", "missing_power": "charger_power", "missing_actual": "charger_actual_current"}[fault])
+    elif fault == "stale":
+        charge["timestamp"] = 1_999_999_990
+    else:
+        coordinator.api.response["vin"] = VIN_B
+    assert await observation.async_read_independent_tesla_vehicle(hass, VIN_A) is None
+
+
+@pytest.mark.asyncio
+async def test_independent_reads_require_advancement_between_reconciliation_reads(independent_source):
+    hass, _entry, _vehicle, coordinator = independent_source()
+    first = await observation.async_read_independent_tesla_vehicle(hass, VIN_A)
+    assert first is not None
+    assert await observation.async_read_independent_tesla_vehicle(hass, VIN_A) is None
+    coordinator.api.response["charge_state"]["timestamp"] += 1
+    later = await observation.async_read_independent_tesla_vehicle(hass, VIN_A, updated_after=first.source_charge_timestamp)
+    assert later is not None
+    assert later.source_charge_timestamp > first.source_charge_timestamp
+
+
+@pytest.mark.asyncio
+async def test_independent_read_waits_for_native_coordinator_lock_and_shares_one_request(independent_source):
+    hass, _entry, _vehicle, coordinator = independent_source("teslemetry")
+    await coordinator.lock.acquire()
+    first = asyncio.create_task(observation.async_read_independent_tesla_vehicle(hass, VIN_A))
+    second = asyncio.create_task(observation.async_read_independent_tesla_vehicle(hass, VIN_A))
+    await asyncio.sleep(0)
+    assert coordinator.api.calls == []
+    coordinator.lock.release()
+    results = await asyncio.wait_for(asyncio.gather(first, second), 1)
+    assert all(result is not None for result in results)
+    assert len(coordinator.api.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_independent_read_rejects_client_replacement_during_cloud_call(independent_source):
+    hass, _entry, _vehicle, coordinator = independent_source()
+
+    async def replace_client():
+        coordinator.api = object()
+
+    coordinator.api.before_return = replace_client
+    assert await observation.async_read_independent_tesla_vehicle(hass, VIN_A) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fault", ["coordinator", "router", "missing_lock", "shutdown", "disabled", "unknown_state", "bool_requested"])
+async def test_independent_read_requires_supported_cloud_source(independent_source, fault):
+    hass, _entry, vehicle, coordinator = independent_source("teslemetry")
+    client = coordinator.api
+    preferred = None
+    if fault == "coordinator":
+        vehicle.coordinator = _Coordinator(_charge(1_999_999_990))
+    elif fault == "router":
+        coordinator.api = types.SimpleNamespace(vehicle_data=client.vehicle_data)
+    elif fault == "missing_lock":
+        coordinator._debounced_refresh = None
+    elif fault == "shutdown":
+        coordinator._shutdown_requested = True
+    elif fault == "disabled":
+        preferred = "switch.native_charge"
+        hass.entity_registry = types.SimpleNamespace(async_get=lambda _entity: types.SimpleNamespace(
+            platform="teslemetry", config_entry_id="native-entry", device_id="device-a",
+            unique_id="native-charge", disabled_by="user"))
+    elif fault == "unknown_state":
+        client.response["charge_state"]["charging_state"] = "Unknown"
+    else:
+        client.response["charge_state"]["charge_current_request"] = True
+    result = await observation.async_read_independent_tesla_vehicle(hass, VIN_A, preferred_entity_id=preferred)
+    assert result is None
+    if fault not in {"unknown_state", "bool_requested"}:
+        assert client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_independent_read_pins_preferred_provider_and_exact_vin(independent_source):
+    hass, entry, vehicle, coordinator = independent_source("teslemetry")
+    other = type(coordinator)()
+    other.api.response["vin"] = VIN_B
+    entry.runtime_data.vehicles.append(_vehicle(VIN_B, other, "device-b", "teslemetry"))
+    preferred = "switch.native_b_charge"
+    hass.entity_registry = types.SimpleNamespace(async_get=lambda _entity: types.SimpleNamespace(
+        platform="teslemetry", config_entry_id="native-entry", device_id="device-b",
+        unique_id="native-b-charge", disabled_by=None))
+    result = await observation.async_read_independent_tesla_vehicle(hass, VIN_B, preferred_entity_id=preferred)
+    assert result is not None
+    assert result.vin == VIN_B
+    assert result.device_id == "device-b"
+    assert coordinator.api.calls == []
+    assert len(other.api.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_independent_read_rechecks_registry_after_cloud_await(independent_source):
+    hass, _entry, _vehicle, coordinator = independent_source()
+    registration = types.SimpleNamespace(platform="tesla_fleet", config_entry_id="native-entry",
+        device_id="device-a", unique_id="native-charge", disabled_by=None)
+    hass.entity_registry = types.SimpleNamespace(async_get=lambda _entity: registration)
+
+    async def rebind():
+        registration.unique_id = "another-vehicle"
+
+    coordinator.api.before_return = rebind
+    assert await observation.async_read_independent_tesla_vehicle(
+        hass, VIN_A, preferred_entity_id="switch.native_charge") is None
+
+
+@pytest.mark.asyncio
+async def test_independent_cancellation_does_not_cancel_other_cloud_waiter(independent_source):
+    hass, _entry, _vehicle, coordinator = independent_source()
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def hold():
+        entered.set()
+        await release.wait()
+
+    coordinator.api.before_return = hold
+    first = asyncio.create_task(observation.async_read_independent_tesla_vehicle(hass, VIN_A))
+    await asyncio.wait_for(entered.wait(), 1)
+    second = asyncio.create_task(observation.async_read_independent_tesla_vehicle(hass, VIN_A))
+    await asyncio.sleep(0)
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    release.set()
+    assert await asyncio.wait_for(second, 1) is not None
+    assert len(coordinator.api.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_independent_timeout_includes_waiting_for_existing_refresh(independent_source):
+    hass, _entry, _vehicle, coordinator = independent_source()
+    await coordinator.lock.acquire()
+    try:
+        assert await observation.async_read_independent_tesla_vehicle(hass, VIN_A, timeout=0.01) is None
+        await asyncio.sleep(0)
+        assert coordinator.api.calls == []
+    finally:
+        coordinator.lock.release()
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("domain", ["tesla_fleet", "teslemetry"])
 async def test_native_vehicle_deviceinfo_mapping_retains_exact_registered_identity(domain):
@@ -869,3 +1096,24 @@ async def test_fleet_command_preparation_supports_real_deviceinfo_mapping(rebind
     result = await observation.async_prepare_tesla_fleet_command(hass, VIN_A, entity)
     assert result is (not rebind)
     assert coordinator.refreshes == 1
+
+
+@pytest.mark.parametrize("domain", ["tesla_fleet", "teslemetry"])
+def test_independent_binding_pins_runtime_without_provider_calls(independent_source, domain):
+    hass, _entry, vehicle, coordinator = independent_source(domain)
+    binding = observation.independent_tesla_source_binding(hass, VIN_A)
+    assert binding is not None
+    assert binding["domain"] == domain
+    assert binding["config_entry_id"] == "native-entry"
+    assert binding["device_id"] == "device-a"
+    assert binding == observation.independent_tesla_source_binding(hass, VIN_A)
+    assert coordinator.api.calls == []
+
+    coordinator.api = type(coordinator.api)()
+    replacement = observation.independent_tesla_source_binding(hass, VIN_A)
+    assert replacement is not None
+    assert replacement["producer_identity"] == binding["producer_identity"]
+    assert replacement["source_token"] != binding["source_token"]
+    assert coordinator.api.calls == []
+    vehicle.vin = VIN_B
+    assert observation.independent_tesla_source_binding(hass, VIN_A) is None

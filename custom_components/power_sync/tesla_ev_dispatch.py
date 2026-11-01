@@ -70,6 +70,8 @@ def _service_error_outcome(error: BaseException) -> DispatchOutcome:
         cls = type(cause)
         module = str(getattr(cls, "__module__", ""))
         name = str(getattr(cls, "__name__", ""))
+        if module.endswith(".tesla_ev_recovery") and name == "RecoverySubmissionDenied":
+            return DispatchOutcome.NOT_SENT
         if module.startswith("tesla_fleet_api"):
             if name == "BluetoothTransportError":
                 return DispatchOutcome.NOT_SENT
@@ -208,8 +210,15 @@ def _proof(
 async def async_dispatch_bluetooth_command(
     hass: Any, target: BluetoothCommandTarget | None, *, value: Any = None,
     authorize: Gate, before_dispatch: Gate, readback_timeout: float = 10,
+    submit: Callable[[Callable[[], Awaitable[Any]]], Awaitable[Any]] | None = None,
 ) -> DispatchReceipt:
-    """Dispatch one exact command and confirm it from a fresh native report."""
+    """Dispatch one exact command and confirm it from a fresh native report.
+
+    ``submit`` is an optional durable handover supplied by the caller.  It is
+    invoked with the real provider coroutine immediately before the service
+    await, so cancellation can retain the child task without tracking the
+    subsequent readback loop.
+    """
     exact = _exact_target(hass, target)
     if exact is None:
         known_target = target if isinstance(target, BluetoothCommandTarget) else None
@@ -250,8 +259,15 @@ async def async_dispatch_bluetooth_command(
     )
     submitted_at = time.time()
     service, data = _command_call(exact, value)
+    async def _submit() -> Any:
+        return await hass.services.async_call(
+            exact.entity_domain, service, data, blocking=True
+        )
     try:
-        await hass.services.async_call(exact.entity_domain, service, data, blocking=True)
+        if submit is None:
+            await _submit()
+        else:
+            await submit(_submit)
     except asyncio.CancelledError:
         raise
     except BaseException as err:
