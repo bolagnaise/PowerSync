@@ -1120,7 +1120,12 @@ def _dynamic_loadpoint(
         connected = actually_charging or bool(state.get("active", False))
 
     paused = bool(state.get("paused", False))
-    status = _loadpoint_status(connected, actually_charging, current_amps, paused)
+    status = (
+        "unknown"
+        if not observed_power_available and not connected and not actually_charging
+        and current_amps <= 0 and not paused
+        else _loadpoint_status(connected, actually_charging, current_amps, paused)
+    )
     blocking_reason = (
         state.get("reason") or None
         if actually_charging

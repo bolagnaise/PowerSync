@@ -1479,6 +1479,29 @@ def _latest_ev_observed_at(
     return current_at
 
 
+def _ev_positive_evidence_expired_before(invalidated_at: Any, *observations: Any) -> bool:
+    """A newer disconnect can invalidate expired evidence, never fresh evidence."""
+    from .ev_load import is_current_ev_power_observation
+
+    def timestamp(value):
+        if isinstance(value, str):
+            try:
+                value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+        return _ev_observed_at(value)
+
+    invalidated = timestamp(invalidated_at)
+    latest = None
+    for value in observations:
+        latest = _latest_ev_observed_at(latest, timestamp(value))
+    return bool(
+        invalidated is not None and latest is not None
+        and latest <= invalidated <= datetime.now(timezone.utc)
+        and not is_current_ev_power_observation(latest)
+    )
+
+
 def _latest_ev_site_presence(
     observations: Iterable[tuple[Any, Any]],
 ) -> tuple[str | None, datetime | None]:
@@ -1517,6 +1540,8 @@ def _site_vehicle_candidates(vehicles: list[dict]) -> list[dict]:
     for index, vehicle in enumerate(vehicles):
         charger_id = str(vehicle.get("charger_id") or "").lower()
         if charger_id.startswith("wall_connector_"):
+            continue
+        if vehicle.get("_site_presence_unconfirmed"):
             continue
         identity = _vehicle_identity_key(
             vehicle.get("bridge_vehicle_id")
@@ -1561,6 +1586,11 @@ def _apply_wall_connector_observation(
     source_device_ids: set[str] | None = None,
 ) -> bool:
     """Attach Wall Connector telemetry only when it can be matched safely."""
+    from .ev_load import is_current_ev_power_observation
+
+    if (wc_observed_at is not None
+            and not is_current_ev_power_observation(_ev_observed_at(wc_observed_at))):
+        return False
     wc_vin_key = str(wc_vin or "").strip().lower()
     if not (
         wc_connected
@@ -1572,6 +1602,8 @@ def _apply_wall_connector_observation(
 
     def update_vehicle(vehicle: dict) -> None:
         direct_observed_at = _ev_observed_at(wc_observed_at)
+        if vehicle.get("_site_presence_unconfirmed") and direct_observed_at is None:
+            return
         power_observed_at = _ev_observed_at(vehicle.get("_observed_at"))
         charging_observed_at = (
             _ev_observed_at(vehicle.get("_charging_observed_at"))
@@ -1605,6 +1637,7 @@ def _apply_wall_connector_observation(
             # this physical vehicle. It supersedes an earlier unavailable
             # Fleet reading when the connector safely matches the vehicle.
             vehicle.pop("power_available", None)
+            vehicle.pop("_power_activity_unknown", None)
             if stopped_at_zero:
                 vehicle["ev_power_kw"] = 0.0
                 vehicle.pop("auxiliary_power_kw", None)
@@ -1617,6 +1650,11 @@ def _apply_wall_connector_observation(
                     vehicle["ev_power_kw"] = wc_power_kw
             if direct_observed_at is not None:
                 vehicle["_observed_at"] = direct_observed_at
+            if (vehicle.get("_site_presence_unconfirmed") and wc_vin_key
+                    and (wc_connected or wc_charging or wc_power_kw > 0.05)):
+                vehicle.pop("_site_presence_unconfirmed", None)
+                vehicle["site_presence"] = "home"
+                vehicle["_site_presence_observed_at"] = direct_observed_at
 
         if direct_is_current(charging_observed_at):
             if stopped_at_zero or stopped_with_auxiliary_draw:
@@ -2206,6 +2244,7 @@ def _get_ev_vehicles_status(hass, entry, *, include_control_evidence=False) -> l
         cable_known = False
         native_status_unavailable = False
         charging_state_reported_at = None
+        positive_native_reported_at = None
 
         for entity in entity_registry.entities.values():
             if entity.device_id != device.id:
@@ -2239,6 +2278,10 @@ def _get_ev_vehicles_status(hass, entry, *, include_control_evidence=False) -> l
             # Away vehicles cannot be contributing to home EV power.
             if domain == "device_tracker" and "_location" in eid:
                 candidate_presence = _ev_tracker_site_presence(state)
+                if candidate_presence == "home":
+                    positive_native_reported_at = _latest_ev_observed_at(
+                        positive_native_reported_at, _ev_power_observed_at(state)
+                    )
                 site_presence, site_presence_observed_at = (
                     _latest_ev_site_presence((
                         (site_presence, site_presence_observed_at),
@@ -2258,6 +2301,10 @@ def _get_ev_vehicles_status(hass, entry, *, include_control_evidence=False) -> l
                     else "home" if state.state == "on"
                     else None
                 )
+                if candidate_presence == "home":
+                    positive_native_reported_at = _latest_ev_observed_at(
+                        positive_native_reported_at, _ev_power_observed_at(state)
+                    )
                 site_presence, site_presence_observed_at = (
                     _latest_ev_site_presence((
                         (site_presence, site_presence_observed_at),
@@ -2294,6 +2341,9 @@ def _get_ev_vehicles_status(hass, entry, *, include_control_evidence=False) -> l
                         getattr(state, "last_updated", None),
                     )
                 if plugged is True:
+                    positive_native_reported_at = _latest_ev_observed_at(
+                        positive_native_reported_at, _ev_power_observed_at(state)
+                    )
                     is_connected = True
                     if state.state.lower() == "charging":
                         is_charging = True
@@ -2307,6 +2357,9 @@ def _get_ev_vehicles_status(hass, entry, *, include_control_evidence=False) -> l
             # Check charge_cable / charge_flap binary sensors
             if domain == "binary_sensor" and ("charge_cable" in eid or "charge_flap" in eid):
                 if state.state == "on":
+                    positive_native_reported_at = _latest_ev_observed_at(
+                        positive_native_reported_at, _ev_power_observed_at(state)
+                    )
                     is_connected = True
                     connected_observed_at = _latest_ev_observed_at(
                         connected_observed_at,
@@ -2421,6 +2474,7 @@ def _get_ev_vehicles_status(hass, entry, *, include_control_evidence=False) -> l
             "_observed_at": vehicle_observed_at,
             "_charging_observed_at": charging_observed_at,
             "_connected_observed_at": vehicle_connected_observed_at,
+            "_positive_native_reported_at": positive_native_reported_at,
         }
         if include_control_evidence and charging_state_evidence is not None:
             vehicle_status["_boost_charging_state_evidence"] = charging_state_evidence
@@ -2691,6 +2745,47 @@ def _get_ev_vehicles_status(hass, entry, *, include_control_evidence=False) -> l
             ble_presence_observed_at = ble_connected_observed_at
 
         bridge_vehicle_id = paired_prefixes.get(prefix)
+        # A radio disconnect is not proof of unplugging or away. It does,
+        # however, invalidate older affirmative Fleet evidence when every
+        # plug/charging/location/measurement sample has expired. Keep the
+        # previous possible load unknown for accounting and cleanup safety.
+        from .tesla_ble import tesla_ble_status_entity_ids
+
+        connection = hass.states.get(tesla_ble_status_entity_ids(prefix)[1])
+        disconnected_at = (
+            _ev_power_observed_at(connection)
+            if connection is not None and connection.state == "off" else None
+        )
+        if ev_provider == EV_PROVIDER_BOTH and bridge_vehicle_id and disconnected_at:
+            for fleet_vehicle in vehicles:
+                if (fleet_vehicle.get("site_presence") == "away"
+                        or not _vehicle_matches_identifier(fleet_vehicle, bridge_vehicle_id)):
+                    continue
+                if not _ev_positive_evidence_expired_before(
+                    disconnected_at,
+                    *(fleet_vehicle.get(field) for field in (
+                        "_observed_at", "_charging_observed_at",
+                        "_connected_observed_at", "_site_presence_observed_at",
+                        "_positive_native_reported_at",
+                    )),
+                ):
+                    continue
+                activity_unknown = bool(
+                    fleet_vehicle.get("is_charging")
+                    or (fleet_vehicle.get("ev_power_kw") or 0) > 0.05
+                )
+                fleet_vehicle.update({
+                    "is_connected": False, "is_charging": False,
+                    "ev_power_kw": 0.0, "power_available": False,
+                    "_power_activity_unknown": activity_unknown,
+                    "_site_presence_unconfirmed": True,
+                })
+                fleet_vehicle.pop("site_presence", None)
+                fleet_vehicle.pop("_site_presence_observed_at", None)
+                if include_control_evidence:
+                    fleet_vehicle["_boost_charging_state_evidence"] = {
+                        "known": False, "charging": None, "observed_at": disconnected_at,
+                    }
         if (
             ev_provider == EV_PROVIDER_BOTH
             and bridge_vehicle_id
@@ -2911,6 +3006,10 @@ def _get_ev_vehicles_status(hass, entry, *, include_control_evidence=False) -> l
         wc_observed_at,
         wc_device_ids,
     ) in wc_observations:
+        if wc_observed_at is not None and not is_current_ev_power_observation(
+            _ev_observed_at(wc_observed_at)
+        ):
+            continue
         matched = _apply_wall_connector_observation(
             vehicles,
             wc_power,
@@ -2981,6 +3080,7 @@ def _get_ev_vehicles_status(hass, entry, *, include_control_evidence=False) -> l
             if vehicle.get(timestamp_field) is None:
                 vehicle.pop(timestamp_field, None)
         vehicle.pop("_source_device_ids", None)
+        vehicle.pop("_positive_native_reported_at", None)
     return coalesced
 
 
@@ -15794,6 +15894,16 @@ class EVVehiclesView(HomeAssistantView):
     @staticmethod
     def _supplement_fleet_with_ble(fleet_v: dict, ble_v: dict) -> None:
         """Supplement a Fleet API vehicle dict with fresher BLE data in-place."""
+        if _ev_positive_evidence_expired_before(
+            ble_v.get("ble_disconnected_updated_at"),
+            *(fleet_v.get(f"{field}_updated_at", fleet_v.get("data_updated_at"))
+              for field in ("charging_state", "is_plugged_in", "charger_power")
+              if fleet_v.get(field) is not None),
+        ):
+            fleet_v.update({
+                "is_plugged_in": False, "plugged_in_definitive": False,
+                "charging_state": "Unknown", "charger_power": None,
+            })
         if ble_v.get("transport_quarantined"):
             fleet_v["ble_connected"] = False
             return
@@ -15993,6 +16103,12 @@ class EVVehiclesView(HomeAssistantView):
             "source": "tesla_ble",
             "brand": "tesla",
             "transport_quarantined": quarantined,
+            "ble_disconnected_updated_at": (
+                observed.isoformat()
+                if (connection := self._hass.states.get(f"binary_sensor.{prefix}_ble_status"))
+                is not None and connection.state == "off"
+                and (observed := _ev_power_observed_at(connection)) is not None else None
+            ),
             **{
                 f"{field}_updated_at": (
                     observed.isoformat() if (observed := _ev_observed_at(
@@ -21578,6 +21694,7 @@ class EVLoadpointStatusView(HomeAssistantView):
                     # normalizer otherwise treats an omitted field as usable
                     # power and renders an unavailable vehicle as Idle/0.00.
                     "power_available": vehicle.get("power_available", True),
+                    "_power_activity_unknown": vehicle.get("_power_activity_unknown", False),
                     "ev_soc": vehicle.get("ev_soc"),
                     "current_amps": vehicle.get("current_amps"),
                     "is_connected": vehicle.get("is_connected", False),
@@ -21761,7 +21878,7 @@ class EVLoadpointStatusView(HomeAssistantView):
                 loadpoint.get("actual_charging")
                 and loadpoint.get("current_power_kw") is None
                 for loadpoint in preliminary_loadpoints
-            )
+            ) or any(vehicle.get("_power_activity_unknown") for vehicle in observed_vehicles)
             total_ev_power_kw = resolve_loadpoint_surplus_power_kw(
                 preliminary_loadpoints
             )
