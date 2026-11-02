@@ -46555,6 +46555,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     confirm_powersync_ev_stop(
                         hass, entry, "zaptec_standalone", observed_at=poll_observed_at,
                     )
+                # Timestamped charging telemetry can expose an accepted stop
+                # that did not take effect, without issuing another command.
+                if parsed.get("charger_operation_mode") == "charging" and math.isfinite(stop_power_w) and stop_power_w > 50:
+                    from .automations.ev_ownership import observe_recorded_ev_stop
+                    observe_recorded_ev_stop(
+                        hass, entry, "zaptec_standalone",
+                        observed_at=poll_observed_at, charging=True,
+                    )
                 # Update charging session if actively charging
                 if parsed.get('charger_operation_mode') == 'charging':
                     try:

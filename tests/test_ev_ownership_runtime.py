@@ -921,3 +921,47 @@ def test_anonymous_non_tesla_policy_does_not_cross_charger_mapping():
         profile.pop(profile_key)
         profile["charger_type"] = "tesla"
         assert ev_ownership.get_external_control_policy(hass, entry, loadpoint) == "override"
+
+
+def test_command_events_follow_shared_loadpoint_and_confirm_through_profile_alias(monkeypatch):
+    from unittest.mock import Mock
+    hass, entry = _Hass(), _Entry()
+    hass.bus = SimpleNamespace(async_fire=Mock())
+    runtime = hass.data["power_sync"][entry.entry_id]
+    runtime["automation_store"] = SimpleNamespace(_data={"vehicle_charging_configs": [
+        {"vehicle_id": "car-a", "charger_type": "generic", "loadpoint_id": "garage"},
+        {"vehicle_id": "car-b", "charger_type": "generic", "loadpoint_id": "garage"},
+    ]})
+    monkeypatch.setattr(ev_ownership, "_schedule_runtime_save", lambda *a: None)
+    ev_ownership.record_ev_command(hass, entry, "car-a", command="stop", success=False)
+    assert "garage" in runtime["ev_stop_alerts"]
+    # A new stopped sample can clear the warning despite the failed command,
+    # without changing ownership or inventing a successful hardware command.
+    ev_ownership.observe_recorded_ev_stop(
+        hass, entry, "car-b", observed_at=datetime.now(timezone.utc) + timedelta(milliseconds=1),
+        charging=False,
+    )
+    assert runtime["ev_stop_alerts"] == {}
+    payloads = [c.args[1] for c in hass.bus.async_fire.call_args_list
+                if c.args[0] == "power_sync_ev_command"]
+    assert [p["vehicle_id"] for p in payloads] == ["garage", "garage"]
+    assert payloads[-1]["physical_confirmation"] is True
+    assert payloads[-1]["observed_at"]
+
+
+def test_fresh_continuing_charge_after_accepted_stop_emits_safety_event(monkeypatch):
+    from unittest.mock import Mock
+    hass, entry = _Hass(), _Entry()
+    hass.bus = SimpleNamespace(async_fire=Mock())
+    monkeypatch.setattr(ev_ownership, "_now_iso", lambda: (
+        datetime.now(timezone.utc) - timedelta(seconds=120)).isoformat())
+    ev_ownership.record_ev_command(hass, entry, "car", command="stop", success=True)
+    ev_ownership.observe_recorded_ev_stop(
+        hass, entry, "car", observed_at=datetime.now(timezone.utc), charging=True,
+    )
+    failures = [c.args[1] for c in hass.bus.async_fire.call_args_list
+                if c.args[0] == "power_sync_ev_stop_failed"]
+    assert len(failures) == 1
+    assert failures[0]["physical_confirmation"] is False
+    # Failed effect observation must not rewrite transport acknowledgement.
+    assert ev_ownership.get_ev_last_commands(hass, entry)["car"]["success"] is True

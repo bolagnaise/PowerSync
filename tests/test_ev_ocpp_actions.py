@@ -12793,6 +12793,47 @@ def test_dynamic_stop_notification_requires_physical_confirmation(
         assert events.index(pushes[0]) > events.index("physical_stop")
 
 
+def test_dynamic_time_window_stop_failure_does_not_announce_success(monkeypatch):
+    """The periodic time-window callback must honor a failed dynamic stop."""
+    vehicle_id = "5YJTEST00000000A1"
+    hass = _Hass([])
+    entry = _Entry()
+    stop_params = []
+    pushes = []
+
+    async def failed_stop(_hass, _entry, params):
+        stop_params.append(params)
+        return False
+
+    async def push(_hass, _title, message):
+        pushes.append(message)
+
+    monkeypatch.setattr(actions, "_is_inside_time_window", lambda *_args: False)
+    monkeypatch.setattr(actions, "_action_stop_ev_charging_dynamic", failed_stop)
+    monkeypatch.setattr(actions, "_send_expo_push", push)
+    actions._dynamic_ev_state.clear()
+    actions._dynamic_ev_state[entry.entry_id] = {
+        vehicle_id: {
+            "active": True,
+            "params": {
+                "dynamic_mode": "battery_target",
+                "owner_mode": "scheduled",
+                "charger_type": "tesla",
+                "vehicle_vin": vehicle_id,
+                "stop_outside_window": True,
+                "time_window_start": "00:00",
+                "time_window_end": "01:00",
+                "timezone": "UTC",
+            },
+        }
+    }
+
+    asyncio.run(actions._dynamic_ev_update(hass, entry, entry.entry_id, vehicle_id))
+
+    assert pushes == []
+    assert stop_params[0]["stop_reason"] == "time window ended"
+
+
 def test_stale_finite_cleanup_token_cannot_stop_replacement_session(monkeypatch):
     """An expiry callback from session A must not stop session B for the VIN."""
     from power_sync.automations import ev_ownership

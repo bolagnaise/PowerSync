@@ -1612,6 +1612,25 @@ def ensure_external_ev_ownership(
     return True
 
 
+def observe_recorded_ev_stop(
+    hass: Any, config_entry: Any, vehicle_id: Any, *,
+    observed_at: Any, charging: bool,
+) -> None:
+    """Observe an existing stop obligation without issuing or authorizing controls."""
+    if not charging:
+        confirm_powersync_ev_stop(hass, config_entry, vehicle_id, observed_at=observed_at)
+        return
+    from ..action_events import observe_ev_stop
+    vid = _ownership_loadpoint_id(hass, config_entry, vehicle_id)
+    commands = get_ev_last_commands(hass, config_entry)
+    for candidate_id in _candidate_vehicle_ids(vid, commands):
+        command = commands.get(candidate_id)
+        if isinstance(command, dict):
+            observe_ev_stop(hass, config_entry, candidate_id, command,
+                            _as_utc_datetime(observed_at), charging=True)
+            break
+
+
 def confirm_powersync_ev_stop(
     hass: Any,
     config_entry: Any,
@@ -1620,6 +1639,7 @@ def confirm_powersync_ev_stop(
     observed_at: Any = None,
 ) -> bool:
     """Clear only the provisional lease once stopped telemetry is observed."""
+    vehicle_id = _ownership_loadpoint_id(hass, config_entry, vehicle_id)
     observed_time = _as_utc_datetime(observed_at)
     lease_id, lease = get_ev_ownership(hass, config_entry, vehicle_id)
     if (
@@ -1640,6 +1660,7 @@ def confirm_powersync_ev_stop(
             reason="PowerSync stop confirmed by vehicle telemetry",
             command="stop_observed",
             source="powersync",
+            observed_at=observed_time.isoformat(),
         )
         return True
     if lease is not None and lease.get("owner") == EXTERNAL_OWNER_MODE:
@@ -1651,6 +1672,13 @@ def confirm_powersync_ev_stop(
         if not isinstance(command, dict) or command.get("source") != "powersync":
             continue
         command_name = str(command.get("command") or "")
+        if not command.get("success"):
+            from ..action_events import observe_ev_stop
+            previously_settled = command.get("settled_at")
+            observe_ev_stop(hass, config_entry, candidate_id, command, observed_time,
+                            charging=False)
+            if not previously_settled and command.get("settled_at"):
+                _schedule_runtime_save(hass, config_entry)
         if not (
             command.get("success")
             and (command_name == "stop" or command_name.startswith("stop_"))
@@ -1662,7 +1690,9 @@ def confirm_powersync_ev_stop(
             command_time is not None and observed_time <= command_time
         ):
             continue
-        command["settled_at"] = _now_iso()
+        from ..action_events import observe_ev_stop
+        observe_ev_stop(hass, config_entry, candidate_id, command, observed_time,
+                        charging=False)
         _schedule_runtime_save(hass, config_entry)
         return True
     return False
@@ -1720,6 +1750,8 @@ def record_ev_command(
         lease["updated_at"] = now
 
     _schedule_runtime_save(hass, config_entry)
+    from ..action_events import publish_ev_command
+    publish_ev_command(hass, config_entry, vid, last_command)
     return last_command
 
 
@@ -1826,6 +1858,9 @@ def claim_ev_ownership(
 
     leases[vid] = lease
     _schedule_runtime_save(hass, config_entry)
+    if command:
+        from ..action_events import publish_ev_command
+        publish_ev_command(hass, config_entry, vid, lease["last_command"], record_type="ownership")
     return lease
 
 
@@ -1884,6 +1919,7 @@ def release_ev_ownership(
     command: str = "release",
     success: bool = True,
     source: str = "powersync",
+    observed_at: str | None = None,
 ) -> dict[str, Any] | None:
     """Release ownership and remember the final command for diagnostics."""
     vid = _ownership_loadpoint_id(hass, config_entry, vehicle_id)
@@ -1900,8 +1936,13 @@ def release_ev_ownership(
         "success": bool(success),
         "reason": reason,
     }
+    if command == "stop_observed":
+        last_command["settled_at"] = observed_at or now
     get_ev_last_commands(hass, config_entry)[vid] = last_command
     _schedule_runtime_save(hass, config_entry)
+    from ..action_events import publish_ev_command
+    publish_ev_command(hass, config_entry, vid, last_command,
+                       physical_confirmation=command == "stop_observed", record_type="ownership")
     return previous if isinstance(previous, dict) else None
 
 
