@@ -676,8 +676,22 @@ function psBars(svg, o) {
       height: Math.abs(y(v) - y(0)), fill: css(v >= 0 ? o.pos : o.neg),
     }, svg);
   });
-  (o.labels || []).forEach(([i, txt, anchor]) => {
-    psSvg('text', { x: L + i * bw, y: H - 4, 'text-anchor': anchor || 'middle' }, svg).textContent = txt;
+  let labelRight = -Infinity;
+  (o.labels || []).forEach(([i, txt, anchor = 'middle']) => {
+    const label = psSvg('text', { x: L + i * bw, y: H - 4, 'text-anchor': anchor }, svg);
+    label.textContent = txt;
+    // A midnight tick can sit only one bar after the start time. Measure the
+    // localized text on every draw so narrow cards and 12-hour times still fit.
+    const width = label.getComputedTextLength?.() || String(txt).length * 7;
+    const offset = anchor === 'start' ? 0 : anchor === 'end' ? width : width / 2;
+    const left = Math.max(L, Math.min(W - R - width, L + i * bw - offset));
+    if (width > W - L - R || left < labelRight + 8) {
+      label.remove();
+      return;
+    }
+    label.setAttribute('x', left);
+    label.setAttribute('text-anchor', 'start');
+    labelRight = left + width;
   });
   psChartTooltip(svg, { x0: 0, x1: n, tooltipStep: 1, tooltipTime: at => o.times?.[Math.min(n - 1, Math.floor(at))] || '' }, at => {
     const value = o.vals[Math.min(n - 1, Math.floor(at))];

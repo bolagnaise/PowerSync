@@ -574,6 +574,77 @@ def test_forecast_cards_show_greedy_inputs_without_claiming_planned_generation()
     assert '0.3<small>kWh' in out["PsLoadForecastCard"]
 
 
+def test_battery_plan_labels_fit_without_overlapping_near_midnight():
+    """#213: a valid midnight boundary must not overprint the start time."""
+    out = _run_board(r"""
+  class El {
+    constructor(tag = '') {
+      this.tag = tag; this.children = []; this.style = {}; this.attrs = {};
+      this.clientHeight = 180;
+      this.classList = { contains: name => this.className === name };
+    }
+    appendChild(el) { this.children.push(el); el.parentElement = this; }
+    insertBefore(el) { this.appendChild(el); }
+    remove() { this.parentElement.children = this.parentElement.children.filter(el => el !== this); }
+    setAttribute(k, v) { this.attrs[k] = v; }
+    querySelector(sel) { return this.children.find(e => '.' + e.className === sel); }
+    getComputedTextLength() { return this.textContent.length * 6.3; }
+    set textContent(value) { this._text = value; this.children = []; }
+    get textContent() { return this._text || ''; }
+  }
+  context.document.createElement = tag => new El(tag);
+  context.document.createElementNS = (_, tag) => new El(tag);
+  const results = [];
+  for (const width of [180, 320, 480]) {
+    for (const format of ['12', '24']) {
+      for (const minute of [0, 30, 45]) {
+        class ChartDate extends Date {
+          constructor(...args) { super(...(args.length ? args : [2026, 10, 2, 23, minute])); }
+          static now() { return new ChartDate().getTime(); }
+        }
+        context.Date = ChartDate;
+        const start = ChartDate.now();
+        const ts = Array.from({length: 192}, (_, i) => new Date(start + i * 900000).toISOString());
+        T.psApiCache.set('power_sync/optimization', { data: {schedule: {
+          timestamps: ts, charge_w: ts.map(() => 3000), discharge_w: ts.map(() => 0),
+        }}});
+        const card = new T.PsBatteryPlanCard();
+        card._hass = {locale: {language: 'en-US', time_format: format}};
+        const svg = new El('svg'), parent = new El();
+        svg.clientWidth = width; parent.appendChild(svg);
+        card.querySelector = () => svg;
+        card._draw();
+        const labels = svg.children.filter(el => el.tag === 'text' && el.attrs.y === 176);
+        const boxes = labels.map(el => {
+          const w = el.getComputedTextLength(), anchor = el.attrs['text-anchor'];
+          const left = Number(el.attrs.x) - (anchor === 'middle' ? w / 2 : anchor === 'end' ? w : 0);
+          return {left, right: left + w, text: el.textContent};
+        });
+        let previous = null;
+        const fits = boxes.every(b => {
+          const valid = b.left >= 34 && b.right <= width - 10 && (!previous || b.left - previous.right >= 8);
+          previous = b; return valid;
+        });
+        // Sparse axis labels must not remove the exact timestamp from tooltips.
+        svg.onkeydown({key: 'ArrowRight', preventDefault() {}});
+        const tip = svg.parentElement.querySelector('.graph-tooltip');
+        results.push({width, format, minute, fits, count: boxes.length, boxes,
+          tooltip: !tip.hidden && tip.innerHTML.includes('3.00 kW')});
+        svg.clientWidth = width + 120;
+        card._draw();
+        results[results.length - 1].bars = svg.children.filter(el => el.tag === 'rect').length;
+      }
+    }
+  }
+  console.log(JSON.stringify({results}));
+""")
+    for sample in out["results"]:
+        assert sample["fits"], sample
+        assert sample["count"] >= (2 if sample["width"] >= 320 else 1), sample
+        assert sample["tooltip"], sample
+        assert sample["bars"] == 192, sample
+
+
 def test_every_small_chart_has_working_pointer_and_keyboard_tooltips():
     out = _run_board(r"""
   class El {
@@ -584,6 +655,7 @@ def test_every_small_chart_has_working_pointer_and_keyboard_tooltips():
     }
     appendChild(el) { this.children.push(el); el.parentElement = this; }
     insertBefore(el) { this.appendChild(el); }
+    remove() { this.parentElement.children = this.parentElement.children.filter(el => el !== this); }
     setAttribute(k, v) { this.attrs[k] = v; }
     querySelector(sel) { return this.children.find(e => '.' + e.className === sel); }
     getBoundingClientRect() { return { left: 100, width: 640 }; }
