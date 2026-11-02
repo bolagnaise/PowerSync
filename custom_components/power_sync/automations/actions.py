@@ -10071,8 +10071,29 @@ async def _action_start_ev_charging(
                         _ev_action_loadpoint_id(params),
                         reason="time window ended",
                     )
-                # Send notification that charging stopped
-                await _send_expo_push(hass, "EV Charging", "Stopped - time window ended")
+                if stop_success:
+                    await _send_expo_push(
+                        hass, "EV Charging", "Stopped - time window ended"
+                    )
+                else:
+                    # This path uses the non-dynamic stop action, so it does
+                    # not pass through the dynamic action's command recorder.
+                    # Keep the failed actuator result visible to the shared
+                    # command/event pipeline and never announce success.
+                    from .ev_ownership import record_ev_command
+
+                    record_ev_command(
+                        hass,
+                        config_entry,
+                        _ev_action_loadpoint_id(params),
+                        command="stop",
+                        success=False,
+                        reason="time window ended; physical stop failed",
+                    )
+                    _LOGGER.warning(
+                        "EV charging stop failed at time-window end for %s",
+                        _ev_action_loadpoint_id(params),
+                    )
                 # Clean up the scheduled stop entry
                 current_stop = _ev_scheduled_stop.get(entry_id)
                 if (
@@ -17062,17 +17083,20 @@ async def _dynamic_ev_update(
                     if vehicle_id == DEFAULT_VEHICLE_ID and params.get("vehicle_vin")
                     else vehicle_id
                 )
-                await _action_stop_ev_charging_dynamic(
+                stop_success = await _action_stop_ev_charging_dynamic(
                     hass,
                     config_entry,
                     {
                         "vehicle_id": target_vehicle_id,
                         "vehicle_vin": target_vehicle_id,
                         "stop_charging": True,
+                        "stop_reason": "time window ended",
                     },
                 )
-                # Send notification that charging stopped
-                await _send_expo_push(hass, "EV Charging", "Stopped - time window ended")
+                if stop_success:
+                    await _send_expo_push(
+                        hass, "EV Charging", "Stopped - time window ended"
+                    )
                 return
 
     group_sessions = _smart_schedule_battery_target_states(entry_id)

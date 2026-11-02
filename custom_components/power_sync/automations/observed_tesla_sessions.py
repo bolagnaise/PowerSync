@@ -133,6 +133,8 @@ class ObservedTeslaSessionTracker:
         vehicle_id: str,
         end_soc: int | None = None,
         observed_at: Any = None,
+        *,
+        stop_observation_valid: bool = False,
     ) -> None:
         observed_session = self._active_observed_session(
             self._session_manager,
@@ -142,7 +144,12 @@ class ObservedTeslaSessionTracker:
 
         _lease_id, lease = get_ev_ownership(self._hass, self._entry, vehicle_id)
         stop_settling = bool(lease and lease.get("stop_settling"))
-        if observed_session is None and not stop_settling:
+        from .ev_ownership import has_pending_ev_stop
+
+        pending_stop = stop_observation_valid and has_pending_ev_stop(
+            self._hass, self._entry, vehicle_id
+        )
+        if observed_session is None and not stop_settling and not pending_stop:
             self._idle_counts.pop(vehicle_id, None)
             return
 
@@ -191,6 +198,17 @@ class ObservedTeslaSessionTracker:
         is_charging = bool(vehicle.get("is_charging")) or (
             power_available and power_kw > ACTIVE_POWER_THRESHOLD_KW
         )
+        if is_charging:
+            from .ev_ownership import observe_recorded_ev_stop
+            # Check the last stop even while an owned session is retained for
+            # retry. The command timestamp and per-vehicle sample fence reject
+            # stale data. Idle confirmation remains gated by _mark_idle so an
+            # isolated zero-power sample cannot clear a stop settling lease.
+            observe_recorded_ev_stop(
+                self._hass, self._entry, vehicle_id,
+                observed_at=vehicle.get("_charging_observed_at") or vehicle.get("_observed_at"),
+                charging=True,
+            )
         if is_charging:
             if self._has_other_active_session(self._session_manager, vehicle_id):
                 return
@@ -260,14 +278,31 @@ class ObservedTeslaSessionTracker:
             ):
                 continue
 
+            # Reconcile recorded stop outcomes before the ownership/session
+            # guard below.  A PowerSync-owned session is intentionally skipped
+            # for observed-session creation, but its fresh charging telemetry
+            # still needs to settle or alert an accepted PowerSync stop.
+            self._reconcile_vehicle_ownership(vehicle, vehicle_id)
+
             if not is_charging:
-                self._reconcile_vehicle_ownership(vehicle, vehicle_id)
                 await self._mark_idle(
                     vehicle_id,
                     end_soc=soc,
                     observed_at=(
                         vehicle.get("_charging_observed_at")
                         or vehicle.get("_observed_at")
+                    ),
+                    stop_observation_valid=(
+                        vehicle.get("power_available") is True
+                        and vehicle.get("is_charging") is False
+                        and (
+                            vehicle.get("_charging_observed_at")
+                            or vehicle.get("_observed_at")
+                        ) is not None
+                        and _current_observation(
+                            vehicle.get("_charging_observed_at")
+                            or vehicle.get("_observed_at")
+                        )
                     ),
                 )
                 continue
@@ -281,7 +316,6 @@ class ObservedTeslaSessionTracker:
             # PowerSync stop creates a provisional stop-settling lease for
             # delayed positive telemetry; that telemetry must not first create
             # a new observed session and then be rejected only for ownership.
-            self._reconcile_vehicle_ownership(vehicle, vehicle_id)
             from .ev_ownership import get_ev_ownership
 
             _lease_id, lease = get_ev_ownership(
