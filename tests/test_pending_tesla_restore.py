@@ -18,10 +18,12 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import importlib
+import sys
 import textwrap
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import logging
 import pytest
@@ -178,9 +180,17 @@ def test_startup_marker_is_loaded_from_storage():
     assert 'hass.data[DOMAIN][entry.entry_id].get("pending_tesla_restore")' in source
 
 
-def _monitoring_sync_probe(data, *, monitoring, verified, uploads):
-    """Run the real upload admission gate with a deterministic transport."""
+def _monitoring_sync_probe(data, *, monitoring, verified, uploads, before_post=None):
+    """Run upload admission and currency through the real final HTTP fence."""
+    package_name = "pending_restore_control_test"
+    if package_name not in sys.modules:
+        package = ModuleType(package_name)
+        package.__path__ = [str(INIT_PATH.parent)]
+        sys.modules[package_name] = package
+    http = importlib.import_module(f"{package_name}.powerwall_control_http")
     sync = _find_function(ast.parse(INIT_PATH.read_text()), "_handle_sync_tou_internal")
+    guard_at = next(i for i, node in enumerate(sync.body)
+                    if isinstance(node, ast.FunctionDef) and node.name == "sync_current")
     override_at = next(i for i, node in enumerate(sync.body)
                        if isinstance(node, ast.Assign)
                        and any(isinstance(target, ast.Name)
@@ -188,16 +198,42 @@ def _monitoring_sync_probe(data, *, monitoring, verified, uploads):
                                for target in node.targets))
     node = ast.AsyncFunctionDef(name="sync", args=ast.arguments(
         posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]),
-        body=sync.body[override_at - 2:override_at + 3] + [
-            ast.Return(ast.Await(ast.Call(ast.Name("upload", ast.Load()), [], [])))],
+        body=sync.body[1:guard_at + 1] + sync.body[override_at - 2:override_at + 3] + [
+            ast.Return(ast.Await(ast.Call(ast.Name("upload", ast.Load()),
+                                        [ast.Name("sync_current", ast.Load())], [])))],
         decorator_list=[])
 
-    async def upload():
-        uploads.append("tariff")
-        return verified
+    class Reply:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            pass
+
+    class Session:
+        def post(self, *args, **kwargs):
+            uploads.append("tariff")
+            return Reply()
+
+    hass = SimpleNamespace(data={"power_sync": {"entry-1": data}})
+    session = http.controlled_session(hass, Session())
+
+    async def upload(is_current):
+        if before_post is not None:
+            before_post(env)
+        async with session.post(
+            "https://api.powersync.cc/api/proxy/api/1/energy_sites/123/time_of_use_settings",
+            _power_sync_is_current=is_current,
+            _power_sync_entry_id="entry-1",
+        ):
+            # Deterministic readback; a submitted write alone is insufficient.
+            return verified
 
     env = dict(_aemo_dispatch_entry_data=lambda: data,
                _is_monitoring_mode=lambda: monitoring,
+               _command_generation=[1],
+               entry=SimpleNamespace(data={"tesla_energy_site_id": "123"}),
+               CONF_TESLA_ENERGY_SITE_ID="tesla_energy_site_id",
                _LOGGER=logging.getLogger(__name__), upload=upload)
     exec(compile(ast.fix_missing_locations(ast.Module(body=[node], type_ignores=[])),
                  "<actual monitoring upload gate>", "exec"), env)
@@ -285,6 +321,29 @@ def test_dynamic_restore_retains_cleanup_until_tariff_upload_verifies(verified, 
     if not verified and not pending_only:
         assert discharge["saved_tariff"] == {"name": "original"}
         assert store.data["force_mode_state"]["active"] is True
+
+
+@pytest.mark.parametrize("monitoring", [False, True])
+@pytest.mark.parametrize("change", ["generation", "runtime", "site"])
+def test_restore_tariff_final_fence_rejects_superseded_cleanup(monitoring, change):
+    uploads = []
+    data = {"_allow_monitoring_tou_sync_once": "owned pending restore"}
+
+    def supersede(env):
+        if change == "generation":
+            env["_command_generation"][0] += 1
+        elif change == "runtime":
+            env["_aemo_dispatch_entry_data"] = lambda: {}
+        else:
+            env["entry"].data["tesla_energy_site_id"] = "456"
+
+    sync = _monitoring_sync_probe(data, monitoring=monitoring, verified=True,
+                                  uploads=uploads, before_post=supersede)
+    core = importlib.import_module("pending_restore_control_test.powerwall_control")
+    with pytest.raises(core.ControlRequestStale):
+        asyncio.run(sync())
+    assert uploads == []
+    assert "_allow_monitoring_tou_sync_once" not in data
 
 
 @pytest.mark.parametrize("pending", [False, True])
