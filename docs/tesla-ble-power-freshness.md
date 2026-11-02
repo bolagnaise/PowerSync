@@ -1,5 +1,21 @@
 # Tesla BLE charging-power freshness
 
+## Vehicle presence and plug status
+
+The ESPHome node's Wi-Fi connection does not establish that the vehicle is
+connected over BLE. When both node Status and BLE Status exist, PowerSync requires
+both to be on before using BLE readings as current plug or home evidence. Older
+bridges exposing only one of these entities remain supported.
+
+An unavailable native cable sensor and an expired idle charging-state report do
+not establish that the car is plugged in. If native connectivity is also unknown,
+an expired home location is no longer presented as confirmed home presence.
+PowerSync shows unavailable status until new evidence arrives; connection loss
+does not prove that the vehicle is away. Fresh idle reports and known cable-on
+readings remain usable, including for sleeping vehicles.
+
+## Charging-power readings
+
 PowerSync accepts the optional raw charging receipt timestamps supplied by a
 Tesla BLE bridge. This keeps confirmed steady power usable when Home Assistant
 suppresses repeated equal numeric readings. The maximum measurement age remains

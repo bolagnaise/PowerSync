@@ -282,6 +282,88 @@ def _tesla_hass(states: list[_State]) -> _Hass:
     )
 
 
+@pytest.mark.parametrize("cable", ["unknown", "unavailable"])
+def test_stale_fleet_home_and_stopped_do_not_prove_a_connected_vehicle(cable):
+    """W3RT1E: unavailable native telemetry must not manufacture a home plug."""
+    power_sync = _power_sync_module()
+    stale = datetime.now(timezone.utc) - timedelta(hours=5)
+    hass = _tesla_hass([
+        _State("binary_sensor.primary_ev_status", "unknown", last_updated=stale),
+        _State("binary_sensor.primary_ev_charge_cable", cable, last_updated=stale),
+        _State("device_tracker.primary_ev_location", "home", last_updated=stale),
+        _State("sensor.primary_ev_charging", "stopped", last_updated=stale),
+        _State("sensor.primary_ev_battery_level", "75", last_updated=stale),
+    ])
+
+    vehicles = power_sync._get_ev_vehicles_status(hass, _Entry())
+    assert len(vehicles) == 1
+    assert vehicles[0]["is_connected"] is False
+    assert vehicles[0].get("site_presence") != "home"
+    assert vehicles[0]["ev_soc"] == 75
+    from power_sync.automations.loadpoint_status import build_loadpoint_status
+    loadpoint = build_loadpoint_status({}, vehicles)[0]
+    assert loadpoint["status"] == "unknown"
+    assert loadpoint["actual_charging"] is False
+
+
+@pytest.mark.parametrize("cable,age_seconds", [("on", 18000), ("unknown", 10)])
+def test_known_plug_or_fresh_stopped_state_still_proves_connected(cable, age_seconds):
+    power_sync = _power_sync_module()
+    observed = datetime.now(timezone.utc) - timedelta(seconds=age_seconds)
+    hass = _tesla_hass([
+        _State("binary_sensor.primary_ev_status", "off", last_updated=observed),
+        _State("binary_sensor.primary_ev_charge_cable", cable, last_updated=observed),
+        _State("device_tracker.primary_ev_location", "home", last_updated=observed),
+        _State("sensor.primary_ev_charging", "stopped", last_updated=observed),
+    ])
+    vehicle = power_sync._get_ev_vehicles_status(hass, _Entry())[0]
+    assert vehicle["is_connected"] is True
+    assert vehicle["site_presence"] == "home"
+
+
+def test_ble_node_online_does_not_make_disconnected_vehicle_online_or_plugged():
+    power_sync = _power_sync_module()
+    now = datetime.now(timezone.utc)
+    hass = _Hass([
+        _State("binary_sensor.home_ble_status", "on", last_updated=now),
+        _State("binary_sensor.home_ble_ble_status", "off", last_updated=now),
+        _State("sensor.home_ble_charging_state", "Stopped", last_updated=now),
+        _State("binary_sensor.home_ble_charge_flap", "on", last_updated=now),
+    ])
+    entry = SimpleNamespace(entry_id="entry-1", data={}, options={
+        "ev_provider": "tesla_ble", "tesla_ble_entity_prefix": "home_ble",
+    })
+    vehicle = power_sync._get_ev_vehicles_status(hass, entry)[0]
+    assert vehicle["is_connected"] is False
+    assert vehicle.get("site_presence") != "home"
+    mobile = power_sync.EVVehiclesView(hass)._get_tesla_ble_vehicle("home_ble")
+    assert mobile["is_online"] is False
+    assert mobile["connection_usable"] is False
+    assert mobile["is_plugged_in"] is False
+    assert mobile["plugged_in_definitive"] is False
+
+
+def test_disconnected_paired_ble_does_not_erase_known_native_plug():
+    power_sync = _power_sync_module()
+    now = datetime.now(timezone.utc)
+    hass = _tesla_hass([
+        _State("binary_sensor.primary_ev_charge_cable", "on", last_updated=now),
+        _State("device_tracker.primary_ev_location", "home", last_updated=now),
+        _State("sensor.primary_ev_charging", "stopped", last_updated=now),
+        _State("binary_sensor.home_ble_status", "on", last_updated=now),
+        _State("binary_sensor.home_ble_ble_status", "off", last_updated=now),
+        _State("sensor.home_ble_charging_state", "Unknown", last_updated=now),
+    ])
+    entry = SimpleNamespace(entry_id="entry-1", data={}, options={
+        "ev_provider": "both", "tesla_ble_entity_prefix": "home_ble",
+        "tesla_ble_vehicle_mapping": "5YJTEST0000000001=home_ble",
+    })
+    vehicles = power_sync._get_ev_vehicles_status(hass, entry)
+    assert len(vehicles) == 1
+    assert vehicles[0]["is_connected"] is True
+    assert vehicles[0]["site_presence"] == "home"
+
+
 def test_ev_vehicle_status_ignores_stale_power_when_tesla_is_away_and_disconnected():
     power_sync = _power_sync_module()
     hass = _tesla_hass([

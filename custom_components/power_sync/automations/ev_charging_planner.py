@@ -584,6 +584,11 @@ def _tesla_ble_plugged_in_status(
         TESLA_BLE_SWITCH_CHARGER,
     )
     from .loadpoint_status import charging_state_plugged_status
+    from ..tesla_ble import get_tesla_ble_status_state
+
+    status = get_tesla_ble_status_state(hass, prefix)
+    if status is not None and str(status.state).strip().lower() != "on":
+        return None
 
     if _tesla_ble_charge_power_kw(hass, prefix) > 0.05:
         _LOGGER.debug("Tesla BLE %s: charge power present -> plugged in", prefix)
@@ -633,11 +638,10 @@ def _tesla_ble_plugged_in_status(
 
 def _tesla_ble_presence_says_home(hass: "HomeAssistant", prefix: str) -> bool:
     """Return True only for current BLE signals that imply the vehicle is nearby."""
-    from ..const import TESLA_BLE_BINARY_STATUS
-
-    status_state = hass.states.get(TESLA_BLE_BINARY_STATUS.format(prefix=prefix))
-    if status_state and status_state.state == "on":
-        return True
+    from ..tesla_ble import get_tesla_ble_status_state
+    status_state = get_tesla_ble_status_state(hass, prefix)
+    if status_state is not None:
+        return status_state.state == "on"
     return _tesla_ble_plugged_in_status(hass, prefix) is True
 
 
