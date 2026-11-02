@@ -3570,6 +3570,12 @@ class BatteryOptimizer:
                 + future_self_consumption_reservations[t],
             )
         future_reservation_active = any(future_reservation_periods)
+        future_solar_reservation_active = future_reservation_active and any(
+            p_solar[t] > p_load[t] + 1e-9
+            and not p_block_charge[t]
+            and any(future_reservation_periods[t + 1:])
+            for t in range(p_n)
+        )
         future_export_budget_kwh = max(
             0.0,
             (
@@ -3634,6 +3640,12 @@ class BatteryOptimizer:
         future_reservation_binary_offset = next_offset
         if future_reservation_active:
             next_offset += p_n
+        future_solar_charge_offset = next_offset
+        if future_solar_reservation_active:
+            next_offset += p_n
+        future_stored_energy_offset = next_offset
+        if future_solar_reservation_active:
+            next_offset += p_n + 1
         economic_adjustment_active = (
             self.physical_round_trip_efficiency
             > self.economic_round_trip_efficiency + 1e-9
@@ -3931,6 +3943,12 @@ class BatteryOptimizer:
 
         def future_reservation_binary_var(t: int) -> int:
             return future_reservation_binary_offset + t
+
+        def future_solar_charge_var(t: int) -> int:
+            return future_solar_charge_offset + t
+
+        def future_stored_energy_var(t: int) -> int:
+            return future_stored_energy_offset + t
 
         def battery_to_grid_var(t: int) -> int:
             return battery_to_grid_offset + t
@@ -4402,7 +4420,9 @@ class BatteryOptimizer:
             # Four source-split rows per period identify the physical
             # intersection of battery discharge and grid export.
             A_ub_rows += 4 * p_n
-        if future_reservation_active:
+        if future_solar_reservation_active:
+            A_ub_rows += 4 * p_n + 1 + sum(future_reservation_periods)
+        elif future_reservation_active:
             A_ub_rows += 1
         if cost_neutral_active:
             A_ub_rows += len(cost_neutral_days)
@@ -4987,7 +5007,50 @@ class BatteryOptimizer:
                         )
                     b_ub.append(self.max_discharge_kw)
 
-        if future_reservation_active:
+        if future_solar_reservation_active:
+            # Track opening inventory and actual stored solar separately from
+            # grid refill. The physical-energy ceiling irreversibly spends
+            # this inventory when earlier home use or other exports drain it.
+            for t in range(p_n + 1):
+                A_ub[len(b_ub), future_stored_energy_var(t)] = 1.0
+                A_ub[len(b_ub), energy_var(t)] = -1.0
+                b_ub.append(0.0)
+            for t in range(p_n):
+                A_ub[len(b_ub), future_solar_charge_var(t)] = 1.0
+                A_ub[len(b_ub), charge_var(t)] = -1.0
+                if ev_charge_active or grid_charge_cap_active:
+                    A_ub[len(b_ub), grid_charge_var(t)] = 1.0
+                b_ub.append(0.0)
+
+                # Solar cannot fund charging and also be exported, curtailed,
+                # or allocated to an EV. Remaining supply serves the house.
+                A_ub[len(b_ub), future_solar_charge_var(t)] = 1.0
+                A_ub[len(b_ub), grid_export_var(t)] = 1.0
+                A_ub[len(b_ub), battery_to_grid_var(t)] = -1.0
+                A_ub[len(b_ub), curtail_var(t)] = 1.0
+                if ev_charge_active:
+                    for vehicle in range(n_ev_vehicles):
+                        A_ub[len(b_ub), ev_solar_source_var(vehicle, t)] = 1.0
+                b_ub.append(max(0.0, p_solar[t]))
+
+                A_ub[len(b_ub), future_stored_energy_var(t + 1)] = 1.0
+                A_ub[len(b_ub), future_stored_energy_var(t)] = -1.0
+                A_ub[len(b_ub), future_solar_charge_var(t)] = -eff * p_dt[t]
+                if future_reservation_periods[t]:
+                    A_ub[len(b_ub), battery_to_grid_var(t)] = p_dt[t] / eff
+                b_ub.append(0.0)
+
+                if future_reservation_periods[t]:
+                    # Only inventory present before this period may fund its
+                    # export. Keep the existing strongest-floor protection;
+                    # same-period or future solar and grid charge add no credit.
+                    A_ub[len(b_ub), future_stored_energy_var(t)] = -1.0
+                    A_ub[len(b_ub), battery_to_grid_var(t)] = p_dt[t] / eff
+                    A_ub[len(b_ub), future_reservation_binary_var(t)] = cap
+                    b_ub.append(
+                        cap - max(future_protected_energy_kwh, default=0.0)
+                    )
+        elif future_reservation_active:
             # Across all protected generic-export periods, spend no more than
             # the battery output that was already stored above the strongest
             # protection floor when this solve began. This prevents an earlier
@@ -5372,6 +5435,7 @@ class BatteryOptimizer:
                 6,
             ),
             "future_export_budget_kwh": round(future_export_budget_kwh, 6),
+            "future_solar_budget_active": future_solar_reservation_active,
             "future_planned_export_kwh": 0.0,
             "acquisition_blocked_periods": acquisition_blocked_periods,
         }
@@ -5642,6 +5706,12 @@ class BatteryOptimizer:
                     if future_reservation_periods[t]
                     else (0.0, 0.0)
                 )
+
+        if future_solar_reservation_active:
+            for t in range(p_n):
+                bounds.append((0.0, max(0.0, p_solar[t] - p_load[t])))
+            bounds.append((soc_0 * cap, soc_0 * cap))
+            bounds.extend((0.0, cap) for _t in range(p_n))
 
         if battery_to_grid_active:
             for t in range(p_n):
@@ -8039,6 +8109,12 @@ class BatteryOptimizer:
             * cap
             * eff,
         )
+        future_solar_reservation_active = any(
+            solar[t] > load[t] + 1e-9
+            and not block_battery_charge[t]
+            and any(future_reservation_slots[t + 1:])
+            for t in range(n)
+        )
         soc = soc_0
         for t in range(n):
             max_grid_export_kw = _max_grid_export_kw(t)
@@ -8174,7 +8250,11 @@ class BatteryOptimizer:
                         discharge_kw,
                         house_deficit_kw + ev_battery_kw,
                     )
-            if manual_mode is None and future_reservation_slots[t]:
+            if (
+                manual_mode is None
+                and future_reservation_slots[t]
+                and not future_solar_reservation_active
+            ):
                 net_home_kw = max(0.0, net_load)
                 discharge_kw = min(
                     discharge_kw,
@@ -8236,6 +8316,13 @@ class BatteryOptimizer:
             profit_max_solar_export_slots,
             manual_control_slots,
             ev_charge_kw=ev_load_kw,
+            future_export_source_floor_slots=(
+                future_export_protection_floor_slots
+                if future_solar_reservation_active else None
+            ),
+            required_charge_kw=(
+                required_charge_kw if future_solar_reservation_active else None
+            ),
         )
 
         candidate_schedule = schedule
@@ -8431,6 +8518,7 @@ class BatteryOptimizer:
                     ),
                     6,
                 ),
+                "future_solar_budget_active": future_solar_reservation_active,
                 "acquisition_blocked_periods": acquisition_blocked_slots,
             }
         }
@@ -8517,6 +8605,8 @@ class BatteryOptimizer:
         profit_max_solar_export_slots: list[bool] | None = None,
         manual_control_slots: list[str | None] | None = None,
         ev_charge_kw: list[float] | None = None,
+        future_export_source_floor_slots: list[float] | None = None,
+        required_charge_kw: list[float] | None = None,
     ) -> OptimizationSchedule:
         """
         Map LP solution to battery actions.
@@ -8535,6 +8625,11 @@ class BatteryOptimizer:
         dt = self.dt_hours
         eff = self.efficiency
         cap = self.capacity_kwh
+        future_stored_energy_kwh = soc_0 * cap
+        future_strongest_floor_kwh = (
+            max(future_export_source_floor_slots, default=0.0) * cap
+            if future_export_source_floor_slots else 0.0
+        )
         # The car is home load. The LP's grid_import already contains its
         # draw, so classifying actions against house-only load misreads an
         # importing car as grid charging, splits export/home service wrong,
@@ -8830,6 +8925,14 @@ class BatteryOptimizer:
                 export_floor = natural_floor
 
             charge_kw = battery_charge[t]
+            if required_charge_kw is not None and manual_mode == "charge":
+                # Native home use may have changed SOC since the greedy raw
+                # projection. Clamp the fixed request against actual SOC here.
+                charge_kw = min(
+                    self._charge_limit_kw(load[t], solar[t], True),
+                    max(0.0, required_charge_kw[t]),
+                    max(0.0, (1.0 - soc) * cap / (eff * dt)),
+                )
             discharge_kw = battery_discharge[t]
             import_kw = grid_import[t]
             export_kw = grid_export[t]
@@ -9228,6 +9331,39 @@ class BatteryOptimizer:
                     action = "self_consumption"
                     power_w = reported_charge_w
 
+            protected_source_export_kw = 0.0
+            if future_export_source_floor_slots:
+                source_floor = future_export_source_floor_slots[t] * cap
+                if source_floor > 0.0 and manual_mode is None and action == "export":
+                    net_home_kw = max(0.0, load[t] - solar[t])
+                    allowed_export_kw = max(
+                        0.0,
+                        min(
+                            (future_stored_energy_kwh - future_strongest_floor_kwh)
+                            * eff / dt,
+                            (soc * cap - source_floor) * eff / dt - net_home_kw,
+                        ),
+                    )
+                    reported_discharge_w = min(
+                        reported_discharge_w,
+                        (net_home_kw + allowed_export_kw) * 1000.0,
+                    )
+                    protected_source_export_kw = max(
+                        0.0, reported_discharge_w / 1000.0 - net_home_kw,
+                    )
+                    if protected_source_export_kw <= threshold_kw:
+                        action = "self_consumption"
+                        reported_discharge_w = min(
+                            reported_discharge_w, net_home_kw * 1000.0,
+                        )
+                        protected_source_export_kw = 0.0
+                        power_w = reported_discharge_w
+                    else:
+                        power_w = max(
+                            0.0, solar[t] - load[t] + reported_discharge_w / 1000.0,
+                        ) * 1000.0
+
+            source_charge_room_kw = max(0.0, (1.0 - soc) * cap / (eff * dt))
             effective_charge_kw = reported_charge_w / 1000
             effective_discharge_kw = reported_discharge_w / 1000
             soc += (effective_charge_kw * eff - effective_discharge_kw / eff) * dt / cap
@@ -9238,6 +9374,26 @@ class BatteryOptimizer:
             # export floor while it is really at 23%, and reporting that inflated
             # value as minimum_forecast_soc.
             soc = max(self_consumption_floor, min(1.0, soc))
+            if future_export_source_floor_slots:
+                # Use emitted native flows, including household discharge.
+                # Later grid refill cannot resurrect solar already consumed.
+                emitted_export_kw = max(
+                    0.0, solar[t] - load[t] + effective_discharge_kw
+                    - effective_charge_kw,
+                )
+                stored_solar_kw = min(
+                    effective_charge_kw,
+                    source_charge_room_kw,
+                    max(0.0, solar[t] - load[t] - emitted_export_kw),
+                )
+                future_stored_energy_kwh = max(
+                    0.0,
+                    min(
+                        soc * cap,
+                        future_stored_energy_kwh + stored_solar_kw * eff * dt
+                        - protected_source_export_kw * dt / eff,
+                    ),
+                )
 
             actions.append(ScheduleAction(
                 timestamp=ts,
