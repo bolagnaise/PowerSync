@@ -41887,10 +41887,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})[
                         "_allow_monitoring_tou_sync_once"
                     ] = "optimizer shutdown restore is releasing an active force tariff"
-                elif force_mode_cleanup_restore:
+                elif force_mode_cleanup_restore or (
+                    force_restore and entry_data.get("pending_tesla_restore")
+                ):
+                    # Reloaded recovery may retain only the durable marker,
+                    # with no active force state. Its cleanup still owns the
+                    # tariff replacement, including during a preference change.
                     hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})[
                         "_allow_monitoring_tou_sync_once"
-                    ] = "restore normal is cleaning up an active force tariff"
+                    ] = "restore normal is cleaning up an active force tariff or unfinished restore"
                 hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})[
                     "_allow_force_restore_tou_sync_once"
                 ] = "restore_normal is replacing an active PowerSync force tariff"
