@@ -14045,6 +14045,10 @@ def test_first_unknown_ble_command_requires_producer_fence_before_ha_fallback(mo
     async def isolate(domain, service, data, **kwargs):
         calls.append((domain, service, data))
         assert data["entity_id"] in {"switch.car_ble_connection", "text.car_transport_isolation_request"}
+        # A real bridge receipt arrives after the request. Stamping it in the
+        # same microsecond tick as the product's request_started read makes
+        # the strict freshness check reject the proof until its 10 s timeout.
+        await asyncio.sleep(0.001)
         now = datetime.now(timezone.utc)
         for entity_id in ("switch.car_ble_connection", "binary_sensor.car_ble_status"):
             hass.states._states[entity_id] = _State(entity_id, "off", last_reported=now)
