@@ -15711,6 +15711,128 @@ def test_solar_surplus_restores_a_downward_ev_ramp_symmetrically():
     )
 
 
+@pytest.fixture
+def solar_credit_replay(monkeypatch):
+    """Advance real surplus decisions without sleeping or contacting a car."""
+    class Clock(datetime):
+        elapsed = 0
+        baseline = datetime.now(timezone.utc)
+
+        @classmethod
+        def now(cls, tz=None):
+            instant = cls.baseline + timedelta(seconds=cls.elapsed)
+            instant = instant.astimezone(tz) if tz else instant.astimezone().replace(tzinfo=None)
+            return cls.fromisoformat(instant.isoformat())
+
+    monkeypatch.setattr(actions, "datetime", Clock)
+    actions._dynamic_ev_state.clear()
+    hass = _Hass([])
+    entry = _Entry()
+    live = dict(battery_soc=40, solar_power=8200, load_power=500,
+                battery_power=-5000, grid_power=-2700)
+    _install_solar_surplus_runtime_stubs(monkeypatch, live)
+    observed = {"amps": 0, "charging": "stopped"}
+    calls = []
+
+    async def power(*args, **kwargs):
+        return observed["amps"] * 0.240, True
+
+    async def start(*args, **kwargs):
+        calls.append((Clock.elapsed, "start"))
+        observed["charging"] = "charging"
+        return True
+
+    async def rate(_hass, _entry, vehicle, amps, params):
+        calls.append((Clock.elapsed, amps))
+        live["grid_power"] += (amps - observed["amps"]) * 240
+        observed["amps"] = amps
+        observed["charging"] = "charging" if amps else "stopped"
+        return True
+
+    monkeypatch.setattr(actions, "_get_observed_ev_power_reading_kw", power)
+    monkeypatch.setattr(actions, "_get_tesla_charging_state", lambda *args: observed["charging"])
+    monkeypatch.setattr(actions, "_clear_ble_dynamic_session_if_unplugged", AsyncMock(return_value=False))
+    monkeypatch.setattr(actions, "_is_vehicle_charge_complete", AsyncMock(return_value=False))
+    monkeypatch.setattr(actions, "_action_start_ev_charging", start)
+    monkeypatch.setattr(actions, "_set_vehicle_amps", rate)
+    state = _solar_surplus_state(current_amps=0)
+    state["charging_started"] = False
+    state["params"].update(
+        vehicle_vin="VIN137", owner_mode="smart_schedule_solar_surplus",
+        min_charge_amps=5, notify_on_start=False, notify_on_error=False,
+        allow_parallel_charging=False, max_battery_charge_rate_kw=5,
+    )
+    actions._dynamic_ev_state[entry.entry_id] = {"VIN137": state}
+
+    def tick(seconds):
+        Clock.elapsed = seconds
+        asyncio.run(actions._dynamic_ev_update_surplus(hass, entry, entry.entry_id, "VIN137"))
+
+    yield SimpleNamespace(hass=hass, entry=entry, live=live, state=state,
+                          observed=observed, calls=calls, tick=tick, clock=Clock)
+    actions._dynamic_ev_state.clear()
+
+
+@pytest.mark.parametrize("soc,parallel,expected", [
+    (6.6, False, []),
+    (6.6, True, [(180, "start"), (180, 9)]),
+    (40, False, [(180, "start"), (180, 30)]),
+])
+def test_solar_credit_replay_steady_conditions_do_not_repeat_commands(
+    solar_credit_replay, soc, parallel, expected,
+):
+    """Forty cloud timer ticks must not replay an unchanged successful target."""
+    replay = solar_credit_replay
+    replay.live["battery_soc"] = soc
+    replay.state["params"]["allow_parallel_charging"] = parallel
+    for second in range(0, 1201, 30):
+        replay.tick(second)
+    assert replay.calls == expected
+
+
+@pytest.mark.parametrize("change", ["grid_import", "battery_idle", "battery_discharge"])
+def test_solar_credit_replay_31_second_stop_requires_changed_conditions(
+    solar_credit_replay, change,
+):
+    """A safety stop is one transition, not an endless wake/start/stop cycle."""
+    replay = solar_credit_replay
+    replay.live["battery_soc"] = 6.6
+    replay.state["params"]["allow_parallel_charging"] = True
+    replay.tick(0)
+    replay.tick(180)
+    assert replay.calls == [(180, "start"), (180, 9)]
+    if change == "grid_import":
+        replay.live["grid_power"] = 500
+    else:
+        replay.live["battery_power"] = 0 if change == "battery_idle" else 500
+    replay.tick(211)
+    for second in range(240, 1201, 30):
+        replay.tick(second)
+    assert replay.calls == [(180, "start"), (180, 9), (211, 0)]
+    assert replay.state["paused"] is True
+    assert replay.state["current_amps"] == 0
+
+
+@pytest.mark.parametrize("outcome", [None, False])
+def test_solar_credit_replay_uncertain_start_obeys_recovery_interval(
+    solar_credit_replay, monkeypatch, outcome,
+):
+    """A dispatched but unsettled start must not be submitted every 30 seconds."""
+    replay = solar_credit_replay
+
+    async def unsettled_start(_hass, _entry, params, context=None):
+        replay.calls.append((replay.clock.elapsed, "start"))
+        params["_tesla_allow_plan_recovery"] = True
+        return outcome
+
+    monkeypatch.setattr(actions, "_action_start_ev_charging", unsettled_start)
+    for second in range(0, 481, 30):
+        replay.tick(second)
+    assert replay.calls == [(180, "start"), (480, "start")]
+    assert replay.state["transport_recovery_pending"] is True
+    assert replay.observed["amps"] == 0
+
+
 @pytest.mark.parametrize("receipt_age,expected", [(5, (7.0, True)), (120, (0.0, False)), (-120, (0.0, False))])
 def test_ble_surplus_power_uses_raw_receipt_not_api_replay(receipt_age, expected):
     now = datetime.now(timezone.utc)
