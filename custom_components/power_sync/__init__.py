@@ -28899,7 +28899,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 and _aemo_dispatch_entry_data() is sync_runtime
                 and _command_generation[0] == sync_command_generation
                 and str(entry.data.get(CONF_TESLA_ENERGY_SITE_ID)) == sync_site_id
-                and (not _is_monitoring_mode() or _monitoring_sync_override)
+                and (not _is_monitoring_mode() or bool(_monitoring_sync_override))
             )
 
         def mode_restore_current():
