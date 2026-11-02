@@ -145,3 +145,18 @@ def test_stop_confirmation_carries_observation_time(env):
     payload = fired(hass, events.EVENT_EV_COMMAND)[0]
     assert payload["observed_at"] == now.isoformat()
     assert payload["timestamp"] != payload["observed_at"]
+
+
+def test_new_accepted_start_rearms_failure_event_without_claiming_recovery(env):
+    hass, entry, notice = env
+    events.publish_ev_command(hass, entry, "car", command(success=False))
+    events.publish_ev_command(hass, entry, "car", command(name="start_scheduled"))
+    notice.async_dismiss.assert_not_called()
+    events.publish_ev_command(hass, entry, "car", command(success=False))
+    assert len(fired(hass, events.EVENT_EV_STOP_FAILED)) == 2
+
+
+def test_continuing_charge_event_is_an_observation_not_a_transport_failure(env):
+    hass, entry, _ = env
+    events.observe_ev_stop(hass, entry, "car", command(), datetime.now(timezone.utc), charging=True)
+    assert fired(hass, events.EVENT_EV_STOP_FAILED)[0]["record_type"] == "observation"

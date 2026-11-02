@@ -80,14 +80,21 @@ def publish_ev_command(hass: Any, config_entry: Any, vehicle_id: str,
         return
     name = str(command["command"])
     is_stop = name == "stop" or name.startswith("stop_")
-    if not is_stop:
+    is_start = name == "start" or name.startswith("start_")
+    if not is_stop and not is_start:
         return
     entry = hass.data.setdefault("power_sync", {}).setdefault(config_entry.entry_id, {})
     alerts = entry.setdefault("ev_stop_alerts", {})
+    if is_start:
+        # New charging intent starts a new failure episode. Retain the visible
+        # warning until a stop is observed, but allow the next failure to alert.
+        if command["success"] and vehicle_id in alerts:
+            alerts[vehicle_id]["rearmed"] = True
+        return
     if physical_confirmation and command["success"]:
         if alerts.pop(vehicle_id, None) is not None:
             _notification(hass, config_entry.entry_id, vehicle_id, reason=None, clear=True)
-    elif not command["success"] and vehicle_id not in alerts:
+    elif not command["success"] and (vehicle_id not in alerts or alerts[vehicle_id].get("rearmed")):
         alerts[vehicle_id] = payload
         fire_action_event(hass, EVENT_EV_STOP_FAILED, payload)
         _notification(hass, config_entry.entry_id, vehicle_id, reason=payload["reason"])
@@ -117,7 +124,7 @@ def observe_ev_stop(hass: Any, config_entry: Any, vehicle_id: str,
         publish_ev_command(hass, config_entry, vehicle_id, {
             **command, "success": False, "observed_at": observed_at.isoformat(),
             "reason": "Vehicle telemetry still reports charging at least 90 seconds after the stop request",
-        })
+        }, record_type="observation")
     else:
         command["settled_at"] = observed_at.isoformat()
         publish_ev_command(hass, config_entry, vehicle_id, {
