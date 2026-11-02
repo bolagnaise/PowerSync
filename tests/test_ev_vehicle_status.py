@@ -416,6 +416,63 @@ def test_awake_charging_car_still_reports_live_charging():
     assert loadpoint["observed_at"] == now.isoformat()
 
 
+def test_disabled_native_status_does_not_hide_live_charging_power():
+    power_sync = _power_sync_module()
+    from power_sync.automations.loadpoint_status import build_loadpoint_status
+
+    now = datetime.now(timezone.utc)
+    hass = _tesla_hass(_restored_charging_w3rt1e(
+        "on", restored_at=now, asleep_at=now,
+    ))
+    status_id = "binary_sensor.primary_ev_status"
+    hass.entity_registry.entities[status_id].disabled_by = "user"
+    hass.states._states.pop(status_id)
+
+    vehicle = power_sync._get_ev_vehicles_status(hass, _Entry())[0]
+    assert vehicle["is_charging"] is True
+    assert vehicle["ev_power_kw"] == 2.0
+    assert power_sync._get_ev_vehicle_status(hass, _Entry())["ev_power_kw"] == 2.0
+    loadpoint = build_loadpoint_status({}, [vehicle])[0]
+    assert loadpoint["actual_charging"] is True
+    assert loadpoint["telemetry_state"] == "live"
+    assert loadpoint["observed_at"] == now.isoformat()
+
+
+@pytest.mark.parametrize("status", ["unknown", "off"])
+@pytest.mark.parametrize("connector_age,expected_state,expected_power", [
+    (timedelta(0), "live", 7.0),
+    (timedelta(hours=2), None, None),
+])
+def test_wall_connector_refreshes_sleeping_or_offline_vehicle_telemetry(
+    status, connector_age, expected_state, expected_power,
+):
+    power_sync = _power_sync_module()
+    from power_sync.automations.loadpoint_status import build_loadpoint_status
+
+    now = datetime.now(timezone.utc)
+    previous = now - timedelta(hours=1)
+    hass = _tesla_hass(_restored_charging_w3rt1e(
+        status, restored_at=previous, asleep_at=previous,
+    ))
+    vehicle = power_sync._get_ev_vehicles_status(hass, _Entry())[0]
+    connector_at = now - connector_age
+    accepted = power_sync._apply_wall_connector_observation(
+        [vehicle], 7.0, True, True, vehicle["vehicle_id"], connector_at,
+    )
+    loadpoint = build_loadpoint_status({}, [vehicle])[0]
+    if expected_state is not None:
+        assert accepted is True
+        assert loadpoint["actual_charging"] is True
+        assert loadpoint["current_power_kw"] == expected_power
+        assert loadpoint["telemetry_state"] == expected_state
+        assert loadpoint["observed_at"] == connector_at.isoformat()
+    else:
+        assert accepted is False
+        assert loadpoint["actual_charging"] is False
+        assert loadpoint["telemetry_state"] == ("offline" if status == "unknown" else "asleep")
+        assert loadpoint["observed_at"] == (None if status == "unknown" else previous.isoformat())
+
+
 @pytest.mark.parametrize("age,expected", [(timedelta(0), "live"), (timedelta(hours=2), "stale")])
 def test_car_without_status_sensor_keeps_charging_and_reports_freshness(age, expected):
     from power_sync.automations.loadpoint_status import build_loadpoint_status

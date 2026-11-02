@@ -1477,6 +1477,8 @@ def _tesla_native_connectivity(entity: Any, state: Any) -> tuple[str, datetime |
     sensor is ``unknown``, so it is the only reliable sign that those values
     are not live. Asleep is observed from the sensor's last change.
     """
+    if getattr(entity, "disabled_by", None) is not None:
+        return None
     eid = str(getattr(entity, "entity_id", "")).lower()
     if (not eid.startswith("binary_sensor.")
             or not re.search(r"_status(?:_\d+)?$", eid)
@@ -1701,6 +1703,8 @@ def _apply_wall_connector_observation(
                     vehicle["ev_power_kw"] = wc_power_kw
             if direct_observed_at is not None:
                 vehicle["_observed_at"] = direct_observed_at
+                vehicle["telemetry_state"] = "live"
+                vehicle["_telemetry_observed_at"] = direct_observed_at
             if (vehicle.get("_site_presence_unconfirmed") and wc_vin_key
                     and (wc_connected or wc_charging or wc_power_kw > 0.05)):
                 vehicle.pop("_site_presence_unconfirmed", None)
@@ -2316,7 +2320,8 @@ def _get_ev_vehicles_status(hass, entry, *, include_control_evidence=False) -> l
             eid = entity.entity_id.lower()
             state = hass.states.get(entity.entity_id)
             domain = getattr(entity, "domain", entity.entity_id.split(".", 1)[0])
-            if domain == "binary_sensor" and re.search(r"_status(?:_\d+)?$", eid):
+            if (domain == "binary_sensor" and re.search(r"_status(?:_\d+)?$", eid)
+                    and getattr(entity, "disabled_by", None) is None):
                 native_status_unavailable |= (
                     state is None or state.state in ("unknown", "unavailable")
                 )
