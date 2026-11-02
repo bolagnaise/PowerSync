@@ -105,18 +105,19 @@ def tesla_ble_status_entity_ids(prefix: str) -> tuple[str, str]:
 
 
 def get_tesla_ble_status_state(hass: Any, prefix: str) -> Any | None:
-    """Return the first available BLE bridge status state.
+    """Return vehicle connectivity, respecting both node and BLE status.
 
     Older/example ESPHome bridge YAML exposes a generic node ``Status`` entity,
-    while the Tesla BLE component itself exposes ``BLE Status``. Prefer the
-    existing node-status signal for compatibility, but do not hide a configured
-    vehicle when only the component connection status is present.
+    while the Tesla BLE component itself exposes ``BLE Status``. A connected
+    Wi-Fi node does not prove a vehicle BLE connection. When both exist they
+    must both be on; retain node-only compatibility and component-only discovery.
     """
-    for entity_id in tesla_ble_status_entity_ids(prefix):
-        state = hass.states.get(entity_id)
-        if state is not None:
-            return state
-    return None
+    node_id, connection_id = tesla_ble_status_entity_ids(prefix)
+    node = hass.states.get(node_id)
+    connection = hass.states.get(connection_id)
+    if node is not None and str(node.state).lower() != "on":
+        return node
+    return connection if connection is not None else node
 
 
 def get_tesla_ble_battery_state(hass: Any, prefix: str) -> Any | None:

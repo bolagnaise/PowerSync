@@ -2202,6 +2202,10 @@ def _get_ev_vehicles_status(hass, entry, *, include_control_evidence=False) -> l
         charging_state_observed_at = None
         connected_observed_at = None
         forced_zero_observed_at = None
+        cable_unavailable = False
+        cable_known = False
+        native_status_unavailable = False
+        charging_state_reported_at = None
 
         for entity in entity_registry.entities.values():
             if entity.device_id != device.id:
@@ -2209,6 +2213,13 @@ def _get_ev_vehicles_status(hass, entry, *, include_control_evidence=False) -> l
             eid = entity.entity_id.lower()
             state = hass.states.get(entity.entity_id)
             domain = getattr(entity, "domain", entity.entity_id.split(".", 1)[0])
+            if domain == "binary_sensor" and re.search(r"_status(?:_\d+)?$", eid):
+                native_status_unavailable |= (
+                    state is None or state.state in ("unknown", "unavailable")
+                )
+            if domain == "binary_sensor" and ("charge_cable" in eid or "charge_flap" in eid):
+                cable_unavailable |= state is None or state.state in ("unknown", "unavailable")
+                cable_known |= state is not None and state.state in ("on", "off")
             if (include_control_evidence and state is not None and domain == "sensor"
                     and re.search(r"_(?:charging_state|charging)(?:_\d+)?$", eid)
                     and not any(word in eid for word in ("limit", "rate", "power"))):
@@ -2269,6 +2280,9 @@ def _get_ev_vehicles_status(hass, entry, *, include_control_evidence=False) -> l
                 and "power" not in eid
             ):
                 plugged = charging_state_plugged_status(state.state)
+                charging_state_reported_at = _latest_ev_observed_at(
+                    charging_state_reported_at, _ev_power_observed_at(state)
+                )
                 charging_state_observed_at = _latest_ev_observed_at(
                     charging_state_observed_at,
                     getattr(state, "last_updated", None),
@@ -2339,6 +2353,26 @@ def _get_ev_vehicles_status(hass, entry, *, include_control_evidence=False) -> l
                     pass
 
         away_from_home = site_presence == "away"
+        # Unknown cable data is not a new confirmation of an old Stopped /
+        # Complete state. Retain fresh idle-state semantics and known cable
+        # readings (including sleeping vehicles), but expose unavailable
+        # telemetry rather than inventing a connected car after a restart.
+        stale_plug_unconfirmed = (
+            cable_unavailable and not cable_known and not is_charging
+            and not hard_disconnected and not away_from_home
+            and charging_state_reported_at is not None
+            and not is_current_ev_power_observation(charging_state_reported_at)
+        )
+        if stale_plug_unconfirmed:
+            is_connected = False
+            connected_observed_at = None
+            if (native_status_unavailable and site_presence == "home"
+                    and site_presence_observed_at is not None
+                    and not is_current_ev_power_observation(site_presence_observed_at)):
+                # Loss of telemetry does not prove away. Remove the affirmative
+                # home claim until native location or local BLE confirms it.
+                site_presence = None
+                site_presence_observed_at = None
         if away_from_home or hard_disconnected:
             is_connected = False
             is_charging = False
@@ -2396,6 +2430,8 @@ def _get_ev_vehicles_status(hass, entry, *, include_control_evidence=False) -> l
                 and measured_power_observed_at is not None
                 and is_current_ev_power_observation(measured_power_observed_at)
             )
+        elif stale_plug_unconfirmed:
+            vehicle_status["power_available"] = False
         if site_presence is not None:
             vehicle_status["site_presence"] = site_presence
         if site_presence_observed_at is not None:
@@ -2521,7 +2557,8 @@ def _get_ev_vehicles_status(hass, entry, *, include_control_evidence=False) -> l
         ):
             continue
 
-        if get_tesla_ble_status_state(hass, prefix) is None:
+        ble_status = get_tesla_ble_status_state(hass, prefix)
+        if ble_status is None:
             continue
 
         ev_power_kw = 0.0
@@ -2751,6 +2788,22 @@ def _get_ev_vehicles_status(hass, entry, *, include_control_evidence=False) -> l
             ble_observation["_site_presence_observed_at"] = (
                 ble_presence_observed_at
             )
+        if str(ble_status.state).strip().lower() != "on":
+            # Retain identity/SOC, but a disconnected bridge cannot supply
+            # current plug, power or home evidence from retained entities.
+            ble_observation.update({
+                "is_connected": False, "is_charging": False,
+                "ev_power_kw": 0.0, "power_available": False,
+                "_observed_at": None, "_charging_observed_at": None,
+                "_connected_observed_at": None,
+            })
+            ble_observation.pop("site_presence", None)
+            ble_observation.pop("_site_presence_observed_at", None)
+            ble_observation.pop("current_amps", None)
+            if include_control_evidence:
+                ble_observation["_boost_charging_state_evidence"] = {
+                    "known": False, "charging": None, "observed_at": None,
+                }
         if bridge_vehicle_id:
             ble_observation["bridge_vehicle_id"] = bridge_vehicle_id
             if (
@@ -15890,7 +15943,10 @@ class EVVehiclesView(HomeAssistantView):
         # Check BLE connection status
         # A stale generic Status/BLE Status entity must not override an
         # explicitly disabled or unavailable connection switch.
-        connection_usable = self._ble_connection_usable(prefix)
+        connection_usable = (
+            self._ble_connection_usable(prefix)
+            and str(status_state.state).strip().lower() == "on"
+        )
         is_online = status_state.state == "on" and connection_usable
         if not connection_usable:
             # A known-disabled radio cannot provide current charge evidence,
@@ -15898,6 +15954,8 @@ class EVVehiclesView(HomeAssistantView):
             charging_state = "Unknown"
             charger_power = None
             charge_power_state = None
+            is_plugged_in = False
+            plugged_in_definitive = False
         if quarantined:
             charging_state = "Unknown"
             charger_power = None

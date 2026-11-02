@@ -138,6 +138,23 @@ def test_active_charging_inferred_from_teslemetry_bt_power():
     ) is True
 
 
+def test_wifi_node_online_cannot_prove_ble_vehicle_home_or_cached_plug():
+    hass = _Hass([
+        _State("binary_sensor.home_ble_status", "on"),
+        _State("binary_sensor.home_ble_ble_status", "off"),
+        _State("sensor.home_ble_charging_state", "Stopped"),
+        _State("binary_sensor.home_ble_charge_flap", "on"),
+        _State("switch.home_ble_charger", "on"),
+    ])
+    assert ev_planner._tesla_ble_presence_says_home(hass, "home_ble") is False
+    assert ev_planner._tesla_ble_plugged_in_status(hass, "home_ble") is None
+
+
+def test_legacy_node_only_ble_presence_remains_supported():
+    hass = _Hass([_State("binary_sensor.home_ble_status", "on")])
+    assert ev_planner._tesla_ble_presence_says_home(hass, "home_ble") is True
+
+
 def test_stopped_teslemetry_bt_auxiliary_draw_is_not_active_charging():
     _install_registry_stubs()
     hass = _Hass([

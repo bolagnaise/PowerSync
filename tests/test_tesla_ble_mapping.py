@@ -30,11 +30,24 @@ from power_sync.tesla_ble import (  # noqa: E402
     get_tesla_ble_charge_power_state,
     get_tesla_ble_charging_state,
     get_tesla_ble_plug_state,
+    get_tesla_ble_status_state,
 )
 
 
 VIN_A = "5YJ3E1EA7NF0000A1"
 VIN_B = "5YJ3E1EA7NF0000B2"
+
+
+@pytest.mark.parametrize("node,connection,expected", [
+    ("on", "off", "off"), ("on", "unknown", "unknown"),
+    ("off", "on", "off"), ("on", "on", "on"),
+])
+def test_vehicle_connectivity_requires_node_and_ble_when_both_exist(node, connection, expected):
+    hass = _hass_states(
+        binary_sensor_home_ble_status=node,
+        binary_sensor_home_ble_ble_status=connection,
+    )
+    assert get_tesla_ble_status_state(hass, "home_ble").state == expected
 
 
 def _both_config(prefixes: str, mapping: str = "") -> dict[str, str]:
