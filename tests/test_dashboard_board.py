@@ -1021,6 +1021,79 @@ def test_self_consumption_heading_follows_measured_battery_flow():
         assert sample["headline"] == expected, sample
 
 
+def test_right_now_in_monitoring_describes_battery_and_planned_action():
+    """In monitoring mode nothing executes, so effective_current_action is the
+    safe default (self_consumption). Observed 2026-11-01: the board said "The
+    battery is powering the home." while the battery charged at 7 kW and the
+    plan wanted to charge. The headline must follow battery power and the lead
+    must state the plan's intent."""
+    out = _run_board(r"""
+  const now = Date.now();
+  const step = 30 * 60000;
+  const t0 = Math.floor(now / step) * step;
+  const n = 8;
+  const ts = Array.from({ length: n }, (_, i) => new Date(t0 + i * step).toISOString());
+  const data = {
+    enabled: true, monitoring_mode: true,
+    current_action: 'self_consumption',
+    effective_current_action: 'self_consumption',
+    planned_current_action: 'charge',
+    next_action: 'charge', next_action_time: new Date(now + 5 * 60000).toISOString(),
+    next_actions: [
+      { action: 'charge', timestamp: new Date(now + 5 * 60000).toISOString() },
+      { action: 'export', timestamp: new Date(t0 + 4 * step).toISOString() },
+    ],
+    schedule: {
+      timestamps: ts, soc: Array(n).fill(0.6),
+      charge_w: ts.map((_, i) => (i < 4 ? 7000 : 0)),
+      discharge_w: Array(n).fill(0), battery_consume_w: Array(n).fill(0),
+      battery_export_w: ts.map((_, i) => (i >= 4 ? 3000 : 0)), ev_charging_w: Array(n).fill(0),
+      import_price: Array(n).fill(0.3), export_price: Array(n).fill(0.05),
+    },
+  };
+  T.psApiCache.set('power_sync/optimization', { at: Date.now(), data, promise: null });
+  const st = (state, attributes = {}) => ({ state: String(state), attributes, last_updated: 'x' });
+  const card = new T.PsNowCard();
+  card._config = { entities: { soc: 'sensor.soc', battery: 'sensor.batt', mode: 'sensor.mode' } };
+  const html = {};
+  for (const [name, kw] of [['charging', -7.0], ['discharging', 2.0], ['idle', 0.0]]) {
+    card._hass = {
+      states: { 'sensor.soc': st(60), 'sensor.batt': st(kw, { unit_of_measurement: 'kW' }), 'sensor.mode': st('normal') },
+      locale: { time_format: '24' }, config: {}, callApi: async () => data,
+    };
+    card._render();
+    html[name] = card.innerHTML;
+  }
+  data.monitoring_mode = false;
+  card._hass = {
+    states: { 'sensor.soc': st(60), 'sensor.batt': st(-7.0, { unit_of_measurement: 'kW' }), 'sensor.mode': st('normal') },
+    locale: { time_format: '24' }, config: {}, callApi: async () => data,
+  };
+  card._render();
+  html.controlling = card.innerHTML;
+  console.log(JSON.stringify(html));
+""")
+    headline = lambda h: h.split("<h1>")[1].split("</h1>")[0]
+    assert headline(out["charging"]) == "The battery is charging."
+    assert headline(out["discharging"]) == "The battery is powering the home."
+    assert headline(out["idle"]) == "The battery is idle."
+    for name in ("charging", "discharging", "idle"):
+        html = out[name]
+        assert "The plan would charge now." in html
+        # psNextChange compares against the planned action: the repeated
+        # charge is skipped and the export is announced conditionally.
+        assert "Next it would export at" in html
+        assert "Next it would charge" not in html
+        assert "Next it will" not in html
+        assert "The plan keeps this going until" not in html
+    # Outside monitoring the executed action still drives the card; its
+    # self-consumption headline follows the measured flow.
+    controlling = out["controlling"]
+    assert headline(controlling) == "The battery is charging."
+    assert "The plan would" not in controlling
+    assert "Next it will charge at" in controlling
+
+
 def test_settings_editor_patch_preserves_other_values_and_encodes_one_percent():
     out = _run_board(r"""
   const dialog = new T.PsSettingsDialog();
