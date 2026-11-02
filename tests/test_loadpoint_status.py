@@ -463,6 +463,8 @@ def test_external_observed_charger_is_kept_without_dynamic_state():
             "duration_minutes": None,
             "expires_at": None,
             "quick_control": False,
+            "telemetry_state": "live",
+            "observed_at": None,
         }
     ]
 

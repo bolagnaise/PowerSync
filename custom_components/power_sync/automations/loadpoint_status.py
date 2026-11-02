@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable, Mapping
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .ev_ownership import is_solar_surplus_owner_mode
@@ -19,6 +19,10 @@ BRIDGE_WIDGET_KEYS = BRIDGE_LOADPOINT_KEYS | {
     "teslable",
     "teslableteslable",
 }
+TELEMETRY_STATE_RANK = {"live": 3, "asleep": 2, "stale": 1, "offline": 0}
+# Mirrors ev_load.EV_TELEMETRY_LIVE_MAX_AGE (kept local: this module is
+# imported without the HA-dependent ev_load chain in tests and helpers).
+TELEMETRY_LIVE_MAX_AGE = timedelta(minutes=15)
 GENERIC_CHARGING_STATES = {"charging"}
 GENERIC_CONNECTED_STATES = {
     "connected",
@@ -211,7 +215,65 @@ def _observation_timestamp(
     return value.astimezone(timezone.utc)
 
 
+def _telemetry_claim(
+    observation: Mapping[str, Any],
+) -> tuple[str, datetime | None]:
+    """Return an observation's telemetry state and last real report time.
+
+    Tesla vehicle observations carry an explicit state from their native
+    connectivity sensor. Other sources fall back to their observation time;
+    an untimestamped source with usable power is treated as live.
+    """
+    observed_at = _observation_timestamp(
+        observation,
+        "_telemetry_observed_at",
+        "_observed_at",
+        "observed_at",
+        "_charging_observed_at",
+        "_connected_observed_at",
+    )
+    state = observation.get("telemetry_state")
+    if state == "offline":
+        return state, None
+    if state in TELEMETRY_STATE_RANK:
+        return state, observed_at
+    if observed_at is not None:
+        age = datetime.now(timezone.utc) - observed_at
+        return ("live" if age <= TELEMETRY_LIVE_MAX_AGE else "stale"), observed_at
+    if observation.get("power_available") is False:
+        return "offline", None
+    return "live", None
+
+
+def _telemetry_fields(observation: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Return the loadpoint ``telemetry_state`` and ``observed_at`` fields."""
+    if observation is None:
+        return {"telemetry_state": "stale", "observed_at": None}
+    state, observed_at = _telemetry_claim(observation)
+    return {
+        "telemetry_state": state,
+        "observed_at": observed_at.isoformat() if observed_at else None,
+    }
+
+
+def _merge_telemetry_state(target: dict[str, Any], source: Mapping[str, Any]) -> None:
+    """Keep the freshest telemetry claim for one physical vehicle."""
+    if "telemetry_state" not in source and "telemetry_state" not in target:
+        return
+    source_state, source_at = _telemetry_claim(source)
+    target_state, target_at = _telemetry_claim(target)
+    if TELEMETRY_STATE_RANK[source_state] > TELEMETRY_STATE_RANK[target_state] or (
+        source_state == target_state
+        and source_at is not None
+        and (target_at is None or source_at > target_at)
+    ):
+        target_state, target_at = source_state, source_at
+    target["telemetry_state"] = target_state
+    target["_telemetry_observed_at"] = target_at
+
+
 def _merge_observation_status(target: dict[str, Any], source: Mapping[str, Any]) -> None:
+    _merge_telemetry_state(target, source)
     # Optional control evidence follows its own state sample, never a meter
     # or location timestamp. Unknown newer samples invalidate older certainty.
     evidence_key = "_boost_charging_state_evidence"
@@ -1220,6 +1282,7 @@ def _dynamic_loadpoint(
         "duration_minutes": duration_minutes,
         "expires_at": expires_at,
         "quick_control": bool((ownership or {}).get("quick_control") or params.get("quick_control")),
+        **_telemetry_fields(observation),
         "load_management": (
             dict(state.get("load_management"))
             if isinstance(state.get("load_management"), Mapping)
@@ -1308,6 +1371,7 @@ def _observed_loadpoint(
         "duration_minutes": (ownership or {}).get("duration_minutes") or observation.get("duration_minutes"),
         "expires_at": (ownership or {}).get("expires_at") or observation.get("expires_at"),
         "quick_control": bool((ownership or {}).get("quick_control") or observation.get("quick_control")),
+        **_telemetry_fields(observation),
     }
 
 

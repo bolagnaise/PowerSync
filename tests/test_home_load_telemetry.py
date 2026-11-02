@@ -19,7 +19,7 @@ leak other power flows into the load estimator's training data:
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import sys
 import time
@@ -1343,6 +1343,95 @@ def test_tesla_missing_wall_connector_power_preserves_vehicle_fallback(monkeypat
 
     assert result["ev_power"] == pytest.approx(4.0)
     assert result["load_power"] == pytest.approx(3.077)
+
+
+def _w3rt1e_ev_load_snapshot(scenario: str, now: datetime):
+    """Site EV snapshot for W3RT1E restored as Charging beside a live 7 kW car.
+
+    Observation shapes match what ``_get_ev_load_observations`` emits for each
+    case (pinned by ``test_asleep_or_offline_restored_charging_does_not_blank_home_load``
+    in test_ev_vehicle_status.py).
+    """
+    from power_sync.ev_load import aggregate_ev_load
+
+    w3rt1e = {
+        # Asleep: an observed 0 kW from the sleep transition hours ago.
+        "asleep": (0.0, now - timedelta(hours=5, minutes=34), False),
+        # Offline / just restored: power unknown, and not claimed active.
+        "offline": (None, now, False),
+        # Awake but its watt reading is older than 90 s: still active.
+        "stale_charging": (None, now - timedelta(seconds=120), True),
+    }[scenario]
+    return aggregate_ev_load(
+        [
+            EvLoadObservation(
+                "vehicle:lrwyhcek8tc828420", "LRWYHCEK8TC828420", *w3rt1e,
+                EvMeasurementKind.VEHICLE,
+            ),
+            EvLoadObservation(
+                "vehicle:5yjtest0000000001", "5YJTEST0000000001", 7.0, now, True,
+                EvMeasurementKind.VEHICLE,
+            ),
+        ],
+        at=now,
+    )
+
+
+@pytest.mark.parametrize(
+    ("scenario", "expected_home_kw", "expected_quality"),
+    [
+        ("asleep", 3.0, "complete"),
+        ("offline", 3.0, "complete"),
+        ("stale_charging", None, "incomplete"),
+    ],
+)
+def test_tesla_fleet_home_load_ignores_asleep_or_offline_restored_charging_car(
+    monkeypatch, scenario, expected_home_kw, expected_quality,
+):
+    """W3RT1E: a reload-restored Charging car must not blank Fleet Home Load."""
+    coordinator = _new_stream_tesla_coordinator()
+
+    async def _request_refresh() -> None:
+        return None
+
+    coordinator.async_request_refresh = _request_refresh
+    entry = types.SimpleNamespace(entry_id="stream-entry", data={}, options={})
+    coordinator.hass.config_entries.async_get_entry = (
+        lambda entry_id: entry if entry_id == "stream-entry" else None
+    )
+    monkeypatch.setattr(
+        sys.modules["power_sync"],
+        "_get_ev_vehicle_status",
+        lambda hass, config_entry: {"ev_power_kw": 7.0, "ev_soc": 75},
+        raising=False,
+    )
+    now = datetime(2026, 7, 8, 1, 0, 0, tzinfo=timezone.utc)
+    coordinator.hass.data[DOMAIN]["stream-entry"][
+        "observed_ev_load_snapshot"
+    ] = _w3rt1e_ev_load_snapshot(scenario, now)
+    event = {
+        "createdAt": "2026-07-08T00:59:30.000Z",
+        "site_id": "12345",
+        "live_status": {
+            "solar_power": 0,
+            "grid_power": 10000,
+            "battery_power": 0,
+            "load_power": 10000,
+            "percentage_charged": 80,
+            "grid_status": "Active",
+        },
+    }
+
+    asyncio.run(coordinator._async_handle_teslemetry_stream_event(event))
+    result = asyncio.run(coordinator._async_update_data())
+
+    assert result["raw_home_load_power"] == pytest.approx(10.0)
+    assert result["home_load_normalization_quality"] == expected_quality
+    if expected_home_kw is None:
+        assert result["load_power"] is None
+    else:
+        assert result["load_power"] == pytest.approx(expected_home_kw)
+        assert result["home_load_basis"] == "excludes_ev"
 
 
 @pytest.mark.parametrize(

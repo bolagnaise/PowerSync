@@ -34,6 +34,10 @@ class HomeLoadBasis(str, Enum):
 # also fresh enough for Home Load attribution.  Keep this in the provider-
 # neutral module so the two paths cannot silently adopt different cutoffs.
 EV_POWER_MAX_AGE = timedelta(seconds=90)
+# Display-only freshness for a vehicle's own telemetry (loadpoint
+# ``telemetry_state``). Polled Fleet data arrives minutes apart, so this is
+# deliberately looser than the control/accounting power window above.
+EV_TELEMETRY_LIVE_MAX_AGE = timedelta(minutes=15)
 
 # Vehicle-reported states that explicitly assert "not charging".  Shared so the
 # display and control paths cannot disagree about what disproves a watt value.

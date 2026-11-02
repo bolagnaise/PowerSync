@@ -321,6 +321,246 @@ def test_known_plug_or_fresh_stopped_state_still_proves_connected(cable, age_sec
     assert vehicle["site_presence"] == "home"
 
 
+def _restored_charging_w3rt1e(status: str, *, restored_at, asleep_at):
+    """W3RT1E 2026-11-02: last awake values were Charging / 2 kW."""
+    return [
+        _State(
+            "binary_sensor.primary_ev_status", status,
+            {"device_class": "connectivity"}, last_updated=asleep_at,
+        ),
+        _State("sensor.primary_ev_charging", "charging",
+               last_updated=restored_at, last_reported=restored_at),
+        _State("sensor.primary_ev_charger_power", "2", {"unit_of_measurement": "kW"},
+               last_updated=restored_at, last_reported=restored_at),
+        _State("binary_sensor.primary_ev_charge_cable", "on", last_updated=restored_at),
+        _State("device_tracker.primary_ev_location", "home", last_updated=restored_at),
+        _State("sensor.primary_ev_battery_level", "64", last_updated=restored_at),
+    ]
+
+
+def test_reload_restored_charging_with_unknown_status_is_offline_not_charging():
+    """A reload re-stamps retained Charging/2 kW while the car status is unknown."""
+    from power_sync.automations.loadpoint_status import build_loadpoint_status
+
+    power_sync = _power_sync_module()
+    now = datetime.now(timezone.utc)
+    hass = _tesla_hass(_restored_charging_w3rt1e(
+        "unknown", restored_at=now, asleep_at=now,
+    ))
+
+    vehicle = power_sync._get_ev_vehicles_status(
+        hass, _Entry(), include_control_evidence=True,
+    )[0]
+    assert vehicle["is_charging"] is False
+    assert vehicle["is_connected"] is False
+    assert vehicle["power_available"] is False
+    assert vehicle["telemetry_state"] == "offline"
+    assert vehicle["_boost_charging_state_evidence"]["charging"] is None
+    assert power_sync._get_ev_vehicle_status(hass, _Entry())["ev_power_kw"] == 0.0
+
+    loadpoint = build_loadpoint_status({}, [vehicle])[0]
+    assert loadpoint["status"] != "charging"
+    assert loadpoint["actual_charging"] is False
+    assert loadpoint["current_power_kw"] is None
+    assert loadpoint["confidence"] == "unknown"
+    assert loadpoint["telemetry_state"] == "offline"
+    assert loadpoint["observed_at"] is None
+
+
+def test_asleep_status_overrides_stale_charging_with_observed_zero():
+    from power_sync.automations.loadpoint_status import build_loadpoint_status
+
+    power_sync = _power_sync_module()
+    now = datetime.now(timezone.utc)
+    asleep_at = now - timedelta(hours=5, minutes=34)
+    hass = _tesla_hass(_restored_charging_w3rt1e(
+        "off", restored_at=asleep_at, asleep_at=asleep_at,
+    ))
+
+    vehicle = power_sync._get_ev_vehicles_status(hass, _Entry())[0]
+    assert vehicle["is_charging"] is False
+    assert vehicle["ev_power_kw"] == 0.0
+    assert vehicle["is_connected"] is True
+    assert vehicle["telemetry_state"] == "asleep"
+    assert power_sync._get_ev_vehicle_status(hass, _Entry())["ev_power_kw"] == 0.0
+
+    loadpoint = build_loadpoint_status({}, [vehicle])[0]
+    assert loadpoint["status"] == "connected_idle"
+    assert loadpoint["actual_charging"] is False
+    assert loadpoint["current_power_kw"] == 0.0
+    assert loadpoint["confidence"] == "observed"
+    assert loadpoint["telemetry_state"] == "asleep"
+    assert loadpoint["observed_at"] == asleep_at.isoformat()
+
+
+def test_awake_charging_car_still_reports_live_charging():
+    from power_sync.automations.loadpoint_status import build_loadpoint_status
+
+    power_sync = _power_sync_module()
+    now = datetime.now(timezone.utc)
+    hass = _tesla_hass(_restored_charging_w3rt1e(
+        "on", restored_at=now, asleep_at=now,
+    ))
+
+    vehicle = power_sync._get_ev_vehicles_status(hass, _Entry())[0]
+    assert vehicle["is_charging"] is True
+    assert vehicle["ev_power_kw"] == 2.0
+    assert vehicle["telemetry_state"] == "live"
+    assert power_sync._get_ev_vehicle_status(hass, _Entry())["ev_power_kw"] == 2.0
+
+    loadpoint = build_loadpoint_status({}, [vehicle])[0]
+    assert loadpoint["status"] == "charging"
+    assert loadpoint["current_power_kw"] == 2.0
+    assert loadpoint["confidence"] == "observed"
+    assert loadpoint["telemetry_state"] == "live"
+    assert loadpoint["observed_at"] == now.isoformat()
+
+
+@pytest.mark.parametrize("age,expected", [(timedelta(0), "live"), (timedelta(hours=2), "stale")])
+def test_car_without_status_sensor_keeps_charging_and_reports_freshness(age, expected):
+    from power_sync.automations.loadpoint_status import build_loadpoint_status
+
+    power_sync = _power_sync_module()
+    observed = datetime.now(timezone.utc) - age
+    states = [
+        state for state in _restored_charging_w3rt1e(
+            "on", restored_at=observed, asleep_at=observed,
+        )
+        if not state.entity_id.endswith("_status")
+    ]
+    hass = _tesla_hass(states)
+
+    vehicle = power_sync._get_ev_vehicles_status(hass, _Entry())[0]
+    assert vehicle["is_charging"] is True
+    assert vehicle["telemetry_state"] == expected
+
+    loadpoint = build_loadpoint_status({}, [vehicle])[0]
+    assert loadpoint["actual_charging"] is True
+    assert loadpoint["telemetry_state"] == expected
+    assert loadpoint["observed_at"] == observed.isoformat()
+
+
+def _w3rt1e_and_live_charging_hass(status: str, *, restored_at, now) -> _Hass:
+    """W3RT1E restored as Charging/2 kW beside a second car live at 7 kW."""
+    w3rt1e = [
+        _State(
+            state.entity_id.replace("primary_ev", "w3rt1e"), state.state,
+            state.attributes,
+            last_updated=getattr(state, "last_updated", None),
+            last_reported=getattr(state, "last_reported", None),
+        )
+        for state in _restored_charging_w3rt1e(
+            status, restored_at=restored_at, asleep_at=restored_at,
+        )
+    ]
+    live = [
+        _State("binary_sensor.second_ev_status", "on",
+               {"device_class": "connectivity"}, last_updated=now),
+        _State("sensor.second_ev_charging", "charging", last_updated=now),
+        _State("sensor.second_ev_charger_power", "7", {"unit_of_measurement": "kW"},
+               last_updated=now, last_reported=now),
+        _State("binary_sensor.second_ev_charge_cable", "on", last_updated=now),
+        _State("device_tracker.second_ev_location", "home", last_updated=now),
+    ]
+    entities = {
+        state.entity_id: _entity(state.entity_id, "device-w3rt1e") for state in w3rt1e
+    }
+    entities.update({
+        state.entity_id: _entity(state.entity_id, "device-second") for state in live
+    })
+    return _Hass(
+        w3rt1e + live,
+        entities,
+        {
+            "device-w3rt1e": SimpleNamespace(
+                id="device-w3rt1e", name="W3RT1E",
+                identifiers={("tesla_fleet", "LRWYHCEK8TC828420")},
+            ),
+            "device-second": SimpleNamespace(
+                id="device-second", name="SECOND EV",
+                identifiers={("tesla_fleet", "5YJTEST0000000001")},
+            ),
+        },
+    )
+
+
+@pytest.mark.parametrize("status,restored_age,expected_power_kw,home_load_known", [
+    ("off", timedelta(hours=5, minutes=34), 0.0, True),
+    ("unknown", timedelta(0), None, True),
+    ("unavailable", timedelta(0), None, True),
+    # A genuinely awake charging car whose watt reading is older than 90 s
+    # must still leave Home Load unknown rather than guess its EV share.
+    ("on", timedelta(seconds=120), None, False),
+])
+def test_asleep_or_offline_restored_charging_does_not_blank_home_load(
+    monkeypatch, status, restored_age, expected_power_kw, home_load_known,
+):
+    """W3RT1E: a restored Charging state blanked an includes-EV Home Load.
+
+    Pins the exact EvLoadObservation shapes that the Fleet, V1R, sensor and
+    optimizer Home Load tests feed through their own consumers.
+    """
+    power_sync = _power_sync_module()
+    ev_load = importlib.import_module("power_sync.ev_load")
+    now = datetime.now(timezone.utc)
+    hass = _w3rt1e_and_live_charging_hass(
+        status, restored_at=now - restored_age, now=now,
+    )
+
+    async def no_sigenergy_charger(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(
+        power_sync, "_read_sigenergy_charger_state_for_entry", no_sigenergy_charger
+    )
+
+    vehicles = power_sync._get_ev_vehicles_status(hass, _Entry())
+    observations = {
+        item.physical_load_key: item
+        for item in asyncio.run(
+            power_sync._get_ev_load_observations(hass, _Entry(), vehicles)
+        )
+    }
+    w3rt1e = observations["vehicle:lrwyhcek8tc828420"]
+    live = observations["vehicle:5yjtest0000000001"]
+    snapshot = ev_load.aggregate_ev_load(observations.values(), at=now)
+    home = ev_load.normalize_home_load(
+        10.0, ev_load.HomeLoadBasis.INCLUDES_EV, snapshot, at=now,
+    )
+
+    assert w3rt1e.active is (not home_load_known)
+    assert w3rt1e.power_kw == expected_power_kw
+    assert (live.power_kw, live.active) == (7.0, True)
+    if home_load_known:
+        assert snapshot.quality == ev_load.EvLoadQuality.COMPLETE
+        assert snapshot.power_kw == 7.0
+        assert home.non_ev_home_load_kw == 3.0
+        assert power_sync._get_ev_vehicle_status(hass, _Entry())["ev_power_kw"] == 7.0
+    else:
+        assert snapshot.unavailable_active_keys == ("vehicle:lrwyhcek8tc828420",)
+        assert home.non_ev_home_load_kw is None
+
+
+def test_offline_fleet_row_yields_to_fresh_ble_telemetry_in_merge():
+    from power_sync.automations.loadpoint_status import coalesce_vehicle_observations
+
+    now = datetime.now(timezone.utc)
+    fleet = {
+        "vehicle_id": "5YJTEST0000000001", "vehicle_name": "PRIMARY EV",
+        "telemetry_state": "offline", "_telemetry_observed_at": None,
+        "power_available": False, "is_charging": False,
+    }
+    ble = {
+        "vehicle_id": "5YJTEST0000000001", "vehicle_name": "PRIMARY EV",
+        "power_available": True, "ev_power_kw": 7.0, "is_charging": True,
+        "_observed_at": now,
+    }
+    merged = coalesce_vehicle_observations([fleet, ble])
+    assert len(merged) == 1
+    assert merged[0]["telemetry_state"] == "live"
+    assert merged[0]["_telemetry_observed_at"] == now
+
+
 def test_ble_node_online_does_not_make_disconnected_vehicle_online_or_plugged():
     power_sync = _power_sync_module()
     now = datetime.now(timezone.utc)
@@ -561,6 +801,7 @@ def test_ev_vehicle_status_ignores_stale_power_when_tesla_is_away_and_disconnect
         "ev_soc": 72,
         "is_connected": False,
         "is_charging": False,
+        "telemetry_state": "stale",
         "site_presence": "away",
     }]
     assert power_sync._get_external_tesla_ev_power_kw(hass, _Entry()) == 0.0
@@ -599,6 +840,7 @@ def test_ev_vehicle_status_excludes_named_zone_charging_from_home_site():
         "ev_soc": 86,
         "is_connected": False,
         "is_charging": False,
+        "telemetry_state": "stale",
         "site_presence": "away",
     }
     assert power_sync._get_external_tesla_ev_power_kw(hass, _Entry()) == 0.0
@@ -2304,6 +2546,7 @@ def test_ev_vehicle_status_prefers_wall_connector_power_for_single_charging_tesl
         "ev_soc": 70,
         "is_connected": True,
         "is_charging": True,
+        "telemetry_state": "stale",
         "site_presence": "home",
     }]
     assert power_sync._get_external_tesla_ev_power_kw(hass, _Entry()) == 3.4
@@ -2357,6 +2600,7 @@ def test_ev_vehicle_status_keeps_wall_connector_auxiliary_draw_idle():
         "ev_soc": 72,
         "is_connected": True,
         "is_charging": False,
+        "telemetry_state": "stale",
         "site_presence": "home",
     }]
 
