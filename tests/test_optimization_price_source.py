@@ -3491,6 +3491,61 @@ def test_optimizer_energy_data_reconciles_direct_same_vehicle_edges(opt_module):
         assert result["home_load_normalization_quality"] == "complete"
 
 
+@pytest.mark.parametrize("source", ["fleet", "v1r"])
+@pytest.mark.parametrize(
+    ("scenario", "expected_home_kw", "expected_quality"),
+    [
+        ("asleep", 3.0, "complete"),
+        ("offline", 3.0, "complete"),
+        ("stale_charging", None, "incomplete"),
+    ],
+)
+def test_optimizer_home_load_ignores_asleep_or_offline_restored_charging_car(
+    opt_module, source, scenario, expected_home_kw, expected_quality,
+):
+    """W3RT1E: the optimizer sees the same Home Load as the published sensor.
+
+    Observation shapes match ``_get_ev_load_observations`` for each case
+    (pinned in test_ev_vehicle_status.py); a second car is live at 7 kW.
+    """
+    ev_load = importlib.import_module("power_sync.ev_load")
+    now = datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc)
+    w3rt1e = {
+        "asleep": (0.0, now - timedelta(hours=5, minutes=34), False),
+        "offline": (None, now, False),
+        "stale_charging": (None, now - timedelta(seconds=120), True),
+    }[scenario]
+    snapshot = ev_load.aggregate_ev_load(
+        [
+            ev_load.EvLoadObservation(
+                "vehicle:lrwyhcek8tc828420", "LRWYHCEK8TC828420", *w3rt1e,
+                ev_load.EvMeasurementKind.VEHICLE,
+            ),
+            ev_load.EvLoadObservation(
+                "vehicle:5yjtest0000000001", "5YJTEST0000000001", 7.0, now, True,
+                ev_load.EvMeasurementKind.VEHICLE,
+            ),
+        ],
+        at=now,
+    )
+    # Fleet live_status and the V1R local-gateway fallback publish the same
+    # raw-load contract; the optimizer re-normalizes either with the snapshot.
+    coordinator_data = {
+        "fleet": {"load_power": 3.0, "raw_home_load_power": 10.0, "ev_power": 7.0},
+        "v1r": {
+            "solar_power": 0.0, "grid_power": 10.0, "battery_power": 0.0,
+            "load_power": 3.0, "raw_home_load_power": 10.0, "ev_power": 7.0,
+            "home_load_basis": "excludes_ev", "last_update": now,
+        },
+    }[source]
+    coordinator = _optimizer_with_ev_snapshot(opt_module, snapshot, coordinator_data)
+
+    result = coordinator._get_energy_data()
+
+    assert result["load_power"] == expected_home_kw
+    assert result["home_load_normalization_quality"] == expected_quality
+
+
 def test_optimizer_newer_same_vehicle_snapshot_beats_stale_direct_meter(opt_module):
     """Ticket #204: an older direct sample must not be restamped as current."""
     ev_load = importlib.import_module("power_sync.ev_load")

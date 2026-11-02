@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import pytest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import importlib.util
 import sys
 import types
@@ -880,6 +880,53 @@ def test_local_status_api_reconciles_direct_same_vehicle_stop_and_restart():
         assert api["load_w"] == expected_load_w
         assert api["ev_power_w"] == direct_power_kw * 1000.0
         assert api["home_load_normalization_quality"] == "complete"
+
+
+@pytest.mark.parametrize(
+    ("scenario", "expected_load_w", "expected_quality"),
+    [
+        ("asleep", 3700.0, "complete"),
+        ("offline", 3700.0, "complete"),
+        ("stale_charging", None, "incomplete"),
+    ],
+)
+def test_local_status_api_ignores_asleep_or_offline_restored_charging_car(
+    scenario, expected_load_w, expected_quality,
+):
+    """W3RT1E: a reload-restored Charging car must not blank V1R Home Load.
+
+    Observation shapes match ``_get_ev_load_observations`` for each case
+    (pinned in test_ev_vehicle_status.py); a second car is live at 7 kW.
+    """
+    ev_load = _load_module(f"{PKG}.ev_load", ROOT / "ev_load.py")
+    now = datetime.now(timezone.utc)
+    w3rt1e = {
+        "asleep": (0.0, now - timedelta(hours=5, minutes=34), False),
+        "offline": (None, now, False),
+        "stale_charging": (None, now - timedelta(seconds=120), True),
+    }[scenario]
+    coord = _coordinator_with_snapshot(ev_power_kw=7.0)
+    coord.hass.data["power_sync"]["entry-1"][
+        "observed_ev_load_snapshot"
+    ] = ev_load.aggregate_ev_load(
+        [
+            ev_load.EvLoadObservation(
+                "vehicle:lrwyhcek8tc828420", "LRWYHCEK8TC828420", *w3rt1e,
+                ev_load.EvMeasurementKind.VEHICLE,
+            ),
+            ev_load.EvLoadObservation(
+                "vehicle:5yjtest0000000001", "5YJTEST0000000001", 7.0, now, True,
+                ev_load.EvMeasurementKind.VEHICLE,
+            ),
+        ],
+        at=now,
+    )
+
+    api = coord.snapshot_as_api()
+
+    assert api["raw_load_w"] == 10700.0
+    assert api["load_w"] == expected_load_w
+    assert api["home_load_normalization_quality"] == expected_quality
 
 
 def test_local_status_api_load_never_goes_negative_after_ev_subtraction():

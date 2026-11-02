@@ -1465,6 +1465,59 @@ def _ev_power_observed_at(state: Any) -> datetime | None:
     ) or _ev_observed_at(getattr(state, "last_updated", None))
 
 
+_TESLA_CONNECTIVITY_RANK = {"online": 2, "asleep": 1, "offline": 0}
+
+
+def _tesla_native_connectivity(entity: Any, state: Any) -> tuple[str, datetime | None] | None:
+    """Classify a Tesla vehicle's native online/asleep connectivity sensor.
+
+    Returns ``("online" | "asleep" | "offline", observed_at)`` or ``None``
+    when the entity is not that sensor. An integration reload restores the
+    vehicle's last charging/power values with fresh timestamps while this
+    sensor is ``unknown``, so it is the only reliable sign that those values
+    are not live. Asleep is observed from the sensor's last change.
+    """
+    if getattr(entity, "disabled_by", None) is not None:
+        return None
+    eid = str(getattr(entity, "entity_id", "")).lower()
+    if (not eid.startswith("binary_sensor.")
+            or not re.search(r"_status(?:_\d+)?$", eid)
+            or re.search(r"_ble_status(?:_\d+)?$", eid)):
+        return None
+    attributes = getattr(state, "attributes", None) or {}
+    device_class = (
+        attributes.get("device_class")
+        or getattr(entity, "device_class", None)
+        or getattr(entity, "original_device_class", None)
+    )
+    if device_class is not None and str(device_class) != "connectivity":
+        return None
+    if state is None or state.state not in ("on", "off"):
+        return "offline", None
+    if state.state == "off":
+        return "asleep", (
+            _ev_observed_at(getattr(state, "last_changed", None))
+            or _ev_observed_at(getattr(state, "last_updated", None))
+        )
+    return "online", _ev_power_observed_at(state)
+
+
+def _merge_tesla_connectivity(
+    current: tuple[str, datetime | None] | None,
+    candidate: tuple[str, datetime | None] | None,
+) -> tuple[str, datetime | None] | None:
+    """Prefer online over asleep over offline across duplicate status sensors."""
+    if candidate is None:
+        return current
+    if current is None:
+        return candidate
+    current_rank = _TESLA_CONNECTIVITY_RANK[current[0]]
+    candidate_rank = _TESLA_CONNECTIVITY_RANK[candidate[0]]
+    if candidate_rank != current_rank:
+        return candidate if candidate_rank > current_rank else current
+    return (current[0], _latest_ev_observed_at(current[1], candidate[1]))
+
+
 def _latest_ev_observed_at(
     current: datetime | None,
     candidate: Any,
@@ -1650,6 +1703,8 @@ def _apply_wall_connector_observation(
                     vehicle["ev_power_kw"] = wc_power_kw
             if direct_observed_at is not None:
                 vehicle["_observed_at"] = direct_observed_at
+                vehicle["telemetry_state"] = "live"
+                vehicle["_telemetry_observed_at"] = direct_observed_at
             if (vehicle.get("_site_presence_unconfirmed") and wc_vin_key
                     and (wc_connected or wc_charging or wc_power_kw > 0.05)):
                 vehicle.pop("_site_presence_unconfirmed", None)
@@ -2035,10 +2090,15 @@ def _get_ev_vehicle_status(hass, entry) -> dict:
         is_fleet_charging = False
         charging_state_seen = False
         charging_state_observed_at = None
+        native_connectivity = None
         for entity in entity_registry.entities.values():
             if entity.device_id != device.id:
                 continue
             eid = entity.entity_id.lower()
+            native_connectivity = _merge_tesla_connectivity(
+                native_connectivity,
+                _tesla_native_connectivity(entity, hass.states.get(entity.entity_id)),
+            )
             if not entity.entity_id.startswith("sensor."):
                 continue
             if not (
@@ -2130,6 +2190,11 @@ def _get_ev_vehicle_status(hass, entry) -> dict:
             if is_fleet_charging and measured_power_seen
             else charging_state_observed_at or measured_power_observed_at
         )
+        if native_connectivity is not None and native_connectivity[0] != "online":
+            # An asleep or offline car is not drawing power, whatever its
+            # retained (or reload-restored) charging readings say.
+            device_power_kw = 0.0
+            device_observed_at = native_connectivity[1]
         vehicle_key = _vehicle_identity_key(vehicle_id)
         existing = fleet_power_by_vehicle_id.get(vehicle_key)
         if existing is None:
@@ -2191,6 +2256,7 @@ def _get_ev_vehicles_status(hass, entry, *, include_control_evidence=False) -> l
         coalesce_vehicle_observations,
     )
     from .ev_load import (
+        EV_TELEMETRY_LIVE_MAX_AGE,
         is_current_ev_power_observation,
         is_ev_power_contradicted_by_state,
     )
@@ -2243,6 +2309,8 @@ def _get_ev_vehicles_status(hass, entry, *, include_control_evidence=False) -> l
         cable_unavailable = False
         cable_known = False
         native_status_unavailable = False
+        native_connectivity = None
+        latest_report_at = None
         charging_state_reported_at = None
         positive_native_reported_at = None
 
@@ -2252,10 +2320,14 @@ def _get_ev_vehicles_status(hass, entry, *, include_control_evidence=False) -> l
             eid = entity.entity_id.lower()
             state = hass.states.get(entity.entity_id)
             domain = getattr(entity, "domain", entity.entity_id.split(".", 1)[0])
-            if domain == "binary_sensor" and re.search(r"_status(?:_\d+)?$", eid):
+            if (domain == "binary_sensor" and re.search(r"_status(?:_\d+)?$", eid)
+                    and getattr(entity, "disabled_by", None) is None):
                 native_status_unavailable |= (
                     state is None or state.state in ("unknown", "unavailable")
                 )
+            native_connectivity = _merge_tesla_connectivity(
+                native_connectivity, _tesla_native_connectivity(entity, state)
+            )
             if domain == "binary_sensor" and ("charge_cable" in eid or "charge_flap" in eid):
                 cable_unavailable |= state is None or state.state in ("unknown", "unavailable")
                 cable_known |= state is not None and state.state in ("on", "off")
@@ -2274,6 +2346,9 @@ def _get_ev_vehicles_status(hass, entry, *, include_control_evidence=False) -> l
                     }
             if not state or state.state in ("unknown", "unavailable"):
                 continue
+            latest_report_at = _latest_ev_observed_at(
+                latest_report_at, _ev_power_observed_at(state)
+            )
 
             # Away vehicles cannot be contributing to home EV power.
             if domain == "device_tracker" and "_location" in eid:
@@ -2460,6 +2535,51 @@ def _get_ev_vehicles_status(hass, entry, *, include_control_evidence=False) -> l
             )
             vehicle_connected_observed_at = connected_observed_at
 
+        power_available_override = None
+        if native_connectivity is not None and native_connectivity[0] == "asleep":
+            # A sleeping car cannot be charging. Its retained charging/power
+            # sensors keep their last awake values (and a reload re-stamps
+            # them), so the sleep transition is the observed 0 kW. Plug and
+            # location readings stay valid while asleep.
+            telemetry_state = "asleep"
+            telemetry_observed_at = native_connectivity[1]
+            is_charging = False
+            ev_power_kw = 0.0
+            power_available_override = True
+            vehicle_observed_at = telemetry_observed_at
+            charging_observed_at = telemetry_observed_at
+        elif native_connectivity is not None and native_connectivity[0] == "offline":
+            # Offline or freshly restored after a reload: none of the car's
+            # retained readings are live. Leave power and plug unknown so only
+            # independent fresh evidence (BLE, Wall Connector) can fill them.
+            telemetry_state = "offline"
+            telemetry_observed_at = None
+            is_charging = False
+            is_connected = False
+            charging_state_known = False
+            ev_power_kw = 0.0
+            power_available_override = False
+            vehicle_observed_at = None
+            charging_observed_at = None
+            vehicle_connected_observed_at = None
+            positive_native_reported_at = None
+        else:
+            telemetry_observed_at = latest_report_at
+            telemetry_state = (
+                "live"
+                if is_current_ev_power_observation(
+                    latest_report_at, max_age=EV_TELEMETRY_LIVE_MAX_AGE
+                )
+                else "stale"
+            )
+        if (power_available_override is not None
+                and charging_state_evidence is not None
+                and charging_state_evidence.get("charging") is True):
+            charging_state_evidence = {
+                "known": False, "charging": None,
+                "observed_at": telemetry_observed_at,
+            }
+
         vehicle_status = {
             "vehicle_id": vehicle_id,
             "vehicle_name": device.name or "Tesla EV",
@@ -2475,6 +2595,8 @@ def _get_ev_vehicles_status(hass, entry, *, include_control_evidence=False) -> l
             "_charging_observed_at": charging_observed_at,
             "_connected_observed_at": vehicle_connected_observed_at,
             "_positive_native_reported_at": positive_native_reported_at,
+            "telemetry_state": telemetry_state,
+            "_telemetry_observed_at": telemetry_observed_at,
         }
         if include_control_evidence and charging_state_evidence is not None:
             vehicle_status["_boost_charging_state_evidence"] = charging_state_evidence
@@ -2486,6 +2608,8 @@ def _get_ev_vehicles_status(hass, entry, *, include_control_evidence=False) -> l
             )
         elif stale_plug_unconfirmed:
             vehicle_status["power_available"] = False
+        if power_available_override is not None:
+            vehicle_status["power_available"] = power_available_override
         if site_presence is not None:
             vehicle_status["site_presence"] = site_presence
         if site_presence_observed_at is not None:
@@ -3076,6 +3200,7 @@ def _get_ev_vehicles_status(hass, entry, *, include_control_evidence=False) -> l
             "_charging_observed_at",
             "_connected_observed_at",
             "_site_presence_observed_at",
+            "_telemetry_observed_at",
         ):
             if vehicle.get(timestamp_field) is None:
                 vehicle.pop(timestamp_field, None)
@@ -21700,6 +21825,8 @@ class EVLoadpointStatusView(HomeAssistantView):
                     "is_connected": vehicle.get("is_connected", False),
                     "is_charging": vehicle.get("is_charging", False),
                     "observed_at": vehicle.get("_observed_at"),
+                    "telemetry_state": vehicle.get("telemetry_state"),
+                    "_telemetry_observed_at": vehicle.get("_telemetry_observed_at"),
                     # A configured vehicle remains a real loadpoint even when
                     # sleeping Fleet telemetry cannot currently prove cable
                     # state or SOC. This keeps Fleet-only vehicles visible

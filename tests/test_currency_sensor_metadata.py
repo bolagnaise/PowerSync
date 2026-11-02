@@ -817,6 +817,83 @@ def test_local_powerwall_home_load_uses_site_ev_snapshot_when_coordinator_is_zer
     assert entity.native_value == 4.67
 
 
+def _w3rt1e_ev_load_snapshot(ev_load, scenario: str, now: datetime):
+    """W3RT1E restored as Charging beside a second car live at 7 kW.
+
+    Observation shapes match ``_get_ev_load_observations`` for each case
+    (pinned in test_ev_vehicle_status.py).
+    """
+    w3rt1e = {
+        "asleep": (0.0, now - timedelta(hours=5, minutes=34), False),
+        "offline": (None, now, False),
+        "stale_charging": (None, now - timedelta(seconds=120), True),
+    }[scenario]
+    return ev_load.aggregate_ev_load(
+        [
+            ev_load.EvLoadObservation(
+                "vehicle:lrwyhcek8tc828420", "LRWYHCEK8TC828420", *w3rt1e,
+                ev_load.EvMeasurementKind.VEHICLE,
+            ),
+            ev_load.EvLoadObservation(
+                "vehicle:5yjtest0000000001", "5YJTEST0000000001", 7.0, now, True,
+                ev_load.EvMeasurementKind.VEHICLE,
+            ),
+        ],
+        at=now,
+    )
+
+
+@pytest.mark.parametrize("source", ["fleet", "v1r"])
+@pytest.mark.parametrize(
+    ("scenario", "expected_home_kw", "expected_quality"),
+    [
+        ("asleep", 3.0, "complete"),
+        ("offline", 3.0, "complete"),
+        ("stale_charging", None, "incomplete"),
+    ],
+)
+def test_home_load_sensor_ignores_asleep_or_offline_restored_charging_car(
+    source, scenario, expected_home_kw, expected_quality,
+):
+    """W3RT1E: the published Home Load must not go unknown for a sleeping car."""
+    sensor = _sensor_module()
+    ev_load = importlib.import_module("power_sync.ev_load")
+    desc = next(d for d in sensor.ENERGY_SENSORS if d.key == "home_load")
+    now = datetime(2026, 5, 3, 12, 0, tzinfo=timezone.utc)
+    entry_data = {
+        "observed_ev_load_snapshot": _w3rt1e_ev_load_snapshot(ev_load, scenario, now),
+    }
+    entry = SimpleNamespace(entry_id="entry-1", data={}, options={})
+    if source == "v1r":
+        entry.data = {sensor.CONF_POWERWALL_LOCAL_PAIRED: True}
+        entry_data["powerwall_local"] = {"coordinator": SimpleNamespace(
+            data=SimpleNamespace(load_w=10_000.0),
+            last_success_ts=time.time(),
+            last_success_monotonic=time.monotonic(),
+        )}
+    entity = sensor.TeslaEnergySensor(
+        SimpleNamespace(data={
+            "load_power": expected_home_kw,
+            # A paired V1R gateway's own 10 kW site load must win over the
+            # (deliberately different) cloud figure.
+            "raw_home_load_power": 10.0 if source == "fleet" else 12.0,
+            "ev_power": 7.0,
+        }),
+        desc,
+        entry,
+    )
+    entity.hass = SimpleNamespace(
+        config=SimpleNamespace(currency="AUD"),
+        data={sensor.DOMAIN: {"entry-1": entry_data}},
+    )
+
+    if expected_home_kw is None:
+        assert entity.native_value is None
+    else:
+        assert abs(entity.native_value - expected_home_kw) < 1e-9
+    assert entity.extra_state_attributes["normalization_quality"] == expected_quality
+
+
 def test_local_powerwall_home_load_never_goes_negative_after_ev_subtraction():
     sensor = _sensor_module()
     desc = next(d for d in sensor.ENERGY_SENSORS if d.key == "home_load")
