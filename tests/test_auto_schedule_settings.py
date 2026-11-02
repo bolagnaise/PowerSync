@@ -689,6 +689,42 @@ def test_power_to_amps_uses_vehicle_charger_phase_settings():
     assert executor._power_to_amps_for_settings(6900, three_phase) == 10
 
 
+def test_successful_smart_schedule_rates_are_suppressed_per_vehicle(monkeypatch):
+    """A second car or repeated plan evaluation must not replay paid targets."""
+    from unittest.mock import AsyncMock
+
+    executor = object.__new__(ev_planner.AutoScheduleExecutor)
+    executor.hass = types.SimpleNamespace()
+    executor.config_entry = types.SimpleNamespace(data={}, options={})
+    executor._current_charge_amps = {}
+    executor._charge_rate_change_threshold = 1
+    executor._resolve_effective_charger_capability = AsyncMock(return_value=None)
+    executor._resolve_vehicle_vin = lambda vehicle: vehicle
+    monkeypatch.setattr(ev_planner, "get_ev_location", AsyncMock(return_value="home"))
+    monkeypatch.setattr(ev_planner, "_with_configured_charger_entities", lambda _hass, params, *_: params)
+    calls = []
+
+    async def rate(_hass, _entry, vehicle, amps, params):
+        calls.append((vehicle, amps))
+        return True
+
+    boundary = types.ModuleType("power_sync.automations.actions")
+    boundary._set_vehicle_amps = rate
+    monkeypatch.setitem(sys.modules, "power_sync.automations.actions", boundary)
+    settings = ev_planner.AutoScheduleSettings(voltage=230, phases=1, max_charge_amps=32)
+
+    async def replay():
+        for _ in range(40):
+            assert await executor._set_vehicle_charge_rate("VIN_A", 3680, settings)
+            assert await executor._set_vehicle_charge_rate("VIN_B", 1840, settings)
+        assert calls == [("VIN_A", 16), ("VIN_B", 8)]
+        assert await executor._set_vehicle_charge_rate("VIN_A", 3910, settings)
+        assert await executor._set_vehicle_charge_rate("VIN_B", 1840, settings)
+        assert calls == [("VIN_A", 16), ("VIN_B", 8), ("VIN_A", 17)]
+
+    asyncio.run(replay())
+
+
 def test_power_to_amps_uses_configured_vehicle_minimum():
     executor = object.__new__(ev_planner.AutoScheduleExecutor)
     settings = ev_planner.AutoScheduleSettings(

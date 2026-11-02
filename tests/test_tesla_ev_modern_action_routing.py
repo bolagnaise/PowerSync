@@ -519,6 +519,90 @@ async def test_unknown_start_retains_hazard_without_fresh_physical_draw(modern, 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cloud_recovery", [False, True])
+async def test_unknown_start_journal_blocks_repeated_commands_and_paid_reads(monkeypatch, cloud_recovery):
+    """An unresolved command cannot spend again through a repeated adapter call."""
+    hass, entry = _both_native_action_harness()
+    _pin_registry_bindings(monkeypatch, hass)
+    entry.options = {"ev_provider": (
+        actions.EV_PROVIDER_BOTH if cloud_recovery else actions.EV_PROVIDER_TESLEMETRY_BT
+    )}
+    if cloud_recovery:
+        # A native read source can exist without an enabled native Start
+        # entity; in that case Both uses the separate Bluetooth command.
+        del hass.entity_registry.entities["switch.native_charge"]
+    commands = importlib.import_module("power_sync.teslemetry_bluetooth_commands")
+    dispatch = importlib.import_module("power_sync.tesla_ev_dispatch")
+    recovery = importlib.import_module("power_sync.tesla_ev_recovery")
+    observation = importlib.import_module("power_sync.tesla_ev_observation")
+    # Keep the real journal and source checks; replace only durable storage
+    # and the external read/command boundaries with deterministic fakes.
+    monkeypatch.setattr(recovery, "_persist", AsyncMock(return_value=True))
+    monkeypatch.setattr(recovery, "_registry", lambda _hass: hass.entity_registry)
+    monkeypatch.setattr(actions, "prepare_ev_submission", _allow_submission)
+    target = commands.resolve_command(hass, VIN, "start")
+    assert target is not None
+    submitted = []
+
+    async def unknown_dispatch(_hass, resolved, **kwargs):
+        if not await kwargs["before_dispatch"]():
+            return DispatchReceipt(DispatchOutcome.NOT_SENT, resolved, reason="journal blocked")
+
+        async def send():
+            submitted.append(resolved.entity_id)
+
+        await kwargs["submit"](send)
+        return DispatchReceipt(DispatchOutcome.SENT_UNKNOWN, resolved,
+                               submitted_at=time.time(), reason="provider timed out")
+
+    monkeypatch.setattr(dispatch, "async_dispatch_bluetooth_command", unknown_dispatch)
+    normal_read = AsyncMock(return_value=None)
+    paid_read = AsyncMock(return_value=None)
+    monkeypatch.setattr(observation, "async_read_tesla_vehicle", normal_read)
+    monkeypatch.setattr(observation, "async_read_independent_tesla_vehicle", paid_read)
+    monkeypatch.setattr(observation, "independent_tesla_source_binding", lambda *args, **kwargs: {
+        "domain": "teslemetry", "config_entry_id": "native-entry",
+        "device_id": "teslemetry-device",
+    })
+    # A Bluetooth-only configuration forbids paid cloud recovery. With Both,
+    # the first unknown attempt may read once, but the journal must prevent
+    # the next twenty submissions from reaching another command or read.
+    params = {"vehicle_vin": VIN}
+    assert await actions._run_modern_teslemetry_bluetooth(hass, entry, params, "start") == (True, None)
+    for _ in range(20):
+        assert await actions._run_modern_teslemetry_bluetooth(hass, entry, params, "start") == (True, False)
+    assert submitted == [target.entity_id]
+    assert normal_read.await_count == 1
+    assert paid_read.await_count == int(cloud_recovery)
+    if cloud_recovery:
+        assert paid_read.await_args.kwargs["allow_paid_refresh"] is True
+    assert params["_tesla_transport_recovery_pending"] is True
+
+    # Compose the outer recovery action too. Its five-minute retry may spend
+    # one authorized read to discover that charging began after a timeout;
+    # the unresolved journal must still block a second writer. This is a
+    # recovery read, distinct from repeatedly submitting the same Start.
+    from datetime import datetime, timedelta
+
+    _pin_solar_ownership(monkeypatch, "_action_start_ev_charging")
+    params["_boost_start_deadline"] = time.time() + 3600
+    state = {"active": True, "params": params, "current_amps": 9,
+             "transport_recovery_pending": True,
+             "last_physical_restart_attempt_at": datetime.now().astimezone()}
+    monkeypatch.setitem(actions._dynamic_ev_state, entry.entry_id, {VIN: state})
+    for retry in range(1, 4):
+        assert not actions._tesla_dynamic_restart_due(state)
+        state["last_physical_restart_attempt_at"] -= timedelta(seconds=300)
+        assert actions._tesla_dynamic_restart_due(state)
+        assert await actions._restart_owned_tesla(hass, entry, VIN, state, 9) is False
+        assert normal_read.await_count == 1 + retry
+        assert paid_read.await_count == (1 + retry) * int(cloud_recovery)
+        assert submitted == [target.entity_id]
+        assert state["params"]["_boost_start_deadline"] == params["_boost_start_deadline"]
+    assert hass.services.calls == []
+
+
+@pytest.mark.asyncio
 async def test_exception_after_handoff_retains_unknown_attempt(modern):
     hass, entry, params, _target_value, current, finished = modern
     current["outcome"] = RuntimeError("queued")
