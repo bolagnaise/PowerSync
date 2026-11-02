@@ -1,5 +1,6 @@
 """Finite Boost retirement consumes the actual Fleet/BLE status producer."""
 from datetime import datetime, timedelta, timezone
+import importlib
 import sys
 from types import SimpleNamespace
 
@@ -24,6 +25,9 @@ def real_status_harness(monkeypatch, *, bridge=False):
     h = BoostHarness()
     h.now = datetime.now(timezone.utc)
     monkeypatch.setattr(power_sync.dt_util, "utcnow", lambda: h.now)
+    # The producer validates connector age against the measurement clock too.
+    # Advance both with the harness so fresh simulated receipts are not future.
+    monkeypatch.setattr(importlib.import_module("power_sync.ev_load"), "utc_now", lambda: h.now)
     states = [
         _State("sensor.car_charging_state", "Charging", last_updated=h.now),
         _State("binary_sensor.car_charge_cable", "on", last_updated=h.now),
