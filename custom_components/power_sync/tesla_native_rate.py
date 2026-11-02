@@ -209,6 +209,9 @@ class NativeRatePorts:
                 and self._pairing_identity() == self.pairing)
 
     def enabled_vins(self):
+        # A disable can leave no VINs to read. Refresh the derived site arm
+        # on every tick while durable sessions and managed claims stay fenced.
+        self.update_armed_sites()
         return self.setting.rate_vins
 
     def _lease(self, vin):

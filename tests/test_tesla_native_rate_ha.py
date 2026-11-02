@@ -175,6 +175,66 @@ async def test_idle_native_rate_tick_reconciles_managed_records_without_enabled_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('disable_forecast', [False, True])
+@pytest.mark.parametrize('remaining', [None, 'native_session', 'managed', 'same_site', 'other_site'])
+async def test_disabling_last_native_rate_vehicle_releases_tariff_charge_guard(
+    live_adapter, disable_forecast, remaining,
+):
+    from unittest.mock import AsyncMock
+    from test_powerwall_battery_dispatch import load_routing, call
+
+    a = live_adapter
+    planning = importlib.import_module(a.m.__package__ + '.tesla_schedule_planning')
+    setting = planning.TeslaSchedulePlanning(SimpleNamespace(async_save=AsyncMock()))
+    setting.vehicles = {}
+    setting.rates = {VIN: True}
+    a.ports.setting = setting
+    controller = a.m.NativeRateController(None, a.ports)
+    controller.loaded = True
+    a.ports.controller = controller
+    a.runtime[a.m.RUNTIME_KEY] = controller
+    a.ports.update_armed_sites()
+
+    ns, _, client, _ = load_routing(tesla_control_method='tariff')
+    ns['site_identity'] = lambda entry: 'site'
+    ns['hass'].data['power_sync_native_rate_budget'] = a.budget
+    with pytest.raises(RuntimeError, match='shared EV headroom'):
+        await ns['_prepare_cloud_tariff_control']('charge', call(power_w=0))
+
+    # The planning API persists either disable and schedules this same tick.
+    # An idle controller has no vehicle reads that could refresh its site arm.
+    await setting.save(VIN, not disable_forecast,
+                       rate_management=None if disable_forecast else False)
+    if remaining == 'native_session':
+        a.budget.entries['one'] = {'site': 'site', 'sessions': {VIN: {
+            'identity': a.observed.identity, 'baseline_amps': 10,
+            'attempted_amps': 10, 'watts_per_amp': 230, 'recovering': True,
+        }}}
+    elif remaining == 'managed':
+        a.budget.managed[VIN] = {'site': 'site', 'reserved_w': 2300, 'uncertain': True}
+    elif remaining in ('same_site', 'other_site'):
+        other = SimpleNamespace(site='site' if remaining == 'same_site' else 'other',
+                                setting=SimpleNamespace(rate_vins={'another-car'}))
+        a.hass.data['power_sync']['two'] = {a.m.RUNTIME_KEY: SimpleNamespace(ports=other)}
+    await controller.tick()
+    await controller.tick()
+    if remaining in ('native_session', 'managed', 'same_site'):
+        with pytest.raises(RuntimeError, match='shared EV headroom'):
+            await ns['_prepare_cloud_tariff_control']('charge', call(power_w=0))
+    else:
+        assert not a.budget.site_armed('site')
+        assert await ns['_prepare_cloud_tariff_control']('charge', call(power_w=0))
+    if remaining == 'other_site':
+        assert a.budget.site_armed('other')
+    if remaining == 'native_session':
+        assert VIN in a.budget.entries['one']['sessions']
+    if remaining == 'managed':
+        assert a.budget.managed[VIN]['uncertain'] is True
+    client.dispatch_battery_power.assert_not_awaited()
+    assert a.calls == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize('state,stopped', [('Starting',False), ('Unknown',False),
     (None,False), ('Stopped',True), ('Complete',True), ('Disconnected',True)])
 async def test_cleanup_distinguishes_confirmed_stop_from_unknown_vehicle_state(live_adapter, state, stopped):
