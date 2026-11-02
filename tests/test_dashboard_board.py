@@ -76,6 +76,7 @@ def _strategy_script(board_missing: bool) -> str:
     'sensor.power_sync_tariff_schedule': s('PEAK (51.00c)', { plan_name: 'FOUR4FREE', utility: 'GloBird', schedule: [] }),
     'sensor.power_sync_daily_solar_energy': s(0, { unit_of_measurement: 'kWh' }),
     'sensor.power_sync_daily_grid_import': s(49.1, { unit_of_measurement: 'kWh' }),
+    'sensor.power_sync_daily_export_earnings': s(0.75),
     'sensor.power_sync_lifetime_solar_energy': s(16074.7, { unit_of_measurement: 'kWh' }),
     'sensor.power_sync_firmware': s('26.34.2'),
     'number.power_sync_backup_reserve': s(100, { min: 0, max: 100, step: 1 }),
@@ -111,6 +112,7 @@ def _strategy_script(board_missing: bool) -> str:
       evSettings: cards.find(c => c.key === 'evset') || null,
       pwRows: (cards.find(c => c.key === 'pwset')?.config.rows || []).map(r => r.entity),
       controls: cards.find(c => c.key === 'controls')?.config.entities || null,
+      nowEntities: cards.find(c => c.key === 'now')?.config.entities || null,
       tariffMeta: cards.find(c => c.key === 'tariff')?.meta || null,
     }));
   }).catch(err => { console.error(err); process.exit(1); });
@@ -136,6 +138,7 @@ def test_generate_hands_every_card_to_the_board():
     assert "switch.power_sync_optimization_enabled" in out["optRows"]
     assert "select.power_sync_operation_mode" in out["pwRows"]
     assert out["controls"]["mode"] == "sensor.power_sync_battery_mode"
+    assert out["nowEntities"]["exportEarnings"] == "sensor.power_sync_daily_export_earnings"
     assert out["controls"]["chargeDuration"] == "select.power_sync_force_charge_duration"
     assert out["tariffMeta"] == "GloBird FOUR4FREE"
 
@@ -318,6 +321,99 @@ def test_plan_separates_solar_charge_from_paid_grid_share_and_capped_export_valu
     assert "Super Export bonus cap" in out["html"] and "15.0 kWh/day" in out["html"]
     assert "5.0 kWh remaining today" in out["html"]
     assert "not total export" in out["html"]
+
+
+def test_now_export_rate_uses_eligible_total_bonus_then_returns_to_base():
+    """Ticket 446: the current rate must agree with capped export earnings."""
+    out = _run_board(r"""
+  const now = Date.parse('2026-11-02T08:21:00Z'); // 19:21 Sydney, browser is UTC
+  vm.runInContext(`Date.now = () => ${now}`, context);
+  const bonus = { day: '2026-11-02', window_start: '18:00', window_end: '21:00',
+    total_rate: 0.15, remaining_kwh: 10, observed_at: '2026-11-02T08:21:00+00:00' };
+  const s = (state, attributes = {}) => ({ state: String(state), attributes });
+  const states = { grid: s(-5.2, { unit_of_measurement: 'kW' }),
+    price: s(0.05, { unit_of_measurement: 'AUD/kWh', currency: 'AUD' }),
+    earnings: s(0.75, { currency: 'AUD', coverage: 'complete', export_bonus_coverage: 'complete', export_bonus: bonus }) };
+  const card = new T.PsNowCard();
+  card._hass = { states, config: { currency: 'AUD', time_zone: 'Australia/Sydney' } };
+  card._config = { entities: { grid: 'grid', exportPrice: 'price', exportEarnings: 'earnings' } };
+  card._api = () => ({ enabled: true, daily_cost_breakdown: { zerohero: {
+    status: 'enabled', window_start: '18:00', window_end: '21:00', super_export_rate: 0.15,
+    bonus_export_cap_kwh: 15, bonus_export_kwh_remaining: 10 } } });
+  const render = () => { card._render(); return card.innerHTML; };
+  const active = render();
+  bonus.remaining_kwh = 0;
+  const exhausted = render();
+  bonus.remaining_kwh = 10;
+  vm.runInContext(`Date.now = () => ${Date.parse('2026-11-02T10:00:00Z')}`, context);
+  const ended = render();
+  console.log(JSON.stringify({ active, exhausted, ended }));
+""")
+    assert "Exporting at 15.0 c/kWh" in out["active"]
+    assert "Exporting at 5.0 c/kWh" in out["exhausted"]
+    assert "Exporting at 5.0 c/kWh" in out["ended"]
+
+
+def test_now_bonus_rate_guards_local_window_quota_coverage_currency_and_staleness():
+    out = _run_board(r"""
+  const render = (options = {}) => {
+    const now = Date.parse(options.now || '2026-11-02T08:21:00Z');
+    vm.runInContext(`Date.now = () => ${now}`, context);
+    const bonus = { day: '2026-11-02', window_start: '18:00', window_end: '21:00',
+      total_rate: 0.15, remaining_kwh: 5, observed_at: new Date(now).toISOString(), ...options.bonus };
+    const attrs = { currency: 'AUD', coverage: 'complete', export_bonus_coverage: 'complete', export_bonus: bonus, ...options.attrs };
+    const card = new T.PsNowCard();
+    card._hass = { config: { currency: options.currency || 'AUD', time_zone: options.zone === undefined ? 'Australia/Sydney' : options.zone }, states: {
+      grid: { state: options.grid || '-5.2', attributes: { unit_of_measurement: 'kW' } },
+      price: { state: options.price || '0.05', attributes: { currency: 'AUD', unit_of_measurement: options.priceUnit || 'AUD/kWh', ...options.priceAttrs } },
+      earnings: { state: options.earningsState || '0.75', attributes: attrs },
+    } };
+    card._config = { entities: { grid: 'grid', exportPrice: 'price', exportEarnings: 'earnings' } };
+    card._api = () => null; card._render(); return card.innerHTML;
+  };
+  console.log(JSON.stringify({
+    partial: render({ attrs: { export_bonus_coverage: 'partial' } }),
+    hardwareGap: render({ attrs: { coverage: 'partial' } }),
+    unknown: render({ bonus: { remaining_kwh: null } }),
+    missing: render({ bonus: { remaining_kwh: '' } }),
+    stale: render({ bonus: { observed_at: '2026-11-02T08:15:00Z' } }),
+    oldDay: render({ bonus: { day: '2026-11-01' } }),
+    noZone: render({ zone: '' }), badZone: render({ zone: 'Bad/Timezone' }),
+    currencyMismatch: render({ attrs: { currency: 'GBP' } }),
+    noPrice: render({ price: 'unavailable' }),
+    offline: render({ earningsState: 'unavailable' }),
+    before: render({ now: '2026-11-02T06:59:00Z' }),
+    start: render({ now: '2026-11-02T07:00:00Z' }),
+    ended: render({ now: '2026-11-02T10:00:00Z' }),
+    winter: render({ now: '2026-07-02T08:00:00Z', bonus: { day: '2026-07-02' } }),
+    overnight: render({ now: '2026-11-01T14:00:00Z', bonus: { window_start: '23:00', window_end: '02:00' } }),
+    outsideOvernight: render({ bonus: { window_start: '23:00', window_end: '02:00' } }),
+    custom: render({ bonus: { total_rate: 0.1075, remaining_kwh: 0.001 } }),
+    higherBase: render({ price: '0.20' }),
+    minorBase: render({ price: '5', priceUnit: 'c/kWh' }),
+    haCurrencyDiffers: render({ currency: 'GBP' }),
+    gbp: render({ priceUnit: 'GBP/kWh', priceAttrs: { currency: 'GBP' }, attrs: { currency: 'GBP' } }),
+    baseProvider: render({ attrs: { export_bonus: null } }),
+    importing: render({ grid: '5.2' }),
+    idle: render({ grid: '0.01' }),
+  }));
+""")
+    for key in ("partial", "hardwareGap", "unknown", "missing", "stale", "oldDay",
+                "noZone", "badZone", "currencyMismatch", "offline"):
+        assert "Exporting at 5.0" in out[key], key
+        assert "base rate; bonus unknown" in out[key], key
+    assert "15.0" not in out["noPrice"]
+    assert "Exporting (rate unknown)" in out["noPrice"]
+    for key in ("before", "ended", "outsideOvernight", "baseProvider"):
+        assert "Exporting at 5.0 c/kWh" in out[key], key
+        assert "bonus unknown" not in out[key], key
+    for key in ("start", "winter", "overnight", "minorBase", "haCurrencyDiffers"):
+        assert "Exporting at 15.0 c/kWh" in out[key], key
+    assert "Exporting at 10.8 c/kWh" in out["custom"]
+    assert "Exporting at 20.0 c/kWh" in out["higherBase"]
+    assert "Exporting at 15.0 p/kWh" in out["gbp"]
+    assert "Exporting" not in out["importing"]
+    assert "Exporting" not in out["idle"]
 
 
 def test_plan_missing_source_and_value_arrays_keep_legacy_meaning():

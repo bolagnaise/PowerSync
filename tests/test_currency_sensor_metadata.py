@@ -261,6 +261,22 @@ def test_daily_cost_uses_restored_numeric_state_while_energy_summary_is_missing(
     assert entity.native_value == 4.56
 
 
+def test_daily_earnings_exposes_measured_bonus_metadata_with_source_currency():
+    sensor = _sensor_module()
+    desc = next(d for d in sensor.ENERGY_SENSORS if d.key == "daily_export_earnings")
+    bonus = {"day": "2026-11-02", "total_rate": 0.15, "remaining_kwh": 5,
+             "window_start": "18:00", "window_end": "21:00",
+             "observed_at": "2026-11-02T19:21:00+11:00"}
+    entity = sensor.TeslaEnergySensor(SimpleNamespace(data={"energy_summary": {
+        "export_earnings_today": 0.75, "export_earnings_coverage": "complete",
+        "export_bonus_coverage": "complete", "export_bonus": bonus,
+    }}), desc, _entry("globird"))
+    entity.hass = _hass("GBP")
+    assert entity.extra_state_attributes["export_bonus"] == bonus
+    assert entity.extra_state_attributes["export_bonus_coverage"] == "complete"
+    assert entity.extra_state_attributes["currency"] == "AUD"
+
+
 def test_daily_earnings_partial_coverage_does_not_restore_stale_value():
     sensor = _sensor_module()
     desc = next(d for d in sensor.ENERGY_SENSORS if d.key == "daily_export_earnings")

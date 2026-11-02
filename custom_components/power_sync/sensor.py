@@ -3404,6 +3404,7 @@ class TeslaEnergySensor(PowerSyncCurrencyMixin, CoordinatorEntity, RestoredNumer
                 "daily_supply_charge": energy_summary.get("daily_supply_charge"),
                 "export_bonus_today": energy_summary.get("export_bonus_today"),
                 "export_bonus_coverage": energy_summary.get("export_bonus_coverage"),
+                "export_bonus": energy_summary.get("export_bonus"),
                 "mtd_supply_charge": energy_summary.get("mtd_supply_charge"),
                 "supply_charge_days": energy_summary.get("supply_charge_days"),
                 "zerohero_credit_today": energy_summary.get("zerohero_credit_today"),

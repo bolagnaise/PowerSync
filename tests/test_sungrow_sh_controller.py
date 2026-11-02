@@ -1234,6 +1234,7 @@ def test_dual_sungrow_keeps_primary_grid_cost_coverage():
                 "export_earnings_coverage": "partial",
                 "grid_import_today_source": "sungrow_daily_register",
                 "grid_export_today_source": "sungrow_daily_register",
+                "export_bonus": {"remaining_kwh": None},
                 "mtd_import_cost": None,
                 "mtd_export_earnings": None,
                 "mtd_load_kwh": 20.0,
@@ -1280,6 +1281,7 @@ def test_dual_sungrow_keeps_primary_grid_cost_coverage():
     summary = data["energy_summary"]
     assert data["grid_power"] == -1.0
     assert summary["grid_export_today_kwh"] == 11.8
+    assert summary["export_bonus"] == {"remaining_kwh": None}
     assert summary["export_earnings_today"] is None
     assert summary["export_earnings_coverage"] == "partial"
     assert summary["avg_cost_per_kwh_today"] is None

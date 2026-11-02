@@ -8295,6 +8295,7 @@ class DualSungrowCoordinator(DataUpdateCoordinator):
             "supply_charge_days",
             "export_bonus_today",
             "export_bonus_coverage",
+            "export_bonus",
         ):
             if key in es1:
                 combined_energy[key] = es1[key]

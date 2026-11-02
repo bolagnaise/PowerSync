@@ -303,6 +303,18 @@ class DailyCostTracker:
                       export_bonus_coverage="partial" if partial else "complete",
                       mtd_supply_charge=round(mtd_supply, 4),
                       supply_charge_days=elapsed_days)
+        # Share the measured site-wide allowance with the current-rate display.
+        # A coverage gap consumes the unknown allowance conservatively; it must
+        # never look like a newly available premium quota after a restart.
+        result["export_bonus"] = (None if self.config is None else {
+            "day": self.state.get("day"),
+            "window_start": self.config.start,
+            "window_end": self.config.end,
+            "total_rate": self.config.super_export_rate,
+            "remaining_kwh": (None if partial or base.get("export_earnings_coverage") != "complete" else max(
+                0.0, self.config.export_cap_kwh - self.state.get("used", 0.0))),
+            "observed_at": self.state.get("last_observed"),
+        })
         result.update(zerohero_credit_today=round(credit, 4),
                       zerohero_credit_status=today_credit.get("status", "disabled"),
                       zerohero_credit_verification="GloBird complete next-day API cost data required",

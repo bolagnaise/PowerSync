@@ -8469,6 +8469,7 @@ function _boardCards(ctx) {
         soc: se('battery_level'), battery: se('battery_power'), solar: se('solar_power'),
         home: se('home_load'), grid: se('grid_power'),
         importPrice: se('current_import_price'), exportPrice: se('current_export_price'),
+        exportEarnings: se('daily_export_earnings'),
         backup: se('backup_time_remaining'), energyLeft: se('energy_left'), capacity: se('total_pack_energy'),
         mode: se('battery_mode'), monitoring: reg('switch', 'monitoring_mode'),
         optimizer: reg('switch', 'optimization_enabled'), dailySolar: se('daily_solar_energy'),

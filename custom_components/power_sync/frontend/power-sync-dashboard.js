@@ -1669,10 +1669,55 @@ function psBatteryControl(modeState) {
   return {label, pill, message: `${request} requested${attribution}.`};
 }
 
+// The current marginal export value uses the same observed allowance as daily
+// earnings, including solar export. Forecast/optimizer quota is not metering.
+function psLiveExportRate(hass, en, now) {
+  const price = psState(hass, en.exportPrice);
+  const earnings = psState(hass, en.exportEarnings);
+  const attrs = earnings?.attributes || {};
+  const bonus = attrs.export_bonus;
+  const result = { minor: psMinor(hass, en.exportPrice), unit: psMinorUnit(hass), qualifier: '' };
+  if (!bonus) return result;
+  const unknown = () => ({ ...result, qualifier: Number.isFinite(result.minor)
+    ? ' (base rate; bonus unknown)' : ' (rate unknown)' });
+  const timeZone = hass?.config?.time_zone;
+  if (!timeZone) return unknown();
+  let parts;
+  try {
+    parts = Object.fromEntries(new Intl.DateTimeFormat('en-CA', {
+      timeZone, year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+    }).formatToParts(now).map(p => [p.type, p.value]));
+  } catch (_) { return unknown(); }
+  const validTime = v => typeof v === 'string' && /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(v);
+  if (!validTime(bonus.window_start) || !validTime(bonus.window_end)) return unknown();
+  const clock = `${parts.hour}:${parts.minute}`;
+  const active = bonus.window_start < bonus.window_end
+    ? clock >= bonus.window_start && clock < bonus.window_end
+    : clock >= bonus.window_start || clock < bonus.window_end;
+  if (!active) return result;
+  const day = `${parts.year}-${parts.month}-${parts.day}`;
+  const observed = typeof bonus.observed_at === 'string' ? Date.parse(bonus.observed_at) : NaN;
+  const currency = price?.attributes?.currency;
+  // Match the accumulator's six-minute staleness guard. Missing/partial or
+  // prior-day history must not promise that premium quota remains available.
+  if (earnings?.state === 'unavailable' || bonus.day !== day
+      || !Number.isFinite(observed) || now < observed || now - observed >= 360000
+      || attrs.export_bonus_coverage !== 'complete'
+      || attrs.coverage !== 'complete'
+      || typeof bonus.remaining_kwh !== 'number' || !Number.isFinite(bonus.remaining_kwh)
+      || bonus.remaining_kwh < 0
+      || typeof bonus.total_rate !== 'number' || !Number.isFinite(bonus.total_rate)
+      || !currency || currency !== attrs.currency || !Number.isFinite(result.minor)) return unknown();
+  result.unit = psMinorUnit({ config: { currency } });
+  if (bonus.remaining_kwh > 0) result.minor = Math.max(result.minor, bonus.total_rate * 100);
+  return result;
+}
+
 class PsNowCard extends PsCardBase {
   _signature() {
     const data = psApiPeek('power_sync/optimization');
-    return `${super._signature()}#${data?.last_optimization || ''}|${data?.current_action || ''}|${data?.next_action_time || ''}`;
+    return `${super._signature()}#${data?.last_optimization || ''}|${data?.current_action || ''}|${data?.next_action_time || ''}|${this._hass?.config?.time_zone}|${Math.floor(Date.now() / 60000)}`;
   }
 
   _render() {
@@ -1681,7 +1726,8 @@ class PsNowCard extends PsCardBase {
     const soc = psNum(hass, en.soc);
     const solar = psKw(hass, en.solar), home = psKw(hass, en.home);
     const battery = psKw(hass, en.battery), grid = psKw(hass, en.grid);
-    const imp = psMinor(hass, en.importPrice), exp = psMinor(hass, en.exportPrice);
+    const imp = psMinor(hass, en.importPrice);
+    const exp = psLiveExportRate(hass, en, Date.now());
     const unit = psMinorUnit(hass);
     const modeState = psState(hass, en.mode);
     const mode = modeState?.state || 'normal';
@@ -1791,7 +1837,7 @@ class PsNowCard extends PsCardBase {
     const battSub = !Number.isFinite(battery) || Math.abs(battery) < 0.05 ? 'Idle' : battery < 0 ? 'Charging' : 'Discharging';
     const gridSub = !Number.isFinite(grid) || Math.abs(grid) < 0.05 ? 'Idle'
       : grid > 0 ? `Importing${Number.isFinite(imp) ? ` at ${imp.toFixed(1)} ${unit}/kWh` : ''}`
-        : `Exporting${Number.isFinite(exp) ? ` at ${exp.toFixed(1)} ${unit}/kWh` : ''}`;
+        : `Exporting${Number.isFinite(exp.minor) ? ` at ${exp.minor.toFixed(1)} ${exp.unit}/kWh` : ''}${exp.qualifier}`;
     const pos = v => (Number.isFinite(v) && v > 0.05 ? v : 0);
     const from = [['--yellow', pos(solar)], ['--green', pos(battery)], ['--cyan', pos(grid)]];
     const to = [['--purple', pos(home)], ['--green', pos(-battery)], ['--red', pos(-grid)]];

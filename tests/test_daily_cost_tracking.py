@@ -69,6 +69,42 @@ def test_forecast_uses_configured_total_rate_then_base_and_resets_local_day():
     assert prices == pytest.approx([0.15, 0.15, 0.10, 0.05, 0.15])
 
 
+def test_live_bonus_metadata_shares_measured_solar_and_battery_export_allowance():
+    clock = _Clock(_time())
+    acc = _new_accumulator(clock)
+    acc._daily_cost_tracker = _module().DailyCostTracker(_config())
+    # All grid export spends the same allowance, irrespective of its origin.
+    acc.update(6, -5, 0, 1, 0.30, 0.05)
+    for _ in range(12):
+        clock.current += timedelta(minutes=5)
+        acc.update(6, -5, 0, 1, 0.30, 0.05)
+    first = acc.as_dict()["export_bonus"]
+    assert first == {"day": "2026-10-25", "window_start": "18:00", "window_end": "21:00",
+                     "total_rate": 0.15, "remaining_kwh": pytest.approx(10),
+                     "observed_at": clock.current.isoformat()}
+    for _ in range(24):
+        clock.current += timedelta(minutes=5)
+        acc.update(0, -5, 6, 1, 0.30, 0.05)
+    assert acc.as_dict()["export_bonus"]["remaining_kwh"] == pytest.approx(0)
+    assert acc.as_dict()["export_earnings_today"] == pytest.approx(2.25)
+
+
+def test_live_bonus_metadata_withholds_unknown_history_and_preserves_local_day_reset():
+    m = _module()
+    tracker = m.DailyCostTracker(_config(super_export_rate=0.10, export_cap_kwh=7))
+    tracker.observe(None, _time(19), 5, 0.05, False)
+    base = {"export_earnings_coverage": "complete"}
+    assert tracker.summary(base)["export_bonus"]["remaining_kwh"] is None
+    restored = m.DailyCostTracker(tracker.config, state=tracker.state)
+    restored.observe(None, _time(day=26), 5, 0.05, False)
+    bonus = restored.summary(base)["export_bonus"]
+    assert bonus["day"] == "2026-10-26"
+    assert bonus["total_rate"] == 0.10
+    assert bonus["remaining_kwh"] == 7
+    assert restored.summary({"export_earnings_coverage": "partial"})["export_bonus"]["remaining_kwh"] is None
+    assert m.DailyCostTracker().summary(base)["export_bonus"] is None
+
+
 def test_exact_window_boundaries_split_measured_energy():
     tracker = _module().DailyCostTracker(_config())
     tracker.observe(None, _time(17, 59), 6, 0.05, False)
