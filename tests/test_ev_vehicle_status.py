@@ -364,6 +364,184 @@ def test_disconnected_paired_ble_does_not_erase_known_native_plug():
     assert vehicles[0]["site_presence"] == "home"
 
 
+def _stale_active_fleet_with_disconnected_ble(power_sync, *, native_age=10800):
+    now = datetime.now(timezone.utc)
+    native = now - timedelta(seconds=native_age)
+    disconnected = now - timedelta(minutes=25)
+    states = [
+        _State("binary_sensor.primary_ev_status", "on", last_updated=native),
+        _State("binary_sensor.primary_ev_charge_cable", "on", last_updated=native),
+        _State("device_tracker.primary_ev_location", "home", last_updated=native),
+        _State("sensor.primary_ev_charging", "charging", last_updated=native),
+        _State("sensor.primary_ev_charger_power", "2", {"unit_of_measurement": "kW"}, last_updated=native),
+        _State("sensor.primary_ev_battery_level", "66", last_updated=native),
+        _State("binary_sensor.home_ble_status", "on", last_updated=native),
+        _State("binary_sensor.home_ble_ble_status", "off", last_updated=disconnected),
+        _State("sensor.home_ble_charging_state", "Unknown", last_updated=disconnected),
+        _State("binary_sensor.home_ble_charge_flap", "unknown", last_updated=disconnected),
+        _State("sensor.home_ble_charge_power", "unknown", last_updated=disconnected),
+    ]
+    hass = _tesla_hass(states)
+    # The bridge is a separate ESPHome device, not a second set of Fleet sensors.
+    hass.entity_registry.entities = {
+        key: value for key, value in hass.entity_registry.entities.items()
+        if "primary_ev" in key
+    }
+    entry = SimpleNamespace(entry_id="entry-1", data={}, options={
+        "ev_provider": power_sync.EV_PROVIDER_BOTH,
+        "tesla_ble_entity_prefix": "home_ble",
+        "tesla_ble_vehicle_mapping": "5YJTEST0000000001=home_ble",
+    })
+    return hass, entry, native, now
+
+
+@pytest.mark.parametrize("cached_connector", [False, True])
+def test_newer_ble_disconnect_invalidates_expired_active_fleet_status(cached_connector):
+    """W3RT1E recurrence: cached cable ON/Charging must not survive departure."""
+    power_sync = _power_sync_module()
+    hass, entry, native, _now = _stale_active_fleet_with_disconnected_ble(power_sync)
+    if cached_connector:
+        hass.data["power_sync"]["entry-1"]["tesla_coordinator"] = SimpleNamespace(data={
+            "last_update": native + timedelta(seconds=30),
+            "wall_connectors_raw": [{
+                "vin": "5YJTEST0000000001", "wall_connector_state": 2,
+                "wall_connector_power": 2000,
+            }],
+        })
+    vehicles = power_sync._get_ev_vehicles_status(hass, entry, include_control_evidence=True)
+    assert len(vehicles) == 1
+    vehicle = vehicles[0]
+    assert vehicle["is_connected"] is False
+    assert vehicle["is_charging"] is False
+    assert vehicle.get("site_presence") != "home"
+    assert vehicle["power_available"] is False
+    assert vehicle["_power_activity_unknown"] is True
+    assert vehicle["_boost_charging_state_evidence"]["known"] is False
+    from power_sync.automations.loadpoint_status import build_loadpoint_status
+    for dynamic in ({}, {vehicle["vehicle_id"]: {"active": False, "current_amps": 0}}):
+        row = build_loadpoint_status(dynamic, vehicles)[0]
+        assert row["connected"] is False
+        assert row["actual_charging"] is False
+        assert row["status"] == "unknown"
+        assert row["current_power_kw"] is None
+        assert row["soc"] == 66
+
+
+def test_fresh_native_charging_survives_older_ble_disconnect():
+    power_sync = _power_sync_module()
+    hass, entry, _native, _now = _stale_active_fleet_with_disconnected_ble(power_sync, native_age=10)
+    vehicle = power_sync._get_ev_vehicles_status(hass, entry)[0]
+    assert vehicle["is_connected"] is True
+    assert vehicle["is_charging"] is True
+    assert vehicle["power_available"] is True
+    assert vehicle["ev_power_kw"] == 2
+    assert vehicle["site_presence"] == "home"
+
+
+def test_unrelated_bridge_disconnect_cannot_invalidate_another_vehicle():
+    power_sync = _power_sync_module()
+    hass, entry, _native, _now = _stale_active_fleet_with_disconnected_ble(power_sync)
+    hass.device_registry.devices["other_fleet"] = SimpleNamespace(
+        id="other_fleet", name="Other EV",
+        identifiers={("tesla_fleet", "5YJTEST0000000002")},
+    )
+    entry.options["tesla_ble_vehicle_mapping"] = "5YJTEST0000000002=home_ble"
+    vehicles = power_sync._get_ev_vehicles_status(hass, entry)
+    vehicle = next(v for v in vehicles if v["vehicle_id"] == "5YJTEST0000000001")
+    assert vehicle["is_connected"] is True
+    assert vehicle["site_presence"] == "home"
+
+
+def test_vinless_connector_cannot_claim_vehicle_with_unconfirmed_presence():
+    power_sync = _power_sync_module()
+    hass, entry, _native, now = _stale_active_fleet_with_disconnected_ble(power_sync)
+    vehicles = power_sync._get_ev_vehicles_status(hass, entry)
+    assert power_sync._apply_wall_connector_observation(
+        vehicles, 4.0, True, True, wc_observed_at=now,
+    ) is False
+    assert vehicles[0]["is_connected"] is False
+    assert vehicles[0]["power_available"] is False
+
+
+def test_repeated_native_cable_report_is_fresh_even_when_value_has_not_changed():
+    power_sync = _power_sync_module()
+    hass, entry, native, now = _stale_active_fleet_with_disconnected_ble(power_sync)
+    hass.states._states["binary_sensor.primary_ev_charge_cable"] = _State(
+        "binary_sensor.primary_ev_charge_cable", "on", last_updated=native,
+        last_reported=now,
+    )
+    assert power_sync._get_ev_vehicles_status(hass, entry)[0]["is_connected"] is True
+
+
+@pytest.mark.parametrize("age,confirmed", [(0, True), (10800, False), (-30, False), (None, False)])
+def test_only_fresh_exact_vehicle_connector_can_recover_unconfirmed_fleet(age, confirmed):
+    power_sync = _power_sync_module()
+    hass, entry, _native, now = _stale_active_fleet_with_disconnected_ble(power_sync)
+    hass.data["power_sync"]["entry-1"]["tesla_coordinator"] = SimpleNamespace(data={
+        "last_update": now - timedelta(seconds=age) if age is not None else None,
+        "wall_connectors_raw": [{
+            "vin": "5YJTEST0000000001", "wall_connector_state": 2,
+            "wall_connector_power": 4000,
+        }],
+    })
+    vehicle = power_sync._get_ev_vehicles_status(hass, entry)[0]
+    assert vehicle["is_connected"] is confirmed
+    assert vehicle["is_charging"] is confirmed
+    if confirmed:
+        assert vehicle["ev_power_kw"] == 4
+        assert vehicle.get("power_available", True) is True
+        assert vehicle["site_presence"] == "home"
+        assert not vehicle.get("_power_activity_unknown")
+    else:
+        assert vehicle["power_available"] is False
+        assert vehicle.get("site_presence") != "home"
+
+
+def test_mobile_stale_active_fleet_becomes_unknown_after_paired_ble_disconnect():
+    power_sync = _power_sync_module()
+    hass, _entry, native, _now = _stale_active_fleet_with_disconnected_ble(power_sync)
+    mobile = power_sync.EVVehiclesView(hass)._get_tesla_ble_vehicle("home_ble")
+    fleet = {
+        "is_plugged_in": True, "charging_state": "Charging", "charger_power": None,
+        "battery_level": 66, "data_updated_at": native.isoformat(),
+        "is_plugged_in_updated_at": native.isoformat(),
+        "charging_state_updated_at": native.isoformat(),
+    }
+    power_sync.EVVehiclesView._supplement_fleet_with_ble(fleet, mobile)
+    assert fleet["is_plugged_in"] is False
+    assert fleet["charging_state"] == "Unknown"
+    assert fleet["charger_power"] is None
+    assert fleet["battery_level"] == 66
+
+
+def test_newer_ble_disconnect_keeps_possible_ev_load_unknown_in_canonical_api(monkeypatch):
+    power_sync = _power_sync_module()
+    hass, entry, _native, _now = _stale_active_fleet_with_disconnected_ble(power_sync)
+    actions = importlib.import_module("power_sync.automations.actions")
+    monkeypatch.setattr(actions, "_dynamic_ev_state", {})
+    monkeypatch.setattr(actions, "_calculate_solar_surplus", lambda *_args: 0.0)
+    monkeypatch.setattr(power_sync, "_configured_sigenergy_charger_state", lambda _entry: None)
+    async def no_sigenergy(*_args):
+        return None
+    monkeypatch.setattr(power_sync, "_read_sigenergy_charger_state_for_entry", no_sigenergy)
+    hass.data["power_sync"]["entry-1"]["tesla_coordinator"] = SimpleNamespace(data={
+        "load_power": 2.5, "load_power_raw": 2.5,
+        "solar_power": 0.0, "grid_power": 2.5, "battery_power": 0.0,
+    })
+    snapshot = asyncio.run(
+        power_sync._get_ev_display_coordinator(hass, entry).async_refresh(force=True)
+    )
+    assert snapshot["success"] is True
+    row = snapshot["loadpoints"][0]
+    assert row["connected"] is False
+    assert row["actual_charging"] is False
+    assert row["status"] == "unknown"
+    assert row["current_power_kw"] is None
+    assert snapshot["site"]["ev_power_kw"] is None
+    assert snapshot["site"]["observation_quality"] == "incomplete"
+    assert snapshot["site"]["load_power_kw"] is None
+
+
 def test_ev_vehicle_status_ignores_stale_power_when_tesla_is_away_and_disconnected():
     power_sync = _power_sync_module()
     hass = _tesla_hass([
@@ -2905,11 +3083,15 @@ def test_display_snapshot_keeps_unknown_ev_power_out_of_surplus_arithmetic(
     assert snapshot["site"]["surplus_kw"] == 1.6
 
 
-def test_wall_connector_same_vehicle_edges_follow_source_timestamp():
+def test_wall_connector_same_vehicle_edges_follow_source_timestamp(monkeypatch):
     """Ticket #204: source time decides same-VIN stop/restart ordering."""
     power_sync = _power_sync_module()
     vehicle_id = "5YJTEST0000000001"
     current = datetime(2026, 8, 17, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        importlib.import_module("power_sync.ev_load"), "utc_now",
+        lambda: current + timedelta(seconds=0),
+    )
 
     stale_vehicle = {
         "vehicle_id": vehicle_id,
@@ -2956,11 +3138,15 @@ def test_wall_connector_same_vehicle_edges_follow_source_timestamp():
     assert current_vehicle["_observed_at"] == current
 
 
-def test_ev_vehicle_status_rejects_older_same_vin_wall_connector_power():
+def test_ev_vehicle_status_rejects_older_same_vin_wall_connector_power(monkeypatch):
     """Ticket #204: stale site telemetry cannot revive stopped EV power."""
     power_sync = _power_sync_module()
     vehicle_id = "5YJTEST0000000001"
     current = datetime(2026, 8, 17, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        importlib.import_module("power_sync.ev_load"), "utc_now",
+        lambda: current + timedelta(seconds=0),
+    )
     hass = _tesla_hass([
         _State(
             "sensor.primary_ev_charger_power_2",
@@ -2993,11 +3179,15 @@ def test_ev_vehicle_status_rejects_older_same_vin_wall_connector_power():
     assert vehicles[0]["_observed_at"] == current
 
 
-def test_ev_vehicle_status_home_metadata_does_not_retimestamp_power_edges():
+def test_ev_vehicle_status_home_metadata_does_not_retimestamp_power_edges(monkeypatch):
     """Ticket #204: unrelated home/cable updates cannot hide direct edges."""
     power_sync = _power_sync_module()
     vehicle_id = "5YJTEST0000000001"
     current = datetime(2026, 8, 17, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        importlib.import_module("power_sync.ev_load"), "utc_now",
+        lambda: current + timedelta(seconds=0),
+    )
 
     for vehicle_power, charging_state, direct_power in (
         (11.0, "charging", 0.0),
@@ -3156,10 +3346,14 @@ def test_same_vin_equal_timestamp_positive_power_clears_stale_auxiliary():
     assert "auxiliary_power_kw" not in coalesced[0]
 
 
-def test_multiple_vinless_wall_connectors_keep_distinct_physical_loads():
+def test_multiple_vinless_wall_connectors_keep_distinct_physical_loads(monkeypatch):
     """Distinct unidentified Wall Connectors must not overwrite one Tesla."""
     power_sync = _power_sync_module()
     current = datetime(2026, 8, 17, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        importlib.import_module("power_sync.ev_load"), "utc_now",
+        lambda: current + timedelta(seconds=0),
+    )
     hass = _tesla_hass([])
     hass.data["power_sync"]["entry-1"]["tesla_coordinator"] = SimpleNamespace(
         data={
@@ -3192,11 +3386,15 @@ def test_multiple_vinless_wall_connectors_keep_distinct_physical_loads():
     assert sum(vehicle["ev_power_kw"] for vehicle in connector_rows) == 12.0
 
 
-def test_away_vin_match_keeps_home_wall_connector_as_separate_loadpoint():
+def test_away_vin_match_keeps_home_wall_connector_as_separate_loadpoint(monkeypatch):
     """A named-zone vehicle cannot be revived by conflicting site telemetry."""
     power_sync = _power_sync_module()
     vehicle_id = "5YJTEST0000000001"
     current = datetime(2026, 8, 17, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        importlib.import_module("power_sync.ev_load"), "utc_now",
+        lambda: current + timedelta(seconds=30),
+    )
     hass = _tesla_hass([
         _State(
             "sensor.primary_ev_charger_power_2",
@@ -3240,11 +3438,15 @@ def test_away_vin_match_keeps_home_wall_connector_as_separate_loadpoint():
     assert connector["is_charging"] is True
 
 
-def test_duplicate_same_vin_away_tracker_fences_exact_wall_connector():
+def test_duplicate_same_vin_away_tracker_fences_exact_wall_connector(monkeypatch):
     """Ticket #204: an unlocated duplicate cannot bypass the away VIN fence."""
     power_sync = _power_sync_module()
     vehicle_id = "5YJTEST0000000001"
     current = datetime(2026, 8, 17, 1, 9, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        importlib.import_module("power_sync.ev_load"), "utc_now",
+        lambda: current + timedelta(seconds=30),
+    )
 
     for device_order in (("away", "duplicate"), ("duplicate", "away")):
         for wall_connector_state, wall_connector_power in (
@@ -3309,7 +3511,7 @@ def test_duplicate_same_vin_away_tracker_fences_exact_wall_connector():
             assert connector["is_charging"] is (wall_connector_power > 0)
 
 
-def test_away_vehicle_fences_zero_power_charging_connector_display_contract():
+def test_away_vehicle_fences_zero_power_charging_connector_display_contract(monkeypatch):
     """Ticket #204: a stale state-2 connector cannot render an away EV onsite."""
     power_sync = _power_sync_module()
     loadpoint_status = importlib.import_module(
@@ -3318,6 +3520,10 @@ def test_away_vehicle_fences_zero_power_charging_connector_display_contract():
     ev_display = importlib.import_module("power_sync.ev_display")
     vehicle_id = "5YJTEST0000000001"
     current = datetime(2026, 8, 17, 5, 26, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        importlib.import_module("power_sync.ev_load"), "utc_now",
+        lambda: current + timedelta(seconds=30),
+    )
 
     tracker = _State(
         "device_tracker.tl_location",
@@ -3381,7 +3587,7 @@ def test_away_vehicle_fences_zero_power_charging_connector_display_contract():
     assert sensor["is_charging"] is False
 
 
-def test_vinless_zero_power_connector_cannot_revive_only_away_vehicle():
+def test_vinless_zero_power_connector_cannot_revive_only_away_vehicle(monkeypatch):
     """Ticket #204: a DIN-only idle connector cannot invent onsite presence."""
     power_sync = _power_sync_module()
     loadpoint_status = importlib.import_module(
@@ -3390,6 +3596,10 @@ def test_vinless_zero_power_connector_cannot_revive_only_away_vehicle():
     ev_display = importlib.import_module("power_sync.ev_display")
     vehicle_id = "5YJTEST0000000001"
     current = datetime(2026, 8, 17, 5, 47, 19, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        importlib.import_module("power_sync.ev_load"), "utc_now",
+        lambda: current + timedelta(seconds=0),
+    )
 
     for device_order in (
         ("away",),
@@ -3455,11 +3665,15 @@ def test_vinless_zero_power_connector_cannot_revive_only_away_vehicle():
         assert sensor["is_charging"] is False
 
 
-def test_vinless_positive_connector_remains_distinct_from_away_vehicle():
+def test_vinless_positive_connector_remains_distinct_from_away_vehicle(monkeypatch):
     """A measured unidentified connector remains a separate physical load."""
     power_sync = _power_sync_module()
     vehicle_id = "5YJTEST0000000001"
     current = datetime(2026, 8, 17, 5, 47, 19, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        importlib.import_module("power_sync.ev_load"), "utc_now",
+        lambda: current + timedelta(seconds=0),
+    )
     tracker = _State(
         "device_tracker.tl_location",
         "work",
@@ -3499,11 +3713,15 @@ def test_vinless_positive_connector_remains_distinct_from_away_vehicle():
     assert connector["is_charging"] is True
 
 
-def test_vinless_connector_accepts_newer_home_presence_for_same_vehicle():
+def test_vinless_connector_accepts_newer_home_presence_for_same_vehicle(monkeypatch):
     """A newer home transition must reopen the DIN-only attribution path."""
     power_sync = _power_sync_module()
     vehicle_id = "5YJTEST0000000001"
     current = datetime(2026, 8, 17, 5, 47, 19, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        importlib.import_module("power_sync.ev_load"), "utc_now",
+        lambda: current + timedelta(seconds=90),
+    )
     states = []
     entities = {}
     devices = {}
@@ -3549,11 +3767,15 @@ def test_vinless_connector_accepts_newer_home_presence_for_same_vehicle():
     assert vehicles[0]["is_charging"] is True
 
 
-def test_duplicate_same_vin_newer_home_tracker_allows_exact_wall_connector():
+def test_duplicate_same_vin_newer_home_tracker_allows_exact_wall_connector(monkeypatch):
     """A newer home observation restores exact-VIN attribution after travel."""
     power_sync = _power_sync_module()
     vehicle_id = "5YJTEST0000000001"
     current = datetime(2026, 8, 17, 1, 9, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        importlib.import_module("power_sync.ev_load"), "utc_now",
+        lambda: current + timedelta(seconds=90),
+    )
 
     for device_order in (("away", "home"), ("home", "away")):
         devices = {}
@@ -3607,11 +3829,15 @@ def test_duplicate_same_vin_newer_home_tracker_allows_exact_wall_connector():
         assert vehicles[0]["ev_power_kw"] == 0.0
 
 
-def test_duplicate_same_vin_untimestamped_away_presence_fails_closed():
+def test_duplicate_same_vin_untimestamped_away_presence_fails_closed(monkeypatch):
     """An unknown-age away observation needs a comparable home transition."""
     power_sync = _power_sync_module()
     vehicle_id = "5YJTEST0000000001"
     current = datetime(2026, 8, 17, 1, 9, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        importlib.import_module("power_sync.ev_load"), "utc_now",
+        lambda: current + timedelta(seconds=30),
+    )
     away_vehicle = {
         "vehicle_id": vehicle_id,
         "site_presence": "away",
@@ -3642,11 +3868,15 @@ def test_duplicate_same_vin_untimestamped_away_presence_fails_closed():
     assert home_vehicle["is_connected"] is False
 
 
-def test_legacy_ev_status_applies_away_tracker_to_duplicate_physical_vin():
+def test_legacy_ev_status_applies_away_tracker_to_duplicate_physical_vin(monkeypatch):
     """The aggregate fallback cannot count an unlocated duplicate as home."""
     power_sync = _power_sync_module()
     vehicle_id = "5YJTEST0000000001"
     current = datetime(2026, 8, 17, 1, 9, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        importlib.import_module("power_sync.ev_load"), "utc_now",
+        lambda: current + timedelta(seconds=30),
+    )
 
     for device_order in (("away", "duplicate"), ("duplicate", "away")):
         devices = {}
@@ -3687,11 +3917,15 @@ def test_legacy_ev_status_applies_away_tracker_to_duplicate_physical_vin():
         assert status["ev_power_kw"] == 0.0
 
 
-def test_legacy_ev_status_accepts_newer_home_for_duplicate_physical_vin():
+def test_legacy_ev_status_accepts_newer_home_for_duplicate_physical_vin(monkeypatch):
     """A newer home tracker re-enables physical-VIN aggregate telemetry."""
     power_sync = _power_sync_module()
     vehicle_id = "5YJTEST0000000001"
     current = datetime(2026, 8, 17, 1, 9, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        importlib.import_module("power_sync.ev_load"), "utc_now",
+        lambda: current + timedelta(seconds=90),
+    )
 
     for device_order in (("away", "home"), ("home", "away")):
         devices = {}
@@ -3755,10 +3989,14 @@ def test_legacy_ev_status_accepts_newer_home_for_duplicate_physical_vin():
         assert status["ev_power_kw"] == 7.0
 
 
-def test_unmatched_explicit_vin_never_falls_through_to_another_vehicle():
+def test_unmatched_explicit_vin_never_falls_through_to_another_vehicle(monkeypatch):
     """A connector's VIN cannot be heuristically assigned to a different car."""
     power_sync = _power_sync_module()
     current = datetime(2026, 8, 17, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        importlib.import_module("power_sync.ev_load"), "utc_now",
+        lambda: current + timedelta(seconds=30),
+    )
     away_vehicle = {
         "vehicle_id": "5YJTEST0000000001",
         "site_presence": "away",
@@ -3789,10 +4027,14 @@ def test_unmatched_explicit_vin_never_falls_through_to_another_vehicle():
     assert home_vehicle["ev_power_kw"] == 0.0
 
 
-def test_exact_vin_zero_state_clears_stale_power_and_connection():
+def test_exact_vin_zero_state_clears_stale_power_and_connection(monkeypatch):
     """An explicit VIN-scoped state-0 sample is still authoritative telemetry."""
     power_sync = _power_sync_module()
     current = datetime(2026, 8, 17, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        importlib.import_module("power_sync.ev_load"), "utc_now",
+        lambda: current + timedelta(seconds=0),
+    )
     vehicle = {
         "vehicle_id": "5YJTEST0000000001",
         "ev_power_kw": 11.0,
@@ -3817,10 +4059,14 @@ def test_exact_vin_zero_state_clears_stale_power_and_connection():
     assert vehicle["_observed_at"] == current
 
 
-def test_unmatched_disconnected_wall_connector_stays_disconnected():
+def test_unmatched_disconnected_wall_connector_stays_disconnected(monkeypatch):
     """An idle connector row must retain its real disconnected state."""
     power_sync = _power_sync_module()
     current = datetime(2026, 8, 17, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        importlib.import_module("power_sync.ev_load"), "utc_now",
+        lambda: current + timedelta(seconds=0),
+    )
     hass = _Hass([], entry_data={
         "tesla_coordinator": SimpleNamespace(data={
             "wall_connectors_raw": [{

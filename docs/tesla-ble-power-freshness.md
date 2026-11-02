@@ -14,6 +14,14 @@ PowerSync shows unavailable status until new evidence arrives; connection loss
 does not prove that the vehicle is away. Fresh idle reports and known cable-on
 readings remain usable, including for sleeping vehicles.
 
+When an explicitly paired bridge reports a newer BLE disconnect, expired Fleet
+home, cable-on and Charging reports no longer establish current connection.
+Fresh repeated reports still count even when their values have not changed.
+The vehicle becomes unconfirmed rather than being declared away; possible stale
+charging power stays unknown in EV/Home accounting. Expired Wall Connector
+reports cannot restore that connection. A fresh connector report identifying
+the exact vehicle can restore it.
+
 ## Charging-power readings
 
 PowerSync accepts the optional raw charging receipt timestamps supplied by a
