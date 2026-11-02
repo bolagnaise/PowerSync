@@ -424,7 +424,7 @@ def load_routing(monitored=False, paired=True, **options):
              '_set_tesla_control_method', '_restore_local_grid_charging_via_cloud', '_stop_native_max_charge', '_try_native_max_charge', '_try_native_powerwall_force', '_powerwall_prefers_native_tariff',
              '_cloud_tariff_control_requested', '_prepare_cloud_tariff_control',
              'handle_force_charge', 'handle_force_discharge', 'persist_force_mode_state', 'restore_force_mode_from_persistence',
-             '_local_powerwall_dispatch_config', '_local_powerwall_dispatch_acknowledged', '_local_powerwall_dispatch_failed', '_local_powerwall_generation_current'}
+             '_local_powerwall_dispatch_config', '_local_powerwall_dispatch_acknowledged', '_local_powerwall_dispatch_failed', '_local_powerwall_generation_current', '_local_powerwall_settings_write_allowed'}
     nodes = [n for n in setup.body if isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef)) and n.name in names]
     class StripImports(ast.NodeTransformer):
         def visit_ImportFrom(self, node): return ast.copy_location(ast.Pass(), node)
@@ -1765,6 +1765,154 @@ def install_grid_permission(client, *, disabled=True):
     async def resume(): events.append(('resume', None)); return True
     client.resume_battery_operation.side_effect = resume
     return snap, events
+
+
+async def install_actual_local_dispatch(ns, client):
+    """Use the production factory so runtime recovery gates reach the actuator."""
+    from test_tesla_local_settings import load_function
+
+    runtime = ns['_local_powerwall_runtime']
+    runtime.pop('powerwall_battery_dispatch', None)
+    client.local_access_enabled = True
+    ns.update(ensure_client=AsyncMock(return_value=client), LocalBatteryDispatch=module.LocalBatteryDispatch)
+    ns['canonical_site_id'] = load_power_sync_function('canonical_site_id', {},
+        path=ROOT / 'custom_components/power_sync/powerwall_control.py')
+    factory = load_function(ROOT / 'custom_components/power_sync/__init__.py',
+                            '_get_local_powerwall_dispatch', ns, strip_imports=True)
+    return await factory()
+
+
+@pytest.mark.parametrize('resumed', [False, True])
+def test_retained_settings_incident_blocks_local_grid_permission_mutation(resumed):
+    async def run():
+        from copy import deepcopy
+
+        ns, _, client, saved = load_routing(optimization_allow_grid_charge=True,
+                                          tesla_control_method='local', tesla_energy_site_id='site')
+        _, events = install_grid_permission(client)
+        incident = {'id': 'old-settings', 'site_id': 'site', 'resume_cloud': resumed,
+                    'updates': {'default_real_mode': 'self_consumption'}}
+        ns['_local_powerwall_runtime']['powerwall_settings_pending'] = incident
+        if resumed:
+            ns['_local_powerwall_runtime']['powerwall_settings_cloud_handoff'] = incident['id']
+        saved['tesla_settings_pending'] = deepcopy(incident)
+        controller = await install_actual_local_dispatch(ns, client)
+        try:
+            with pytest.raises(RuntimeError, match='settings.*suspend'):
+                await ns['handle_force_charge'](call(source='optimizer', power_w=1000, duration=1))
+            client._transport.write_config.assert_not_awaited()
+            client.dispatch_battery_power.assert_not_awaited()
+            assert not events
+            assert saved['tesla_settings_pending'] == incident
+        finally:
+            await controller.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('direction', ['charge', 'discharge'])
+def test_retained_settings_incident_preserves_timed_watts_without_settings_changes(direction):
+    async def run():
+        ns, _, client, saved = load_routing(optimization_allow_grid_charge=True,
+                                          tesla_control_method='local', tesla_energy_site_id='site')
+        _, events = install_grid_permission(client, disabled=False)
+        incident = {'id': 'old-settings', 'site_id': 'site', 'resume_cloud': True}
+        ns['_local_powerwall_runtime']['powerwall_settings_pending'] = incident
+        ns['_local_powerwall_runtime']['powerwall_settings_cloud_handoff'] = incident['id']
+        saved['tesla_settings_pending'] = dict(incident)
+        controller = await install_actual_local_dispatch(ns, client)
+        try:
+            result = await ns[f'handle_force_{direction}'](call(source='optimizer', power_w=1000, duration=1))
+            assert result['control_path'] == 'powerwall_local_dispatch'
+            client.dispatch_battery_power.assert_awaited_once()
+            client._transport.write_config.assert_not_awaited()
+            assert [event[0] for event in events] == ['watts']
+            assert saved['tesla_settings_pending'] == incident
+        finally:
+            await controller.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('incident_site,configured_site,blocked', [
+    ('00042', 42, True), (None, 'site', True), ('previous-site', 'site', False),
+])
+def test_local_grid_permission_guard_uses_physical_site_identity(incident_site, configured_site, blocked):
+    async def run():
+        ns, _, client, saved = load_routing(optimization_allow_grid_charge=True,
+                                          tesla_control_method='local', tesla_energy_site_id=configured_site)
+        _, events = install_grid_permission(client)
+        incident = {'id': 'retained', 'site_id': incident_site, 'resume_cloud': True, 'terminal': True}
+        ns['_local_powerwall_runtime'].update(powerwall_settings_pending=incident,
+                                            powerwall_settings_cloud_handoff=incident['id'])
+        saved['tesla_settings_pending'] = dict(incident)
+        controller = await install_actual_local_dispatch(ns, client)
+        try:
+            command = ns['handle_force_charge'](call(source='optimizer', power_w=1000, duration=1))
+            if blocked:
+                with pytest.raises(RuntimeError, match='settings.*suspend'):
+                    await command
+                client._transport.write_config.assert_not_awaited()
+                client.dispatch_battery_power.assert_not_awaited()
+            else:
+                assert (await command)['success']
+                assert [event[0] for event in events] == ['grid', 'watts']
+            assert saved['tesla_settings_pending'] == incident
+        finally:
+            await controller.stop()
+    asyncio.run(run())
+
+
+def test_new_settings_incident_after_grid_submission_save_fences_actual_write():
+    async def run():
+        ns, _, client, saved = load_routing(optimization_allow_grid_charge=True,
+                                          tesla_control_method='local', tesla_energy_site_id='site')
+        _, events = install_grid_permission(client)
+        controller = await install_actual_local_dispatch(ns, client)
+        persist = controller.persist
+        incident = {'id': 'arrived-during-save', 'site_id': 'site'}
+        async def save_then_quarantine():
+            await persist()
+            record = controller.grid_charge_restore
+            if record and record['acceptance_until']:
+                ns['_local_powerwall_runtime']['powerwall_settings_pending'] = incident
+                saved['tesla_settings_pending'] = dict(incident)
+        controller.persist = save_then_quarantine
+        try:
+            with pytest.raises(RuntimeError, match='settings.*suspend'):
+                await ns['handle_force_charge'](call(source='optimizer', power_w=1000, duration=1))
+            client._transport.write_config.assert_awaited_once()
+            client.dispatch_battery_power.assert_not_awaited()
+            assert not any(event[0] == 'grid' for event in events)
+            assert saved['tesla_settings_pending'] == incident
+        finally:
+            await controller.stop()
+    asyncio.run(run())
+
+
+def test_settings_incident_during_owned_charge_retains_grid_restore_without_mutation():
+    async def run():
+        ns, _, client, saved = load_routing(optimization_allow_grid_charge=True,
+                                          tesla_control_method='local', tesla_energy_site_id='site')
+        _, events = install_grid_permission(client)
+        controller = await install_actual_local_dispatch(ns, client)
+        runtime = ns['_local_powerwall_runtime']
+        try:
+            assert (await ns['handle_force_charge'](call(source='optimizer', power_w=1000, duration=1)))['success']
+            incident = {'id': 'new-uncertainty', 'site_id': 'site', 'resume_cloud': True}
+            runtime.update(powerwall_settings_pending=incident, powerwall_settings_cloud_handoff=incident['id'])
+            saved['tesla_settings_pending'] = dict(incident)
+            with pytest.raises(ValueError, match='settings.*suspend'):
+                await controller.stop()
+            assert controller.pending
+            assert controller.grid_charge_restore['phase'] == 'restoring'
+            assert saved['force_mode_state']['local_grid_charge_restore']
+            assert [event[0] for event in events] == ['grid', 'watts', 'resume']
+            assert saved['tesla_settings_pending'] == incident
+        finally:
+            # Stand in for a separately proven terminal retirement, then drain cleanup.
+            runtime.pop('powerwall_settings_pending', None)
+            saved.pop('tesla_settings_pending', None)
+            await controller.stop()
+    asyncio.run(run())
 
 
 def test_optimizer_local_charge_enables_grid_before_watts_and_restores_after_resume():

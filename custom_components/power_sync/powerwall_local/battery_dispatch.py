@@ -201,7 +201,7 @@ class LocalBatteryDispatch:
     """
 
     def __init__(self, client, config, allowed, persist, stopped, guarded_write=None, acknowledged=None, failed=None,
-                 cleanup_allowed=None):
+                 cleanup_allowed=None, settings_write_allowed=None):
         self.client = client
         self.config = config
         self.allowed = allowed
@@ -211,6 +211,7 @@ class LocalBatteryDispatch:
         self.acknowledged = acknowledged
         self.failed = failed
         self._cleanup_allowed = cleanup_allowed or (lambda: True)
+        self._settings_write_allowed = settings_write_allowed or (lambda: True)
         self._lock = asyncio.Lock()
         self._task = None
         self._cleanup_task = None
@@ -420,7 +421,12 @@ class LocalBatteryDispatch:
                 task.result()
             raise
 
+    def _check_settings_write_allowed(self):
+        if getattr(self, "_settings_write_allowed", lambda: True)() is not True:
+            raise ValueError("Local Powerwall settings writes are suspended during settings recovery")
+
     async def _write_grid_setting(self, target):
+        self._check_settings_write_allowed()
         record = self._grid_charge_restore
         generation = self._generation
         checked = None
@@ -431,6 +437,7 @@ class LocalBatteryDispatch:
             checked = deepcopy(config)  # Transport edits its working copy next.
             return self._grid_value(checked) is (not target)
         def fence():
+            self._check_settings_write_allowed()
             if (not self._cleanup_allowed() or getattr(self.client, "local_access_enabled", True) is not True
                     or self._grid_charge_restore is not record or not self.pending
                     or generation != self._generation
@@ -488,6 +495,7 @@ class LocalBatteryDispatch:
             raise GridChargingPermissionError("Local grid charging is disabled or unknown",
                 "grid_charging_not_permitted" if enabled is False else "grid_charging_permission_unknown")
         battery_watts("charge", self._target, snapshot, self.config(), target_basis=self._target_basis)
+        self._check_settings_write_allowed()
         din = getattr(self.client, "_din", None)
         if not isinstance(din, str) or not din:
             raise ValueError("Local grid charging gateway identity is unavailable")

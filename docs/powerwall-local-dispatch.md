@@ -133,6 +133,10 @@ To resume, run **PowerSync: Resume Powerwall settings through cloud** (`power_sy
 
 This is supervised resumption, not proof that the old write finished. The local request contained a full configuration snapshot and may still apply after newer changes. Signature expiry, restart and matching readback do not prove completion. A genuine terminal reply updates only its incident and never replays an old setting or starts an old restore. Receipt observation cannot hold later authorised cloud requests or reload indefinitely. Dismissing the Repairs notice does not grant resumption.
 
+The restriction covers local **settings** writes, including temporarily enabling or restoring grid-charging permission for a timed Local V1R charge. A retained incident for the same site keeps those changes suspended even after cloud access resumes. If an incident arrives while a temporary grid-charging change is owned, restoration stays pending rather than issuing another local settings write through the block.
+
+Timed Local V1R battery-power commands are a separate actuator. A retained settings incident alone does not block a short power command that requires no settings change and passes the normal identity, ownership, fresh-telemetry, SOC, power-limit and permission checks. Charging still requires grid charging already permitted. This does not settle the old request, clear its Repair, reopen settings writes, or establish that local control has been physically verified. Native Max remains subject to its separate settings-recovery admission checks.
+
 **Restore Normal** finishes a current forcing override. After that owner has finished, the retained basis is a reference for supervised manual recovery; it is not replayed over newer settings. If the old write later changes settings, explicitly apply the intended settings through the normal cloud controls. An unrelated active override must still complete its confirmed cleanup before a new manual setting takes over; cloud recovery permission remains available if cleanup needs another attempt.
 
 ## Available grid-export targets

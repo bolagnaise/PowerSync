@@ -35805,6 +35805,28 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 state["expires_at"] = state.get("hardware_expires_at") or dt_util.utcnow()
         await persist_force_mode_state()
 
+    def _local_powerwall_settings_write_allowed():
+        """Timed watts do not reopen an incident's suspended config writes."""
+        from .powerwall_control import canonical_site_id
+
+        if (not _local_powerwall_generation_current()
+                or _local_powerwall_runtime.get("powerwall_settings_recovering")):
+            return False
+        for key in ("powerwall_settings_pending", "tesla_settings_pending"):
+            pending = _local_powerwall_runtime.get(key)
+            if not pending:
+                continue
+            if not isinstance(pending, dict):
+                return False
+            try:
+                if canonical_site_id(pending.get("site_id")) == canonical_site_id(
+                    entry.data.get(CONF_TESLA_ENERGY_SITE_ID)
+                ):
+                    return False
+            except (TypeError, ValueError):
+                return False
+        return True
+
     async def _get_local_powerwall_dispatch():
         if not _local_powerwall_generation_current():
             raise HomeAssistantError("Powerwall dispatch setup generation was replaced")
@@ -35825,6 +35847,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _clear_local_powerwall_dispatch,
             acknowledged=_local_powerwall_dispatch_acknowledged, failed=_local_powerwall_dispatch_failed,
             cleanup_allowed=_local_powerwall_generation_current,
+            settings_write_allowed=_local_powerwall_settings_write_allowed,
         )
         runtime["powerwall_battery_dispatch"] = controller
         return controller
