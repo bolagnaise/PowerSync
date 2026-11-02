@@ -4893,6 +4893,207 @@ def test_generic_export_reserves_only_forecast_future_load_energy(
     )
 
 
+@pytest.mark.parametrize("allow_grid_charge", [False, True])
+@pytest.mark.parametrize("efficiency", [1.0, 0.9])
+def test_low_soc_solar_refill_can_fund_protected_evening_export(
+    battery_optimizer_module, allow_grid_charge, efficiency,
+):
+    """A morning solve must keep usable solar for the better evening FIT."""
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=10000,
+        max_charge_w=5000,
+        max_discharge_w=5000,
+        efficiency=efficiency,
+        backup_reserve=0.20,
+        hardware_reserve=0.0,
+        interval_minutes=5,
+        horizon_hours=5,
+        terminal_weight=0.0,
+    )
+    result = optimizer.optimize(
+        import_prices=[0.30] * 12 + [0.58] * 12 + [0.56] * 12
+        + [0.58] * 12 + [0.56] * 12,
+        export_prices=[0.05] * 12 + [0.17] * 12 + [0.26] * 12
+        + [0.0] * 12 + [0.126] * 12,
+        solar_forecast=[5.0] * 12 + [0.0] * 48,
+        load_forecast=[0.0] * 36 + [1.0] * 12 + [0.0] * 12,
+        current_soc=0.20,
+        acquisition_cost_kwh=0.0,
+        acquisition_cost_known_zero=True,
+        allow_grid_charge=allow_grid_charge,
+        allow_battery_export=[False] * 12 + [True] * 24
+        + [False] * 12 + [True] * 12,
+    )
+
+    assert result.solver_used == "highs"
+    assert sum(result.battery_to_grid_w[24:36]) / 12000 == pytest.approx(
+        5.0 * efficiency**2 - 1.0, abs=0.02
+    )
+    assert max(result.battery_to_grid_w[12:24]) <= 1e-6
+    assert max(result.battery_to_grid_w[48:]) <= 1e-6
+    assert result.schedule.actions[35].soc >= 0.20 + 0.10 / efficiency - 1e-4
+
+
+@pytest.mark.parametrize("greedy", [False, True])
+@pytest.mark.parametrize("solar_case", ["stored", "blocked", "sold", "future"])
+def test_protected_export_credits_only_earlier_stored_solar(
+    battery_optimizer_module, monkeypatch, greedy, solar_case,
+):
+    """Grid refill, unabsorbed PV and tomorrow's solar add no export credit."""
+    module = battery_optimizer_module
+    monkeypatch.setattr(module, "HIGHS_AVAILABLE", not greedy)
+    optimizer = module.BatteryOptimizer(
+        capacity_wh=10000, max_charge_w=5000, max_discharge_w=5000,
+        efficiency=1.0, backup_reserve=0.20, hardware_reserve=0.0,
+        interval_minutes=5, horizon_hours=5, terminal_weight=0.0,
+    )
+    solar = [5.0] * 12 + [0.0] * 48
+    if solar_case == "future":
+        solar = [0.0] * 48 + [5.0] * 12
+    result = optimizer.optimize(
+        import_prices=[0.80] * 12 + [0.05] * 12 + [0.56] * 12 + [0.58] * 24,
+        export_prices=[0.60 if solar_case == "sold" else 0.0] * 12
+        + [0.0] * 12 + [0.26] * 12 + [0.0] * 24,
+        solar_forecast=solar,
+        load_forecast=[0.0] * 36 + [1.0] * 12 + [0.0] * 12,
+        current_soc=0.20,
+        acquisition_cost_kwh=0.0, acquisition_cost_known_zero=True,
+        allow_grid_charge=True,
+        allow_battery_export=[False] * 24 + [True] * 12 + [False] * 24,
+        block_battery_charge=[solar_case == "blocked"] * 12 + [False] * 48,
+        manual_control={
+            "mode_slots": ["export" if solar_case == "sold" else None] * 12
+            + [None] * 48,
+            "required_discharge_kw": [0.0] * 60,
+        },
+    )
+    assert result.solver_used == ("greedy" if greedy else "highs")
+    exported = sum(result.battery_to_grid_w[24:36]) / 12000
+    if solar_case == "stored":
+        assert exported == pytest.approx(4.0, abs=0.02)
+    else:
+        assert exported == pytest.approx(0.0, abs=1e-6)
+    if solar_case == "sold":
+        assert sum(result.grid_export_w[:12]) / 12000 == pytest.approx(5.0)
+
+
+@pytest.mark.parametrize("greedy", [False, True])
+@pytest.mark.parametrize("native_home_use", [False, True])
+def test_grid_refill_cannot_reuse_depleted_solar_export_credit(
+    battery_optimizer_module, monkeypatch, greedy, native_home_use,
+):
+    module = battery_optimizer_module
+    monkeypatch.setattr(module, "HIGHS_AVAILABLE", not greedy)
+    optimizer = module.BatteryOptimizer(
+        capacity_wh=10000, max_charge_w=5000, max_discharge_w=5000,
+        efficiency=1.0, backup_reserve=0.20, hardware_reserve=0.0,
+        interval_minutes=5, horizon_hours=5, terminal_weight=0.0,
+    )
+    result = optimizer.optimize(
+        import_prices=[0.80] * 12 + [0.05 if native_home_use else 0.80] * 12
+        + [0.05] * 12 + [0.56] * 12 + [0.58] * 12,
+        export_prices=[0.0] * 12 + [0.05 if native_home_use else 0.0] * 12
+        + [0.0] * 12 + [0.26] * 12 + [0.0] * 12,
+        solar_forecast=[5.0] * 12 + [0.0] * 48,
+        load_forecast=[0.0] * 12 + [5.0] * 12 + [0.0] * 24 + [1.0] * 12,
+        current_soc=0.20, acquisition_cost_kwh=0.0,
+        acquisition_cost_known_zero=True, allow_grid_charge=True,
+        allow_battery_export=[False] * 36 + [True] * 12 + [False] * 12,
+        disable_idle=True,
+        block_battery_charge=[False] * 12 + [native_home_use] * 12 + [False] * 36,
+        manual_control={
+            "mode_slots": [None] * 24 + ["charge"] * 12 + [None] * 24,
+            "required_charge_kw": [0.0] * 24 + [5.0] * 12 + [0.0] * 24,
+        },
+    )
+    assert result.solver_used == ("greedy" if greedy else "highs")
+    assert result.schedule.actions[23].soc <= 0.20 + 1e-4
+    assert any(a.battery_charge_w > 100 for a in result.schedule.actions[24:36])
+    assert max(result.battery_to_grid_w[36:48]) <= 1e-6
+
+
+@pytest.mark.parametrize("greedy", [False, True])
+def test_same_period_solar_cannot_fund_protected_export(
+    battery_optimizer_module, monkeypatch, greedy,
+):
+    module = battery_optimizer_module
+    monkeypatch.setattr(module, "HIGHS_AVAILABLE", not greedy)
+    optimizer = module.BatteryOptimizer(
+        capacity_wh=10000, max_charge_w=5000, max_discharge_w=5000,
+        efficiency=1.0, backup_reserve=0.20, hardware_reserve=0.0,
+        interval_minutes=60, horizon_hours=4, terminal_weight=0.0,
+    )
+    result = optimizer.optimize(
+        import_prices=[0.80, 0.05, 0.56, 0.58],
+        export_prices=[0.0, 0.0, 0.26, 0.0],
+        solar_forecast=[0.1, 0.0, 5.0, 0.0],
+        load_forecast=[0.0, 0.0, 0.0, 1.0],
+        current_soc=0.20, acquisition_cost_kwh=0.0,
+        acquisition_cost_known_zero=True,
+        allow_battery_export=[False, False, True, False],
+    )
+    assert result.solver_used == ("greedy" if greedy else "highs")
+    assert result.battery_to_grid_w[2] <= 1e-6
+
+
+@pytest.mark.parametrize("greedy", [False, True])
+def test_repeated_protected_windows_share_stored_solar_credit(
+    battery_optimizer_module, monkeypatch, greedy,
+):
+    module = battery_optimizer_module
+    monkeypatch.setattr(module, "HIGHS_AVAILABLE", not greedy)
+    optimizer = module.BatteryOptimizer(
+        capacity_wh=10000, max_charge_w=5000, max_discharge_w=5000,
+        efficiency=1.0, backup_reserve=0.20, hardware_reserve=0.0,
+        interval_minutes=5, horizon_hours=5, terminal_weight=0.0,
+    )
+    result = optimizer.optimize(
+        import_prices=[0.30] * 12 + [0.56] * 12 + [0.58] * 12
+        + [0.56] * 12 + [0.58] * 12,
+        export_prices=[0.0] * 12 + [0.26] * 12 + [0.0] * 12
+        + [0.26] * 12 + [0.0] * 12,
+        solar_forecast=[5.0] * 12 + [0.0] * 48,
+        load_forecast=[0.0] * 24 + [1.0] * 12 + [0.0] * 12 + [1.0] * 12,
+        current_soc=0.20, acquisition_cost_kwh=0.0,
+        acquisition_cost_known_zero=True, allow_grid_charge=False,
+        allow_battery_export=[False] * 12 + [True] * 12 + [False] * 12
+        + [True] * 12 + [False] * 12,
+    )
+    assert result.solver_used == ("greedy" if greedy else "highs")
+    exported = sum(result.battery_to_grid_w) / 12000
+    assert 0.0 < exported <= 3.0 + 1e-6
+    assert min(a.soc for a in result.schedule.actions) >= 0.20 - 1e-4
+
+
+def test_greedy_manual_solar_credit_is_limited_by_actual_charge_room(
+    battery_optimizer_module, monkeypatch,
+):
+    module = battery_optimizer_module
+    monkeypatch.setattr(module, "HIGHS_AVAILABLE", False)
+    optimizer = module.BatteryOptimizer(
+        capacity_wh=10000, max_charge_w=5000, max_discharge_w=5000,
+        efficiency=1.0, backup_reserve=0.20, hardware_reserve=0.0,
+        interval_minutes=5, horizon_hours=5, terminal_weight=0.0,
+    )
+    result = optimizer.optimize(
+        import_prices=[0.05] * 36 + [0.56] * 12 + [0.58] * 12,
+        export_prices=[0.0] * 36 + [0.26] * 12 + [0.0] * 12,
+        solar_forecast=[0.0] * 24 + [5.0] * 12 + [0.0] * 24,
+        load_forecast=[0.0] * 48 + [1.0] * 12,
+        current_soc=0.20, acquisition_cost_kwh=0.0,
+        acquisition_cost_known_zero=True,
+        allow_battery_export=[False] * 36 + [True] * 12 + [False] * 12,
+        manual_control={
+            "mode_slots": [None] * 24 + ["charge"] * 12 + [None] * 24,
+            "required_charge_kw": [0.0] * 24 + [5.0] * 12 + [0.0] * 24,
+        },
+    )
+    assert result.solver_used == "greedy"
+    stored_solar = sum(a.battery_charge_w for a in result.schedule.actions[24:36]) / 12000
+    assert stored_solar == pytest.approx(3.0, abs=0.01)
+    assert sum(result.battery_to_grid_w[36:48]) / 12000 <= 2.0 + 1e-6
+
+
 def test_future_load_reservation_blocks_only_export_not_current_home_use(
     battery_optimizer_module,
 ):
