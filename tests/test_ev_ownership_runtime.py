@@ -965,3 +965,19 @@ def test_fresh_continuing_charge_after_accepted_stop_emits_safety_event(monkeypa
     assert failures[0]["physical_confirmation"] is False
     # Failed effect observation must not rewrite transport acknowledgement.
     assert ev_ownership.get_ev_last_commands(hass, entry)["car"]["success"] is True
+
+
+def test_future_stop_observation_cannot_clear_provisional_lease_or_emit_confirmation():
+    from unittest.mock import Mock
+    hass, entry = _Hass(), _Entry()
+    hass.bus = SimpleNamespace(async_fire=Mock())
+    command = ev_ownership.record_ev_command(hass, entry, "car", command="stop", success=True)
+    ev_ownership.claim_ev_ownership(
+        hass, entry, "car", owner="external", owner_mode="external",
+        extra={"stop_settling": True, "stop_command_at": command["at"]},
+    )
+    assert not ev_ownership.confirm_powersync_ev_stop(
+        hass, entry, "car", observed_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+    )
+    assert ev_ownership.get_ev_ownership(hass, entry, "car")[1]["stop_settling"] is True
+    assert not any(c.args[1].get("physical_confirmation") for c in hass.bus.async_fire.call_args_list)

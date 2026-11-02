@@ -1641,6 +1641,8 @@ def confirm_powersync_ev_stop(
     """Clear only the provisional lease once stopped telemetry is observed."""
     vehicle_id = _ownership_loadpoint_id(hass, config_entry, vehicle_id)
     observed_time = _as_utc_datetime(observed_at)
+    if observed_time is None or (observed_time - datetime.now(timezone.utc)).total_seconds() > 60:
+        return False
     lease_id, lease = get_ev_ownership(hass, config_entry, vehicle_id)
     if (
         lease_id is not None
