@@ -11391,6 +11391,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             return
 
+        from ..action_events import publish_optimizer_action
+        publish_optimizer_action(self, action, "evaluating")
         self._export_reserve_decision = None
         execution_schedule = getattr(self, "_current_schedule", None)
         execution_plan_time = getattr(self, "_last_update_time", None)
@@ -11474,6 +11476,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "[MONITORING] Optimizer would execute: %s (power=%sW) — blocked by monitoring mode",
                 runtime_action, getattr(action, 'power_w', 'N/A'),
             )
+            publish_optimizer_action(self, action, "monitoring", runtime_action)
             return
 
         battery = self._executor.battery_controller
@@ -11551,6 +11554,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     self._force_state_clearer()
             self._last_executed_planned_action = action.action
             self._last_executed_action = "self_consumption"
+            publish_optimizer_action(self, action, "runtime_target", "self_consumption")
             return
         if force_state and force_state.get("active"):
                 force_type = force_state.get("type", "unknown")
@@ -11620,6 +11624,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             return
                         self._last_executed_planned_action = action.action
                         self._last_executed_action = "self_consumption"
+                        publish_optimizer_action(self, action, "runtime_target", "self_consumption")
                         return
                     try:
                         cap_reached, charge_soc_now, charge_soc_cap = (
@@ -11684,6 +11689,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         if not cap_cancelled_for_new_action:
                             self._last_executed_planned_action = action.action
                             self._last_executed_action = "self_consumption"
+                            publish_optimizer_action(self, action, "runtime_target", "self_consumption")
                             return
 
                 if not cap_cancelled_for_new_action and lp_matches_force:
@@ -11755,6 +11761,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                     self._force_state_clearer()
                                 self._last_executed_planned_action = action.action
                                 self._last_executed_action = "self_consumption"
+                                publish_optimizer_action(self, action, "runtime_target", "self_consumption")
                                 return
                         except Exception as reserve_err:
                             _LOGGER.debug(
@@ -11783,6 +11790,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             await fenced_call(self, lambda: battery.set_self_consumption_mode(), 'set_self_consumption_mode')
                         self._last_executed_planned_action = action.action
                         self._last_executed_action = "self_consumption"
+                        publish_optimizer_action(self, action, "runtime_target", "self_consumption")
                         return
 
                     # Extend the expiry timer so the force mode doesn't expire
@@ -11866,6 +11874,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 self._force_state_clearer()
                             self._last_executed_planned_action = action.action
                             self._last_executed_action = "self_consumption"
+                            publish_optimizer_action(self, action, "runtime_target", "self_consumption")
                             return
                         if safe_mins < extend_mins:
                             _LOGGER.info(
@@ -12077,6 +12086,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                         self._force_state_clearer()
                                     self._last_executed_planned_action = action.action
                                     self._last_executed_action = "self_consumption"
+                                    publish_optimizer_action(self, action, "runtime_target", "self_consumption")
                                     return
                                 force_power_w = (
                                     self._export_command_power_w(force_window_action)
@@ -12618,6 +12628,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         return
                     self._last_executed_planned_action = action.action
                     self._last_executed_action = "self_consumption"
+                    publish_optimizer_action(self, action, "runtime_target", "self_consumption")
                     return
                 try:
                     cap_reached, charge_soc_now, charge_soc_cap = (
@@ -12669,6 +12680,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         return
                     self._last_executed_planned_action = action.action
                     self._last_executed_action = "self_consumption"
+                    publish_optimizer_action(self, action, "runtime_target", "self_consumption")
                     return
                 if hasattr(battery, "force_charge"):
                     if self._tesla_force_charge_should_yield_to_live_solar(action):
@@ -12680,6 +12692,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     if effective_action != "charge":
                         self._last_executed_planned_action = action.action
                         self._last_executed_action = effective_action
+                        publish_optimizer_action(self, action, "runtime_target", effective_action)
                         return
 
                     charge_power_w = self._charge_command_power_w(action)
@@ -12741,6 +12754,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 return
                             self._last_executed_planned_action = action.action
                             self._last_executed_action = "self_consumption"
+                            publish_optimizer_action(self, action, "runtime_target", "self_consumption")
                             return
                         if safe_duration < charge_duration:
                             _LOGGER.info(
@@ -12918,6 +12932,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 return
                             self._last_executed_planned_action = planned_action
                             self._last_executed_action = "self_consumption"
+                            publish_optimizer_action(self, action, "runtime_target", "self_consumption")
                             return
                         if safe_mins < discharge_duration:
                             _LOGGER.info(
@@ -13492,6 +13507,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             self._last_executed_planned_action = planned_action
             self._last_executed_action = effective_action
+            publish_optimizer_action(self, action, "runtime_target", effective_action)
 
         except Exception as e:
             decision = getattr(self, "_export_reserve_decision", None)
@@ -13500,6 +13516,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     "command_unconfirmed" if decision["payload"]["status"] == "limited"
                     else "restore_unconfirmed"
                 )
+            publish_optimizer_action(self, action, "failed")
             _LOGGER.error("Failed to execute optimizer action: %s", e)
 
     def _battery_export_price_status(self, action: Any | None = None) -> dict[str, Any]:

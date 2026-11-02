@@ -699,3 +699,18 @@ def test_calibration_holds_active_optimizer_force_without_hardware_refresh(opt_m
         assert calls == []
 
     asyncio.run(_run())
+
+
+def test_monitoring_action_events_distinguish_plan_from_runtime_target(opt_module):
+    from unittest.mock import Mock
+    battery = SimpleNamespace(set_self_consumption_mode=Mock())
+    coordinator = _execute_coordinator(opt_module, battery)
+    coordinator.hass.bus = SimpleNamespace(async_fire=Mock())
+    coordinator._monitoring_mode_active = lambda: True
+    action = _self_consumption_action()
+    asyncio.run(coordinator._execute_optimizer_action(action))
+    calls = coordinator.hass.bus.async_fire.call_args_list
+    assert [c.args[1]["status"] for c in calls] == ["evaluating", "monitoring"]
+    assert all(c.args[1]["physical_confirmation"] is False for c in calls)
+    assert calls[-1].args[1]["effective_action"] == "self_consumption"
+    battery.set_self_consumption_mode.assert_not_called()

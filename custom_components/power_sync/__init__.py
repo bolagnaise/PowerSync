@@ -29026,7 +29026,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 and _aemo_dispatch_entry_data() is sync_runtime
                 and _command_generation[0] == sync_command_generation
                 and str(entry.data.get(CONF_TESLA_ENERGY_SITE_ID)) == sync_site_id
-                and (not _is_monitoring_mode() or _monitoring_sync_override)
+                and (not _is_monitoring_mode() or bool(_monitoring_sync_override))
             )
 
         def mode_restore_current():
@@ -46681,6 +46681,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
                     confirm_powersync_ev_stop(
                         hass, entry, "zaptec_standalone", observed_at=poll_observed_at,
+                    )
+                # Timestamped charging telemetry can expose an accepted stop
+                # that did not take effect, without issuing another command.
+                if parsed.get("charger_operation_mode") == "charging" and math.isfinite(stop_power_w) and stop_power_w > 50:
+                    from .automations.ev_ownership import observe_recorded_ev_stop
+                    observe_recorded_ev_stop(
+                        hass, entry, "zaptec_standalone",
+                        observed_at=poll_observed_at, charging=True,
                     )
                 # Update charging session if actively charging
                 if parsed.get('charger_operation_mode') == 'charging':

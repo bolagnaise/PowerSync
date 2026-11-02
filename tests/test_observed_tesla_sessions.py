@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import sys
 import types
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -56,6 +56,14 @@ class _Coordinator:
         }
 
 
+class _Bus:
+    def __init__(self) -> None:
+        self.events = []
+
+    def async_fire(self, event_type, event_data=None):
+        self.events.append((event_type, event_data or {}))
+
+
 class _Hass:
     def __init__(self) -> None:
         self.data = {
@@ -77,6 +85,7 @@ class _Hass:
                 },
             },
         }
+        self.bus = _Bus()
 
 
 class _Session:
@@ -196,6 +205,93 @@ def test_observed_tesla_charge_does_not_duplicate_powersync_session():
     assert manager.updated == []
     assert manager.ended == []
     assert get_ev_ownership(hass, _Entry(), VIN)[1]["owner_mode"] == "solar_surplus"
+
+
+@pytest.mark.parametrize("stop_success", [True, False])
+def test_owned_session_stop_observation_alerts_and_settles(monkeypatch, stop_success):
+    """Stop telemetry is observed even when history owns the active session."""
+    manager = _SessionManager()
+    hass = _Hass()
+    manager.active_sessions[VIN] = _Session(VIN, "solar_surplus")
+    claim_ev_ownership(hass, _Entry(), VIN, owner_mode="solar_surplus")
+    tracker = _tracker(
+        manager,
+        [{
+            "vehicle_id": VIN,
+            "ev_power_kw": 7.0,
+            "is_charging": True,
+            "is_connected": True,
+        }],
+        hass,
+    )
+    command = record_ev_command(
+        hass,
+        _Entry(),
+        VIN,
+        command="stop",
+        success=stop_success,
+        reason="window ended",
+    )
+    command["at"] = (datetime.now(timezone.utc) - timedelta(seconds=120)).isoformat()
+    if not stop_success:
+        hass.bus.events.clear()
+
+    # A stale sample after the command is ignored.
+    tracker._vehicle_status_fn(hass, _Entry())[0]["_charging_observed_at"] = (
+        datetime.fromisoformat(command["at"]) + timedelta(seconds=30)
+    ).isoformat()
+    asyncio.run(tracker.poll())
+    assert not any(
+        event_type == "power_sync_ev_stop_failed" for event_type, _data in hass.bus.events
+    )
+
+    # A fresh continuing-charge sample raises the safety event despite the
+    # existing PowerSync-owned session causing observed-session creation to be
+    # skipped.
+    vehicle = tracker._vehicle_status_fn(hass, _Entry())[0]
+    vehicle["_charging_observed_at"] = datetime.now(timezone.utc).isoformat()
+    asyncio.run(tracker.poll())
+    assert (
+        any(
+            event_type == "power_sync_ev_stop_failed"
+            for event_type, _data in hass.bus.events
+        )
+        or (
+            not stop_success
+            and VIN in hass.data["power_sync"]["entry-1"].get("ev_stop_alerts", {})
+        )
+    )
+
+    # Unavailable power cannot count as known stopped telemetry, even twice.
+    vehicle.update({
+        "ev_power_kw": 0.0,
+        "is_charging": False,
+        "power_available": False,
+        "_charging_observed_at": datetime.now(timezone.utc).isoformat(),
+    })
+    asyncio.run(tracker.poll())
+    asyncio.run(tracker.poll())
+    assert not any(
+        event_type == "power_sync_ev_command"
+        and data.get("command") == "stop_observed"
+        for event_type, data in hass.bus.events
+    )
+
+    # Two newer known stopped samples confirm either an accepted or rejected
+    # stop and clear the alert.
+    vehicle.update({
+        "power_available": True,
+        "_charging_observed_at": datetime.now(timezone.utc).isoformat(),
+    })
+    asyncio.run(tracker.poll())
+    asyncio.run(tracker.poll())
+    assert any(
+        event_type == "power_sync_ev_command"
+        and data.get("command") == "stop_observed"
+        and data.get("physical_confirmation") is True
+        for event_type, data in hass.bus.events
+    )
+    assert hass.data["power_sync"]["entry-1"].get("ev_stop_alerts", {}) == {}
 
 
 def test_observed_tesla_charge_ends_after_idle_confirmation():
