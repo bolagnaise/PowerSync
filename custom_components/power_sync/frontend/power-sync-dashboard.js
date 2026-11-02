@@ -199,6 +199,7 @@ svg.chart text { font-family: var(--mono); font-size: 10.5px; fill: var(--muted)
 .read .v small { font-size: 14px; color: var(--muted); margin-left: 3px; font-weight: 400; }
 .read.zero .v { color: var(--muted); }
 .read .s { font-size: 13px; color: var(--muted); }
+.read.active .s { color: var(--c); }
 .balance { grid-column: 1 / -1; display: grid; grid-template-columns: 40px minmax(0, 1fr); gap: 6px 12px; align-items: center; font-size: 12px; color: var(--muted); }
 .bar { display: flex; height: 8px; border-radius: 4px; overflow: hidden; gap: 2px; background: var(--border-subtle); }
 .bar span { background: var(--c); }
@@ -1782,7 +1783,7 @@ class PsNowCard extends PsCardBase {
     // Readouts
     const read = (label, color, kw, sub, idle) => {
       const zero = !Number.isFinite(kw) || Math.abs(kw) < 0.05;
-      return `<div class="read ${zero && idle ? 'zero' : ''}" style="--c:var(${color})"><span class="k">${label}</span><span class="v num">${Number.isFinite(kw) ? Math.abs(kw).toFixed(1) : '—'}<small>kW</small></span><span class="s">${psEsc(sub)}</span></div>`;
+      return `<div class="read ${zero && idle ? 'zero' : ''}${!zero ? ' active' : ''}" style="--c:var(${color})"><span class="k">${label}</span><span class="v num">${Number.isFinite(kw) ? Math.abs(kw).toFixed(1) : '—'}<small>kW</small></span><span class="s">${psEsc(sub)}</span></div>`;
     };
     const dailySolar = psKwh(hass, en.dailySolar);
     const solarSub = Number.isFinite(solar) && solar >= 0.05 ? 'Generating'

@@ -2,6 +2,8 @@
 
 PowerSync includes an **auto-generated Lovelace dashboard** that adapts to your configuration. The dashboard checks which entities exist and only builds cards for features you have set up.
 
+In the **Right now** tile, active Solar, Home, Battery, and Grid state labels use the same bright colour as their power readings. Idle and unavailable flow states stay muted.
+
 ## HACS Frontend Cards
 
 PowerSync bundles the dashboard strategy, price charts, and animated energy-flow card. Install these via HACS > Frontend only where noted:
