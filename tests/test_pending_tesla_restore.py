@@ -178,9 +178,37 @@ def test_startup_marker_is_loaded_from_storage():
     assert 'hass.data[DOMAIN][entry.entry_id].get("pending_tesla_restore")' in source
 
 
+def _monitoring_sync_probe(data, *, monitoring, verified, uploads):
+    """Run the real upload admission gate with a deterministic transport."""
+    sync = _find_function(ast.parse(INIT_PATH.read_text()), "_handle_sync_tou_internal")
+    override_at = next(i for i, node in enumerate(sync.body)
+                       if isinstance(node, ast.Assign)
+                       and any(isinstance(target, ast.Name)
+                               and target.id == "_monitoring_sync_override"
+                               for target in node.targets))
+    node = ast.AsyncFunctionDef(name="sync", args=ast.arguments(
+        posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]),
+        body=sync.body[override_at - 2:override_at + 3] + [
+            ast.Return(ast.Await(ast.Call(ast.Name("upload", ast.Load()), [], [])))],
+        decorator_list=[])
+
+    async def upload():
+        uploads.append("tariff")
+        return verified
+
+    env = dict(_aemo_dispatch_entry_data=lambda: data,
+               _is_monitoring_mode=lambda: monitoring,
+               _LOGGER=logging.getLogger(__name__), upload=upload)
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[node], type_ignores=[])),
+                 "<actual monitoring upload gate>", "exec"), env)
+    return env["sync"]
+
+
+@pytest.mark.parametrize("monitoring", [False, True])
+@pytest.mark.parametrize("pending_only", [False, True], ids=["active-force", "pending-after-reload"])
 @pytest.mark.parametrize("verified", [False, True])
-def test_dynamic_restore_retains_cleanup_until_tariff_upload_verifies(verified):
-    """A normally returning sync service can still have failed its 429/readback."""
+def test_dynamic_restore_retains_cleanup_until_tariff_upload_verifies(verified, pending_only, monitoring):
+    """Reloaded recovery can upload in monitoring; failed readback keeps ownership."""
     tree = ast.parse(INIT_PATH.read_text())
     handler = _find_function(tree, "handle_restore_normal")
     dynamic = next(n for n in ast.walk(handler) if isinstance(n, ast.If)
@@ -197,19 +225,22 @@ def test_dynamic_restore_retains_cleanup_until_tariff_upload_verifies(verified):
     # Success clears the marker with force_mode_state in one guarded store
     # write, then releases the in-memory force state.
     end = next(i for i, n in enumerate(terminal.body)
-               if isinstance(n, ast.Assign)
-               and ast.unparse(n.targets[0]) == "force_discharge_state['active']")
-    body = [dynamic] + terminal.body[terminal.body.index(failure):end + 1]
+               if isinstance(n, ast.Assign) and ast.unparse(n.targets[0]) == "signature")
+    body = [dynamic] + terminal.body[terminal.body.index(failure):end]
     node = ast.AsyncFunctionDef(name="run", args=ast.arguments(
         posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]),
         body=body, decorator_list=[])
-    discharge = {"active": True, "saved_tariff": {"name": "original"}}
-    data = {}
-    store = _Store()
-    retries = []
+    discharge = {"active": not pending_only}
+    if not pending_only:
+        discharge["saved_tariff"] = {"name": "original"}
+    data = {"pending_tesla_restore": {"reason": "one or more Tesla restore writes failed"},
+            "optimizer_force_restart_restore_pending": True}
+    store = _Store(data)
+    retries, uploads = [], []
     env = dict(
         electricity_provider="amber", dynamic_providers=("amber", "flow_power", "octopus"),
-        allow_monitoring_restore=False, force_mode_cleanup_restore=True,
+        allow_monitoring_restore=False, force_mode_cleanup_restore=not pending_only,
+        force_restore=pending_only, entry_data=data,
         hass=SimpleNamespace(data={"power_sync": {"entry-1": data}}),
         entry=SimpleNamespace(entry_id="entry-1"), DOMAIN="power_sync",
         SERVICE_SYNC_TOU="sync_tou", force_discharge_state=discharge,
@@ -222,8 +253,9 @@ def test_dynamic_restore_retains_cleanup_until_tariff_upload_verifies(verified):
         store=store, _restore_generation=0, _restore_current=lambda: True,
     )
     seed_powerwall_store_closures(env, hass=env["hass"], entry=env["entry"])
-    async def sync(**kwargs):
-        return verified
+    sync = _monitoring_sync_probe(data, monitoring=monitoring, verified=verified, uploads=uploads)
+    async def sync_check(**kwargs):
+        return await sync()
     async def service(*args, **kwargs):
         # Existing HA service does not propagate the upload's Boolean result.
         return None
@@ -231,17 +263,26 @@ def test_dynamic_restore_retains_cleanup_until_tariff_upload_verifies(verified):
         store.data["force_mode_state"] = dict(discharge)
     def mark_failed(reason):
         env["tesla_restore_failed"] = True
-    env.update(handle_sync_rest_api_check=sync, persist_force_mode_state=persist_force,
+    env.update(handle_sync_rest_api_check=sync_check, persist_force_mode_state=persist_force,
                _mark_tesla_restore_failed=mark_failed)
     env["hass"].services = SimpleNamespace(async_call=service)
     not_completed = _find_function(handler, "_restore_not_completed")
     exec(compile(ast.fix_missing_locations(ast.Module(body=[not_completed, node], type_ignores=[])),
                  "<dynamic-restore-completion>", "exec"), env)
     asyncio.run(env["run"]())
-    assert discharge["active"] is (not verified)
+    assert uploads == ["tariff"]
+    assert discharge["active"] is (not pending_only and not verified)
     assert bool(store.data.get("pending_tesla_restore")) is (not verified)
+    assert bool(data.get("pending_tesla_restore")) is (not verified)
+    assert data["optimizer_force_restart_restore_pending"] is (not verified)
     assert bool(retries) is (not verified)
-    if not verified:
+    # Recovery's exception is consumed; a subsequent ordinary sync must not
+    # inherit permission to write in Monitoring Mode.
+    assert "_allow_monitoring_tou_sync_once" not in data
+    uploads.clear()
+    asyncio.run(sync())
+    assert uploads == ([] if monitoring else ["tariff"])
+    if not verified and not pending_only:
         assert discharge["saved_tariff"] == {"name": "original"}
         assert store.data["force_mode_state"]["active"] is True
 
