@@ -4,6 +4,8 @@ PowerSync includes an **auto-generated Lovelace dashboard** that adapts to your 
 
 In the **Right now** tile, active Solar, Home, Battery, and Grid state labels use the same bright colour as their power readings. Idle and unavailable flow states stay muted.
 
+In monitoring mode PowerSync plans but does not control the battery, so the **Right now** headline describes what the battery is measured doing (charging, powering the home, or idle). The plan's intended action is shown separately, for example "The plan would charge now.", and upcoming changes read "Next it would…" rather than "will".
+
 ## HACS Frontend Cards
 
 PowerSync bundles the dashboard strategy, price charts, and animated energy-flow card. Install these via HACS > Frontend only where noted:
