@@ -6498,6 +6498,21 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if soc is None or capacity is None:
             self._battery_provenance_reconciliation = "invalid_soc_or_capacity"
             return
+        # Power can advance while SOC retains an already-consumed snapshot.
+        # Keep measured energy pending across both refreshes and optimizer
+        # solves, including solves with no additional measured interval.
+        if (
+            reason in ("measured_interval", "optimizer_run")
+            and getattr(self, "_battery_provenance_soc_pending", False)
+            and self._battery_provenance_is_usable()
+            and getattr(self, "_battery_provenance_last_soc", None) is not None
+            and abs(self._battery_provenance_last_soc - min(1.0, soc)) <= 1e-6
+            and getattr(self, "_battery_provenance_last_capacity_wh", None) == capacity
+        ):
+            self._battery_provenance_reconciliation = f"deferred_unchanged_soc:{reason}"
+            self._schedule_battery_provenance_save()
+            return
+        self._battery_provenance_soc_pending = False
         target_kwh = min(1.0, soc) * capacity / 1000.0
         if not self._battery_provenance_is_usable():
             # No historical provenance: retaining this as unknown preserves the
@@ -6593,28 +6608,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._battery_provenance_unknown_kwh *= ratio
             self._battery_provenance_grid_cost *= ratio
 
-        # A provider can refresh battery power more frequently than SOC.  If
-        # this measured interval changed the ledger but the SOC value is the
-        # same observation already reconciled, do not manufacture an unknown
-        # increase or trim known energy against that stale snapshot.  The next
-        # changed SOC (or an explicit gap/startup reconciliation) remains
-        # authoritative and settles the accumulated measured interval.
-        previous_soc = _nonnegative_finite_number(
-            getattr(self, "_battery_provenance_last_soc", None)
-        )
-        current_soc_value = _nonnegative_finite_number(current_soc)
-        unchanged_soc = (
-            previous_soc is not None
-            and current_soc_value is not None
-            and abs(previous_soc - min(1.0, current_soc_value)) <= 1e-6
-            and (solar_charge > 1e-9 or grid_charge > 1e-9 or discharge > 1e-9)
-        )
-        if unchanged_soc and not telemetry_gap:
-            self._battery_provenance_reconciliation = (
-                "deferred_unchanged_soc:measured_interval"
-            )
-            self._schedule_battery_provenance_save()
-            return
+        if solar_charge > 1e-9 or grid_charge > 1e-9 or discharge > 1e-9 or solar_export > 1e-9:
+            self._battery_provenance_soc_pending = True
         self._reconcile_battery_provenance(
             current_soc, capacity_wh, reason="measured_interval"
         )

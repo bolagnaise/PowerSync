@@ -2,7 +2,7 @@
 
 import ast
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -42,6 +42,70 @@ def _stored_inventory():
     return {"solar_kwh": 3.0, "grid_kwh": 21.03, "grid_cost": 0.0,
             "unknown_kwh": 0.0, "last_soc": 0.89, "last_capacity_wh": 27_000,
             "last_observed_at": "2026-10-31T09:55:00+00:00"}
+
+
+@pytest.mark.parametrize("power", [-6.0, 6.0])
+def test_optimizer_solves_preserve_origin_until_soc_catches_up(opt_module, monkeypatch, power):
+    """Ticket #144: a solve must not undo measured-interval SOC deferral."""
+    clock = {"now": datetime(2026, 11, 1, 10, tzinfo=timezone.utc),
+             "data": {"battery_level": 50.0, "battery_power": power,
+                      "solar_power": max(0.0, -power), "grid_power": 0.0}}
+    coordinator = _charging_solve_coordinator(opt_module, monkeypatch, clock)
+    _run_to_acquisition_cost(coordinator)
+    coordinator._battery_provenance_available = True
+    coordinator._battery_provenance_solar_kwh = 4.5
+    coordinator._battery_provenance_grid_kwh = 4.5
+    coordinator._battery_provenance_grid_cost = 0.9
+    coordinator._battery_provenance_unknown_kwh = 4.5
+    coordinator._track_actual_cost()
+    solar, grid, unknown, cost = 4.5, 4.5, 4.5, 0.9
+    for _ in range(3):
+        clock["now"] += timedelta(seconds=60)
+        if power < 0:
+            solar += 0.1
+        else:
+            ratio = (solar + grid + unknown - 0.1) / (solar + grid + unknown)
+            solar, grid, unknown, cost = [v * ratio for v in (solar, grid, unknown, cost)]
+        _run_to_acquisition_cost(coordinator)
+        # A second solve at the identical timestamp has no new interval.
+        _run_to_acquisition_cost(coordinator)
+        assert coordinator._battery_provenance_solar_kwh == pytest.approx(solar)
+        assert coordinator._battery_provenance_grid_kwh == pytest.approx(grid)
+        assert coordinator._battery_provenance_unknown_kwh == pytest.approx(unknown)
+        assert coordinator._battery_provenance_grid_cost == pytest.approx(cost)
+    clock["data"]["battery_level"] = (solar + grid + unknown) / 27 * 100
+    _run_to_acquisition_cost(coordinator)
+    assert coordinator._battery_provenance_total_kwh() == pytest.approx(solar + grid + unknown)
+    assert coordinator._battery_provenance_unknown_kwh == pytest.approx(unknown)
+    assert clock["acquisition_cost"] == pytest.approx((cost + unknown * 0.2986) / (solar + grid + unknown))
+
+
+@pytest.mark.parametrize("boundary", ["gap", "startup", "capacity", "changed_soc", "zero_interval"])
+def test_pending_measured_origin_keeps_authoritative_boundaries(opt_module, boundary):
+    coordinator = _provenance_coordinator(opt_module)
+    coordinator._battery_provenance_available = True
+    coordinator._battery_provenance_solar_kwh = 5.0
+    coordinator._battery_provenance_last_soc = 0.5
+    coordinator._battery_provenance_last_capacity_wh = 10_000
+    interval = dict(solar_charge_kwh=0.1, grid_charge_kwh=0.0,
+                    grid_charge_cost=0.0, discharge_kwh=0.0,
+                    current_soc=0.5, capacity_wh=10_000, telemetry_gap=False)
+    coordinator._record_battery_provenance_interval(**interval)
+    assert coordinator._battery_provenance_total_kwh() == pytest.approx(5.1)
+    if boundary in ("gap", "zero_interval"):
+        interval.update(solar_charge_kwh=0.0, telemetry_gap=boundary == "gap")
+        coordinator._record_battery_provenance_interval(**interval)
+    else:
+        coordinator._reconcile_battery_provenance(
+            0.52 if boundary == "changed_soc" else 0.5,
+            12_000 if boundary == "capacity" else 10_000,
+            reason="startup" if boundary == "startup" else "optimizer_run",
+        )
+    expected = {"gap": 5.0, "startup": 5.0, "capacity": 6.0,
+                "changed_soc": 5.2, "zero_interval": 5.1}[boundary]
+    assert coordinator._battery_provenance_total_kwh() == pytest.approx(expected)
+    assert coordinator._battery_provenance_unknown_kwh == pytest.approx(max(0, expected - 5.1))
+    assert coordinator._battery_provenance_soc_pending is (boundary == "zero_interval")
 
 
 @pytest.mark.parametrize("data", [
