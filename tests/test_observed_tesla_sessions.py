@@ -207,7 +207,8 @@ def test_observed_tesla_charge_does_not_duplicate_powersync_session():
     assert get_ev_ownership(hass, _Entry(), VIN)[1]["owner_mode"] == "solar_surplus"
 
 
-def test_owned_session_stop_observation_alerts_and_settles(monkeypatch):
+@pytest.mark.parametrize("stop_success", [True, False])
+def test_owned_session_stop_observation_alerts_and_settles(monkeypatch, stop_success):
     """Stop telemetry is observed even when history owns the active session."""
     manager = _SessionManager()
     hass = _Hass()
@@ -228,25 +229,12 @@ def test_owned_session_stop_observation_alerts_and_settles(monkeypatch):
         _Entry(),
         VIN,
         command="stop",
-        success=True,
+        success=stop_success,
         reason="window ended",
     )
     command["at"] = (datetime.now(timezone.utc) - timedelta(seconds=120)).isoformat()
-    claim_ev_ownership(
-        hass,
-        _Entry(),
-        VIN,
-        owner="external",
-        owner_mode="external",
-        session_id="session-after-stop",
-        extra={
-            "stop_settling": True,
-            "stop_command_at": command["at"],
-            "stop_settling_expires_at": (
-                datetime.now(timezone.utc) + timedelta(minutes=5)
-            ).isoformat(),
-        },
-    )
+    if not stop_success:
+        hass.bus.events.clear()
 
     # A stale sample after the command is ignored.
     tracker._vehicle_status_fn(hass, _Entry())[0]["_charging_observed_at"] = (
@@ -263,14 +251,36 @@ def test_owned_session_stop_observation_alerts_and_settles(monkeypatch):
     vehicle = tracker._vehicle_status_fn(hass, _Entry())[0]
     vehicle["_charging_observed_at"] = datetime.now(timezone.utc).isoformat()
     asyncio.run(tracker.poll())
-    assert any(
-        event_type == "power_sync_ev_stop_failed" for event_type, _data in hass.bus.events
+    assert (
+        any(
+            event_type == "power_sync_ev_stop_failed"
+            for event_type, _data in hass.bus.events
+        )
+        or (
+            not stop_success
+            and VIN in hass.data["power_sync"]["entry-1"].get("ev_stop_alerts", {})
+        )
     )
 
-    # A newer stopped sample confirms the accepted stop and clears the alert.
+    # Unavailable power cannot count as known stopped telemetry, even twice.
     vehicle.update({
         "ev_power_kw": 0.0,
         "is_charging": False,
+        "power_available": False,
+        "_charging_observed_at": datetime.now(timezone.utc).isoformat(),
+    })
+    asyncio.run(tracker.poll())
+    asyncio.run(tracker.poll())
+    assert not any(
+        event_type == "power_sync_ev_command"
+        and data.get("command") == "stop_observed"
+        for event_type, data in hass.bus.events
+    )
+
+    # Two newer known stopped samples confirm either an accepted or rejected
+    # stop and clear the alert.
+    vehicle.update({
+        "power_available": True,
         "_charging_observed_at": datetime.now(timezone.utc).isoformat(),
     })
     asyncio.run(tracker.poll())

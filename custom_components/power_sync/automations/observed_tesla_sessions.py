@@ -133,6 +133,8 @@ class ObservedTeslaSessionTracker:
         vehicle_id: str,
         end_soc: int | None = None,
         observed_at: Any = None,
+        *,
+        stop_observation_valid: bool = False,
     ) -> None:
         observed_session = self._active_observed_session(
             self._session_manager,
@@ -142,7 +144,12 @@ class ObservedTeslaSessionTracker:
 
         _lease_id, lease = get_ev_ownership(self._hass, self._entry, vehicle_id)
         stop_settling = bool(lease and lease.get("stop_settling"))
-        if observed_session is None and not stop_settling:
+        from .ev_ownership import has_pending_ev_stop
+
+        pending_stop = stop_observation_valid and has_pending_ev_stop(
+            self._hass, self._entry, vehicle_id
+        )
+        if observed_session is None and not stop_settling and not pending_stop:
             self._idle_counts.pop(vehicle_id, None)
             return
 
@@ -284,6 +291,18 @@ class ObservedTeslaSessionTracker:
                     observed_at=(
                         vehicle.get("_charging_observed_at")
                         or vehicle.get("_observed_at")
+                    ),
+                    stop_observation_valid=(
+                        vehicle.get("power_available") is True
+                        and vehicle.get("is_charging") is False
+                        and (
+                            vehicle.get("_charging_observed_at")
+                            or vehicle.get("_observed_at")
+                        ) is not None
+                        and _current_observation(
+                            vehicle.get("_charging_observed_at")
+                            or vehicle.get("_observed_at")
+                        )
                     ),
                 )
                 continue

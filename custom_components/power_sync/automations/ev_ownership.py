@@ -1612,6 +1612,21 @@ def ensure_external_ev_ownership(
     return True
 
 
+def has_pending_ev_stop(hass: Any, config_entry: Any, vehicle_id: Any) -> bool:
+    """Whether this loadpoint has a recorded stop awaiting newer telemetry."""
+    vid = _ownership_loadpoint_id(hass, config_entry, vehicle_id)
+    commands = get_ev_last_commands(hass, config_entry)
+    for candidate_id in _candidate_vehicle_ids(vid, commands):
+        command = commands.get(candidate_id)
+        if not isinstance(command, dict):
+            continue
+        name = str(command.get("command") or "")
+        return bool(command.get("source") == "powersync"
+                    and (name == "stop" or name.startswith("stop_"))
+                    and not command.get("settled_at"))
+    return False
+
+
 def observe_recorded_ev_stop(
     hass: Any, config_entry: Any, vehicle_id: Any, *,
     observed_at: Any, charging: bool,
