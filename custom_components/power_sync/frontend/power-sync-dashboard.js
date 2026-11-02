@@ -2841,10 +2841,27 @@ class PsBatteryPlanCard extends PsCardBase {
   _draw() {
     const svg = this.querySelector('svg.chart');
     if (!svg) return;
-    const { rows } = psSchedule(psApiPeek('power_sync/optimization'));
+    const { rows, interval } = psSchedule(psApiPeek('power_sync/optimization'));
     const now = Date.now();
-    const shown = rows.filter(r => r.t >= now - 30 * 60_000).slice(0, 48 * 4);
-    const vals = shown.map(r => (r.chargeKw > 0 ? r.chargeKw : -(r.dischargeKw || r.exportKw)));
+    // Bound the window by time, not row count: the plan interval varies
+    // (5-minute LP plans vs 15/30-minute ones), so a fixed count of rows
+    // covered only ~16 h of a 5-minute plan. Bucket to at least 15 minutes so
+    // 48 h stays at <= 192 bars and each bar remains legible.
+    const inWindow = rows.filter(r => r.t >= now - 30 * 60_000 && r.t < now + 48 * 3_600_000);
+    const bucketMs = Math.max(15, interval) * 60_000;
+    const shown = [];
+    let bucket = null;
+    inWindow.forEach(r => {
+      const v = r.chargeKw > 0 ? r.chargeKw : -(r.dischargeKw || r.exportKw);
+      const key = Math.floor(r.t / bucketMs);
+      if (!bucket || bucket.key !== key) {
+        bucket = { key, t: r.t, sum: 0, n: 0 };
+        shown.push(bucket);
+      }
+      bucket.sum += Number.isFinite(v) ? v : 0;
+      bucket.n += 1;
+    });
+    const vals = shown.map(b => b.sum / b.n);
     const y1 = psNiceMax(vals.filter(v => v > 0), 2), y0 = -psNiceMax(vals.filter(v => v < 0).map(v => -v), 2);
     const labels = [];
     shown.forEach((r, i) => {

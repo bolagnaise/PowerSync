@@ -645,6 +645,56 @@ def test_battery_plan_labels_fit_without_overlapping_near_midnight():
         assert sample["bars"] == 192, sample
 
 
+def test_battery_plan_covers_48_hours_of_a_5_minute_plan():
+    """A 5-minute LP plan must still chart the full 48 h, not the first 192 rows (16 h)."""
+    out = _run_board(r"""
+  class El {
+    constructor(tag = '') {
+      this.tag = tag; this.children = []; this.style = {}; this.attrs = {};
+      this.clientWidth = 480; this.clientHeight = 180;
+      this.classList = { contains: name => this.className === name };
+    }
+    appendChild(el) { this.children.push(el); el.parentElement = this; }
+    insertBefore(el) { this.appendChild(el); }
+    remove() { this.parentElement.children = this.parentElement.children.filter(el => el !== this); }
+    setAttribute(k, v) { this.attrs[k] = v; }
+    querySelector(sel) { return this.children.find(e => '.' + e.className === sel); }
+    getComputedTextLength() { return this.textContent.length * 6.3; }
+    set textContent(value) { this._text = value; this.children = []; }
+    get textContent() { return this._text || ''; }
+  }
+  context.document.createElement = tag => new El(tag);
+  context.document.createElementNS = (_, tag) => new El(tag);
+  class ChartDate extends Date {
+    constructor(...args) { super(...(args.length ? args : [2026, 10, 2, 6, 0])); }
+    static now() { return new ChartDate().getTime(); }
+  }
+  context.Date = ChartDate;
+  const start = ChartDate.now();
+  // 48 h at 5-minute resolution; only the final 6 h discharge.
+  const ts = Array.from({length: 576}, (_, i) => new Date(start + i * 300000).toISOString());
+  T.psApiCache.set('power_sync/optimization', { data: {schedule: {
+    timestamps: ts,
+    charge_w: ts.map((_, i) => (i < 504 ? 3000 : 0)),
+    discharge_w: ts.map((_, i) => (i < 504 ? 0 : 2000)),
+  }}});
+  const card = new T.PsBatteryPlanCard();
+  card._hass = {locale: {language: 'en-US', time_format: '24'}};
+  const svg = new El('svg'), parent = new El();
+  parent.appendChild(svg);
+  card.querySelector = () => svg;
+  card._draw();
+  const rects = svg.children.filter(el => el.tag === 'rect');
+  // Discharge bars sit below the zero line, so they start where charge bars end.
+  const zero = Number(rects[0].attrs.y) + Number(rects[0].attrs.height);
+  const neg = rects.filter(el => Math.abs(Number(el.attrs.y) - zero) < 0.01);
+  console.log(JSON.stringify({bars: rects.length, discharging: neg.length}));
+""")
+    assert out["bars"] == 192, out
+    # The last 6 h (24 x 15-minute bars) are discharging and must be visible.
+    assert out["discharging"] == 24, out
+
+
 def test_every_small_chart_has_working_pointer_and_keyboard_tooltips():
     out = _run_board(r"""
   class El {
