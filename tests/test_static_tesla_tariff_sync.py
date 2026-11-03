@@ -129,6 +129,50 @@ def test_malformed_static_tariff_fails_closed(tariff_converter_module, raw_tarif
     assert tariff_converter_module.convert_custom_tariff_to_tesla_tariff(raw_tariff) is None
 
 
+@pytest.mark.parametrize("wrapped", [False, True])
+@pytest.mark.parametrize("minutes", [None, (15, 45)])
+def test_static_tou_uses_v2_period_objects_without_changing_saved_schedule(
+    tariff_converter_module, wrapped, minutes,
+):
+    """Tesla's v2 write contract uses {periods: [...]}, not legacy arrays.
+
+    Contract example linked from Tesla's energy endpoint documentation:
+    https://digitalassets-energy.tesla.com/raw/upload/app/fleet-api/example-tariff/PGE-EV2-A.json
+    """
+    raw_tariff = {
+        "name": "Engie", "utility": "Custom Provider", "currency": "AUD",
+        "seasons": {"All Year": {
+            "fromMonth": 1, "toMonth": 12,
+            "tou_periods": {"ALL": [{
+                "fromDayOfWeek": 0, "toDayOfWeek": 6,
+                "fromHour": 0, "toHour": 24,
+            }]},
+        }},
+        "energy_charges": {"All Year": {"ALL": 0.4755}},
+        "sell_tariff": {"energy_charges": {"All Year": {"ALL": 0.12}}},
+    }
+    ranges = raw_tariff["seasons"]["All Year"]["tou_periods"]["ALL"]
+    if minutes is not None:
+        ranges[0].update(fromHour=1, toHour=2,
+                         fromMinute=minutes[0], toMinute=minutes[1])
+    if wrapped:
+        raw_tariff["seasons"]["All Year"]["tou_periods"]["ALL"] = {"periods": ranges}
+    before = copy.deepcopy(raw_tariff)
+
+    payload = tariff_converter_module.convert_custom_tariff_to_tesla_tariff(raw_tariff)
+
+    assert payload is not None
+    expected_range = {**ranges[0], "fromMinute": minutes[0] if minutes else 0,
+                      "toMinute": minutes[1] if minutes else 0}
+    for side in (payload, payload["sell_tariff"]):
+        assert side["seasons"]["All Year"]["tou_periods"]["ALL"] == {
+            "periods": [expected_range],
+        }
+    assert payload["energy_charges"]["All Year"]["rates"] == {"ALL": 0.4755}
+    assert payload["sell_tariff"]["energy_charges"]["All Year"]["rates"] == {"ALL": 0.12}
+    assert raw_tariff == before
+
+
 @pytest.mark.parametrize(
     "mutation",
     [

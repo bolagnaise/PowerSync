@@ -22,6 +22,8 @@ Changing the preference stops the current force action and confirms restoration 
 
 For Custom TOU recovery, PowerSync prepares the configured tariff in the same format used by a normal tariff sync, including its buy and sell schedule. This also applies to unfinished restoration loaded after a restart. Invalid configured tariffs are not uploaded; an available valid baseline is used instead. Other Powerwall settings can remain blocked until the earlier restore succeeds and is confirmed.
 
+Saved Custom TOU schedules, including flat all-day tariffs, are converted to Tesla's current upload format for both normal sync and recovery. Buy and sell prices, weekday ranges and explicit minute boundaries are preserved. A rejected upload still retains the pending restore and blocks a control-method change.
+
 When Automatic selects native tariff charging and **Allow grid charging** is enabled, the optimiser can temporarily enable a known disabled Tesla charge-from-grid setting. It verifies the setting before any startup command or charging tariff, then restores the original value during cleanup, including after restart. Turning Tesla grid charging off again ends the action rather than repeatedly enabling it. Site limits, SOC ceilings, EV demand, Monitoring Mode and demand protection still apply.
 
 ## Gateway command limits

@@ -262,6 +262,41 @@ def test_invalid_configured_restore_falls_back_to_cached_baseline(
     assert probe.calls == [probe.cached]
 
 
+@pytest.mark.parametrize("provider", ["other", "tou_only"])
+@pytest.mark.parametrize("source", ["store", "initial"])
+def test_engie_all_tariff_restore_posts_v2_period_objects(
+    restore_probe, configured_tariff_converter, provider, source,
+):
+    """Exercise ticket 148's supplied tariff after pending-only restart."""
+    probe = restore_probe
+    original = _configured_custom_tariff()
+    original.update(name="Engie", utility="Custom Provider")
+    original["seasons"]["All Year"]["tou_periods"] = {"ALL": [{
+        "fromDayOfWeek": 0, "toDayOfWeek": 6, "fromHour": 0, "toHour": 24,
+    }]}
+    original["energy_charges"] = {"All Year": {"ALL": .4755}}
+    original["sell_tariff"] = {"energy_charges": {"All Year": {"ALL": .12}}}
+    before = copy.deepcopy(original)
+    _configured_tariff_probe(probe, original if source == "store" else None,
+                            original if source == "initial" else None)
+    probe.ns["entry"].options["electricity_provider"] = provider
+
+    probe.run()
+
+    assert len(probe.calls) == 1
+    posted = probe.calls[0]
+    for side in (posted, posted["sell_tariff"]):
+        assert side["seasons"]["All Year"]["tou_periods"]["ALL"] == {
+            "periods": [{"fromDayOfWeek": 0, "toDayOfWeek": 6,
+                         "fromHour": 0, "toHour": 24,
+                         "fromMinute": 0, "toMinute": 0}],
+        }
+    assert posted["energy_charges"]["All Year"]["rates"] == {"ALL": .4755}
+    assert posted["sell_tariff"]["energy_charges"]["All Year"]["rates"] == {"ALL": .12}
+    assert original == before
+    assert probe.ns["hass"].data["power_sync"]["test"]["pending_tesla_restore"]
+
+
 def test_explicit_recovery_can_fall_back_to_cached_tariff(restore_probe):
     probe = restore_probe
     probe.ns["_configured_restorable_tesla_tariff"] = lambda: None

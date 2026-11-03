@@ -342,7 +342,20 @@ def convert_custom_tariff_to_tesla_tariff(
                 if field in season_data:
                     clean_season[field] = deepcopy(season_data[field])
             if isinstance(season_data.get("tou_periods"), dict):
-                clean_season["tou_periods"] = deepcopy(season_data["tou_periods"])
+                # Config-flow tariffs use legacy arrays; tariff_content_v2
+                # requires a named object containing the periods array. Raw
+                # validation above accepts both shapes. Build the same v2
+                # shape for each, preserving explicit bounds and filling only
+                # the optional zero-minute defaults used by tariff_time.
+                clean_season["tou_periods"] = {}
+                for name, ranges in season_data["tou_periods"].items():
+                    if isinstance(ranges, dict):
+                        ranges = ranges["periods"]
+                    periods = deepcopy(ranges)
+                    for period in periods:
+                        period.setdefault("fromMinute", 0)
+                        period.setdefault("toMinute", 0)
+                    clean_season["tou_periods"][name] = {"periods": periods}
             seasons[str(season)] = clean_season
 
     energy_charges = _normalise_tariff_charge_sections(
