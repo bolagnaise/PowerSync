@@ -127,7 +127,7 @@ def test_setup_bootstraps_and_preserves_tariff_before_refresh():
 def test_automatic_agl_preset_is_repaired_before_startup_prices():
     source = COMPONENT.read_text()
     loaded = source.index("await automation_store.async_load()")
-    migration = source.index("await async_migrate_ausgrid_seasonal_import_tariff(", loaded)
+    migration = source.index("await async_prepare_agl_startup_tariff(", loaded)
     bootstrap = source.index("_bootstrap_static_tariff_schedule(", loaded)
     assert loaded < migration < bootstrap
 

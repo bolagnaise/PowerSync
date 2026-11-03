@@ -23,6 +23,14 @@ rates and export overlay are unchanged. Missing/manual selection and edited
 tariffs are preserved. Saved tariffs take precedence over the original setup
 snapshot so a later setup stage cannot undo the repair or a manual edit.
 
+Fresh setup is distinguished from a legacy upgrade snapshot. A newly authored
+initial tariff is saved before startup pricing reads the global automation
+store, which survives integration removal. Reinstalling therefore honors the
+newly selected manual/current automatic tariff instead of retaining another
+installation's tariff. Only an explicitly selected, exact legacy automatic
+snapshot defers to existing saved data. The regression executes the actual
+startup preparation block for both fresh manual and automatic choices.
+
 The relevant Discord evidence is the [original account terms](https://discord.com/channels/1443943629130567874/1534147378343313428/1537009280123801662)
 and the [3 November screenshots](https://discord.com/channels/1443943629130567874/1546066744467263518/1566985416257568788).
 The screenshots were downloaded with size/signature receipts and visually

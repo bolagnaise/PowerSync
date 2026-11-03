@@ -483,6 +483,32 @@ async def async_migrate_ausgrid_seasonal_import_tariff(
     return True
 
 
+async def async_prepare_agl_startup_tariff(entry: Any, store: Any) -> bool:
+    """Honor a fresh setup tariff before repairing existing automatic presets.
+
+    AutomationStore survives entry removal. A current setup's pending tariff
+    must replace that retained state before startup pricing reads it. Only an
+    explicitly selected, exact legacy automatic snapshot defers to the saved
+    tariff, so it cannot undo an upgrade repair or later user edits.
+    """
+    data = getattr(entry, "data", {})
+    options = getattr(entry, "options", {})
+    data = data if isinstance(data, Mapping) else {}
+    options = options if isinstance(options, Mapping) else {}
+    initial = data.get("initial_custom_tariff")
+    selection = options.get("agl_import_schedule", data.get("agl_import_schedule"))
+    if isinstance(initial, dict) and initial:
+        legacy_snapshot = (
+            selection == AGL_IMPORT_SCHEDULE_AUSGRID_SEASONAL
+            and repair_legacy_ausgrid_seasonal_import_tariff(initial) is not initial
+        )
+        if not legacy_snapshot:
+            store.set_custom_tariff(deepcopy(initial))
+            await store.async_save()
+            return False
+    return await async_migrate_ausgrid_seasonal_import_tariff(entry, store)
+
+
 def _days_in_range(start: int, end: int) -> list[int]:
     """Expand an inclusive Home Assistant weekday range."""
     start %= 7

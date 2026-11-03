@@ -775,6 +775,86 @@ async def test_ausgrid_migration_does_not_overwrite_unreadable_saved_tariff(agl_
     assert not await agl_module.async_migrate_ausgrid_seasonal_import_tariff(entry, Store())
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("selection", ["manual", "ausgrid_seasonal"])
+async def test_agl_startup_honors_fresh_setup_over_retained_store(agl_module, selection):
+    """Removing/readding an entry retains AutomationStore, not its old tariff choice."""
+    source = (COMPONENT_ROOT / "__init__.py").read_text()
+    tree = ast.parse(source)
+    prepare = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.If)
+        and any(
+            isinstance(child, ast.ImportFrom) and child.module == "agl"
+            and any(alias.name.startswith("async_") for alias in child.names)
+            for child in node.body
+        )
+    )
+    function = ast.AsyncFunctionDef(
+        name="prepare_tariff", args=ast.arguments(posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]),
+        body=[prepare], decorator_list=[],
+    )
+    module = ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[]))
+    initial = agl_module.repair_legacy_ausgrid_seasonal_import_tariff(
+        _legacy_ausgrid_tariff(agl_module, overlay=True)
+    )
+    if selection == "manual":
+        initial["name"] = "Fresh manual tariff"
+    old = {"name": "Tariff retained from previous installation"}
+    class Store:
+        def __init__(self):
+            self.tariff, self.saved = old, 0
+        def get_custom_tariff(self):
+            return self.tariff
+        def set_custom_tariff(self, tariff):
+            self.tariff = tariff
+        async def async_save(self):
+            self.saved += 1
+    store = Store()
+    namespace = {
+        "__package__": "power_sync", "electricity_provider": "agl",
+        "entry": SimpleNamespace(options={"agl_import_schedule": selection},
+                                 data={"initial_custom_tariff": initial}),
+        "automation_store": store,
+        "_LOGGER": SimpleNamespace(info=lambda *_: None),
+    }
+    exec(compile(module, "<agl-startup-preparation>", "exec"), namespace)
+    await namespace["prepare_tariff"]()
+    assert store.tariff == initial
+    assert store.saved == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("edited", [False, True])
+async def test_agl_startup_preparation_keeps_legacy_upgrade_guards(agl_module, edited):
+    initial = _legacy_ausgrid_tariff(agl_module, overlay=True)
+    saved = deepcopy(initial)
+    if edited:
+        saved["seasons"]["Summer"]["tou_periods"]["PEAK"][0]["fromHour"] = 16
+    before = deepcopy(saved)
+    class Store:
+        def __init__(self):
+            self.tariff, self.saves = saved, 0
+        def get_custom_tariff(self):
+            return self.tariff
+        def set_custom_tariff(self, tariff):
+            self.tariff = tariff
+        async def async_save(self):
+            self.saves += 1
+    store = Store()
+    entry = SimpleNamespace(options=MappingProxyType({"agl_import_schedule": "ausgrid_seasonal"}),
+                            data=MappingProxyType({"initial_custom_tariff": initial}))
+    migrated = await agl_module.async_prepare_agl_startup_tariff(entry, store)
+    assert saved == before
+    assert migrated is (not edited)
+    assert store.saves == (0 if edited else 1)
+    if edited:
+        assert store.tariff is saved
+    else:
+        assert set(store.tariff["seasons"]) == {"Summer", "Autumn", "Winter", "Spring"}
+    assert entry.data["initial_custom_tariff"] is initial
+
+
 def test_agl_is_wired_as_a_first_class_static_provider():
     const_source = (COMPONENT_ROOT / "const.py").read_text()
     config_source = (COMPONENT_ROOT / "config_flow.py").read_text()

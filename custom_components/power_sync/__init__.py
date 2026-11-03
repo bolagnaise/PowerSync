@@ -23728,9 +23728,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     automation_store = AutomationStore(hass)
     await automation_store.async_load()
     if electricity_provider == "agl":
-        from .agl import async_migrate_ausgrid_seasonal_import_tariff
+        from .agl import async_prepare_agl_startup_tariff
 
-        if await async_migrate_ausgrid_seasonal_import_tariff(entry, automation_store):
+        if await async_prepare_agl_startup_tariff(entry, automation_store):
             _LOGGER.info("Corrected the unchanged automatic AGL/Ausgrid seasonal tariff")
     _bootstrap_static_tariff_schedule(
         hass,
