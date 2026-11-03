@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from copy import deepcopy
+import math
 from typing import Any
 
 from .const import (
     AGL_BATTERY_REWARDS_END_HOUR,
     AGL_BATTERY_REWARDS_START_HOUR,
+    AGL_IMPORT_SCHEDULE_AUSGRID_SEASONAL,
 )
 
 _REWARD_SUFFIX = "_AGL_REWARD"
@@ -40,11 +43,80 @@ def build_ausgrid_seasonal_import_periods(
 
     seasons = [
         {"name": "Summer", "from_month": 11, "to_month": 3},
-        {"name": "Winter", "from_month": 4, "to_month": 10},
+        {"name": "Autumn", "from_month": 4, "to_month": 5},
+        {"name": "Winter", "from_month": 6, "to_month": 8},
+        {"name": "Spring", "from_month": 9, "to_month": 10},
     ]
-    # The peak definition is authored separately per season so the tariff-time
-    # lookup selects it by each locally-timestamped optimizer slot.
+    # Ausgrid's peak window is the same on every day in the two seasons that
+    # have a peak.  Autumn and Spring retain the winter off-peak rate; there is
+    # no additional shoulder-rate input in the AGL setup flow.
     periods = [
+        {
+            "name": "PEAK",
+            "season": "Summer",
+            "start": 15,
+            "end": 21,
+            "days": "all_days",
+            "import_rate": float(summer_peak_rate),
+            "export_rate": 0.0,
+        },
+        {
+            "name": "OFF_PEAK",
+            "season": "Summer",
+            "start": 0,
+            "end": 24,
+            "days": "all_days",
+            "import_rate": float(summer_offpeak_rate),
+            "export_rate": 0.0,
+        },
+        {
+            "name": "OFF_PEAK",
+            "season": "Autumn",
+            "start": 0,
+            "end": 24,
+            "days": "all_days",
+            "import_rate": float(winter_offpeak_rate),
+            "export_rate": 0.0,
+        },
+        {
+            "name": "PEAK",
+            "season": "Winter",
+            "start": 15,
+            "end": 21,
+            "days": "all_days",
+            "import_rate": float(winter_peak_rate),
+            "export_rate": 0.0,
+        },
+        {
+            "name": "OFF_PEAK",
+            "season": "Winter",
+            "start": 0,
+            "end": 24,
+            "days": "all_days",
+            "import_rate": float(winter_offpeak_rate),
+            "export_rate": 0.0,
+        },
+        {
+            "name": "OFF_PEAK",
+            "season": "Spring",
+            "start": 0,
+            "end": 24,
+            "days": "all_days",
+            "import_rate": float(winter_offpeak_rate),
+            "export_rate": 0.0,
+        },
+    ]
+    return seasons, periods
+
+
+def _legacy_ausgrid_period_rows(
+    summer_offpeak_rate: float,
+    summer_peak_rate: float,
+    winter_offpeak_rate: float,
+    winter_peak_rate: float,
+) -> list[dict[str, Any]]:
+    """Return the exact explicit rows emitted by the former two-season builder."""
+    return [
         {
             "name": "PEAK",
             "season": "Summer",
@@ -82,7 +154,333 @@ def build_ausgrid_seasonal_import_periods(
             "export_rate": 0.0,
         },
     ]
-    return seasons, periods
+
+
+def _legacy_ausgrid_base_rates(
+    tariff: Any,
+) -> tuple[dict[str, float], list[dict[str, Any]]] | None:
+    """Validate and extract the former generated two-season tariff."""
+    if not isinstance(tariff, dict):
+        return None
+    if tariff.get("name") != "AGL / Ausgrid Seasonal TOU":
+        return None
+    if tariff.get("utility") != "AGL":
+        return None
+    if _BASE_TARIFF_KEY in tariff or _METADATA_KEY in tariff:
+        return None
+
+    seasons = tariff.get("seasons")
+    if not isinstance(seasons, dict) or set(seasons) != {"Summer", "Winter"}:
+        return None
+    expected_seasons = {
+        "Summer": (11, 3, 14, 20),
+        "Winter": (4, 10, 17, 21),
+    }
+    expected_ranges = {
+        "Summer": {
+            "PEAK": [
+                {
+                    "fromDayOfWeek": 1,
+                    "toDayOfWeek": 5,
+                    "fromHour": 14,
+                    "toHour": 20,
+                }
+            ],
+            "OFF_PEAK": [
+                {
+                    "fromDayOfWeek": 0,
+                    "toDayOfWeek": 6,
+                    "fromHour": 0,
+                    "toHour": 24,
+                }
+            ],
+        },
+        "Winter": {
+            "PEAK": [
+                {
+                    "fromDayOfWeek": 1,
+                    "toDayOfWeek": 5,
+                    "fromHour": 17,
+                    "toHour": 21,
+                }
+            ],
+            "OFF_PEAK": [
+                {
+                    "fromDayOfWeek": 0,
+                    "toDayOfWeek": 6,
+                    "fromHour": 0,
+                    "toHour": 24,
+                }
+            ],
+        },
+    }
+    for season_name, (from_month, to_month, _start, _end) in expected_seasons.items():
+        season = seasons.get(season_name)
+        if not isinstance(season, dict):
+            return None
+        if set(season) != {"fromMonth", "toMonth", "tou_periods"}:
+            return None
+        if season.get("fromMonth") != from_month or season.get("toMonth") != to_month:
+            return None
+        if season.get("tou_periods") != expected_ranges[season_name]:
+            return None
+
+    energy_charges = tariff.get("energy_charges")
+    sell_tariff = tariff.get("sell_tariff")
+    if not isinstance(energy_charges, dict) or set(energy_charges) != set(seasons):
+        return None
+    if not isinstance(sell_tariff, dict):
+        return None
+    sell_charges = sell_tariff.get("energy_charges")
+    if not isinstance(sell_charges, dict) or set(sell_charges) != set(seasons):
+        return None
+
+    rates: dict[str, float] = {}
+    for season_name in ("Summer", "Winter"):
+        season_rates = energy_charges.get(season_name)
+        season_sell_rates = sell_charges.get(season_name)
+        if not isinstance(season_rates, dict) or set(season_rates) != {
+            "PEAK",
+            "OFF_PEAK",
+        }:
+            return None
+        if not isinstance(season_sell_rates, dict) or set(season_sell_rates) != {
+            "PEAK",
+            "OFF_PEAK",
+        }:
+            return None
+        for period_name in ("PEAK", "OFF_PEAK"):
+            if isinstance(season_rates[period_name], bool) or isinstance(
+                season_sell_rates[period_name], bool
+            ):
+                return None
+            try:
+                import_rate = float(season_rates[period_name])
+                export_rate = float(season_sell_rates[period_name])
+            except (TypeError, ValueError):
+                return None
+            if not math.isfinite(import_rate) or not math.isfinite(export_rate):
+                return None
+            if export_rate != 0.0:
+                return None
+            rates[f"{season_name.lower()}_{period_name.lower()}"] = import_rate
+
+    rows = _legacy_ausgrid_period_rows(
+        rates["summer_off_peak"],
+        rates["summer_peak"],
+        rates["winter_off_peak"],
+        rates["winter_peak"],
+    )
+    if (
+        "power_sync_explicit_periods" in tariff
+        and tariff.get("power_sync_explicit_periods") != rows
+    ):
+        return None
+    return rates, rows
+
+
+def _reauthor_ausgrid_base(
+    tariff: dict[str, Any],
+    rates: dict[str, float],
+) -> dict[str, Any]:
+    """Rebuild only the calendar and explicit rows for a validated base."""
+    season_defs, explicit_rows = build_ausgrid_seasonal_import_periods(
+        summer_offpeak_rate=rates["summer_off_peak"],
+        summer_peak_rate=rates["summer_peak"],
+        winter_offpeak_rate=rates["winter_off_peak"],
+        winter_peak_rate=rates["winter_peak"],
+    )
+    old_seasons = tariff["seasons"]
+    new_seasons: dict[str, dict[str, Any]] = {}
+    new_energy: dict[str, dict[str, float]] = {}
+    new_sell_energy: dict[str, dict[str, float]] = {}
+    for season_def in season_defs:
+        season_name = str(season_def["name"])
+        source_name = "Summer" if season_name == "Summer" else "Winter"
+        season = deepcopy(old_seasons[source_name])
+        season["fromMonth"] = int(season_def["from_month"])
+        season["toMonth"] = int(season_def["to_month"])
+        season_periods: dict[str, list[dict[str, int]]] = {}
+        season_rates: dict[str, float] = {}
+        season_sell_rates: dict[str, float] = {}
+        for period in explicit_rows:
+            if period["season"] != season_name:
+                continue
+            period_name = str(period["name"])
+            season_periods[period_name] = [
+                {
+                    "fromDayOfWeek": 0 if period["days"] == "all_days" else 1,
+                    "toDayOfWeek": 6 if period["days"] == "all_days" else 5,
+                    "fromHour": int(period["start"]),
+                    "toHour": int(period["end"]),
+                }
+            ]
+            season_rates[period_name] = float(period["import_rate"])
+            season_sell_rates[period_name] = float(period["export_rate"])
+        season["tou_periods"] = season_periods
+        new_seasons[season_name] = season
+        new_energy[season_name] = season_rates
+        new_sell_energy[season_name] = season_sell_rates
+
+    result = deepcopy(tariff)
+    result["seasons"] = new_seasons
+    result["energy_charges"] = new_energy
+    sell_tariff = deepcopy(tariff["sell_tariff"])
+    sell_tariff["energy_charges"] = new_sell_energy
+    result["sell_tariff"] = sell_tariff
+    result["power_sync_explicit_periods"] = deepcopy(explicit_rows)
+    return result
+
+
+def _overlay_values(metadata: Any) -> tuple[float, float, int, int] | None:
+    """Read the required Battery Rewards metadata without accepting guesses."""
+    if not isinstance(metadata, dict):
+        return None
+    if any(type(metadata.get(key)) is not int for key in ("start_hour", "end_hour")):
+        return None
+    if any(
+        isinstance(metadata.get(key), bool)
+        for key in ("peak_export_rate", "offpeak_export_rate", "start_hour", "end_hour")
+    ):
+        return None
+    try:
+        peak = float(metadata["peak_export_rate"])
+        offpeak = float(metadata["offpeak_export_rate"])
+        start = metadata["start_hour"]
+        end = metadata["end_hour"]
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not math.isfinite(peak) or not math.isfinite(offpeak):
+        return None
+    if not 0 <= peak <= 2 or not 0 <= offpeak <= 2:
+        return None
+    if not 0 <= start < end <= 24:
+        return None
+    return peak, offpeak, start, end
+
+
+def repair_legacy_ausgrid_seasonal_import_tariff(
+    tariff: Any,
+) -> dict[str, Any] | Any:
+    """Repair the pre-November AGL/Ausgrid calendar, preserving user data.
+
+    The migration is deliberately exact.  A tariff is changed only when it is
+    the generated two-season tariff, including any generated overlay.  A
+    hand-edited calendar, explicit row list, base tariff, or reward overlay is
+    returned by identity so a user change cannot be overwritten on startup.
+    """
+    if not isinstance(tariff, dict):
+        return tariff
+    if tariff.get("name") != "AGL / Ausgrid Seasonal TOU" or tariff.get(
+        "utility"
+    ) != "AGL":
+        return tariff
+
+    has_base = _BASE_TARIFF_KEY in tariff
+    has_metadata = _METADATA_KEY in tariff
+    if has_base != has_metadata:
+        return tariff
+
+    if not has_base:
+        validated = _legacy_ausgrid_base_rates(tariff)
+        if validated is None:
+            return tariff
+        rates, _rows = validated
+        try:
+            return _reauthor_ausgrid_base(tariff, rates)
+        except (KeyError, TypeError, ValueError):
+            return tariff
+
+    base = tariff.get(_BASE_TARIFF_KEY)
+    metadata = tariff.get(_METADATA_KEY)
+    validated = _legacy_ausgrid_base_rates(base)
+    overlay = _overlay_values(metadata)
+    if validated is None or overlay is None:
+        return tariff
+    rates, legacy_rows = validated
+    if "power_sync_explicit_periods" in tariff and tariff.get(
+        "power_sync_explicit_periods"
+    ) != legacy_rows:
+        return tariff
+    try:
+        expected_overlay = apply_battery_rewards_export_rates(
+            base,
+            peak_export_rate=overlay[0],
+            offpeak_export_rate=overlay[1],
+            start_hour=overlay[2],
+            end_hour=overlay[3],
+        )
+    except (TypeError, ValueError, KeyError):
+        return tariff
+    for section in ("seasons", "energy_charges", "sell_tariff"):
+        if tariff.get(section) != expected_overlay.get(section):
+            return tariff
+
+    try:
+        repaired_base = _reauthor_ausgrid_base(base, rates)
+    except (KeyError, TypeError, ValueError):
+        return tariff
+    repaired = apply_battery_rewards_export_rates(
+        repaired_base,
+        peak_export_rate=overlay[0],
+        offpeak_export_rate=overlay[1],
+        start_hour=overlay[2],
+        end_hour=overlay[3],
+    )
+    # Keep the stored metadata byte-for-byte, including future fields unknown
+    # to this helper, and retain any non-tariff metadata on the overlay.
+    repaired[_METADATA_KEY] = deepcopy(metadata)
+    for key, value in tariff.items():
+        if key not in {
+            "seasons",
+            "energy_charges",
+            "sell_tariff",
+            _BASE_TARIFF_KEY,
+            _METADATA_KEY,
+            "power_sync_explicit_periods",
+        }:
+            repaired[key] = deepcopy(value)
+    return repaired
+
+
+async def async_migrate_ausgrid_seasonal_import_tariff(
+    entry: Any,
+    store: Any,
+) -> bool:
+    """Persist the strict AGL calendar repair when the user opted in."""
+    options = getattr(entry, "options", None)
+    data = getattr(entry, "data", None)
+    if not isinstance(options, Mapping):
+        options = {}
+    if not isinstance(data, Mapping):
+        data = {}
+    schedule = (
+        options["agl_import_schedule"]
+        if "agl_import_schedule" in options
+        else data.get("agl_import_schedule")
+    )
+    if schedule != AGL_IMPORT_SCHEDULE_AUSGRID_SEASONAL:
+        return False
+    if store is None:
+        return False
+    try:
+        source = store.get_custom_tariff()
+    except Exception:
+        return False
+    if not isinstance(source, dict) or not source:
+        source = data.get("initial_custom_tariff")
+    if not isinstance(source, dict) or not source:
+        return False
+    repaired = repair_legacy_ausgrid_seasonal_import_tariff(source)
+    if repaired is source:
+        return False
+    setter = getattr(store, "set_custom_tariff", None)
+    saver = getattr(store, "async_save", None)
+    if not callable(setter) or not callable(saver):
+        return False
+    setter(repaired)
+    await saver()
+    return True
 
 
 def _days_in_range(start: int, end: int) -> list[int]:

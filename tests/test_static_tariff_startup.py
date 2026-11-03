@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -121,3 +122,87 @@ def test_setup_bootstraps_and_preserves_tariff_before_refresh():
     assert loaded < bootstrap < first_refresh < full_entry_data
     assert '"tariff_schedule": startup_tariff_schedule,' in source
     assert '"automation_store": automation_store,' in source
+
+
+def test_automatic_agl_preset_is_repaired_before_startup_prices():
+    source = COMPONENT.read_text()
+    loaded = source.index("await automation_store.async_load()")
+    migration = source.index("await async_migrate_ausgrid_seasonal_import_tariff(", loaded)
+    bootstrap = source.index("_bootstrap_static_tariff_schedule(", loaded)
+    assert loaded < migration < bootstrap
+
+
+def test_agl_early_tariff_conversion_prefers_saved_plan_to_initial_snapshot():
+    """A later setup stage cannot undo the repair or a user's manual edits."""
+    tree = ast.parse(COMPONENT.read_text())
+    early_conversion = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.If)
+        and isinstance(node.test, ast.Compare)
+        and any(
+            isinstance(child, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == "initial_custom_tariff"
+                    for target in child.targets)
+            for child in node.body
+        )
+    )
+    module = ast.fix_missing_locations(ast.Module(body=[early_conversion], type_ignores=[]))
+    original = {"name": "Old initial preset"}
+    saved = {"name": "Saved repaired or edited plan"}
+    for persisted in (saved, None):
+        converted = []
+        hass = SimpleNamespace(data={"power_sync": {"entry": {}}})
+        namespace = {
+            "electricity_provider": "agl",
+            "entry": SimpleNamespace(entry_id="entry", data={"initial_custom_tariff": original}),
+            "automation_store": _TariffStore(persisted),
+            "hass": hass,
+            "DOMAIN": "power_sync",
+            "currency_for_entry": lambda *_: "AUD",
+            "convert_custom_tariff_to_schedule": lambda tariff, **_: converted.append(tariff) or tariff,
+            "_LOGGER": SimpleNamespace(info=lambda *_: None),
+        }
+        exec(compile(module, str(COMPONENT), "exec"), namespace)
+        expected = saved if persisted else original
+        assert converted == [expected]
+        assert hass.data["power_sync"]["entry"]["tariff_schedule"] is expected
+
+
+def test_agl_final_initial_tariff_save_keeps_the_persisted_plan():
+    tree = ast.parse(COMPONENT.read_text())
+    storage = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.If)
+        and isinstance(node.test, ast.Name) and node.test.id == "initial_custom_tariff"
+        and any(isinstance(child, ast.Expr) and isinstance(child.value, ast.Await)
+                for child in node.body)
+    )
+    function = ast.AsyncFunctionDef(
+        name="save_initial", args=ast.arguments(posonlyargs=[], args=[ast.arg(arg="initial_custom_tariff")], kwonlyargs=[], kw_defaults=[], defaults=[]),
+        body=[storage], decorator_list=[],
+    )
+    module = ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[]))
+    initial, saved = {"name": "Original preset"}, {"name": "Persisted repaired or edited tariff"}
+
+    class Store(_TariffStore):
+        def set_custom_tariff(self, tariff):
+            self._tariff = tariff
+        async def async_save(self):
+            pass
+
+    for persisted in (saved, None):
+        store = Store(persisted)
+        updates = []
+        namespace = {
+            "initial_custom_tariff": initial,
+            "electricity_provider": "agl",
+            "automation_store": store,
+            "entry": SimpleNamespace(data={"initial_custom_tariff": initial, "other": 1}),
+            "hass": SimpleNamespace(config_entries=SimpleNamespace(
+                async_update_entry=lambda entry, *, data: updates.append(data))),
+            "_LOGGER": SimpleNamespace(info=lambda *_: None),
+        }
+        exec(compile(module, str(COMPONENT), "exec"), namespace)
+        asyncio.run(namespace["save_initial"](initial))
+        assert store.get_custom_tariff() is (saved if persisted else initial)
+        assert updates == [{"other": 1}]

@@ -23727,6 +23727,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     automation_store = AutomationStore(hass)
     await automation_store.async_load()
+    if electricity_provider == "agl":
+        from .agl import async_migrate_ausgrid_seasonal_import_tariff
+
+        if await async_migrate_ausgrid_seasonal_import_tariff(entry, automation_store):
+            _LOGGER.info("Corrected the unchanged automatic AGL/Ausgrid seasonal tariff")
     _bootstrap_static_tariff_schedule(
         hass,
         entry,
@@ -26805,6 +26810,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # The full automation_store loading happens later and will update this
     if electricity_provider in ("agl", "globird", "aemo_vpp", "other", "tou_only", "nz"):
         initial_custom_tariff = entry.data.get("initial_custom_tariff")
+        if electricity_provider == "agl":
+            # Keep a repaired preset or a later manual edit authoritative over
+            # the original config-flow snapshot during the second setup stage.
+            initial_custom_tariff = automation_store.get_custom_tariff() or initial_custom_tariff
         if initial_custom_tariff:
             tariff_schedule = convert_custom_tariff_to_schedule(
                 initial_custom_tariff,
@@ -48318,6 +48327,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Handle initial custom tariff from config flow (if present)
     initial_custom_tariff = entry.data.get("initial_custom_tariff")
     if initial_custom_tariff:
+        if electricity_provider == "agl":
+            initial_custom_tariff = automation_store.get_custom_tariff() or initial_custom_tariff
         # Store the custom tariff in automation_store
         automation_store.set_custom_tariff(initial_custom_tariff)
         await automation_store.async_save()
