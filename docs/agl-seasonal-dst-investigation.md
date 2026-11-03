@@ -86,6 +86,13 @@ transitions. All passed; the equivalent Cloud defect was not reproduced.
 Cloud's 48 wall-clock display slots remain a representation limitation on
 23/25-hour transition days, separate from a persistent November shift.
 
+Non-Tesla manual/custom tariffs use a fixed 48-slot daily schedule in the
+configured custom-tariff timezone, falling back to the site timezone. Their
+current price, optimizer, billing and curtailment paths use the same local-slot
+semantics. Sydney's skipped and repeated local hours passed a separate fixture,
+and the retail-curtailment pricing check passed. This path has no date-based
+season support or copied AGL preset.
+
 The actual HA optimizer timestamp generator also passed Sydney's skipped and
 repeated hours with constant elapsed interval spacing. Its actual TOU forecast
 method passed the November season boundary and authored 15:00–21:00 local peak
