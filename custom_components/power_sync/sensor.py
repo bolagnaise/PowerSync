@@ -37,6 +37,7 @@ from .curtailment_config import (
     get_effective_solar_curtailment_configuration,
 )
 from .registry_compat import iter_device_entries
+from .tariff_time import tariff_components_for_datetime
 from .const import (
     CONF_POWERWALL_LOCAL_PAIRED,
     CONF_BATTERY_SENSOR_DISPLAY_MODE,
@@ -4700,12 +4701,12 @@ class TariffScheduleSensor(SensorEntity):
         self._unsub_time_interval = None
         # Cache for the schedule-list / buy_prices / sell_prices dicts, which are
         # expensive to rebuild and only change when the tariff data changes (every
-        # ~5 minutes on Amber). Rebuilt only when last_sync changes; the
+        # ~5 minutes on Amber). Also rebuild on local date/offset changes; the
         # time-sensitive fields (current_period, buy_price, current_time) are
         # computed fresh on every write from the cached tariff data.
         self._schedule_cache: dict = {}
         self._schedule_cache_sync: str | None = None
-        self._schedule_cache_dow: int = -1  # weekday the cache was built on (0=Mon)
+        self._schedule_cache_day: tuple | None = None
         # Last computed price tuple — shared between native_value and
         # extra_state_attributes within the same HA state-write cycle to avoid
         # calling get_current_price_from_tariff_schedule twice per update.
@@ -4798,9 +4799,9 @@ class TariffScheduleSensor(SensorEntity):
     def _rebuild_schedule_cache(self, tariff_data: dict) -> None:
         """Rebuild the static parts of extra_state_attributes (schedule lists, raw dicts).
 
-        Called when last_sync changes (~5 min on Amber) OR when the weekday
-        changes (midnight rollover). Day-of-week is part of the cache key so
-        TOU tariffs with weekday/weekend rate differences stay correct.
+        Called when last_sync changes (~5 min on Amber), the local date rolls
+        over, or the UTC offset changes. Static tariffs retain all seasons, so
+        select today's periods/rates rather than the startup season snapshot.
         The time-sensitive fields (current_period, buy_price, current_time) are
         computed separately on every write.
         """
@@ -4809,13 +4810,19 @@ class TariffScheduleSensor(SensorEntity):
         buy_rates = tariff_data.get("buy_rates", {})
         sell_rates = tariff_data.get("sell_rates", {})
         tou_periods = tariff_data.get("tou_periods", {})
-        today_dow = dt_util.now().weekday()  # 0=Monday; used for TOU day filtering — must use HA tz, not container UTC
+        now = dt_util.now()  # HA local time, including DST, rather than container UTC.
+        today_dow = now.weekday()
+        current_season = tariff_data.get("current_season")
+        if not buy_prices and tariff_data.get("seasons"):
+            tou_periods, buy_rates, sell_rates, current_season = (
+                tariff_components_for_datetime(tariff_data, now)
+            )
 
         attrs: dict[str, Any] = {
             "last_sync": tariff_data.get("last_sync"),
             "utility": tariff_data.get("utility"),
             "plan_name": tariff_data.get("plan_name"),
-            "current_season": tariff_data.get("current_season"),
+            "current_season": current_season,
         }
 
         if buy_prices:
@@ -4966,7 +4973,7 @@ class TariffScheduleSensor(SensorEntity):
 
         self._schedule_cache = attrs
         self._schedule_cache_sync = tariff_data.get("last_sync")
-        self._schedule_cache_dow = today_dow
+        self._schedule_cache_day = (now.date(), now.utcoffset())
 
     @property
     def native_value(self) -> Any:
@@ -4987,17 +4994,17 @@ class TariffScheduleSensor(SensorEntity):
         if not tariff_data:
             return {}
 
-        # Rebuild when tariff changes OR when the day rolls over (TOU tariffs have
-        # weekday/weekend rate differences that depend on the current day).
+        # A static tariff need not sync at a season boundary. Include the actual
+        # local date and offset, even if the last update was the same weekday.
+        now = dt_util.now()
         if (
             tariff_data.get("last_sync") != self._schedule_cache_sync
-            or dt_util.now().weekday() != self._schedule_cache_dow
+            or (now.date(), now.utcoffset()) != self._schedule_cache_day
         ):
             self._rebuild_schedule_cache(tariff_data)
 
         # Reuse price already computed by native_value in this write cycle
         buy_price_cents, sell_price_cents, current_period = self._last_price_result
-        now = dt_util.now()  # HA tz; naive datetime.now() returns UTC in containers
 
         return {
             **self._schedule_cache,

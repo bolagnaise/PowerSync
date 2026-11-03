@@ -12,11 +12,90 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pytest
 
 
 ROOT = Path(__file__).resolve().parent.parent / "custom_components" / "power_sync"
+
+
+def _seasonal_display_tariff():
+    def periods(start):
+        return {
+            "PEAK": [{"fromDayOfWeek": 0, "toDayOfWeek": 6,
+                      "fromHour": start, "toHour": 21}],
+            "OFF_PEAK": [{"fromDayOfWeek": 0, "toDayOfWeek": 6,
+                          "fromHour": 0, "toHour": 24}],
+        }
+
+    # This is the persisted schedule created in October. Its flattened fields
+    # remain October's snapshot when the calendar moves into November.
+    return {
+        "last_sync": "2026-10-25T12:00:00+11:00",
+        "current_season": "Winter",
+        "tou_periods": periods(15),
+        "buy_rates": {"PEAK": 0.41, "OFF_PEAK": 0.11},
+        "sell_rates": {"PEAK": 0.03, "OFF_PEAK": 0.03},
+        "seasons": {
+            "Summer": {"fromMonth": 11, "toMonth": 3, "tou_periods": periods(16)},
+            "Winter": {"fromMonth": 4, "toMonth": 10, "tou_periods": periods(15)},
+        },
+        "season_buy_rates": {
+            "Summer": {"PEAK": 0.61, "OFF_PEAK": 0.21},
+            "Winter": {"PEAK": 0.41, "OFF_PEAK": 0.11},
+        },
+        "season_sell_rates": {
+            "Summer": {"PEAK": 0.08, "OFF_PEAK": 0.04},
+            "Winter": {"PEAK": 0.03, "OFF_PEAK": 0.03},
+        },
+    }
+
+
+@pytest.mark.parametrize("previous_day", [25, 31])
+def test_tariff_chart_reselects_season_without_sync_or_reload(monkeypatch, previous_day):
+    sensor = _sensor_module()
+    now = datetime(2026, 10, previous_day, 12, tzinfo=ZoneInfo("Australia/Sydney"))
+    monkeypatch.setattr(sensor.dt_util, "now", lambda: now)
+    tariff = _seasonal_display_tariff()
+    hass, entry = _hass("AUD"), _entry("agl")
+    hass.data = {"power_sync": {entry.entry_id: {"tariff_schedule": tariff}}}
+    entity = sensor.TariffScheduleSensor(hass, entry)
+    october = entity.extra_state_attributes
+    assert october["current_season"] == "Winter"
+    assert october["schedule"][30]["buy"] == 0.41
+
+    # October 25 and November 1 are both Sunday: weekday-only invalidation
+    # also fails if the sensor misses a week of updates.
+    now = datetime(2026, 11, 1, 12, tzinfo=now.tzinfo)
+    november = entity.extra_state_attributes
+    assert november["current_season"] == "Summer"
+    assert november["buy_rates"] == {"PEAK": 61.0, "OFF_PEAK": 21.0}
+    assert november["sell_rates"] == {"PEAK": 8.0, "OFF_PEAK": 4.0}
+    assert november["schedule"][30] == {"time": "15:00", "buy": 0.21, "sell": 0.04}
+    assert november["schedule"][32] == {"time": "16:00", "buy": 0.61, "sell": 0.08}
+    assert november["schedule"][42] == {"time": "21:00", "buy": 0.21, "sell": 0.04}
+    peak = next(row for row in november["tou_schedule"] if row["period"] == "PEAK")
+    assert peak["windows"][0]["from_hour"] == 16
+    assert tariff == _seasonal_display_tariff()  # Display never rewrites the saved plan.
+    assert entity.extra_state_attributes["schedule"] is november["schedule"]
+
+
+@pytest.mark.parametrize("zone", ["Australia/Sydney", "Australia/Brisbane"])
+@pytest.mark.parametrize("month, day", [(4, 4), (4, 5), (10, 3), (10, 4)])
+def test_static_tariff_chart_keeps_authored_local_hours_across_dst(monkeypatch, zone, month, day):
+    sensor = _sensor_module()
+    now = datetime(2026, month, day, 12, tzinfo=ZoneInfo(zone))
+    monkeypatch.setattr(sensor.dt_util, "now", lambda: now)
+    tariff = _seasonal_display_tariff()
+    hass, entry = _hass("AUD"), _entry("agl")
+    hass.data = {"power_sync": {entry.entry_id: {"tariff_schedule": tariff}}}
+    entity = sensor.TariffScheduleSensor(hass, entry)
+    schedule = entity.extra_state_attributes["schedule"]
+    assert schedule[29]["buy"] == 0.11
+    assert schedule[30]["buy"] == 0.41
+    assert schedule[41]["buy"] == 0.41
+    assert schedule[42]["buy"] == 0.11
 
 
 @pytest.fixture(autouse=True)
