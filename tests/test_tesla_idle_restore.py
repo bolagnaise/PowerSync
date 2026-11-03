@@ -297,6 +297,48 @@ def test_engie_all_tariff_restore_posts_v2_period_objects(
     assert probe.ns["hass"].data["power_sync"]["test"]["pending_tesla_restore"]
 
 
+@pytest.mark.parametrize("baseline_source", ["captured", "cached"])
+def test_retained_legacy_periods_restore_as_v2_without_changing_baseline(
+    restore_probe, baseline_source,
+):
+    """Earlier converted payloads can survive an upgrade in recovery storage."""
+    probe = restore_probe
+    # The old converter wrapped rates but retained legacy period arrays.
+    baseline = {
+        "code": "POWER_SYNC:STATIC_TOU", "name": "Engie",
+        "seasons": {"All Year": {"fromMonth": 1, "toMonth": 12,
+            "tou_periods": {"ALL": [{"fromDayOfWeek": 0, "toDayOfWeek": 6,
+                                      "fromHour": 0, "toHour": 24}]}}},
+        "energy_charges": {"All Year": {"rates": {"ALL": .4755}}},
+        "sell_tariff": {"energy_charges": {"All Year": {"rates": {"ALL": .12}}}},
+    }
+    baseline["sell_tariff"]["seasons"] = copy.deepcopy(baseline["seasons"])
+    before = copy.deepcopy(baseline)
+    probe.ns["hass"].data["power_sync"]["test"]["pending_tesla_restore"] = {
+        "reason": "earlier restore failed",
+    }
+    if baseline_source == "captured":
+        probe.ns["force_charge_state"]["saved_tariff"] = baseline
+    else:
+        probe.ns["_configured_restorable_tesla_tariff"] = lambda: None
+        probe.ns["_cached_restorable_tesla_tariff"] = lambda: baseline
+
+    probe.run()
+
+    assert len(probe.calls) == 1
+    posted = probe.calls[0]
+    for side in (posted, posted["sell_tariff"]):
+        assert side["seasons"]["All Year"]["tou_periods"]["ALL"] == {
+            "periods": [{"fromDayOfWeek": 0, "toDayOfWeek": 6,
+                         "fromHour": 0, "toHour": 24,
+                         "fromMinute": 0, "toMinute": 0}],
+        }
+    assert posted["energy_charges"] == baseline["energy_charges"]
+    assert posted["sell_tariff"]["energy_charges"] == baseline["sell_tariff"]["energy_charges"]
+    assert baseline == before
+    assert probe.ns["hass"].data["power_sync"]["test"]["pending_tesla_restore"]
+
+
 def test_explicit_recovery_can_fall_back_to_cached_tariff(restore_probe):
     probe = restore_probe
     probe.ns["_configured_restorable_tesla_tariff"] = lambda: None

@@ -583,7 +583,12 @@ def _select_restorable_tesla_tariff(*tariffs: Any) -> dict[str, Any] | None:
                 for season in side["seasons"].values():
                     if not isinstance(season, dict) or not isinstance(season.get("tou_periods"), dict):
                         continue
-                    for periods in season["tou_periods"].values():
+                    for name, periods in season["tou_periods"].items():
+                        # Earlier configured restores could persist legacy
+                        # arrays in a captured/cached baseline. Upgrade those
+                        # copies too, before posting tariff_content_v2.
+                        if isinstance(periods, list):
+                            season["tou_periods"][name] = {"periods": periods}
                         if isinstance(periods, dict):
                             periods = periods.get("periods")
                         if isinstance(periods, list):
