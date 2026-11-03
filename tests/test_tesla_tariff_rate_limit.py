@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import copy
+import importlib.util
 import logging
 import sys
 from pathlib import Path
@@ -83,6 +85,104 @@ def upload_harness(monkeypatch):
     module = ast.Module(body=[ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0), *nodes], type_ignores=[])
     exec(compile(ast.fix_missing_locations(module), "<tariff-upload>", "exec"), namespace)
     return namespace["send_tariff_to_tesla"], SimpleNamespace(data={}), session, clock
+
+
+@pytest.fixture(scope="module")
+def restore_helpers():
+    """Exercise the actual persisted-baseline selector without importing HA."""
+    tree = ast.parse((ROOT / "custom_components/power_sync/__init__.py").read_text())
+    names = {"_select_restorable_tesla_tariff", "_is_powersync_force_tariff",
+             "_iter_tariff_strings", "_FORCE_TARIFF_TEXT_MARKERS",
+             "_FORCE_TARIFF_CODE_PREFIXES", "_MANAGER_OWN_TARIFF_CODES"}
+    nodes = [node for node in tree.body if getattr(node, "name", None) in names
+             or isinstance(node, ast.Assign) and any(
+                 isinstance(target, ast.Name) and target.id in names for target in node.targets)]
+    namespace = {"copy": copy}
+    module = ast.Module(body=[ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0), *nodes], type_ignores=[])
+    exec(compile(ast.fix_missing_locations(module), "<restore-selector>", "exec"), namespace)
+    spec = importlib.util.spec_from_file_location(
+        "restore_tariff_time", ROOT / "custom_components/power_sync/tariff_time.py")
+    tariff_time = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tariff_time)
+    converter = ast.parse((ROOT / "custom_components/power_sync/tariff_converter.py").read_text())
+    validators = [node for node in converter.body if getattr(node, "name", None)
+                  in {"_valid_day_or_month", "_valid_tou_range"}]
+    module = ast.Module(body=[ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0), *validators], type_ignores=[])
+    exec(compile(ast.fix_missing_locations(module), "<tou-validator>", "exec"), namespace)
+    return namespace["_select_restorable_tesla_tariff"], tariff_time, namespace["_valid_tou_range"]
+
+
+def _sparse_restore_tariff(period):
+    # Same abbreviated structure as the saved tariff in ticket 148. Prices and
+    # identity are synthetic; there is no customer/site data in this fixture.
+    tariff = {
+        "version": 1, "name": "Custom", "utility": "Example",
+        "daily_charges": [{"name": "Charge"}],
+        "energy_charges": {"ALL": {"rates": {"ALL": 0}},
+                           "Summer": {"rates": {"OFF_PEAK": .48}}, "Winter": {}},
+        "seasons": {"Summer": {"fromDay": 1, "toDay": 31, "fromMonth": 1,
+                               "toMonth": 12, "tou_periods": {
+                                   "OFF_PEAK": {"periods": [copy.deepcopy(period)]}}},
+                    "Winter": {}},
+    }
+    tariff["sell_tariff"] = copy.deepcopy(tariff)
+    tariff["sell_tariff"]["energy_charges"]["Summer"]["rates"]["OFF_PEAK"] = .12
+    return tariff
+
+
+@pytest.mark.parametrize("period", [
+    {"toDayOfWeek": 6},  # Actual newly observed variant: all scalar zeros omitted.
+    {"toDayOfWeek": 6, "fromHour": 21},
+    {"fromDayOfWeek": 5, "toDayOfWeek": 6, "toHour": 7},
+    {"fromDayOfWeek": 0, "toDayOfWeek": 0, "fromHour": 22, "toHour": 7},
+    {"fromDayOfWeek": 1, "toDayOfWeek": 5, "fromHour": 21, "toHour": 0},
+])
+def test_sparse_restore_expands_time_defaults_without_changing_schedule(restore_helpers, period):
+    select, tariff_time, valid_range = restore_helpers
+    original = _sparse_restore_tariff(period)
+    before = copy.deepcopy(original)
+    prepared = select(original)
+    for side in (prepared, prepared["sell_tariff"]):
+        expanded = side["seasons"]["Summer"]["tou_periods"]["OFF_PEAK"]["periods"][0]
+        assert valid_range(expanded)
+        assert set(expanded) == {"fromDayOfWeek", "toDayOfWeek", "fromHour",
+                                 "toHour", "fromMinute", "toMinute"}
+        assert all(expanded[key] == value for key, value in period.items())
+        # Every minute of every weekday, including overnight and midnight edges.
+        for minute in range(7 * 24 * 60):
+            when = datetime(2026, 11, 1) + timedelta(minutes=minute)
+            assert tariff_time.tou_period_matches(period, when) == tariff_time.tou_period_matches(expanded, when)
+    assert prepared["energy_charges"] == before["energy_charges"]
+    assert prepared["sell_tariff"]["energy_charges"] == before["sell_tariff"]["energy_charges"]
+    assert original == before
+    assert select(prepared) == prepared
+
+
+@pytest.mark.parametrize("bad", [None, "bad", -1, True])
+def test_restore_defaults_preserve_explicit_invalid_values(restore_helpers, bad):
+    select, _tariff_time, valid_range = restore_helpers
+    prepared = select(_sparse_restore_tariff({"toDayOfWeek": 6, "fromHour": bad}))
+    period = prepared["seasons"]["Summer"]["tou_periods"]["OFF_PEAK"]["periods"][0]
+    assert period["fromHour"] is bad
+    assert not valid_range(period)
+
+
+def test_persisted_sparse_tariff_is_prepared_at_real_upload_boundary(restore_helpers, upload_harness):
+    select, _tariff_time, _valid_range = restore_helpers
+    upload, hass, session, clock = upload_harness
+    session.responses = [200, 200]
+    tariff = _sparse_restore_tariff({"toDayOfWeek": 6})
+    prepared = select(tariff)
+    assert asyncio.run(upload(hass, "site-a", prepared, "token")) is True
+    posted = session.posts[0][2]["tou_settings"]["tariff_content_v2"]
+    for side in (posted, posted["sell_tariff"]):
+        assert side["seasons"]["Summer"]["tou_periods"]["OFF_PEAK"]["periods"] == [{
+            "fromDayOfWeek": 0, "toDayOfWeek": 6, "fromHour": 0,
+            "toHour": 24, "fromMinute": 0, "toMinute": 0,
+        }]
+    # A successful POST still cannot clear the restore obligation without readback.
+    clock.confirmed = False
+    assert asyncio.run(upload(hass, "site-a", prepared, "token")) is False
 
 
 def test_final_429_defers_fresh_call_until_retry_after_even_with_rotated_token(upload_harness):

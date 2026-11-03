@@ -566,7 +566,32 @@ def _select_restorable_tesla_tariff(*tariffs: Any) -> dict[str, Any] | None:
     """Return the first tariff that is safe to use as a normal restore tariff."""
     for tariff in tariffs:
         if isinstance(tariff, dict) and tariff and not _is_powersync_force_tariff(tariff):
-            return copy.deepcopy(tariff)
+            restored = copy.deepcopy(tariff)
+            # Tesla readback can omit zero-valued TOU fields. Replaying that
+            # abbreviated response as an upload leaves required time bounds
+            # absent. Materialize the same defaults tariff_time uses to read
+            # these periods, on both buy and sell sides. Never overwrite an
+            # explicit value or change the persisted baseline in place.
+            defaults = {
+                "fromDayOfWeek": 0, "toDayOfWeek": 6,
+                "fromHour": 0, "toHour": 24,
+                "fromMinute": 0, "toMinute": 0,
+            }
+            for side in (restored, restored.get("sell_tariff")):
+                if not isinstance(side, dict) or not isinstance(side.get("seasons"), dict):
+                    continue
+                for season in side["seasons"].values():
+                    if not isinstance(season, dict) or not isinstance(season.get("tou_periods"), dict):
+                        continue
+                    for periods in season["tou_periods"].values():
+                        if isinstance(periods, dict):
+                            periods = periods.get("periods")
+                        if isinstance(periods, list):
+                            for period in periods:
+                                if isinstance(period, dict):
+                                    for field, default in defaults.items():
+                                        period.setdefault(field, default)
+            return restored
     return None
 
 
