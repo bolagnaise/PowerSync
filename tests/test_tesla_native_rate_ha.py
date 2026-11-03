@@ -10,6 +10,8 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
+from test_native_rate_admission import admission
+
 ROOT = Path(__file__).parents[1] / 'custom_components/power_sync'
 NOW = 1800000000.0
 VIN = '5YJ3E1EA7KF000001'
@@ -499,3 +501,200 @@ async def test_increase_lowers_battery_and_requires_two_fresh_physical_samples(a
         assert len(a.calls) == 1
     else:
         assert a.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('platform', ['tesla_fleet', 'teslemetry'])
+@pytest.mark.parametrize('phase,case', [
+    (0, 'healthy'), (10, 'healthy'), (20, 'healthy'), (29, 'healthy'),
+    (20, 'stale_vehicle'), (20, 'stale_meter'), (20, 'owner'),
+    (20, 'inflight'), (20, 'identity'), (20, 'power'),
+    (20, 'second_vin'), (20, 'other_site'),
+])
+async def test_passive_settlement_catches_independent_native_reports(
+    admission, monkeypatch, platform, phase, case,
+):
+    from copy import deepcopy
+    from unittest.mock import AsyncMock
+    from test_powerwall_battery_dispatch import load_routing, call
+    a = admission
+    now = [NOW]
+    monkeypatch.setattr(a.m.time, 'time', lambda: now[0])
+    registry = sys.modules['homeassistant.helpers.entity_registry'].async_get(a.hass)
+    for registration in registry.entities.values():
+        registration.platform = platform
+    a.provider.runtime_data.vehicles[0].device.identifiers = {(platform, VIN)}
+    a.hass.config_entries.async_entries = lambda domain: [a.provider] if domain == platform else []
+    # Match the supplied numeric values; use valid, related provider identities.
+    record = dict(entry_id='one', site='site', identity=f'{platform}:provider:car:amps',
+                  entity_id=a.state.entity_id, setting_entity_id=a.state.entity_id,
+                  target_amps=32, target_w=28800, reserved_w=28800, watts_per_amp=900,
+                  submitted_at=NOW-172800, operation='rate', uncertain=True,
+                  identities=[f'{platform}:provider:car:amps', f'{platform}:provider:car:charging'])
+    a.store.data = {'entries': {}, 'managed': {VIN: record}}
+    if case in ('second_vin', 'other_site'):
+        second = deepcopy(record)
+        second.update(site='other' if case == 'other_site' else 'site',
+                      identity=f'{platform}:provider:other-car:amps', entity_id='number.other')
+        a.store.data['managed']['5YJ3E1EA7KF000002'] = second
+    # A new instance exercises restart: no transient settle samples survive.
+    budget = a.b.SharedRateBudget(a.store, clock=lambda: now[0])
+    await budget.load()
+    assert budget.managed_settle == {}
+    a.hass.data[a.b.RUNTIME_KEY] = budget
+    a.hass.services = SimpleNamespace(async_call=AsyncMock(side_effect=AssertionError('no commands')))
+    m = importlib.import_module(a.m.__package__ + '.tesla_native_rate')
+    ports = m.NativeRatePorts(a.hass, a.entry, SimpleNamespace(rate_vins=frozenset()), budget)
+    controller = m.NativeRateController(a.b.EntryRateJournal(budget, 'one', 'site'), ports)
+    ports.controller = controller
+    a.runtime[m.RUNTIME_KEY] = controller
+    control_ticks = []
+    original_tick = controller.tick
+    async def control_tick():
+        control_ticks.append(now[0])
+        await original_tick()
+    controller.tick = control_tick
+    callbacks, tasks, cancelled = [], [], set()
+    event = ModuleType('homeassistant.helpers.event')
+    def track(hass, callback, interval):
+        callbacks.append((interval.total_seconds(), callback))
+        return lambda: cancelled.add(callback)
+    event.async_track_time_interval = track
+    monkeypatch.setitem(sys.modules, event.__name__, event)
+    def create(coro):
+        task = asyncio.create_task(coro)
+        tasks.append(task)
+        return task
+    a.hass.async_create_task = create
+    a.state.state = '16'
+    a.state.last_reported = datetime.fromtimestamp(NOW - 84822, timezone.utc)
+    a.charge.update(charge_current_request=16, charger_actual_current=0, charger_power=0,
+                    charging_state='Disconnected', timestamp=NOW + (0 if phase == 0 else phase-60))
+    a.local.last_success_ts = NOW
+    native = a.provider.runtime_data.vehicles[0].coordinator
+    native.async_request_refresh = AsyncMock(side_effect=AssertionError('no provider polling'))
+    a.local.async_request_refresh = AsyncMock(side_effect=AssertionError('no meter polling'))
+    if case == 'owner':
+        a.runtime['ev_ownership'] = {VIN: {'owner': 'powersync'}}
+    if case == 'inflight':
+        budget.managed_tasks[VIN] = asyncio.current_task()
+    if case == 'identity':
+        registry.entities[a.state.entity_id].unique_id = 'replacement'
+    if case == 'power':
+        a.charge['charger_power'] = 1
+    if case == 'stale_vehicle':
+        a.charge['timestamp'] = NOW - 1000
+    if case == 'stale_meter':
+        a.local.last_success_ts = NOW - 1000
+    await m.async_start(a.hass, a.entry)
+    await asyncio.gather(*tasks)
+    ns, _, client, _ = load_routing(tesla_control_method='tariff')
+    ns['site_identity'] = lambda entry: 'site'
+    ns['hass'].data[a.b.RUNTIME_KEY] = budget
+    with pytest.raises(RuntimeError, match='shared EV headroom'):
+        await ns['_prepare_cloud_tariff_control']('charge', call(power_w=0))
+    # Healthy atomic source acquisitions every minute, independently phased;
+    # local meter successes every two seconds. No event or clock is forged.
+    for second in range(1, 182):
+        now[0] = NOW + second
+        if case != 'stale_meter':
+            a.local.last_success_ts = NOW + (second // 2) * 2
+        if case != 'stale_vehicle' and second >= phase and (second-phase) % 60 == 0:
+            a.charge['timestamp'] = now[0]
+        for interval, callback in tuple(callbacks):
+            if second % interval == 0:
+                await callback(None)
+        await asyncio.sleep(0)
+    a.hass.services.async_call.assert_not_called()
+    assert ports.setting.rate_vins == frozenset()
+    clear = case in ('healthy', 'second_vin', 'other_site')
+    assert (VIN not in budget.managed) is clear
+    assert (VIN not in a.store.data['managed']) is clear
+    if clear and case != 'second_vin':
+        assert await ns['_prepare_cloud_tariff_control']('charge', call(power_w=0))
+    else:
+        with pytest.raises(RuntimeError, match='shared EV headroom'):
+            await ns['_prepare_cloud_tariff_control']('charge', call(power_w=0))
+    if case in ('second_vin', 'other_site'):
+        assert '5YJ3E1EA7KF000002' in budget.managed
+    assert control_ticks == [NOW + offset for offset in range(0, 181, 30)]
+    native.async_request_refresh.assert_not_called()
+    a.local.async_request_refresh.assert_not_called()
+    client.dispatch_battery_power.assert_not_called()
+    await m.async_stop(a.hass, a.entry)
+    assert cancelled == {callback for _, callback in callbacks}
+    settled = deepcopy(budget.managed)
+    stop_ticks = len(control_ticks)  # stop() may run its own cleanup tick.
+    for _, callback in callbacks:  # A callback queued before unload is inert.
+        await callback(None)
+    assert budget.managed == settled
+    assert len(control_ticks) == stop_ticks
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('invalidate', ['stop', 'runtime', 'controller'])
+async def test_passive_settlement_serializes_callbacks_and_rejects_old_runtime(
+    live_adapter, monkeypatch, invalidate,
+):
+    from unittest.mock import AsyncMock
+
+    a = live_adapter
+    calls, timers, startup = [], {}, []
+    entered, release = asyncio.Event(), asyncio.Event()
+    blocked = False
+    admission_module = ModuleType(a.m.__package__ + '.native_rate_admission')
+
+    async def refresh(hass, budget, **kwargs):
+        calls.append(kwargs)
+        if blocked:
+            entered.set()
+            await release.wait()
+
+    admission_module.refresh_managed_records = refresh
+    monkeypatch.setitem(sys.modules, admission_module.__name__, admission_module)
+    event = ModuleType('homeassistant.helpers.event')
+    cancelled = []
+
+    def track(hass, callback, interval):
+        timers[interval.total_seconds()] = callback
+        return lambda: cancelled.append(interval.total_seconds())
+
+    event.async_track_time_interval = track
+    monkeypatch.setitem(sys.modules, event.__name__, event)
+    controller = SimpleNamespace(ports=a.ports, tick=AsyncMock(), stop=AsyncMock())
+    a.runtime[a.m.RUNTIME_KEY] = controller
+    a.budget.drain_storage = AsyncMock()
+
+    def create(coro):
+        task = asyncio.create_task(coro)
+        startup.append(task)
+        return task
+
+    a.hass.async_create_task = create
+    await a.m.async_start(a.hass, a.entry)
+    await asyncio.gather(*startup)
+    assert len(calls) == 1
+    blocked = True
+    pending = asyncio.create_task(timers[2](None))
+    await entered.wait()
+    await timers[2](None)
+    await timers[30](None)
+    assert len(calls) == 2  # Neither callback overlaps the blocked cached read.
+    assert controller.tick.await_count == 2
+    release.set()
+    await pending
+    blocked = False
+    await timers[2](None)
+    assert len(calls) == 3
+
+    if invalidate == 'stop':
+        await a.m.async_stop(a.hass, a.entry)
+        assert sorted(cancelled) == [2, 30]
+    elif invalidate == 'runtime':
+        a.hass.data['power_sync'][a.entry.entry_id] = dict(a.runtime)
+    else:
+        a.runtime[a.m.RUNTIME_KEY] = SimpleNamespace()
+    for callback in timers.values():
+        await callback(None)
+    assert len(calls) == 3
+    assert controller.tick.await_count == 2

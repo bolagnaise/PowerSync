@@ -128,6 +128,39 @@ async def test_native_stopped_reconciliation_uses_two_fresh_charge_documents(adm
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('platform', ['tesla_fleet', 'teslemetry'])
+async def test_passive_settlement_cannot_commit_after_lifecycle_revocation(
+    admission, monkeypatch, platform,
+):
+    a = admission
+    now, active = [NOW], [True]
+    monkeypatch.setattr(a.m.time, 'time', lambda: now[0])
+    a.budget.clock = lambda: now[0]
+    registry = sys.modules['homeassistant.helpers.entity_registry'].async_get(a.hass)
+    for registration in registry.entities.values():
+        registration.platform = platform
+    a.provider.runtime_data.vehicles[0].device.identifiers = {(platform, VIN)}
+    a.hass.config_entries.async_entries = lambda domain: [a.provider] if domain == platform else []
+    a.budget.armed_sites.clear()
+    assert await a.budget.admit_managed(VIN, {
+        'entry_id': 'one', 'site': 'site', 'identity': f'{platform}:provider:car:amps',
+        'entity_id': a.state.entity_id, 'setting_entity_id': a.state.entity_id,
+        'target_amps': 32, 'target_w': 28800, 'reserved_w': 28800,
+        'submitted_at': NOW - 100, 'operation': 'rate', 'uncertain': True,
+    }, {}, lambda: True)
+    a.charge.update(charger_actual_current=0, charger_power=0, charging_state='Disconnected')
+    await a.m.refresh_managed_records(a.hass, a.budget, is_current=lambda: active[0])
+    now[0] += 4
+    a.charge['timestamp'] = a.local.last_success_ts = now[0]
+    a.store.hook = lambda: active.__setitem__(0, False)
+    await a.m.refresh_managed_records(a.hass, a.budget, is_current=lambda: active[0])
+    assert active[0] is False
+    assert VIN in a.budget.managed
+    assert VIN in a.store.data['managed']
+    assert a.budget.managed[VIN]['uncertain'] is True
+
+
+@pytest.mark.asyncio
 async def test_current_and_start_reuse_one_vin_demand_without_double_counting(admission):
     a = admission
     assert await a.m.prepare_ev_submission(a.hass, a.state.entity_id, operation='rate', amps=20)

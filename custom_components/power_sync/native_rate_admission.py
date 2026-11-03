@@ -384,7 +384,8 @@ def _managed_native_entity(hass, entry, runtime, vin, record, registration):
     return None
 
 
-async def refresh_managed_records(hass, budget, *, vins=None, site=None, native_reports=None):
+async def refresh_managed_records(hass, budget, *, vins=None, site=None, native_reports=None,
+                                  is_current=None):
     """Observe each managed VIN independently; never infer it from a total."""
     if not budget.managed:
         return
@@ -394,6 +395,8 @@ async def refresh_managed_records(hass, budget, *, vins=None, site=None, native_
     from .automations.ev_ownership import get_ev_ownership
     registry = er.async_get(hass)
     for vin, record in tuple(budget.managed.items()):
+        if is_current is not None and not is_current():
+            return
         if vins is not None and vin not in vins:
             continue
         if site is not None and record.get("site") != site:
@@ -467,7 +470,8 @@ async def refresh_managed_records(hass, budget, *, vins=None, site=None, native_
 
         def current_scope():
             return (
-                hass.data.get("power_sync", {}).get(record.get("entry_id")) is runtime
+                (is_current is None or is_current())
+                and hass.data.get("power_sync", {}).get(record.get("entry_id")) is runtime
                 and budget.managed.get(vin) is record
                 and _identity(registry.async_get(record["entity_id"])) == record["identity"]
                 and (get_ev_ownership(hass, entry, vin)[1] if entry is not None else None) is owner

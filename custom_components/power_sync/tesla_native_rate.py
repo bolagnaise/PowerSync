@@ -607,19 +607,53 @@ async def async_start(hass, entry):
     """Activate only after optimiser setup and restart recovery are ready."""
     from homeassistant.helpers.event import async_track_time_interval
     runtime = hass.data["power_sync"][entry.entry_id]
+    if cancel := runtime.pop("tesla_native_rate_cancel", None):
+        cancel()
     controller = runtime[RUNTIME_KEY]
-    async def tick(_now=None):
-        await controller.tick()
-        # Native-rate reads already reconcile while a VIN is enabled. Keep a
-        # disabled/idle controller able to consume the existing cached report
-        # as well, without creating a new provider poll or vehicle command.
+    stopped = False
+    settling = False
+
+    def current():
+        return (not stopped
+                and hass.data.get("power_sync", {}).get(entry.entry_id) is runtime
+                and runtime.get(RUNTIME_KEY) is controller
+                and not getattr(controller, "stopping", False))
+
+    async def settle(_now=None):
+        nonlocal settling
+        if settling or not current():
+            return
         ports = getattr(controller, "ports", None)
         budget = getattr(ports, "budget", None)
         site = getattr(ports, "site", None)
         if budget is not None and site is not None:
             from .native_rate_admission import refresh_managed_records
-            await refresh_managed_records(hass, budget, site=site)
-    runtime["tesla_native_rate_cancel"] = async_track_time_interval(hass, tick, timedelta(seconds=30))
+            settling = True
+            try:
+                await refresh_managed_records(hass, budget, site=site, is_current=current)
+            finally:
+                settling = False
+
+    async def tick(_now=None):
+        if not current():
+            return
+        await controller.tick()
+        await settle()
+
+    control_cancel = async_track_time_interval(hass, tick, timedelta(seconds=30))
+    # Native settlement needs charge/meter stamps within five seconds. A
+    # 30-second sampler can miss every healthy minute-spaced native report.
+    # Check cached evidence at the local meter cadence; never poll a provider
+    # or run the command controller from this passive callback.
+    settle_cancel = async_track_time_interval(hass, settle, timedelta(seconds=2))
+
+    def cancel():
+        nonlocal stopped
+        stopped = True
+        control_cancel()
+        settle_cancel()
+
+    runtime["tesla_native_rate_cancel"] = cancel
     hass.async_create_task(tick())
 
 
