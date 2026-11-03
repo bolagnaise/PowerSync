@@ -3816,6 +3816,15 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
                 "lifetime_totals": self._lifetime_totals,
             }
 
+            # The feature-enabled setting and cached site_info do not establish
+            # active protection. Observe the fresh Fleet/Teslemetry live sample.
+            from .tesla_storm_watch import update_storm_watch_alert
+
+            update_storm_watch_alert(
+                self.hass, self._entry_id, self.site_id,
+                live_status.get("storm_mode_active"),
+            )
+
             # Refresh lifetime totals once per hour (best-effort, never fails the poll)
             _lifetime_stale = (time.monotonic() - self._lifetime_last_fetch) > 3600
             if _lifetime_stale and not self._lifetime_fetch_failed:

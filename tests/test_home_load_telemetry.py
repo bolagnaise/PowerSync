@@ -1013,6 +1013,36 @@ def test_tesla_coordinator_notifies_only_terminal_class_changes(monkeypatch):
     )
 
 
+@pytest.mark.parametrize("active", [True, False, None])
+def test_tesla_storm_watch_alert_uses_live_status_not_cached_settings(monkeypatch, active):
+    coordinator = _new_stream_tesla_coordinator()
+    coordinator._site_info_cache = {
+        "storm_mode_active": not active,
+        "user_settings": {"storm_mode_enabled": True},
+    }
+    alert = types.ModuleType("power_sync.tesla_storm_watch")
+    from unittest.mock import Mock
+
+    alert.update_storm_watch_alert = Mock()
+    monkeypatch.setitem(sys.modules, alert.__name__, alert)
+
+    async def publish():
+        coordinator.async_request_refresh = AsyncMock()
+        live = {"solar_power": 0, "grid_power": 1500, "battery_power": 0,
+                "load_power": 1500, "percentage_charged": 100, "grid_status": "Active"}
+        if active is not None:
+            live["storm_mode_active"] = active
+        await coordinator._async_handle_teslemetry_stream_event({
+            "createdAt": datetime.now(timezone.utc).isoformat(),
+            "site_id": "12345", "live_status": live})
+        result = await coordinator._async_update_data()
+        assert result["battery_power"] == 0
+
+    asyncio.run(publish())
+    alert.update_storm_watch_alert.assert_called_once_with(
+        coordinator.hass, coordinator._entry_id, "12345", active)
+
+
 def test_tesla_explicit_zero_wall_connector_power_suppresses_vehicle_fallback(
     monkeypatch,
 ):
