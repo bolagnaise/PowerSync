@@ -5367,22 +5367,17 @@ class AutoScheduleExecutor:
     async def save_settings(self, store) -> None:
         """Save settings to storage."""
         try:
-            stored_data = await store.async_load() if hasattr(store, 'async_load') else {}
-            if not stored_data:
-                stored_data = {}
+            from .. import _update_powerwall_store
 
             auto_schedule_data = {}
             for vehicle_id, settings in self._settings.items():
                 auto_schedule_data[vehicle_id] = settings.to_dict()
 
-            stored_data["auto_schedule_settings"] = auto_schedule_data
-
-            # Save cached SoC values
-            stored_data["cached_vehicle_soc"] = self._cached_soc
-
             if hasattr(store, 'async_save'):
-                store._data = stored_data
-                await store.async_save(stored_data)
+                await _update_powerwall_store(store, {
+                    "auto_schedule_settings": auto_schedule_data,
+                    "cached_vehicle_soc": self._cached_soc,
+                })
 
             _LOGGER.debug(f"Saved auto-schedule settings for {len(self._settings)} vehicles")
         except Exception as e:
@@ -5588,15 +5583,10 @@ class AutoScheduleExecutor:
             return
 
         try:
-            stored_data = await self._store.async_load() if hasattr(self._store, 'async_load') else {}
-            if not stored_data:
-                stored_data = {}
-
-            stored_data["cached_vehicle_soc"] = self._cached_soc
+            from .. import _update_powerwall_store
 
             if hasattr(self._store, 'async_save'):
-                self._store._data = stored_data
-                await self._store.async_save(stored_data)
+                await _update_powerwall_store(self._store, {"cached_vehicle_soc": self._cached_soc})
 
             self._last_cache_save = datetime.now()
             _LOGGER.debug(f"Force-saved cached SoC for {len(self._cached_soc)} vehicles")

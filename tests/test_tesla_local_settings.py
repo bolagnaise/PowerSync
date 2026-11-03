@@ -594,6 +594,64 @@ def recovery_call(**changes):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("writer", ["save_settings", "_force_save_cached_soc"])
+@pytest.mark.parametrize("transition", ["stage", "resume"])
+async def test_ev_planner_saves_preserve_concurrent_powerwall_incident(monkeypatch, writer, transition):
+    ns, runtime, saved = recovery_context()
+    if transition == "stage":
+        saved["tesla_settings_pending"] = runtime["powerwall_settings_pending"] = None
+    saved["unrelated"] = {"preserved": True}
+    loaded, release, settings_waiting = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    lock = asyncio.Lock()
+    class ObservedLock:
+        async def __aenter__(self):
+            if loaded.is_set():
+                settings_waiting.set()
+            await lock.acquire()
+        async def __aexit__(self, *args):
+            lock.release()
+    ns["store"]._power_sync_update_lock = ObservedLock()
+    load = ns["store"].async_load.side_effect
+    first = True
+    async def pause_planner_snapshot():
+        nonlocal first
+        value = load()
+        if first:
+            first = False
+            loaded.set()
+            await release.wait()
+        return value
+    ns["store"].async_load.side_effect = pause_planner_snapshot
+    planner = SimpleNamespace(_store=ns["store"], _cached_soc={"vehicle": {"soc": 42}},
+        _settings={"vehicle": SimpleNamespace(to_dict=lambda: {"enabled": True})})
+    ns["datetime"] = __import__("datetime").datetime
+    # Keep the production lazy import, exposing the real extracted helper.
+    package = __import__("types").ModuleType("power_sync")
+    package._update_powerwall_store = ns["_update_powerwall_store"]
+    monkeypatch.setitem(__import__("sys").modules, "power_sync", package)
+    ns["__package__"] = "power_sync.automations"
+    save_planner = load_function(ROOT / "automations/ev_charging_planner.py", writer, ns)
+    planner_task = asyncio.create_task(save_planner(planner, ns["store"]) if writer == "save_settings"
+                                       else save_planner(planner))
+    await loaded.wait()
+    record = {"id": "new-incident", "site_id": "site", "updates": {"default_real_mode": "backup"}}
+    change = (ns["_record_tesla_settings_submission"](record) if transition == "stage"
+              else ns["handle_resume_powerwall_settings"](recovery_call()))
+    settings_task = asyncio.create_task(change)
+    await settings_waiting.wait()
+    release.set()
+    await asyncio.gather(planner_task, settings_task)
+    pending = saved["tesla_settings_pending"]
+    assert pending and pending["id"] == (record["id"] if transition == "stage" else "incident")
+    assert bool(pending.get("resume_cloud")) == (transition == "resume")
+    assert saved["cached_vehicle_soc"] == planner._cached_soc
+    assert saved["unrelated"] == {"preserved": True}
+    if writer == "save_settings":
+        assert saved["auto_schedule_settings"] == {"vehicle": {"enabled": True}}
+    assert "_data" not in vars(ns["store"])  # HA owns its pending-write envelope.
+
+
+@pytest.mark.asyncio
 async def test_supervised_recovery_after_terminal_clear_verification_failure():
     ns, runtime, saved = recovery_context({"force_mode_state": {"saved_operation_mode": "backup"}})
     transport = staged_transport()
