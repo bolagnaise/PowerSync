@@ -593,6 +593,102 @@ def recovery_call(**changes):
                                  "incident_id": "incident", "acknowledge": True, **changes})
 
 
+@pytest.mark.asyncio
+async def test_supervised_recovery_after_terminal_clear_verification_failure():
+    ns, runtime, saved = recovery_context({"force_mode_state": {"saved_operation_mode": "backup"}})
+    transport = staged_transport()
+    ns["get_local_transport"] = lambda *_: transport
+    cloud = AsyncMock(return_value=True)
+    verification_reads = 0
+    async def read_persisted():
+        nonlocal verification_reads
+        verification_reads += 1
+        if verification_reads == 2:
+            # The terminal clear reached disk, but its verification failed.
+            return {**copy.deepcopy(saved), "verification_mismatch": True}
+        return copy.deepcopy(saved)
+    ns["Store"] = lambda *args, **kwargs: SimpleNamespace(async_load=read_persisted)
+    with pytest.raises(RuntimeError, match="recovery owner changed"):
+        await ns["dispatch_powerwall_setting"](ns["hass"], ns["entry"], site_id="site",
+            updates={"default_real_mode": "autonomous"}, cloud_call=cloud,
+            before_submit=ns["_record_tesla_settings_submission"], is_current=lambda: True,
+            deadline=time.monotonic()+2, label="terminal clear")
+    incident = copy.deepcopy(runtime["powerwall_settings_pending"])
+    assert incident and saved["tesla_settings_pending"] is None
+    transport.read_config.assert_not_awaited()
+    cloud.assert_not_awaited()
+
+    result = await ns["handle_resume_powerwall_settings"](recovery_call(incident_id=incident["id"]))
+    assert result == {"success": True, "route": "cloud", "incident_id": incident["id"]}
+    resumed = saved["tesla_settings_pending"]
+    assert resumed["resume_cloud"] is True
+    assert resumed["updates"] == incident["updates"]
+    assert resumed["restore_basis"] == incident["restore_basis"]
+    assert not resumed.get("terminal")  # Verification failure is not terminal proof.
+    assert runtime["powerwall_settings_pending"] == resumed
+    cloud.assert_not_awaited()  # Recovery only grants permission.
+    ns["get_local_transport"] = Mock(side_effect=AssertionError("local remains suspended"))
+    assert await ns["dispatch_powerwall_setting"](ns["hass"], ns["entry"], site_id="site",
+        updates={"default_real_mode": "backup"}, cloud_call=cloud,
+        is_current=lambda: True, deadline=time.monotonic()+.1, label="after recovery")
+    cloud.assert_awaited_once()
+    _, restarted, _ = recovery_context(copy.deepcopy(saved))
+    assert restarted["powerwall_settings_cloud_handoff"] == incident["id"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("durable", [None, "absent", {"id": "new", "site_id": "site"},
+                                    {"id": "incident", "site_id": "other"}, {}])
+async def test_runtime_incident_recovery_never_overwrites_a_conflicting_saved_record(durable):
+    ns, runtime, saved = recovery_context()
+    original = copy.deepcopy(runtime["powerwall_settings_pending"])
+    if durable == "absent":
+        saved.pop("tesla_settings_pending")
+    else:
+        saved["tesla_settings_pending"] = durable
+    before = copy.deepcopy(saved)
+    if durable in (None, "absent"):
+        await ns["handle_resume_powerwall_settings"](recovery_call())
+        assert saved["tesla_settings_pending"]["resume_cloud"] is True
+        assert saved["tesla_settings_pending"]["id"] == original["id"]
+    else:
+        with pytest.raises(RuntimeError, match="recovery state changed"):
+            await ns["handle_resume_powerwall_settings"](recovery_call())
+        assert saved == before
+        assert runtime["powerwall_settings_pending"] == original
+        assert not runtime.get("powerwall_settings_cloud_handoff")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("changed", ["runtime", "incident", "site", "stopping"])
+async def test_missing_record_recovery_rechecks_owner_after_storage_load(changed):
+    ns, runtime, saved = recovery_context()
+    saved["tesla_settings_pending"] = None
+    started, release = asyncio.Event(), asyncio.Event()
+    load = ns["store"].async_load.side_effect
+    async def paused_load():
+        value = load()
+        started.set()
+        await release.wait()
+        return value
+    ns["store"].async_load.side_effect = paused_load
+    recovering = asyncio.create_task(ns["handle_resume_powerwall_settings"](recovery_call()))
+    await started.wait()
+    if changed == "runtime":
+        ns["hass"].data["power_sync"]["entry"] = dict(runtime)
+    elif changed == "incident":
+        runtime["powerwall_settings_pending"] = {"id": "new", "site_id": "site"}
+    elif changed == "site":
+        ns["entry"].data["tesla_energy_site_id"] = "new-site"
+    else:
+        runtime["powerwall_local_dispatch_stopping"] = True
+    release.set()
+    with pytest.raises(RuntimeError, match="recovery state changed"):
+        await recovering
+    ns["store"].async_save.assert_not_awaited()
+    assert not runtime.get("powerwall_settings_cloud_handoff")
+
+
 def resolve_recovery_backend(ns):
     """Use setup's real brand resolver instead of assuming explicit Tesla."""
     for node in ast.parse((ROOT / "const.py").read_text()).body:
@@ -869,8 +965,11 @@ async def test_cancelled_foreground_cannot_let_recovery_overtake_its_storage_wor
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", ["disk_error", "shutdown_deferred", None])
-async def test_critical_store_verification_reads_disk_instead_of_pending_buffer(tmp_path, failure):
+@pytest.mark.parametrize("missing_record", [False, True])
+async def test_critical_store_verification_reads_disk_instead_of_pending_buffer(tmp_path, failure, missing_record):
     ns, runtime, saved = recovery_context()
+    if missing_record:
+        saved["tesla_settings_pending"] = None
     path = tmp_path / "entry.json"
     json = __import__("json")
     path.write_text(json.dumps(saved))
@@ -898,7 +997,7 @@ async def test_critical_store_verification_reads_disk_instead_of_pending_buffer(
         with pytest.raises(RuntimeError):
             await ns["handle_resume_powerwall_settings"](recovery_call())
         assert not runtime["powerwall_settings_pending"].get("resume_cloud")
-        assert not json.loads(path.read_text())["tesla_settings_pending"].get("resume_cloud")
+        assert not (json.loads(path.read_text())["tesla_settings_pending"] or {}).get("resume_cloud")
     else:
         await ns["handle_resume_powerwall_settings"](recovery_call())
         assert runtime["powerwall_settings_pending"]["resume_cloud"] is True

@@ -45595,11 +45595,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 configured_site = entry.data.get(CONF_TESLA_ENERGY_SITE_ID)
                 def current():
                     latest = hass.config_entries.async_get_entry(entry.entry_id)
+                    selected = runtime.get("powerwall_settings_pending")
                     return (_local_powerwall_generation_current()
                             and hass.data.get(DOMAIN, {}).get(entry.entry_id) is runtime
                             and not runtime.get("powerwall_local_dispatch_stopping")
                             and latest is not None
-                            and latest.data.get(CONF_TESLA_ENERGY_SITE_ID) == configured_site)
+                            and latest.data.get(CONF_TESLA_ENERGY_SITE_ID) == configured_site
+                            and isinstance(selected, dict)
+                            and selected.get("id") == call.data.get("incident_id")
+                            and selected.get("site_id") == call.data.get("site_id"))
                 incident = runtime.get("powerwall_settings_pending")
                 if (not current() or not isinstance(incident, dict)
                         or not incident.get("id") or incident.get("id") != call.data.get("incident_id")
@@ -45622,6 +45626,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 def transition(data):
                     nonlocal resumed
                     pending = data.get("tesla_settings_pending")
+                    if pending is None:
+                        # A terminal clear can reach disk before verification
+                        # fails, leaving this exact runtime incident blocked.
+                        # Explicit supervision may persist its cloud handoff;
+                        # it must never replace a different durable incident.
+                        pending = dict(incident)
                     if (not isinstance(pending, dict) or pending.get("id") != incident["id"]
                             or pending.get("site_id") != incident["site_id"]):
                         return None
