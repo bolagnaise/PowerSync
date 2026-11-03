@@ -654,6 +654,9 @@ from .const import (
     CONF_GOODWE_PROTOCOL,
     CONF_GOODWE_EMS_ENTITY_PREFIX,
     CONF_GOODWE_EMS_CONTROL_MODE,
+    CONF_GOODWE_CURTAILMENT_METHOD,
+    GOODWE_CURTAILMENT_EXPORT_LIMIT,
+    GOODWE_CURTAILMENT_EMS_LOAD_FOLLOWING,
     GOODWE_EMS_CONTROL_DIRECT,
     GOODWE_EMS_CONTROL_ENTITY,
     DEFAULT_GOODWE_PORT_UDP,
@@ -11190,11 +11193,21 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
                     port = resolve_goodwe_port(
                         protocol, user_input.get(CONF_GOODWE_PORT)
                     )
+                    curtailment_method = user_input.get(
+                        CONF_GOODWE_CURTAILMENT_METHOD,
+                        GOODWE_CURTAILMENT_EXPORT_LIMIT,
+                    )
+                    if curtailment_method not in (
+                        GOODWE_CURTAILMENT_EXPORT_LIMIT,
+                        GOODWE_CURTAILMENT_EMS_LOAD_FOLLOWING,
+                    ):
+                        curtailment_method = GOODWE_CURTAILMENT_EXPORT_LIMIT
                     goodwe_values = {
                         CONF_GOODWE_HOST: goodwe_host,
                         CONF_GOODWE_PORT: port,
                         CONF_GOODWE_PROTOCOL: protocol,
                         CONF_GOODWE_EMS_CONTROL_MODE: ems_control_mode,
+                        CONF_GOODWE_CURTAILMENT_METHOD: curtailment_method,
                     }
                     new_data.update(goodwe_values)
                     new_options.update(goodwe_values)
@@ -11276,6 +11289,25 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
                             "suggested_value": current_ems_prefix or "goodwe"
                         },
                     ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+                    vol.Required(
+                        CONF_GOODWE_CURTAILMENT_METHOD,
+                        default=self._get_option(
+                            CONF_GOODWE_CURTAILMENT_METHOD,
+                            GOODWE_CURTAILMENT_EXPORT_LIMIT,
+                        ),
+                    ): SelectSelector(SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(
+                                value=GOODWE_CURTAILMENT_EXPORT_LIMIT,
+                                label="Export limit 0 W (default)",
+                            ),
+                            SelectOptionDict(
+                                value=GOODWE_CURTAILMENT_EMS_LOAD_FOLLOWING,
+                                label="EMS load following (BuyPower 0 W)",
+                            ),
+                        ],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )),
                     **goodwe_site_solar_schema(
                         self._get_option(CONF_CUSTOM_SOLAR_POWER_ENTITY, "")
                     ),

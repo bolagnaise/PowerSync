@@ -1012,6 +1012,7 @@ from .const import (
     CONF_GOODWE_PROTOCOL,
     CONF_GOODWE_EMS_ENTITY_PREFIX,
     CONF_GOODWE_EMS_CONTROL_MODE,
+    CONF_GOODWE_CURTAILMENT_METHOD,
     GOODWE_EMS_CONTROL_ENTITY,
     DEFAULT_GOODWE_PORT_UDP,
     DEFAULT_GOODWE_PORT_TCP,
@@ -25088,6 +25089,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 CONF_CUSTOM_SOLAR_POWER_ENTITY,
                 entry.data.get(CONF_CUSTOM_SOLAR_POWER_ENTITY, ""),
             ),
+            curtailment_method=entry.options.get(
+                CONF_GOODWE_CURTAILMENT_METHOD,
+                entry.data.get(CONF_GOODWE_CURTAILMENT_METHOD),
+            ),
         )
     elif is_alphaess:
         _LOGGER.info("Running in AlphaESS mode - Tesla credentials not required")
@@ -31478,6 +31483,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             and active_force.get("type") == "discharge"
         )
 
+    def _goodwe_force_charge_active(entry_data: dict) -> bool:
+        """Return true while user or optimizer force-charge owns GoodWe."""
+        if force_charge_state.get("active"):
+            return True
+
+        opt_coord = entry_data.get("optimization_coordinator")
+        active_getter = getattr(opt_coord, "get_active_force_state", None)
+        if not callable(active_getter):
+            return False
+
+        try:
+            active_force = active_getter() or {}
+        except Exception as err:
+            _LOGGER.debug("GoodWe curtailment: active force check failed: %s", err)
+            return False
+
+        return (
+            bool(active_force.get("active"))
+            and active_force.get("type") == "charge"
+        )
+
     async def _restore_goodwe_curtailment_for_export(
         entry_data: dict,
         reason: str,
@@ -31656,6 +31682,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     else:
                         _LOGGER.debug(
                             "GoodWe curtailment skipped while force discharge/export is active"
+                        )
+                    return
+
+                if getattr(
+                    controller, "uses_ems_load_following", False
+                ) is True and _goodwe_force_charge_active(entry_data):
+                    # BuyPower 0 W holds grid import at zero, which would
+                    # cancel a grid charge. The charge command owns EMS mode.
+                    if current_state != "normal":
+                        await _restore_goodwe_curtailment_for_export(
+                            entry_data,
+                            "active force charge",
+                        )
+                    else:
+                        _LOGGER.debug(
+                            "GoodWe load-following curtailment skipped while force charge is active"
                         )
                     return
 

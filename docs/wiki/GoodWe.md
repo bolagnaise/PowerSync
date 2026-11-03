@@ -79,6 +79,43 @@ When the prefix is set, PowerSync routes force charge/discharge through those Ho
 Telemetry, backup reserve, and export-limit operations still use PowerSync's GoodWe connection.
 Hold SoC requires the EMS entity path; PowerSync does not issue an unverified direct-UDP hold command.
 
+## Solar curtailment method (direct control)
+
+Direct GoodWe control curtails uneconomic export in one of two ways. Choose it
+under **GoodWe connection** → **Solar curtailment method**. Saving reloads the
+integration.
+
+- **Export limit 0 W (default).** Enables the export limiter (47509) and sets
+  a 0 W limit (47510), then restores the saved limiter values.
+- **EMS load following (BuyPower 0 W).** Puts the inverter in GoodWe's EMS
+  BuyPower mode (47511 = 9) with a 0 W grid set point (47512). The inverter
+  balances against its own meter: PV keeps supplying the house and charging the
+  battery, surplus PV is reduced, and the battery covers any shortfall. Release
+  restores the saved EMS mode and set point. This is GoodWe's documented
+  third-party EMS mode (Third-Party EMS Protocol MODBUS V1.1.1, Table 1-4). It
+  does not change the export limiter, Off-grid mode, fallback or meter settings.
+
+Use EMS load following when the export limit is accepted and read back but the
+inverter keeps exporting once the battery is full. This has been seen on the
+ESA/EHA-G20. Requirements and safeguards:
+
+- A working GoodWe meter on the grid connection. BuyPower controls to the meter
+  reading.
+- EMS fallback (47505) must read **10**, the factory default: keep the last
+  mode. PowerSync refuses to start load following if it reads another value or
+  cannot be read. It never changes the fallback.
+- If the inverter was already left in BuyPower 0 W, or its EMS mode was never
+  set, release returns it to self-use (EMS mode 1).
+- If SEMS, an EMS entity command or a force mode has already replaced the hold,
+  PowerSync releases its claim without overwriting that setting.
+- Force charge and force discharge release the hold first. Curtailment does
+  not resume until the force mode ends.
+- An interrupted release is persisted across restarts and retried with the
+  saved EMS baseline, even if you have since switched methods.
+
+The card still reports **Active** only after fresh telemetry shows export below
+the 250 W tolerance.
+
 ## Whole-site solar for AC-coupled arrays
 
 If the property has solar on both the GoodWe hybrid and a separate AC-coupled
@@ -127,8 +164,10 @@ at a time. A newer price callback waits for the current transition and then
 evaluates the updated state. An interrupted write remains Pending and keeps its
 retry backoff.
 
-For an ESA still exporting after a verified limit, check the native meter/CT
-selection and grid-connected power-limit configuration with the installer.
+For an ESA still exporting after a verified limit, switch **Solar curtailment
+method** to **EMS load following (BuyPower 0 W)**. If export continues, check the
+native meter/CT selection and grid-connected power-limit configuration with the
+installer.
 PowerSync does not expose GoodWe Off-grid mode as an automatic curtailment
 fallback.
 

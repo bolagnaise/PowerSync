@@ -9,13 +9,13 @@
   },
   "source_state": {
     "components": {
-      "config_flow.py": "15cad08f6c7634f5762874e0a92b9e0f89b8f392853b1b435933d960f2969705",
-      "const.py": "f04fa76c99b3cd7a890d94546b84202d7906560d7ba76cab82eab1ed8580e35e",
+      "config_flow.py": "c3ba2231f67f29da4fcab28d7e3896929b73e3c8a00eb85d84a90752efeb63eb",
+      "const.py": "9cb9187d77a6eb7639dd1aba85de36baab29942ad62b2640f4a69d195bfdae5a",
       "battery_backend/profiles.py": "d308ecc78740d8dfc9cd895e4b9750a02859d46e5f0863dd5c098b8aaab2bcc2",
       "battery_backend/discovery.py": "3a8c88c00d6c57f6101d55056968524d7971d1ac3b8e16365923bca978f9489b",
       "settings_metadata.py": "deea4c452dd3cd334d5e1b9348e0ead03891542128c4061c368ad6e1c012ffd9",
-      "strings.json": "ad0170aec2266f0ca48755aad90b0fb97d1421deac22f4b5e58161532ca537d8",
-      "translations/en.json": "4e3f96767c87a9c290edbe9aa88331841c5a58509cea4e16f1266a08330cd095",
+      "strings.json": "c903b233028f88d319fc2fa79663666b3f114a5adf57901650c708959cef6e27",
+      "translations/en.json": "a0bc3594a659b6f5f5133537cf229bd671fec03ef366a086f7c4ccc80072c2a6",
       "services.yaml": "bd900e351e007f6107ee35ddd10e13c2b7185bcf90c116313781834453fc5d92",
       "switch.py": "878970c76ede8803ed9802eaf5bf95c4a483c5c58497010a6cf21a1e74f3be7b",
       "select.py": "8d5d7dbd06e0919d3ba84b52660f342dde1583bf9d8d57c2bb5bcbd2ca655d99",
@@ -806,6 +806,7 @@
       "options.globird_portal_login_options.globird_password": "Password",
       "options.globird_portal_options.connect_globird_portal": "Connect or refresh GloBird portal login",
       "options.goodwe_connection_options.custom_solar_power_entity": "Whole-site solar power sensor (all PV)",
+      "options.goodwe_connection_options.goodwe_curtailment_method": "Solar curtailment method",
       "options.goodwe_connection_options.goodwe_ems_control_mode": "EMS control method",
       "options.goodwe_connection_options.goodwe_ems_entity_prefix": "GoodWe entity mode prefix",
       "options.goodwe_connection_options.goodwe_host": "Inverter IP address",
@@ -11916,6 +11917,10 @@
       "status": "documented"
     },
     "options.goodwe_connection_options.custom_solar_power_entity": {
+      "page": "Battery-GoodWe",
+      "status": "documented"
+    },
+    "options.goodwe_connection_options.goodwe_curtailment_method": {
       "page": "Battery-GoodWe",
       "status": "documented"
     },

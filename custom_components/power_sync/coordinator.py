@@ -9676,6 +9676,7 @@ class GoodWeEnergyCoordinator(
         ems_entity_prefix: str | None = None,
         entity_telemetry_prefix: str | None = None,
         solar_override_entity: str | None = None,
+        curtailment_method: str | None = None,
     ) -> None:
         """Initialize the coordinator."""
         self.host = host
@@ -9707,7 +9708,10 @@ class GoodWeEnergyCoordinator(
             from .inverters.goodwe_battery import GoodWeBatteryController
 
             self._controller = GoodWeBatteryController(
-                host=host, port=port, comm_addr=comm_addr
+                host=host,
+                port=port,
+                comm_addr=comm_addr,
+                curtailment_method=curtailment_method or "export_limit",
             )
             self._telemetry_controller = self._controller
         self._connected = False

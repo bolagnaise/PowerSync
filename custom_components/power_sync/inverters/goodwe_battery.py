@@ -18,14 +18,57 @@ _GOODWE_UDP_PORT = 8899
 _UDP_FAILURE_CACHE_SECONDS = 300  # re-try UDP no more than once every 5 min
 _GOODWE_EXPORT_LIMIT_MAX_W = 65535
 
+# Curtailment methods for the direct hybrid controller.
+CURTAILMENT_METHOD_EXPORT_LIMIT = "export_limit"
+CURTAILMENT_METHOD_EMS_LOAD_FOLLOWING = "ems_load_following"
+CURTAILMENT_METHODS = (
+    CURTAILMENT_METHOD_EXPORT_LIMIT,
+    CURTAILMENT_METHOD_EMS_LOAD_FOLLOWING,
+)
+
+# GoodWe Third-Party EMS Protocol MODBUS V1.1.1, section 9 and Table 1-4.
+# 47511 EMS Power Mode and 47512 EMS Power Set (U16, W) are listed for ESA,
+# ET and EH families. BuyPower (0x0009) holds grid purchase at the set point
+# using the site meter: "When the PV power is too large, the MPPT power will
+# be limited. When the load is too large, the battery will discharge." With a
+# 0 W set point that is native load following: PV keeps supplying the house
+# and battery while export is curtailed.
+_EMS_MODE_REGISTER = 47511
+_EMS_POWER_REGISTER = 47512
+_EMS_FALLBACK_REGISTER = 47505
+_EMS_MODE_AUTO = 0x0001
+_EMS_MODE_BUY_POWER = 0x0009
+_EMS_MODE_STOPPED = 0x00FF
+_EMS_DOCUMENTED_MODES = frozenset(range(0x0001, 0x000D)) | {_EMS_MODE_STOPPED}
+# 47505: 10 (default) keeps the last EMS mode when no instruction arrives for
+# 30 s. 2 shuts the inverter down and 3 returns to self-use, so neither can
+# hold a PowerSync curtailment between its periodic checks.
+_EMS_FALLBACK_KEEP_LAST_MODE = 10
+
 
 class GoodWeBatteryController:
     """Battery controller for GoodWe hybrid inverters."""
 
-    def __init__(self, host: str, port: int = 8899, comm_addr: int = 0):
+    def __init__(
+        self,
+        host: str,
+        port: int = 8899,
+        comm_addr: int = 0,
+        curtailment_method: str = CURTAILMENT_METHOD_EXPORT_LIMIT,
+    ):
         self.host = host
         self.port = port
         self.comm_addr = comm_addr
+        self.curtailment_method = (
+            curtailment_method
+            if curtailment_method in CURTAILMENT_METHODS
+            else CURTAILMENT_METHOD_EXPORT_LIMIT
+        )
+        # Which method owns the saved pre-curtailment baseline. Restore always
+        # follows the owner, even if the configured method changed meanwhile.
+        self._saved_method: str | None = None
+        self._saved_ems_mode: int | None = None
+        self._saved_ems_power_limit: int | None = None
         self._inverter = None  # goodwe.Inverter instance (data / TCP)
         self._lock: asyncio.Lock | None = None
         self._udp_unavailable_until: float = 0.0  # epoch time; 0 = never tried
@@ -210,6 +253,11 @@ class GoodWeBatteryController:
         """Force charge from grid using ECO_CHARGE mode."""
         import goodwe
 
+        # A load-following BuyPower hold (EMS mode 9) would override the
+        # work-mode command; hand the EMS mode back first.
+        if not await self.release_ems_hold():
+            return False
+
         ok = await self._apply_operation_mode(
             goodwe.OperationMode.ECO_CHARGE,
             eco_mode_power=power_pct,
@@ -222,6 +270,11 @@ class GoodWeBatteryController:
     async def force_discharge(self, power_pct: int = 100, soc_floor: int = 10) -> bool:
         """Force discharge to grid using ECO_DISCHARGE mode."""
         import goodwe
+
+        # A load-following BuyPower hold (EMS mode 9) would override the
+        # work-mode command; hand the EMS mode back first.
+        if not await self.release_ems_hold():
+            return False
 
         ok = await self._apply_operation_mode(
             goodwe.OperationMode.ECO_DISCHARGE,
@@ -296,12 +349,19 @@ class GoodWeBatteryController:
         self._saved_grid_export_limit = await self._read_grid_export_setting(
             "grid_export_limit"
         )
+        self._saved_method = CURTAILMENT_METHOD_EXPORT_LIMIT
         self._grid_export_state_saved = True
 
     def get_grid_export_restore_state(self) -> dict[str, int | None] | None:
         """Return the export settings that must survive a controller restart."""
         if not self._grid_export_state_saved:
             return None
+        if self._saved_method == CURTAILMENT_METHOD_EMS_LOAD_FOLLOWING:
+            return {
+                "method": CURTAILMENT_METHOD_EMS_LOAD_FOLLOWING,
+                "ems_mode": self._saved_ems_mode,
+                "ems_power_limit": self._saved_ems_power_limit,
+            }
         return {
             "grid_export": self._saved_grid_export_enabled,
             "grid_export_limit": self._saved_grid_export_limit,
@@ -311,6 +371,17 @@ class GoodWeBatteryController:
         """Restore a previously persisted pre-curtail export-setting snapshot."""
         if not isinstance(state, dict):
             return False
+        if state.get("method") == CURTAILMENT_METHOD_EMS_LOAD_FOLLOWING:
+            try:
+                mode = state.get("ems_mode")
+                power = state.get("ems_power_limit")
+                self._saved_ems_mode = int(mode) if mode is not None else None
+                self._saved_ems_power_limit = int(power) if power is not None else None
+            except (TypeError, ValueError, OverflowError):
+                return False
+            self._saved_method = CURTAILMENT_METHOD_EMS_LOAD_FOLLOWING
+            self._grid_export_state_saved = True
+            return True
         try:
             enabled = state.get("grid_export")
             limit = state.get("grid_export_limit")
@@ -318,6 +389,7 @@ class GoodWeBatteryController:
             self._saved_grid_export_limit = int(limit) if limit is not None else None
         except (TypeError, ValueError, OverflowError):
             return False
+        self._saved_method = CURTAILMENT_METHOD_EXPORT_LIMIT
         self._grid_export_state_saved = True
         return True
 
@@ -344,11 +416,172 @@ class GoodWeBatteryController:
         )
         return False
 
+    @property
+    def uses_ems_load_following(self) -> bool:
+        """True when curtailment owns (or will own) the GoodWe EMS mode."""
+        if self._grid_export_state_saved and self._saved_method is not None:
+            return self._saved_method == CURTAILMENT_METHOD_EMS_LOAD_FOLLOWING
+        return self.curtailment_method == CURTAILMENT_METHOD_EMS_LOAD_FOLLOWING
+
+    async def _read_register(self, register: int) -> int | None:
+        """Read one raw holding register through the goodwe library."""
+        try:
+            return int(await self._inverter.read_setting(f"modbus_{register}"))
+        except Exception as exc:
+            _LOGGER.debug("GoodWe register %d read unavailable: %s", register, exc)
+            return None
+
+    async def _read_ems_setting(self, setting_id: str) -> int | None:
+        try:
+            value = await self._inverter.read_setting(setting_id)
+        except Exception as exc:
+            _LOGGER.debug("GoodWe %s read unavailable: %s", setting_id, exc)
+            return None
+        try:
+            # 47511/47512 are unsigned; some library versions decode them as
+            # signed 16-bit integers.
+            return int(value) & 0xFFFF
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+    async def _write_ems(self, mode: int, power_w: int) -> None:
+        """Write EMS mode and power set point.
+
+        The protocol documents function 0x10 for writes. Write both adjacent
+        registers in one 0x10 frame when the library exposes it; otherwise
+        write the set point first so the mode never runs on a stale target.
+        """
+        power_w = max(0, min(0xFFFF, int(power_w)))
+        multi = getattr(self._inverter, "_write_multi_command", None)
+        send = getattr(self._inverter, "_read_from_socket", None)
+        if callable(multi) and callable(send):
+            payload = int(mode).to_bytes(2, "big") + power_w.to_bytes(2, "big")
+            await send(multi(_EMS_MODE_REGISTER, payload))
+            return
+        await self._inverter.write_setting("ems_power_limit", power_w)
+        await self._inverter.write_setting("ems_mode", int(mode))
+
+    async def _verify_ems(self, expected_mode: int, expected_power: int) -> bool:
+        actual_mode = await self._read_ems_setting("ems_mode")
+        actual_power = await self._read_ems_setting("ems_power_limit")
+        if actual_mode == expected_mode and actual_power == expected_power:
+            return True
+        _LOGGER.warning(
+            "GoodWe EMS write is not confirmed: expected mode=%d, set=%dW; "
+            "read mode=%s, set=%sW",
+            expected_mode,
+            expected_power,
+            actual_mode,
+            actual_power,
+        )
+        return False
+
+    async def _curtail_ems_load_following(self) -> bool:
+        """Hold grid exchange at 0 W with native EMS BuyPower mode."""
+        if not (
+            self._grid_export_state_saved
+            and self._saved_method == CURTAILMENT_METHOD_EMS_LOAD_FOLLOWING
+        ):
+            fallback = await self._read_register(_EMS_FALLBACK_REGISTER)
+            if fallback != _EMS_FALLBACK_KEEP_LAST_MODE:
+                _LOGGER.error(
+                    "GoodWe load-following curtailment refused: EMS fallback "
+                    "(47505) reads %s, expected %d (keep last mode). Another "
+                    "fallback would stop the inverter or drop the curtailment "
+                    "between checks; PowerSync will not change it",
+                    fallback,
+                    _EMS_FALLBACK_KEEP_LAST_MODE,
+                )
+                return False
+            mode = await self._read_ems_setting("ems_mode")
+            power = await self._read_ems_setting("ems_power_limit")
+            if mode is None or power is None:
+                _LOGGER.error(
+                    "GoodWe load-following curtailment refused: EMS mode/set "
+                    "point (47511/47512) could not be read"
+                )
+                return False
+            if mode == _EMS_MODE_STOPPED or mode not in _EMS_DOCUMENTED_MODES:
+                # 0 means the EMS mode was never set; stopped/unknown values
+                # are not a running baseline. Self-use is the normal state.
+                mode = _EMS_MODE_AUTO
+            elif mode == _EMS_MODE_BUY_POWER and power == 0:
+                # Indistinguishable from a hold left by an interrupted run.
+                # Never make it the "original" setting, or restore would
+                # keep curtailing forever.
+                _LOGGER.warning(
+                    "GoodWe EMS was already in BuyPower 0 W before curtailment; "
+                    "it will be restored to self-use"
+                )
+                mode = _EMS_MODE_AUTO
+            self._saved_ems_mode = mode
+            self._saved_ems_power_limit = power
+            self._saved_method = CURTAILMENT_METHOD_EMS_LOAD_FOLLOWING
+            self._grid_export_state_saved = True
+
+        await self._write_ems(_EMS_MODE_BUY_POWER, 0)
+        if not await self._verify_ems(_EMS_MODE_BUY_POWER, 0):
+            return False
+        _LOGGER.info(
+            "GoodWe curtailed: EMS BuyPower load following at 0 W grid exchange"
+        )
+        return True
+
+    async def _restore_ems_load_following(self) -> bool:
+        """Return EMS mode and set point to the saved baseline."""
+        restore_mode = self._saved_ems_mode or _EMS_MODE_AUTO
+        restore_power = self._saved_ems_power_limit
+        current_mode = await self._read_ems_setting("ems_mode")
+        current_power = await self._read_ems_setting("ems_power_limit")
+        if current_mode is None:
+            _LOGGER.warning("GoodWe EMS restore deferred: EMS mode unreadable")
+            return False
+        if not (current_mode == _EMS_MODE_BUY_POWER and current_power == 0):
+            # Something else (SEMS, an EMS entity command or a force mode)
+            # has already replaced PowerSync's hold. Do not overwrite it.
+            _LOGGER.info(
+                "GoodWe EMS restore: hold already replaced (mode=%s, set=%sW); "
+                "leaving the current EMS setting in place",
+                current_mode,
+                current_power,
+            )
+        else:
+            if restore_power is None:
+                restore_power = 0
+            await self._write_ems(restore_mode, restore_power)
+            if not await self._verify_ems(restore_mode, restore_power):
+                return False
+            _LOGGER.info(
+                "GoodWe restore: EMS mode restored to %d (set=%dW)",
+                restore_mode,
+                restore_power,
+            )
+        self._saved_ems_mode = None
+        self._saved_ems_power_limit = None
+        self._saved_method = None
+        self._grid_export_state_saved = False
+        return True
+
+    async def release_ems_hold(self) -> bool:
+        """Release a load-following EMS hold before another mode command."""
+        if not (
+            self._grid_export_state_saved
+            and self._saved_method == CURTAILMENT_METHOD_EMS_LOAD_FOLLOWING
+        ):
+            return True
+        try:
+            return await self._restore_ems_load_following()
+        except Exception as exc:
+            _LOGGER.error("GoodWe EMS hold release failed: %s", exc)
+            return False
+
     async def curtail(self) -> bool:
-        """Zero-export curtailment: block all grid export via export limit register."""
+        """Curtail grid export with the configured native GoodWe method."""
         try:
             if not await self.connect():
                 return False
+            if self.uses_ems_load_following:
+                return await self._curtail_ems_load_following()
             await self._save_grid_export_state()
             if not await self._write_grid_export_enabled(1):
                 return False
@@ -366,6 +599,9 @@ class GoodWeBatteryController:
         try:
             if not await self.connect():
                 return False
+            if self.uses_ems_load_following:
+                # BuyPower never touched the export limiter; leave it as set.
+                return await self._restore_ems_load_following()
             restore_limit = (
                 self._saved_grid_export_limit
                 if self._saved_grid_export_limit is not None
@@ -396,6 +632,7 @@ class GoodWeBatteryController:
                 return False
             self._saved_grid_export_enabled = None
             self._saved_grid_export_limit = None
+            self._saved_method = None
             self._grid_export_state_saved = False
             _LOGGER.info(
                 "GoodWe restore: export limit restored to %dW (enabled=%d)",

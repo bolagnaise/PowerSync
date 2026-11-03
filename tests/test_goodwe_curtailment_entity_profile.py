@@ -120,6 +120,7 @@ def _build_goodwe_curtailment_handler(
     last_reapply: float | None = None,
     last_effect_retry: float | None = None,
     monotonic_values: tuple[float, ...] | None = None,
+    force_charge_active: bool = False,
 ):
     """Build the real handler against a fake coordinator."""
     entry_data: dict[str, Any] = {"goodwe_curtailment_state": initial_state}
@@ -130,6 +131,14 @@ def _build_goodwe_curtailment_handler(
     if last_effect_retry is not None:
         entry_data["_last_goodwe_curtailment_effect_retry"] = last_effect_retry
     logger = _Logger()
+
+    async def _release_for_force(data, reason, **_kwargs):
+        data.setdefault("_force_releases", []).append(reason)
+        if await controller.restore(allow_zero_export_limit=False):
+            data["goodwe_curtailment_state"] = "normal"
+            return True
+        return False
+
     entry_data["goodwe_coordinator"] = SimpleNamespace(
         _controller=controller,
         data=coordinator_data,
@@ -153,6 +162,8 @@ def _build_goodwe_curtailment_handler(
             )
         ),
         "_goodwe_force_export_active": lambda _entry_data: False,
+        "_goodwe_force_charge_active": lambda _entry_data: force_charge_active,
+        "_restore_goodwe_curtailment_for_export": _release_for_force,
         "async_dispatcher_send": lambda *args, **_kwargs: dispatches.append(args),
         "get_current_prices_for_curtailment": lambda *_a, **_k: (None, None, None),
         "amber_coordinator": None,
@@ -540,3 +551,47 @@ def test_entity_telemetry_profiles_build_no_control_surface():
         if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
     assert "curtail" not in methods
+
+
+class _EmsLoadFollowingController(_Controller):
+    uses_ems_load_following = True
+
+    async def restore(self, **_kwargs):
+        self.calls.append("restore")
+        return True
+
+
+def test_load_following_releases_hold_while_force_charge_is_active():
+    """#29: BuyPower 0 W would cancel a grid charge; the charge owns EMS."""
+    controller = _EmsLoadFollowingController()
+    entry_data, _logger, _dispatches = _run_goodwe_curtailment(
+        controller,
+        feedin_price=6.0,
+        initial_state="curtailed",
+        force_charge_active=True,
+    )
+
+    assert controller.calls == ["restore"]
+    assert entry_data["_force_releases"] == ["active force charge"]
+    assert entry_data["goodwe_curtailment_state"] == "normal"
+
+
+def test_load_following_does_not_start_hold_during_force_charge():
+    controller = _EmsLoadFollowingController()
+    entry_data, _logger, _dispatches = _run_goodwe_curtailment(
+        controller, feedin_price=6.0, force_charge_active=True
+    )
+
+    assert controller.calls == []
+    assert entry_data["goodwe_curtailment_state"] == "normal"
+
+
+def test_export_limit_method_still_curtails_during_force_charge():
+    """The 0 W export limiter does not block grid charging; keep it."""
+    controller = _Controller()
+    entry_data, _logger, _dispatches = _run_goodwe_curtailment(
+        controller, feedin_price=6.0, force_charge_active=True
+    )
+
+    assert controller.calls == ["curtail"]
+    assert entry_data["goodwe_curtailment_state"] == "curtailed"

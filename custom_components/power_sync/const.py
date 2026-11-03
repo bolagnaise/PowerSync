@@ -396,6 +396,11 @@ CONF_GOODWE_PORT = "goodwe_port"
 CONF_GOODWE_PROTOCOL = "goodwe_protocol"  # "udp" or "tcp"
 CONF_GOODWE_EMS_ENTITY_PREFIX = "goodwe_ems_entity_prefix"  # e.g. "goodwe" → uses select.goodwe_ems_mode etc.
 CONF_GOODWE_EMS_CONTROL_MODE = "goodwe_ems_control_mode"
+# Direct hybrid curtailment method: "export_limit" (47509/47510 zero export,
+# default) or "ems_load_following" (EMS BuyPower mode 9 at 0 W, 47511/47512).
+CONF_GOODWE_CURTAILMENT_METHOD = "goodwe_curtailment_method"
+GOODWE_CURTAILMENT_EXPORT_LIMIT = "export_limit"
+GOODWE_CURTAILMENT_EMS_LOAD_FOLLOWING = "ems_load_following"
 GOODWE_EMS_CONTROL_DIRECT = "direct"
 GOODWE_EMS_CONTROL_ENTITY = "entity"
 DEFAULT_GOODWE_PORT_UDP = 8899

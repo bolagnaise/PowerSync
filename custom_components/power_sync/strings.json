@@ -1738,9 +1738,11 @@
           "goodwe_port": "Port",
           "goodwe_ems_control_mode": "EMS control method",
           "goodwe_ems_entity_prefix": "GoodWe entity mode prefix",
+          "goodwe_curtailment_method": "Solar curtailment method",
           "custom_solar_power_entity": "Whole-site solar power sensor (all PV)"
         },
         "data_description": {
+          "goodwe_curtailment_method": "How direct GoodWe control stops uneconomic export. Export limit writes a 0 W grid export limit. EMS load following holds grid exchange at 0 W with GoodWe's EMS BuyPower mode, so solar keeps supplying the house and battery while surplus PV is reduced. Use it when the export limit is accepted but the inverter keeps exporting at full battery (seen on ESA/EHA-G20). Needs a working GoodWe meter and EMS fallback 47505 = 10.",
           "goodwe_host": "Local IP address of your GoodWe inverter.",
           "goodwe_protocol": "UDP uses direct GoodWe control on port 8899. TCP uses Modbus on port 502 for LAN/Kit-20 setups.",
           "goodwe_port": "Default: 8899 for UDP, 502 for TCP.",
