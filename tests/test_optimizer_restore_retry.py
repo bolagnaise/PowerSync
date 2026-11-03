@@ -404,6 +404,182 @@ def _self_consumption_action():
     )
 
 
+def _ev_preserve_refresh_coordinator(opt_module, *, failure=False):
+    """Exercise the real command routing with a fake FoxESS adapter."""
+    calls = []
+
+    async def hold():
+        calls.append("hold")
+        return not failure
+
+    async def restore():
+        calls.append("restore")
+        return True
+
+    async def self_consumption():
+        return True
+
+    coordinator = _execute_coordinator(
+        opt_module, SimpleNamespace(set_self_consumption_mode=self_consumption)
+    )
+    coordinator.battery_system = "foxess"
+    coordinator.energy_coordinator = SimpleNamespace(
+        set_no_discharge_mode=hold, restore_no_discharge_mode=restore
+    )
+    coordinator._enabled = True
+    coordinator._optimization_lock = asyncio.Lock()
+    coordinator._execute_lock = asyncio.Lock()
+    coordinator._last_executed_action = "self_consumption"
+    coordinator._last_executed_planned_action = "self_consumption"
+    intent = {"active": False}
+    coordinator._scheduled_ev_preserve_active = lambda: intent["active"]
+    coordinator._get_current_action = _self_consumption_action
+    coordinator._seconds_until_initial_optimization_allowed = lambda: 0
+    coordinator.hass.async_create_background_task = (
+        lambda coro, name: asyncio.create_task(coro, name=name)
+    )
+    coordinator.get_api_data = lambda: {}
+    coordinator.async_set_updated_data = lambda data: None
+    return coordinator, intent, calls
+
+
+def test_ev_preserve_refresh_handles_repeated_price_stop_restart(opt_module):
+    """Each new accepted session holds the battery without a five-minute tick."""
+    async def run():
+        coordinator, intent, calls = _ev_preserve_refresh_coordinator(opt_module)
+        for active in (True, False, True, False, True):
+            intent["active"] = active
+            coordinator.request_ev_preservation_refresh()
+            await coordinator._ev_preserve_refresh_task
+            assert coordinator._scheduled_ev_no_discharge_active is active
+        assert calls == ["hold", "restore", "hold", "restore", "hold"]
+        assert coordinator._last_executed_action == "no_discharge"
+
+    asyncio.run(run())
+
+
+def test_ev_preserve_refresh_coalesces_and_rechecks_after_solve(opt_module):
+    """Waiting work uses the latest intent and shares the hardware lock."""
+    async def run():
+        coordinator, intent, calls = _ev_preserve_refresh_coordinator(opt_module)
+        await coordinator._optimization_lock.acquire()
+        intent["active"] = True
+        coordinator.request_ev_preservation_refresh()
+        task = coordinator._ev_preserve_refresh_task
+        await asyncio.sleep(0)
+        assert calls == []
+        intent["active"] = False
+        coordinator.request_ev_preservation_refresh()
+        assert coordinator._ev_preserve_refresh_task is task
+        coordinator._optimization_lock.release()
+        await task
+        assert calls == []
+
+        await coordinator._execute_lock.acquire()
+        intent["active"] = True
+        coordinator.request_ev_preservation_refresh()
+        task = coordinator._ev_preserve_refresh_task
+        await asyncio.sleep(0)
+        assert calls == []
+        coordinator.request_ev_preservation_refresh()
+        coordinator._execute_lock.release()
+        await task
+        assert calls == ["hold"]
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("blocker", ["disabled", "monitoring", "manual_force"])
+def test_ev_preserve_refresh_respects_control_blockers(opt_module, blocker):
+    async def run():
+        coordinator, intent, calls = _ev_preserve_refresh_coordinator(opt_module)
+        intent["active"] = True
+        if blocker == "disabled":
+            coordinator._enabled = False
+        elif blocker == "monitoring":
+            coordinator._monitoring_mode_active = lambda: True
+        else:
+            coordinator._get_active_force_state = lambda: {
+                "active": True, "source": "manual", "mode": "charge",
+            }
+        coordinator.request_ev_preservation_refresh()
+        task = getattr(coordinator, "_ev_preserve_refresh_task", None)
+        if task:
+            await task
+        assert calls == []
+        assert coordinator._scheduled_ev_no_discharge_active is False
+
+    asyncio.run(run())
+
+
+def test_ev_preserve_refresh_failure_remains_retryable(opt_module):
+    async def run():
+        coordinator, intent, calls = _ev_preserve_refresh_coordinator(
+            opt_module, failure=True
+        )
+        intent["active"] = True
+        coordinator.request_ev_preservation_refresh()
+        await coordinator._ev_preserve_refresh_task
+        assert calls == ["hold"]
+        assert coordinator._scheduled_ev_no_discharge_active is False
+        assert coordinator._last_executed_action == "self_consumption"
+        await coordinator._execute_optimizer_action(_self_consumption_action())
+        assert calls == ["hold", "hold"]
+
+    asyncio.run(run())
+
+
+def test_ev_preserve_refresh_waits_for_startup_restore(opt_module):
+    async def run():
+        coordinator, intent, calls = _ev_preserve_refresh_coordinator(opt_module)
+        restoring = asyncio.Event()
+
+        async def restore_startup():
+            await restoring.wait()
+
+        coordinator._deferred_restore_task = asyncio.create_task(restore_startup())
+        intent["active"] = True
+        coordinator.request_ev_preservation_refresh()
+        task = coordinator._ev_preserve_refresh_task
+        await asyncio.sleep(0)
+        assert calls == []
+        restoring.set()
+        await task
+        assert calls == ["hold"]
+
+    asyncio.run(run())
+
+
+def test_ev_preserve_refresh_skips_hold_already_applied_by_solve(opt_module):
+    async def run():
+        coordinator, intent, calls = _ev_preserve_refresh_coordinator(opt_module)
+        await coordinator._optimization_lock.acquire()
+        intent["active"] = True
+        coordinator.request_ev_preservation_refresh()
+        task = coordinator._ev_preserve_refresh_task
+        await asyncio.sleep(0)
+        await coordinator._execute_optimizer_action(_self_consumption_action())
+        coordinator._optimization_lock.release()
+        await task
+        assert calls == ["hold"]
+
+    asyncio.run(run())
+
+
+def test_ev_preserve_refresh_does_not_reissue_battery_charge(opt_module):
+    async def run():
+        coordinator, intent, calls = _ev_preserve_refresh_coordinator(opt_module)
+        action = _self_consumption_action()
+        action.action = "charge"
+        coordinator._get_current_action = lambda: action
+        intent["active"] = True
+        coordinator.request_ev_preservation_refresh()
+        await coordinator._ev_preserve_refresh_task
+        assert calls == []
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("failure", ["false", "exception"])
 @pytest.mark.parametrize("previous_action", ["charge", "self_consumption"])
 def test_failed_foxess_ev_preserve_keeps_action_and_retries(

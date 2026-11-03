@@ -3978,6 +3978,66 @@ def test_price_level_preserve_home_battery_sets_optimizer_intent(fake_actions):
     assert preserve_state["source"] == "price_level_charging"
 
 
+@pytest.mark.parametrize("mode", ["price_level", "scheduled", "smart_schedule"])
+def test_preserve_transitions_wake_optimizer_once_per_effective_change(mode):
+    """Each EV mode wakes execution; repeated evaluations do not issue more work."""
+    hass = _FakeHass()
+    entry = _FakeConfigEntry()
+    calls = []
+    data = hass.data["power_sync"]["entry-1"]
+    data["optimization_coordinator"] = SimpleNamespace(
+        request_ev_preservation_refresh=lambda: calls.append(
+            data["scheduled_ev_preserve_state"]["active"]
+        )
+    )
+    if mode == "smart_schedule":
+        executor = ev_planner.AutoScheduleExecutor(hass, entry, None)
+        start = lambda: executor._set_active_charging_preserve_intent(VIN, "charging")
+        stop = lambda: executor._clear_active_charging_preserve_intent(VIN, "stopped")
+    else:
+        cls = (ev_planner.PriceLevelChargingExecutor if mode == "price_level"
+               else ev_planner.ScheduledChargingExecutor)
+        executor = cls(hass, entry)
+        start = lambda: executor._set_preserve_home_battery_intent("charging")
+        stop = lambda: executor._clear_preserve_home_battery_intent("stopped")
+    start()
+    start()
+    stop()
+    stop()
+    start()
+    assert calls == [True, False, True]
+
+
+def test_preserve_mode_handoff_does_not_release_battery():
+    """Ending Price-Level must retain a simultaneous Scheduled preserve request."""
+    hass = _FakeHass()
+    entry = _FakeConfigEntry()
+    calls = []
+    data = hass.data["power_sync"]["entry-1"]
+    data["optimization_coordinator"] = SimpleNamespace(
+        request_ev_preservation_refresh=lambda: calls.append(
+            data["scheduled_ev_preserve_state"]["active"]
+        )
+    )
+    price = ev_planner.PriceLevelChargingExecutor(hass, entry)
+    scheduled = ev_planner.ScheduledChargingExecutor(hass, entry)
+    previous_price = ev_planner.get_price_level_executor()
+    previous_scheduled = ev_planner.get_scheduled_charging_executor()
+    ev_planner.set_price_level_executor(price)
+    ev_planner.set_scheduled_charging_executor(scheduled)
+    try:
+        scheduled._set_preserve_home_battery_intent("scheduled")
+        price._set_preserve_home_battery_intent("price accepted")
+        price._clear_preserve_home_battery_intent("price rejected")
+        assert calls == [True]
+        assert data["scheduled_ev_preserve_state"]["source"] == "scheduled_charging"
+        scheduled._clear_preserve_home_battery_intent("window ended")
+        assert calls == [True, False]
+    finally:
+        ev_planner.set_price_level_executor(previous_price)
+        ev_planner.set_scheduled_charging_executor(previous_scheduled)
+
+
 def test_scheduled_does_not_yield_an_ambiguous_default_loadpoint(monkeypatch, fake_actions):
     fake_actions._dynamic_ev_state = {}
     fake_actions._action_stop_ev_charging_dynamic = AsyncMock(return_value=True)

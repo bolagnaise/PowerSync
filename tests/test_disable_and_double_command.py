@@ -208,6 +208,75 @@ def test_disable_tolerates_missing_price_reoptimize_task_attr(opt_module):
     asyncio.run(_run())
 
 
+def test_disable_drains_ev_preservation_before_restoration(opt_module):
+    """Queued EV work must be cancelled before shutdown can restore hardware."""
+    async def run():
+        coordinator = _disable_coordinator(opt_module)
+        events = []
+        started = asyncio.Event()
+
+        async def pending_refresh():
+            try:
+                started.set()
+                await asyncio.Event().wait()
+            finally:
+                events.append("refresh drained")
+
+        async def save(_):
+            events.append("shutdown save")
+
+        task = asyncio.create_task(pending_refresh())
+        coordinator._ev_preserve_refresh_task = task
+        coordinator._cost_store.async_save = save
+        await started.wait()
+        await coordinator.disable()
+        assert task.cancelled()
+        assert coordinator._ev_preserve_refresh_task is None
+        assert events == ["refresh drained", "shutdown save"]
+        coordinator.request_ev_preservation_refresh()
+        assert coordinator._ev_preserve_refresh_task is None
+
+    asyncio.run(run())
+
+
+def test_disable_waits_for_inflight_ev_hold_acknowledgement(opt_module):
+    """An accepted hold must become known before shutdown decides to restore it."""
+    async def run():
+        coordinator = _disable_coordinator(opt_module)
+        events = []
+        started = asyncio.Event()
+        acknowledge = asyncio.Event()
+
+        async def hold_command():
+            coordinator._ev_preserve_refresh_executing = True
+            try:
+                started.set()
+                await acknowledge.wait()
+                coordinator._scheduled_ev_no_discharge_active = True
+                events.append("hold acknowledged")
+            finally:
+                coordinator._ev_preserve_refresh_executing = False
+
+        async def restore():
+            events.append("restored")
+            return True
+
+        coordinator.energy_coordinator = SimpleNamespace(restore_no_discharge_mode=restore)
+        task = asyncio.create_task(hold_command())
+        coordinator._ev_preserve_refresh_task = task
+        await started.wait()
+        shutdown = asyncio.create_task(coordinator.disable())
+        await asyncio.sleep(0)
+        assert not shutdown.done()
+        assert not task.cancelled()
+        acknowledge.set()
+        await shutdown
+        assert events == ["hold acknowledged", "restored"]
+        assert coordinator._scheduled_ev_no_discharge_active is False
+
+    asyncio.run(run())
+
+
 def _execute_coordinator(opt_module, battery, enabled: bool = True):
     coordinator = object.__new__(opt_module.OptimizationCoordinator)
     coordinator._executor = SimpleNamespace(battery_controller=battery)

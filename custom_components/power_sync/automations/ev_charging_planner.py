@@ -115,6 +115,25 @@ class SensitiveDataFilter(logging.Filter):
 _LOGGER = logging.getLogger(__name__)
 _LOGGER.addFilter(SensitiveDataFilter())
 
+
+def _publish_ev_preserve_state(
+    entry_data: dict, *, active: bool, source: str, reason: str
+) -> None:
+    """Wake guarded battery execution only when effective EV preservation changes."""
+    state = entry_data.setdefault("scheduled_ev_preserve_state", {})
+    was_active = bool(state.get("active"))
+    state.update({
+        "active": active,
+        "mode": "no_discharge_charge_allowed",
+        "source": source,
+        "reason": reason,
+    })
+    if was_active != active:
+        optimizer = entry_data.get("optimization_coordinator")
+        request_refresh = getattr(optimizer, "request_ev_preservation_refresh", None)
+        if callable(request_refresh):
+            request_refresh()
+
 # Minimum power (kW) required to start/continue EV charging.
 # Default 1.4 kW ≈ 6A @ 230V single-phase. Override per-vehicle
 # via charger settings if your charger has a different minimum.
@@ -7138,12 +7157,10 @@ class AutoScheduleExecutor:
             return
 
         was_active = bool(state.get("active"))
-        state.update({
-            "active": False,
-            "mode": "no_discharge_charge_allowed",
-            "source": "smart_schedule",
-            "reason": reason,
-        })
+        _publish_ev_preserve_state(
+            entry_data, active=False,
+            source="smart_schedule", reason=reason,
+        )
         if was_active:
             _LOGGER.info(
                 "Smart Schedule: cleared inactive home battery preserve request%s",
@@ -7161,12 +7178,10 @@ class AutoScheduleExecutor:
         existing = entry_data.get("scheduled_ev_preserve_state", {})
         if existing.get("active") and existing.get("source") not in (None, "smart_schedule"):
             return
-        entry_data["scheduled_ev_preserve_state"] = {
-            "active": True,
-            "mode": "no_discharge_charge_allowed",
-            "source": "smart_schedule",
-            "reason": reason,
-        }
+        _publish_ev_preserve_state(
+            entry_data, active=True,
+            source="smart_schedule", reason=reason,
+        )
 
     def _smart_schedule_active_preserve_reason(self, fallback: str = "") -> str:
         """Return a representative reason for active Smart Schedule preserve."""
@@ -10947,12 +10962,10 @@ class PriceLevelChargingExecutor:
             self.config_entry.entry_id,
             {},
         )
-        entry_data["scheduled_ev_preserve_state"] = {
-            "active": True,
-            "mode": "no_discharge_charge_allowed",
-            "source": "price_level_charging",
-            "reason": reason,
-        }
+        _publish_ev_preserve_state(
+            entry_data, active=True,
+            source="price_level_charging", reason=reason,
+        )
         self._preserve_home_battery_active = True
 
     def _clear_preserve_home_battery_intent(self, reason: str = "") -> None:
@@ -10967,20 +10980,16 @@ class PriceLevelChargingExecutor:
             return
         scheduled = get_scheduled_charging_executor()
         if scheduled and getattr(scheduled, "_preserve_home_battery_active", False):
-            state.update({
-                "active": True,
-                "mode": "no_discharge_charge_allowed",
-                "source": "scheduled_charging",
-                "reason": reason,
-            })
+            _publish_ev_preserve_state(
+                entry_data, active=True,
+                source="scheduled_charging", reason=reason,
+            )
             self._preserve_home_battery_active = False
             return
-        state.update({
-            "active": False,
-            "mode": "no_discharge_charge_allowed",
-            "source": "price_level_charging",
-            "reason": reason,
-        })
+        _publish_ev_preserve_state(
+            entry_data, active=False,
+            source="price_level_charging", reason=reason,
+        )
         self._preserve_home_battery_active = False
 
     async def apply_preserve_home_battery(
@@ -12004,12 +12013,10 @@ class ScheduledChargingExecutor:
             self.config_entry.entry_id,
             {},
         )
-        entry_data["scheduled_ev_preserve_state"] = {
-            "active": True,
-            "mode": "no_discharge_charge_allowed",
-            "source": "scheduled_charging",
-            "reason": reason,
-        }
+        _publish_ev_preserve_state(
+            entry_data, active=True,
+            source="scheduled_charging", reason=reason,
+        )
         if not self._preserve_home_battery_active:
             _LOGGER.info(
                 "Scheduled charging: requested home battery preserve mode (%s)",
@@ -12029,20 +12036,16 @@ class ScheduledChargingExecutor:
             return
         price_level = get_price_level_executor()
         if price_level and getattr(price_level, "_preserve_home_battery_active", False):
-            state.update({
-                "active": True,
-                "mode": "no_discharge_charge_allowed",
-                "source": "price_level_charging",
-                "reason": reason,
-            })
+            _publish_ev_preserve_state(
+                entry_data, active=True,
+                source="price_level_charging", reason=reason,
+            )
             self._preserve_home_battery_active = False
             return
-        state.update({
-            "active": False,
-            "mode": "no_discharge_charge_allowed",
-            "source": "scheduled_charging",
-            "reason": reason,
-        })
+        _publish_ev_preserve_state(
+            entry_data, active=False,
+            source="scheduled_charging", reason=reason,
+        )
         if not self._preserve_home_battery_active:
             return
         self._preserve_home_battery_active = False
