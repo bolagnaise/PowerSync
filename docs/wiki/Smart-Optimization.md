@@ -182,6 +182,15 @@ the existing force-control state and device telemetry remain the evidence of
 what the battery actually accepted. Monitoring-only connection methods remain
 write-free.
 
+### Powerwall site export limits
+
+For paired Powerwalls, Smart Optimization uses a fresh gateway site export
+limit alongside the configured optimizer limit, taking the lower of the two.
+This keeps planned export and battery SOC consistent when surplus solar exceeds
+the site's export allowance. The effective gateway limit does not overwrite
+your saved settings, and command acceptance still requires separate power
+readings to establish what the battery actually did.
+
 ### Allow grid charging
 
 When enabled, Smart Optimization may plan forced battery charging from grid

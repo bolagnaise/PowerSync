@@ -11718,6 +11718,120 @@ def test_grid_export_cap_resolves_from_energy_data(opt_module):
     assert coordinator._resolve_max_grid_export_w() == 4600
 
 
+def _tesla_native_export_cap_coordinator(opt_module, software_cap=None):
+    import time
+
+    coordinator = _coordinator(
+        opt_module, "amber", optimization_max_grid_export_w=software_cap,
+    )
+    coordinator._entry.data.update(
+        powerwall_local_paired=True, powerwall_local_ip="gateway.local",
+    )
+    local = SimpleNamespace(
+        data=SimpleNamespace(raw={"config": {"site_info": {
+            "min_site_meter_power_ac": -5, "max_site_meter_power_ac": 1e9,
+        }}}),
+        last_success_monotonic=time.monotonic(),
+    )
+    coordinator.hass.data = {"power_sync": {coordinator.entry_id: {
+        "powerwall_local": {"coordinator": local},
+    }}}
+    coordinator._powerwall_route = lambda _direction: "local"
+    coordinator._optimizer = SimpleNamespace(max_grid_export_w=software_cap)
+    return coordinator, local
+
+
+@pytest.mark.parametrize("route", ["local", "tariff"])
+@pytest.mark.parametrize("software_cap,native_kw,expected", [
+    (None, -5, 5000), (8000, -5, 5000), (2000, -5, 2000),
+    (None, 0, 0), (None, -1e9, None),
+])
+def test_tesla_native_export_cap_constrains_planning_without_persisting(
+    opt_module, route, software_cap, native_kw, expected,
+):
+    coordinator, local = _tesla_native_export_cap_coordinator(opt_module, software_cap)
+    coordinator._powerwall_route = lambda _direction: route
+    local.data.raw["config"]["site_info"]["min_site_meter_power_ac"] = native_kw
+    options = dict(coordinator._entry.options)
+    data = dict(coordinator._entry.data)
+
+    coordinator._sync_grid_export_cap_to_optimizer()
+
+    assert coordinator._optimizer.max_grid_export_w == expected
+    assert coordinator._config.max_grid_export_w == expected
+    assert coordinator._entry.options == options
+    assert coordinator._entry.data == data
+
+    # A confirmed unset native limit must remove the old effective ceiling.
+    local.data.raw["config"]["site_info"]["min_site_meter_power_ac"] = -1e9
+    coordinator._sync_grid_export_cap_to_optimizer()
+    assert coordinator._optimizer.max_grid_export_w == software_cap
+
+
+@pytest.mark.parametrize("unusable", ["stale", "missing", "invalid", "other_brand"])
+def test_tesla_native_export_cap_ignores_unusable_or_other_brand_snapshot(opt_module, unusable):
+    coordinator, local = _tesla_native_export_cap_coordinator(opt_module, 8000)
+    if unusable == "stale":
+        local.last_success_monotonic -= 91
+    elif unusable == "missing":
+        local.data.raw["config"] = None
+    elif unusable == "invalid":
+        local.data.raw["config"]["site_info"]["min_site_meter_power_ac"] = 5
+    else:
+        coordinator.battery_system = "sigenergy"
+
+    coordinator._sync_grid_export_cap_to_optimizer()
+    assert coordinator._optimizer.max_grid_export_w == 8000
+
+
+@pytest.fixture
+def native_export_cap_model():
+    # This file's coordinator fixture stubs the LP. Load the real LP under
+    # an isolated package, including its real schedule dataclasses.
+    prefix = "native_export_cap_regression"
+    package = types.ModuleType(prefix)
+    package.__path__ = [str(COMPONENT_ROOT)]
+    sys.modules[prefix] = package
+    optimization = types.ModuleType(f"{prefix}.optimization")
+    optimization.__path__ = [str(COMPONENT_ROOT / "optimization")]
+    sys.modules[f"{prefix}.optimization"] = optimization
+    try:
+        yield importlib.import_module(f"{prefix}.optimization.battery_optimizer")
+    finally:
+        for name in list(sys.modules):
+            if name == prefix or name.startswith(prefix + "."):
+                sys.modules.pop(name, None)
+
+
+@pytest.mark.parametrize("highs", [True, False])
+def test_tesla_native_export_cap_prevents_sunny_battery_depletion_plan(
+    opt_module, monkeypatch, native_export_cap_model, highs,
+):
+    model = native_export_cap_model
+    assert not highs or model.HIGHS_AVAILABLE
+    monkeypatch.setattr(model, "HIGHS_AVAILABLE", highs)
+    coordinator, _ = _tesla_native_export_cap_coordinator(opt_module)
+    coordinator._optimizer = model.BatteryOptimizer(
+        capacity_wh=13500, max_charge_w=5000, max_discharge_w=5000,
+        backup_reserve=.2, hardware_reserve=0, horizon_hours=1,
+    )
+    coordinator._sync_grid_export_cap_to_optimizer()
+    result = coordinator._optimizer.optimize(
+        import_prices=[.3] * 12, export_prices=[.5] * 6 + [.05] * 6,
+        solar_forecast=[9.0] * 6 + [0.0] * 6, load_forecast=[1.0] * 12,
+        current_soc=.6, allow_battery_export=True, allow_grid_charge=False,
+        initial_solar_energy_kwh=8.1,
+    )
+
+    assert result.feasible
+    assert result.solver_used == ("highs" if highs else "greedy")
+    assert max(result.grid_export_w) <= 5000.1
+    first = result.schedule.actions[0]
+    assert first.battery_discharge_w == 0
+    assert first.battery_charge_w >= 2999.9
+    assert first.soc > .6
+
+
 def test_curtailed_sigenergy_zero_export_limit_is_not_planning_cap(opt_module):
     coordinator = _coordinator(opt_module, "amber")
     coordinator.energy_coordinator = SimpleNamespace(

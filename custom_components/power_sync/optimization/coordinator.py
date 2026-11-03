@@ -3202,7 +3202,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def _sync_grid_export_cap_to_optimizer(self) -> None:
         """Keep the LP grid export cap aligned with current site settings."""
-        self._config.max_grid_export_w = self._resolve_max_grid_export_w()
+        configured = self._resolve_max_grid_export_w()
+        native = self._local_powerwall_plan_limits().get("max_grid_export_w")
+        # The gateway enforces its site-meter cap independently of the chosen
+        # actuator. Model that same bound without persisting it as a user limit.
+        self._config.max_grid_export_w = (
+            min(configured, native) if configured is not None and native is not None
+            else native if native is not None else configured
+        )
         if self._optimizer:
             self._optimizer.max_grid_export_w = self._config.max_grid_export_w
 
@@ -3305,9 +3312,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if last_success is not None and 0 <= time.monotonic() - last_success <= 90:
             try:
                 from ..powerwall_local.battery_dispatch import site_grid_limits_w
-                imported, _ = site_grid_limits_w(coordinator.data)
+                imported, exported = site_grid_limits_w(coordinator.data)
                 if imported is not None:
                     limits["max_grid_import_w"] = imported
+                if exported is not None:
+                    limits["max_grid_export_w"] = exported
             except (ValueError, TypeError, AttributeError):
                 pass
         return limits
