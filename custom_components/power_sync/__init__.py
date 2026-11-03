@@ -33242,15 +33242,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
 
     def _configured_restorable_tesla_tariff() -> dict[str, Any] | None:
+        from .tariff_converter import convert_custom_tariff_to_tesla_tariff
+
         custom_tariff = None
         try:
             custom_tariff = automation_store.get_custom_tariff()
         except Exception:
             custom_tariff = None
-        return _select_restorable_tesla_tariff(
-            custom_tariff,
-            entry.data.get("initial_custom_tariff"),
-        )
+        # Stored config-flow tariffs use the UI/legacy rate shape and include
+        # metadata. Recovery must use the same validated Tesla envelope as a
+        # normal static sync, including the complete sell-side schedule.
+        for candidate in (custom_tariff, entry.data.get("initial_custom_tariff")):
+            restorable = _select_restorable_tesla_tariff(candidate)
+            if restorable is not None:
+                payload = convert_custom_tariff_to_tesla_tariff(restorable)
+                if payload is not None:
+                    return payload
+        return None
 
     def _optional_bool(value: Any) -> bool | None:
         """Return a bool for API booleans/strings, or None when unknown."""

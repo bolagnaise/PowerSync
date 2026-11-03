@@ -5,12 +5,13 @@ import ast
 import asyncio
 import copy
 import logging
+import sys
 from pathlib import Path
-from types import SimpleNamespace as NS
+from types import ModuleType, SimpleNamespace as NS
 
 import pytest
 
-from conftest import load_power_sync_submodule
+from conftest import load_power_sync_submodule, load_source_node
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -162,6 +163,103 @@ def test_pending_restore_survives_restart_without_active_force(restore_probe):
     probe.ns["hass"].data["power_sync"]["test"]["pending_tesla_restore"] = {"reason": "failed restore"}
     probe.run()
     assert probe.calls == [probe.custom]
+
+
+def _configured_tariff_probe(probe, configured, initial=None):
+    """Use the real configured-baseline helper inside the recovery handler."""
+    load_power_sync_submodule("tariff_converter", "_idle_restore_probe")
+    probe.ns["automation_store"] = NS(get_custom_tariff=lambda: configured)
+    probe.ns["entry"].data["initial_custom_tariff"] = initial
+    helper = load_source_node(
+        ROOT / "custom_components/power_sync/__init__.py",
+        "_configured_restorable_tesla_tariff",
+    )
+    module = ast.Module(body=[ast.ImportFrom(
+        module="__future__", names=[ast.alias(name="annotations")], level=0,
+    ), helper], type_ignores=[])
+    exec(compile(ast.fix_missing_locations(module), "<configured-restore>", "exec"), probe.ns)
+    probe.ns["hass"].data["power_sync"]["test"]["pending_tesla_restore"] = {
+        "reason": "failed restore",
+    }
+
+
+@pytest.fixture
+def configured_tariff_converter(monkeypatch):
+    # The converter only needs this import for these static payload tests.
+    root = ModuleType("homeassistant")
+    util = ModuleType("homeassistant.util")
+    dt = ModuleType("homeassistant.util.dt")
+    root.util = util
+    util.dt = dt
+    for name, module in (("homeassistant", root), ("homeassistant.util", util),
+                         ("homeassistant.util.dt", dt)):
+        monkeypatch.setitem(sys.modules, name, module)
+
+
+def _configured_custom_tariff():
+    # The shape produced by the config flow, then persisted by AutomationStore.
+    return {
+        "name": "Example", "utility": "Example", "currency": "AUD",
+        "seasons": {"All Year": {
+            "fromMonth": 1, "toMonth": 12,
+            "tou_periods": {"OFF_PEAK": [{
+                "fromDayOfWeek": 0, "toDayOfWeek": 6,
+                "fromHour": 0, "toHour": 24,
+            }]},
+        }},
+        "energy_charges": {"All Year": {"OFF_PEAK": .48}},
+        "sell_tariff": {"energy_charges": {"All Year": {"OFF_PEAK": .12}}},
+        "power_sync_explicit_periods": [{"buy_rate": .48, "sell_rate": .12}],
+        "updated_at": "2026-11-03T00:00:00Z",
+        "daily_supply_charge": 1.25,
+    }
+
+
+@pytest.mark.parametrize("provider", ["other", "tou_only"])
+@pytest.mark.parametrize("source", ["store", "initial"])
+def test_pending_restore_converts_configured_tariff_at_upload_boundary(
+    restore_probe, configured_tariff_converter, provider, source,
+):
+    probe = restore_probe
+    original = _configured_custom_tariff()
+    before = copy.deepcopy(original)
+    _configured_tariff_probe(probe, original if source == "store" else None,
+                            original if source == "initial" else None)
+    probe.ns["entry"].options["electricity_provider"] = provider
+    probe.run()
+    assert len(probe.calls) == 1
+    posted = probe.calls[0]
+    assert posted["energy_charges"]["All Year"] == {"rates": {"OFF_PEAK": .48}}
+    assert posted["sell_tariff"]["energy_charges"]["All Year"] == {"rates": {"OFF_PEAK": .12}}
+    assert posted["sell_tariff"]["seasons"] == posted["seasons"]
+    assert posted["daily_charges"] == [{"name": "Charge", "amount": 1.25}]
+    assert "power_sync_explicit_periods" not in posted
+    assert "updated_at" not in posted
+    assert "daily_supply_charge" not in posted
+    assert original == before
+    # Stopping at upload cannot release the persisted cleanup obligation.
+    assert probe.ns["hass"].data["power_sync"]["test"]["pending_tesla_restore"]
+
+
+@pytest.mark.parametrize("bad", [None, {"name": "broken"},
+                                    {"utility": "PowerSync", "name": "Force charge"}])
+def test_invalid_configured_restore_uses_valid_initial_tariff(
+    restore_probe, configured_tariff_converter, bad,
+):
+    probe = restore_probe
+    initial = _configured_custom_tariff()
+    _configured_tariff_probe(probe, bad, initial)
+    probe.run()
+    assert probe.calls[0]["energy_charges"]["All Year"] == {"rates": {"OFF_PEAK": .48}}
+
+
+def test_invalid_configured_restore_falls_back_to_cached_baseline(
+    restore_probe, configured_tariff_converter,
+):
+    probe = restore_probe
+    _configured_tariff_probe(probe, {"name": "broken"}, {"name": "also broken"})
+    probe.run()
+    assert probe.calls == [probe.cached]
 
 
 def test_explicit_recovery_can_fall_back_to_cached_tariff(restore_probe):

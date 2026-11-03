@@ -20,6 +20,8 @@ From v2.12.1563, **Restore** and the active charge/discharge button show **Resto
 
 Changing the preference stops the current force action and confirms restoration before saving. Pending or failed cleanup keeps the previous preference. From v2.12.1515, this also attempts any unfinished cloud settings restore after stopping local dispatch, even when no active force action remains. If Tesla cannot confirm restoration, the change fails and the previous preference remains selected. The optimiser requests a fresh plan; a stopped manual action is not replayed. Mobile reads the saved backend preference and hides the selector when an older backend does not advertise support.
 
+For Custom TOU recovery, PowerSync prepares the configured tariff in the same format used by a normal tariff sync, including its buy and sell schedule. This also applies to unfinished restoration loaded after a restart. Invalid configured tariffs are not uploaded; an available valid baseline is used instead. Other Powerwall settings can remain blocked until the earlier restore succeeds and is confirmed.
+
 When Automatic selects native tariff charging and **Allow grid charging** is enabled, the optimiser can temporarily enable a known disabled Tesla charge-from-grid setting. It verifies the setting before any startup command or charging tariff, then restores the original value during cleanup, including after restart. Turning Tesla grid charging off again ends the action rather than repeatedly enabling it. Site limits, SOC ceilings, EV demand, Monitoring Mode and demand protection still apply.
 
 ## Gateway command limits
