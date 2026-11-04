@@ -473,9 +473,10 @@ class NativeMaxChargeSession:
             raise NativeMaxChargeError("Native Max cleanup belongs to another paired identity")
         # Preserve independent same-site proof before releasing the budget. A
         # failed journal clear must remain recoverable after that release.
-        self.record.setdefault("pairing_recovery", {
-            "site": site, "identity": identity, "token": token, "confirmed": False})
-        await self._save()
+        if "pairing_recovery" not in self.record:
+            self.record["pairing_recovery"] = {
+                "site": site, "identity": identity, "token": token, "confirmed": False}
+            await self._save()
         fence()
         if await confirm(deepcopy(self.record), fence) is not True:
             raise NativeMaxRestorePending("Native Max pairing recovery readback is pending")

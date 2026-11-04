@@ -370,6 +370,36 @@ async def test_orphaned_charge_cannot_invent_missing_site_proof(setup, invalid):
 
 
 @pytest.mark.asyncio
+async def test_orphaned_charge_failed_readback_has_bounded_retries_and_no_journal_churn(setup):
+    s = setup
+    recovered = await orphaned_charge(s)
+    s.state.tariff = deepcopy(s.store.data['baseline']['forcing_tariff'])
+    reads, saves = [], []
+    read, save = s.adapter.read_tariff, s.store.async_save
+    async def counted_read():
+        reads.append(True)
+        return await read()
+    async def counted_save(data):
+        saves.append(deepcopy(data))
+        await save(data)
+    s.adapter.read_tariff, s.store.async_save = counted_read, counted_save
+    events = deepcopy(s.state.events)
+    try:
+        for _ in range(3):
+            with pytest.raises(s.m.NativeMaxChargeError): await recovered.recover()
+            await recovered._cancel_watch()
+        assert len(reads) == 1 and len(saves) == 1
+        assert s.budget.native_max_claim('site') and recovered.pending
+        s.state.tariff = deepcopy(s.original[1])
+        s.state.at += 31
+        assert await recovered.recover()
+        assert len(reads) > 1 and s.store.data is None
+        assert s.state.events == events
+    finally:
+        await recovered._cancel_watch()
+
+
+@pytest.mark.asyncio
 async def test_native_export_uses_cloud_when_v1r_omits_original_permission(setup):
     s = setup
     s.adapter.direction = 'discharge'
