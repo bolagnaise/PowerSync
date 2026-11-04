@@ -77,10 +77,20 @@ re-pairing, unpairing and Gateway address changes. Finish **Restore Normal**
 before changing those settings. A pairing handshake also checks again before
 saving its new key, so a session started during pairing keeps its recovery owner.
 
-This protection prevents losing access to the original cleanup identity. It
-does not clear or transfer a record already tied to an older pairing. If cleanup
-reports another paired identity, retain the saved record and seek support;
-deleting it or pairing again does not prove the original settings were restored.
+This protection prevents losing access to the original cleanup identity. An
+expired Native Max **charge** record already stranded by an older pairing can
+also recover automatically when its separate, saved site reservation proves
+the same owner and fresh readings confirm that cleanup has finished. Mode and
+reserve must already be released, the current tariff must be normal, and fresh
+battery/grid readings must confirm that forced charging has stopped. This
+recovery only releases the saved reservation and record; it sends no battery
+commands and does not replay the old settings through the new pairing.
+
+Update through HACS and restart Home Assistant to run startup recovery. Missing
+or conflicting site ownership, uncertain writes, remaining forced settings or
+unconfirmed physical readings keep recovery pending. Discharge recovery retains
+its existing pairing checks. If the warning remains, retain the saved record
+and seek support; deleting it or pairing again does not prove restoration.
 
 ## Grid Charging confirmation for Tariff discharge
 

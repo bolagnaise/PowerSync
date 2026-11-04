@@ -92,6 +92,283 @@ def setup(monkeypatch):
                            adapter=adapter,session=session,store=store)
 
 
+async def orphaned_charge(s, phase='restoring'):
+    """A legacy charge journal left behind after cleanup and a new pairing."""
+    await s.session.start(120)
+    await s.session._cancel_watch()
+    s.store.data['phase'] = phase
+    s.store.data['cleanup'] = {'mode_released': True, 'reserve_released': True}
+    s.state.config, s.state.tariff = deepcopy(s.original)
+    s.state.at += 200
+    s.state.identity = s.adapter.identity = 'replacement-pairing'
+    return type(s.session)(s.adapter, s.store, clock=lambda: s.state.at,
+                           monotonic=lambda: s.state.at)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('phase', ['restoring', 'settling', 'restored'])
+async def test_same_site_orphaned_charge_retires_after_read_only_confirmation(setup, phase):
+    s = setup
+    recovered = await orphaned_charge(s, phase)
+    events = deepcopy(s.state.events)
+    try:
+        assert await recovered.recover()
+        assert s.store.data is None and not recovered.pending
+        assert s.budget.native_max_claim('site') is None
+        assert s.state.events == events  # No baseline replay, resume or forcing.
+        assert (s.state.config, s.state.tariff) == s.original
+    finally:
+        await recovered._cancel_watch()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('unsafe', [
+    'missing_claim', 'other_site', 'other_token', 'other_deadline', 'other_direction', 'preparing',
+    'mode_pending', 'reserve_pending', 'tariff_pending', 'kick_pending',
+    'local_pending', 'grid_pending', 'export_pending', 'not_expired',
+    'forced_tariff', 'other_temporary_tariff', 'forced_mode', 'forced_reserve',
+    'physical_draw', 'unbalanced', 'offline', 'stale_config',
+])
+async def test_orphaned_charge_keeps_owner_when_recovery_proof_is_incomplete(setup, unsafe):
+    s = setup
+    recovered = await orphaned_charge(s)
+    claim = s.budget.entries['native_max:battery']
+    if unsafe == 'missing_claim': s.budget.entries.clear()
+    elif unsafe == 'other_site': claim['site'] = 'other-site'
+    elif unsafe == 'other_token': claim['native_max']['token'] = 'other-owner'
+    elif unsafe == 'other_deadline': claim['native_max']['expires_at'] += 1
+    elif unsafe == 'other_direction': claim['native_max']['direction'] = 'discharge'
+    elif unsafe == 'preparing': claim['native_max']['preparing'] = True
+    elif unsafe == 'mode_pending': s.store.data['cleanup'].pop('mode_released')
+    elif unsafe == 'reserve_pending': s.store.data['cleanup'].pop('reserve_released')
+    elif unsafe == 'tariff_pending': s.store.data['tariff_intent'] = 'baseline'
+    elif unsafe == 'kick_pending': s.store.data['kick_pending'] = True
+    elif unsafe == 'local_pending': s.store.data['local_acceptance_until'] = s.state.at + 10
+    elif unsafe == 'grid_pending':
+        s.store.data['grid_charge_intent'] = True
+        s.store.data['baseline']['grid_charge_blocked'] = True
+    elif unsafe == 'export_pending': s.store.data['export_conflict'] = True
+    elif unsafe == 'not_expired': s.state.at -= 200
+    elif unsafe == 'forced_tariff': s.state.tariff = deepcopy(s.store.data['baseline']['forcing_tariff'])
+    elif unsafe == 'other_temporary_tariff': s.state.tariff = {'code': 'ANOTHER_FORCE'}
+    elif unsafe == 'forced_mode': s.state.config['default_real_mode'] = 'autonomous'
+    elif unsafe == 'forced_reserve': s.state.config['site_info']['backup_reserve_percent'] = 100
+    elif unsafe == 'physical_draw': s.state.battery_w = -10000
+    elif unsafe == 'unbalanced':
+        snapshot = s.adapter.client.get_snapshot
+        async def unbalanced_snapshot():
+            result = await snapshot()
+            result.grid_w += 10000
+            return result
+        s.adapter.client.get_snapshot = unbalanced_snapshot
+    elif unsafe == 'offline': s.state.grid = 'SystemIslandedActive'
+    elif unsafe == 'stale_config':
+        read = s.adapter.client._transport.read_config
+        async def slow_config(din):
+            result = await read(din)
+            s.state.at += 6
+            return result
+        s.adapter.client._transport.read_config = slow_config
+    events = deepcopy(s.state.events)
+    try:
+        with pytest.raises(s.m.NativeMaxChargeError):
+            await recovered.recover()
+        assert recovered.pending and s.store.data is not None
+        assert s.state.events == events
+        if unsafe != 'missing_claim':
+            assert s.budget.entries['native_max:battery'] == claim
+    finally:
+        await recovered._cancel_watch()
+
+
+@pytest.mark.asyncio
+async def test_orphaned_charge_restarts_after_site_release_and_failed_journal_clear(setup):
+    s = setup
+    recovered = await orphaned_charge(s)
+    save = s.store.async_save
+    async def fail_clear(data):
+        if data is None: raise OSError('journal clear failed')
+        await save(data)
+    s.store.async_save = fail_clear
+    events = deepcopy(s.state.events)
+    try:
+        with pytest.raises(OSError, match='journal clear failed'):
+            await recovered.recover()
+        assert s.budget.native_max_claim('site') is None
+        assert s.store.data['phase'] == 'restored'
+        await recovered._cancel_watch()
+        s.store.async_save = save
+        restarted = type(recovered)(s.adapter, s.store, clock=lambda: s.state.at,
+                                    monotonic=lambda: s.state.at)
+        assert await restarted.recover()
+        assert s.store.data is None and s.state.events == events
+    finally:
+        await recovered._cancel_watch()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('stage', ['config', 'tariff', 'first_sample', 'second_sample',
+                                  'receipt_save', 'completed_save', 'site_release'])
+async def test_orphaned_charge_rechecks_pairing_across_recovery_awaits(setup, stage):
+    s = setup
+    recovered = await orphaned_charge(s)
+    async def changed_after(call, *args, **kwargs):
+        result = await call(*args, **kwargs)
+        s.state.identity = 'another-pairing'
+        return result
+    if stage == 'config':
+        read = s.adapter.client._transport.read_config
+        s.adapter.client._transport.read_config = lambda *a: changed_after(read, *a)
+    elif stage == 'tariff':
+        read = s.adapter.read_tariff
+        s.adapter.read_tariff = lambda: changed_after(read)
+    elif stage in ('first_sample', 'second_sample'):
+        read = s.adapter.client.get_snapshot
+        samples = []
+        async def changed_snapshot():
+            result = await read()
+            samples.append(result)
+            if len(samples) == (1 if stage == 'first_sample' else 2):
+                s.state.identity = 'another-pairing'
+            return result
+        s.adapter.client.get_snapshot = changed_snapshot
+    elif stage in ('receipt_save', 'completed_save'):
+        save = s.store.async_save
+        async def changed_save(data):
+            await save(data)
+            if data and data.get('pairing_recovery', {}).get('confirmed') is (stage == 'completed_save'):
+                s.state.identity = 'another-pairing'
+        s.store.async_save = changed_save
+    elif stage == 'site_release':
+        save = s.budget.store.async_save
+        s.budget.store.async_save = lambda *a: changed_after(save, *a)
+    events = deepcopy(s.state.events)
+    try:
+        with pytest.raises(s.m.NativeMaxChargeError):
+            await recovered.recover()
+        assert recovered.pending and s.store.data is not None
+        assert s.state.events == events
+        if stage != 'site_release': assert s.budget.native_max_claim('site')
+    finally:
+        await recovered._cancel_watch()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('field', ['site', 'token', 'expires_at', 'direction'])
+async def test_orphaned_charge_cannot_release_a_changed_site_claim(setup, field):
+    s = setup
+    recovered = await orphaned_charge(s)
+    release = s.adapter.release_after_pairing_change
+    async def changed_claim(record, fence):
+        owner = s.budget.entries['native_max:battery']
+        if field == 'site': owner['site'] = 'another-site'
+        elif field == 'expires_at': owner['native_max'][field] += 1
+        elif field == 'direction': owner['native_max'][field] = 'discharge'
+        else: owner['native_max'][field] = 'another-owner'
+        return await release(record, fence)
+    s.adapter.release_after_pairing_change = changed_claim
+    events = deepcopy(s.state.events)
+    try:
+        with pytest.raises(s.m.NativeMaxChargeError): await recovered.recover()
+        assert recovered.pending and s.budget.entries.get('native_max:battery')
+        assert s.state.events == events
+    finally:
+        await recovered._cancel_watch()
+
+
+@pytest.mark.asyncio
+async def test_orphaned_charge_rejects_a_tariff_changed_during_physical_checks(setup):
+    s = setup
+    recovered = await orphaned_charge(s)
+    sample = s.adapter.client.get_snapshot
+    async def changed_tariff():
+        result = await sample()
+        s.state.tariff = deepcopy(s.store.data['baseline']['forcing_tariff'])
+        return result
+    s.adapter.client.get_snapshot = changed_tariff
+    events = deepcopy(s.state.events)
+    try:
+        with pytest.raises(s.m.NativeMaxChargeError): await recovered.recover()
+        assert recovered.pending and s.budget.native_max_claim('site')
+        assert s.state.events == events
+    finally:
+        await recovered._cancel_watch()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('change', ['mode', 'reserve', 'physical_draw'])
+async def test_orphaned_charge_revalidates_after_persisting_completion(setup, change):
+    s = setup
+    recovered = await orphaned_charge(s)
+    save = s.store.async_save
+    async def changed_save(data):
+        await save(data)
+        if data and data.get('pairing_recovery', {}).get('confirmed'):
+            if change == 'mode': s.state.config['default_real_mode'] = 'autonomous'
+            elif change == 'reserve': s.state.config['site_info']['backup_reserve_percent'] = 100
+            else: s.state.battery_w = -10000
+    s.store.async_save = changed_save
+    events = deepcopy(s.state.events)
+    try:
+        with pytest.raises(s.m.NativeMaxChargeError): await recovered.recover()
+        assert recovered.pending and s.budget.native_max_claim('site')
+        assert s.state.events == events
+    finally:
+        await recovered._cancel_watch()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('failure', ['site_release', 'slow_site_release', 'changed_pair_after_release'])
+async def test_orphaned_charge_preserves_retry_after_budget_storage_failure(setup, failure):
+    s = setup
+    recovered = await orphaned_charge(s)
+    save = s.budget.store.async_save
+    async def fail_save(data):
+        if failure == 'site_release': raise OSError('budget save failed')
+        await save(data)
+        if failure == 'slow_site_release': s.state.at += 6
+        else: s.state.identity = 'another-pairing'
+    s.budget.store.async_save = fail_save
+    events = deepcopy(s.state.events)
+    try:
+        with pytest.raises((OSError, s.m.NativeMaxChargeError)): await recovered.recover()
+        assert s.store.data['phase'] == 'restored'
+        assert s.store.data['pairing_recovery']['confirmed'] is True
+        await recovered._cancel_watch()
+        s.budget.store.async_save = save
+        restarted = type(recovered)(s.adapter, s.store, clock=lambda: s.state.at,
+                                    monotonic=lambda: s.state.at)
+        if failure == 'changed_pair_after_release':
+            try:
+                with pytest.raises(s.m.NativeMaxChargeError): await restarted.recover()
+                assert s.store.data is not None
+            finally:
+                await restarted._cancel_watch()
+        else:
+            assert await restarted.recover()
+            assert s.store.data is None
+        assert s.state.events == events
+    finally:
+        await recovered._cancel_watch()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('invalid', [None, {}, {'confirmed': True},
+                                    {'site': 'site', 'identity': 'replacement-pairing',
+                                     'token': 'wrong-owner', 'confirmed': True}])
+async def test_orphaned_charge_cannot_invent_missing_site_proof(setup, invalid):
+    s = setup
+    recovered = await orphaned_charge(s, 'restored')
+    s.budget.entries.clear()
+    if invalid is not None: s.store.data['pairing_recovery'] = invalid
+    events = deepcopy(s.state.events)
+    try:
+        with pytest.raises(s.m.NativeMaxChargeError): await recovered.recover()
+        assert s.store.data is not None and s.state.events == events
+    finally:
+        await recovered._cancel_watch()
+
+
 @pytest.mark.asyncio
 async def test_native_export_uses_cloud_when_v1r_omits_original_permission(setup):
     s = setup

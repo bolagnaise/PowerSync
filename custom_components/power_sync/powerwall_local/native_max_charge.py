@@ -106,6 +106,14 @@ class NativeMaxChargeSession:
                         {"mode_released", "reserve_released", "tariff_released", "mode_disarmed", "export_released", "grid_released"}
                         or type(value) is not bool for key, value in cleanup.items())):
                     raise NativeMaxChargeError("Native Max cleanup journal is invalid")
+                receipt = data.get("pairing_recovery")
+                if receipt is not None and (not isinstance(receipt, dict)
+                        or set(receipt) != {"site", "identity", "token", "confirmed"}
+                        or any(not isinstance(receipt.get(key), str) or not receipt[key]
+                               for key in ("site", "identity", "token"))
+                        or receipt.get("token") != data["id"]
+                        or type(receipt.get("confirmed")) is not bool):
+                    raise NativeMaxChargeError("Native Max pairing recovery journal is invalid")
                 until = data.get("local_acceptance_until", 0)
                 if (type(until) not in (int, float) or not math.isfinite(until) or until < 0
                         or data.get("tariff_intent") not in (None, "forcing", "baseline")):
@@ -377,7 +385,8 @@ class NativeMaxChargeSession:
             return
         token = self.record["id"]
         if self.record["identity"] != self.adapter.identity:
-            raise NativeMaxChargeError("Native Max cleanup belongs to another paired identity")
+            await self._retire_after_pairing_change()
+            return
         def restore_fence():
             if not self.record or self.record["id"] != token or self.record["identity"] != self.adapter.identity:
                 raise NativeMaxChargeError("Native Max cleanup ownership changed")
@@ -440,6 +449,48 @@ class NativeMaxChargeSession:
         await self._save()
         if await self.adapter.release(token) is not True:
             raise NativeMaxChargeError("Native Max site release was not confirmed")
+        await self._clear_record()
+
+    async def _retire_after_pairing_change(self):
+        """Retire a proven completed charge; never transfer old write authority."""
+        site_for = getattr(self.adapter, "pairing_recovery_site", None)
+        confirm = getattr(self.adapter, "pairing_recovery_complete", None)
+        release = getattr(self.adapter, "release_after_pairing_change", None)
+        if not callable(site_for) or not callable(confirm) or not callable(release):
+            raise NativeMaxChargeError("Native Max cleanup belongs to another paired identity")
+        token, original = self.record["id"], self.record["identity"]
+        identity = self.adapter.identity
+
+        def fence():
+            if (not self.record or self.record["id"] != token
+                    or self.record["identity"] != original or self.adapter.identity != identity
+                    or not self.adapter.pairing_recovery_current()):
+                raise NativeMaxChargeError("Native Max pairing recovery ownership changed")
+
+        site = await site_for(deepcopy(self.record))
+        fence()
+        if not site:
+            raise NativeMaxChargeError("Native Max cleanup belongs to another paired identity")
+        # Preserve independent same-site proof before releasing the budget. A
+        # failed journal clear must remain recoverable after that release.
+        self.record.setdefault("pairing_recovery", {
+            "site": site, "identity": identity, "token": token, "confirmed": False})
+        await self._save()
+        fence()
+        if await confirm(deepcopy(self.record), fence) is not True:
+            raise NativeMaxRestorePending("Native Max pairing recovery readback is pending")
+        fence()
+        self.record["phase"] = "restored"
+        self.record["pairing_recovery"]["confirmed"] = True
+        self.record.setdefault("cleanup", {})["tariff_released"] = True
+        await self._save()
+        fence()
+        if await release(deepcopy(self.record), fence) is not True:
+            raise NativeMaxChargeError("Native Max site release was not confirmed")
+        fence()
+        await self._clear_record()
+
+    async def _clear_record(self):
         old = self.record
         self.record = None
         self._clearing = True

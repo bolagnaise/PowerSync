@@ -165,27 +165,37 @@ class SharedRateBudget:
             self.revision += 1
             return True
 
-    async def release_native_max(self, entry_id, site, token):
+    async def release_native_max(self, entry_id, site, token, *, expected=None, before_release=None):
         """Release only the exact Max generation after native cleanup."""
         await self.load()
-        task = asyncio.create_task(self._release_native_max(entry_id, site, token))
+        task = asyncio.create_task(self._release_native_max(
+            entry_id, site, token, expected=deepcopy(expected), before_release=before_release))
         self.storage_tasks.add(task)
         task.add_done_callback(self.storage_tasks.discard)
         return await asyncio.shield(task)
 
-    async def _release_native_max(self, entry_id, site, token):
+    async def _release_native_max(self, entry_id, site, token, *, expected=None, before_release=None):
         async with self.lock:
             key = f"native_max:{entry_id}"
             old = self.entries.get(key)
+            if before_release is not None:
+                before_release()
             if old is None:
                 return True
             if old.get("site") != site or old.get("native_max", {}).get("token") != token:
                 return False
+            if expected is not None:
+                claim = old.get("native_max", {})
+                defaults = {"direction": "charge", "ev_coexistence": False, "preparing": False}
+                if any(claim.get(field, defaults.get(field)) != value for field, value in expected.items()):
+                    return False
             entries = deepcopy(self.entries)
             entries.pop(key)
             await self.store.async_save({"entries": entries, "managed": self.managed})
             self.entries = entries
             self.revision += 1
+            if before_release is not None:
+                before_release()
             return True
 
     @staticmethod
