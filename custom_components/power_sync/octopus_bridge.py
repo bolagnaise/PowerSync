@@ -285,21 +285,28 @@ def related_entities(hass, binding):
     account = binding.get("account_id", "").lower().replace("-", "_")
     meter = binding.get("serial", "").lower()
     result = []
-    for state in states(hass):
+    all_states = states(hass)
+    registry, peer_entries = None, set()
+    try:
+        from homeassistant.helpers import entity_registry as er
+        registry = er.async_get(hass)
+        for state in all_states:
+            if _identity(hass, state) == (binding["mpan"].lower(), meter):
+                entry = registry.async_get(state.entity_id)
+                if entry:
+                    peer_entries.add(entry.config_entry_id)
+    except (ImportError, AttributeError, KeyError):
+        pass
+    for state in all_states:
         name = canonical_id(hass, state)
         if not name.startswith("octopus_energy_"):
             continue
         # Registry associations include Intelligent devices and gas meters
         # without relying on a user's entity name.
         belongs = bool(meter and f"_{meter}_" in name) or bool(account and name.replace("-", "_").startswith(f"octopus_energy_{account}_"))
-        try:
-            from homeassistant.helpers import entity_registry as er
-            registry = er.async_get(hass)
+        if registry is not None:
             current = registry.async_get(state.entity_id)
-            peers = [registry.async_get(s.entity_id) for s in states(hass, "sensor") if _identity(hass, s) == (binding["mpan"].lower(), meter)]
-            belongs |= bool(current and any(p and p.config_entry_id == current.config_entry_id for p in peers))
-        except (ImportError, AttributeError, KeyError):
-            pass
+            belongs |= bool(current and current.config_entry_id in peer_entries)
         if belongs:
             result.append({"entity_id": state.entity_id, "state": state.state,
                            "unit": (state.attributes or {}).get("unit_of_measurement"),

@@ -8845,7 +8845,7 @@
     },
     {
       "id": "tesla_powerwall_monitoring",
-      "label": "Home Assistant Powerwall integration \u2014 monitoring only",
+      "label": "Home Assistant Powerwall integration — monitoring only",
       "page": "Battery-Tesla-Powerwall",
       "monitoring_only": true
     },
@@ -8857,7 +8857,7 @@
     },
     {
       "id": "sigenergy_ha_monitoring",
-      "label": "Sigenergy Local Modbus integration \u2014 monitoring only",
+      "label": "Sigenergy Local Modbus integration — monitoring only",
       "page": "Battery-Sigenergy",
       "monitoring_only": true
     },
@@ -8869,7 +8869,7 @@
     },
     {
       "id": "sungrow_ihomemanager",
-      "label": "iHomeManager forwarding \u2014 monitoring only",
+      "label": "iHomeManager forwarding — monitoring only",
       "page": "Battery-Sungrow",
       "monitoring_only": true
     },
@@ -8881,7 +8881,7 @@
     },
     {
       "id": "sungrow_ha_monitoring",
-      "label": "Home Assistant Sungrow entities \u2014 monitoring only",
+      "label": "Home Assistant Sungrow entities — monitoring only",
       "page": "Battery-Sungrow",
       "monitoring_only": true
     },
@@ -8923,7 +8923,7 @@
     },
     {
       "id": "goodwe_ha_monitoring",
-      "label": "Home Assistant GoodWe integration \u2014 monitoring only",
+      "label": "Home Assistant GoodWe integration — monitoring only",
       "page": "Battery-GoodWe",
       "monitoring_only": true
     },
@@ -8935,13 +8935,13 @@
     },
     {
       "id": "alphaess_cloud_monitoring",
-      "label": "AlphaESS Cloud API \u2014 monitoring only",
+      "label": "AlphaESS Cloud API — monitoring only",
       "page": "AlphaESS",
       "monitoring_only": true
     },
     {
       "id": "alphaess_ha_monitoring",
-      "label": "AlphaESS Home Assistant integration \u2014 monitoring only",
+      "label": "AlphaESS Home Assistant integration — monitoring only",
       "page": "AlphaESS",
       "monitoring_only": true
     },
@@ -8983,7 +8983,7 @@
     },
     {
       "id": "solaredge_ha_only",
-      "label": "SolarEdge Modbus Multi \u2014 Home Assistant only",
+      "label": "SolarEdge Modbus Multi — Home Assistant only",
       "page": "Battery-SolarEdge",
       "monitoring_only": false
     },
@@ -9007,7 +9007,7 @@
     },
     {
       "id": "custom_entities",
-      "label": "Selected Home Assistant entities \u2014 monitoring only",
+      "label": "Selected Home Assistant entities — monitoring only",
       "page": "Battery-Custom-Controller",
       "monitoring_only": true
     },
