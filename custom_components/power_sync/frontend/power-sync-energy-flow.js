@@ -2169,9 +2169,11 @@ import {
             fill: #e3e8f3;
             text-anchor: start;
             font-family: "DM Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            /* A solid dark outline under each reading (drawn first by
+               paint-order) keeps it legible on bright, sunny renders. */
             paint-order: stroke fill;
-            stroke: rgba(2, 6, 23, 0.55);
-            stroke-width: 1px;
+            stroke: rgba(2, 6, 23, 0.7);
+            stroke-width: 4px;
             stroke-linejoin: round;
           }
           .flow-label {
@@ -2240,12 +2242,12 @@ import {
           }
           .flow-node.inactive .flow-label,
           .flow-node.inactive .flow-status {
-            opacity: 0.8;
+            opacity: 0.88;
           }
           .flow-node.inactive .flow-power,
           .flow-node.inactive .flow-pct {
             fill: #aab3c7 !important;
-            opacity: 0.85;
+            opacity: 0.9;
           }
           .flow-node.inactive .flow-node-guide {
             opacity: 0;
@@ -2352,8 +2354,8 @@ import {
                 <svg viewBox="${sceneViewBox}">
                   <defs>
                     <radialGradient id="flow-node-halo-grad">
-                      <stop offset="0" stop-color="#020617" stop-opacity="0.7"></stop>
-                      <stop offset="0.55" stop-color="#020617" stop-opacity="0.4"></stop>
+                      <stop offset="0" stop-color="#020617" stop-opacity="0.78"></stop>
+                      <stop offset="0.55" stop-color="#020617" stop-opacity="0.5"></stop>
                       <stop offset="1" stop-color="#020617" stop-opacity="0"></stop>
                     </radialGradient>
                   </defs>
