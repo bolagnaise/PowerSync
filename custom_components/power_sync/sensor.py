@@ -6625,7 +6625,7 @@ class FlowPowerPriceSensor(PowerSyncCurrencyMixin, CoordinatorEntity, RestoredNu
         """Return the current price in $/kWh."""
         contract = self._flow_power_provider_contract()
         plan_id = ((contract or {}).get("plan") or {}).get("plan_id")
-        if plan_id in {"happy_hour_2026", "four_free_2026", "flow_home_2026"}:
+        if plan_id in {"happy_hour_2026", "happy_hour_plus_2026", "four_free_2026", "flow_home_2026"}:
             marginal = ((contract.get("prices") or {}).get("marginal") or {})
             key = "import" if self._is_import_sensor else "export"
             try:

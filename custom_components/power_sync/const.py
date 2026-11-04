@@ -1230,6 +1230,7 @@ FLOW_POWER_PLAN_EFFECTIVE_FROM = "2026-09-01"
 FLOW_POWER_PLAN_IDS = {
     "legacy_unclassified": "Legacy / unclassified",
     "happy_hour_2026": "Battery Happy Hour",
+    "happy_hour_plus_2026": "Happy Hour Plus (40c)",
     "four_free_2026": "Flow Power 4Free",
     "flow_home_2026": "Flow Home",
     "account_specific": "Account-specific contract",

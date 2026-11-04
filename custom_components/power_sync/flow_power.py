@@ -20,7 +20,9 @@ from .quota import QuotaLedger, QuotaRule, tariff_datetime
 
 LEGACY_PLAN_ID = "legacy_unclassified"
 ACCOUNT_SPECIFIC_PLAN_ID = "account_specific"
-OFFICIAL_PLAN_IDS = {"happy_hour_2026", "four_free_2026", "flow_home_2026"}
+OFFICIAL_PLAN_IDS = {
+    "happy_hour_2026", "happy_hour_plus_2026", "four_free_2026", "flow_home_2026",
+}
 CUSTOM_EXPORT_CAPABILITY = "custom_export_tiers_v1"
 CUSTOM_EXPORT_RULE_ID = "flow_custom_export"
 CUSTOM_EXPORT_RATE_FIELDS = (
@@ -73,6 +75,7 @@ def _validate_custom_export(overrides: Mapping[str, Any]) -> dict[str, Any]:
 
 _PLAN_REGIONS = {
     "happy_hour_2026": ("NSW", "QLD", "SA", "VIC"),
+    "happy_hour_plus_2026": ("NSW", "QLD", "SA", "VIC"),
     "four_free_2026": ("NSW", "SA", "SEQ", "VIC"),
     "flow_home_2026": ("NSW", "QLD", "SA", "SEQ", "VIC"),
     LEGACY_PLAN_ID: ("NSW", "QLD", "SA", "SEQ", "VIC"),
@@ -146,6 +149,10 @@ def flow_power_plan_catalog() -> list[dict[str, Any]]:
         "happy_hour_2026": (
             "17:30-21:30 export: first 15 kWh/day at 35c NSW/QLD/SA or "
             "30c VIC, then 10c; 0c outside."
+        ),
+        "happy_hour_plus_2026": (
+            "17:30-21:30 export: first 15 kWh/day at 40c, then 10c; 0c outside. "
+            "Select only if these rates match your Happy Hour Plus contract."
         ),
         "four_free_2026": (
             "11:00-15:00 import credit capped separately at 8 kWh each hour; "
@@ -289,6 +296,9 @@ def flow_power_quota_rules(snapshot: FlowPowerPlanSnapshot) -> tuple[QuotaRule, 
         bonus = 20.0 if region == "VIC" else 25.0
         return (_rule("flow_happy_hour_export", "export", timezone_token,
                       (("17:30", "21:30"),), 15.0, 10.0, bonus),)
+    if plan_id == "happy_hour_plus_2026":
+        return (_rule("flow_happy_hour_plus_export", "export", timezone_token,
+                      (("17:30", "21:30"),), 15.0, 10.0, 30.0),)
     if plan_id == "four_free_2026":
         export_base = 2.0 if region == "VIC" else 5.0
         rules = [
@@ -493,7 +503,11 @@ def _export_terms(snapshot: FlowPowerPlanSnapshot, plan_id: str, local: datetime
         return 0.0, 0.0, None
     if plan_id == "flow_home_2026":
         return 2.0, 0.0, None
-    rule_id = "flow_happy_hour_export" if plan_id == "happy_hour_2026" else "flow_4free_export"
+    rule_id = {
+        "happy_hour_2026": "flow_happy_hour_export",
+        "happy_hour_plus_2026": "flow_happy_hour_plus_export",
+        "four_free_2026": "flow_4free_export",
+    }[plan_id]
     rule = rules[rule_id]
     if rule.contains(local):
         return rule.base_price_c_per_kwh, rule.bonus_price_c_per_kwh, rule_id

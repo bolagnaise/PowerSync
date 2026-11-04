@@ -15080,6 +15080,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         if runtime is not None and (runtime[0].plan_id in {
             "happy_hour_2026",
+            "happy_hour_plus_2026",
             "four_free_2026",
             "flow_home_2026",
         } or custom_tiers):

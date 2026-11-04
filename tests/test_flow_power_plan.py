@@ -94,6 +94,10 @@ def test_explicit_happy_hour_switches_at_local_effective_date():
     [
         ("happy_hour_2026", "NSW", 0.10, 0.25),
         ("happy_hour_2026", "VIC", 0.10, 0.20),
+        ("happy_hour_plus_2026", "NSW", 0.10, 0.30),
+        ("happy_hour_plus_2026", "QLD", 0.10, 0.30),
+        ("happy_hour_plus_2026", "SA", 0.10, 0.30),
+        ("happy_hour_plus_2026", "VIC", 0.10, 0.30),
         ("four_free_2026", "NSW", 0.05, 0.15),
         ("four_free_2026", "VIC", 0.02, 0.15),
     ],
@@ -121,6 +125,75 @@ def test_unknown_confidence_preserves_base_and_disables_bonus():
     )
     assert series.settlement_export == pytest.approx((0.10,))
     assert series.export_bonus == (0.0,)
+
+
+@pytest.mark.parametrize("confidence,settled,expected_rate,remaining", [
+    ("authoritative", 0.0, 0.40, 15.0),
+    ("authoritative", 14.5, 0.40, 0.5),
+    ("authoritative", 15.0, 0.10, 0.0),
+    ("unknown", 0.0, 0.10, 0.0),
+])
+def test_happy_hour_plus_window_quota_and_next_day(confidence, settled, expected_rate, remaining):
+    snapshot = _snapshot("happy_hour_plus_2026", region="NSW")
+    rule_id = "flow_happy_hour_plus_export"
+    ledger = QuotaLedger(flow_power_quota_rules(snapshot), QuotaLedgerState(
+        tariff_day="2026-09-02", timezone_token="Australia/Sydney",
+        confidence=confidence, settled_kwh={rule_id: settled},
+    ))
+    timestamps = [datetime.fromisoformat(f"2026-09-02T{clock}:00+10:00")
+                  for clock in ("17:29", "17:30", "21:29", "21:30")]
+    timestamps.append(datetime.fromisoformat("2026-09-03T17:30:00+10:00"))
+    before = ledger.state.to_dict()
+    series = flow_power_price_series(snapshot, timestamps, [0.31] * 5, ledger=ledger)
+    assert series.marginal_export == pytest.approx((0, expected_rate, expected_rate, 0, 0.40))
+    assert series.settlement_import == (0.31,) * 5
+    assert series.import_bonus == (0.0,) * 5
+    assert series.export_group_caps_kwh == {
+        f"2026-09-02:{rule_id}": remaining, f"2026-09-03:{rule_id}": 15.0,
+    }
+    assert ledger.state.to_dict() == before
+
+
+def test_happy_hour_plus_measured_export_crosses_cap_and_survives_restart():
+    snapshot = _snapshot("happy_hour_plus_2026", region="NSW")
+    rules = flow_power_quota_rules(snapshot)
+    rule_id = "flow_happy_hour_plus_export"
+    start = datetime.fromisoformat("2026-09-02T18:00:00+10:00")
+    end = datetime.fromisoformat("2026-09-02T18:30:00+10:00")
+    ledger = QuotaLedger(rules, QuotaLedgerState(
+        tariff_day="2026-09-02", timezone_token="Australia/Sydney",
+        confidence="authoritative", settled_kwh={rule_id: 14.0},
+        last_meter_kwh={"import": None, "export": 100.0},
+        last_sample_at={"import": None, "export": start.isoformat()},
+    ))
+    earned_bonus = ledger.observe_cumulative("export", 102.0, end)
+    assert earned_bonus == pytest.approx(1.0)
+    assert ledger.remaining_kwh(rule_id) == 0.0
+    assert flow_power.flow_power_export_earnings(
+        snapshot, end=end, duration_hours=0.5, export_kwh=2.0,
+        settled_bonus_kwh=earned_bonus,
+    ) == pytest.approx(0.50)  # 1 kWh at 40c, then 1 kWh at 10c.
+    restored = QuotaLedger(rules, QuotaLedgerState.from_dict(ledger.state.to_dict()))
+    contract = flow_power_provider_contract(snapshot, at=end, import_price=0.31, ledger=restored)
+    assert contract["prices"]["marginal"]["export"] == pytest.approx(0.10)
+    assert contract["quotas"][0]["remaining_kwh"] == 0.0
+
+
+def test_happy_hour_plus_is_explicit_and_keeps_legacy_settings_out_of_quota_identity():
+    plus = _snapshot("happy_hour_plus_2026", region="NSW")
+    equivalent = _snapshot("happy_hour_plus_2026", region="NSW", legacy_rate=0.20,
+                           legacy_end="19:30")
+    standard = _snapshot("happy_hour_2026", region="NSW")
+    catalog = next(item for item in flow_power_plan_catalog()
+                   if item["plan_id"] == plus.plan_id)
+    assert catalog["label"] == "Happy Hour Plus (40c)"
+    assert "15 kWh/day at 40c, then 10c" in catalog["summary"]
+    assert plus.plan_hash == equivalent.plan_hash
+    assert plus.plan_hash != standard.plan_hash
+    before_start = datetime.fromisoformat("2026-08-31T18:00:00+10:00")
+    series = flow_power_price_series(plus, [before_start], [0.31])
+    assert series.active_plan_ids == ("legacy_unclassified",)
+    assert series.marginal_export == (0.45,)
 
 
 def test_four_free_has_independent_hourly_import_buckets():

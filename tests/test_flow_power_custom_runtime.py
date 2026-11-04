@@ -3,12 +3,13 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import sys
 from datetime import date, datetime, timezone
 from types import SimpleNamespace
 
 import pytest
 
-from test_flow_power_plan import PACKAGE, ROOT, _custom_snapshot, flow_power, quota
+from test_flow_power_plan import PACKAGE, ROOT, _custom_snapshot, _snapshot, flow_power, quota
 from test_provider_config_auto_sync import _handler_globals
 
 COMPONENT = ROOT / "custom_components" / "power_sync"
@@ -34,7 +35,8 @@ def _form_helpers():
 
 def test_ha_unrelated_save_preserves_custom_and_official_effective_dates():
     parse = _form_helpers()["_flow_power_form_selection"]
-    for raw in (_custom_snapshot().selection.to_dict(), {
+    for raw in (_custom_snapshot().selection.to_dict(),
+                _snapshot("happy_hour_plus_2026", region="VIC").selection.to_dict(), {
         "schema_version": 1, "plan_id": "happy_hour_2026", "region": "VIC",
         "effective_from": "2026-08-01", "overrides": {},
     }):
@@ -97,10 +99,12 @@ def _runtime_namespace(now):
     ("authoritative", 15, [False, False, False]),
     ("unknown", 0, [False, False, False]),
 ])
-def test_custom_export_priority_uses_window_and_remaining_quota(confidence, settled, expected):
-    snapshot = _custom_snapshot()
+@pytest.mark.parametrize("plan", ["account_specific", "happy_hour_plus_2026"])
+def test_export_priority_uses_window_and_remaining_quota(confidence, settled, expected, plan):
+    snapshot = _custom_snapshot() if plan == "account_specific" else _snapshot(plan, region="VIC")
+    rule_id = flow_power.flow_power_quota_rules(snapshot)[0].rule_id
     ledger = quota.QuotaLedger(flow_power.flow_power_quota_rules(snapshot), quota.QuotaLedgerState(
-        tariff_day="2026-09-06", confidence=confidence, settled_kwh={"flow_custom_export": settled},
+        tariff_day="2026-09-06", confidence=confidence, settled_kwh={rule_id: settled},
     ))
     now = datetime.fromisoformat("2026-09-06T17:00:00+10:00")
     timestamps = [datetime.fromisoformat(f"2026-09-06T{time}:00+10:00") for time in ("17:00", "17:30", "21:30")]
@@ -112,6 +116,45 @@ def test_custom_export_priority_uses_window_and_remaining_quota(confidence, sett
         _price_timestamps=lambda n: timestamps[:n],
     )
     assert method(coordinator, 3) == expected
+
+
+def test_happy_hour_plus_static_tariff_uses_base_prices_for_full_window():
+    snapshot = _snapshot("happy_hour_plus_2026", region="NSW")
+    namespace = {
+        **vars(sys.modules[f"{PACKAGE}.const"]),
+        "__package__": PACKAGE, "date": date,
+        "dt_util": SimpleNamespace(now=lambda: datetime(2026, 9, 6, tzinfo=timezone.utc)),
+        "_LOGGER": SimpleNamespace(info=lambda *args: None),
+    }
+    method = _extract(COMPONENT / "tariff_converter.py", "apply_flow_power_export", namespace)
+    rates = {f"PERIOD_{hour:02d}_{minute:02d}": 0.99 for hour in range(24) for minute in (0, 30)}
+    tariff = {"sell_tariff": {"energy_charges": {season: {"rates": dict(rates)}
+                                               for season in ("Summer", "Winter")}}}
+    method(tariff, "NSW1", export_rate=0.45, happy_hour_end="19:30",
+           plan_selection=snapshot.selection.to_dict())
+    for season in tariff["sell_tariff"]["energy_charges"].values():
+        assert season["rates"] == {
+            period: (0.10 if "PERIOD_17_30" <= period < "PERIOD_21_30" else 0.0)
+            for period in rates
+        }
+
+
+@pytest.mark.parametrize("settled,expected", [(0.0, 0.40), (15.0, 0.10)])
+def test_happy_hour_plus_sensor_prefers_remaining_contract_rate(settled, expected):
+    snapshot = _snapshot("happy_hour_plus_2026", region="NSW")
+    at = datetime.fromisoformat("2026-09-06T20:00:00+10:00")
+    ledger = quota.QuotaLedger(flow_power.flow_power_quota_rules(snapshot), quota.QuotaLedgerState(
+        tariff_day="2026-09-06", confidence="authoritative",
+        settled_kwh={"flow_happy_hour_plus_export": settled},
+    ))
+    contract = flow_power.flow_power_provider_contract(snapshot, at=at, import_price=0.31, ledger=ledger)
+    method = _extract(COMPONENT / "sensor.py", "native_value", {}, "FlowPowerPriceSensor")
+    sensor = SimpleNamespace(_is_import_sensor=False,
+                             _flow_power_provider_contract=lambda: contract,
+                             _get_current_tariff_price=lambda: (0.45, {}))
+    assert method(sensor) == pytest.approx(expected)
+    sensor._is_import_sensor = True
+    assert method(sensor) == pytest.approx(0.31)
 
 
 def test_custom_static_tariff_preserves_period_structure_and_base_prices():
