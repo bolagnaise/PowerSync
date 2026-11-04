@@ -618,6 +618,132 @@ def test_offline_fleet_row_yields_to_fresh_ble_telemetry_in_merge():
     assert merged[0]["_telemetry_observed_at"] == now
 
 
+@pytest.mark.parametrize("fleet_soc_newer", [False, True])
+@pytest.mark.parametrize("ble_connected", [False, True])
+def test_mapped_ble_state_and_soc_have_independent_freshness(fleet_soc_newer, ble_connected):
+    """W3RT1E: old Fleet/zero watts must not hide newer BLE state or SOC."""
+    power_sync = _power_sync_module()
+    from power_sync.automations.loadpoint_status import build_loadpoint_status
+
+    now = datetime.now(timezone.utc)
+    native = now - timedelta(hours=9)
+    power_at = now - timedelta(hours=4)
+    state_at = now - timedelta(minutes=7)
+    native_soc_at = now - timedelta(minutes=3) if fleet_soc_newer else native
+    native_states = [
+        _State("binary_sensor.primary_ev_status", "on", last_updated=native),
+        _State("binary_sensor.primary_ev_charge_cable", "on", last_updated=native),
+        _State("sensor.primary_ev_charging", "stopped", last_updated=native),
+        _State("sensor.primary_ev_charger_power", "0", {"unit_of_measurement": "kW"}, last_updated=native),
+        _State("sensor.primary_ev_battery_level", "70", last_updated=native_soc_at),
+    ]
+    ble_states = [
+        _State("binary_sensor.home_ble_status", "on", last_updated=now),
+        _State("binary_sensor.home_ble_ble_status", "on" if ble_connected else "off", last_updated=now),
+        _State("sensor.home_ble_charging_state", "Stopped", last_updated=state_at),
+        _State("sensor.home_ble_charge_power", "0", {"unit_of_measurement": "kW"}, last_updated=power_at),
+        _State("sensor.home_ble_charge_level", "67", last_updated=power_at),
+    ]
+    hass = _tesla_hass(native_states + ble_states)
+    hass.entity_registry.entities = {
+        key: value for key, value in hass.entity_registry.entities.items()
+        if "primary_ev" in key
+    }
+    entry = SimpleNamespace(entry_id="entry-1", data={}, options={
+        "ev_provider": "both", "tesla_ble_entity_prefix": "home_ble",
+        "tesla_ble_vehicle_mapping": "5YJTEST0000000001=home_ble",
+    })
+    vehicles = power_sync._get_ev_vehicles_status(hass, entry)
+    assert len(vehicles) == 1
+    vehicle = vehicles[0]
+    expected_soc = 70 if fleet_soc_newer or not ble_connected else 67
+    assert vehicle["ev_soc"] == expected_soc
+    assert vehicle.get("_soc_observed_at") == (
+        native_soc_at if expected_soc == 70 else power_at
+    )
+    row = build_loadpoint_status({}, vehicles)[0]
+    assert row["soc"] == expected_soc
+    if ble_connected:
+        latest = native_soc_at if fleet_soc_newer else state_at
+        assert row["telemetry_state"] == "live"
+        assert row["observed_at"] == latest.isoformat()
+        assert vehicle["_charging_observed_at"] == state_at
+        assert row["current_power_kw"] is None
+        assert row["confidence"] == "unknown"
+        assert row["source"] == "unknown"
+    else:
+        assert row["telemetry_state"] == ("live" if fleet_soc_newer else "stale")
+
+
+def test_ble_battery_receipt_dates_soc_without_renewing_old_watts():
+    power_sync = _power_sync_module()
+    from power_sync.automations.loadpoint_status import build_loadpoint_status
+
+    now = datetime.now(timezone.utc)
+    old = now - timedelta(hours=4)
+    received = now - timedelta(seconds=5)
+    hass = _Hass([
+        _State("binary_sensor.home_ble_status", "on", last_updated=now),
+        _State("sensor.home_ble_charging_state", "Stopped", last_updated=old),
+        _State("sensor.home_ble_charge_power", "0", {"unit_of_measurement": "kW"}, last_updated=old),
+        _State("sensor.home_ble_charge_level", "67", last_updated=old),
+        _State("sensor.home_ble_charge_level_received", received.isoformat(), last_updated=now),
+    ])
+    entry = SimpleNamespace(entry_id="entry-1", data={}, options={
+        "ev_provider": "tesla_ble", "tesla_ble_entity_prefix": "home_ble",
+    })
+    vehicle = power_sync._get_ev_vehicles_status(hass, entry)[0]
+    assert vehicle["_soc_observed_at"] == received
+    assert vehicle["_observed_at"] == old
+    assert vehicle["power_available"] is False
+    row = build_loadpoint_status({}, [vehicle])[0]
+    assert row["telemetry_state"] == "stale"
+    assert row["observed_at"] == old.isoformat()
+    assert row["current_power_kw"] is None
+
+
+def test_quarantined_ble_cannot_renew_telemetry_from_soc_or_connection(monkeypatch):
+    power_sync = _power_sync_module()
+    from power_sync.automations.loadpoint_status import build_loadpoint_status
+
+    monkeypatch.setattr(importlib.import_module("power_sync.tesla_ev_recovery"),
+                        "ble_quarantined", lambda *_args: True)
+    now = datetime.now(timezone.utc)
+    hass = _Hass([
+        _State("binary_sensor.home_ble_status", "on", last_updated=now),
+        _State("sensor.home_ble_charging_state", "Stopped", last_updated=now),
+        _State("sensor.home_ble_charge_power", "0", {"unit_of_measurement": "kW"}, last_updated=now),
+        _State("sensor.home_ble_charge_level", "67", last_updated=now),
+    ])
+    entry = SimpleNamespace(entry_id="entry-1", data={}, options={
+        "ev_provider": "tesla_ble", "tesla_ble_entity_prefix": "home_ble",
+    })
+    vehicle = power_sync._get_ev_vehicles_status(hass, entry, include_control_evidence=True)[0]
+    assert vehicle["ev_soc"] == 67
+    assert vehicle.get("_soc_observed_at") is None
+    assert vehicle["_boost_charging_state_evidence"]["known"] is False
+    row = build_loadpoint_status({}, [vehicle])[0]
+    assert row["telemetry_state"] == "offline"
+    assert row["observed_at"] is None
+    assert row["current_power_kw"] is None
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_native_battery_candidates_choose_newest_soc_report(reverse):
+    power_sync = _power_sync_module()
+    now = datetime.now(timezone.utc)
+    old = now - timedelta(hours=9)
+    states = [
+        _State("sensor.primary_ev_battery_level", "70", last_updated=old),
+        _State("sensor.primary_ev_battery_level_2", "67", last_updated=now),
+    ]
+    vehicle = power_sync._get_ev_vehicles_status(
+        _tesla_hass(list(reversed(states)) if reverse else states), _Entry(),
+    )[0]
+    assert vehicle["ev_soc"] == 67
+    assert vehicle["_soc_observed_at"] == now
+
+
 def test_ble_node_online_does_not_make_disconnected_vehicle_online_or_plugged():
     power_sync = _power_sync_module()
     now = datetime.now(timezone.utc)

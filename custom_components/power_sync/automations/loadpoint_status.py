@@ -224,25 +224,46 @@ def _telemetry_claim(
     connectivity sensor. Other sources fall back to their observation time;
     an untimestamped source with usable power is treated as live.
     """
-    observed_at = _observation_timestamp(
-        observation,
-        "_telemetry_observed_at",
-        "_observed_at",
-        "observed_at",
-        "_charging_observed_at",
-        "_connected_observed_at",
-    )
     state = observation.get("telemetry_state")
     if state == "offline":
         return state, None
     if state in TELEMETRY_STATE_RANK:
+        observed_at = _observation_timestamp(
+            observation, "_telemetry_observed_at", "_observed_at", "observed_at"
+        )
+        has_timestamp = any(observation.get(key) is not None for key in (
+            "_telemetry_observed_at", "_observed_at", "observed_at",
+        ))
+        if has_timestamp and (
+            observed_at is None or observed_at > datetime.now(timezone.utc)
+        ):
+            return ("stale" if state == "live" else state), None
         return state, observed_at
+    # BLE state and measured watts can arrive independently. A retained watt
+    # timestamp must not hide a newer car-state report. This display clock
+    # never changes measurement availability or the power observation time.
+    observed_at = _latest_report_timestamp(
+        observation, "_telemetry_observed_at", "_observed_at", "observed_at",
+        "_charging_observed_at", "_connected_observed_at",
+    )
     if observed_at is not None:
         age = datetime.now(timezone.utc) - observed_at
         return ("live" if age <= TELEMETRY_LIVE_MAX_AGE else "stale"), observed_at
     if observation.get("power_available") is False:
         return "offline", None
     return "live", None
+
+
+def _latest_report_timestamp(
+    observation: Mapping[str, Any], *fields: str,
+) -> datetime | None:
+    """Select real, non-future report times without mixing measurement clocks."""
+    now = datetime.now(timezone.utc)
+    return max((
+        stamp for field in fields
+        if (stamp := _observation_timestamp(observation, field)) is not None
+        and stamp <= now
+    ), default=None)
 
 
 def _telemetry_fields(observation: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -415,11 +436,19 @@ def _merge_observation_status(target: dict[str, Any], source: Mapping[str, Any])
 
     source_soc = source.get("ev_soc", source.get("current_soc"))
     target_soc = target.get("ev_soc", target.get("current_soc"))
+    source_soc_at = _latest_report_timestamp(source, "_soc_observed_at")
+    target_soc_at = _latest_report_timestamp(target, "_soc_observed_at")
+    soc_is_newer = (
+        source_is_newer(source_soc_at, target_soc_at)
+        if source_soc_at is not None or target_soc_at is not None
+        else not target_power_is_newer
+    )
     if source_soc is not None and (
-        target_soc is None or not target_power_is_newer
+        target_soc is None or soc_is_newer
     ):
         target["ev_soc"] = source_soc
         target["current_soc"] = source_soc
+        target["_soc_observed_at"] = source_soc_at
 
     source_presence = str(source.get("site_presence") or "").lower()
     target_presence = str(target.get("site_presence") or "").lower()

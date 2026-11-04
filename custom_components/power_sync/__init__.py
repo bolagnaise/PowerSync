@@ -2344,6 +2344,7 @@ def _get_ev_vehicles_status(hass, entry, *, include_control_evidence=False) -> l
         latest_report_at = None
         charging_state_reported_at = None
         positive_native_reported_at = None
+        soc_observed_at = None
 
         for entity in entity_registry.entities.values():
             if entity.device_id != device.id:
@@ -2503,11 +2504,20 @@ def _get_ev_vehicles_status(hass, entry, *, include_control_evidence=False) -> l
                 ):
                     measured_power_kw = max(measured_power_kw, val)
 
-            if ev_soc is None and "battery" in eid and "range" not in eid and "heater" not in eid:
+            if "battery" in eid and "range" not in eid and "heater" not in eid:
                 try:
                     val = float(state.state)
-                    if 0 <= val <= 100:
+                    candidate_soc_at = _ev_power_observed_at(state)
+                    if candidate_soc_at and candidate_soc_at > datetime.now(timezone.utc):
+                        continue
+                    if 0 <= val <= 100 and (
+                        ev_soc is None
+                        or candidate_soc_at is not None and (
+                            soc_observed_at is None or candidate_soc_at > soc_observed_at
+                        )
+                    ):
                         ev_soc = int(val)
+                        soc_observed_at = candidate_soc_at
                 except (ValueError, TypeError):
                     pass
 
@@ -2628,6 +2638,9 @@ def _get_ev_vehicles_status(hass, entry, *, include_control_evidence=False) -> l
             "_positive_native_reported_at": positive_native_reported_at,
             "telemetry_state": telemetry_state,
             "_telemetry_observed_at": telemetry_observed_at,
+            "_soc_observed_at": (
+                soc_observed_at if telemetry_state != "offline" else None
+            ),
         }
         if include_control_evidence and charging_state_evidence is not None:
             vehicle_status["_boost_charging_state_evidence"] = charging_state_evidence
@@ -2638,6 +2651,11 @@ def _get_ev_vehicles_status(hass, entry, *, include_control_evidence=False) -> l
                 and is_current_ev_power_observation(measured_power_observed_at)
             )
         elif stale_plug_unconfirmed:
+            vehicle_status["power_available"] = False
+        elif (vehicle_observed_at is not None
+              and not is_current_ev_power_observation(vehicle_observed_at)):
+            # A newer BLE state may refresh display telemetry below; it must
+            # not expose this expired native idle zero as measured power.
             vehicle_status["power_available"] = False
         if power_available_override is not None:
             vehicle_status["power_available"] = power_available_override
@@ -2779,6 +2797,7 @@ def _get_ev_vehicles_status(hass, entry, *, include_control_evidence=False) -> l
         ble_connected_observed_at = None
         current_amps = None
         charging_state_plugged = None
+        ble_soc_observed_at = None
 
         charge_state = get_tesla_ble_charging_state(hass, prefix)
         if charge_state and charge_state.state not in ("unknown", "unavailable"):
@@ -2966,6 +2985,7 @@ def _get_ev_vehicles_status(hass, entry, *, include_control_evidence=False) -> l
         if soc_state and soc_state.state not in ("unknown", "unavailable"):
             try:
                 ev_soc = int(float(soc_state.state))
+                ble_soc_observed_at = get_tesla_ble_observed_at(hass, soc_state)
             except (ValueError, TypeError):
                 pass
 
@@ -2978,6 +2998,7 @@ def _get_ev_vehicles_status(hass, entry, *, include_control_evidence=False) -> l
             # as measured 0.00 kW / Idle in the EV card.
             "power_available": power_available,
             "ev_soc": ev_soc,
+            "_soc_observed_at": ble_soc_observed_at,
             "is_connected": is_connected,
             # Keep a fresh BLE Charging state distinct from the availability
             # of its watt measurement. This informs status only; commands
@@ -3026,6 +3047,8 @@ def _get_ev_vehicles_status(hass, entry, *, include_control_evidence=False) -> l
                 "_power_activity_unknown": True,
                 "_observed_at": None,
                 "_charging_observed_at": None,
+                "_connected_observed_at": None,
+                "_soc_observed_at": None,
                 "transport_quarantined": True,
             })
             ble_observation.pop("current_amps", None)
@@ -3046,6 +3069,7 @@ def _get_ev_vehicles_status(hass, entry, *, include_control_evidence=False) -> l
                 "ev_power_kw": 0.0, "power_available": False,
                 "_observed_at": None, "_charging_observed_at": None,
                 "_connected_observed_at": None,
+                "_soc_observed_at": None,
             })
             ble_observation.pop("site_presence", None)
             ble_observation.pop("_site_presence_observed_at", None)
@@ -3232,6 +3256,7 @@ def _get_ev_vehicles_status(hass, entry, *, include_control_evidence=False) -> l
             "_connected_observed_at",
             "_site_presence_observed_at",
             "_telemetry_observed_at",
+            "_soc_observed_at",
         ):
             if vehicle.get(timestamp_field) is None:
                 vehicle.pop(timestamp_field, None)
@@ -21852,6 +21877,7 @@ class EVLoadpointStatusView(HomeAssistantView):
                     "power_available": vehicle.get("power_available", True),
                     "_power_activity_unknown": vehicle.get("_power_activity_unknown", False),
                     "ev_soc": vehicle.get("ev_soc"),
+                    "_soc_observed_at": vehicle.get("_soc_observed_at"),
                     "current_amps": vehicle.get("current_amps"),
                     "is_connected": vehicle.get("is_connected", False),
                     "is_charging": vehicle.get("is_charging", False),

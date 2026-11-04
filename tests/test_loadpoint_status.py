@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 import types
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -24,6 +24,7 @@ from power_sync.automations.loadpoint_status import (  # noqa: E402
     build_generic_charger_observation,
     build_loadpoint_status,
     charging_state_plugged_status,
+    coalesce_vehicle_observations,
     coalesce_ev_widget_data,
     resolve_loadpoint_surplus_power_kw,
     resolve_vehicle_display_name,
@@ -102,6 +103,151 @@ def test_newer_unavailable_ble_status_keeps_fresh_fleet_power_measurement():
     assert target["current_power_kw"] == 2.3
     assert target["power_available"] is True
     assert target["is_charging"] is True
+
+
+@pytest.mark.parametrize("fresh_field", [
+    "_charging_observed_at", "_connected_observed_at",
+])
+def test_vehicle_telemetry_uses_newest_report_without_renewing_power(fresh_field):
+    now = datetime.now(timezone.utc)
+    fresh = now - timedelta(minutes=7)
+    row = build_loadpoint_status({}, [{
+        "vehicle_id": "5YJTEST0000000001", "vehicle_name": "PRIMARY EV",
+        "ev_power_kw": 0.0, "power_available": False,
+        "is_connected": True, "is_charging": False,
+        "_observed_at": now - timedelta(hours=4), fresh_field: fresh,
+    }])[0]
+
+    assert row["telemetry_state"] == "live"
+    assert row["observed_at"] == fresh.isoformat()
+    assert row["current_power_kw"] is None
+    assert row["confidence"] == "unknown"
+    assert row["actual_charging"] is False
+
+
+@pytest.mark.parametrize("state", ["asleep", "offline"])
+def test_native_connectivity_remains_authoritative_over_other_timestamps(state):
+    now = datetime.now(timezone.utc)
+    old = now - timedelta(hours=4)
+    row = build_loadpoint_status({}, [{
+        "vehicle_id": "5YJTEST0000000001", "vehicle_name": "PRIMARY EV",
+        "is_connected": True, "power_available": False,
+        "telemetry_state": state, "_telemetry_observed_at": old,
+        "_charging_observed_at": now,
+    }])[0]
+
+    assert row["telemetry_state"] == state
+    assert row["observed_at"] == (None if state == "offline" else old.isoformat())
+    assert row["current_power_kw"] is None
+
+
+@pytest.mark.parametrize("invalid", ["not-a-time", "future"])
+def test_invalid_new_vehicle_timestamp_cannot_make_old_telemetry_live(invalid):
+    now = datetime.now(timezone.utc)
+    old = now - timedelta(hours=4)
+    row = build_loadpoint_status({}, [{
+        "vehicle_id": "5YJTEST0000000001", "vehicle_name": "PRIMARY EV",
+        "is_connected": True, "power_available": False,
+        "_observed_at": old,
+        "_charging_observed_at": now + timedelta(hours=1) if invalid == "future" else invalid,
+    }])[0]
+
+    assert row["telemetry_state"] == "stale"
+    assert row["observed_at"] == old.isoformat()
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("newer_power_available", [False, True])
+def test_soc_merges_by_battery_timestamp_independently_of_power(reverse, newer_power_available):
+    now = datetime.now(timezone.utc)
+    older = {
+        "ev_soc": 70, "_soc_observed_at": now - timedelta(hours=9),
+        "ev_power_kw": 0.0, "power_available": True, "_observed_at": now,
+    }
+    newer = {
+        "ev_soc": 67, "_soc_observed_at": now - timedelta(hours=4),
+        "ev_power_kw": 0.0, "power_available": newer_power_available,
+        "_observed_at": now - timedelta(hours=4),
+    }
+    target, source = (dict(newer), older) if reverse else (dict(older), newer)
+    _merge_observation_status(target, source)
+
+    assert target["ev_soc"] == 67
+    assert target["_soc_observed_at"] == newer["_soc_observed_at"]
+    assert target["power_available"] is True
+    assert target["_observed_at"] == now
+
+
+@pytest.mark.parametrize("source_stamp", [None, "invalid", "future"])
+def test_undated_or_invalid_soc_does_not_replace_dated_battery(source_stamp):
+    now = datetime.now(timezone.utc)
+    target = {"ev_soc": 70, "_soc_observed_at": now - timedelta(minutes=2)}
+    _merge_observation_status(target, {
+        "ev_soc": 67, "_soc_observed_at": (
+            now + timedelta(hours=1) if source_stamp == "future" else source_stamp
+        ), "_observed_at": now,
+    })
+    assert target["ev_soc"] == 70
+
+
+def test_soc_timestamp_cannot_renew_vehicle_state_or_power():
+    now = datetime.now(timezone.utc)
+    old = now - timedelta(hours=4)
+    row = build_loadpoint_status({}, [{
+        "vehicle_id": "5YJTEST0000000001", "vehicle_name": "PRIMARY EV",
+        "is_connected": True, "power_available": False,
+        "ev_soc": 67, "_soc_observed_at": now,
+        "_observed_at": old, "_charging_observed_at": old,
+    }])[0]
+    assert row["soc"] == 67
+    assert row["telemetry_state"] == "stale"
+    assert row["observed_at"] == old.isoformat()
+    assert row["current_power_kw"] is None
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_newer_soc_stays_on_exact_mapped_car_in_two_vehicle_merge(reverse):
+    now = datetime.now(timezone.utc)
+    first = "5YJTEST0000000001"
+    second = "5YJTEST0000000002"
+    rows = [
+        {"vehicle_id": first, "vehicle_name": "FIRST", "ev_soc": 70,
+         "_soc_observed_at": now - timedelta(hours=9)},
+        {"vehicle_id": second, "vehicle_name": "SECOND", "ev_soc": 51,
+         "_soc_observed_at": now - timedelta(hours=9)},
+        {"vehicle_id": "ble_primary", "vehicle_name": "Tesla BLE (primary)",
+         "bridge_vehicle_id": first, "ev_soc": 67,
+         "_soc_observed_at": now - timedelta(hours=4), "power_available": False},
+    ]
+    merged = coalesce_vehicle_observations(list(reversed(rows)) if reverse else rows)
+    assert {row["vehicle_id"]: row["ev_soc"] for row in merged} == {first: 67, second: 51}
+
+
+def test_equal_soc_timestamps_keep_existing_sample_and_legacy_rows_still_merge():
+    now = datetime.now(timezone.utc)
+    target = {"ev_soc": 70, "_soc_observed_at": now, "power_available": False}
+    _merge_observation_status(target, {
+        "ev_soc": 67, "_soc_observed_at": now, "power_available": True,
+    })
+    assert target["ev_soc"] == 70
+    legacy = {"ev_soc": 70, "power_available": False}
+    _merge_observation_status(legacy, {"ev_soc": 67, "power_available": True})
+    assert legacy["ev_soc"] == 67
+
+
+@pytest.mark.parametrize("invalid", ["invalid", "future"])
+def test_explicit_live_telemetry_rejects_invalid_report_timestamp(invalid):
+    now = datetime.now(timezone.utc)
+    row = build_loadpoint_status({}, [{
+        "vehicle_id": "5YJTEST0000000001", "vehicle_name": "PRIMARY EV",
+        "is_connected": True, "power_available": False,
+        "telemetry_state": "live", "_telemetry_observed_at": (
+            now + timedelta(hours=1) if invalid == "future" else invalid
+        ),
+    }])[0]
+    assert row["telemetry_state"] == "stale"
+    assert row["observed_at"] is None
+    assert row["current_power_kw"] is None
 
 
 def test_generic_charger_soc_resolver_prefers_primary_sensor():
