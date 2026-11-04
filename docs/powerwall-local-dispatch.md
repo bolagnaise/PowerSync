@@ -70,6 +70,18 @@ Before native Max captures its restore tariff, PowerSync waits for an earlier pr
 
 Cloud Max charging has a separate implementation and delivery history. This section describes the Home Assistant control path.
 
+### Keep pairing settings during Native Max recovery
+
+While a Native Max session or its saved cleanup is pending, PowerSync refuses
+re-pairing, unpairing and Gateway address changes. Finish **Restore Normal**
+before changing those settings. A pairing handshake also checks again before
+saving its new key, so a session started during pairing keeps its recovery owner.
+
+This protection prevents losing access to the original cleanup identity. It
+does not clear or transfer a record already tied to an older pairing. If cleanup
+reports another paired identity, retain the saved record and seek support;
+deleting it or pairing again does not prove the original settings were restored.
+
 ## Grid Charging confirmation for Tariff discharge
 
 ### Returning to Tariff after failed Local V1R setup

@@ -94,6 +94,17 @@ def test_pairing_success_schedules_local_warmup_without_blocking():
     assert "_schedule_local_coordinator_warmup(hass, entry)" in button_source
 
 
+def test_pairing_callback_failure_does_not_report_verified_or_retain_result():
+    async def reject_replacement(_result):
+        raise RuntimeError("Powerwall recovery is pending")
+    manager = pairing.PowerwallPairingManager(
+        object(), "https://example.invalid", "token", on_success=reject_replacement)
+    asyncio.run(manager._complete(b"private", b"public", "gateway", 123))
+    assert manager.status().state == pairing.PairingState.FAILED
+    assert manager.result() is None
+    assert manager.status().error
+
+
 PUBLIC_KEY = b"this attempt's DER public key"
 PUBLIC_KEY_B64 = base64.b64encode(PUBLIC_KEY).decode()
 
