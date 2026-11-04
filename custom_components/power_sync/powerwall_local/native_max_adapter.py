@@ -18,7 +18,7 @@ import time
 from .battery_dispatch import battery_watts, site_grid_limits_w, validate_dispatch_config
 from .full_rate_charge import native_max_charge_eligibility
 from .control_method import control_policy_result
-from .native_max_charge import (NativeMaxChargeError, NativeMaxTariffNotSubmitted,
+from .native_max_charge import (NativeMaxChargeError, NativeMaxRestorePending, NativeMaxTariffNotSubmitted,
     NativeMaxTariffRejected, NativeMaxExportNotSubmitted, NativeMaxExportRejected)
 from ..tesla_export_permissions import EXPORT_RULES, ExportRuleReading
 
@@ -659,6 +659,118 @@ class NativeMaxChargeAdapter:
             if self.token == token:
                 self.token = None
         return result
+
+    def pairing_recovery_current(self):
+        return self.current_identity() == self.identity and self.client.local_access_enabled
+
+    def _pairing_recovery_claim(self, record):
+        return {"entry_id": self.entry_id, "token": record["id"],
+                "expires_at": record["expires_at"], "direction": "charge",
+                "preparing": False}
+
+    async def pairing_recovery_site(self, record):
+        """Prove the old owner is this site without trusting the changed key.
+
+        Legacy native journals contain an opaque pairing hash. Their separate
+        durable site claim is the provenance; a new pairing alone is not proof.
+        This path only retires already released, expired charge settings. It
+        never grants permission to restore through the replacement pairing.
+        """
+        baseline, progress = record["baseline"], record.get("cleanup", {})
+        if (record["phase"] not in ("restoring", "settling", "restored")
+                or baseline.get("direction", "charge") != "charge"
+                or progress.get("mode_released") is not True
+                or progress.get("reserve_released") is not True
+                or self.clock() < record["expires_at"]
+                or record.get("local_acceptance_until", 0) + 1 > self.clock()
+                or record.get("kick_lease_until", 0) > self.clock()
+                or any(record.get(key) for key in ("kick_pending", "grid_charge_intent",
+                                                  "tariff_intent", "export_intent", "export_conflict"))
+                or not self.pairing_recovery_current()):
+            return None
+        receipt = record.get("pairing_recovery")
+        expected = {"site": self.site, "identity": self.identity, "token": record["id"]}
+        if receipt is not None and any(receipt.get(key) != value for key, value in expected.items()):
+            return None
+        await self.budget.load()
+        async with self.budget.lock:
+            if not self.pairing_recovery_current():
+                return None
+            owner = self.budget.entries.get(f"native_max:{self.entry_id}")
+            if owner is None:
+                # Only confirmed persisted recovery can follow a site release
+                # whose subsequent journal clear failed or was interrupted.
+                return self.site if (not self.budget.native_max_claim(self.site)
+                                     and record["phase"] == "restored" and receipt
+                                     and receipt.get("confirmed") is True) else None
+            claim = owner.get("native_max", {})
+            defaults = {"direction": "charge", "ev_coexistence": False, "preparing": False}
+            if (owner.get("site") != self.site or any(
+                    claim.get(key, defaults.get(key)) != value
+                    for key, value in self._pairing_recovery_claim(record).items())):
+                return None
+            return self.site
+
+    async def release_after_pairing_change(self, record, fence):
+        fence()
+        # Journal persistence can yield for an arbitrary time. Repeat the
+        # complete read-only proof after that save, before releasing capacity.
+        if await self.pairing_recovery_complete(record, fence) is not True:
+            return False
+        fence()
+        confirmed_at = self.monotonic()
+        def release_fence():
+            fence()
+            if not 0 <= self.monotonic() - confirmed_at <= 5:
+                raise NativeMaxRestorePending("Native Max pairing recovery proof expired")
+        return await self.budget.release_native_max(
+            self.entry_id, self.site, record["id"], expected=self._pairing_recovery_claim(record),
+            before_release=release_fence)
+
+    async def pairing_recovery_complete(self, record, fence):
+        """Read-only confirmation; incomplete proof retains both journals."""
+        async def current():
+            fence()
+            site = await self.pairing_recovery_site(record)
+            fence()
+            return site == self.site
+
+        async def settings_released():
+            if not await current():
+                return False
+            started = self.monotonic()
+            config = await self.client._transport.read_config(self.client._din)
+            fence()
+            if (not await current() or not 0 <= self.monotonic() - started <= 5
+                    or not isinstance(config, dict)):
+                return False
+            baseline = record["baseline"]
+            info = config.get("site_info")
+            mode = config.get("default_real_mode")
+            reserve = info.get("backup_reserve_percent") if isinstance(info, dict) else None
+            if (mode not in ("autonomous", "self_consumption", "backup")
+                    or (mode == "autonomous" and baseline.get("mode") != "autonomous")
+                    or type(reserve) not in (int, float) or not math.isfinite(reserve)
+                    or not 0 <= reserve <= 100
+                    or (reserve == baseline.get("force_reserve", 100) and reserve != baseline.get("reserve"))):
+                return False
+            started = self.monotonic()
+            tariff = await self.read_tariff()
+            fence()
+            return (await current() and 0 <= self.monotonic() - started <= 5
+                    and isinstance(tariff, dict) and bool(tariff)
+                    and bool(self.restorable(tariff)))
+
+        try:
+            if not await settings_released():
+                return False
+            if await self.settled(deepcopy(record["baseline"])) is not True:
+                return False
+            # Re-read after the two physical samples; a new tariff or setting
+            # must not be hidden by an earlier successful observation.
+            return await settings_released()
+        except Exception:
+            return False
 
     async def restoration_tariff_current(self):
         """Revalidate saved cleanup progress without submitting any writes."""
