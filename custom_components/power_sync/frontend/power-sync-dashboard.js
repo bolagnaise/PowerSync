@@ -265,6 +265,10 @@ details.res .kv { margin-top: 10px; font-size: 13px; }
 .timing-label { font-size: 12px; color: var(--muted); }
 .timing-summary { color: var(--fg-2); font-size: 13px; }
 .stepper output { min-width: 64px; text-align: center; font-family: var(--mono); font-size: 14px; }
+.power-limit { display: flex; flex-direction: column; gap: 8px; }
+.power-limit output { flex: none; font-size: 14px; }
+.power-limit input { width: 100%; min-width: 0; height: 32px; margin: 0; accent-color: var(--cyan); cursor: pointer; }
+.power-limit input:disabled { opacity: .45; cursor: default; }
 .switch { position: relative; width: 44px; height: 26px; border-radius: 13px; border: 0; background: var(--hold); cursor: pointer; flex: none; transition: background .2s; }
 .switch::after { content: ""; position: absolute; top: 3px; left: 3px; width: 20px; height: 20px; border-radius: 50%; background: #fff; transition: transform .2s; }
 .switch[aria-checked="true"] { background: var(--green); }
@@ -1946,8 +1950,18 @@ class PsControlsCard extends PsCardBase {
     this._until = '';
     this._confirmToken = null;
     this._saveTimer = null;
-    this.addEventListener('input', e => this._onTimingInput(e));
-    this.addEventListener('change', e => { if (e.target.dataset?.timingInput) this._saveCustomDuration(); });
+    this._powerEditing = false;
+    this.addEventListener('input', e => {
+      if (e.target.dataset?.powerLimit != null) this._onPowerInput(e);
+      else this._onTimingInput(e);
+    });
+    this.addEventListener('change', e => {
+      if (e.target.dataset?.powerLimit != null) this._onPowerChange(e);
+      else if (e.target.dataset?.timingInput) this._saveCustomDuration();
+    });
+    this.addEventListener('focusout', e => {
+      if (e.target.dataset?.powerLimit != null) { this._powerEditing = false; this._invalidate(); }
+    });
     this._confirm = null;
     this._confirmTimer = null;
     this.addEventListener('click', e => this._onClick(e));
@@ -1963,6 +1977,8 @@ class PsControlsCard extends PsCardBase {
   }
 
   _render() {
+    // Keep the native range element in place while dragging or saving it.
+    if (this._powerEditing) return;
     const hass = this._hass, en = this.ents;
     this._initTiming();
     const focused = this.querySelector('[data-timing-input]:focus');
@@ -1982,6 +1998,7 @@ class PsControlsCard extends PsCardBase {
     const remaining = restoring || starting ? NaN : Number(modeState?.attributes?.remaining_minutes);
     const power = psState(hass, en.forcePower);
     const powerKw = Number(power?.state);
+    const powerLabel = Number.isFinite(powerKw) ? (powerKw > 0 ? `${powerKw.toFixed(1)} kW` : 'Max') : 'Unavailable';
     if (this._confirm && (this._confirmPower !== power?.state || this._confirmTimezone !== hass?.config?.time_zone)) this._clearConfirm();
     const timing = this._timingRequest();
     const btn = (kind, cls) => {
@@ -2003,7 +2020,7 @@ class PsControlsCard extends PsCardBase {
         ${btn('charge', 'primary')}${btn('discharge', 'amber')}${btn('self', 'quiet')}${btn('hold', 'quiet')}
         ${active ? `<button type="button" class="btn danger full${this._confirm === 'restore' ? ' confirming' : ''}" data-kind="restore">${restoring ? 'Restoring…' : this._confirm === 'restore' ? 'Confirm restore normal' : 'Restore normal'}</button>` : ''}
       </div>
-      ${power ? `<div class="row2"><span class="lab">Power limit<small>Max uses the fastest rate allowed</small></span><div class="stepper"><button type="button" data-step="power" data-d="-1" aria-label="Lower power limit">−</button><output class="num">${Number.isFinite(powerKw) && powerKw > 0 ? `${powerKw.toFixed(1)} kW` : 'Max'}</output><button type="button" data-step="power" data-d="1" aria-label="Raise power limit">+</button></div></div>` : ''}
+      ${power ? `<label class="power-limit"><span class="row2"><span class="lab">Power limit<small>0 = Max · fastest rate allowed</small></span><output class="num" data-power-readout>${powerLabel}</output></span><input type="range" data-power-limit min="${Number(power.attributes?.min ?? 0)}" max="${Number(power.attributes?.max ?? 100)}" step="${Number(power.attributes?.step) || 1}" value="${Number.isFinite(powerKw) ? powerKw : 0}" aria-label="Power limit" aria-valuetext="${powerLabel}" ${Number.isFinite(powerKw) ? '' : 'disabled'}></label>` : ''}
       <p class="hint">Tap a button twice to confirm. Hold charge and Power the home use the Run for preset.</p>`;
     if (focus) {
       const input = this.querySelector(`[data-timing-input="${focus.key}"]`);
@@ -2083,6 +2100,33 @@ class PsControlsCard extends PsCardBase {
     this._invalidate();
   }
 
+  _onPowerInput(e) {
+    const value = Number(e.target.value);
+    if (!Number.isFinite(value)) return;
+    this._powerEditing = true;
+    this._clearConfirm();
+    const label = value > 0 ? `${value.toFixed(1)} kW` : 'Max';
+    const output = this.querySelector('[data-power-readout]');
+    if (output) output.textContent = label;
+    e.target.setAttribute('aria-valuetext', label);
+  }
+
+  async _onPowerChange(e) {
+    this._powerEditing = true;
+    this._clearConfirm();
+    try {
+      const id = this.ents.forcePower, state = psState(this._hass, id);
+      const value = Number(e.target.value);
+      if (!state || !Number.isFinite(Number(state.state)) || !Number.isFinite(value)) return;
+      const min = Number(state.attributes?.min ?? 0), max = Number(state.attributes?.max ?? 100);
+      const next = Math.round(Math.max(min, Math.min(max, value)) * 100) / 100;
+      if (next !== Number(state.state)) await this._call('number', 'set_value', { entity_id: id, value: next });
+    } finally {
+      this._powerEditing = false;
+      this._invalidate();
+    }
+  }
+
   _saveCustomDuration() {
     if (this._timingMode !== 'duration') return;
     const value = this._customMinutes(), id = this.ents.customDischarge;
@@ -2129,13 +2173,6 @@ class PsControlsCard extends PsCardBase {
         if (!Number.isFinite(value)) return;
         this._setCustomMinutes(Math.max(1, Math.min(1440, value + Number(step.dataset.d))));
         this._saveCustomDuration();
-      } else {
-        const id = en.forcePower, state = psState(hass, id);
-        if (!state) return;
-        const inc = Number(state.attributes?.step) || 1;
-        const min = Number(state.attributes?.min ?? 0), max = Number(state.attributes?.max ?? 100);
-        const next = Math.max(min, Math.min(max, (Number(state.state) || 0) + inc * Number(step.dataset.d)));
-        this._call('number', 'set_value', { entity_id: id, value: Math.round(next * 100) / 100 });
       }
       this._invalidate();
       return;
