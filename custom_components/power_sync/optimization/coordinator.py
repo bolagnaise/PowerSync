@@ -6052,6 +6052,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         time-out) don't block async_setup_entry and risk HA bootstrap
         stage 2 cancellation.
         """
+        source = getattr(self, "price_coordinator", None)
+        if type(source).__name__ == "OctopusPriceCoordinator" and self._monitoring_mode_active():
+            _LOGGER.info("Octopus startup: external battery ownership — no mode or reserve writes")
+            return
         force = self._get_active_force_state()
         if force and force.get("active") and force.get("source") != "optimizer":
             return  # Startup must not change a newer manual/external force mode.

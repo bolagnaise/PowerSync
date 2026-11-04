@@ -14,7 +14,7 @@ def optimizer_class():
     tree = ast.parse(path.read_text())
     cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "OptimizationCoordinator")
     selected = {"_is_octopus_dynamic_tariff", "_price_update_generation_key", "_on_price_update",
-                "_run_octopus_price_updates", "_execute_optimizer_action", "_monitoring_mode_active", "_setup_price_listener"}
+                "_run_octopus_price_updates", "_execute_optimizer_action", "_monitoring_mode_active", "_setup_price_listener", "_deferred_enable_restore"}
     cls.body = [n for n in cls.body if getattr(n, "name", None) in selected]
     cls.bases = []
     for n in cls.body:
@@ -122,4 +122,15 @@ def test_expired_price_blocks_a_matching_cached_plan_at_command_boundary():
             "channelType": "general", "valid_from": "2020-01-01T00:00:00Z", "valid_to": "2020-01-01T00:30:00Z",
         }]
         await obj._execute_optimizer_action(NS(action="charge"))
+    asyncio.run(scenario())
+
+
+def test_intelligent_flux_startup_cannot_restore_or_change_battery_modes():
+    async def scenario():
+        obj = optimizer_class()()
+        obj.price_coordinator = source()
+        obj.price_coordinator.data["octopus"] = {"external_battery_control": True}
+        # Reaching force/telemetry/executor access would fail: ownership is
+        # established before startup attempts any battery read or write.
+        await obj._deferred_enable_restore()
     asyncio.run(scenario())
