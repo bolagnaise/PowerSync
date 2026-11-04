@@ -1,4 +1,10 @@
-<!-- release: v2.12.1624 -->
+<!-- release: v2.12.1625 -->
+
+## Tesla EV Stop after a session change
+
+Tesla EV Stop now remains available after a charging session changes, expires or reloads when an earlier native current command has an unknown outcome. PowerSync still checks the exact vehicle and provider; it retains the uncertain command record, so Start and current adjustments may remain on hold.
+
+Update through HACS and restart Home Assistant. Leave saved recovery records unchanged.
 
 ## Powerwall charge recovery after re-pairing
 
