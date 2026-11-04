@@ -44,6 +44,170 @@ def _stored_inventory():
             "last_observed_at": "2026-10-31T09:55:00+00:00"}
 
 
+def _paired_local_solve(opt_module, monkeypatch):
+    """Use real source selection with independently clocked cloud/local data."""
+    clock = {"now": datetime(2026, 11, 4, 1, 40, tzinfo=timezone.utc),
+             "monotonic": 1000.0,
+             "data": {"battery_level": 50.0, "battery_power": -10.0,
+                      "grid_power": 14.0, "solar_power": 3.0,
+                      "load_power": 4.0, "raw_home_load_power": 7.0,
+                      "ev_power": 3.0, "firmware": "cloud-metadata"}}
+    coordinator = _charging_solve_coordinator(opt_module, monkeypatch, clock)
+    coordinator._get_energy_data = opt_module.OptimizationCoordinator._get_energy_data.__get__(coordinator)
+    coordinator._entry.data["powerwall_local_paired"] = True
+    coordinator.energy_coordinator = SimpleNamespace(data=clock["data"])
+    local = SimpleNamespace(
+        data=SimpleNamespace(soc=50.0, battery_w=-10_000.0, grid_w=14_000.0,
+                             solar_w=3000.0, load_w=7000.0,
+                             observed_monotonic=1000.0),
+        last_success_monotonic=1000.0, last_success_ts=clock["now"].timestamp(),
+        last_update_success=True,
+    )
+    coordinator.hass.data["power_sync"] = {
+        coordinator.entry_id: {"powerwall_local": {"coordinator": local}}
+    }
+    monkeypatch.setattr(opt_module.dt_util, "utcnow", lambda: clock["now"])
+    time_module = SimpleNamespace(**vars(opt_module.time))
+    time_module.monotonic = lambda: clock["monotonic"]
+    monkeypatch.setattr(opt_module, "time", time_module)
+    clock["data"]["last_update"] = clock["now"]
+    return coordinator, clock, local
+
+
+def test_paired_optimizer_uses_one_local_sample_and_keeps_cloud_metadata(opt_module, monkeypatch):
+    coordinator, clock, local = _paired_local_solve(opt_module, monkeypatch)
+    local.data.soc = 54.99
+    local.data.battery_w = 4500.0
+    local.data.grid_w = 0.0
+    local.data.solar_w = 2500.0
+    data = coordinator._get_energy_data()
+    assert data["battery_level"] == 54.99
+    assert data["battery_power"] == 4.5
+    assert data["grid_power"] == 0.0
+    assert data["solar_power"] == 2.5
+    assert data["load_power"] == 4.0  # Gross local load minus the observed EV once.
+    assert data["firmware"] == "cloud-metadata"
+    assert clock["data"]["battery_level"] == 50.0
+    assert data["last_update"] == clock["now"]
+    clock["now"] += timedelta(seconds=10)
+    clock["monotonic"] += 10
+    assert coordinator._get_energy_data()["last_update"] == data["last_update"]
+
+
+def test_stepped_cloud_soc_cannot_dilute_fresh_local_measured_origin(opt_module, monkeypatch):
+    """Ticket #144: changed, delayed SOC at a charge/discharge transition."""
+    coordinator, clock, local = _paired_local_solve(opt_module, monkeypatch)
+    _run_to_acquisition_cost(coordinator)
+    coordinator._battery_provenance_available = True
+    coordinator._battery_provenance_grid_kwh = 13.5
+    coordinator._battery_provenance_unknown_kwh = 0.0
+    coordinator._battery_provenance_grid_cost = 1.35
+    coordinator._track_actual_cost()
+    energy, cost = 13.5, 1.35
+    cloud_soc = 50.0
+    for index, power in enumerate([-10.0, -10.0, -10.0, 4.5, 4.5, -10.0]):
+        clock["now"] += timedelta(seconds=60)
+        clock["monotonic"] += 60
+        if index in (2, 4):
+            cloud_soc = energy / 27 * 100
+        delta = -power / 60
+        cost = cost + delta * 0.093 if delta > 0 else cost * (energy + delta) / energy
+        energy += delta
+        clock["data"].update(battery_level=cloud_soc, battery_power=power,
+                             grid_power=max(0.0, -power), solar_power=0.0,
+                             last_update=clock["now"])
+        local.data.soc = energy / 27 * 100
+        local.data.battery_w = power * 1000
+        local.data.grid_w = max(0.0, -power) * 1000
+        local.data.solar_w = 0.0
+        local.data.observed_monotonic = clock["monotonic"]
+        local.last_success_monotonic = clock["monotonic"]
+        local.last_success_ts = clock["now"].timestamp()
+        _run_to_acquisition_cost(coordinator)
+        _run_to_acquisition_cost(coordinator)
+        assert coordinator._battery_provenance_total_kwh() == pytest.approx(energy)
+        assert coordinator._battery_provenance_grid_kwh == pytest.approx(energy)
+        assert coordinator._battery_provenance_unknown_kwh == pytest.approx(0.0)
+        assert coordinator._battery_provenance_grid_cost == pytest.approx(cost)
+        assert clock["acquisition_cost"] == pytest.approx(cost / energy)
+
+
+def test_local_cloud_source_switches_do_not_settle_old_samples_twice(opt_module, monkeypatch):
+    coordinator, clock, local = _paired_local_solve(opt_module, monkeypatch)
+    coordinator._entry.data["powerwall_local_paired"] = False
+    _run_to_acquisition_cost(coordinator)
+    coordinator._track_actual_cost()
+    start = clock["now"]
+    clock["now"] += timedelta(seconds=10)
+    clock["monotonic"] += 10
+    coordinator._entry.data["powerwall_local_paired"] = True
+    local.data.observed_monotonic += 8  # Request start precedes its success.
+    local.last_success_monotonic += 10
+    local.last_success_ts = clock["now"].timestamp()
+    local.data.soc = (13.5 + 10 * 8 / 3600) / 27 * 100
+    _run_to_acquisition_cost(coordinator)
+    assert coordinator._actual_charge_kwh_today == pytest.approx(10 * 8 / 3600)
+    assert coordinator._last_cost_tracking_time == start + timedelta(seconds=8)
+    local.last_update_success = False
+    clock["data"]["last_update"] = start + timedelta(seconds=5)
+    _run_to_acquisition_cost(coordinator)
+    assert coordinator._actual_charge_kwh_today == pytest.approx(10 * 8 / 3600)
+    assert coordinator._last_cost_tracking_time == start + timedelta(seconds=8)
+    clock["now"] += timedelta(seconds=20)
+    clock["monotonic"] += 20
+    clock["data"]["last_update"] = start + timedelta(seconds=25)
+    _run_to_acquisition_cost(coordinator)
+    assert coordinator._actual_charge_kwh_today == pytest.approx(10 * 25 / 3600)
+    local.last_update_success = True
+    _run_to_acquisition_cost(coordinator)  # Local request is still fresh but older.
+    assert coordinator._actual_charge_kwh_today == pytest.approx(10 * 25 / 3600)
+    assert coordinator._last_cost_tracking_time == start + timedelta(seconds=25)
+
+
+@pytest.mark.parametrize("boundary", [
+    "unpaired", "other_brand", "failed", "missing", "stale", "stale_snapshot",
+    "future_snapshot", "no_timestamp", "no_wall_timestamp", "future_wall_timestamp",
+    "missing_soc", "nan_soc", "invalid_soc", "missing_power", "nan_power", "missing_grid",
+    "missing_solar", "missing_load",
+])
+def test_local_optimizer_source_falls_back_atomically(opt_module, monkeypatch, boundary):
+    coordinator, clock, local = _paired_local_solve(opt_module, monkeypatch)
+    local.data.soc = 54.99
+    local.data.battery_w = 4500.0
+    if boundary == "unpaired":
+        coordinator._entry.data["powerwall_local_paired"] = False
+    elif boundary == "other_brand":
+        coordinator.battery_system = "sigenergy"
+    elif boundary == "failed":
+        local.last_update_success = False
+    elif boundary == "missing":
+        local.data = None
+    elif boundary == "stale":
+        local.last_success_monotonic -= 31
+    elif boundary == "stale_snapshot":
+        local.data.observed_monotonic -= 31
+    elif boundary == "future_snapshot":
+        local.data.observed_monotonic += 1
+    elif boundary == "no_timestamp":
+        local.data.observed_monotonic = None
+    elif boundary == "no_wall_timestamp":
+        local.last_success_ts = None
+    elif boundary == "future_wall_timestamp":
+        local.last_success_ts += 60
+    else:
+        attr, value = {
+            "missing_soc": ("soc", None), "nan_soc": ("soc", float("nan")),
+            "invalid_soc": ("soc", 101.0), "missing_power": ("battery_w", None),
+            "nan_power": ("battery_w", float("nan")), "missing_grid": ("grid_w", None),
+            "missing_solar": ("solar_w", None), "missing_load": ("load_w", None),
+        }[boundary]
+        setattr(local.data, attr, value)
+    data = coordinator._get_energy_data()
+    assert data["battery_level"] == 50.0
+    assert data["battery_power"] == -10.0
+    assert data["last_update"] == clock["data"]["last_update"]
+
+
 @pytest.mark.parametrize("power", [-6.0, 6.0])
 def test_optimizer_solves_preserve_origin_until_soc_catches_up(opt_module, monkeypatch, power):
     """Ticket #144: a solve must not undo measured-interval SOC deferral."""
