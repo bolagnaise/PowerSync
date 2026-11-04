@@ -2257,6 +2257,9 @@ class PsPlanCard extends PsCardBase {
     m.bonus = psExportOffer(hass, en);
     const prices = [];
     for (let h = m.start; h < m.end; h += 0.25) prices.push(m.imp(h), m.exp(h), m.exportValue(h));
+    for (const r of plan) {
+      if (r.h + interval / 60 > nowH && r.h < m.end) prices.push(r.exportValuePrice);
+    }
     const finite = prices.filter(Number.isFinite);
     m.pMin = Math.min(0, ...finite);
     m.pMax = psNiceMax(finite, 20);

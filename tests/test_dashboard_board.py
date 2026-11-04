@@ -405,10 +405,19 @@ def test_super_export_offer_validation_and_forecast_fallback():
   const m = plan._buildModel(data);
   result.rates = m.plan.map(r => m.exportValue(r.h));
   result.past = m.exportValue(m.nowH - 1);
+  // An isolated premium at xx:05 must set the scale even when the quarter-hour
+  // samples fall before and after it. Keep the fixture independent of wall time.
+  const edge = Math.floor(Date.now() / 3600000) * 3600000 + 7200000;
+  const short = plan._buildModel({schedule: {
+    timestamps: [0, 5, 10, 15].map(min => new Date(edge + min * 60000).toISOString()),
+    export_price: [0.05, 0.05, 0.05, 0.05], export_value_price: [0.05, 0.80, 0.05, 0.05],
+  }});
+  result.shortPremiumFits = short.pMax >= 80;
   console.log(JSON.stringify(result));
 """)
     assert out == dict(overnight=True, zero=False, missing=False, invalid=False,
-                       invalidRate=False, currency=False, rates=[5, 20, 5, 5], past=None)
+                       invalidRate=False, currency=False, rates=[5, 20, 5, 5], past=None,
+                       shortPremiumFits=True)
 
 
 def test_plan_draws_exact_partial_quota_intervals_and_scrubs_their_value():
