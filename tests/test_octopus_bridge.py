@@ -149,6 +149,18 @@ def test_upstream_events_apply_multiple_same_slot_corrections_and_close_drains()
             await asyncio.sleep(0.15)
         assert changed == [7, 8]
         assert len(set(boundaries)) == 3
+        source.is_running = False
+        runtime._event(NS(event_type=bridge.RATE_EVENTS[1], data={
+            "mpan": "111", "serial_number": "ABC", "rates": [{
+                "start": rates[0]["start"], "end": rates[0]["end"], "value_inc_vat": 0.09,
+            }],
+        }))
+        await asyncio.sleep(0.15)
+        assert changed == [7, 8]
+        source.is_running = True
+        runtime.request()
+        await asyncio.sleep(0.15)
+        assert changed == [7, 8, 9]
         runtime.request()
         await runtime.close()
         assert runtime._task.done()
