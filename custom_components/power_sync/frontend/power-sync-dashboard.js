@@ -1728,6 +1728,24 @@ function psLiveExportRate(hass, en, now) {
   return result;
 }
 
+// Configured offer only: this never asserts that measured quota remains, or
+// reconstructs historical earnings. Planned rates come from export_value_price.
+function psExportOffer(hass, en) {
+  const attrs = psState(hass, en.exportEarnings)?.attributes || {};
+  const b = attrs.export_bonus;
+  const time = v => typeof v === 'string' && /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(v);
+  if (!b || !time(b.window_start) || !time(b.window_end)
+      || typeof b.cap_kwh !== 'number' || !Number.isFinite(b.cap_kwh) || b.cap_kwh <= 0
+      || typeof b.total_rate !== 'number' || !Number.isFinite(b.total_rate) || b.total_rate <= 0
+      || !attrs.currency || attrs.currency !== hass?.config?.currency) return null;
+  return b;
+}
+
+function psExportOfferHtml(hass, offer) {
+  if (!offer) return '';
+  return `<p class="hint"><b>Super Export offer: ${psFix(offer.total_rate * 100)} ${psEsc(psMinorUnit(hass))}/kWh total</b>, ${psEsc(offer.window_start)}–${psEsc(offer.window_end)} (site time), for the first ${psFix(offer.cap_kwh)} kWh/day shared by solar and battery export. The base tariff applies after the allowance. Planned export values use the shared allowance; actual earnings depend on measured export.</p>`;
+}
+
 class PsNowCard extends PsCardBase {
   _signature() {
     const data = psApiPeek('power_sync/optimization');
@@ -2169,7 +2187,7 @@ class PsPlanCard extends PsCardBase {
 
   _signature() {
     const data = psApiPeek('power_sync/optimization');
-    return `${data?.last_optimization || ''}|${data?.monitoring_mode}|${this._histAt}|${psState(this._hass, this.ents.soc)?.state}`;
+    return `${super._signature()}|${this._hass?.config?.currency}|${data?.last_optimization || ''}|${data?.monitoring_mode}|${this._histAt}`;
   }
 
   _loadHistory() {
@@ -2209,6 +2227,10 @@ class PsPlanCard extends PsCardBase {
       start: nowH - 12, end: nowH + 24,
       imp: h => (h < nowH ? histVal(en.importPrice, h, unitMinor(en.importPrice)) : planAt(h)?.imp ?? NaN),
       exp: h => (h < nowH ? histVal(en.exportPrice, h, unitMinor(en.exportPrice)) : planAt(h)?.exp ?? NaN),
+      exportValue: h => {
+        const r = h >= nowH ? planAt(h) : null;
+        return r && Number.isFinite(r.exp) ? Math.max(r.exp, r.exportValuePrice) : NaN;
+      },
       soc: h => {
         if (h <= nowH) {
           const v = histVal(en.soc, h);
@@ -2231,8 +2253,10 @@ class PsPlanCard extends PsCardBase {
       car: h => (h < nowH ? 0 : planAt(h)?.evKw || 0),
     };
     m.hasCar = plan.some(r => r.evKw > 0);
+    m.hasExportValue = plan.some(r => r.exportValuePrice > r.exp);
+    m.bonus = psExportOffer(hass, en);
     const prices = [];
-    for (let h = m.start; h < m.end; h += 0.25) prices.push(m.imp(h), m.exp(h));
+    for (let h = m.start; h < m.end; h += 0.25) prices.push(m.imp(h), m.exp(h), m.exportValue(h));
     const finite = prices.filter(Number.isFinite);
     m.pMin = Math.min(0, ...finite);
     m.pMax = psNiceMax(finite, 20);
@@ -2320,7 +2344,8 @@ class PsPlanCard extends PsCardBase {
 
     const legend = [
       '<span><i style="--c:var(--cyan)"></i>Import price</span>',
-      '<span><i class="dash" style="--c:var(--red)"></i>Export price</span>',
+      `<span><i class="dash" style="--c:var(--red)"></i>${m.bonus || m.hasExportValue ? 'Base export price' : 'Export price'}</span>`,
+      m.hasExportValue ? '<span><i class="dash" style="--c:var(--yellow)"></i>Planned export value (quota applies)</span>' : '',
       '<span><i class="line" style="--c:var(--green)"></i>Charge level</span>',
       '<span><i style="--c:var(--green)"></i>Charge</span>',
       '<span><i style="--c:var(--yellow)"></i>Solar charge</span>',
@@ -2335,13 +2360,15 @@ class PsPlanCard extends PsCardBase {
       <div class="scrub" aria-live="polite">
         <div><span>Time</span><b data-sc="t"></b></div>
         <div><span>Import</span><b data-sc="i"></b></div>
-        <div><span>Export</span><b data-sc="e"></b></div>
+        <div><span>${m.bonus || m.hasExportValue ? 'Base export' : 'Export'}</span><b data-sc="e"></b></div>
+        ${m.hasExportValue ? '<div><span>Planned export</span><b data-sc="v"></b></div>' : ''}
         <div><span>Battery</span><b class="actv" data-sc="a"></b></div>
         <div><span>Charge level</span><b data-sc="s"></b></div>
         ${m.hasCar ? '<div><span>Car</span><b data-sc="c"></b></div>' : ''}
       </div>
       <svg class="dayline" role="img" tabindex="0" aria-label="Import and export prices with the battery's measured and planned charge level. Use the left and right arrow keys to step through the hours."></svg>
       <div class="legend" aria-hidden="true">${legend}</div>
+      ${psExportOfferHtml(hass, m.bonus)}
       <div class="plan-foot">
         <div class="windows">${winHtml}${hasBonusCap ? `<p class="hint">The daily cap limits premium-rate energy, not total export. ${zerohero.bonus_export_kwh_remaining != null && Number.isFinite(Number(zerohero.bonus_export_kwh_remaining)) ? `${psFix(zerohero.bonus_export_kwh_remaining)} kWh remaining today. ` : ''}Export earnings include the allowance shared with solar export.</p>` : ''}</div>
         ${resRows.length ? `<details class="res"><summary>Reserve details</summary><dl class="kv">${resRows.map(([k, v]) => `<dt>${psEsc(k)}</dt><dd>${psEsc(v)}</dd>`).join('')}</dl></details>` : ''}
@@ -2429,6 +2456,19 @@ class PsPlanCard extends PsCardBase {
       psSvg('path', { d: li, fill: 'none', stroke: css('--cyan'), 'stroke-width': 1.75 }, svg);
     }
     if (le) psSvg('path', { d: le, fill: 'none', stroke: css('--red'), 'stroke-width': 1.25, 'stroke-dasharray': '4 3' }, svg);
+    if (m.hasExportValue) {
+      // Retain exact plan boundaries, including a partially used five-minute
+      // quota interval. Do not cover the base line or invent past premiums.
+      let value = '', previousEnd = NaN;
+      for (const r of m.plan) {
+        const start = Math.max(m.nowH, m.start, r.h);
+        const end = Math.min(m.end, r.h + m.interval / 60);
+        if (start >= end || !(r.exportValuePrice > r.exp)) continue;
+        value += `${Math.abs(previousEnd - start) < 1e-6 ? 'L' : 'M'}${x(start)},${yP(r.exportValuePrice)} L${x(end)},${yP(r.exportValuePrice)} `;
+        previousEnd = end;
+      }
+      if (value) psSvg('path', { d: value, fill: 'none', stroke: css('--yellow'), 'stroke-width': 1.75, 'stroke-dasharray': '2 3' }, svg);
+    }
 
     // Charge level: solid measured, dashed planned.
     const past = [], fut = [];
@@ -2495,7 +2535,7 @@ class PsPlanCard extends PsCardBase {
     const isNow = t == null;
     const tt = isNow ? m.nowH : Math.max(m.start, Math.min(m.end - 0.01, t));
     this._scrubT = isNow ? null : tt;
-    const q = isNow ? m.nowH : Math.floor(tt * 4) / 4;
+    const q = isNow ? m.nowH : tt >= m.nowH ? tt : Math.floor(tt * 4) / 4;
     const set = (k, text, color) => {
       const el = this.querySelector(`[data-sc="${k}"]`);
       if (!el) return;
@@ -2507,6 +2547,8 @@ class PsPlanCard extends PsCardBase {
     const iv = m.imp(q), ev = m.exp(q);
     set('i', Number.isFinite(iv) ? `${iv.toFixed(1)} ${unit}` : '—');
     set('e', Number.isFinite(ev) ? `${ev.toFixed(1)} ${unit}` : '—');
+    const value = m.exportValue(q);
+    set('v', Number.isFinite(value) ? `${value.toFixed(1)} ${unit}` : '—');
     const a = m.act(q + 0.01);
     set('a', a ? PS_ACT[a][0] : '—', a && a !== 'hold' ? `var(${PS_ACT[a][1]})` : 'var(--fg)');
     const sv = m.soc(isNow ? m.nowH : q);
@@ -2531,7 +2573,7 @@ class PsTariffCard extends PsCardBase {
   _signature() {
     const s = psState(this._hass, this.ents.tariff);
     const minute = Math.floor(Date.now() / 60_000);
-    return `${s?.attributes?.last_sync}|${s?.state}|${minute}`;
+    return `${super._signature()}|${this._hass?.config?.currency}|${s?.attributes?.last_sync}|${s?.state}|${minute}`;
   }
 
   _render() {
@@ -2600,6 +2642,7 @@ class PsTariffCard extends PsCardBase {
         ${rowsHtml}
       </div>
       <p class="hint">Prices in ${psEsc(unit)}/kWh.</p>`;
+    this.innerHTML += psExportOfferHtml(hass, psExportOffer(hass, this.ents));
   }
 }
 

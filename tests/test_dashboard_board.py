@@ -113,6 +113,8 @@ def _strategy_script(board_missing: bool) -> str:
       pwRows: (cards.find(c => c.key === 'pwset')?.config.rows || []).map(r => r.entity),
       controls: cards.find(c => c.key === 'controls')?.config.entities || null,
       nowEntities: cards.find(c => c.key === 'now')?.config.entities || null,
+      planEntities: cards.find(c => c.key === 'plan')?.config.entities || null,
+      tariffEntities: cards.find(c => c.key === 'tariff')?.config.entities || null,
       tariffMeta: cards.find(c => c.key === 'tariff')?.meta || null,
     }));
   }).catch(err => { console.error(err); process.exit(1); });
@@ -141,6 +143,8 @@ def test_generate_hands_every_card_to_the_board():
     assert out["nowEntities"]["exportEarnings"] == "sensor.power_sync_daily_export_earnings"
     assert out["controls"]["chargeDuration"] == "select.power_sync_force_charge_duration"
     assert out["tariffMeta"] == "GloBird FOUR4FREE"
+    assert out["planEntities"]["exportEarnings"] == "sensor.power_sync_daily_export_earnings"
+    assert out["tariffEntities"]["exportEarnings"] == "sensor.power_sync_daily_export_earnings"
 
 
 def test_generate_falls_back_to_classic_layout_without_board():
@@ -187,7 +191,7 @@ def _board_script(body: str) -> str:
         + r"""
   vm.createContext(context);
   const src = fs.readFileSync(process.argv[1], 'utf8').replace(/^export \{[^}]*\};?\s*$/m, '');
-  vm.runInContext(src + '\n;globalThis.__t = { PowerSyncBoard, PsSettingsDialog, PS_SETTING_EDITORS, PsSettingsCard, PsTodayCard, PsNowCard, PsPlanCard, PsControlsCard, psUntilPreview, psSchedule, psWindows, psActionKey, PS_LAYOUT_KEY, PS_DEFAULT_LAYOUT, psChartValue, psChart, psBars, PsPricesCard, PsEnergyCard, PsLoadForecastCard, PsSolarLoadCard, PsBatteryPlanCard, psApiCache, psPlannedRunEnd };', context);
+  vm.runInContext(src + '\n;globalThis.__t = { PowerSyncBoard, PsSettingsDialog, PS_SETTING_EDITORS, PsSettingsCard, PsTodayCard, PsNowCard, PsTariffCard, psExportOffer, PsPlanCard, PsControlsCard, psUntilPreview, psSchedule, psWindows, psActionKey, PS_LAYOUT_KEY, PS_DEFAULT_LAYOUT, psChartValue, psChart, psBars, PsPricesCard, PsEnergyCard, PsLoadForecastCard, PsSolarLoadCard, PsBatteryPlanCard, psApiCache, psPlannedRunEnd };', context);
   const T = context.__t;
 """
         + body
@@ -321,6 +325,123 @@ def test_plan_separates_solar_charge_from_paid_grid_share_and_capped_export_valu
     assert "Super Export bonus cap" in out["html"] and "15.0 kWh/day" in out["html"]
     assert "5.0 kWh remaining today" in out["html"]
     assert "not total export" in out["html"]
+
+
+def test_super_export_offer_is_separate_from_base_in_tariff_and_plan():
+    out = _run_board(r"""
+  class FixedDate extends Date {
+    constructor(...args) { super(...(args.length ? args : ['2026-11-03T06:00:00Z'])); }
+    static now() { return new FixedDate().getTime(); }
+  }
+  context.Date = FixedDate;
+  const s = (state, attributes = {}) => ({ state: String(state), attributes });
+  const bonus = { window_start: '18:00', window_end: '21:00', total_rate: 0.15,
+    cap_kwh: 15, remaining_kwh: null };
+  const hass = { config: { time_zone: 'Australia/Sydney', currency: 'AUD' }, states: {
+    earnings: s('unknown', { currency: 'AUD', export_bonus: bonus, export_bonus_coverage: 'partial' }),
+    tariff: s('peak', { schedule: [{time: '00:00', buy: 0.572, sell: 0.05}] }),
+    price: s(0.05, {currency: 'AUD', unit_of_measurement: 'AUD/kWh'}),
+  }};
+  const entities = {tariff: 'tariff', exportEarnings: 'earnings', exportPrice: 'price'};
+  const ts = ['2026-11-03T06:00:00Z', '2026-11-03T07:00:00Z', '2026-11-03T08:00:00Z',
+    '2026-11-03T09:00:00Z', '2026-11-03T10:00:00Z'];
+  const data = {schedule: {timestamps: ts, import_price: ts.map(() => 0.572),
+    export_price: ts.map(() => 0.05), export_value_price: [0.05, 0.15, 0.15, 0.10, 0.05]}};
+  T.psApiCache.set('power_sync/optimization', {data});
+  const plan = new T.PsPlanCard();
+  plan._hass = hass; plan._config = {entities}; plan._loadHistory = () => {};
+  plan.querySelector = () => ({addEventListener() {}});
+  plan._render();
+  const model = plan._model;
+  const values = model.plan.map(r => [model.exp(r.h), model.exportValue(r.h)]);
+  const tariff = new T.PsTariffCard(); tariff._hass = hass; tariff._config = {entities};
+  tariff._render();
+  const partial = tariff.innerHTML;
+  bonus.remaining_kwh = 0;
+  tariff._render();
+  const exhausted = tariff.innerHTML;
+  bonus.total_rate = 0.30; bonus.cap_kwh = 7;
+  tariff._render();
+  const custom = tariff.innerHTML;
+  hass.states.earnings.attributes.export_bonus = null;
+  tariff._render();
+  console.log(JSON.stringify({values, plan: plan.innerHTML, partial, exhausted, custom,
+    disabled: tariff.innerHTML}));
+""")
+    assert out["values"] == [[5, 5], [5, 15], [5, 15], [5, 10], [5, 5]]
+    for html in (out["plan"], out["partial"], out["exhausted"]):
+        assert "Super Export offer" in html
+        assert "15.0 c/kWh total" in html
+        assert "18:00–21:00" in html
+        assert "first 15.0 kWh/day" in html
+        assert "solar and battery" in html
+        assert "base" in html
+    assert 'class="e">5.0</span>' in out["partial"]
+    assert "30.0 c/kWh total" in out["custom"] and "first 7.0 kWh/day" in out["custom"]
+    assert "Super Export offer" not in out["disabled"]
+
+
+def test_super_export_offer_validation_and_forecast_fallback():
+    out = _run_board(r"""
+  const bonus = {window_start: '23:00', window_end: '02:00', total_rate: 0.15, cap_kwh: 15};
+  const hass = {config: {currency: 'AUD', time_zone: 'Australia/Sydney'}, states: {
+    earnings: {attributes: {currency: 'AUD', export_bonus: bonus}},
+  }};
+  const en = {exportEarnings: 'earnings'};
+  const valid = overrides => {
+    hass.states.earnings.attributes.export_bonus = {...bonus, ...overrides};
+    return !!T.psExportOffer(hass, en);
+  };
+  const result = {
+    overnight: valid({}), zero: valid({cap_kwh: 0}), missing: valid({cap_kwh: null}),
+    invalid: valid({window_start: '25:00'}), invalidRate: valid({total_rate: '0.15'}),
+  };
+  hass.config.currency = 'USD'; result.currency = valid({});
+  const plan = new T.PsPlanCard(); plan._hass = hass; plan._config = {entities: en};
+  const start = Date.now() + 3600000;
+  const ts = Array.from({length: 4}, (_, i) => new Date(start + i * 1800000).toISOString());
+  const data = {schedule: {timestamps: ts, export_price: [0.05, 0.20, 0.05, 0.05],
+    export_value_price: [null, 0.15, 'invalid', 0.05]}};
+  const m = plan._buildModel(data);
+  result.rates = m.plan.map(r => m.exportValue(r.h));
+  result.past = m.exportValue(m.nowH - 1);
+  console.log(JSON.stringify(result));
+""")
+    assert out == dict(overnight=True, zero=False, missing=False, invalid=False,
+                       invalidRate=False, currency=False, rates=[5, 20, 5, 5], past=None)
+
+
+def test_plan_draws_exact_partial_quota_intervals_and_scrubs_their_value():
+    out = _run_board(r"""
+  class El {
+    constructor(tag = '') { this.tag = tag; this.children = []; this.attrs = {}; this.style = {}; }
+    appendChild(el) { this.children.push(el); }
+    setAttribute(k, v) { this.attrs[k] = v; }
+    set textContent(v) { this.text = v; this.children = []; }
+    get textContent() { return this.text || ''; }
+  }
+  context.document.createElementNS = (_, tag) => new El(tag);
+  const start = Date.now() + 3600000;
+  const ts = Array.from({length: 4}, (_, i) => new Date(start + i * 300000).toISOString());
+  const data = {schedule: {timestamps: ts, export_price: [0.05, 0.05, 0.05, 0.05],
+    export_value_price: [0.15, 0.10, 0.05, 0.05]}};
+  const card = new T.PsPlanCard(); card._hass = {config: {currency: 'AUD'}};
+  card._api = () => data;
+  const svg = new El('svg'); svg.clientWidth = 480; svg.clientHeight = 320;
+  const tip = new El();
+  card.querySelector = s => s === 'svg.dayline' ? svg : s === '[data-sc="v"]' ? tip : null;
+  const m = card._model = card._buildModel(data);
+  card._draw();
+  const value = svg.children.find(e => e.tag === 'path' && e.attrs['stroke-dasharray'] === '2 3');
+  const x = card._geo.x, y = card._geo.yP;
+  card._setScrub(m.plan[1].h + 0.001);
+  console.log(JSON.stringify({path: value?.attrs.d, expected:
+    `M${x(m.plan[0].h)},${y(15)} L${x(m.plan[0].h + 5/60)},${y(15)} ` +
+    `L${x(m.plan[1].h)},${y(10)} L${x(m.plan[1].h + 5/60)},${y(10)} `,
+    tip: tip.textContent}));
+""")
+    assert out["path"] == out["expected"]
+    assert out["tip"] == "10.0 c"
 
 
 def test_now_export_rate_uses_eligible_total_bonus_then_returns_to_base():

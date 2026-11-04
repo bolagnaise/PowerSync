@@ -8484,6 +8484,7 @@ function _boardCards(ctx) {
       config: { entities: {
         soc: se('battery_level'), battery: se('battery_power'), grid: se('grid_power'),
         importPrice: se('current_import_price'), exportPrice: se('current_export_price'),
+        exportEarnings: se('daily_export_earnings'),
       } },
     });
   }
@@ -8516,7 +8517,7 @@ function _boardCards(ctx) {
     const plan = [attrs.utility, attrs.plan_name].filter(Boolean).join(' ');
     add({
       key: 'tariff', title: 'Tariff today', meta: plan || undefined, native: 'ps-tariff-card',
-      config: { entities: { tariff: e('tariff_schedule') } },
+      config: { entities: { tariff: e('tariff_schedule'), exportEarnings: se('daily_export_earnings') } },
     });
   }
 

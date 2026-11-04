@@ -311,6 +311,7 @@ class DailyCostTracker:
             "window_start": self.config.start,
             "window_end": self.config.end,
             "total_rate": self.config.super_export_rate,
+            "cap_kwh": self.config.export_cap_kwh,
             "remaining_kwh": (None if partial or base.get("export_earnings_coverage") != "complete" else max(
                 0.0, self.config.export_cap_kwh - self.state.get("used", 0.0))),
             "observed_at": self.state.get("last_observed"),

@@ -80,7 +80,7 @@ def test_live_bonus_metadata_shares_measured_solar_and_battery_export_allowance(
         acc.update(6, -5, 0, 1, 0.30, 0.05)
     first = acc.as_dict()["export_bonus"]
     assert first == {"day": "2026-10-25", "window_start": "18:00", "window_end": "21:00",
-                     "total_rate": 0.15, "remaining_kwh": pytest.approx(10),
+                     "total_rate": 0.15, "cap_kwh": 15, "remaining_kwh": pytest.approx(10),
                      "observed_at": clock.current.isoformat()}
     for _ in range(24):
         clock.current += timedelta(minutes=5)
@@ -100,6 +100,7 @@ def test_live_bonus_metadata_withholds_unknown_history_and_preserves_local_day_r
     bonus = restored.summary(base)["export_bonus"]
     assert bonus["day"] == "2026-10-26"
     assert bonus["total_rate"] == 0.10
+    assert bonus["cap_kwh"] == 7
     assert bonus["remaining_kwh"] == 7
     assert restored.summary({"export_earnings_coverage": "partial"})["export_bonus"]["remaining_kwh"] is None
     assert m.DailyCostTracker().summary(base)["export_bonus"] is None
