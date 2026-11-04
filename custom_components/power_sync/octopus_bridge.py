@@ -361,6 +361,7 @@ class OctopusUpdateBridge:
         self.hass, self.coordinator, self.options, self.on_change = hass, coordinator, options, on_change
         self.event_rates = {}
         self.prepare_programs = prepare_programs
+        self._applied_revision = (coordinator.data or {}).get("revision")
         self._unsub = []
         self._timer = None
         self._task = None
@@ -408,7 +409,6 @@ class OctopusUpdateBridge:
                     continue
                 if data is None:
                     continue  # Existing REST coordinator remains the fallback.
-                previous = (self.coordinator.data or {}).get("revision")
                 if self.prepare_programs and (self.coordinator.data or {}).get("octopus", {}).get("programs") != data["octopus"]["programs"]:
                     await self.prepare_programs()
                 if self._closed:
@@ -418,8 +418,9 @@ class OctopusUpdateBridge:
                         setattr(self.coordinator, key, data[key])
                 self.coordinator.async_set_updated_data(data)
                 self._schedule_boundary(data)
-                if previous != data["revision"] and getattr(self.hass, "is_running", False):
+                if self._applied_revision != data["revision"] and getattr(self.hass, "is_running", False):
                     await self.on_change()
+                    self._applied_revision = data["revision"]
         except asyncio.CancelledError:
             raise
         except Exception:
