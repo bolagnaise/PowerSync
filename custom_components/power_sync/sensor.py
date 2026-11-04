@@ -2019,6 +2019,7 @@ async def async_setup_entry(
             )
     elif octopus_coordinator:
         _LOGGER.info("Adding Octopus price sensors (import and export)")
+        entities.append(OctopusSourceSensor(octopus_coordinator, entry))
         for description in PRICE_SENSORS:
             entities.append(
                 AmberPriceSensor(
@@ -2991,6 +2992,8 @@ class AmberPriceSensor(PowerSyncCurrencyMixin, CoordinatorEntity, RestoredNumeri
     @property
     def native_value(self) -> Any:
         """Return the state of the sensor."""
+        if self.entity_description.key == SENSOR_TYPE_CURRENT_EXPORT_PRICE and (self.coordinator.data or {}).get("octopus", {}).get("export_status") == "unknown":
+            return None
         if self.entity_description.value_fn:
             value = self.entity_description.value_fn(self.coordinator.data)
             _LOGGER.debug("AmberPriceSensor %s native_value: %s", self.entity_description.key, value)
@@ -4175,6 +4178,34 @@ class AEMOSpikeSensor(PowerSyncCurrencyMixin, SensorEntity):
         else:
             attrs = {}
         return _entity_currency_attrs(self, attrs)
+
+
+class OctopusSourceSensor(CoordinatorEntity, SensorEntity):
+    """Selected Octopus source and account-level monitoring evidence."""
+
+    _attr_has_entity_name = True
+    _attr_name = "Octopus source status"
+    _attr_icon = "mdi:octagram"
+    _unrecorded_attributes = frozenset({"original_rates", "effective_rates", "dispatches", "programs", "related_entities"})
+
+    def __init__(self, coordinator, entry):
+        super().__init__(coordinator)
+        self._entry = entry
+        self._attr_unique_id = f"{entry.entry_id}_octopus_source_status"
+        self._attr_suggested_object_id = "power_sync_octopus_source_status"
+
+    @property
+    def device_info(self):
+        return family_device_info(self._entry.entry_id, SENSOR_FAMILY_OCTOPUS)
+
+    @property
+    def native_value(self):
+        return (self.coordinator.data or {}).get("octopus", {}).get("health", "base_tariff")
+
+    @property
+    def extra_state_attributes(self):
+        data = self.coordinator.data or {}
+        return {"source": data.get("source"), "revision": data.get("revision"), **data.get("octopus", {})}
 
 
 class SavingSessionSensor(CoordinatorEntity, SensorEntity):
