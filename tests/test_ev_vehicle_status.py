@@ -735,13 +735,16 @@ def test_native_battery_candidates_choose_newest_soc_report(reverse):
     old = now - timedelta(hours=9)
     states = [
         _State("sensor.primary_ev_battery_level", "70", last_updated=old),
-        _State("sensor.primary_ev_battery_level_2", "67", last_updated=now),
+        _State("sensor.primary_ev_battery_level_2", "67", last_updated=now - timedelta(seconds=1)),
+        _State("sensor.primary_ev_battery_temperature", "22", {"unit_of_measurement": "°C"}, last_updated=now),
+        _State("sensor.primary_ev_battery_power", "5", {"unit_of_measurement": "kW"}, last_updated=now),
+        _State("sensor.primary_ev_battery_health", "99", {"unit_of_measurement": "%"}, last_updated=now),
     ]
     vehicle = power_sync._get_ev_vehicles_status(
         _tesla_hass(list(reversed(states)) if reverse else states), _Entry(),
     )[0]
     assert vehicle["ev_soc"] == 67
-    assert vehicle["_soc_observed_at"] == now
+    assert vehicle["_soc_observed_at"] == now - timedelta(seconds=1)
 
 
 def test_ble_node_online_does_not_make_disconnected_vehicle_online_or_plugged():

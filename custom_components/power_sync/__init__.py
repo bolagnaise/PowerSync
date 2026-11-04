@@ -2504,7 +2504,9 @@ def _get_ev_vehicles_status(hass, entry, *, include_control_evidence=False) -> l
                 ):
                     measured_power_kw = max(measured_power_kw, val)
 
-            if "battery" in eid and "range" not in eid and "heater" not in eid:
+            if domain == "sensor" and re.search(
+                r"_battery(?:_level|_soc|_percentage|_percent|_state_of_charge)?(?:_\d+)?$", eid,
+            ):
                 try:
                     val = float(state.state)
                     candidate_soc_at = _ev_power_observed_at(state)
