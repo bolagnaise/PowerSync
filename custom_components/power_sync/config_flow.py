@@ -2091,6 +2091,8 @@ def _octopus_source_fields(hass, current):
     for key, export in (("octopus_import_meter", False), ("octopus_export_meter", True)):
         choices = meter_options(hass, export)
         if choices:
+            if current.get(key) and current[key] not in {choice["value"] for choice in choices}:
+                choices.append({"value": current[key], "label": "Previously selected meter (unavailable)"})
             marker = vol.Optional(key, default=current[key]) if current.get(key) else vol.Optional(key)
             fields[marker] = SelectSelector(SelectSelectorConfig(options=choices, mode=SelectSelectorMode.DROPDOWN))
     return fields

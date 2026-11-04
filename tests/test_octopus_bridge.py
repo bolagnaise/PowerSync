@@ -178,3 +178,13 @@ def test_wrong_meter_rate_event_cannot_change_bound_price():
         }]}, NOW)
     })
     assert data["current"][0]["perKwh"] == 30
+
+
+def test_explicit_rest_source_ignores_other_loaded_accounts():
+    assert bridge.read_snapshot(hass({"A": account(), "B": account("222")}),
+                                {"octopus_import_meter": "rest"}, now=NOW) is None
+
+
+def test_explicit_missing_export_does_not_rebind_to_a_discovered_meter():
+    data = bridge.read_snapshot(hass({"A": account()}), {"octopus_export_meter": "none"}, now=NOW)
+    assert data["octopus"]["export_status"] == "unknown"

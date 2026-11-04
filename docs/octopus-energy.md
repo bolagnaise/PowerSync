@@ -9,7 +9,9 @@ In PowerSync's Octopus settings, select the BottlecapDave import and export
 meters when more than one is available. The selected source's actual tariff
 overrides the fallback product preset, so published Cosy, Snug, Tracker,
 fixed/variable and other interval schedules can be consumed without inventing
-new hardcoded product codes. Export must belong to the selected account/site;
+new hardcoded product codes. Select **Published tariff API (no Intelligent dispatches)**
+for the direct API path, or **No export tariff (unknown)** to clear an export binding.
+Export must belong to the selected account/site;
 an unavailable export rate is unknown and earns no assumed revenue in planning.
 
 The **Octopus source status** sensor exposes the binding, original/effective

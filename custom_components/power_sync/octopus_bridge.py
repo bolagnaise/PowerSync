@@ -116,8 +116,9 @@ def discover_meters(hass, *, now=None):
 
 
 def meter_options(hass, is_export=False):
-    return [{"value": m["key"], "label": f"{m['account_id']} · {m['mpan']} · {m['serial']}"}
-            for m in discover_meters(hass) if m["is_export"] == is_export]
+    choices = [{"value": m["key"], "label": f"{m['account_id']} · {m['mpan']} · {m['serial']}"}
+               for m in discover_meters(hass) if m["is_export"] == is_export]
+    return [{"value": "none" if is_export else "rest", "label": "No export tariff (unknown)" if is_export else "Published tariff API (no Intelligent dispatches)"}] + choices
 
 
 def _agreement(meter, now):
@@ -232,6 +233,8 @@ def _meter_rows(hass, meter, now, event_rates):
 def read_snapshot(hass, options=None, *, now=None, event_rates=None):
     """Return one selected-account Amber-compatible snapshot, or no upstream."""
     now, options = now or datetime.now(timezone.utc), options or {}
+    if options.get(IMPORT_METER) == "rest":
+        return None
     meters = discover_meters(hass, now=now)
     if not meters:
         if options.get(IMPORT_METER):
@@ -246,7 +249,9 @@ def read_snapshot(hass, options=None, *, now=None, event_rates=None):
     exports = [m for m in meters if m["is_export"] and m["account_id"] == imp["account_id"]
                and (not imp["property_id"] or m["property_id"] == imp["property_id"])]
     selected_export = options.get(EXPORT_METER)
-    if selected_export:
+    if selected_export == "none":
+        exports = []
+    elif selected_export:
         exports = [m for m in exports if m["key"] == selected_export]
         if len(exports) != 1:
             raise OctopusSourceError("Selected Octopus export meter is unavailable or belongs to another account/site")
