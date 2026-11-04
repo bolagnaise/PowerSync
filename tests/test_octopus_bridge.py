@@ -64,6 +64,20 @@ def test_multiple_import_meters_require_selection():
     assert data["current"][0]["perKwh"] == 30
 
 
+def test_released_upstream_agreement_shape_and_replaced_meters():
+    data = account()
+    point = data["ACCOUNT"].account["electricity_meter_points"][0]
+    point["meters"].append({"serial_number": "OLD", "is_export": False, "active_to": NOW - timedelta(days=1)})
+    point["agreements"] = [
+        {"start": NOW - timedelta(days=30), "end": NOW - timedelta(days=1), "tariff_code": "E-1R-OLD-C"},
+        {"start": NOW - timedelta(days=1), "end": None, "tariff_code": "E-1R-COSY-VAR-26-10-01-C"},
+    ]
+    snapshot = bridge.read_snapshot(hass({"A": data}), now=NOW)
+    assert snapshot["tariff_code"] == "E-1R-COSY-VAR-26-10-01-C"
+    assert snapshot["product_code"] == "COSY-VAR-26-10-01"
+    assert snapshot["octopus"]["binding"]["serial"] == "ABC"
+
+
 @pytest.mark.parametrize("pence", [-5, 0, 1, 2, 7, 250])
 def test_public_rate_units_are_explicit(pence):
     data = bridge.read_snapshot(hass(states=[state(pence / 100)]), now=NOW)

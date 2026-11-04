@@ -11563,6 +11563,20 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             ):
                 _LOGGER.info("Octopus action deferred until a valid current rate plan is available")
                 return
+        if type(price_source).__name__ == "OctopusPriceCoordinator" and revision is not None:
+            valid_current_price = False
+            for row in (price_source.data or {}).get("current", []):
+                if row.get("channelType") != "general":
+                    continue
+                try:
+                    start = datetime.fromisoformat(row["valid_from"].replace("Z", "+00:00"))
+                    end = datetime.fromisoformat(row["valid_to"].replace("Z", "+00:00"))
+                    valid_current_price |= start <= dt_util.utcnow() < end
+                except (KeyError, TypeError, ValueError):
+                    continue
+            if not valid_current_price:
+                _LOGGER.info("Octopus action deferred: current import price expired or unavailable")
+                return
         if getattr(self, "battery_system", None) == "tesla" and hasattr(self, "_powerwall_plan_routes"):
             from ..powerwall_local.control_method import control_method
             entry = getattr(self, "_entry", None)

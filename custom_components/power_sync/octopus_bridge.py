@@ -72,9 +72,10 @@ def _identity(hass, state):
     return (match[2], match[1]) if match else None
 
 
-def discover_meters(hass):
+def discover_meters(hass, *, now=None):
     """Return meter records, not a last-account-wins aggregate."""
     result = []
+    now = now or datetime.now(timezone.utc)
     accounts = hass.data.get("octopus_energy", {})
     for account_id, data in accounts.items() if isinstance(accounts, dict) else ():
         if not isinstance(data, dict):
@@ -84,6 +85,9 @@ def discover_meters(hass):
             continue
         for point in account.get("electricity_meter_points", []):
             for meter in point.get("meters", []):
+                active_from, active_to = parse_time(meter.get("active_from")), parse_time(meter.get("active_to"))
+                if (active_from and active_from > now) or (active_to and active_to <= now):
+                    continue
                 mpan, serial = str(point.get("mpan", "")), str(meter.get("serial_number", ""))
                 if not mpan or not serial:
                     continue
@@ -93,6 +97,8 @@ def discover_meters(hass):
                                "agreements": point.get("agreements", []), "result": rates,
                                "property_id": point.get("property_id"), "account": account})
     for state in states(hass, "sensor"):
+        if state.state in ("unknown", "unavailable", ""):
+            continue
         identity = _identity(hass, state)
         is_export = bool((state.attributes or {}).get("is_export")) or "_export_" in canonical_id(hass, state)
         if not identity or any((m["mpan"].lower(), m["serial"].lower()) == identity and m["is_export"] == is_export for m in result):
@@ -111,10 +117,16 @@ def meter_options(hass, is_export=False):
 
 
 def _agreement(meter, now):
-    agreements = [a for a in meter["agreements"] if
-                  (not a.get("valid_from") or (parse_time(a["valid_from"]) or now) <= now)
-                  and (not a.get("valid_to") or now < (parse_time(a["valid_to"]) or now))]
-    return max(agreements, key=lambda a: str(a.get("valid_from", "")), default={}).get("tariff_code")
+    agreements = []
+    for agreement in meter["agreements"]:
+        start = agreement.get("start") or agreement.get("valid_from")
+        end = agreement.get("end") or agreement.get("valid_to")
+        if start and (parse_time(start) is None or parse_time(start) > now):
+            continue
+        if end and (parse_time(end) is None or parse_time(end) <= now):
+            continue
+        agreements.append(agreement)
+    return max(agreements, key=lambda a: parse_time(a.get("start") or a.get("valid_from")) or datetime.min.replace(tzinfo=timezone.utc), default={}).get("tariff_code")
 
 
 def _entry(start, end, value, export, now, *, pounds=False, **metadata):
@@ -216,7 +228,7 @@ def _meter_rows(hass, meter, now, event_rates):
 def read_snapshot(hass, options=None, *, now=None, event_rates=None):
     """Return one selected-account Amber-compatible snapshot, or no upstream."""
     now, options = now or datetime.now(timezone.utc), options or {}
-    meters = discover_meters(hass)
+    meters = discover_meters(hass, now=now)
     if not meters:
         if options.get(IMPORT_METER):
             raise OctopusSourceError("Selected Octopus meter unavailable; waiting for its integration")
@@ -390,6 +402,9 @@ class OctopusUpdateBridge:
                     await self.prepare_programs()
                 if self._closed:
                     return
+                for key in ("tariff_code", "product_code"):
+                    if data.get(key):
+                        setattr(self.coordinator, key, data[key])
                 self.coordinator.async_set_updated_data(data)
                 self._schedule_boundary(data)
                 if previous != data["revision"] and getattr(self.hass, "is_running", False):

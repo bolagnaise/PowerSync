@@ -13013,7 +13013,8 @@ class OctopusPriceCoordinator(DataUpdateCoordinator):
     @property
     def external_battery_control(self) -> bool:
         """Intelligent Flux retains Octopus battery ownership, also via REST."""
-        return "INTELLI-FLUX" in str(self.tariff_code).upper()
+        tariff = (getattr(self, "data", None) or {}).get("tariff_code") or self.tariff_code
+        return "INTELLI-FLUX" in str(tariff).upper()
 
     @staticmethod
     def _expand_to_half_hourly(rates: list[dict[str, Any]]) -> list[dict[str, Any]]:
