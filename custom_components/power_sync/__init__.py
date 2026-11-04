@@ -2991,9 +2991,36 @@ def _get_ev_vehicles_status(hass, entry, *, include_control_evidence=False) -> l
             except (ValueError, TypeError):
                 pass
 
+        # Vehicle telemetry has its own display clock. Equal state/SOC reports
+        # (or their raw receipts) are still communication from this car, but
+        # cannot renew measured watts, plug evidence or command readback.
+        # Resolve each receipt independently: an invalid receipt must not fall
+        # back to a freshly replayed HA timestamp for that field. Connection
+        # entities and timezone-free bridge Last update text are not receipts.
+        telemetry_now = datetime.now(timezone.utc)
+        ble_telemetry_observed_at = max((
+            stamp for stamp in (
+                ble_power_observed_at,
+                get_tesla_ble_observed_at(hass, charge_state)
+                if charging_state_plugged is not None else None,
+                ble_soc_observed_at if ev_soc is not None and 0 <= ev_soc <= 100 else None,
+                get_tesla_ble_observed_at(hass, current_state)
+                if current_amps is not None else None,
+                get_tesla_ble_observed_at(hass, charge_flap)
+                if charge_flap is not None and charge_flap.state in ("on", "off") else None,
+            )
+            if stamp is not None and stamp <= telemetry_now
+        ), default=None)
+
         ble_observation = {
             "vehicle_id": ble_vehicle_id,
             "vehicle_name": f"Tesla BLE ({prefix})",
+            "telemetry_state": (
+                "offline" if ble_telemetry_observed_at is None else
+                "live" if telemetry_now - ble_telemetry_observed_at <= EV_TELEMETRY_LIVE_MAX_AGE else
+                "stale"
+            ),
+            "_telemetry_observed_at": ble_telemetry_observed_at,
             "ev_power_kw": ev_power_kw,
             # Keep unavailable BLE power distinct from an explicit zero. The
             # latter is a useful idle observation; the former must not render
@@ -3051,6 +3078,8 @@ def _get_ev_vehicles_status(hass, entry, *, include_control_evidence=False) -> l
                 "_charging_observed_at": None,
                 "_connected_observed_at": None,
                 "_soc_observed_at": None,
+                "telemetry_state": "offline",
+                "_telemetry_observed_at": None,
                 "transport_quarantined": True,
             })
             ble_observation.pop("current_amps", None)
@@ -3072,6 +3101,8 @@ def _get_ev_vehicles_status(hass, entry, *, include_control_evidence=False) -> l
                 "_observed_at": None, "_charging_observed_at": None,
                 "_connected_observed_at": None,
                 "_soc_observed_at": None,
+                "telemetry_state": "offline",
+                "_telemetry_observed_at": None,
             })
             ble_observation.pop("site_presence", None)
             ble_observation.pop("_site_presence_observed_at", None)

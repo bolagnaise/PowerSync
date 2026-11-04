@@ -22,6 +22,29 @@ charging power stays unknown in EV/Home accounting. Expired Wall Connector
 reports cannot restore that connection. A fresh connector report identifying
 the exact vehicle can restore it.
 
+## Vehicle telemetry freshness
+
+The EV card tracks communication with the car separately from its charging-power
+measurement. Fresh BLE charging-state or battery-level reports count as current
+telemetry even when their values have not changed and Fleet data is older. A
+fresh state-of-charge report can update the car's telemetry status while its
+charging power remains unavailable. Pair each bridge with the correct vehicle
+in multi-car installations; one bridge cannot refresh another car.
+
+PowerSync uses matching raw receipt timestamps when a bridge provides them,
+otherwise the individual HA entity's report time. An expired or invalid receipt
+cannot be replaced by the time HA republished that field. These display times
+do not renew charging power, prove a plug-state change, or confirm a command.
+Without receipt entities, PowerSync retains the legacy HA timestamp behavior;
+it cannot distinguish a replayed cached value from a new native sample. This
+release does not add receipt support to the bridge's firmware.
+
+BLE connectivity alone is not fresh vehicle telemetry. A bridge may reconnect
+while retaining old SOC, charging state and power readings. The legacy bridge
+`Last update` text also lacks a timezone and can describe non-charging data, so
+PowerSync does not use it to renew these readings. If that timestamp stops
+advancing, check the bridge's vehicle-data polling as well as its connection.
+
 ## Charging-power readings
 
 PowerSync accepts the optional raw charging receipt timestamps supplied by a
