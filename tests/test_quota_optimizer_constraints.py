@@ -231,15 +231,18 @@ def test_daily_export_bonus_groups_do_not_share_caps(optimizer_module, use_highs
 
 
 @pytest.mark.parametrize("use_highs", [False, True])
-def test_custom_flow_plan_limits_optimizer_to_measured_remaining_bonus(optimizer_module, use_highs):
-    from test_flow_power_plan import _custom_snapshot, flow_power, quota
+@pytest.mark.parametrize("plan", ["account_specific", "happy_hour_plus_2026"])
+def test_flow_plan_limits_optimizer_to_measured_remaining_bonus(optimizer_module, use_highs, plan):
+    from test_flow_power_plan import _custom_snapshot, _snapshot, flow_power, quota
 
     if use_highs and not optimizer_module.HIGHS_AVAILABLE:
         pytest.skip("highspy unavailable")
-    snapshot = _custom_snapshot(premium_rate_c_per_kwh=60, post_quota_rate_c_per_kwh=5)
+    snapshot = (_custom_snapshot(premium_rate_c_per_kwh=60, post_quota_rate_c_per_kwh=5)
+                if plan == "account_specific" else _snapshot(plan, region="NSW"))
+    rule_id = flow_power.flow_power_quota_rules(snapshot)[0].rule_id
     ledger = quota.QuotaLedger(flow_power.flow_power_quota_rules(snapshot), quota.QuotaLedgerState(
         tariff_day="2026-09-06", confidence="authoritative",
-        settled_kwh={"flow_custom_export": 14.5},
+        settled_kwh={rule_id: 14.5},
     ))
     start = datetime.fromisoformat("2026-09-06T17:30:00+10:00")
     timestamps = [start + timedelta(minutes=5 * i) for i in range(12)]
@@ -265,4 +268,4 @@ def test_custom_flow_plan_limits_optimizer_to_measured_remaining_bonus(optimizer
         optimizer_module.HIGHS_AVAILABLE = old
     exported = sum(result.grid_export_w) / 1000 * optimizer.interval_minutes / 60
     assert 0 < exported <= 0.5 + 1e-6
-    assert ledger.state.settled_kwh == {"flow_custom_export": 14.5}
+    assert ledger.state.settled_kwh == {rule_id: 14.5}

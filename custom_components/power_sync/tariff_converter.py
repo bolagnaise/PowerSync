@@ -1918,7 +1918,7 @@ def apply_flow_power_export(
     region = str((plan_selection or {}).get("region") or "").upper()
     effective_from = str((plan_selection or {}).get("effective_from") or "2026-09-01")
     official_active = False
-    if plan_id in {"happy_hour_2026", "four_free_2026", "flow_home_2026"}:
+    if plan_id in {"happy_hour_2026", "happy_hour_plus_2026", "four_free_2026", "flow_home_2026"}:
         try:
             official_active = dt_util.now().date() >= date.fromisoformat(effective_from)
         except ValueError:
@@ -1928,7 +1928,7 @@ def apply_flow_power_export(
     # are supplied separately to the optimizer and must never be flattened
     # across an entire capped window.
     all_day_rate = None
-    if official_active and plan_id == "happy_hour_2026":
+    if official_active and plan_id in {"happy_hour_2026", "happy_hour_plus_2026"}:
         export_rate = 0.10
         happy_hour_end = "21:30"
     elif official_active and plan_id == "four_free_2026":
