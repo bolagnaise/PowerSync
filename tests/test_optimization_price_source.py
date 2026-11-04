@@ -1825,41 +1825,15 @@ def test_amber_unusable_fresh_current_retains_usable_cached_price(opt_module, mo
 
 
 def _read_octopus_public_prices(opt_module, states, now):
-    """Run the real entity bridge without importing unrelated HA coordinators."""
-    source = ast.parse((COMPONENT_ROOT / "coordinator.py").read_text())
-    coordinator_class = next(
-        node for node in source.body
-        if isinstance(node, ast.ClassDef) and node.name == "OctopusPriceCoordinator"
-    )
-    methods = {
-        "_parse_octopus_datetime", "_octopus_rate_to_pence", "_octopus_state_entries",
-        "_build_octopus_amber_entry", "_read_from_octopus_energy_entities",
-    }
-    coordinator_class.bases = []
-    coordinator_class.body = [
-        node for node in coordinator_class.body
-        if isinstance(node, ast.FunctionDef) and node.name in methods
-    ]
-
-    class FixedDatetime(datetime):
-        @classmethod
-        def now(cls, tz=None):
-            return now.astimezone(tz) if tz else now.replace(tzinfo=None)
-
-    namespace = {
-        "datetime": FixedDatetime, "math": math, "dt_util": opt_module.dt_util,
-        "_LOGGER": logging.getLogger(__name__),
-    }
-    module = ast.Module(body=[coordinator_class], type_ignores=[])
-    exec(compile(ast.fix_missing_locations(module), "octopus_entity_bridge", "exec"), namespace)
-    bridge = namespace["OctopusPriceCoordinator"]()
-    bridge.product_code = "AGILE-24-10-01"
-    bridge.tariff_code = "E-1R-AGILE-24-10-01-A"
-    bridge.gsp_region = "A"
-    bridge.hass = SimpleNamespace(states=SimpleNamespace(
-        async_all=lambda domain: [s for s in states if s.entity_id.startswith(domain + ".")],
+    """Run the real standalone source adapter at the supplied event time."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("octopus_public_price_test", COMPONENT_ROOT / "octopus_bridge.py")
+    source = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(source)
+    hass = SimpleNamespace(data={}, states=SimpleNamespace(
+        async_all=lambda domain=None: [s for s in states if domain is None or s.entity_id.startswith(domain + ".")],
     ))
-    return bridge._read_from_octopus_energy_entities()
+    return source.read_snapshot(hass, now=now)
 
 
 @pytest.mark.parametrize("live_pence,cached_pence", [(22.75, -6.28), (-6.28, 22.75), (0.0, 22.75)])

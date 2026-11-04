@@ -29095,9 +29095,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 retry with a long Retry-After, because the next sync sends a
                 fresher tariff. Manual syncs and restores wait it out.
         """
-        if octopus_coordinator is not None and (getattr(octopus_coordinator, "external_battery_control", False) or (octopus_coordinator.data or {}).get("octopus", {}).get("external_battery_control")):
-            _LOGGER.info("Octopus owns battery control; tariff upload is monitoring only")
-            return False
         # Snapshot before price acquisition, which can also yield to a newer
         # force/restore command. That command owns the tariff from then on.
         sync_command_generation = _command_generation[0]

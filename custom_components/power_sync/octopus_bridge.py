@@ -68,13 +68,14 @@ def canonical_id(hass, state):
 
 def _identity(hass, state):
     name = canonical_id(hass, state).replace("_export_current_rate", "_current_rate")
-    match = re.fullmatch(r"octopus_energy_electricity_(.+)_([^_]+)_current_rate", name)
+    name = name.replace("_export_current_day_rates", "_current_day_rates")
+    match = re.fullmatch(r"octopus_energy_electricity_(.+)_([^_]+)_(?:current_rate|(?:current|next|previous)_day_rates)", name)
     return (match[2], match[1]) if match else None
 
 
 def discover_meters(hass, *, now=None):
     """Return meter records, not a last-account-wins aggregate."""
-    result = []
+    result, inactive = [], set()
     now = now or datetime.now(timezone.utc)
     accounts = hass.data.get("octopus_energy", {})
     for account_id, data in accounts.items() if isinstance(accounts, dict) else ():
@@ -87,6 +88,7 @@ def discover_meters(hass, *, now=None):
             for meter in point.get("meters", []):
                 active_from, active_to = parse_time(meter.get("active_from")), parse_time(meter.get("active_to"))
                 if (active_from and active_from > now) or (active_to and active_to <= now):
+                    inactive.add((str(point.get("mpan", "")).lower(), str(meter.get("serial_number", "")).lower()))
                     continue
                 mpan, serial = str(point.get("mpan", "")), str(meter.get("serial_number", ""))
                 if not mpan or not serial:
@@ -96,10 +98,12 @@ def discover_meters(hass, *, now=None):
                                "mpan": mpan, "serial": serial, "is_export": bool(meter.get("is_export", point.get("is_export", False))),
                                "agreements": point.get("agreements", []), "result": rates,
                                "property_id": point.get("property_id"), "account": account})
-    for state in states(hass, "sensor"):
+    for state in states(hass):
         if state.state in ("unknown", "unavailable", ""):
             continue
         identity = _identity(hass, state)
+        if identity in inactive:
+            continue
         is_export = bool((state.attributes or {}).get("is_export")) or "_export_" in canonical_id(hass, state)
         if not identity or any((m["mpan"].lower(), m["serial"].lower()) == identity and m["is_export"] == is_export for m in result):
             continue
