@@ -1389,6 +1389,21 @@ def test_curtailment_price_fallback_preserves_negative_export_earnings():
     assert source == "tariff_schedule"
 
 
+def test_unknown_octopus_export_cannot_trigger_curtailment_from_tariff_fallback():
+    namespace = {
+        "Any": object,
+        "get_current_price_from_tariff_schedule": lambda tariff: (31.0, -2.5, "PEAK"),
+    }
+    exec(_top_level_function_source("get_current_prices_for_curtailment"), namespace)
+    coordinator = SimpleNamespace(data={
+        "current": [{"channelType": "general", "perKwh": 7.0}],
+        "octopus": {"export_status": "unknown"},
+    })
+    assert namespace["get_current_prices_for_curtailment"](
+        {"tariff_schedule": {"tou_periods": {"PEAK": []}}}, (coordinator,)
+    ) == (None, 7.0, None)
+
+
 def test_flow_power_curtailment_prefers_tariff_export_over_raw_aemo():
     namespace = {
         "Any": object,

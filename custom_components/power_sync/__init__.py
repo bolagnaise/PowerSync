@@ -14388,6 +14388,11 @@ def get_current_prices_for_curtailment(
             elif channel == "general":
                 import_price = price
 
+        # An Octopus planning estimate cannot establish an export price for
+        # physical curtailment, including via a previously generated tariff.
+        if (data.get("octopus") or {}).get("export_status") == "unknown":
+            return None, import_price, None
+
         if feedin_price is not None:
             return feedin_price, import_price, "price_coordinator"
 

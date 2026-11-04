@@ -277,7 +277,7 @@ def read_snapshot(hass, options=None, *, now=None, event_rates=None):
                  r.get("is_intelligent_adjusted"), r.get("is_capped")) for r in all_rows]
     revision = hashlib.sha256(json.dumps([binding, tariff, material, context["programs"], context["dispatches"]], sort_keys=True, default=str).encode()).hexdigest()[:20]
     source = "octopus_energy_integration" if any(r["source"] == "octopus_energy_internal" for r in rows) else "octopus_energy_entities"
-    return {"current": [r for r in all_rows if r["type"] == "CurrentInterval"], "forecast": all_rows,
+    return {"current": [r for r in all_rows if r["type"] == "CurrentInterval" and r.get("price_available", True)], "forecast": all_rows,
             "export_rates": export_rows, "last_update": now, "source": source, "tariff_code": tariff,
             "product_code": "-".join(tariff.split("-")[2:-1]) if tariff else None, "revision": revision,
             "octopus": {"binding": binding, "health": "ready", "export_status": "known" if export_known else "unknown",
@@ -299,13 +299,15 @@ def related_entities(hass, binding):
     try:
         from homeassistant.helpers import entity_registry as er
         registry = er.async_get(hass)
+        if not callable(getattr(registry, "async_get", None)):
+            registry = None
         for state in all_states:
-            if _identity(hass, state) == (binding["mpan"].lower(), meter):
+            if registry is not None and _identity(hass, state) == (binding["mpan"].lower(), meter):
                 entry = registry.async_get(state.entity_id)
                 if entry:
                     peer_entries.add(entry.config_entry_id)
     except (ImportError, AttributeError, KeyError):
-        pass
+        registry = None
     for state in all_states:
         name = canonical_id(hass, state)
         if not name.startswith("octopus_energy_"):

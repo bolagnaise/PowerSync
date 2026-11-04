@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import sys
+import types
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace as NS
@@ -53,6 +54,7 @@ def test_live_public_correction_replaces_internal_price_and_keeps_provenance():
     assert row["is_intelligent_adjusted"] is True
     assert data["octopus"]["binding"]["mpan"] == "111"
     assert data["octopus"]["export_status"] == "unknown"
+    assert not any(r["channelType"] == "feedIn" for r in data["current"])
     assert all(r["perKwh"] == 0 for r in data["forecast"] if r["channelType"] == "feedIn")
 
 
@@ -62,6 +64,18 @@ def test_multiple_import_meters_require_selection():
         bridge.read_snapshot(source, now=NOW)
     data = bridge.read_snapshot(source, {"octopus_import_meter": "A|111|ABC"}, now=NOW)
     assert data["current"][0]["perKwh"] == 30
+
+
+def test_optional_registry_failure_keeps_meter_scoped_prices_and_diagnostics(monkeypatch):
+    root = sys.modules.get("homeassistant", types.ModuleType("homeassistant"))
+    helpers = sys.modules.get("homeassistant.helpers", types.ModuleType("homeassistant.helpers"))
+    monkeypatch.setitem(sys.modules, "homeassistant", root)
+    monkeypatch.setitem(sys.modules, "homeassistant.helpers", helpers)
+    monkeypatch.setattr(root, "helpers", helpers, raising=False)
+    monkeypatch.setattr(helpers, "entity_registry", NS(async_get=lambda _: NS()), raising=False)
+    data = bridge.read_snapshot(hass({"A": account()}, [state()]), now=NOW)
+    assert data["current"][0]["perKwh"] == 7
+    assert data["octopus"]["related_entities"][0]["entity_id"] == state().entity_id
 
 
 def test_released_upstream_agreement_shape_and_replaced_meters():

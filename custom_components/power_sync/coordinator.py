@@ -13311,8 +13311,7 @@ class OctopusPriceCoordinator(DataUpdateCoordinator):
                     current_prices.append(amber_entry)
                 export_forecast.append(amber_entry)
 
-            # If no export rates configured, create synthetic export prices
-            # (typically 0 for non-export tariffs, or use SEG rates)
+            # Unknown export has zero planning revenue, never a live tariff.
             if not export_rates:
                 for rate in import_rates:
                     valid_from_str = rate.get("valid_from", "")
@@ -13334,8 +13333,6 @@ class OctopusPriceCoordinator(DataUpdateCoordinator):
                     else:
                         interval_type = "ForecastInterval"
 
-                    # Default export rate: Smart Export Guarantee minimum (typically 4.1p)
-                    # or 0 if tariff doesn't support export
                     default_export_pence = 0.0  # Unknown export: no assumed revenue
 
                     amber_entry = {
@@ -13346,10 +13343,10 @@ class OctopusPriceCoordinator(DataUpdateCoordinator):
                         "duration": 30,
                         "valid_from": valid_from.isoformat(),
                         "valid_to": valid_to.isoformat(),
+                        "source": "unknown_export",
+                        "price_available": False,
                     }
 
-                    if interval_type == "CurrentInterval":
-                        current_prices.append(amber_entry)
                     export_forecast.append(amber_entry)
 
             # Combine import and export forecasts

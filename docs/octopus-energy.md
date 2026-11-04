@@ -13,6 +13,7 @@ new hardcoded product codes. Select **Published tariff API (no Intelligent dispa
 for the direct API path, or **No export tariff (unknown)** to clear an export binding.
 Export must belong to the selected account/site;
 an unavailable export rate is unknown and earns no assumed revenue in planning.
+It is not published as a live export price or used to trigger price curtailment.
 
 The **Octopus source status** sensor exposes the binding, original/effective
 prices, adjustment/cap flags, upstream timestamps, dispatch information,
