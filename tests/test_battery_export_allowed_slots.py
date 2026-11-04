@@ -5151,6 +5151,38 @@ def test_octopus_free_electricity_does_not_allow_battery_export(opt_module):
     assert coordinator._battery_export_allowed_slots(12, [0.0] * 12) == [False] * 12
 
 
+def test_octopus_partial_cheap_period_does_not_make_surrounding_five_minute_cells_cheap(opt_module, monkeypatch):
+    coordinator = _coordinator(opt_module, "octopus", profit_max=False)
+    coordinator._entry = None
+    coordinator._electricity_provider = lambda: "octopus"
+    coordinator._read_epex_import_price_entity = lambda _: None
+    coordinator._read_epex_export_price_entity = lambda _: None
+    coordinator._epex_export_source = lambda: "fixed"
+    now = datetime(2026, 5, 3, 9, 10, tzinfo=timezone.utc)
+    rows = []
+    for start, end, price in ((0, 12, 30), (12, 18, 7), (18, 30, 30)):
+        rows.append({"channelType": "general", "perKwh": price,
+                     "valid_from": now.replace(minute=start).isoformat(),
+                     "valid_to": now.replace(minute=end).isoformat(), "duration": end-start})
+    coordinator.price_coordinator = SimpleNamespace(data={"forecast": rows})
+    monkeypatch.setattr(opt_module.dt_util, "now", lambda: now)
+    monkeypatch.setattr(opt_module.dt_util, "utcnow", lambda: now)
+    prices, _ = asyncio.run(coordinator._get_price_forecast())
+    # 09:10–09:15 and 09:15–09:20 both include expensive minutes.
+    assert prices[:2] == [0.30, 0.30]
+
+
+def test_octopus_free_electricity_credit_does_not_replace_retail_import_price(opt_module):
+    coordinator = _coordinator(opt_module, "octopus", profit_max=False)
+    coordinator._saving_session_coordinator = SimpleNamespace(data={"sessions": [SimpleNamespace(
+        joined=True, session_type="free_electricity", start=datetime(2026, 5, 3, 8, 0, tzinfo=timezone.utc),
+        end=datetime(2026, 5, 3, 10, 0, tzinfo=timezone.utc), octopoints_per_kwh=0,
+    )]})
+    imported, exported = coordinator._apply_saving_session_prices([0.3] * 12, [0.1] * 12)
+    assert imported == [0.3] * 12
+    assert exported == [0.1] * 12
+
+
 def test_saving_session_price_overlay_ignores_null_octopoints(opt_module):
     coordinator = _coordinator(opt_module, "octopus", profit_max=True)
     coordinator._saving_session_coordinator = SimpleNamespace(

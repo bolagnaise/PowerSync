@@ -290,11 +290,15 @@
         "description": "Select your Octopus product and GSP region. Find your GSP region on your Octopus bill or at {octopus_url}.",
         "data": {
           "octopus_product": "Octopus product",
-          "octopus_region": "GSP region"
+          "octopus_region": "GSP region",
+          "octopus_import_meter": "BottlecapDave import meter",
+          "octopus_export_meter": "BottlecapDave export meter"
         },
         "data_description": {
           "octopus_product": "Agile = half-hourly dynamic. Go/Intelligent Go = cheap overnight EV rates. Flux/Intelligent Flux = solar+battery optimised. Tracker = daily wholesale.",
-          "octopus_region": "Your Grid Supply Point region (single letter A-P). Check your Octopus bill or account dashboard."
+          "octopus_region": "Your Grid Supply Point region (single letter A-P). Check your Octopus bill or account dashboard.",
+          "octopus_import_meter": "Select your household import meter. Live rates and tariff changes from this meter override the fallback product preset.",
+          "octopus_export_meter": "Select the export meter for the same account and property. Missing export prices are treated as unknown, with no assumed export earnings."
         },
         "submit": "Next"
       },
@@ -314,8 +318,8 @@
           "octopus_saving_sessions_source": "Direct uses the Octopus GraphQL API (requires API key). Entity reads from Bottlecap Dave's Octopus integration.",
           "octopus_api_key": "Your Octopus API key from the developer dashboard (not the same as your public tariff API key).",
           "octopus_account_number": "Your Octopus account number (e.g. A-12345678).",
-          "octopus_saving_sessions_entity": "Entity ID of the Bottlecap Dave saving sessions event entity (e.g. event.octopus_energy_saving_sessions).",
-          "octopus_saving_sessions_auto_join": "Automatically join available saving sessions. Only works in direct mode."
+          "octopus_saving_sessions_entity": "Select the current BottlecapDave Power Down event entity. Legacy Saving Sessions entities remain compatible.",
+          "octopus_saving_sessions_auto_join": "Join available Power Down / Saving Sessions using the selected source. Membership is confirmed from the next upstream update."
         },
         "submit": "Next"
       },
@@ -2451,23 +2455,27 @@
       },
       "octopus_options": {
         "title": "Octopus Energy settings",
-        "description": "Update your Octopus tariff and sync settings. Changes apply after the next sync cycle.",
+        "description": "Choose your Octopus tariff fallback and optional BottlecapDave meters. Live rate changes are picked up during a half-hour, subject to upstream availability.",
         "data": {
           "octopus_product": "Octopus product",
           "octopus_region": "GSP region",
           "auto_sync_enabled": "Enable automatic TOU sync",
-          "battery_curtailment_enabled": "Stop export below threshold"
+          "battery_curtailment_enabled": "Stop export below threshold",
+          "octopus_import_meter": "BottlecapDave import meter",
+          "octopus_export_meter": "BottlecapDave export meter"
         },
         "data_description": {
           "octopus_product": "Agile = half-hourly dynamic. Go/Intelligent Go = cheap overnight EV rates. Flux/Intelligent Flux = solar+battery optimised. Tracker = daily wholesale.",
           "octopus_region": "Your Grid Supply Point region (single letter A-P). Check your Octopus bill or account dashboard.",
           "auto_sync_enabled": "Automatically upload TOU tariff schedules to your battery based on current prices.",
-          "battery_curtailment_enabled": "Stop battery from exporting when export earnings drop below the configured threshold."
+          "battery_curtailment_enabled": "Stop battery from exporting when export earnings drop below the configured threshold.",
+          "octopus_import_meter": "Select your household import meter. Live rates and tariff changes from this meter override the fallback product preset.",
+          "octopus_export_meter": "Select the export meter for the same account and property. Missing export prices are treated as unknown, with no assumed export earnings."
         },
         "submit": "Save"
       },
       "octopus_saving_sessions_options": {
-        "title": "Saving sessions settings",
+        "title": "Octopus Power Down / Saving Sessions",
         "description": "Configure automatic battery export during Octopus Saving Sessions. Changes take effect immediately.",
         "data": {
           "octopus_saving_sessions_enabled": "Enable saving sessions",
@@ -2482,8 +2490,8 @@
           "octopus_saving_sessions_source": "Direct uses the Octopus GraphQL API (requires API key). Entity reads from Bottlecap Dave's Octopus integration.",
           "octopus_api_key": "Your Octopus API key from the developer dashboard (not the same as your public tariff API key).",
           "octopus_account_number": "Your Octopus account number (e.g. A-12345678).",
-          "octopus_saving_sessions_entity": "Entity ID of the Bottlecap Dave saving sessions event entity (e.g. event.octopus_energy_saving_sessions).",
-          "octopus_saving_sessions_auto_join": "Automatically join available saving sessions. Only works in direct mode."
+          "octopus_saving_sessions_entity": "Select the current BottlecapDave Power Down event entity. Legacy Saving Sessions entities remain compatible.",
+          "octopus_saving_sessions_auto_join": "Join available Power Down / Saving Sessions using the selected source. Membership is confirmed from the next upstream update."
         },
         "submit": "Save"
       },

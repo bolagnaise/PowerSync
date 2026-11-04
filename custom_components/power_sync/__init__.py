@@ -5455,7 +5455,7 @@ class SavingSessionTariffManager:
 
         sessions = self._session_coordinator.data.get("sessions", [])
         active = next(
-            (s for s in sessions if s.is_active() and s.joined and s.session_type == "saving"),
+            (s for s in sessions if s.is_active() and s.joined and s.session_type == "saving" and getattr(s, "reward_confirmed", True)),
             None,
         )
 
@@ -5579,7 +5579,7 @@ class SavingSessionTariffManager:
                 sessions = coordinator.data.get("sessions", []) if coordinator and coordinator.data else []
                 return base_current() and any(
                     candidate.code == code and candidate.joined
-                    and candidate.session_type == "saving" and candidate.is_active()
+                    and candidate.session_type == "saving" and candidate.is_active() and getattr(candidate, "reward_confirmed", True)
                     for candidate in sessions)
             if (not current() or not self._saved_tariff
                     or self._saved_operation_mode not in ("autonomous", "self_consumption", "backup")):
@@ -5867,7 +5867,7 @@ class GenericSavingSessionManager:
 
         sessions = self._session_coordinator.data.get("sessions", [])
         active = next(
-            (s for s in sessions if s.is_active() and s.joined and s.session_type == "saving"),
+            (s for s in sessions if s.is_active() and s.joined and s.session_type == "saving" and getattr(s, "reward_confirmed", True)),
             None,
         )
 
@@ -14387,6 +14387,11 @@ def get_current_prices_for_curtailment(
                 feedin_price = price
             elif channel == "general":
                 import_price = price
+
+        # An Octopus planning estimate cannot establish an export price for
+        # physical curtailment, including via a previously generated tariff.
+        if (data.get("octopus") or {}).get("export_status") == "unknown":
+            return None, import_price, None
 
         if feedin_price is not None:
             return feedin_price, import_price, "price_coordinator"
@@ -23920,6 +23925,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         ) == SUNGROW_CONNECTION_IHOMEMANAGER:
             return True
         entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+        octopus_source = entry_data.get("octopus_coordinator")
+        if octopus_source is not None and (getattr(octopus_source, "external_battery_control", False) or (octopus_source.data or {}).get("octopus", {}).get("external_battery_control")):
+            return True
         if isinstance(entry_data, dict) and entry_data.get(
             "_monitoring_handoff_active", False
         ):
@@ -26288,9 +26296,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 gsp_region=octopus_region,
                 export_product_code=octopus_export_product_code,
                 export_tariff_code=octopus_export_tariff_code,
+                source_options={**entry.data, **entry.options},
             )
             try:
                 await octopus_coordinator.async_config_entry_first_refresh()
+                binding = (octopus_coordinator.data or {}).get("octopus", {}).get("binding", {})
+                if binding and not _entry_value("octopus_import_meter"):
+                    hass.config_entries.async_update_entry(entry, data={**entry.data, "octopus_import_meter": binding["key"]})
                 _LOGGER.info(
                     "Octopus Energy Coordinator initialized: product=%s, tariff=%s, region=%s",
                     octopus_product_code,
@@ -26299,7 +26311,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 )
             except Exception as e:
                 _LOGGER.error("Failed to initialize Octopus coordinator: %s", e)
-                octopus_coordinator = None
+                # Keep the source available for recovery/diagnostics; no valid
+                # prices means the normal consumers remain unable to dispatch.
         else:
             _LOGGER.warning("Octopus mode enabled but product/tariff codes not configured")
 
@@ -47662,6 +47675,28 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.data[DOMAIN][entry.entry_id]["octopus_sync_cancel"] = cancel_octopus_cron
         _LOGGER.info("🐙 Octopus TOU sync scheduled at :00 and :30 (1 POST per 30-min period)")
 
+    if octopus_coordinator is not None:
+        from .octopus_bridge import OctopusUpdateBridge
+
+        async def _octopus_programs_changed():
+            if saving_session_coordinator is not None:
+                await saving_session_coordinator.async_request_refresh()
+
+        async def _octopus_source_changed():
+            # Publish first, then use the existing guarded sync/optimizer routes.
+            if _aemo_dispatch_entry_data() is None:
+                return
+            if entry.options.get(CONF_AUTO_SYNC_ENABLED, entry.data.get(CONF_AUTO_SYNC_ENABLED, True)):
+                await handle_sync_rest_api_check(check_name="Octopus source revision", periodic=True)
+
+        octopus_update_bridge = OctopusUpdateBridge(
+            hass, octopus_coordinator, octopus_coordinator._source_options, _octopus_source_changed,
+            prepare_programs=_octopus_programs_changed,
+        )
+        octopus_coordinator._update_bridge = octopus_update_bridge
+        hass.data[DOMAIN][entry.entry_id]["octopus_update_bridge"] = octopus_update_bridge
+        octopus_update_bridge.start()
+
     if is_nem_provider:
         if aemo_sensor_coordinator is not None:
             _LOGGER.info(
@@ -51969,6 +52004,10 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 return_exceptions=True,
             )
         entry_data["aemo_dispatch_tasks"] = set()
+
+    if octopus_bridge := entry_data.get("octopus_update_bridge"):
+        await octopus_bridge.close()
+        entry_data["octopus_update_bridge"] = None
 
     if tesla_stream_coordinator := entry_data.get("tesla_coordinator"):
         try:

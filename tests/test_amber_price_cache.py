@@ -360,7 +360,7 @@ def test_amber_extended_forecast_cache_survives_refresh_failure(monkeypatch):
     assert result["forecast"] == _forecast_5min() + _forecast_30min()
 
 
-def test_octopus_integration_synthesizes_export_when_integration_has_import_only():
+def test_octopus_integration_uses_zero_revenue_when_export_is_unknown():
     now = datetime.now(timezone.utc)
     start = now - timedelta(minutes=5)
     end = now + timedelta(minutes=25)
@@ -403,8 +403,11 @@ def test_octopus_integration_synthesizes_export_when_integration_has_import_only
     assert result is not None
     current = result["current"]
     assert next(p for p in current if p["channelType"] == "general")["perKwh"] == 24.5
-    assert next(p for p in current if p["channelType"] == "feedIn")["perKwh"] == -4.1
+    assert not any(p["channelType"] == "feedIn" for p in current)
+    assert result["octopus"]["export_status"] == "unknown"
     assert result["export_rates"][0]["channelType"] == "feedIn"
+    assert result["export_rates"][0]["perKwh"] == 0.0
+    assert result["export_rates"][0]["price_available"] is False
 
 
 def test_octopus_integration_reads_public_current_rate_entities_when_internal_data_missing():

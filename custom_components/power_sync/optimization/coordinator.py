@@ -973,6 +973,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def _monitoring_mode_active(self) -> bool:
         """Return True when monitoring mode should block hardware writes."""
+        source = getattr(self, "price_coordinator", None)
+        if type(source).__name__ == "OctopusPriceCoordinator" and (getattr(source, "external_battery_control", False) or (source.data or {}).get("octopus", {}).get("external_battery_control")):
+            return True
         if self.battery_system == CUSTOM_BATTERY_SYSTEM:
             return True
         from ..const import CONF_MONITORING_MODE, DOMAIN
@@ -5585,20 +5588,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
 
     def _is_octopus_dynamic_tariff(self) -> bool:
-        """Return True when the active Octopus tariff is genuinely half-hourly.
-
-        Checks both product_code and the live tariff_code. The tariff_code is
-        authoritative when data is sourced from BottlecapDave (the configured
-        product_code may not match what the user is actually billed on).
-        """
-        if not self.price_coordinator:
-            return False
-        product = (getattr(self.price_coordinator, "product_code", "") or "").upper()
-        tariff = (getattr(self.price_coordinator, "tariff_code", "") or "").upper()
-        for token in ("AGILE", "FLUX", "COSY"):
-            if token in product or token in tariff:
-                return True
-        return False
+        """All Octopus schedules can be revised, including Intelligent Go."""
+        return self.price_coordinator is not None
 
     async def _setup_price_listener(self) -> None:
         """Set up price-triggered optimization for dynamic pricing providers."""
@@ -5769,6 +5760,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         the elapsed-time duplicate guard.
         """
         data = getattr(self.price_coordinator, "data", None)
+        if type(self.price_coordinator).__name__ == "OctopusPriceCoordinator" and isinstance(data, dict):
+            if data.get("revision"):
+                return ("octopus", data["revision"])
+            # The REST fallback has no upstream revision, but an in-window
+            # correction still has a material identity independent of its end.
+            rows = list(data.get("current", [])) + list(data.get("forecast", []))
+            return ("octopus", repr([(r.get("channelType"), r.get("valid_from"), r.get("nemTime"), r.get("perKwh")) for r in rows]))
         current = data.get("current") if isinstance(data, dict) else None
         if not isinstance(current, list):
             return None
@@ -5816,6 +5814,19 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             return
 
+        if type(self.price_coordinator).__name__ == "OctopusPriceCoordinator":
+            revision = self._price_update_generation_key()
+            if revision == getattr(self, "_last_octopus_revision", None):
+                return
+            self._last_octopus_revision = revision
+            self._octopus_price_pending = True
+            task = getattr(self, "_price_reoptimize_task", None)
+            if task is None or task.done():
+                self._price_reoptimize_task = self.hass.async_create_background_task(
+                    self._run_octopus_price_updates(), "powersync_octopus_reoptimize"
+                )
+            return
+
         # Rate-limit: Amber/Octopus can fire two coordinator updates per
         # billing window (usage price + spot price). Avoid duplicate LP runs
         # and repeated force mode commands inside the same interval, but do
@@ -5846,6 +5857,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._price_reoptimize_task = self.hass.async_create_background_task(
             self._run_optimization(), "powersync_price_reoptimize"
         )
+
+    async def _run_octopus_price_updates(self) -> None:
+        """Drain the newest rate revision through the ordinary guarded solve."""
+        while getattr(self, "_octopus_price_pending", False) and self._enabled:
+            self._octopus_price_pending = False
+            await self._run_optimization(force=True, execution_trigger="octopus_rate_update")
 
     @optimizer_work
     async def enable(self) -> bool:
@@ -6035,6 +6052,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         time-out) don't block async_setup_entry and risk HA bootstrap
         stage 2 cancellation.
         """
+        source = getattr(self, "price_coordinator", None)
+        if type(source).__name__ == "OctopusPriceCoordinator" and self._monitoring_mode_active():
+            _LOGGER.info("Octopus startup: external battery ownership — no mode or reserve writes")
+            return
         force = self._get_active_force_state()
         if force and force.get("active") and force.get("source") != "optimizer":
             return  # Startup must not change a newer manual/external force mode.
@@ -7441,6 +7462,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             _LOGGER.debug("Optimization in progress — queuing forced re-optimization")
         await self._optimization_lock.acquire()
         try:
+            octopus_revision = (
+                (self.price_coordinator.data or {}).get("revision")
+                if type(getattr(self, "price_coordinator", None)).__name__ == "OctopusPriceCoordinator" else None
+            )
             self._pending_price_timestamps = None
             self._pending_amber_forecast_confidence = None
 
@@ -8487,6 +8512,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if key in reserve_semantic_keys
             }
             self._current_schedule = result.schedule
+            self._octopus_schedule_revision = octopus_revision
             self._last_optimizer_result = result
             self._adopt_solved_ev_series(result)
             self._commit_price_forecast_cache(import_prices, export_prices)
@@ -8823,6 +8849,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # (see OB-10). _execute_optimizer_action also guards on _enabled
             # internally, but skip the call — and the lock acquisition below —
             # entirely once disabled rather than relying solely on that.
+            if octopus_revision is not None and octopus_revision != (self.price_coordinator.data or {}).get("revision"):
+                self._octopus_price_pending = True
+                _LOGGER.info("Octopus rates changed during solve; discarding superseded execution")
+                return False
             await self._execute_current_action_and_publish(
                 current_action,
                 execution_trigger=execution_trigger,
@@ -11529,6 +11559,28 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # method to behave as if the optimizer is running.
         if not getattr(self, "_enabled", True):
             return
+        price_source = getattr(self, "price_coordinator", None)
+        if type(price_source).__name__ == "OctopusPriceCoordinator":
+            revision = (price_source.data or {}).get("revision")
+            if not getattr(price_source, "last_update_success", True) or (
+                revision is not None and revision != getattr(self, "_octopus_schedule_revision", None)
+            ):
+                _LOGGER.info("Octopus action deferred until a valid current rate plan is available")
+                return
+        if type(price_source).__name__ == "OctopusPriceCoordinator" and revision is not None:
+            valid_current_price = False
+            for row in (price_source.data or {}).get("current", []):
+                if row.get("channelType") != "general":
+                    continue
+                try:
+                    start = datetime.fromisoformat(row["valid_from"].replace("Z", "+00:00"))
+                    end = datetime.fromisoformat(row["valid_to"].replace("Z", "+00:00"))
+                    valid_current_price |= start <= dt_util.utcnow() < end
+                except (KeyError, TypeError, ValueError):
+                    continue
+            if not valid_current_price:
+                _LOGGER.info("Octopus action deferred: current import price expired or unavailable")
+                return
         if getattr(self, "battery_system", None) == "tesla" and hasattr(self, "_powerwall_plan_routes"):
             from ..powerwall_local.control_method import control_method
             entry = getattr(self, "_entry", None)
@@ -15447,6 +15499,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         for session in sessions:
             if not session.joined:
                 continue
+            if session.session_type == "saving" and not getattr(session, "reward_confirmed", True):
+                continue
+            if session.session_type == "saving" and not getattr(session, "reward_confirmed", True):
+                continue
             start = getattr(session, "start", None)
             end = getattr(session, "end", None)
             if start is None or end is None:
@@ -15482,8 +15538,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         export_result[t] += session_rate
                         # Also bump import price to discourage grid charging
                         import_result[t] = max(import_result[t], session_rate * 2)
-                    elif session.session_type == "free_electricity":
-                        # Free power - set import price to 0
+                    elif session.session_type == "free_electricity" and getattr(session, "retail_rate_confirmed", False):
+                        # Baseline-dependent bill credits are not a free retail tariff.
                         import_result[t] = 0.0
                     boosted += 1
 
@@ -17381,7 +17437,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 # Discord #71.
                                 continue
                         for pos in range(start_idx, end_idx):
-                            import_slots[pos] = price_dollar
+                            # A partial Octopus interval cannot make the
+                            # expensive portion of a five-minute cell cheap.
+                            previous = import_slots[pos]
+                            import_slots[pos] = max(previous, price_dollar) if _provider == "octopus" and previous is not None else price_dollar
                             priced_mask[pos] = True
                         last_import_slot = max(last_import_slot, end_idx)
 
@@ -17440,8 +17499,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             is_spike=e.get("spikeStatus") in ("spike", "potential") or e.get("descriptor") == "spike",
                         ))
                         for pos in range(start_idx, end_idx):
-                            export_slots[pos] = lp_price
-                            display_export_slots[pos] = display_price
+                            previous = export_slots[pos]
+                            export_slots[pos] = min(previous, lp_price) if _provider == "octopus" and previous is not None else lp_price
+                            previous_display = display_export_slots[pos]
+                            display_export_slots[pos] = min(previous_display, display_price) if _provider == "octopus" and previous_display is not None else display_price
 
                     export_prices = self._fill_price_gaps(export_slots)
                     display_export_raw = self._fill_price_gaps(

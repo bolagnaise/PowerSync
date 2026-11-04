@@ -656,6 +656,7 @@ def test_only_periodic_price_syncs_cap_retry_after():
         "aemo dispatch": True,
         "cron fallback": True,
         "octopus :00/:30": True,
+        "Octopus source revision": True,
         "agl static startup": False,
         "flow power startup": False,
     }

@@ -77,6 +77,8 @@ class SavingSession:
     octopoints_per_kwh: int  # Typically 800-1800 for saving sessions
     joined: bool
     session_type: str  # "saving" or "free_electricity"
+    reward_confirmed: bool = True
+    retail_rate_confirmed: bool = False
 
     def is_active(self) -> bool:
         """Return True if the session is currently active."""
@@ -95,6 +97,8 @@ class SavingSession:
     @property
     def rate_pence_per_kwh(self) -> float:
         """Return the effective rate in pence/kWh (octopoints / 8)."""
+        if not self.reward_confirmed:
+            return 0.0
         try:
             return float(self.octopoints_per_kwh or 0) / 8.0
         except (TypeError, ValueError):
@@ -127,6 +131,7 @@ def saving_session_from_octopus_energy_event(
         ),
         joined=joined,
         session_type="saving",
+        reward_confirmed=event.get("octopoints_per_kwh") is not None,
     )
 
 

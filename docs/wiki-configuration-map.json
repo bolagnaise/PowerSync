@@ -9,18 +9,18 @@
   },
   "source_state": {
     "components": {
-      "config_flow.py": "c3ba2231f67f29da4fcab28d7e3896929b73e3c8a00eb85d84a90752efeb63eb",
+      "config_flow.py": "87a1825b30bdf180803c9c47b97523f93cff7c812ea6dd97decbebdbfdf2b2ec",
       "const.py": "767a6a9dd0a051c625f80ec7899ebd810c4f7d17af9f4ea527ffa14bbcdea870",
       "battery_backend/profiles.py": "d308ecc78740d8dfc9cd895e4b9750a02859d46e5f0863dd5c098b8aaab2bcc2",
       "battery_backend/discovery.py": "3a8c88c00d6c57f6101d55056968524d7971d1ac3b8e16365923bca978f9489b",
       "settings_metadata.py": "deea4c452dd3cd334d5e1b9348e0ead03891542128c4061c368ad6e1c012ffd9",
-      "strings.json": "c903b233028f88d319fc2fa79663666b3f114a5adf57901650c708959cef6e27",
-      "translations/en.json": "a0bc3594a659b6f5f5133537cf229bd671fec03ef366a086f7c4ccc80072c2a6",
+      "strings.json": "eaae07cebed0017beab9524b16e6474d2cd5151847af2a9c9705f57750945b69",
+      "translations/en.json": "f99c712d7c163bc17da632d26f608a5f43b2c877dc958ec109b04a78f91e99c2",
       "services.yaml": "bd900e351e007f6107ee35ddd10e13c2b7185bcf90c116313781834453fc5d92",
       "switch.py": "878970c76ede8803ed9802eaf5bf95c4a483c5c58497010a6cf21a1e74f3be7b",
       "select.py": "8d5d7dbd06e0919d3ba84b52660f342dde1583bf9d8d57c2bb5bcbd2ca655d99",
       "number.py": "738171cc9d2c8f71f84a38402a737eaf9ca2a1b56de1cb0c0eb18886ceb9b595",
-      "sensor.py": "c5f233f7715d6964111b29d00734cc243748f06adde7a5333a9150e0e343f785",
+      "sensor.py": "1b012c72866b7b91c4584d61302e4845f3c58f805793f56c73e7bd7a3e7df75a",
       "binary_sensor.py": "cad335bcce4d56edb1121bc08a6bbe34d55cad991ce31a34547d150ec4898704",
       "button.py": "69368d0dc0f8a1a9e336fed0da117103676670003db81d3360fc24bc0e6123b0",
       "automations/actions.py": "96c848e414706d6c086afb44913b82818074b0a500d2aab075747e1e0db8ca40",
@@ -450,6 +450,8 @@
       "config.nz_rates.nz_shoulder_rate": "Shoulder rate",
       "config.nz_retailer.nz_distribution_zone": "Distribution zone",
       "config.nz_retailer.nz_retailer": "Retailer",
+      "config.octopus.octopus_export_meter": "BottlecapDave export meter",
+      "config.octopus.octopus_import_meter": "BottlecapDave import meter",
       "config.octopus.octopus_product": "Octopus product",
       "config.octopus.octopus_region": "GSP region",
       "config.octopus_saving_sessions.octopus_account_number": "Account number",
@@ -901,6 +903,8 @@
       "options.nz_options.nz_shoulder_rate": "Shoulder rate",
       "options.octopus_options.auto_sync_enabled": "Enable automatic TOU sync",
       "options.octopus_options.battery_curtailment_enabled": "Stop export below threshold",
+      "options.octopus_options.octopus_export_meter": "BottlecapDave export meter",
+      "options.octopus_options.octopus_import_meter": "BottlecapDave import meter",
       "options.octopus_options.octopus_product": "Octopus product",
       "options.octopus_options.octopus_region": "GSP region",
       "options.octopus_saving_sessions_options.octopus_account_number": "Account number",
@@ -8790,6 +8794,46 @@
       "source_line": 16070,
       "group": null,
       "rendering": "SolarEdge only; optional explicit member sensors"
+    },
+    {
+      "scope": "config",
+      "form": "octopus",
+      "field": "octopus_import_meter",
+      "label": "BottlecapDave import meter",
+      "page": "Provider-Octopus.md",
+      "source_line": 2099,
+      "group": null,
+      "rendering": "conditional union; see page availability notes"
+    },
+    {
+      "scope": "config",
+      "form": "octopus",
+      "field": "octopus_export_meter",
+      "label": "BottlecapDave export meter",
+      "page": "Provider-Octopus.md",
+      "source_line": 2099,
+      "group": null,
+      "rendering": "conditional union; see page availability notes"
+    },
+    {
+      "scope": "options",
+      "form": "octopus_options",
+      "field": "octopus_import_meter",
+      "label": "BottlecapDave import meter",
+      "page": "Provider-Octopus.md",
+      "source_line": 2099,
+      "group": null,
+      "rendering": "conditional union; see page availability notes"
+    },
+    {
+      "scope": "options",
+      "form": "octopus_options",
+      "field": "octopus_export_meter",
+      "label": "BottlecapDave export meter",
+      "page": "Provider-Octopus.md",
+      "source_line": 2099,
+      "group": null,
+      "rendering": "conditional union; see page availability notes"
     }
   ],
   "profiles": [
@@ -9800,6 +9844,62 @@
       "page": "Provider-Amber",
       "status": "documented"
     },
+    "config.amber_smartshift.amber_smartshift_allow_enable": {
+      "page": "Amber-Smart-Shift",
+      "status": "documented"
+    },
+    "config.amber_smartshift.amber_smartshift_email": {
+      "page": "Amber-Smart-Shift",
+      "status": "documented"
+    },
+    "config.amber_smartshift.amber_smartshift_managed": {
+      "page": "Amber-Smart-Shift",
+      "status": "documented"
+    },
+    "config.amber_smartshift.amber_smartshift_password": {
+      "page": "Amber-Smart-Shift",
+      "status": "documented"
+    },
+    "config.amber_smartshift.custom_grid_power_entity": {
+      "page": "Amber-Smart-Shift",
+      "status": "documented"
+    },
+    "config.amber_smartshift.custom_load_power_entity": {
+      "page": "Amber-Smart-Shift",
+      "status": "documented"
+    },
+    "config.amber_smartshift.custom_solar_power_entity": {
+      "page": "Amber-Smart-Shift",
+      "status": "documented"
+    },
+    "config.amber_smartshift_reauth.amber_smartshift_allow_enable": {
+      "page": "Amber-Smart-Shift",
+      "status": "documented"
+    },
+    "config.amber_smartshift_reauth.amber_smartshift_email": {
+      "page": "Amber-Smart-Shift",
+      "status": "documented"
+    },
+    "config.amber_smartshift_reauth.amber_smartshift_managed": {
+      "page": "Amber-Smart-Shift",
+      "status": "documented"
+    },
+    "config.amber_smartshift_reauth.amber_smartshift_password": {
+      "page": "Amber-Smart-Shift",
+      "status": "documented"
+    },
+    "config.amber_smartshift_reauth.custom_grid_power_entity": {
+      "page": "Amber-Smart-Shift",
+      "status": "documented"
+    },
+    "config.amber_smartshift_reauth.custom_load_power_entity": {
+      "page": "Amber-Smart-Shift",
+      "status": "documented"
+    },
+    "config.amber_smartshift_reauth.custom_solar_power_entity": {
+      "page": "Amber-Smart-Shift",
+      "status": "documented"
+    },
     "config.anker_solix.anker_solix_battery_capacity_kwh": {
       "page": "Battery-Anker-Solix",
       "status": "documented"
@@ -10348,6 +10448,10 @@
       "status": "source_text_only",
       "reason": "Not in the active source-schema field reference; legacy/helper/conditional text is not proof of a visible control. Review this exclusion on source change."
     },
+    "config.inverter_config_setup.solaredge_ac_power_entities": {
+      "page": "SolarEdge-AC-Telemetry",
+      "status": "documented"
+    },
     "config.localvolts.localvolts_api_key": {
       "page": "Provider-Localvolts",
       "status": "documented"
@@ -10556,6 +10660,14 @@
       "page": "Provider-New-Zealand",
       "status": "documented"
     },
+    "config.octopus.octopus_export_meter": {
+      "page": "Provider-Octopus",
+      "status": "documented"
+    },
+    "config.octopus.octopus_import_meter": {
+      "page": "Provider-Octopus",
+      "status": "documented"
+    },
     "config.octopus.octopus_product": {
       "page": "Provider-Octopus",
       "status": "documented"
@@ -10761,6 +10873,14 @@
       "status": "documented"
     },
     "config.sungrow.sungrow_host": {
+      "page": "Battery-Sungrow",
+      "status": "documented"
+    },
+    "config.sungrow.sungrow_ihomemanager_host": {
+      "page": "Battery-Sungrow",
+      "status": "documented"
+    },
+    "config.sungrow.sungrow_ihomemanager_port": {
       "page": "Battery-Sungrow",
       "status": "documented"
     },
@@ -11068,6 +11188,34 @@
       "page": "Provider-Amber",
       "status": "documented"
     },
+    "options.amber_smartshift.amber_smartshift_allow_enable": {
+      "page": "Amber-Smart-Shift",
+      "status": "documented"
+    },
+    "options.amber_smartshift.amber_smartshift_email": {
+      "page": "Amber-Smart-Shift",
+      "status": "documented"
+    },
+    "options.amber_smartshift.amber_smartshift_managed": {
+      "page": "Amber-Smart-Shift",
+      "status": "documented"
+    },
+    "options.amber_smartshift.amber_smartshift_password": {
+      "page": "Amber-Smart-Shift",
+      "status": "documented"
+    },
+    "options.amber_smartshift.custom_grid_power_entity": {
+      "page": "Amber-Smart-Shift",
+      "status": "documented"
+    },
+    "options.amber_smartshift.custom_load_power_entity": {
+      "page": "Amber-Smart-Shift",
+      "status": "documented"
+    },
+    "options.amber_smartshift.custom_solar_power_entity": {
+      "page": "Amber-Smart-Shift",
+      "status": "documented"
+    },
     "options.anker_solix.anker_solix_battery_capacity_kwh": {
       "page": "Battery-Anker-Solix",
       "status": "documented"
@@ -11220,6 +11368,14 @@
       "page": "Curtailment",
       "status": "documented"
     },
+    "options.curtailment_options.negative_import_solar_controls_all_pv": {
+      "page": "Negative-Import-Solar",
+      "status": "documented"
+    },
+    "options.curtailment_options.negative_import_solar_enabled": {
+      "page": "Negative-Import-Solar",
+      "status": "documented"
+    },
     "options.curtailment_options.openweathermap_api_key": {
       "status": "source_text_only",
       "reason": "Not in the active source-schema field reference; legacy/helper/conditional text is not proof of a visible control. Review this exclusion on source change."
@@ -11230,6 +11386,22 @@
     },
     "options.curtailment_options.sigenergy_dc_curtailment_enabled": {
       "page": "Curtailment",
+      "status": "documented"
+    },
+    "options.curtailment_options.solar_production_control_entities": {
+      "page": "Negative-Import-Solar",
+      "status": "documented"
+    },
+    "options.curtailment_options.solar_production_grid_connected_entity": {
+      "page": "Negative-Import-Solar",
+      "status": "documented"
+    },
+    "options.curtailment_options.solar_production_import_price_entity": {
+      "page": "Negative-Import-Solar",
+      "status": "documented"
+    },
+    "options.curtailment_options.solar_production_power_entity": {
+      "page": "Negative-Import-Solar",
       "status": "documented"
     },
     "options.custom_battery.custom_battery_level_entity": {
@@ -12076,6 +12248,14 @@
       "page": "Battery-Sungrow",
       "status": "documented"
     },
+    "options.init_sungrow.sungrow_ihomemanager_host": {
+      "page": "Battery-Sungrow",
+      "status": "documented"
+    },
+    "options.init_sungrow.sungrow_ihomemanager_port": {
+      "page": "Battery-Sungrow",
+      "status": "documented"
+    },
     "options.init_sungrow.sungrow_port": {
       "page": "Battery-Sungrow",
       "status": "documented"
@@ -12154,6 +12334,10 @@
     },
     "options.inverter_config.inverter_token": {
       "page": "AC-Inverter-Curtailment",
+      "status": "documented"
+    },
+    "options.inverter_config.solaredge_ac_power_entities": {
+      "page": "SolarEdge-AC-Telemetry",
       "status": "documented"
     },
     "options.localvolts_options.auto_sync_enabled": {
@@ -12288,6 +12472,14 @@
       "page": "Provider-Octopus",
       "status": "documented"
     },
+    "options.octopus_options.octopus_export_meter": {
+      "page": "Provider-Octopus",
+      "status": "documented"
+    },
+    "options.octopus_options.octopus_import_meter": {
+      "page": "Provider-Octopus",
+      "status": "documented"
+    },
     "options.octopus_options.octopus_product": {
       "page": "Provider-Octopus",
       "status": "documented"
@@ -12364,6 +12556,10 @@
       "page": "Optimization-Settings",
       "status": "documented"
     },
+    "options.optimization.optimization_ai_summary_auto_refresh_interval": {
+      "page": "Smart-Optimization",
+      "status": "documented"
+    },
     "options.optimization.optimization_ai_summary_clear_api_key": {
       "page": "Optimization-Settings",
       "status": "documented"
@@ -12373,6 +12569,10 @@
       "status": "documented"
     },
     "options.optimization.optimization_ai_summary_local_model": {
+      "page": "Optimization-Settings",
+      "status": "documented"
+    },
+    "options.optimization.optimization_ai_summary_local_timeout": {
       "page": "Optimization-Settings",
       "status": "documented"
     },
@@ -12596,6 +12796,14 @@
       "page": "Battery-Sungrow",
       "status": "documented"
     },
+    "options.sungrow_connection.sungrow_ihomemanager_host": {
+      "page": "Battery-Sungrow",
+      "status": "documented"
+    },
+    "options.sungrow_connection.sungrow_ihomemanager_port": {
+      "page": "Battery-Sungrow",
+      "status": "documented"
+    },
     "options.sungrow_connection.sungrow_port": {
       "page": "Battery-Sungrow",
       "status": "documented"
@@ -12688,8 +12896,16 @@
       "status": "source_text_only",
       "reason": "Not in the active source-schema field reference; legacy/helper/conditional text is not proof of a visible control. Review this exclusion on source change."
     },
+    "options.tesla_site.tesla_energy_site_id": {
+      "page": "Battery-Tesla-Powerwall",
+      "status": "documented"
+    },
     "options.teslemetry_token.teslemetry_api_token": {
       "page": "Battery-Tesla-Powerwall",
+      "status": "documented"
+    },
+    "options.weather_options.no_solar_installed": {
+      "page": "Weather-and-Solar-Forecasts",
       "status": "documented"
     },
     "options.weather_options.openweathermap_api_key": {
@@ -12697,6 +12913,10 @@
       "status": "documented"
     },
     "options.weather_options.solar_forecast_provider": {
+      "page": "Weather-and-Solar-Forecasts",
+      "status": "documented"
+    },
+    "options.weather_options.solar_nowcast_enabled": {
       "page": "Weather-and-Solar-Forecasts",
       "status": "documented"
     },
@@ -12738,166 +12958,6 @@
     },
     "options.zaptec_cloud_options.zaptec_username": {
       "page": "EV-Smart-Charging",
-      "status": "documented"
-    },
-    "options.curtailment_options.negative_import_solar_enabled": {
-      "page": "Negative-Import-Solar",
-      "status": "documented"
-    },
-    "options.curtailment_options.solar_production_control_entities": {
-      "page": "Negative-Import-Solar",
-      "status": "documented"
-    },
-    "options.curtailment_options.negative_import_solar_controls_all_pv": {
-      "page": "Negative-Import-Solar",
-      "status": "documented"
-    },
-    "options.curtailment_options.solar_production_power_entity": {
-      "page": "Negative-Import-Solar",
-      "status": "documented"
-    },
-    "options.curtailment_options.solar_production_import_price_entity": {
-      "page": "Negative-Import-Solar",
-      "status": "documented"
-    },
-    "options.curtailment_options.solar_production_grid_connected_entity": {
-      "page": "Negative-Import-Solar",
-      "status": "documented"
-    },
-    "config.amber_smartshift.amber_smartshift_allow_enable": {
-      "page": "Amber-Smart-Shift",
-      "status": "documented"
-    },
-    "config.amber_smartshift.amber_smartshift_email": {
-      "page": "Amber-Smart-Shift",
-      "status": "documented"
-    },
-    "config.amber_smartshift.amber_smartshift_managed": {
-      "page": "Amber-Smart-Shift",
-      "status": "documented"
-    },
-    "config.amber_smartshift.amber_smartshift_password": {
-      "page": "Amber-Smart-Shift",
-      "status": "documented"
-    },
-    "config.amber_smartshift.custom_grid_power_entity": {
-      "page": "Amber-Smart-Shift",
-      "status": "documented"
-    },
-    "config.amber_smartshift.custom_load_power_entity": {
-      "page": "Amber-Smart-Shift",
-      "status": "documented"
-    },
-    "config.amber_smartshift.custom_solar_power_entity": {
-      "page": "Amber-Smart-Shift",
-      "status": "documented"
-    },
-    "config.amber_smartshift_reauth.amber_smartshift_allow_enable": {
-      "page": "Amber-Smart-Shift",
-      "status": "documented"
-    },
-    "config.amber_smartshift_reauth.amber_smartshift_email": {
-      "page": "Amber-Smart-Shift",
-      "status": "documented"
-    },
-    "config.amber_smartshift_reauth.amber_smartshift_managed": {
-      "page": "Amber-Smart-Shift",
-      "status": "documented"
-    },
-    "config.amber_smartshift_reauth.amber_smartshift_password": {
-      "page": "Amber-Smart-Shift",
-      "status": "documented"
-    },
-    "config.amber_smartshift_reauth.custom_grid_power_entity": {
-      "page": "Amber-Smart-Shift",
-      "status": "documented"
-    },
-    "config.amber_smartshift_reauth.custom_load_power_entity": {
-      "page": "Amber-Smart-Shift",
-      "status": "documented"
-    },
-    "config.amber_smartshift_reauth.custom_solar_power_entity": {
-      "page": "Amber-Smart-Shift",
-      "status": "documented"
-    },
-    "options.amber_smartshift.amber_smartshift_allow_enable": {
-      "page": "Amber-Smart-Shift",
-      "status": "documented"
-    },
-    "options.amber_smartshift.amber_smartshift_email": {
-      "page": "Amber-Smart-Shift",
-      "status": "documented"
-    },
-    "options.amber_smartshift.amber_smartshift_managed": {
-      "page": "Amber-Smart-Shift",
-      "status": "documented"
-    },
-    "options.amber_smartshift.amber_smartshift_password": {
-      "page": "Amber-Smart-Shift",
-      "status": "documented"
-    },
-    "options.amber_smartshift.custom_grid_power_entity": {
-      "page": "Amber-Smart-Shift",
-      "status": "documented"
-    },
-    "options.amber_smartshift.custom_load_power_entity": {
-      "page": "Amber-Smart-Shift",
-      "status": "documented"
-    },
-    "options.amber_smartshift.custom_solar_power_entity": {
-      "page": "Amber-Smart-Shift",
-      "status": "documented"
-    },
-    "options.tesla_site.tesla_energy_site_id": {
-      "page": "Battery-Tesla-Powerwall",
-      "status": "documented"
-    },
-    "options.optimization.optimization_ai_summary_local_timeout": {
-      "page": "Optimization-Settings",
-      "status": "documented"
-    },
-    "options.weather_options.no_solar_installed": {
-      "page": "Weather-and-Solar-Forecasts",
-      "status": "documented"
-    },
-    "config.sungrow.sungrow_ihomemanager_host": {
-      "page": "Battery-Sungrow",
-      "status": "documented"
-    },
-    "config.sungrow.sungrow_ihomemanager_port": {
-      "page": "Battery-Sungrow",
-      "status": "documented"
-    },
-    "options.sungrow_connection.sungrow_ihomemanager_host": {
-      "page": "Battery-Sungrow",
-      "status": "documented"
-    },
-    "options.sungrow_connection.sungrow_ihomemanager_port": {
-      "page": "Battery-Sungrow",
-      "status": "documented"
-    },
-    "options.init_sungrow.sungrow_ihomemanager_host": {
-      "page": "Battery-Sungrow",
-      "status": "documented"
-    },
-    "options.init_sungrow.sungrow_ihomemanager_port": {
-      "page": "Battery-Sungrow",
-      "status": "documented"
-    },
-    "options.weather_options.solar_nowcast_enabled": {
-      "page": "Weather-and-Solar-Forecasts",
-      "status": "documented"
-    },
-    "config.inverter_config_setup.solaredge_ac_power_entities": {
-      "page": "SolarEdge-AC-Telemetry",
-      "status": "documented"
-    },
-    "options.inverter_config.solaredge_ac_power_entities": {
-      "page": "SolarEdge-AC-Telemetry",
-      "status": "documented"
-    },
-    "options.optimization.optimization_ai_summary_auto_refresh_interval": {
-      "page": "Smart-Optimization",
       "status": "documented"
     }
   }

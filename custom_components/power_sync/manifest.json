@@ -6,7 +6,8 @@
     "recorder",
     "tesla_fleet",
     "zeroconf",
-    "esy_sunhome"
+    "esy_sunhome",
+    "octopus_energy"
   ],
   "codeowners": [
     "@benboller"

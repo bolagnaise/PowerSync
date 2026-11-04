@@ -2084,6 +2084,20 @@ def resolve_goodwe_port(protocol: str, port: int | None) -> int:
 
 
 
+def _octopus_source_fields(hass, current):
+    """Offer explicit upstream meter binding when the integration is loaded."""
+    from .octopus_bridge import meter_options
+    fields = {}
+    for key, export in (("octopus_import_meter", False), ("octopus_export_meter", True)):
+        choices = meter_options(hass, export)
+        if choices:
+            if current.get(key) and current[key] not in {choice["value"] for choice in choices}:
+                choices.append({"value": current[key], "label": "Previously selected meter (unavailable)"})
+            marker = vol.Optional(key, default=current[key]) if current.get(key) else vol.Optional(key)
+            fields[marker] = SelectSelector(SelectSelectorConfig(options=choices, mode=SelectSelectorMode.DROPDOWN))
+    return fields
+
+
 class PowerSyncConfigFlow(AmberSetupMixin, config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for PowerSync."""
 
@@ -3262,9 +3276,14 @@ class PowerSyncConfigFlow(AmberSetupMixin, config_entries.ConfigFlow, domain=DOM
                     else None
                 )
 
-                rates = await client.get_current_rates(
-                    product_code, tariff_code, page_size=5
-                )
+                from .octopus_bridge import read_snapshot
+                selected_source = read_snapshot(self.hass, user_input) if user_input.get("octopus_import_meter") else None
+                if selected_source:
+                    tariff_code = selected_source.get("tariff_code") or tariff_code
+                    product_code = selected_source.get("product_code") or product_code
+                    rates = selected_source["forecast"]
+                else:
+                    rates = await client.get_current_rates(product_code, tariff_code, page_size=5)
 
                 if not rates:
                     errors["base"] = "no_prices"
@@ -3282,6 +3301,7 @@ class PowerSyncConfigFlow(AmberSetupMixin, config_entries.ConfigFlow, domain=DOM
                 self._octopus_data = {
                     CONF_OCTOPUS_PRODUCT: product_key,
                     CONF_OCTOPUS_REGION: region,
+                    **{key: user_input[key] for key in ("octopus_import_meter", "octopus_export_meter") if key in user_input},
                     CONF_OCTOPUS_PRODUCT_CODE: product_code,
                     CONF_OCTOPUS_TARIFF_CODE: tariff_code,
                     CONF_OCTOPUS_EXPORT_PRODUCT_CODE: export_product_code,
@@ -3301,7 +3321,8 @@ class PowerSyncConfigFlow(AmberSetupMixin, config_entries.ConfigFlow, domain=DOM
         # Build form schema
         data_schema = vol.Schema(
             {
-                vol.Required(CONF_OCTOPUS_PRODUCT, default="agile"): SelectSelector(
+                **_octopus_source_fields(self.hass, {**self.config_entry.data, **self.config_entry.options} if hasattr(self, "config_entry") else {}),
+                    vol.Required(CONF_OCTOPUS_PRODUCT, default="agile"): SelectSelector(
                     SelectSelectorConfig(
                         options=[
                             SelectOptionDict(value=k, label=v)
@@ -3330,6 +3351,7 @@ class PowerSyncConfigFlow(AmberSetupMixin, config_entries.ConfigFlow, domain=DOM
                 "octopus_url": "https://octopus.energy/smart/agile/",
             },
         )
+
 
     async def async_step_amber(
         self, user_input: dict[str, Any] | None = None
@@ -17727,9 +17749,14 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
                     else None
                 )
 
-                rates = await client.get_current_rates(
-                    product_code, tariff_code, page_size=5
-                )
+                from .octopus_bridge import read_snapshot
+                selected_source = read_snapshot(self.hass, user_input) if user_input.get("octopus_import_meter") else None
+                if selected_source:
+                    tariff_code = selected_source.get("tariff_code") or tariff_code
+                    product_code = selected_source.get("product_code") or product_code
+                    rates = selected_source["forecast"]
+                else:
+                    rates = await client.get_current_rates(product_code, tariff_code, page_size=5)
 
                 if not rates:
                     errors["base"] = "no_prices"
@@ -17748,6 +17775,7 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
                     CONF_ELECTRICITY_PROVIDER: "octopus",
                     CONF_OCTOPUS_PRODUCT: product_key,
                     CONF_OCTOPUS_REGION: region,
+                    **{key: user_input[key] for key in ("octopus_import_meter", "octopus_export_meter") if key in user_input},
                     CONF_OCTOPUS_PRODUCT_CODE: product_code,
                     CONF_OCTOPUS_TARIFF_CODE: tariff_code,
                     CONF_OCTOPUS_EXPORT_PRODUCT_CODE: export_product_code,
@@ -17778,6 +17806,7 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
             step_id="octopus_options",
             data_schema=vol.Schema(
                 {
+                    **_octopus_source_fields(self.hass, {**self.config_entry.data, **self.config_entry.options} if hasattr(self, "config_entry") else {}),
                     vol.Required(CONF_OCTOPUS_PRODUCT, default=current_product): SelectSelector(
                         SelectSelectorConfig(
                             options=[
@@ -17813,6 +17842,7 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
                 "octopus_url": "https://octopus.energy/smart/agile/",
             },
         )
+
 
     async def async_step_octopus_saving_sessions_options(
         self, user_input: dict[str, Any] | None = None

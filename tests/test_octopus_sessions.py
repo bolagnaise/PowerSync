@@ -126,7 +126,7 @@ def test_join_session_returns_false_without_removed_mutation_call():
     assert asyncio.run(client.join_session("event-1")) is False
 
 
-def test_dave_joined_event_with_null_octopoints_uses_default_reward_rate():
+def test_dave_joined_event_with_null_octopoints_has_unconfirmed_reward():
     session = octopus_sessions.saving_session_from_octopus_energy_event(
         {
             "id": "saving-1",
@@ -142,7 +142,8 @@ def test_dave_joined_event_with_null_octopoints_uses_default_reward_rate():
     assert session.octopoints_per_kwh == (
         octopus_sessions.DEFAULT_SAVING_SESSION_OCTOPOINTS_PER_KWH
     )
-    assert session.rate_pence_per_kwh == 100
+    assert session.rate_pence_per_kwh == 0
+    assert session.reward_confirmed is False
     assert session.start.isoformat() == "2026-05-05T10:00:00+00:00"
 
 
