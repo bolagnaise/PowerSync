@@ -274,9 +274,6 @@ class PowerwallPairingManager:
         din: str,
         energy_site_id: int,
     ) -> None:
-        self._status.state = PairingState.VERIFIED
-        self._status.message = "Paired — local control enabled"
-        self._status.key_state = _KEY_STATE_VERIFIED
         self._result = PairingResult(
             private_key_pem=private_pem,
             public_key_der=public_der,
@@ -289,6 +286,12 @@ class PowerwallPairingManager:
                 await self._on_success(self._result)
             except Exception as err:
                 _LOGGER.error("on_success callback failed: %s", err)
+                self._result = None
+                self._fail("Pairing settings could not be saved; existing pairing was kept")
+                return
+        self._status.state = PairingState.VERIFIED
+        self._status.message = "Paired — local control enabled"
+        self._status.key_state = _KEY_STATE_VERIFIED
 
     async def _fetch_first_energy_site(self) -> tuple[int | None, str | None]:
         """List products on the Tesla account and return the first energy site."""

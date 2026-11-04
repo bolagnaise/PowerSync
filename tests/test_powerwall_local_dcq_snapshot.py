@@ -174,14 +174,17 @@ async def test_shutdown_completes_after_entry_listener_removal(listener_removed,
 
 @pytest.mark.asyncio
 async def test_unpair_clears_runtime_after_listener_already_removed():
-    """Exercise the real unpair handler through local coordinator shutdown."""
+    """Exercise admitted unpair through local coordinator shutdown.
+
+    Pairing recovery admission is covered by test_powerwall_pairing_recovery.
+    """
     import ast
 
     tree = ast.parse((ROOT / "powerwall_local" / "views.py").read_text())
     cls = next(n for n in tree.body if isinstance(n, ast.ClassDef)
                and n.name == "PowerwallPairUnpairView")
     post = next(n for n in cls.body if isinstance(n, ast.AsyncFunctionDef)
-                and n.name == "post")
+                and n.name == "_post")
     coord = coordinator_mod.PowerwallLocalCoordinator.__new__(
         coordinator_mod.PowerwallLocalCoordinator
     )
@@ -200,7 +203,7 @@ async def test_unpair_clears_runtime_after_listener_already_removed():
     for arg in post.args.args:
         arg.annotation = None
     exec(compile(ast.Module(body=[post], type_ignores=[]), "<unpair>", "exec"), namespace)
-    result = await namespace["post"](SimpleNamespace(_hass=hass), None)
+    result = await namespace["_post"](SimpleNamespace(_hass=hass), None, entry)
     assert result == {"success": True}
     assert runtime == {"coordinator": None, "client": None, "pairing_manager": None}
     assert updates == [{"data": {"keep": "value"}}]

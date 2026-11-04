@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import time
+from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
 from aiohttp import web
@@ -26,7 +27,9 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import Context, HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers.storage import Store
 from ..powerwall_control_http import async_get_clientsession
+from ..powerwall_control import coordinator_for
 
 from ..const import (
     CONF_TESLA_API_PROVIDER,
@@ -59,6 +62,7 @@ from .curtailment_fallback import get_fallback as _get_curtailment_fallback
 from .exceptions import PowerwallLocalError, PowerwallPairingError
 from ..powerwall_host import local_battery_dispatch_configured, normalize_powerwall_gateway_host
 from .pairing import PowerwallPairingManager
+from .route_lock import BatteryRouteLock
 from .transport import get_insecure_ssl_context
 
 if TYPE_CHECKING:
@@ -158,6 +162,33 @@ def _runtime(hass: HomeAssistant, entry: ConfigEntry) -> dict[str, Any]:
         _RUNTIME_KEY,
         {"client": None, "coordinator": None, "pairing_manager": None},
     )
+
+
+@asynccontextmanager
+async def _pairing_configuration_change(hass: HomeAssistant, entry: ConfigEntry):
+    """Keep the original pairing reachable until its native cleanup finishes."""
+    runtime = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    site_id = _control_site_id(entry)
+    lock = (runtime or {}).get("powerwall_battery_dispatch_route_lock")
+    if lock is None:
+        # A first pairing may discover the site. Native control cannot start
+        # without a site; configured sites use the same lock as native setup.
+        lock = coordinator_for(hass, entry, site_id).route_lock if site_id else BatteryRouteLock()
+    async with lock:
+        try:
+            journal = await Store(hass, 1, f"{DOMAIN}.native_max_charge.{entry.entry_id}").async_load()
+        except Exception as err:
+            raise PowerwallPairingError("Powerwall recovery could not be checked; pairing settings were kept") from err
+        current = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+        native = (current or {}).get("powerwall_native_max_charge")
+        if (current is not runtime or _control_site_id(entry) != site_id
+                or journal is not None or (native is not None and native.pending)
+                or any((current or {}).get(key) for key in
+                       ("native_max_startup_pending", "native_max_recovery_unavailable"))):
+            raise PowerwallPairingError(
+                "Powerwall recovery is still pending; keep the current pairing and gateway address "
+                "until Restore Normal completes")
+        yield
 
 
 def _local_access_status(
@@ -461,6 +492,13 @@ class PowerwallPairStartView(HomeAssistantView):
             )
 
         try:
+            async with _pairing_configuration_change(self._hass, entry):
+                return await self._post(request, entry)
+        except PowerwallPairingError as err:
+            return web.json_response({"success": False, "error": str(err)}, status=409)
+
+    async def _post(self, request: web.Request, entry: ConfigEntry) -> web.Response:
+        try:
             payload = await request.json()
         except Exception:
             payload = {}
@@ -518,17 +556,23 @@ class PowerwallPairStartView(HomeAssistantView):
         session = controlled_session(self._hass, async_get_clientsession(self._hass), entry_id=entry.entry_id)
 
         async def _on_success(result):
-            updated = {
-                **entry.data,
-                CONF_POWERWALL_LOCAL_PAIRED: True,
-                CONF_POWERWALL_LOCAL_PAIRED_AT: time.time(),
-                CONF_POWERWALL_LOCAL_PRIVATE_KEY: result.private_key_pem.decode(),
-                CONF_POWERWALL_LOCAL_PUBLIC_KEY: result.public_key_der.hex(),
-                CONF_POWERWALL_LOCAL_DIN: result.din,
-                CONF_POWERWALL_LOCAL_ENERGY_SITE_ID: result.energy_site_id,
-            }
-            self._hass.config_entries.async_update_entry(entry, data=updated)
-            _schedule_local_coordinator_warmup(self._hass, entry)
+            # Native control may have acquired a restore owner while the
+            # asynchronous pairing handshake waited for its physical toggle.
+            async with _pairing_configuration_change(self._hass, entry):
+                if (_runtime(self._hass, entry) is not runtime
+                        or runtime.get("pairing_manager") is not mgr):
+                    raise PowerwallPairingError("Powerwall pairing attempt was superseded")
+                updated = {
+                    **entry.data,
+                    CONF_POWERWALL_LOCAL_PAIRED: True,
+                    CONF_POWERWALL_LOCAL_PAIRED_AT: time.time(),
+                    CONF_POWERWALL_LOCAL_PRIVATE_KEY: result.private_key_pem.decode(),
+                    CONF_POWERWALL_LOCAL_PUBLIC_KEY: result.public_key_der.hex(),
+                    CONF_POWERWALL_LOCAL_DIN: result.din,
+                    CONF_POWERWALL_LOCAL_ENERGY_SITE_ID: result.energy_site_id,
+                }
+                self._hass.config_entries.async_update_entry(entry, data=updated)
+                _schedule_local_coordinator_warmup(self._hass, entry)
 
         mgr = PowerwallPairingManager(
             session,
@@ -640,6 +684,13 @@ class PowerwallPairUnpairView(HomeAssistantView):
             return web.json_response(
                 {"success": False, "error": "PowerSync not configured"}, status=503
             )
+        try:
+            async with _pairing_configuration_change(self._hass, entry):
+                return await self._post(request, entry)
+        except PowerwallPairingError as err:
+            return web.json_response({"success": False, "error": str(err)}, status=409)
+
+    async def _post(self, request: web.Request, entry: ConfigEntry) -> web.Response:
         runtime = _runtime(self._hass, entry)
         mgr: PowerwallPairingManager | None = runtime.get("pairing_manager")
         if mgr is not None and mgr.is_running:
@@ -699,6 +750,13 @@ class PowerwallSetGatewayIpView(HomeAssistantView):
                 {"success": False, "error": "PowerSync not configured"}, status=503
             )
 
+        try:
+            async with _pairing_configuration_change(self._hass, entry):
+                return await self._post(request, entry)
+        except PowerwallPairingError as err:
+            return web.json_response({"success": False, "error": str(err)}, status=409)
+
+    async def _post(self, request: web.Request, entry: ConfigEntry) -> web.Response:
         try:
             payload = await request.json()
         except Exception:
