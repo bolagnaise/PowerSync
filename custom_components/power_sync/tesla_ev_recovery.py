@@ -3091,8 +3091,15 @@ async def async_begin_attempt(
                 and dict(old_anchor_current) == dict(anchor_identity)
                 and existing_route.get("vehicle_id") in (None, vid)
             )
+            binding_route = dict(existing_route)
+            if operation_name == "stop":
+                # A revoked/replaced lease must not strand an exact-producer
+                # compensating Stop. Keep its original session pin and every
+                # physical binding check; only positive work needs that lease
+                # to remain current. The caller owns Stop admission authority.
+                binding_route.pop("session_scope", None)
             if same_provider_device and _compatible(
-                hass, entry, runtime, vid, existing_route
+                hass, entry, runtime, vid, binding_route
             ):
                 route_for_pin["session_scope"] = deepcopy(
                     existing_route["session_scope"]
