@@ -3138,12 +3138,72 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._last_custom_energy_warning = None
         return data
 
+    def _fresh_local_powerwall_energy_data(self) -> dict[str, Any] | None:
+        """Read one paired SOC/power sample without advancing any accumulators."""
+        from ..const import (
+            CONF_POWERWALL_LOCAL_PAIRED,
+            TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS,
+        )
+
+        entry = getattr(self, "_entry", None)
+        if (
+            getattr(self, "battery_system", None) != "tesla"
+            or not getattr(entry, "data", {}).get(CONF_POWERWALL_LOCAL_PAIRED)
+        ):
+            return None
+        runtime = self.hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+        local = (runtime.get("powerwall_local") or {}).get("coordinator")
+        snap = getattr(local, "data", None)
+        if snap is None or not getattr(local, "last_update_success", False):
+            return None
+        observed = _nonnegative_finite_number(getattr(snap, "observed_monotonic", None))
+        succeeded = _nonnegative_finite_number(getattr(local, "last_success_monotonic", None))
+        succeeded_at = _positive_finite_number(getattr(local, "last_success_ts", None))
+        now_monotonic = time.monotonic()
+        if (
+            observed is None or succeeded is None or succeeded_at is None
+            or not 0 <= now_monotonic - observed <= TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS
+            or not observed <= succeeded <= now_monotonic
+        ):
+            return None
+        # Anchor to the exact sample's request start. Re-reading a cached sample
+        # must retain its timestamp, even when a solve or cloud poll runs later.
+        try:
+            observed_at = datetime.fromtimestamp(
+                succeeded_at - (succeeded - observed), timezone.utc
+            )
+        except (ValueError, OverflowError, OSError):
+            return None
+        if observed_at > dt_util.utcnow():
+            return None
+        values = {key: getattr(snap, key, None)
+                  for key in ("soc", "battery_w", "grid_w", "solar_w", "load_w")}
+        if any(type(value) not in (int, float) or not math.isfinite(value)
+               for value in values.values()) or not 0 <= values["soc"] <= 100:
+            return None
+        return {
+            "battery_level": values["soc"],
+            "battery_power": values["battery_w"] / 1000.0,
+            "grid_power": values["grid_w"] / 1000.0,
+            "solar_power": values["solar_w"] / 1000.0,
+            "load_power": values["load_w"] / 1000.0,
+            "raw_home_load_power": values["load_w"] / 1000.0,
+            "last_update": observed_at,
+            "data_source": "powerwall_local",
+        }
+
     def _get_energy_data(self) -> dict[str, Any] | None:
         """Return the same canonical non-EV Home Load used by HA sensors."""
         custom_data = self._read_custom_energy_data()
         data = custom_data or getattr(self.energy_coordinator, "data", None)
         if not isinstance(data, dict):
             return None
+        ev_observed_at = data.get("last_update")
+        local_data = self._fresh_local_powerwall_energy_data()
+        if local_data is not None:
+            # Match HA's fresh-local preference atomically: using only local SOC
+            # with cloud power (or vice versa) still mixes observation clocks.
+            data = {**data, **local_data}
 
         from ..ev_load import (
             EvLoadObservation,
@@ -3171,7 +3231,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 at=now,
                 fallback_power_kw=data.get("ev_power", 0.0),
                 fallback_by_physical_key=physical_fallbacks,
-                fallback_observed_at=data.get("last_update"),
+                fallback_observed_at=ev_observed_at,
             )
         elif isinstance(ev_snapshot, ObservedEvLoadSnapshot):
             age = now - ev_snapshot.observed_at
