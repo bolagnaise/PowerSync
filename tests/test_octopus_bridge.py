@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import sys
+import threading
 import types
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -17,7 +18,19 @@ SPEC = importlib.util.spec_from_file_location(
 )
 bridge = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = bridge
-SPEC.loader.exec_module(bridge)
+
+
+def ha_callback(func):
+    """Match HA's callback marker and job classification contract."""
+    func._hass_callback = True
+    return func
+
+
+with pytest.MonkeyPatch.context() as patch:
+    core = types.ModuleType("homeassistant.core")
+    core.callback = ha_callback
+    patch.setitem(sys.modules, "homeassistant.core", core)
+    SPEC.loader.exec_module(bridge)
 NOW = datetime(2026, 11, 4, 17, 12, tzinfo=timezone.utc)
 
 
@@ -181,6 +194,101 @@ def test_upstream_events_apply_multiple_same_slot_corrections_and_close_drains()
         assert not any(listeners.values())
         runtime.request()
         assert not runtime._pending
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("trigger", ["rates", "program", "state", "startup", "boundary"])
+def test_registered_callbacks_refresh_on_loop_and_drain_on_unload(monkeypatch, trigger):
+    """HA sends unmarked sync listeners/timers to the executor, not the loop."""
+    async def scenario():
+        loop_thread = threading.get_ident()
+        now = datetime.now(timezone.utc)
+        source = hass({"A": account()})
+        rates = source.data["octopus_energy"]["A"]["ELECTRICITY_RATES_111_ABC"].rates
+        rates[0].update(start=now - timedelta(minutes=12), end=now + timedelta(minutes=18))
+        listeners, timers, changed = {}, [], []
+
+        def on_loop():
+            assert threading.get_ident() == loop_thread
+
+        original_states = source.states.async_all
+
+        def all_states(domain=None):
+            on_loop()  # Registry/state access also requires the event loop.
+            return original_states(domain)
+
+        source.states.async_all = all_states
+
+        def listen(name, handler):
+            listeners.setdefault(name, []).append(handler)
+            return lambda: listeners[name].remove(handler)
+
+        def track(_hass, handler, _when):
+            on_loop()
+            timers.append(handler)
+            return lambda: timers.remove(handler)
+
+        event_module = types.ModuleType("homeassistant.helpers.event")
+        event_module.async_track_point_in_utc_time = track
+        monkeypatch.setitem(sys.modules, "homeassistant.helpers.event", event_module)
+
+        def create_task(coro, name):
+            if threading.get_ident() != loop_thread:
+                coro.close()
+                raise RuntimeError("hass.async_create_task called outside event loop")
+            return asyncio.create_task(coro, name=name)
+
+        async def dispatch(handler, event):
+            if getattr(handler, "_hass_callback", False) is True:
+                handler(event)
+            else:
+                await asyncio.to_thread(handler, event)
+
+        source.bus = NS(async_listen=listen)
+        source.async_create_task = create_task
+        source.is_running = True
+        coordinator = NS(data=bridge.read_snapshot(source))
+
+        def publish(data):
+            on_loop()
+            coordinator.data = data
+
+        coordinator.async_set_updated_data = publish
+
+        async def on_change():
+            on_loop()
+            changed.append(coordinator.data["current"][0]["perKwh"])
+
+        runtime = bridge.OctopusUpdateBridge(source, coordinator, {}, on_change)
+        runtime.start()
+        await runtime._task
+        assert changed == []
+        event_type = {"rates": bridge.RATE_EVENTS[1], "program": bridge.PROGRAM_EVENTS[0],
+                      "state": "state_changed", "startup": "homeassistant_started"}.get(trigger)
+        handler = timers[0] if trigger == "boundary" else listeners[event_type][0]
+        event = now if trigger == "boundary" else NS(event_type=event_type, data={})
+        try:
+            for pence in (7, 8):
+                rates[0]["value_inc_vat"] = pence
+                if trigger == "rates":
+                    event.data = {"mpan": "111", "serial_number": "ABC", "rates": [{
+                        **rates[0], "value_inc_vat": pence / 100,
+                    }]}
+                elif trigger == "state":
+                    event.data = {"new_state": state(pence / 100)}
+                await dispatch(handler, event)
+                await runtime._task
+            assert changed == [7, 8]
+            # An already-queued callback cannot recreate work after unload.
+            await runtime.close()
+            await dispatch(handler, event)
+            assert not runtime._pending
+            assert runtime._task.done()
+            assert not any(listeners.values()) and not timers
+            assert changed == [7, 8]
+        finally:
+            await runtime.close()
 
     asyncio.run(scenario())
 

@@ -75,6 +75,11 @@ def _install_ha_stubs() -> None:
             self.data = None
 
     ha_core.HomeAssistant = type("HomeAssistant", (), {})
+    def callback(func):
+        func._hass_callback = True
+        return func
+
+    ha_core.callback = callback
     ha_exceptions.ConfigEntryNotReady = type("ConfigEntryNotReady", (Exception,), {})
     ha_storage.Store = _Store
     ha_update.DataUpdateCoordinator = _DataUpdateCoordinator

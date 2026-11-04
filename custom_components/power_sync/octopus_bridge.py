@@ -15,6 +15,8 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from homeassistant.core import callback
+
 _LOGGER = logging.getLogger(__name__)
 RATE_EVENTS = tuple(f"octopus_energy_electricity_{day}_day_rates" for day in ("previous", "current", "next"))
 PROGRAM_EVENTS = tuple(
@@ -378,22 +380,25 @@ class OctopusUpdateBridge:
     def start(self):
         self._unsub.extend(self.hass.bus.async_listen(event, self._event) for event in RATE_EVENTS + PROGRAM_EVENTS)
         self._unsub.append(self.hass.bus.async_listen("state_changed", self._state))
-        self._unsub.append(self.hass.bus.async_listen("homeassistant_started", lambda _: self.request()))
+        self._unsub.append(self.hass.bus.async_listen("homeassistant_started", self.request))
         self.request()
 
+    @callback
     def _event(self, event):
         data = event.data or {}
         if event.event_type in RATE_EVENTS and isinstance(data.get("rates"), list):
             self.event_rates[(event.event_type, str(data.get("mpan")), str(data.get("serial_number")))] = (data, datetime.now(timezone.utc))
         self.request()
 
+    @callback
     def _state(self, event):
         data = event.data or {}
         state = data.get("new_state") or data.get("old_state")
         if state is not None and canonical_id(self.hass, state).startswith("octopus_energy_"):
             self.request()
 
-    def request(self):
+    @callback
+    def request(self, _event=None):
         if self._closed:
             return
         self._pending = True
@@ -443,7 +448,7 @@ class OctopusUpdateBridge:
         times += [parse_time(p.get(k)) for d in data.get("octopus", {}).get("dispatches", [])
                   for p in d.get("planned_dispatches", []) + d.get("started_dispatches", []) for k in ("start", "end")]
         boundary = min((t for t in times if t and t > now), default=now + timedelta(minutes=5))
-        self._timer = async_track_point_in_utc_time(self.hass, lambda _: self.request(), min(boundary, now + timedelta(minutes=5)))
+        self._timer = async_track_point_in_utc_time(self.hass, self.request, min(boundary, now + timedelta(minutes=5)))
 
     async def close(self):
         self._closed = True
