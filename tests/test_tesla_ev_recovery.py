@@ -1114,6 +1114,48 @@ async def test_native_session_route_carries_across_operation_entities(harness):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("binding_change", ["none", "rate_identity", "anchor_identity", "device", "pairing"])
+async def test_old_native_session_stop_keeps_exact_binding_and_unknown_rate(harness, binding_change):
+    hass, entry, registrations, owners = harness
+    current_entity = "number.fallback_current"
+    registrations[current_entity] = _Entity(
+        current_entity, device="native-device", entry="native-entry", platform="teslemetry",
+    )
+    start = await recovery.async_begin_attempt(
+        hass, entry, VIN_A, {"kind": "ha", "entity_id": "switch.fallback"},
+        "start", "switch.fallback",
+    )
+    assert start is not None and await recovery.async_finish_attempt(start, "accepted_unconfirmed")
+    rate = await recovery.async_begin_attempt(
+        hass, entry, VIN_A, {"kind": "ha", "entity_id": current_entity},
+        "rate", current_entity,
+    )
+    assert rate is not None and await recovery.async_finish_attempt(rate, "sent_unknown")
+    original = deepcopy(hass.data["power_sync"][entry.entry_id][recovery.RECOVERY_KEY]["vehicles"][VIN_A])
+    owners[VIN_A] = {"owner": "powersync", "owner_mode": "manual", "session_id": "new-session"}
+    if binding_change == "rate_identity":
+        registrations[current_entity].unique_id = "replacement-current"
+    elif binding_change == "anchor_identity":
+        registrations["switch.fallback"].unique_id = "replacement-switch"
+    elif binding_change == "device":
+        registrations["switch.fallback"].device_id = "another-device"
+    elif binding_change == "pairing":
+        entry.options = {"ev_provider": "tesla_ble"}
+    stop = await recovery.async_begin_attempt(
+        hass, entry, VIN_A, {"kind": "ha", "entity_id": "switch.fallback"},
+        "stop", "switch.fallback",
+    )
+    if binding_change == "none":
+        assert stop is not None and await recovery.async_finish_attempt(stop, "accepted_unconfirmed")
+        ledger = hass.data["power_sync"][entry.entry_id][recovery.RECOVERY_KEY]["vehicles"][VIN_A]
+        assert ledger["attempts"] == original["attempts"]
+        assert recovery.get_vehicle_route(hass, entry, VIN_A)["kind"] == "blocked"
+    else:
+        assert stop is None
+        assert hass.data["power_sync"][entry.entry_id][recovery.RECOVERY_KEY]["vehicles"][VIN_A] == original
+
+
+@pytest.mark.asyncio
 async def test_native_session_route_rejects_other_provider_operation_entity(harness):
     hass, entry, registrations, _ = harness
     registrations["number.other_current"] = _Entity(

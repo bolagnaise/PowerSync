@@ -969,6 +969,95 @@ async def test_native_unknown_survives_reload_and_stop_without_another_start(mon
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("lease_transition", ["replaced", "released", "reload"])
+async def test_native_unknown_rate_allows_exact_stop_after_lease_transition(
+    monkeypatch, lease_transition,
+):
+    """A new manual session cannot strand Stop behind an older unknown Rate."""
+    import importlib
+
+    from power_sync.automations import ev_ownership
+
+    recovery = importlib.import_module("power_sync.tesla_ev_recovery")
+    persisted = {}
+
+    async def persist(_hass, _entry, runtime):
+        persisted.clear()
+        persisted.update(deepcopy(runtime[recovery.RECOVERY_KEY]))
+        return True
+
+    monkeypatch.setattr(recovery, "_persist", persist)
+    monkeypatch.setattr(recovery, "_registry", lambda h: h.entity_registry)
+    hass = _native_hass(monkeypatch, "tesla_fleet")
+    entry = _Entry()
+    hass.entity_registry.entities[AMPS_ENTITY] = SimpleNamespace(
+        entity_id=AMPS_ENTITY, platform="tesla_fleet",
+        config_entry_id="tesla_fleet-entry", device_id="tesla_fleet-device",
+        unique_id=f"{VIN}-amps", disabled_by=None,
+    )
+    hass.states._states[AMPS_ENTITY] = _State(AMPS_ENTITY, "16")
+    ev_ownership.claim_ev_ownership(
+        hass, entry, VIN, owner_mode="solar_surplus", session_id="old-session",
+    )
+    params = {"vehicle_vin": VIN, "charger_type": "tesla"}
+
+    async def native(operation, entity, domain, service, **values):
+        return await actions._run_native_tesla_service_command(
+            hass, entry, dict(params), operation, entity, domain, service,
+            {"entity_id": entity, **values},
+            actions._tesla_transport_authority(
+                hass, entry, params, operation=operation, cleanup=operation == "stop",
+            ),
+        )
+
+    assert (await native("start", ENTITY, "switch", "turn_on")).outcome == "accepted_unconfirmed"
+    original_call = hass.services.async_call
+
+    async def lost_rate_response(domain, service, data, **kwargs):
+        await original_call(domain, service, data, **kwargs)
+        raise RuntimeError("native current response unavailable")
+
+    hass.services.async_call = lost_rate_response
+    assert (await native("rate", AMPS_ENTITY, "number", "set_value", value=17)).outcome == "sent_unknown"
+    hass.services.async_call = original_call
+    assert (await native("stop", ENTITY, "switch", "turn_off")).outcome == "accepted_unconfirmed"
+    original_attempts = deepcopy(persisted["vehicles"][VIN]["attempts"])
+    assert len(original_attempts) == 1
+    unknown = next(iter(original_attempts.values()))
+    assert unknown["operation"] == "rate" and unknown["target"] is None
+    assert unknown["route"]["session_anchor"]["entity_id"] == ENTITY
+
+    if lease_transition == "released":
+        ev_ownership.release_ev_ownership(hass, entry, VIN, reason="Manual stop")
+    else:
+        ev_ownership.claim_ev_ownership(
+            hass, entry, VIN, owner_mode="manual_solar_surplus", session_id="new-session",
+        )
+    if lease_transition == "reload":
+        old_runtime = hass.data["power_sync"][entry.entry_id]
+        hass.data["power_sync"][entry.entry_id] = {
+            "automation_store": old_runtime["automation_store"],
+            "ev_ownership": deepcopy(old_runtime["ev_ownership"]),
+            recovery.RECOVERY_KEY: deepcopy(persisted),
+        }
+
+    calls_before = len(hass.services.calls)
+    assert recovery.get_vehicle_route(hass, entry, VIN)["kind"] == "blocked"
+    assert (await native("start", ENTITY, "switch", "turn_on")).outcome == "not_sent"
+    assert len(hass.services.calls) == calls_before
+    result = await actions._action_stop_ev_charging.__wrapped__(hass, entry, {
+        **params, "_force_tesla_stop_request": True, "_user_initiated": True,
+        "_ev_cleanup_only": True,
+    })
+    assert result is True
+    assert hass.services.calls[calls_before:] == [("switch", "turn_off", {"entity_id": ENTITY})]
+    assert persisted["vehicles"][VIN]["attempts"] == original_attempts
+    assert persisted["vehicles"][VIN]["route"]["session_scope"]["session_id"] == "old-session"
+    assert (await native("start", ENTITY, "switch", "turn_on")).outcome == "not_sent"
+    assert recovery.get_vehicle_route(hass, entry, "5YJ3E1EA7NF0000B2") is None
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("replace_runtime", [False, True])
 async def test_expired_native_finite_session_rebinds_exact_cleanup_stop_only(
     monkeypatch, replace_runtime,
