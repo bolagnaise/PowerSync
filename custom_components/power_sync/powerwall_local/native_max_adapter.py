@@ -729,6 +729,10 @@ class NativeMaxChargeAdapter:
 
     async def pairing_recovery_complete(self, record, fence):
         """Read-only confirmation; incomplete proof retains both journals."""
+        # The cleanup watchdog can retry immediately after a failed attempt.
+        # Cache only refusal, never successful readback or write authority.
+        if self.monotonic() < getattr(self, "_pairing_recovery_retry_at", 0):
+            return False
         async def current():
             fence()
             site = await self.pairing_recovery_site(record)
@@ -761,6 +765,7 @@ class NativeMaxChargeAdapter:
                     and isinstance(tariff, dict) and bool(tariff)
                     and bool(self.restorable(tariff)))
 
+        confirmed = False
         try:
             if not await settings_released():
                 return False
@@ -768,9 +773,13 @@ class NativeMaxChargeAdapter:
                 return False
             # Re-read after the two physical samples; a new tariff or setting
             # must not be hidden by an earlier successful observation.
-            return await settings_released()
+            confirmed = await settings_released()
+            return confirmed
         except Exception:
             return False
+        finally:
+            if not confirmed:
+                self._pairing_recovery_retry_at = self.monotonic() + 30
 
     async def restoration_tariff_current(self):
         """Revalidate saved cleanup progress without submitting any writes."""

@@ -88,7 +88,8 @@ commands and does not replay the old settings through the new pairing.
 
 Update through HACS and restart Home Assistant to run startup recovery. Missing
 or conflicting site ownership, uncertain writes, remaining forced settings or
-unconfirmed physical readings keep recovery pending. Discharge recovery retains
+unconfirmed physical readings keep recovery pending. Failed readback checks
+wait at least 30 seconds before retrying. Discharge recovery retains
 its existing pairing checks. If the warning remains, retain the saved record
 and seek support; deleting it or pairing again does not prove restoration.
 
