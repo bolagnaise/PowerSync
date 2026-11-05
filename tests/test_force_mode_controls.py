@@ -4733,6 +4733,86 @@ def test_force_switches_follow_dispatcher_state_and_propagate_service_errors():
         assert "self._attr_is_on = False" not in expiry
 
 
+@pytest.mark.parametrize("mode", ["charge", "discharge"])
+def test_force_switch_pending_restore_retires_expiry_listener(mode):
+    """#442: repeated pending updates must not orphan recurring expiry timers."""
+    source = SWITCH_PATH.read_text()
+    tree = ast.parse(source)
+    class_name = "ForceChargeSwitch" if mode == "charge" else "ForceDischargeSwitch"
+    now = datetime(2026, 11, 5, 10, tzinfo=timezone.utc)
+    listeners = []
+    messages = []
+
+    def track_interval(_hass, action, interval):
+        listener = SimpleNamespace(action=action, due=now + interval,
+                                   interval=interval, cancelled=False)
+        listeners.append(listener)
+
+        def cancel():
+            listener.cancelled = True
+
+        return cancel
+
+    def advance(seconds):
+        nonlocal now
+        target = now + timedelta(seconds=seconds)
+        while pending := [item for item in listeners
+                          if not item.cancelled and item.due <= target]:
+            listener = min(pending, key=lambda item: item.due)
+            now = listener.due
+            # HA schedules its next interval before calling the action.
+            listener.due += listener.interval
+            listener.action(now)
+        now = target
+
+    namespace = {
+        "Any": object, "datetime": datetime, "timedelta": timedelta,
+        "callback": lambda fn: fn,
+        "async_track_time_interval": track_interval,
+        "_datetime_now_for": lambda _expiry: now,
+        "_parse_expiry": datetime.fromisoformat,
+        "_LOGGER": SimpleNamespace(info=messages.append),
+    }
+    methods = ["_schedule_expiry_check", f"_handle_force_{mode}_update",
+               "async_will_remove_from_hass"]
+    for name in methods:
+        node = _find_class_method(tree, class_name, name)
+        exec(textwrap.dedent(ast.get_source_segment(source, node)), namespace)
+    switch = SimpleNamespace(hass=object(), _cancel_expiry_timer=None,
+                             async_write_ha_state=lambda: None)
+    switch._schedule_expiry_check = lambda: namespace["_schedule_expiry_check"](switch)
+    update = lambda state: namespace[f"_handle_force_{mode}_update"](switch, state)
+    live = lambda: [item for item in listeners if not item.cancelled]
+    state = {"active": True, "expires_at": (now + timedelta(seconds=60)).isoformat(),
+             "command_status": "restore_pending"}
+    update(state)
+    advance(30)
+    assert len(live()) == 1
+    advance(30)
+    assert not live()
+    assert switch._cancel_expiry_timer is None
+    assert switch._attr_is_on  # Expiry is not proof of successful restoration.
+
+    for _ in range(8):
+        update(state)
+        advance(30)
+    assert not live()
+    assert len(messages) == 1
+    assert switch._attr_is_on
+
+    # A later force window can still be tracked and a confirmed restore cancels it.
+    state["expires_at"] = (now + timedelta(seconds=60)).isoformat()
+    update(state)
+    assert len(live()) == 1
+    update({"active": False})
+    assert not live()
+    assert not switch._attr_is_on
+    update(state)
+    assert len(live()) == 1
+    asyncio.run(namespace["async_will_remove_from_hass"](switch))
+    assert not live()
+
+
 def test_goodwe_entity_echo_does_not_claim_physical_force_discharge():
     """#398: an entity echo owns the override but does not prove battery flow."""
     source = SENSOR_PATH.read_text()
