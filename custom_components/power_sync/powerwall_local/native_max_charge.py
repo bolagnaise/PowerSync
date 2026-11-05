@@ -102,6 +102,9 @@ class NativeMaxChargeSession:
                         or not isinstance(data.get("baseline"), dict)):
                     raise NativeMaxChargeError("Native Max restore journal is invalid")
                 cleanup = data.get("cleanup", {})
+                if "normal_tariff" in data and (not isinstance(data["normal_tariff"], dict)
+                                                or not data["normal_tariff"]):
+                    raise NativeMaxChargeError("Native Max normal tariff journal is invalid")
                 if (not isinstance(cleanup, dict) or any(key not in
                         {"mode_released", "reserve_released", "tariff_released", "mode_disarmed", "export_released", "grid_released"}
                         or type(value) is not bool for key, value in cleanup.items())):
@@ -232,6 +235,10 @@ class NativeMaxChargeSession:
             self.record["handoff_phase"] = "tariff"
         elif kind == "local_confirmed":
             self.record.pop("local_acceptance_until", None)
+        elif kind == "normal_tariff":
+            if not isinstance(value, dict) or not value or self.record.get("tariff_intent"):
+                raise NativeMaxChargeError("Native Max normal tariff replacement is invalid")
+            self.record["normal_tariff"] = deepcopy(value)
         elif kind == "tariff":
             if value not in ("forcing", "baseline"):
                 raise NativeMaxChargeError("Native Max tariff intent is invalid")
@@ -426,6 +433,9 @@ class NativeMaxChargeSession:
             baseline["_grid_charge_intent"] = self.record.get("grid_charge_intent", False)
             baseline["_export_intent"] = self.record.get("export_intent")
             baseline["_export_conflict"] = self.record.get("export_conflict", False)
+            baseline["_normal_tariff"] = deepcopy(self.record.get("normal_tariff"))
+            baseline["_session_id"] = token
+            baseline["_expires_at"] = self.record["expires_at"]
             if await self.adapter.restore(baseline, before_restore,
                     write_intent=self._write_intent) is not True:
                 raise NativeMaxChargeError("Native Max restore was not confirmed")

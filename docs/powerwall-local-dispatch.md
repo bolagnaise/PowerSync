@@ -68,6 +68,20 @@ A local HTTP timeout does not expire a signed gateway command. PowerSync records
 
 Before native Max captures its restore tariff, PowerSync waits for an earlier price-tariff upload and its readback to finish. New price uploads defer during this handoff, so a PowerSync price refresh cannot replace the saved baseline during acquisition. The original request deadline still applies, and tariffs changed by another controller remain protected.
 
+For Amber sites with automatic tariff sync enabled, Native Max cleanup builds a
+fresh Amber schedule instead of replaying the prices captured before forcing.
+This also repairs retained cleanup on restart when Tesla is still showing a
+different old PowerSync force tariff. The configured Amber controller can replace
+that temporary tariff under the exact saved site and session owner; historical
+prices and force-tariff equality are not prerequisites for its normal upload.
+Monitoring Mode and Amber SmartShift retain their existing ownership rules.
+
+The replacement includes the current price, forecast and configured tariff
+adjustments. Failed Amber refreshes retain recovery for retry without replaying
+old prices. A submitted replacement is saved before sending and confirmed after
+upload; an uncertain request must be reconciled before another is submitted.
+Pairing/site ownership, mode/reserve cleanup and physical settling still apply.
+
 Cloud Max charging has a separate implementation and delivery history. This section describes the Home Assistant control path.
 
 ### Keep pairing settings during Native Max recovery

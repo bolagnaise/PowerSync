@@ -52,7 +52,8 @@ class NativeMaxChargeAdapter:
                  budget, entry_id, site, tariff_matches=None, monotonic=time.monotonic,
                  settle_interval=5, direction="charge", clock=time.time,
                  read_export_rule=None, write_export_rule=None,
-                 reconcile_managed=None, reconcile_timeout=20):
+                 reconcile_managed=None, reconcile_timeout=20,
+                 normal_tariff_source=None, normal_tariff_allowed=None):
         self.client, self.identity = client, identity
         self.current_identity, self.policy, self.config = current_identity, policy, config
         self.read_tariff, self.upload, self.restorable = read_tariff, upload, restorable
@@ -60,6 +61,8 @@ class NativeMaxChargeAdapter:
         self.budget, self.entry_id, self.site = budget, entry_id, site
         self.monotonic = monotonic
         self.tariff_matches = tariff_matches or (lambda expected, observed: expected == observed)
+        self.normal_tariff_source = normal_tariff_source
+        self.normal_tariff_allowed = normal_tariff_allowed
         self.token = None
         self._grid_charge_ready = False
         self._snapshot = None
@@ -1093,11 +1096,67 @@ class NativeMaxChargeAdapter:
         return await self._write_config("autonomous", baseline.get("force_reserve", 100),
                                         before_write, baseline, write_intent)
 
+    async def _restore_normal_tariff(self, baseline, cleanup_fence, write_intent):
+        """Reconcile the configured live tariff under the durable session owner.
+
+        This is a normal controller upload, not a replay of historic prices.
+        Its authority comes from the configured controller and exact claim,
+        rather than the provider's current prices or temporary tariff code.
+        """
+        fresh_current = None
+
+        def allowed():
+            claim = self.budget.native_max_claim(self.site)
+            if (self.current_identity() != self.identity or not self.client.local_access_enabled
+                    or not callable(self.normal_tariff_allowed)
+                    or self.normal_tariff_allowed() is not True
+                    or not claim or claim.get("token") != baseline.get("_session_id")
+                    or claim.get("expires_at") != baseline.get("_expires_at")
+                    or claim.get("direction", "charge") != baseline.get("direction", "charge")
+                    or (fresh_current is not None and fresh_current() is not True)):
+                raise NativeMaxChargeError("Native Max live tariff cleanup authority changed")
+
+        async def before_normal_upload():
+            fence = await cleanup_fence()
+            def checked():
+                fence()
+                allowed()
+            checked()
+            return checked
+
+        await before_normal_upload()
+        pending = baseline.get("_tariff_intent")
+        previous = baseline.get("_normal_tariff")
+        if pending:
+            # Do not let another upload overtake an uncertain earlier POST.
+            target = (baseline["forcing_tariff"] if pending == "forcing"
+                      else previous or baseline["tariff"])
+            observed = await self.read_tariff()
+            await before_normal_upload()
+            if not self._matches(target, observed):
+                return False
+            await write_intent("tariff_confirmed")
+            if pending == "baseline" and previous:
+                return True
+
+        result = await asyncio.wait_for(self.normal_tariff_source(), timeout=20)
+        if not isinstance(result, tuple) or len(result) != 2 or not callable(result[1]):
+            raise NativeMaxChargeError("Current normal tariff is unavailable")
+        tariff, fresh_current = result
+        await before_normal_upload()
+        if not isinstance(tariff, dict) or not tariff or not self.restorable(tariff):
+            raise NativeMaxChargeError("Current normal tariff is unavailable")
+        # Persist the exact replacement before recording submission, so a
+        # restart can reconcile that POST without replaying yesterday's rates.
+        await write_intent("normal_tariff", tariff)
+        return await self._upload(deepcopy(tariff), "baseline", before_normal_upload, write_intent)
+
     async def restore(self, baseline, before_write, *, write_intent):
         """Release each owned field independently; retain uncertain cleanup.
 
-        A foreign tariff/mode/reserve never authorizes overwriting that field
-        and never prevents removing the other settings this session owns.
+        Snapshot restoration preserves foreign fields. An explicitly configured
+        live tariff source instead authorizes its normal schedule upload under
+        the exact durable owner, independently of historical tariff prices.
         Cleanup progress is part of the session's existing durable journal.
         """
         progress = deepcopy(baseline.get("_cleanup", {}))
@@ -1235,6 +1294,9 @@ class NativeMaxChargeAdapter:
             else:
                 await release_field("export_released", "site_info.customer_preferred_export_rule",
                                     baseline["export_rule"], "battery_ok")
+        live_tariff = (callable(self.normal_tariff_source)
+                       and callable(self.normal_tariff_allowed)
+                       and self.normal_tariff_allowed() is True)
         try:
             tariff = await self.read_tariff()
         except Exception:
@@ -1242,14 +1304,15 @@ class NativeMaxChargeAdapter:
         if (progress.get("tariff_released") and isinstance(tariff, dict) and tariff
                 and not self.restorable(tariff)):
             await checkpoint(tariff_released=False)
-        if pending_tariff:
-            target = baseline["forcing_tariff"] if pending_tariff == "forcing" else baseline["tariff"]
+        if pending_tariff and not live_tariff:
+            target = (baseline["forcing_tariff"] if pending_tariff == "forcing"
+                      else baseline.get("_normal_tariff") or baseline["tariff"])
             if self._matches(target, tariff):
                 # A unique late forcing tariff, or the baseline after an owned
                 # restoration, proves this one submitted attempt arrived.
                 await write_intent("tariff_confirmed")
                 pending_tariff = None
-        if (not pending_tariff and isinstance(tariff, dict) and tariff
+        if (not live_tariff and not pending_tariff and isinstance(tariff, dict) and tariff
                 and self.restorable(tariff) and not self._matches(baseline["forcing_tariff"], tariff)):
             # A different temporary controller tariff is still unresolved;
             # only a normal external tariff can release this cleanup owner.
@@ -1282,14 +1345,21 @@ class NativeMaxChargeAdapter:
                 except Exception:
                     pass
 
-        if not progress.get("tariff_released") and not pending_tariff:
+        if live_tariff:
+            if not await self._restore_normal_tariff(baseline, cleanup_fence, write_intent):
+                return False
+            await checkpoint(tariff_released=True)
+            pending_tariff = None
+
+        if not live_tariff and not progress.get("tariff_released") and not pending_tariff:
             async def before_tariff_restore():
                 observed = await self.read_tariff()
                 if isinstance(observed, dict) and observed and not self._matches(baseline["forcing_tariff"], observed):
                     raise NativeMaxChargeError("Native Max tariff changed before restore")
                 return await cleanup_fence()
             try:
-                await self._upload(deepcopy(baseline["tariff"]), "baseline", before_tariff_restore, write_intent)
+                target = baseline.get("_normal_tariff") or baseline["tariff"]
+                await self._upload(deepcopy(target), "baseline", before_tariff_restore, write_intent)
             except Exception:
                 pass
             try:

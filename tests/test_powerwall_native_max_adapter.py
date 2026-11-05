@@ -1541,6 +1541,189 @@ async def test_foreign_tariff_is_preserved_while_owned_mode_and_reserve_restore(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('observed', ['owned', 'other_temporary', 'normal'])
+async def test_amber_recovery_uploads_live_schedule_instead_of_saved_prices(setup, observed):
+    s = setup
+    await s.session.start(120)
+    await s.session._cancel_watch()
+    fresh = {'code': 'POWER_SYNC:AMBER', 'name': 'Current Amber schedule',
+             'energy_charges': {'Summer': {'rates': {'NOW': 0.42}}}}
+    calls = []
+    async def current_tariff():
+        calls.append('fetch')
+        return deepcopy(fresh), lambda: True
+    s.adapter.normal_tariff_source = current_tariff
+    s.adapter.normal_tariff_allowed = lambda: True
+    s.adapter.restorable = lambda tariff: tariff.get('code') in {'REAL', 'POWER_SYNC:AMBER'}
+    if observed == 'other_temporary':
+        s.state.tariff = {'code': 'DISCHARGE_NATIVE_MAX_previous', 'name': 'Force Discharge'}
+    elif observed == 'normal':
+        s.state.tariff = deepcopy(s.original[1])
+    s.state.events.clear()
+    recovered = type(s.session)(s.adapter, s.store, clock=lambda: s.state.at,
+                                monotonic=lambda: s.state.at)
+    try:
+        assert await recovered.recover()
+        assert s.state.tariff == fresh
+        assert calls == ['fetch']
+        assert [value for kind, value in s.state.events if kind == 'tariff'] == [fresh]
+        assert s.store.data is None and not recovered.pending
+        assert s.budget.native_max_claim('site') is None
+    finally:
+        await recovered._cancel_watch()
+
+
+async def live_amber_recovery(s):
+    await s.session.start(120)
+    await s.session._cancel_watch()
+    s.state.events.clear()
+    fresh = {'code': 'POWER_SYNC:AMBER', 'name': 'Current Amber schedule'}
+    async def source():
+        return deepcopy(fresh), lambda: True
+    s.adapter.normal_tariff_source = source
+    s.adapter.normal_tariff_allowed = lambda: True
+    s.adapter.restorable = lambda tariff: tariff.get('code') in {'REAL', 'POWER_SYNC:AMBER'}
+    recovered = type(s.session)(s.adapter, s.store, clock=lambda: s.state.at,
+                                monotonic=lambda: s.state.at)
+    return recovered, fresh
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('stage', ['missing_claim', 'other_claim', 'different_deadline',
+    'different_direction', 'source_pairing', 'source_disabled', 'source_generation',
+    'saved_pairing', 'saved_claim', 'saved_session'])
+async def test_amber_live_tariff_rechecks_owner_and_policy_before_submission(setup, stage):
+    s = setup
+    recovered, fresh = await live_amber_recovery(s)
+    enabled = [True]
+    generation = [True]
+    s.adapter.normal_tariff_allowed = lambda: enabled[0]
+    def change():
+        if stage in ('source_pairing', 'saved_pairing'):
+            s.state.identity = 'different-pairing'
+        elif stage == 'source_disabled': enabled[0] = False
+        elif stage == 'source_generation': generation[0] = False
+        elif stage == 'saved_session': recovered.record['id'] = 'other-session'
+        else: s.budget.entries['native_max:battery']['native_max']['token'] = 'different-owner'
+    async def source():
+        if stage.startswith('source_'): change()
+        return deepcopy(fresh), lambda: generation[0]
+    s.adapter.normal_tariff_source = source
+    save = s.store.async_save
+    async def changed_save(data):
+        await save(data)
+        if data and data.get('normal_tariff') and stage.startswith('saved_'): change()
+    s.store.async_save = changed_save
+    if stage == 'missing_claim': s.budget.entries.clear()
+    elif stage == 'other_claim': change()
+    elif stage == 'different_deadline':
+        s.budget.entries['native_max:battery']['native_max']['expires_at'] += 1
+    elif stage == 'different_direction':
+        s.budget.entries['native_max:battery']['native_max']['direction'] = 'discharge'
+    try:
+        with pytest.raises(s.m.NativeMaxChargeError): await recovered.recover()
+        assert recovered.pending and s.store.data is not None
+        assert not [event for event in s.state.events if event[0] == 'tariff']
+    finally:
+        await recovered._cancel_watch()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('source_failure', ['empty', 'temporary', 'exception'])
+async def test_amber_price_failure_does_not_replay_old_snapshot(setup, source_failure):
+    s = setup
+    recovered, _ = await live_amber_recovery(s)
+    async def unavailable():
+        if source_failure == 'exception': raise OSError('Amber unavailable')
+        return (None if source_failure == 'empty' else {'code': 'CHARGE_FORCE'}), lambda: True
+    s.adapter.normal_tariff_source = unavailable
+    try:
+        with pytest.raises((s.m.NativeMaxChargeError, OSError)): await recovered.recover()
+        assert recovered.pending and s.store.data is not None
+        assert s.budget.native_max_claim('site')
+        assert s.state.config['default_real_mode'] == s.original[0]['default_real_mode']
+        assert s.state.config['site_info']['backup_reserve_percent'] == s.original[0]['site_info']['backup_reserve_percent']
+        assert not [event for event in s.state.events if event[0] == 'tariff']
+    finally:
+        await recovered._cancel_watch()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('arrived', [True, False])
+@pytest.mark.parametrize('live', [True, False])
+async def test_amber_uncertain_replacement_survives_restart_without_overtaking(setup, arrived, live):
+    s = setup
+    recovered, fresh = await live_amber_recovery(s)
+    calls = []
+    async def uncertain(tariff, before_write):
+        fence = await before_write()
+        fence()
+        calls.append(deepcopy(tariff))
+        if arrived: s.state.tariff = deepcopy(tariff)
+        raise OSError('connection lost after submission')
+    original_upload = s.adapter.upload
+    s.adapter.upload = uncertain
+    try:
+        with pytest.raises((s.m.NativeMaxChargeError, OSError)): await recovered.recover()
+        assert s.store.data['normal_tariff'] == fresh
+        assert s.store.data['baseline']['tariff'] == s.original[1]
+        assert s.store.data['tariff_intent'] == 'baseline'
+        await recovered._cancel_watch()
+        restarted = type(s.session)(s.adapter, s.store, clock=lambda: s.state.at,
+                                    monotonic=lambda: s.state.at)
+        s.adapter.upload = original_upload
+        async def no_second_fetch(): raise AssertionError('Uncertain upload must reconcile first')
+        s.adapter.normal_tariff_source = no_second_fetch
+        s.adapter.normal_tariff_allowed = lambda: live
+        if not arrived:
+            with pytest.raises(s.m.NativeMaxChargeError): await restarted.recover()
+            assert s.budget.native_max_claim('site')
+            assert s.store.data['tariff_intent'] == 'baseline'
+            s.state.tariff = deepcopy(fresh)
+        assert await restarted.recover()
+        assert s.store.data is None and s.budget.native_max_claim('site') is None
+        assert calls == [fresh]
+    finally:
+        await recovered._cancel_watch()
+        if 'restarted' in locals(): await restarted._cancel_watch()
+
+
+@pytest.mark.asyncio
+async def test_amber_replacement_keeps_owner_until_physical_settling(setup):
+    s = setup
+    recovered, fresh = await live_amber_recovery(s)
+    s.state.battery_w = -10000
+    try:
+        with pytest.raises(s.m.NativeMaxChargeError, match='physical settling'):
+            await recovered.recover()
+        assert s.state.tariff == fresh and s.store.data['phase'] == 'settling'
+        assert s.budget.native_max_claim('site')
+        s.state.battery_w = 0
+        assert await recovered.recover()
+        assert [value for kind, value in s.state.events if kind == 'tariff'] == [fresh]
+        assert s.store.data is None
+    finally:
+        await recovered._cancel_watch()
+
+
+@pytest.mark.asyncio
+async def test_amber_capability_can_become_available_during_pending_recovery(setup):
+    s = setup
+    recovered, fresh = await live_amber_recovery(s)
+    enabled = [False]
+    s.adapter.normal_tariff_allowed = lambda: enabled[0]
+    s.state.tariff = {'code': 'DISCHARGE_NATIVE_MAX_previous', 'name': 'Force Discharge'}
+    try:
+        with pytest.raises(s.m.NativeMaxChargeError): await recovered.recover()
+        assert not [event for event in s.state.events if event[0] == 'tariff']
+        enabled[0] = True
+        assert await recovered.recover()
+        assert s.state.tariff == fresh and s.store.data is None
+    finally:
+        await recovered._cancel_watch()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize('direction', ['CHARGE', 'DISCHARGE'])
 async def test_another_temporary_native_tariff_cannot_release_cleanup(setup, direction):
     s=setup
