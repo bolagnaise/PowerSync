@@ -1104,14 +1104,27 @@ class NativeMaxChargeAdapter:
         rather than the provider's current prices or temporary tariff code.
         """
         fresh_current = None
+        # Optimizer refreshes may shorten the journal's stop deadline without
+        # extending or replacing its durable site lease. Pin that exact lease
+        # throughout cleanup, and require it to contain the earlier stop time.
+        cleanup_claim = deepcopy(self.budget.native_max_claim(self.site))
 
         def allowed():
             claim = self.budget.native_max_claim(self.site)
+            lease_deadline = claim.get("expires_at") if claim else None
+            stop_deadline = baseline.get("_expires_at")
+            deadline_contained = (
+                type(lease_deadline) in (int, float)
+                and type(stop_deadline) in (int, float)
+                and math.isfinite(lease_deadline) and math.isfinite(stop_deadline)
+                and stop_deadline <= lease_deadline
+            )
             if (self.current_identity() != self.identity or not self.client.local_access_enabled
                     or not callable(self.normal_tariff_allowed)
                     or self.normal_tariff_allowed() is not True
                     or not claim or claim.get("token") != baseline.get("_session_id")
-                    or claim.get("expires_at") != baseline.get("_expires_at")
+                    or claim.get("entry_id") != self.entry_id
+                    or not deadline_contained or claim != cleanup_claim
                     or claim.get("direction", "charge") != baseline.get("direction", "charge")
                     or (fresh_current is not None and fresh_current() is not True)):
                 raise NativeMaxChargeError("Native Max live tariff cleanup authority changed")

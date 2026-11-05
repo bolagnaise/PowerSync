@@ -68,6 +68,11 @@ A local HTTP timeout does not expire a signed gateway command. PowerSync records
 
 Before native Max captures its restore tariff, PowerSync waits for an earlier price-tariff upload and its readback to finish. New price uploads defer during this handoff, so a PowerSync price refresh cannot replace the saved baseline during acquisition. The original request deadline still applies, and tariffs changed by another controller remain protected.
 
+When an optimiser refresh shortens a Native Max stop time, cleanup retains the
+original site lease and accepts the earlier deadline. The session, site, pairing
+and direction must still match, and the lease cannot change during cleanup. This
+also allows an already retained shortened session to recover after restart.
+
 For Amber sites with automatic tariff sync enabled, Native Max cleanup builds a
 fresh Amber schedule instead of replaying the prices captured before forcing.
 This also repairs retained cleanup on restart when Tesla is still showing a
