@@ -1573,6 +1573,29 @@ async def test_amber_recovery_uploads_live_schedule_instead_of_saved_prices(setu
         await recovered._cancel_watch()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize('restart', [False, True])
+@pytest.mark.parametrize('expired', [False, True])
+async def test_amber_cleanup_after_optimizer_shortens_active_deadline(setup, restart, expired):
+    s = setup
+    recovered, fresh = await live_amber_recovery(s)
+    original_claim = deepcopy(s.budget.native_max_claim('site'))
+    await s.session.shorten(s.state.at + 30)
+    assert s.session.record['expires_at'] < original_claim['expires_at']
+    assert s.budget.native_max_claim('site') == original_claim
+    if expired:
+        s.state.at += 200
+    controller = recovered if restart else s.session
+    try:
+        assert await controller.stop()
+        assert s.state.tariff == fresh
+        assert s.store.data is None
+        assert s.budget.native_max_claim('site') is None
+    finally:
+        await controller._cancel_watch()
+        await s.session._cancel_watch()
+
+
 async def live_amber_recovery(s):
     await s.session.start(120)
     await s.session._cancel_watch()
@@ -1590,8 +1613,8 @@ async def live_amber_recovery(s):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('stage', ['missing_claim', 'other_claim', 'different_deadline',
-    'different_direction', 'source_pairing', 'source_disabled', 'source_generation',
-    'saved_pairing', 'saved_claim', 'saved_session'])
+    'different_direction', 'other_site', 'other_entry', 'source_pairing', 'source_disabled', 'source_generation',
+    'source_deadline', 'saved_deadline', 'saved_pairing', 'saved_claim', 'saved_session'])
 async def test_amber_live_tariff_rechecks_owner_and_policy_before_submission(setup, stage):
     s = setup
     recovered, fresh = await live_amber_recovery(s)
@@ -1604,6 +1627,8 @@ async def test_amber_live_tariff_rechecks_owner_and_policy_before_submission(set
         elif stage == 'source_disabled': enabled[0] = False
         elif stage == 'source_generation': generation[0] = False
         elif stage == 'saved_session': recovered.record['id'] = 'other-session'
+        elif stage in ('source_deadline', 'saved_deadline'):
+            s.budget.entries['native_max:battery']['native_max']['expires_at'] += 1
         else: s.budget.entries['native_max:battery']['native_max']['token'] = 'different-owner'
     async def source():
         if stage.startswith('source_'): change()
@@ -1617,7 +1642,10 @@ async def test_amber_live_tariff_rechecks_owner_and_policy_before_submission(set
     if stage == 'missing_claim': s.budget.entries.clear()
     elif stage == 'other_claim': change()
     elif stage == 'different_deadline':
-        s.budget.entries['native_max:battery']['native_max']['expires_at'] += 1
+        s.budget.entries['native_max:battery']['native_max']['expires_at'] -= 1
+    elif stage == 'other_site': s.budget.entries['native_max:battery']['site'] = 'other-site'
+    elif stage == 'other_entry':
+        s.budget.entries['native_max:battery']['native_max']['entry_id'] = 'other-entry'
     elif stage == 'different_direction':
         s.budget.entries['native_max:battery']['native_max']['direction'] = 'discharge'
     try:
