@@ -4367,9 +4367,11 @@ def test_vinless_connector_accepts_newer_home_presence_for_same_vehicle(monkeypa
         devices,
         entry_data={
             "tesla_coordinator": SimpleNamespace(data={
+                # State 2 at 0 W is Tesla's idle standby; attribution
+                # needs measured connector power to prove charging.
                 "wall_connectors_raw": [{
                     "wall_connector_state": 2,
-                    "wall_connector_power": 0,
+                    "wall_connector_power": 7000,
                     "din": "1529455-42-H--PGT26089015211",
                 }],
                 "last_update": current + timedelta(seconds=90),
@@ -5260,3 +5262,75 @@ def test_fleet_only_mapped_boosts_keep_fresh_fleet_power_over_old_or_unavailable
     snapshot = ev_load.aggregate_ev_load(observations, at=now)
     assert snapshot.quality == ev_load.EvLoadQuality.COMPLETE
     assert snapshot.power_kw == pytest.approx(2.33)
+
+
+@pytest.mark.parametrize("standby_state", [2, 1, 0])
+def test_idle_wall_connector_standby_cannot_revive_stale_fleet_charging(standby_state):
+    """W3RT1E recurrence: an unplugged Wall Connector is not a charging car.
+
+    Tesla's ``live_status`` reports an idle connector with no vehicle as
+    ``wall_connector_state: 2`` and 0 W (HA's own Tesla Fleet/Teslemetry
+    fixtures). That standby record must not re-stamp a Fleet ``Charging``
+    reading restored at the last HA restart as live charging over the newer
+    BLE ``Stopped`` 0 kW sample.
+    """
+    power_sync = _power_sync_module()
+    now = datetime.now(timezone.utc)
+    restored = now - timedelta(hours=6, minutes=30)
+    ble_seen = now - timedelta(hours=1)
+    states = [
+        _State("binary_sensor.primary_ev_status", "on", last_updated=restored),
+        _State("binary_sensor.primary_ev_charge_cable", "on", last_updated=restored),
+        _State("device_tracker.primary_ev_location", "home", last_updated=restored),
+        _State("sensor.primary_ev_charging", "charging", last_updated=restored),
+        _State("sensor.primary_ev_charger_power", "2",
+               {"unit_of_measurement": "kW"}, last_updated=restored),
+        _State("sensor.primary_ev_battery_level", "62", last_updated=restored),
+        _State("binary_sensor.second_car_status", "on", last_updated=ble_seen),
+        _State("sensor.second_car_charging_state", "Stopped",
+               last_updated=ble_seen, last_reported=ble_seen),
+        _State("sensor.second_car_charge_power", "0.0",
+               {"unit_of_measurement": "kW"},
+               last_updated=ble_seen, last_reported=ble_seen),
+        _State("sensor.second_car_charge_level", "68",
+               last_updated=ble_seen, last_reported=ble_seen),
+    ]
+    hass = _tesla_hass(states)
+    hass.entity_registry.entities = {
+        key: value for key, value in hass.entity_registry.entities.items()
+        if "primary_ev" in key
+    }
+    hass.data["power_sync"]["entry-1"]["tesla_coordinator"] = SimpleNamespace(data={
+        "last_update": now - timedelta(seconds=5),
+        "wall_connectors_raw": [{
+            "din": "1529455-02-E--PGT00000000000",
+            "wall_connector_state": standby_state,
+            "wall_connector_fault_state": 2,
+            "wall_connector_power": 0,
+        }],
+    })
+    entry = SimpleNamespace(entry_id="entry-1", data={}, options={
+        "ev_provider": power_sync.EV_PROVIDER_BOTH,
+        "tesla_ble_entity_prefix": "second_car",
+        "tesla_ble_vehicle_mapping": "5YJTEST0000000001=second_car",
+    })
+
+    vehicles = power_sync._get_ev_vehicles_status(hass, entry)
+    vehicle = next(
+        item for item in vehicles if item.get("vehicle_id") == "5YJTEST0000000001"
+    )
+    assert vehicle["is_charging"] is False
+    # The restored 2 kW is neither current nor measured: it may only survive
+    # as an unavailable reading, never as live charging power.
+    assert vehicle["ev_power_kw"] == 0.0 or vehicle["power_available"] is False
+    assert vehicle.get("telemetry_state") != "live"
+    assert not any(
+        item.get("is_charging") or item.get("is_connected")
+        for item in vehicles
+        if str(item.get("charger_id") or "").startswith("wall_connector_")
+    )
+
+    from power_sync.automations.loadpoint_status import build_loadpoint_status
+    rows = build_loadpoint_status({}, vehicles)
+    assert not any(row["actual_charging"] for row in rows)
+    assert not any(row["status"] == "charging" for row in rows)

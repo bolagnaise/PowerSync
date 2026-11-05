@@ -3138,8 +3138,12 @@ def _get_ev_vehicles_status(hass, entry, *, include_control_evidence=False) -> l
             wc_power_kw = _kw_from_wall_connector_power(
                 wc.get("wall_connector_power", wc.get("power"))
             )
-            wc_connected = wc_state in (2, 4, 6, 7, 11) or wc_power_kw > 0.05
-            wc_charging = wc_power_kw > 0.05 or wc_state == 2
+            # Tesla live_status reports an idle connector with no vehicle as
+            # state 2 at 0 W, so the state code alone never proves charging.
+            # Plugged-in states match the energy coordinator's (4/6/7/11);
+            # charging needs measured connector power.
+            wc_connected = wc_state in (4, 6, 7, 11) or wc_power_kw > 0.05
+            wc_charging = wc_power_kw > 0.05
             wc_observations.append((
                 wc_power_kw,
                 wc_connected,
