@@ -3225,6 +3225,81 @@ def test_price_level_start_uses_vehicle_charger_config(fake_actions):
     assert params["allow_ownership_takeover"] is True
 
 
+def test_price_level_transport_recovery_is_pending_in_api_without_restarting(
+    monkeypatch, fake_actions, caplog,
+):
+    """An armed Tesla recovery controller is not a confirmed physical start."""
+    hass = _FakeHass()
+    entry = _FakeConfigEntry()
+    pending = {
+        "active": True,
+        "charging_started": False,
+        "transport_recovery_pending": True,
+        "params": {"owner_mode": "price_level_recovery"},
+    }
+    hass.data["power_sync"][entry.entry_id]["dynamic_ev_state"] = {VIN: pending}
+    fake_actions._action_start_ev_charging_dynamic = AsyncMock(return_value=True)
+    fake_actions._action_stop_ev_charging_dynamic = AsyncMock(return_value=True)
+    executor = ev_planner.PriceLevelChargingExecutor(hass, entry)
+    caplog.set_level("INFO")
+
+    assert asyncio.run(executor._start_charging(
+        "price_level_recovery", "Cheap price", vehicle_vin=VIN,
+    )) is True
+
+    view = executor.get_state()["vehicle_states"][VIN]
+    assert view["is_charging"] is False
+    assert view["start_pending"] is True
+    assert view["last_decision"] == "starting"
+    assert "transport recovery" in view["last_decision_reason"]
+    assert not any("Price-level charging: Started" in r.message for r in caplog.records)
+
+    # The controller remains managed, so the next eligible evaluation must
+    # neither replace its recovery session nor send another start/stop.
+    monkeypatch.setattr(ev_planner, "discover_all_tesla_vehicles", AsyncMock(
+        return_value=[{"vin": VIN, "name": "Test car"}],
+    ))
+    monkeypatch.setattr(executor, "get_charging_decision_for_vehicle", AsyncMock(
+        return_value=(True, "Cheap price", "price_level_recovery"),
+    ))
+    asyncio.run(executor.evaluate_all_vehicles(10))
+    assert fake_actions._action_start_ev_charging_dynamic.await_count == 1
+    fake_actions._action_stop_ev_charging_dynamic.assert_not_awaited()
+
+    executor._stop_charging = AsyncMock(return_value=True)
+    executor.get_charging_decision_for_vehicle.return_value = (False, "Price too high", "")
+    asyncio.run(executor.evaluate_all_vehicles(40))
+    executor._stop_charging.assert_awaited_once_with("Price too high", vehicle_vin=VIN)
+
+    pending["transport_recovery_pending"] = False
+    pending["charging_started"] = True
+    view = executor.get_state()["vehicle_states"][VIN]
+    assert view["is_charging"] is True
+    assert view["start_pending"] is False
+
+
+@pytest.mark.parametrize("case", ["other_vehicle", "other_mode", "inactive"])
+def test_price_level_recovery_status_does_not_borrow_another_session(fake_actions, case):
+    hass = _FakeHass()
+    entry = _FakeConfigEntry()
+    executor = ev_planner.PriceLevelChargingExecutor(hass, entry)
+    state = executor._get_or_create_vehicle_state(VIN)
+    state.is_charging = True
+    state.charging_mode = "price_level_recovery"
+    state.last_decision = "started"
+    pending = {
+        "active": case != "inactive",
+        "transport_recovery_pending": True,
+        "params": {"owner_mode": "solar_surplus" if case == "other_mode" else state.charging_mode},
+    }
+    vehicle = "5YJOTHER0000000A1" if case == "other_vehicle" else VIN
+    hass.data["power_sync"][entry.entry_id]["dynamic_ev_state"] = {vehicle: pending}
+    view = executor.get_state()["vehicle_states"][VIN]
+    assert view["is_charging"] is True
+    assert view["start_pending"] is False
+    assert view["last_decision"] == "started"
+
+
 def test_price_level_does_not_start_a_fleet_vehicle_reporting_complete(fake_actions):
     fake_actions._action_start_ev_charging_dynamic = AsyncMock(return_value=True)
     fake_actions._is_vehicle_charge_complete = AsyncMock(return_value=True)

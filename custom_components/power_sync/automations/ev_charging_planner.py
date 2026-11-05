@@ -11099,23 +11099,25 @@ class PriceLevelChargingExecutor:
             state.charging_mode = mode
             state.last_decision = "starting" if state.start_pending else "started"
             state.last_decision_reason = reason
+            status = self._state_for_api(state, vehicle_vin)
             _LOGGER.info(
                 "Price-level charging: %s (%s) for VIN %s - %s",
-                "armed" if state.start_pending else "Started",
+                "armed" if status["start_pending"] else "Started",
                 mode,
                 vehicle_vin,
-                reason,
+                status["last_decision_reason"],
             )
         else:
             state.is_charging = not state.start_pending
             state.charging_mode = mode
             state.last_decision = "starting" if state.start_pending else "started"
             state.last_decision_reason = reason
+            status = self._state_for_api(state, vehicle_vin)
             _LOGGER.info(
                 "Price-level charging: %s (%s) - %s",
-                "armed" if state.start_pending else "Started",
+                "armed" if status["start_pending"] else "Started",
                 mode,
-                reason,
+                status["last_decision_reason"],
             )
         await self.apply_preserve_home_battery(
             state.is_charging or state.start_pending,
@@ -11904,6 +11906,36 @@ class PriceLevelChargingExecutor:
         if reason:
             state.last_decision_reason = reason
 
+    def _state_for_api(
+        self, state: PriceLevelChargingState, vehicle_vin: Optional[str] = None,
+    ) -> dict:
+        """Separate an armed recovery controller from physical charging status."""
+        from .actions import DEFAULT_VEHICLE_ID
+
+        runtime = self.hass.data.get(self._domain, {}).get(self.config_entry.entry_id, {})
+        session = (runtime.get("dynamic_ev_state") or {}).get(
+            vehicle_vin or DEFAULT_VEHICLE_ID, {}
+        )
+        recovery_pending = bool(
+            session.get("active")
+            and session.get("transport_recovery_pending")
+            and (session.get("params") or {}).get("owner_mode") == state.charging_mode
+        )
+        # is_charging also retains executor ownership while recovery is armed.
+        # Changing it here would make each eligible cycle replace the session
+        # and issue another Stop. Only the public projection is physical status.
+        return {
+            "is_charging": state.is_charging and not recovery_pending,
+            "charging_mode": state.charging_mode,
+            "last_decision": "starting" if recovery_pending else state.last_decision,
+            "last_decision_reason": (
+                f"{state.last_decision_reason}; waiting for Tesla transport recovery"
+                if recovery_pending else state.last_decision_reason
+            ),
+            "start_pending": state.start_pending or recovery_pending,
+            "stop_pending": state.stop_pending,
+        }
+
     def get_state(self) -> dict:
         """Get current state for API."""
         settings = self._get_settings()
@@ -11911,21 +11943,15 @@ class PriceLevelChargingExecutor:
         # Build per-vehicle state info
         vehicle_states = {}
         for vin, state in self._vehicle_states.items():
-            vehicle_states[vin] = {
-                "is_charging": state.is_charging,
-                "charging_mode": state.charging_mode,
-                "last_decision": state.last_decision,
-                "last_decision_reason": state.last_decision_reason,
-                "start_pending": state.start_pending,
-                "stop_pending": state.stop_pending,
-            }
+            vehicle_states[vin] = self._state_for_api(state, vin)
 
+        legacy_state = self._state_for_api(self._state)
         return {
             "enabled": settings.get("enabled", False),
-            "is_charging": self._state.is_charging,
-            "charging_mode": self._state.charging_mode,
-            "last_decision": self._state.last_decision,
-            "last_decision_reason": self._state.last_decision_reason,
+            "is_charging": legacy_state["is_charging"],
+            "charging_mode": legacy_state["charging_mode"],
+            "last_decision": legacy_state["last_decision"],
+            "last_decision_reason": legacy_state["last_decision_reason"],
             "preserve_home_battery_active": self._preserve_home_battery_active,
             "settings": settings,
             "vehicle_states": vehicle_states,  # Per-vehicle state tracking
