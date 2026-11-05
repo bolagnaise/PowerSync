@@ -94,6 +94,10 @@ async def test_recovery_uses_fresh_current_prices_and_existing_user_adjustments(
     assert 'tariff_schedule' not in b.ns['_aemo_dispatch_entry_data']()
     b.ns['_command_generation'][0] += 1
     assert not current()
+    b.ns['_command_generation'][0] -= 1
+    assert current()
+    b.ns['_is_monitoring_mode'] = lambda: True
+    assert not current()
 
 
 @pytest.mark.asyncio
