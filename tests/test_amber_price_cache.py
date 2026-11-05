@@ -20,6 +20,12 @@ _ha_root = sys.modules.setdefault("homeassistant", types.ModuleType("homeassista
 _ha_core = sys.modules.setdefault("homeassistant.core", types.ModuleType("homeassistant.core"))
 _ha_core.HomeAssistant = object
 
+
+def _callback(func):
+    func._hass_callback = True
+    return func
+
+
 _ha_exceptions = sys.modules.setdefault(
     "homeassistant.exceptions", types.ModuleType("homeassistant.exceptions")
 )
@@ -360,7 +366,8 @@ def test_amber_extended_forecast_cache_survives_refresh_failure(monkeypatch):
     assert result["forecast"] == _forecast_5min() + _forecast_30min()
 
 
-def test_octopus_integration_uses_zero_revenue_when_export_is_unknown():
+def test_octopus_integration_uses_zero_revenue_when_export_is_unknown(monkeypatch):
+    monkeypatch.setattr(sys.modules["homeassistant.core"], "callback", _callback, raising=False)
     now = datetime.now(timezone.utc)
     start = now - timedelta(minutes=5)
     end = now + timedelta(minutes=25)
@@ -410,7 +417,8 @@ def test_octopus_integration_uses_zero_revenue_when_export_is_unknown():
     assert result["export_rates"][0]["price_available"] is False
 
 
-def test_octopus_integration_reads_public_current_rate_entities_when_internal_data_missing():
+def test_octopus_integration_reads_public_current_rate_entities_when_internal_data_missing(monkeypatch):
+    monkeypatch.setattr(sys.modules["homeassistant.core"], "callback", _callback, raising=False)
     now = datetime.now(timezone.utc)
     start = now - timedelta(minutes=5)
     end = now + timedelta(minutes=25)
@@ -807,7 +815,10 @@ def test_tesla_uses_powerwall_local_snapshot_when_cloud_status_is_empty():
             "power_sync": {
                 "entry-1": {
                     "powerwall_local": {
-                        "coordinator": SimpleNamespace(data=snap),
+                        "coordinator": SimpleNamespace(
+                            data=snap, reachable=True,
+                            last_success_monotonic=coordinator.time.monotonic(),
+                        ),
                     },
                 },
             },
@@ -831,6 +842,181 @@ def test_tesla_uses_powerwall_local_snapshot_when_cloud_status_is_empty():
     assert data["grid_status"] == "Active"
     assert data["total_pack_energy_kwh"] == 27.0
     assert data["energy_left_kwh"] == 20.66
+
+
+def _tesla_with_local_snapshot(monkeypatch):
+    monkeypatch.setattr(coordinator.time, "monotonic", lambda: 100.0)
+    local = SimpleNamespace(
+        data=SimpleNamespace(
+            soc=76.5, solar_w=5200.0, battery_w=-3100.0,
+            grid_w=400.0, load_w=2500.0,
+            grid_status="SystemGridConnected",
+        ),
+        last_success_monotonic=98.0,
+        reachable=True,
+    )
+    hass = _FakeHass(data={"power_sync": {"entry-1": {
+        "powerwall_local": {"coordinator": local},
+    }}})
+    tesla = coordinator.TeslaEnergyCoordinator(
+        hass, "site-1", "token", entry_id="entry-1",
+    )
+    tesla._energy_acc._last_update = datetime.now(timezone.utc)
+    tesla._energy_acc.update = lambda *args, **kwargs: None
+    tesla._lifetime_totals_restored = True
+    return tesla, local
+
+
+@pytest.mark.parametrize("failure", ["empty", "network", "timeout", "token", "partial"])
+def test_tesla_cloud_outage_keeps_fresh_local_energy(monkeypatch, failure):
+    tesla, _local = _tesla_with_local_snapshot(monkeypatch)
+
+    async def fetch(*args, **kwargs):
+        if failure == "network":
+            raise coordinator.UpdateFailed("Network error: DNS timeout")
+        if failure == "timeout":
+            raise coordinator.UpdateFailed("Timeout after 60s")
+        if failure == "partial":
+            return {"response": {"battery_power": None}}
+        return {"response": None}
+
+    monkeypatch.setattr(coordinator, "_fetch_with_retry", fetch)
+    if failure == "token":
+        tesla._token_getter = lambda: (None, tesla.api_provider)
+
+    data = asyncio.run(tesla._async_update_data())
+
+    assert data["data_source"] == "powerwall_local"
+    assert [data[k] for k in ("solar_power", "battery_power", "grid_power", "load_power")] == [5.2, -3.1, 0.4, 2.5]
+    assert data["battery_level"] == 76.5
+    assert (datetime.now(timezone.utc) - data["last_update"]).total_seconds() >= 2
+
+
+@pytest.mark.parametrize("failure", ["empty", "network", "token"])
+@pytest.mark.parametrize("local_state", ["missing", "stale", "undated", "future", "unreachable", "incomplete", "nonfinite"])
+def test_tesla_cloud_outage_rejects_unusable_local_energy(monkeypatch, failure, local_state):
+    tesla, local = _tesla_with_local_snapshot(monkeypatch)
+    if local_state == "missing":
+        local.data = None
+    elif local_state == "stale":
+        local.last_success_monotonic = 69.0
+    elif local_state == "undated":
+        local.last_success_monotonic = None
+    elif local_state == "future":
+        local.last_success_monotonic = 101.0
+    elif local_state == "unreachable":
+        local.reachable = False
+    elif local_state == "incomplete":
+        local.data.battery_w = None
+    elif local_state == "nonfinite":
+        local.data.grid_w = float("nan")
+
+    async def fetch(*args, **kwargs):
+        if failure == "network":
+            raise coordinator.UpdateFailed("Network error: DNS timeout")
+        return {"response": None}
+
+    monkeypatch.setattr(coordinator, "_fetch_with_retry", fetch)
+    if failure == "token":
+        tesla._token_getter = lambda: (None, tesla.api_provider)
+    with pytest.raises(coordinator.UpdateFailed):
+        asyncio.run(tesla._async_update_data())
+
+
+def test_tesla_cloud_auth_failure_still_requires_reauth_with_local_energy(monkeypatch):
+    tesla, _local = _tesla_with_local_snapshot(monkeypatch)
+    tesla._auth_expiry_notified = True
+
+    async def fetch(*args, **kwargs):
+        raise coordinator.ConfigEntryAuthFailed("Token revoked")
+
+    monkeypatch.setattr(coordinator, "_fetch_with_retry", fetch)
+    with pytest.raises(coordinator.ConfigEntryAuthFailed):
+        asyncio.run(tesla._async_update_data())
+
+
+def test_tesla_cloud_outage_rechecks_local_age_after_request(monkeypatch):
+    tesla, local = _tesla_with_local_snapshot(monkeypatch)
+
+    async def fetch(*args, **kwargs):
+        # A valid snapshot at request start can expire during REST retries.
+        local.last_success_monotonic = 60.0
+        raise coordinator.UpdateFailed("Network error: DNS timeout")
+
+    monkeypatch.setattr(coordinator, "_fetch_with_retry", fetch)
+    with pytest.raises(coordinator.UpdateFailed):
+        asyncio.run(tesla._async_update_data())
+
+
+def test_tesla_cloud_poll_recovers_after_local_fallback(monkeypatch):
+    tesla, _local = _tesla_with_local_snapshot(monkeypatch)
+    responses = iter([
+        {"response": None},
+        {"response": {
+            "solar_power": 1300, "grid_power": -1100,
+            "battery_power": 0, "load_power": 200,
+            "percentage_charged": 77,
+        }},
+    ])
+
+    async def fetch(*args, **kwargs):
+        return next(responses)
+
+    monkeypatch.setattr(coordinator, "_fetch_with_retry", fetch)
+    tesla._lifetime_last_fetch = 100.0
+    assert asyncio.run(tesla._async_update_data())["data_source"] == "powerwall_local"
+    data = asyncio.run(tesla._async_update_data())
+    assert data["solar_power"] == 1.3
+    assert data["battery_power"] == 0
+    assert data["battery_level"] == 77
+    assert data.get("data_source") != "powerwall_local"
+
+
+def test_tesla_cloud_poll_cancellation_is_not_local_success(monkeypatch):
+    tesla, _local = _tesla_with_local_snapshot(monkeypatch)
+
+    async def fetch(*args, **kwargs):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(coordinator, "_fetch_with_retry", fetch)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(tesla._async_update_data())
+
+
+@pytest.mark.parametrize("failure", ["network", "timeout", "server", "rate_limit", "fleet_401", "direct_401"])
+def test_tesla_outage_fallback_through_real_rest_retry(monkeypatch, failure):
+    tesla, _local = _tesla_with_local_snapshot(monkeypatch)
+    tesla.api_provider = (
+        coordinator.TESLA_PROVIDER_FLEET_API
+        if failure == "fleet_401" else coordinator.TESLA_PROVIDER_TESLEMETRY
+    )
+    tesla._auth_expiry_notified = True
+    requests = []
+
+    class Response(_FakeResponse):
+        async def __aenter__(self):
+            requests.append(failure)
+            if failure == "network":
+                raise coordinator.aiohttp.ClientConnectionError("DNS timeout")
+            if failure == "timeout":
+                raise asyncio.TimeoutError
+            return self
+
+    status = {"server": 503, "rate_limit": 429, "fleet_401": 401, "direct_401": 401}.get(failure, 200)
+    tesla.session = _FakeSession(Response(status, text="upstream unavailable"))
+
+    async def no_delay(*args):
+        pass
+
+    monkeypatch.setattr(coordinator.asyncio, "sleep", no_delay)
+    if failure == "direct_401":
+        with pytest.raises(coordinator.ConfigEntryAuthFailed):
+            asyncio.run(tesla._async_update_data())
+    else:
+        data = asyncio.run(tesla._async_update_data())
+        assert data["data_source"] == "powerwall_local"
+        assert data["solar_power"] == 5.2
+    assert len(requests) == (1 if failure.endswith("401") else 3)
 
 
 def test_tesla_outage_notification_waits_for_sustained_failure():

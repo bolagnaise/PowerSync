@@ -55,6 +55,7 @@ from .const import (
     CONF_POWERSYNC_CLIENT_INSTANCE_ID,
     TESLA_SITE_INFO_CACHE_TTL_SECONDS,
     TESLA_SITE_INFO_RETRY_SECONDS,
+    TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS,
     CONF_SIGENERGY_CHARGER_ENABLED,
     CONF_SIGENERGY_CHARGER_TYPE,
     CONF_TESLA_BLE_VEHICLE_MAPPING,
@@ -3206,12 +3207,32 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         return should_notify, failure_duration
 
     def _local_powerwall_energy_data(self) -> dict[str, Any] | None:
-        """Return energy data from the paired local Powerwall coordinator."""
+        """Return fresh, complete telemetry from the paired local Powerwall."""
         entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry_id, {})
         local_runtime = entry_data.get("powerwall_local") or {}
         local_coordinator = local_runtime.get("coordinator")
         snap = getattr(local_coordinator, "data", None)
-        if snap is None:
+        last_success = getattr(local_coordinator, "last_success_monotonic", None)
+        if (
+            snap is None
+            or getattr(local_coordinator, "reachable", False) is not True
+            or type(last_success) not in (int, float)
+        ):
+            return None
+        age = time.monotonic() - last_success
+        if not 0 <= age <= TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS:
+            return None
+        # A cached snapshot can survive a failed local poll. Missing meter
+        # values are unknown, never measured zero, even during a cloud outage.
+        for field in ("solar_w", "grid_w", "battery_w", "load_w"):
+            raw = getattr(snap, field, None)
+            try:
+                if raw is None or isinstance(raw, bool) or not math.isfinite(float(raw)):
+                    return None
+            except (TypeError, ValueError, OverflowError):
+                return None
+
+        if getattr(local_coordinator, "needs_repair", False):
             return None
 
         def _kw(value: Any) -> float:
@@ -3316,7 +3337,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
             "battery_level": soc_pct,
             "grid_status": grid_status,
             "ev_power": ev_power_kw,
-            "last_update": dt_util.utcnow(),
+            "last_update": dt_util.utcnow() - timedelta(seconds=age),
             "energy_summary": self._energy_acc.as_dict(),
             "firmware": self._firmware,
             "battery_max_charge_power": None,
@@ -3457,6 +3478,9 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
             stream_live_status = None
             current_token = self._get_current_token()
             if not current_token:
+                local_energy_data = self._local_powerwall_energy_data()
+                if local_energy_data is not None:
+                    return local_energy_data
                 raise UpdateFailed(
                     "Tesla token temporarily unavailable — will retry next poll"
                 )
@@ -3472,15 +3496,28 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
             else:
                 # Fleet API, PowerSync Cloud, and an unhealthy Teslemetry
                 # stream continue through the proven REST retry path.
-                data = await _fetch_with_retry(
-                    self.session,
-                    f"{self.api_base_url}/api/1/energy_sites/{self.site_id}/live_status",
-                    headers,
-                    max_retries=3,
-                    timeout_seconds=60,
-                    raise_auth_failed=self.api_provider
-                    != TESLA_PROVIDER_FLEET_API,
-                )
+                try:
+                    data = await _fetch_with_retry(
+                        self.session,
+                        f"{self.api_base_url}/api/1/energy_sites/{self.site_id}/live_status",
+                        headers,
+                        max_retries=3,
+                        timeout_seconds=60,
+                        raise_auth_failed=self.api_provider
+                        != TESLA_PROVIDER_FLEET_API,
+                    )
+                except UpdateFailed:
+                    # The REST retry helper wraps transient network, timeout
+                    # and upstream-token failures in UpdateFailed. Keep HA's
+                    # ConfigEntryAuthFailed path intact for revoked credentials.
+                    local_energy_data = self._local_powerwall_energy_data()
+                    if local_energy_data is not None:
+                        _LOGGER.debug(
+                            "Tesla live_status unavailable; using paired Powerwall "
+                            "local snapshot for energy telemetry"
+                        )
+                        return local_energy_data
+                    raise
                 live_status = data.get("response") or {}
                 _LOGGER.debug("Tesla API live_status response: %s", live_status)
 
@@ -3624,6 +3661,9 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
             # it enter optimizer planning.  Preserve an explicit numeric zero.
             battery_power_w = _finite_float(live_status.get("battery_power"))
             if battery_power_w is None:
+                local_energy_data = self._local_powerwall_energy_data()
+                if local_energy_data is not None:
+                    return local_energy_data
                 raise UpdateFailed(
                     "Tesla live_status response omitted valid battery_power"
                 )

@@ -460,6 +460,8 @@ class _FakeLocalPowerwallCoordinator:
 
     def __init__(self, snap, ev_power_w: float) -> None:
         self.data = snap
+        self.reachable = True
+        self.last_success_monotonic = time.monotonic()
         self._ev_power_w = ev_power_w
 
     def _observed_ev_power_w(self) -> float:
@@ -526,6 +528,8 @@ def test_tesla_local_powerwall_fallback_clamps_load_at_zero_and_defaults_ev_to_z
     class _NoEvMethodCoordinator:
         def __init__(self, snap) -> None:
             self.data = snap
+            self.reachable = True
+            self.last_success_monotonic = time.monotonic()
 
     coordinator = _new_tesla_coordinator(_NoEvMethodCoordinator(snap))
 
