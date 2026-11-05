@@ -29137,7 +29137,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # Snapshot before price acquisition, which can also yield to a newer
         # force/restore command. That command owns the tariff from then on.
         sync_command_generation = _command_generation[0]
-        _monitoring_sync_override = None
         sync_runtime = _aemo_dispatch_entry_data()
         sync_site_id = str(entry.data.get(CONF_TESLA_ENERGY_SITE_ID))
         def sync_current():
@@ -30143,7 +30142,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             # but never run the ordinary upload or operation-mode side effects.
             interval_end = dt_util.parse_datetime(current_actual_interval["general"]["nemTime"])
             def tariff_current():
-                return (sync_current() and interval_end is not None
+                return (not _is_monitoring_mode() and sync_current() and interval_end is not None
                         and dt_util.utcnow() < interval_end
                         and 0 <= (dt_util.utcnow() - updated).total_seconds() < 60)
             return (tariff, tariff_current) if tariff_current() else None
