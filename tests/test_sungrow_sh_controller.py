@@ -54,6 +54,7 @@ def _install_const_stub() -> None:
     const.CONF_DAILY_SUPPLY_CHARGE = "daily_supply_charge"
     const.CONF_MONTHLY_SUPPLY_CHARGE = "monthly_supply_charge"
     const.TESLA_SITE_INFO_RETRY_SECONDS = 300
+    const.TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS = 30
     const.CONF_POWERSYNC_CLIENT_INSTANCE_ID = "powersync_client_instance_id"
     const.CONF_EV_PROVIDER = "ev_provider"
     const.CONF_TESLA_BLE_ENTITY_PREFIX = "tesla_ble_entity_prefix"
