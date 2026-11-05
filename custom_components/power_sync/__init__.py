@@ -29117,8 +29117,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.error(f"Error in FoxESS schedule sync: {e}", exc_info=True)
 
     async def _handle_sync_tou_internal(
-        websocket_data, sync_mode='settled_price', periodic: bool = False
-    ) -> bool | None:
+        websocket_data, sync_mode='settled_price', periodic: bool = False,
+        build_only: bool = False,
+    ):
         """Internal sync logic with price-aware de-dupe.
 
         Args:
@@ -29130,10 +29131,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             periodic: True for scheduled price syncs. Their uploads drop a
                 retry with a long Retry-After, because the next sync sends a
                 fresher tariff. Manual syncs and restores wait it out.
+            build_only: Build a freshly refreshed Amber tariff and return its
+                submission guard to session-owned recovery, without uploads.
         """
         # Snapshot before price acquisition, which can also yield to a newer
         # force/restore command. That command owns the tariff from then on.
         sync_command_generation = _command_generation[0]
+        _monitoring_sync_override = None
         sync_runtime = _aemo_dispatch_entry_data()
         sync_site_id = str(entry.data.get(CONF_TESLA_ENERGY_SITE_ID))
         def sync_current():
@@ -29164,12 +29168,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             CONF_ELECTRICITY_PROVIDER,
             entry.data.get(CONF_ELECTRICITY_PROVIDER, "amber")
         )
+        if build_only and (battery_system != "tesla" or electricity_provider_check != "amber"
+                           or amber_coordinator is None):
+            return None
         if electricity_provider_check in ("globird", "aemo_vpp"):
             _LOGGER.debug("⏭️  TOU sync skipped - %s uses AEMO spike detection only", electricity_provider_check)
             return
 
         skip_battery_tariff_sync = False
-        force_restore_sync_override = (
+        force_restore_sync_override = None if build_only else (
             hass.data.get(DOMAIN, {})
             .get(entry.entry_id, {})
             .pop("_allow_force_restore_tou_sync_once", None)
@@ -29412,7 +29419,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.info(f"⏰ Fetching current price from REST API")
 
             # Refresh coordinator to get REST API current prices
-            await amber_coordinator.async_request_refresh()
+            if build_only:
+                # Recovery must not turn a retained coordinator snapshot into
+                # today's tariff after a failed refresh.
+                await amber_coordinator.async_refresh()
+                data = amber_coordinator.data or {}
+                updated = data.get("last_update")
+                if (getattr(amber_coordinator, "last_update_success", False) is not True
+                        or not isinstance(updated, datetime)
+                        or not 0 <= (dt_util.utcnow() - updated).total_seconds() < 300):
+                    return None
+            else:
+                await amber_coordinator.async_request_refresh()
 
             if amber_coordinator.data:
                 # Use the refreshed current endpoint for the active TOU period.
@@ -29420,6 +29438,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 # boundary even when the live endpoint has already advanced.
                 current_prices = amber_coordinator.data.get("current", [])
                 current_actual_interval = extract_current_price_interval(current_prices)
+                if build_only and (not current_actual_interval
+                                   or not current_actual_interval.get("general")):
+                    return None
 
                 if current_actual_interval:
                     general_price = current_actual_interval.get('general', {}).get('perKwh') if current_actual_interval.get('general') else None
@@ -29486,7 +29507,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             not use_aemo_sensor and
             not use_kwatch and
             not use_octopus and  # Octopus doesn't have multiple forecast types
-            forecast_discrepancy_alert_enabled and
+            forecast_discrepancy_alert_enabled and not build_only and
             forecast_data
         ):
             # Check cooldown and daily limit to prevent notification fatigue
@@ -29559,7 +29580,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
         if (
             sync_mode == 'settled_price' and
-            price_spike_alert_enabled and
+            price_spike_alert_enabled and not build_only and
             forecast_data
         ):
             import_threshold = entry.options.get(
@@ -30115,6 +30136,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     chip_threshold,
                     reference_tariff=chip_reference_tariff,
                 )
+
+        if build_only:
+            # The recovery caller owns submission, journalling and confirmation.
+            # Keep the canonical Amber conversion (including user adjustments),
+            # but never run the ordinary upload or operation-mode side effects.
+            interval_end = dt_util.parse_datetime(current_actual_interval["general"]["nemTime"])
+            def tariff_current():
+                return (sync_current() and interval_end is not None
+                        and dt_util.utcnow() < interval_end
+                        and 0 <= (dt_util.utcnow() - updated).total_seconds() < 60)
+            return (tariff, tariff_current) if tariff_current() else None
 
         # Store dynamic tariff schedules in hass.data for the sensor to read.
         # Static custom tariffs were already stored in their lossless internal
@@ -36121,7 +36153,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             return current
         from .powerwall_local.views import ensure_client
         from .powerwall_local.native_max_charge import (
-            NativeMaxChargeSession, NativeMaxTariffNotSubmitted, NativeMaxTariffRejected,
+            NativeMaxChargeSession, NativeMaxChargeError, NativeMaxTariffNotSubmitted, NativeMaxTariffRejected,
             NativeMaxExportNotSubmitted, NativeMaxExportRejected,
         )
         from .powerwall_local.native_max_adapter import NativeMaxChargeAdapter
@@ -36275,13 +36307,35 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             from .native_rate_admission import reconcile_managed_for_native_max
             return await reconcile_managed_for_native_max(hass, budget, site)
 
+        def normal_tariff_allowed():
+            return (
+                _local_powerwall_generation_current()
+                and entry.options.get(CONF_ELECTRICITY_PROVIDER,
+                    entry.data.get(CONF_ELECTRICITY_PROVIDER, "amber")) == "amber"
+                and entry.options.get(CONF_AUTO_SYNC_ENABLED,
+                    entry.data.get(CONF_AUTO_SYNC_ENABLED, True)) is True
+                and amber_coordinator is not None
+                and amber_smartshift_coordinator is None
+                and not _is_monitoring_mode()
+            )
+
+        async def normal_tariff_source():
+            configured = site_config()
+            result = await _handle_sync_tou_internal(None, build_only=True)
+            if result is None or site_config() != configured:
+                raise NativeMaxChargeError("Current Amber tariff is unavailable for recovery")
+            tariff, current = result
+            return tariff, lambda: current() and site_config() == configured
+
         adapter = NativeMaxChargeAdapter(client=client, identity=identity,
             current_identity=_native_max_identity, policy=permitted, config=_local_powerwall_dispatch_config,
             read_tariff=read_tariff, upload=upload, restorable=_select_restorable_tesla_tariff,
             forcing_tariff={}, budget=budget, entry_id=entry.entry_id, site=site,
             tariff_matches=_tesla_tariff_matches_readback, direction=recovery_direction,
             read_export_rule=read_export_rule, write_export_rule=write_export_rule,
-            reconcile_managed=reconcile_managed)
+            reconcile_managed=reconcile_managed,
+            normal_tariff_source=normal_tariff_source,
+            normal_tariff_allowed=normal_tariff_allowed)
         current = NativeMaxChargeSession(adapter, _native_max_store, changed=changed)
         await current.load()
         if not _local_powerwall_generation_current():
