@@ -552,6 +552,7 @@ class NativeMaxChargeSession:
     async def _watch(self, token, generation):
         while self.record and self.record["id"] == token:
             await asyncio.sleep(min(1, self.interval))
+            restoring = False
             try:
                 r = self.record
                 if not r or r["id"] != token:
@@ -567,6 +568,7 @@ class NativeMaxChargeSession:
                 self._abort_application()
                 async with self._lock:
                     if self.record and self.record["id"] == token:
+                        restoring = True
                         await self._restore_locked()
             except asyncio.CancelledError:
                 raise
@@ -576,8 +578,16 @@ class NativeMaxChargeSession:
                     # A policy error ends charging; retries only restore.
                     self._generation += 1
                     self._abort_application()
-                    async with self._lock:
-                        try:
-                            await self._restore_locked()
-                        except Exception:
-                            pass
+                    if not restoring:
+                        # Policy loss needs immediate cleanup, but a failed
+                        # cleanup must not be retried again in the same tick.
+                        async with self._lock:
+                            try:
+                                await self._restore_locked()
+                            except Exception:
+                                pass
+                    if self.record and self.record["id"] == token:
+                        # Failed readback/settling keeps the durable owner.
+                        # Back off without holding the lock so explicit stop
+                        # and lifecycle recovery can still run immediately.
+                        await asyncio.sleep(max(30, self.interval))

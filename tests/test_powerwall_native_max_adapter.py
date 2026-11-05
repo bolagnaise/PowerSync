@@ -2022,6 +2022,66 @@ async def test_rejected_baseline_restore_can_retry_after_restart_and_cooldown(se
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('failure', ['unavailable', 'foreign_temporary'])
+async def test_discharge_restore_watch_bounds_readback_and_recovers_after_restart(setup, monkeypatch, failure):
+    s = setup
+    s.adapter.direction = 'discharge'
+    await s.session.start(120)
+    await s.session._cancel_watch()
+    s.state.at += 121
+    read = s.adapter.read_tariff
+    reads = []
+    failed_at = []
+    attempts = []
+
+    async def intermittent_tariff():
+        reads.append(s.state.at)
+        if len(attempts) <= 2:
+            if failure == 'unavailable':
+                raise s.m.NativeMaxChargeError('Native Max tariff readback is unavailable')
+            return {'code': 'FOREIGN_TEMPORARY', 'name': 'another temporary controller'}
+        return await read()
+
+    s.adapter.read_tariff = intermittent_tariff
+    recovered = type(s.session)(s.adapter, s.store, clock=lambda: s.state.at,
+                                monotonic=lambda: s.state.at)
+    await recovered.load()
+    restore = recovered._restore_locked
+
+    async def restore_attempt():
+        attempts.append(s.state.at)
+        try:
+            await restore()
+        except s.m.NativeMaxChargeError:
+            failed_at.append(s.state.at)
+            assert recovered.pending and s.store.data
+            assert s.budget.native_max_claim('site')
+            # Refused/unavailable readback must never submit a baseline tariff.
+            assert len([event for event in s.state.events if event[0] == 'tariff']) == 1
+            raise
+
+    real_sleep = asyncio.sleep
+
+    async def advance(seconds):
+        if seconds >= 30:
+            assert not recovered._lock.locked()
+        s.state.at += seconds
+        await real_sleep(0)
+
+    monkeypatch.setattr(recovered, '_restore_locked', restore_attempt)
+    monkeypatch.setattr(asyncio, 'sleep', advance)
+    await recovered._watch(recovered.record['id'], recovered._generation)
+    assert len(attempts) == 3 and len(failed_at) == 2
+    assert all(later - earlier >= 30 for earlier, later in zip(attempts, attempts[1:]))
+    # Completion also revalidates the tariff around physical settling.
+    assert len(reads) <= 5 * len(attempts)
+    assert not recovered.pending and s.store.data is None
+    assert not s.budget.native_max_claim('site')
+    assert (s.state.config, s.state.tariff) == s.original
+    assert len([event for event in s.state.events if event[0] == 'tariff']) == 2
+
+
+@pytest.mark.asyncio
 async def test_settings_restored_with_high_battery_draw_keeps_ev_barrier_across_restart(setup):
     s=setup;await s.session.start(120)
     s.state.battery_w=-13800

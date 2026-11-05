@@ -71,6 +71,105 @@ def setup():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('restart', [False, True])
+@pytest.mark.parametrize('failure', ['unavailable', 'foreign_tariff', 'settling'])
+async def test_failed_restore_watch_retries_are_bounded_and_recover(monkeypatch, restart, failure):
+    """A retained discharge must not hammer readback twice per one-second tick."""
+    s, a, store, clock = setup()
+    a.current['direction'] = 'discharge'
+    baseline = deepcopy(a.current)
+    await s.start(120)
+    await s._cancel_watch()
+    clock.now += 121
+    if restart:
+        store.data['phase'] = 'restoring'
+        s = m.NativeMaxChargeSession(a, store, clock=lambda: clock.now,
+                                    monotonic=lambda: clock.now, interval=.01)
+        await s.load()
+    attempts = []
+    restore = s._restore_locked
+
+    async def failed_readback():
+        attempts.append(clock.now)
+        if len(attempts) < 3:
+            if failure == 'settling':
+                raise m.NativeMaxRestorePending('physical settling pending')
+            raise m.NativeMaxChargeError(failure)
+        await restore()
+
+    real_sleep = asyncio.sleep
+
+    async def advance(seconds):
+        if seconds >= 30:
+            assert not s._lock.locked()
+        clock.now += seconds
+        await real_sleep(0)
+
+    monkeypatch.setattr(s, '_restore_locked', failed_readback)
+    monkeypatch.setattr(m.asyncio, 'sleep', advance)
+    await s._watch(s.record['id'], s._generation)
+    assert len(attempts) == 3
+    assert all(later - earlier >= 30 for earlier, later in zip(attempts, attempts[1:]))
+    assert not s.pending and store.data is None and a.barrier is None
+    assert a.current == baseline
+    assert a.events.count('apply_tariff') == 1
+
+
+@pytest.mark.asyncio
+async def test_policy_refusal_watch_restores_immediately_before_retry_delay(monkeypatch):
+    s, a, store, clock = setup()
+    await s.start(120)
+    await s._cancel_watch()
+    a.policy = False
+    real_sleep = asyncio.sleep
+    sleeps = []
+
+    async def advance(seconds):
+        sleeps.append(seconds)
+        clock.now += seconds
+        await real_sleep(0)
+
+    monkeypatch.setattr(m.asyncio, 'sleep', advance)
+    await s._watch(s.record['id'], s._generation)
+    assert not s.pending and store.data is None and a.barrier is None
+    assert a.events.count('restore') == 1 and a.events.count('apply_tariff') == 1
+    assert sum(sleeps) < 1  # No backoff before the first safety cleanup.
+
+
+@pytest.mark.asyncio
+async def test_explicit_stop_cancels_failed_restore_backoff(monkeypatch):
+    s, a, store, clock = setup()
+    await s.start(120)
+    await s._cancel_watch()
+    clock.now += 121
+    a.restore_ok = False
+    sleeping = asyncio.Event()
+    real_sleep = asyncio.sleep
+
+    async def backoff(seconds):
+        if seconds >= 30:
+            assert not s._lock.locked()
+            sleeping.set()
+            await asyncio.Event().wait()
+        else:
+            await real_sleep(0)
+
+    monkeypatch.setattr(m.asyncio, 'sleep', backoff)
+    s._watch_task = asyncio.create_task(s._watch(s.record['id'], s._generation))
+    try:
+        await asyncio.wait_for(sleeping.wait(), 1)
+        assert s.pending and store.data and a.barrier
+        assert a.events.count('restore') == 1
+        a.restore_ok = True
+        assert await asyncio.wait_for(s.stop(), 1)
+        assert store.data is None and a.barrier is None
+        assert a.events.count('restore') == 2
+        assert a.events.count('apply_tariff') == 1
+    finally:
+        await s._cancel_watch()
+
+
+@pytest.mark.asyncio
 async def test_persist_baseline_and_original_deadline_before_native_writes():
     s,a,store,clock=setup();original=deepcopy(a.current)
     result=await s.start(120)
