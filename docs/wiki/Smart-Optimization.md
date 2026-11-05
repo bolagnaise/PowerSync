@@ -7,6 +7,14 @@ forecast, household load forecast, battery limits, and configured reserve floors
 Solar forecasting via Solcast or Open-Meteo Solar Forecast should be configured
 for accurate schedules.
 
+## Historical charging in the optimizer plan
+
+The dashboard labels measured battery charging as **Solar charge** when recorded
+solar generation can cover the charging power and grid import is negligible
+(up to 300 W of measurement variation). Mixed grid/solar charging and missing
+source readings keep the general **Charge** label. Past activity comes from
+measurements, independently of the future optimizer plan.
+
 ## Enabling Monitoring Mode
 
 When Monitoring Mode is switched on, PowerSync first releases its active battery control and restores any backup reserve temporarily raised for an IDLE or EV preservation hold. The switch stays off if that cleanup cannot be confirmed, retaining the saved reserve for retry. Successful cleanup enables monitoring and blocks subsequent automatic battery commands; it does not confirm that an EV has stopped charging or restore exhausted provider credits.

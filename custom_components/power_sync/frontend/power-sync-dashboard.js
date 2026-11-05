@@ -526,8 +526,13 @@ function psHistory(hass, ids, start) {
       if (!Array.isArray(series) || !series.length) continue;
       const id = series[0].entity_id;
       out[id] = series
-        .map(row => [Date.parse(row.last_changed || row.lu * 1000 || row.last_updated), Number(row.state ?? row.s)])
-        .filter(([t, v]) => Number.isFinite(t) && Number.isFinite(v));
+        .map(row => {
+          const raw = row.state ?? row.s;
+          const value = raw !== null && raw !== undefined && raw !== '' ? Number(raw) : NaN;
+          return [Date.parse(row.last_changed || row.lu * 1000 || row.last_updated), value];
+        })
+        // Keep unavailable readings as gaps, including in source attribution.
+        .filter(([t]) => Number.isFinite(t));
     }
     return out;
   });
@@ -2231,7 +2236,7 @@ class PsPlanCard extends PsCardBase {
     const en = this.ents;
     if (Date.now() - this._histAt < PS_HISTORY_TTL_MS) return;
     this._histAt = Date.now();
-    psHistory(this._hass, [en.soc, en.battery, en.grid, en.importPrice, en.exportPrice], new Date(Date.now() - 12.5 * 3_600_000))
+    psHistory(this._hass, [en.soc, en.battery, en.grid, en.solar, en.importPrice, en.exportPrice], new Date(Date.now() - 12.5 * 3_600_000))
       .then(hist => { this._hist = hist; this._histAt = Date.now(); this._invalidate(); });
   }
 
@@ -2281,7 +2286,12 @@ class PsPlanCard extends PsCardBase {
           const bp = histVal(en.battery, h, kwScale(en.battery));
           const g = histVal(en.grid, h, kwScale(en.grid));
           if (!Number.isFinite(bp)) return '';
-          if (bp < -0.3) return 'charge';
+          if (bp < -0.3) {
+            const solar = histVal(en.solar, h, kwScale(en.solar));
+            // Measured flows have a 300 W deadband. Only identify solar
+            // when it can cover charging and grid import is negligible.
+            return Number.isFinite(g) && g <= 0.3 && Number.isFinite(solar) && solar > 0.3 && solar >= -bp - 0.3 ? 'solar' : 'charge';
+          }
           if (bp > 0.3) return Number.isFinite(g) && g < -0.3 ? 'export' : 'self';
           return 'hold';
         }

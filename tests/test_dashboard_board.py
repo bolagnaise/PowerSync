@@ -1454,3 +1454,54 @@ def test_classic_controls_keep_custom_charge_duration_and_finish_time_entry():
     )
     out = _run(script)
     assert out == {"duration": "77", "until": True, "editable": True}
+
+
+def test_plan_history_distinguishes_solar_and_keeps_unknown_sources_generic():
+    out = _run_board(r"""
+  const now = Date.now(), base = now - 2 * 3600000;
+  const id = name => `sensor.${name}`;
+  const cases = [
+    [-2000, 0, 3000], [-2000, -500, 3000], [-2000, 300, 1800],
+    [-2000, 301, 3000], [-2000, 1500, 3000], [-2000, 0, 0],
+    [-2000, 0, 1000], [-2000, NaN, 3000], [-2000, 0, NaN],
+    [NaN, 0, 3000], [2000, -1000, 3000], [2000, 0, 0], [0, 0, 3000],
+  ];
+  const results = {};
+  for (const unit of ['W', 'kW']) {
+    const card = new T.PsPlanCard();
+    card._config = { entities: { battery: id('battery'), grid: id('grid'), solar: id('solar') } };
+    card._hass = { states: Object.fromEntries(['battery', 'grid', 'solar'].map(name => [id(name), {attributes: {unit_of_measurement: unit}}])) };
+    card._hist = Object.fromEntries(['battery', 'grid', 'solar'].map((name, j) => [id(name), cases.map((c, i) => [base + i * 300000, c[j] / (unit === 'kW' ? 1000 : 1)])]));
+    const model = card._buildModel({schedule: {}});
+    const midnight = new Date(new Date().getFullYear(), new Date().getMonth(), new Date().getDate()).getTime();
+    results[unit] = cases.map((_, i) => model.act((base + i * 300000 - midnight) / 3600000));
+  }
+  console.log(JSON.stringify(results));
+""")
+    expected = ["solar", "solar", "solar", "charge", "charge", "charge",
+                "charge", "charge", "charge", "", "export", "self", "hold"]
+    assert out == {"W": expected, "kW": expected}
+
+
+def test_plan_requests_solar_history_and_preserves_unavailable_gaps():
+    out = _run_board(r"""
+  (async () => {
+    const card = new T.PsPlanCard();
+    card._config = {entities: {solar: 'sensor.solar', battery: 'sensor.battery', grid: 'sensor.grid'}};
+    let requested;
+    card._hass = {states: {}, callApi: async (_, path) => {
+      requested = path;
+      return [[
+        {entity_id: 'sensor.solar', last_changed: '2026-11-06T00:00:00Z', state: '3000'},
+        {last_changed: '2026-11-06T00:05:00Z', state: 'unavailable'},
+        {last_changed: '2026-11-06T00:10:00Z', state: null},
+      ]];
+    }};
+    card._invalidate = () => {};
+    card._loadHistory();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    console.log(JSON.stringify({requested, values: card._hist['sensor.solar'].map(p => p[1])}));
+  })();
+""")
+    assert "sensor.solar" in out["requested"]
+    assert out["values"] == [3000, None, None]
