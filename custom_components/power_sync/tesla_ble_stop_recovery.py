@@ -372,6 +372,7 @@ async def _run_inventory(hass, entry, runtime, bridges, refs, affected, config, 
                 manager._runtime(hass, entry) is runtime and manager._sidecar_ready(runtime)
                 and not runtime.get(manager._RECOVERY_STOPPING_KEY)
                 and runtime.get(ACTIVE_KEY, {}).get("token") == token
+                and not runtime.get(ACTIVE_KEY, {}).get("interrupted")
                 and _configuration(entry) == config
                 and all(b.current() for b in bridges.values())
                 and all(manager._owner_snapshot(hass, entry, vid) == owner for vid, owner in owners.items())
@@ -519,6 +520,8 @@ async def _resume_released(hass, entry, runtime, bridges, inventory, *, expected
         raise StopRecoveryRefused("completed_recovery_binding_changed")
     token = uuid4().hex
     previous_active = runtime.get(ACTIVE_KEY)
+    if isinstance(previous_active, dict) and previous_active.get("interrupted"):
+        raise StopRecoveryRefused("recovery_preempted_by_stop")
     runtime[ACTIVE_KEY] = {"token": token, "vehicles": tuple(generations)}
 
     def current():
@@ -528,6 +531,7 @@ async def _resume_released(hass, entry, runtime, bridges, inventory, *, expected
             return bool(manager._runtime(hass, entry) is runtime and manager._sidecar_ready(runtime)
                 and not runtime.get(manager._RECOVERY_STOPPING_KEY)
                 and runtime.get(ACTIVE_KEY, {}).get("token") == token
+                and not runtime.get(ACTIVE_KEY, {}).get("interrupted")
                 and not _live_refs(runtime) and incident.get("phase") == "released"
                 and incident.get("phase_token") == phase_token
                 and incident.get("generation") == generations

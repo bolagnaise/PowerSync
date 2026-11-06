@@ -191,7 +191,7 @@ async def test_replayed_or_incomplete_native_proof_retires_nothing(inventory, va
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("variant", ["owner", "config", "registry", "runtime", "generation", "phase_token", "new_liability"])
+@pytest.mark.parametrize("variant", ["owner", "config", "registry", "runtime", "generation", "phase_token", "new_liability", "stop"])
 async def test_scope_change_during_prepare_aborts_all_retirement(inventory, variant):
     c = inventory
     async def change(prefix,action):
@@ -202,6 +202,7 @@ async def test_scope_change_during_prepare_aborts_all_retirement(inventory, vari
         elif variant == "runtime": c.config_entries[prefix].runtime_data = types.SimpleNamespace(client=object())
         elif variant == "generation": c.runtime[recovery._SIDECAR_STATE_KEY]["generations"][c.aliases[prefix]] += 1
         elif variant == "phase_token": next(iter(c.runtime[recovery._SIDECAR_STATE_KEY]["incidents"].values()))["phase_token"] = "foreign"
+        elif variant == "stop": c.runtime[stop.ACTIVE_KEY]["interrupted"] = True
         else:
             ledger = c.runtime[recovery.RECOVERY_KEY]["vehicles"][c.aliases[prefix]]
             ledger["attempts"]["new"] = {**deepcopy(next(iter(ledger["attempts"].values()))),"attempt_id":"new"}

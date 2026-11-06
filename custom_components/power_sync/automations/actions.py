@@ -5480,6 +5480,7 @@ def _tesla_transport_authority(
     """Bind provider recovery to this request without extending its deadline."""
     from ..teslemetry_solar import ev_owner_snapshot
     from ..tesla_ev_recovery import current_vehicle_generation, recovery_control_allowed
+    from ..tesla_ble_stop_recovery import ACTIVE_KEY
     runtime = hass.data.get(DOMAIN, {}).get(entry.entry_id)
     vehicle = params.get("vehicle_vin") or params.get("vehicle_id")
     captured_generation = (
@@ -5500,6 +5501,14 @@ def _tesla_transport_authority(
     original_pairing = pairing()
     deadline = params.get("_boost_start_deadline")
     def current():
+        active_recovery = runtime.get(ACTIVE_KEY) if isinstance(runtime, dict) else None
+        if isinstance(active_recovery, dict):
+            # Whole-entry recovery covers legacy aliases as well as physical
+            # VINs. An already-created closure must respect it too, including
+            # stock recovery's intentional bypass of the ordinary phase gate.
+            if authority_operation != "stop":
+                return False
+            active_recovery["interrupted"] = True
         binding_ok = (
             not params.get("_quick_control_binding")
             or _tesla_quick_control_binding_current(hass, entry, params)
@@ -5542,8 +5551,13 @@ async def _tesla_transport_route(hass, entry, params, operation):
     from ..tesla_ble_stop_recovery import ACTIVE_KEY
     recovery_runtime = hass.data.get(DOMAIN, {}).get(entry.entry_id)
     active_recovery = recovery_runtime.get(ACTIVE_KEY) if isinstance(recovery_runtime, dict) else None
-    if isinstance(active_recovery, dict) and str(vehicle) in active_recovery.get("vehicles", ()):
+    if isinstance(active_recovery, dict):
         params["_tesla_transport_recovery_pending"] = True
+        if operation == "stop":
+            # Preserve the existing native Stop path. A Stop preempts the
+            # recovery transaction; it must never unlock using older samples.
+            active_recovery["interrupted"] = True
+            return {"kind": "ha"}
         return {"kind": "blocked", "reason": "ble_stop_recovery_active"}
     route = get_vehicle_route(hass, entry, vehicle)
     if route is None and operation in {"rate", "limit", "stop"}:

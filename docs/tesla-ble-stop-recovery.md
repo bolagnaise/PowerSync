@@ -27,6 +27,9 @@ Keep EV automations and other writers paused while installing and recovering.
 The vehicle must be available to BLE and already report stopped, complete,
 disconnected or no-power, with actual current and power both zero. Recovery
 reads vehicle state; it does not stop an actively charging vehicle for you.
+A PowerSync Stop request interrupts recovery and retains its existing native
+provider path where configured. The companion bridge remains protected until
+recovery completes; an interrupted run cannot unlock from earlier samples.
 
 1. Update PowerSync through HACS and restart HA.
 2. In **each affected bridge's existing YAML**, preserve its device name, VIN,
