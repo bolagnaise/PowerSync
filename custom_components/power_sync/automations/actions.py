@@ -5537,6 +5537,14 @@ async def _tesla_transport_route(hass, entry, params, operation):
     # its exact mutation-time anchor into the first Rate/Limit/Stop command so
     # route selection cannot fall back to BLE during that handoff window.
     vehicle = params.get("vehicle_vin") or params.get("vehicle_id")
+    # A producer-proof recovery owns a read-only bridge session. Do not let
+    # normal route discovery or automatic isolation interrupt that session.
+    from ..tesla_ble_stop_recovery import ACTIVE_KEY
+    recovery_runtime = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    active_recovery = recovery_runtime.get(ACTIVE_KEY) if isinstance(recovery_runtime, dict) else None
+    if isinstance(active_recovery, dict) and str(vehicle) in active_recovery.get("vehicles", ()):
+        params["_tesla_transport_recovery_pending"] = True
+        return {"kind": "blocked", "reason": "ble_stop_recovery_active"}
     route = get_vehicle_route(hass, entry, vehicle)
     if route is None and operation in {"rate", "limit", "stop"}:
         anchor = params.get("_tesla_command_entity_id")

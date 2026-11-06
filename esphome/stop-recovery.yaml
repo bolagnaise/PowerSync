@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Add AFTER the pinned PedroKTFC packages. Install only after reviewing the
+# operator inventory and rollback instructions in docs/tesla-ble-stop-recovery.md.
+substitutions:
+  BLE_library: "https://github.com/PedroKTFC/tesla-ble.git#969f05f9dfdd5bfb9f3da5ad6b9f5c2265be133b"
+text_sensor:
+  - platform: template
+    id: powersync_recovery_proof
+    name: "PowerSync Recovery Proof"
+    entity_category: diagnostic
+    update_interval: never
+
+text:
+  - platform: template
+    name: "PowerSync Recovery Request"
+    entity_category: config
+    mode: text
+    min_length: 0
+    max_length: 64
+    optimistic: true
+    restore_value: false
+    set_action:
+      - lambda: |-
+          id(tesla_ble_vehicle_id)->request_stop_recovery(x);
+
+tesla_ble_vehicle:
+  recovery_proof: powersync_recovery_proof
