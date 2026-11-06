@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import ast
 import math
+import json
+from unittest.mock import AsyncMock, Mock
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -101,16 +103,136 @@ def test_full_day_discharge_does_not_wrap_to_one_period(minute):
     assert now + timedelta(minutes=1440) <= expiry <= now + timedelta(minutes=1470)
 
 
-def test_tesla_config_flow_exposes_and_persists_both_rates():
+def _flow_namespace():
+    namespace = {}
+    # Literal constants let the source-extracted flow run without HA imports.
+    for node in ast.parse((ROOT / "const.py").read_text()).body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target = node.targets[0]
+            if isinstance(target, ast.Name):
+                try:
+                    namespace[target.id] = ast.literal_eval(node.value)
+                except (ValueError, TypeError):
+                    pass
+    validate, configured = _price_helpers()
+    namespace.update(
+        validate_force_discharge_prices=validate,
+        configured_force_discharge_prices=configured,
+    )
+    return namespace
+
+
+def _compile_flow(function, namespace):
+    module = ast.fix_missing_locations(ast.Module(body=[
+        ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0),
+        function,
+    ], type_ignores=[]))
+    exec(compile(module, str(ROOT / "config_flow.py"), "exec"), namespace)
+    return namespace[function.name]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rates", [{}, {BUY_KEY: 0.7, SELL_KEY: 30}])
+async def test_reconnecting_tesla_preserves_saved_force_prices(rates):
+    namespace = _flow_namespace()
+    namespace.update(
+        _detect_tesla_ev_integrations=lambda _: {"tesla_fleet": True, "teslemetry": True},
+        normalize_powerwall_gateway_host=lambda value: value,
+    )
+    entry = SimpleNamespace(data={**rates, "tesla_energy_site_id": "123"}, options={})
+    flow = SimpleNamespace(
+        config_entry=entry,
+        hass=SimpleNamespace(config_entries=SimpleNamespace(async_update_entry=Mock())),
+        _schedule_entry_reload=Mock(),
+        async_create_entry=lambda **kwargs: kwargs,
+    )
+    function = _compile_flow(_function(ROOT / "config_flow.py", "async_step_tesla_connection"), namespace)
+    await function(flow, {"tesla_api_provider": namespace["TESLA_PROVIDER_FLEET_API"]})
+    saved = flow.hass.config_entries.async_update_entry.call_args.kwargs["data"]
+    assert {key: saved[key] for key in rates} == rates
+    for key in {BUY_KEY, SELL_KEY} - rates.keys():
+        assert key not in saved
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("is_tesla,submitted,expected", [
+    (True, {BUY_KEY: 0.8, SELL_KEY: 35}, (0.8, 35.0)),
+    (True, {}, (0.7, 30.0)),
+    (False, {BUY_KEY: 0.8, SELL_KEY: 35}, (0.7, 30.0)),
+    (True, {BUY_KEY: 40, SELL_KEY: 35}, None),
+    (True, {BUY_KEY: float("nan"), SELL_KEY: 35}, None),
+])
+async def test_optimizer_validates_and_saves_force_prices(is_tesla, submitted, expected):
+    function = _function(ROOT / "config_flow.py", "_async_step_optimization")
+    submission = next(node for node in function.body if isinstance(node, ast.If) and ast.unparse(node.test) == "user_input is not None")
+    # Run the production validation and entry-data write, independent of the
+    # unrelated optimizer, AI and hardware-reserve settings in this large form.
+    nodes = [node for node in submission.body if (
+        isinstance(node, ast.If) and ast.unparse(node.test) == "is_tesla"
+        or isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id in {"new_data", "new_options"}
+            for target in node.targets
+        )
+    )]
+    function.body = nodes + [ast.Return(value=ast.Name(id="new_data", ctx=ast.Load()))]
+    namespace = _flow_namespace()
+    namespace["is_tesla"] = is_tesla
+    flow = SimpleNamespace(
+        config_entry=SimpleNamespace(data={BUY_KEY: 0.7, SELL_KEY: 30}, options={}),
+        _async_step_optimization=AsyncMock(return_value="invalid"),
+    )
+    result = await _compile_flow(function, namespace)(flow, submitted)
+    if expected is None:
+        assert result == "invalid"
+        assert flow._async_step_optimization.call_args.kwargs["errors"] == {
+            "base": "tesla_force_discharge_prices_invalid"
+        }
+    else:
+        assert (result[BUY_KEY], result[SELL_KEY]) == expected
+        flow._async_step_optimization.assert_not_called()
+    assert flow.config_entry.data == {BUY_KEY: 0.7, SELL_KEY: 30}
+
+
+@pytest.mark.parametrize("is_tesla", [True, False])
+def test_optimizer_renders_saved_prices_only_for_tesla(is_tesla):
+    function = _function(ROOT / "config_flow.py", "_async_step_optimization")
+    branch = next(node for node in function.body if isinstance(node, ast.If)
+                  and ast.unparse(node.test) == "is_tesla")
+    namespace = _flow_namespace()
+    namespace.update(
+        is_tesla=is_tesla,
+        self=SimpleNamespace(config_entry=SimpleNamespace(data={BUY_KEY: 0.7, SELL_KEY: 30})),
+        current_form_values={}, schema_fields={},
+        vol=SimpleNamespace(Required=lambda key, **kwargs: key),
+        NumberSelector=lambda config: config,
+        NumberSelectorConfig=lambda **kwargs: kwargs,
+        NumberSelectorMode=SimpleNamespace(BOX="box"),
+    )
+    exec(compile(ast.Module(body=[branch], type_ignores=[]), "<price-schema>", "exec"), namespace)
+    assert namespace["current_form_values"] == ({BUY_KEY: 0.7, SELL_KEY: 30} if is_tesla else {})
+    schema = namespace["schema_fields"]
+    assert set(schema) == ({BUY_KEY, SELL_KEY} if is_tesla else set())
+    if is_tesla:
+        assert schema[BUY_KEY]["min"] == 0
+        assert schema[SELL_KEY]["min"] == 0.01
+        assert schema[SELL_KEY]["max"] == 99
+
+
+def test_force_price_fields_live_in_optimizer_dispatch_group():
     source = (ROOT / "config_flow.py").read_text()
-    setup = ast.get_source_segment(source, _function(ROOT / "config_flow.py", "async_step_tesla_provider"))
-    options_methods = [
-        node for node in ast.walk(ast.parse(source))
-        if isinstance(node, ast.AsyncFunctionDef) and node.name == "async_step_tesla_connection"
-    ]
-    options = ast.get_source_segment(source, options_methods[0])
-    site = ast.get_source_segment(source, _function(ROOT / "config_flow.py", "async_step_site_selection"))
-    for key in ("CONF_TESLA_FORCE_DISCHARGE_BUY_PRICE", "CONF_TESLA_FORCE_DISCHARGE_SELL_PRICE"):
-        assert key in setup and key in options and key in site
-        assert f"new_data[{key}]" in options
-        assert f"self._site_data[{key}]" in site
+    for name in ("async_step_tesla_provider", "async_step_tesla_connection", "async_step_site_selection"):
+        method = ast.get_source_segment(source, _function(ROOT / "config_flow.py", name))
+        assert "CONF_TESLA_FORCE_DISCHARGE" not in method
+    optimizer = _function(ROOT / "config_flow.py", "_async_step_optimization")
+    sections = next(node.value for node in optimizer.body if isinstance(node, ast.Assign)
+                    and any(isinstance(t, ast.Name) and t.id == "section_fields" for t in node.targets))
+    namespace = _flow_namespace()
+    groups = eval(compile(ast.Expression(body=sections), "<sections>", "eval"), namespace)
+    assert {BUY_KEY, SELL_KEY} <= groups["dispatch_behaviour"]
+    for name in ("strings.json", "translations/en.json"):
+        translations = json.loads((ROOT / name).read_text())
+        for step in (translations["config"]["step"]["tesla_provider"], translations["options"]["step"]["tesla_connection"]):
+            assert not {BUY_KEY, SELL_KEY} & step["data"].keys()
+        dispatch = translations["options"]["step"]["optimization"]["sections"]["dispatch_behaviour"]
+        assert {BUY_KEY, SELL_KEY} <= dispatch["data"].keys()
+        assert {BUY_KEY, SELL_KEY} <= dispatch["data_description"].keys()

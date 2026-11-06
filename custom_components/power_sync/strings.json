@@ -858,18 +858,14 @@
       },
       "tesla_provider": {
         "title": "Tesla API connection",
-        "description": "{fleet_detected}\n\nChoose Tesla API providers and the temporary buy/sell rates used during Powerwall force discharge.",
+        "description": "{fleet_detected}\n\nChoose your Powerwall and vehicle API providers.",
         "data": {
           "tesla_api_provider": "Powerwall API provider",
-          "tesla_ev_api_provider": "Vehicle API provider",
-          "tesla_force_discharge_buy_price": "Force-discharge buy price ($/kWh)",
-          "tesla_force_discharge_sell_price": "Force-discharge sell price ($/kWh)"
+          "tesla_ev_api_provider": "Vehicle API provider"
         },
         "data_description": {
           "tesla_api_provider": "Controls how PowerSync reads and writes your Powerwall TOU schedule. PowerSync.cc is free and handles OAuth for you.",
-          "tesla_ev_api_provider": "Only needed if you want PowerSync to send commands to a Tesla vehicle (e.g. start/stop charging). Choose None if you only have a Powerwall or use BLE.",
-          "tesla_force_discharge_buy_price": "Temporary Tesla import price during force discharge. Defaults to $0.55/kWh; this is a control signal, not your retail tariff.",
-          "tesla_force_discharge_sell_price": "Temporary Tesla export price during force discharge. Defaults to $25.00/kWh and must exceed the buy price; this is a control signal, not your feed-in tariff."
+          "tesla_ev_api_provider": "Only needed if you want PowerSync to send commands to a Tesla vehicle (e.g. start/stop charging). Choose None if you only have a Powerwall or use BLE."
         },
         "submit": "Next"
       },
@@ -1633,21 +1629,17 @@
       },
       "tesla_connection": {
         "title": "Tesla API connection",
-        "description": "Update Tesla API providers and the temporary buy/sell rates PowerSync uploads during Powerwall force discharge. Rates apply to the next force-discharge session.",
+        "description": "Update your Tesla API providers and optional local Powerwall gateway connection.",
         "data": {
           "tesla_api_provider": "Powerwall API provider",
           "tesla_ev_api_provider": "Vehicle API provider",
           "powerwall_local_ip": "Powerwall gateway IP address",
-          "tesla_force_discharge_buy_price": "Force-discharge buy price ($/kWh)",
-          "tesla_force_discharge_sell_price": "Force-discharge sell price ($/kWh)",
           "update_teslemetry_token": "New API token (leave blank to keep current)"
         },
         "data_description": {
           "tesla_api_provider": "Controls how PowerSync reads and writes your Powerwall TOU schedule. PowerSync.cc is free and handles OAuth for you.",
           "tesla_ev_api_provider": "Only needed if you want PowerSync to send commands to a Tesla vehicle (e.g. start/stop charging). Choose None if you only have a Powerwall or use BLE.",
           "powerwall_local_ip": "Optional. Provides direct LAN access for live local polling and fast gateway writes — pairing handles authentication via RSA signing, no password required.",
-          "tesla_force_discharge_buy_price": "Temporary Tesla import price during force discharge. Defaults to $0.55/kWh; this is a control signal, not your retail tariff.",
-          "tesla_force_discharge_sell_price": "Temporary Tesla export price during force discharge. Defaults to $25.00/kWh and must exceed the buy price; this is a control signal, not your feed-in tariff.",
           "update_teslemetry_token": "Paste a new token to rotate it. Leave blank to keep your existing token."
         },
         "submit": "Save"
@@ -1926,14 +1918,18 @@
               "optimization_spread_import_enabled": "Spread import across window",
               "optimization_disable_idle": "Disable idle mode",
               "monitoring_mode": "Monitoring mode",
-              "neovolt_surplus_balancer_mode": "Independent stack surplus balancing"
+              "neovolt_surplus_balancer_mode": "Independent stack surplus balancing",
+              "tesla_force_discharge_buy_price": "Force-discharge buy price ($/kWh)",
+              "tesla_force_discharge_sell_price": "Force-discharge sell price ($/kWh)"
             },
             "data_description": {
               "optimization_spread_export_enabled": "When enabled on supported batteries, Smart Optimization spreads planned battery export across the full eligible export window instead of using maximum discharge power.",
               "optimization_spread_import_enabled": "When enabled on supported batteries, Smart Optimization spreads planned grid charging across each same-price import window instead of using maximum charge power.",
               "optimization_disable_idle": "Replace every Smart Optimization idle hold action with self-consumption for any electricity provider. This takes precedence over Charge By Time.",
               "monitoring_mode": "Block battery and inverter control commands while still updating prices, sensors, and plans for observation.",
-              "neovolt_surplus_balancer_mode": "Controls independent NeoVolt stack balancing. Auto balances multiple selected Neovolt integrations whenever PowerSync is running; the Smart Optimization switch does not control it."
+              "neovolt_surplus_balancer_mode": "Controls independent NeoVolt stack balancing. Auto balances multiple selected Neovolt integrations whenever PowerSync is running; the Smart Optimization switch does not control it.",
+              "tesla_force_discharge_buy_price": "Tesla Powerwall only. Temporary import price used to trigger force discharge, including optimiser and manual sessions. Defaults to $0.55/kWh. Applies to the next session; this is not your retail tariff or an optimiser decision threshold.",
+              "tesla_force_discharge_sell_price": "Tesla Powerwall only. Temporary export price used to trigger force discharge. Defaults to $25.00/kWh and must exceed the buy price. Applies to the next session; this is not your feed-in tariff or an optimiser decision threshold."
             }
           },
           "ai_explanations": {

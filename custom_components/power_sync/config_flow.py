@@ -117,8 +117,6 @@ from .const import (
     CONF_TESLA_API_PROVIDER,
     CONF_TESLA_FORCE_DISCHARGE_BUY_PRICE,
     CONF_TESLA_FORCE_DISCHARGE_SELL_PRICE,
-    DEFAULT_TESLA_FORCE_DISCHARGE_BUY_PRICE,
-    DEFAULT_TESLA_FORCE_DISCHARGE_SELL_PRICE,
     TESLA_PROVIDER_TESLEMETRY,
     TESLA_PROVIDER_FLEET_API,
     TESLA_PROVIDER_POWERSYNC,
@@ -6515,41 +6513,8 @@ class PowerSyncConfigFlow(AmberSetupMixin, config_entries.ConfigFlow, domain=DOM
                             mode=SelectSelectorMode.DROPDOWN,
                         )
                     ),
-                    vol.Required(
-                        CONF_TESLA_FORCE_DISCHARGE_BUY_PRICE,
-                        default=DEFAULT_TESLA_FORCE_DISCHARGE_BUY_PRICE,
-                    ): NumberSelector(NumberSelectorConfig(
-                        min=0, max=99, step=0.01,
-                        mode=NumberSelectorMode.BOX,
-                    )),
-                    vol.Required(
-                        CONF_TESLA_FORCE_DISCHARGE_SELL_PRICE,
-                        default=DEFAULT_TESLA_FORCE_DISCHARGE_SELL_PRICE,
-                    ): NumberSelector(NumberSelectorConfig(
-                        min=0.01, max=99, step=0.01,
-                        mode=NumberSelectorMode.BOX,
-                    )),
                 }
             )
-
-        if user_input is not None:
-            try:
-                self._tesla_force_discharge_prices = validate_force_discharge_prices(
-                    user_input.get(
-                        CONF_TESLA_FORCE_DISCHARGE_BUY_PRICE,
-                        DEFAULT_TESLA_FORCE_DISCHARGE_BUY_PRICE,
-                    ),
-                    user_input.get(
-                        CONF_TESLA_FORCE_DISCHARGE_SELL_PRICE,
-                        DEFAULT_TESLA_FORCE_DISCHARGE_SELL_PRICE,
-                    ),
-                )
-            except ValueError:
-                return self.async_show_form(
-                    step_id="tesla_provider",
-                    data_schema=_build_schema(self._tesla_fleet_available),
-                    errors={"base": "tesla_force_discharge_prices_invalid"},
-                )
 
         async def _handle_ev_provider_selection(
             user_input_local: dict[str, Any],
@@ -7988,11 +7953,6 @@ class PowerSyncConfigFlow(AmberSetupMixin, config_entries.ConfigFlow, domain=DOM
                         CONF_TESLA_ENERGY_SITE_ID
                     ],
                 }
-                discharge_prices = getattr(self, "_tesla_force_discharge_prices", None)
-                if discharge_prices is not None:
-                    self._site_data[CONF_TESLA_FORCE_DISCHARGE_BUY_PRICE] = discharge_prices[0]
-                    self._site_data[CONF_TESLA_FORCE_DISCHARGE_SELL_PRICE] = discharge_prices[1]
-
                 if gateway_ip:
                     self._site_data[CONF_POWERWALL_LOCAL_IP] = gateway_ip
 
@@ -10489,19 +10449,6 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            try:
-                discharge_buy, discharge_sell = validate_force_discharge_prices(
-                    user_input.get(
-                        CONF_TESLA_FORCE_DISCHARGE_BUY_PRICE,
-                        DEFAULT_TESLA_FORCE_DISCHARGE_BUY_PRICE,
-                    ),
-                    user_input.get(
-                        CONF_TESLA_FORCE_DISCHARGE_SELL_PRICE,
-                        DEFAULT_TESLA_FORCE_DISCHARGE_SELL_PRICE,
-                    ),
-                )
-            except ValueError:
-                errors["base"] = "tesla_force_discharge_prices_invalid"
             tesla_provider = user_input.get(
                 CONF_TESLA_API_PROVIDER, TESLA_PROVIDER_TESLEMETRY
             )
@@ -10539,8 +10486,6 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
                 new_data = dict(self.config_entry.data)
                 new_data[CONF_TESLA_API_PROVIDER] = tesla_provider
                 new_data[CONF_TESLA_EV_API_PROVIDER] = ev_choice
-                new_data[CONF_TESLA_FORCE_DISCHARGE_BUY_PRICE] = discharge_buy
-                new_data[CONF_TESLA_FORCE_DISCHARGE_SELL_PRICE] = discharge_sell
                 # Persist gateway IP changes; remove the key entirely when
                 # cleared so the diagnostic binary_sensor flips correctly
                 # rather than reading an empty string as "set".
@@ -10577,9 +10522,6 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
         )
         current_gateway_ip = self.config_entry.data.get(
             CONF_POWERWALL_LOCAL_IP, ""
-        )
-        current_discharge_buy, current_discharge_sell = (
-            configured_force_discharge_prices(self.config_entry.data)
         )
 
         tesla_providers = {
@@ -10620,20 +10562,6 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
                         CONF_POWERWALL_LOCAL_IP,
                         default=current_gateway_ip,
                     ): str,
-                    vol.Required(
-                        CONF_TESLA_FORCE_DISCHARGE_BUY_PRICE,
-                        default=current_discharge_buy,
-                    ): NumberSelector(NumberSelectorConfig(
-                        min=0, max=99, step=0.01,
-                        mode=NumberSelectorMode.BOX,
-                    )),
-                    vol.Required(
-                        CONF_TESLA_FORCE_DISCHARGE_SELL_PRICE,
-                        default=current_discharge_sell,
-                    ): NumberSelector(NumberSelectorConfig(
-                        min=0.01, max=99, step=0.01,
-                        mode=NumberSelectorMode.BOX,
-                    )),
                 }
             ),
             errors=errors,
@@ -12196,6 +12124,21 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
             == SUNGROW_CONNECTION_IHOMEMANAGER
         )
         if user_input is not None:
+            if is_tesla:
+                current_buy, current_sell = configured_force_discharge_prices(
+                    self.config_entry.data
+                )
+                try:
+                    discharge_buy, discharge_sell = validate_force_discharge_prices(
+                        user_input.get(CONF_TESLA_FORCE_DISCHARGE_BUY_PRICE, current_buy),
+                        user_input.get(CONF_TESLA_FORCE_DISCHARGE_SELL_PRICE, current_sell),
+                    )
+                except ValueError:
+                    return await self._async_step_optimization(
+                        None,
+                        form_step_id=form_step_id,
+                        errors={"base": "tesla_force_discharge_prices_invalid"},
+                    )
             optimization_provider = user_input.get(
                 CONF_OPTIMIZATION_PROVIDER, OPT_PROVIDER_NATIVE
             )
@@ -12231,6 +12174,11 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
                 optimization_enabled = True
             new_data = dict(self.config_entry.data)
             new_options = dict(self.config_entry.options)
+            if is_tesla:
+                # Force-tariff creation reads entry.data for both manual and
+                # optimiser dispatch, including when native mode is selected.
+                new_data[CONF_TESLA_FORCE_DISCHARGE_BUY_PRICE] = discharge_buy
+                new_data[CONF_TESLA_FORCE_DISCHARGE_SELL_PRICE] = discharge_sell
             for ai_key in (
                 CONF_OPTIMIZATION_AI_SUMMARY_PROVIDER,
                 CONF_OPTIMIZATION_AI_SUMMARY_API_KEY,
@@ -13337,6 +13285,30 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
                 default=False,
             ): BooleanSelector(),
         }
+        if is_tesla:
+            current_discharge_buy, current_discharge_sell = (
+                configured_force_discharge_prices(self.config_entry.data)
+            )
+            current_form_values.update({
+                CONF_TESLA_FORCE_DISCHARGE_BUY_PRICE: current_discharge_buy,
+                CONF_TESLA_FORCE_DISCHARGE_SELL_PRICE: current_discharge_sell,
+            })
+            schema_fields.update({
+                vol.Required(
+                    CONF_TESLA_FORCE_DISCHARGE_BUY_PRICE,
+                    default=current_discharge_buy,
+                ): NumberSelector(NumberSelectorConfig(
+                    min=0, max=99, step=0.01,
+                    mode=NumberSelectorMode.BOX,
+                )),
+                vol.Required(
+                    CONF_TESLA_FORCE_DISCHARGE_SELL_PRICE,
+                    default=current_discharge_sell,
+                ): NumberSelector(NumberSelectorConfig(
+                    min=0.01, max=99, step=0.01,
+                    mode=NumberSelectorMode.BOX,
+                )),
+            })
         if battery_system == BATTERY_SYSTEM_NEOVOLT:
             schema_fields[
                 vol.Required(
@@ -13567,6 +13539,8 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
                 CONF_OPTIMIZATION_MIN_EXPORT_PRICE,
             },
             "dispatch_behaviour": {
+                CONF_TESLA_FORCE_DISCHARGE_BUY_PRICE,
+                CONF_TESLA_FORCE_DISCHARGE_SELL_PRICE,
                 CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED,
                 CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED,
                 CONF_OPTIMIZATION_DISABLE_IDLE,
