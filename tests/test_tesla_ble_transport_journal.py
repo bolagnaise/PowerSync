@@ -788,3 +788,41 @@ def test_ble_mutation_phase_never_downgrades_submitted_to_prewrite():
         assert phase["phase"] == "submitted"
     finally:
         actions._tesla_ble_mutation_phase.reset(token)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["start", "rate", "limit", "stop"])
+async def test_stop_recovery_read_session_blocks_normal_route_and_isolation(monkeypatch, operation):
+    import importlib
+    recovery = importlib.import_module("power_sync.tesla_ev_recovery")
+    from power_sync.tesla_ble_stop_recovery import ACTIVE_KEY
+    hass, entry = _ble_hass(), _Entry()
+    hass.data.setdefault("power_sync", {})[entry.entry_id] = {ACTIVE_KEY: {"vehicles": (VIN,)}}
+    def unexpected(*args, **kwargs):
+        raise AssertionError("normal discovery/isolation interrupted read-only recovery")
+    monkeypatch.setattr(recovery,"get_vehicle_route",unexpected)
+    monkeypatch.setattr(recovery,"async_isolate_ble",unexpected)
+    params = {"vehicle_vin": VIN}
+    assert (await actions._tesla_transport_route(hass,entry,params,operation))["kind"] == ("ha" if operation == "stop" else "blocked")
+    assert params["_tesla_transport_recovery_pending"] is True
+    assert bool(hass.data["power_sync"][entry.entry_id][ACTIVE_KEY].get("interrupted")) == (operation == "stop")
+
+
+@pytest.mark.asyncio
+async def test_captured_authority_cannot_bypass_whole_entry_recovery(monkeypatch):
+    import importlib
+    from power_sync.tesla_ble_stop_recovery import ACTIVE_KEY
+    recovery = importlib.import_module("power_sync.tesla_ev_recovery")
+    hass, entry = _ble_hass(), _Entry()
+    runtime = hass.data.setdefault("power_sync", {}).setdefault(entry.entry_id, {})
+    monkeypatch.setattr(recovery,"current_vehicle_generation",lambda *_: 0)
+    monkeypatch.setattr(recovery,"recovery_control_allowed",lambda *_: True)
+    authority = actions._tesla_transport_authority(hass,entry,{"vehicle_vin": VIN},ignore_recovery_gate=True)
+    assert authority()
+    runtime[ACTIVE_KEY] = {"token":"new", "vehicles":("ble_legacy_alias",)}
+    # The VIN/alias difference cannot evade a complete-entry recovery hold.
+    assert not authority()
+    assert (await actions._tesla_transport_route(hass,entry,{"vehicle_vin":VIN},"start"))["kind"] == "blocked"
+    cleanup = actions._tesla_transport_authority(hass,entry,{"vehicle_vin":VIN},cleanup=True)
+    assert cleanup()
+    assert runtime[ACTIVE_KEY]["interrupted"] is True

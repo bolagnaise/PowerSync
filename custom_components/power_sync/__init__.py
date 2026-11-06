@@ -46024,6 +46024,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             "recovery": recovery_sidecar_snapshot(hass, entry),
         }
 
+    async def handle_recover_ble_stop_history(call: ServiceCall) -> dict[str, Any]:
+        """Recover an explicitly declared complete inventory of held BLE Stops."""
+        from .tesla_ble_stop_recovery import async_recover_ble_stops, StopRecoveryRefused
+
+        try:
+            return await async_recover_ble_stops(
+                hass, entry, call.data.get("inventory"),
+                confirm_complete_history=call.data.get("confirm_complete_history", False),
+            )
+        except StopRecoveryRefused as error:
+            return {"success": False, "error": str(error)}
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _LOGGER.exception("BLE Stop recovery remains held")
+            return {"success": False, "error": "recovery_failed"}
+
     from .licensing.entry_routing import register_handlers, routed_handler
     if amber_smartshift_coordinator:
         from .amber_smartshift.controls import handlers as amber_handlers
@@ -46068,6 +46085,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         'resume_powerwall_settings': handle_resume_powerwall_settings,
         'recover_max_backup': handle_recover_max_backup,
         'recover_ev_transport': handle_recover_ev_transport,
+        'recover_ble_stop_history': handle_recover_ble_stop_history,
         'set_operation_mode': handle_set_operation_mode,
         'set_grid_charging': handle_set_grid_charging,
         'set_grid_export': handle_set_grid_export,
@@ -46085,6 +46103,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.services.async_register(
         DOMAIN, "recover_ev_transport",
         routed_handler(hass, entry.entry_id, "recover_ev_transport", handle_recover_ev_transport),
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+    hass.services.async_register(
+        DOMAIN, "recover_ble_stop_history",
+        routed_handler(hass, entry.entry_id, "recover_ble_stop_history", handle_recover_ble_stop_history),
         supports_response=SupportsResponse.OPTIONAL,
     )
     hass.services.async_register(
