@@ -481,6 +481,7 @@ class EnergyAccumulator:
         self._load_accounting_partial_mtd = False
         self._last_month: Any = None
         self._store: Store | None = None
+        self._save_pending = False
         if hass and store_key:
             self._store = Store(
                 hass,
@@ -731,14 +732,24 @@ class EnergyAccumulator:
         """
         if not self._store:
             return
+        self._save_pending = False
         await self._store.async_save(self._data_to_save())
 
     def _schedule_save(self) -> None:
-        """Schedule a coalesced write of energy data to persistent storage."""
-        if not self._store:
+        """Checkpoint live totals without postponing an already pending write."""
+        if not self._store or getattr(self, "_save_pending", False):
             return
+        # Store.async_delay_save debounces: calling it on every telemetry poll
+        # postpones the write forever while polls arrive faster than the delay.
+        # Keep one deadline and serialize the latest totals when it fires.
+        self._save_pending = True
+
+        def snapshot() -> dict:
+            self._save_pending = False
+            return self._data_to_save()
+
         self._store.async_delay_save(
-            self._data_to_save,
+            snapshot,
             ENERGY_ACC_SAVE_DELAY,
         )
 

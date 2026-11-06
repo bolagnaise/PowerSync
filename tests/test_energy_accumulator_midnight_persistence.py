@@ -49,6 +49,38 @@ class _Logger:
         return lambda *args, **kwargs: None
 
 
+class _DebouncedStore(_Store):
+    """Model HA Store's public delayed-save contract with a virtual clock.
+
+    Every async_delay_save call moves the deadline. A hard restart retains
+    only data that actually reached disk, unlike the simple callback fake.
+    """
+
+    def __init__(self, clock, data=None):
+        super().__init__(data)
+        self.clock = clock
+        self.deadline = None
+        self.writes = []
+
+    def async_delay_save(self, callback, delay):
+        super().async_delay_save(callback, delay)
+        self.deadline = self.clock.current + timedelta(seconds=delay)
+
+    def run_due(self):
+        if self.deadline is not None and self.clock.current >= self.deadline:
+            callback = self.delayed_callback
+            self.deadline = None
+            self.delayed_callback = None
+            self.data = callback()
+            self.writes.append(self.data)
+
+    async def async_save(self, data):
+        self.deadline = None
+        self.delayed_callback = None
+        await super().async_save(data)
+        self.writes.append(data)
+
+
 def _price_coverage_schema() -> int:
     """Read the shipped coverage-schema marker instead of pinning a copy."""
     tree = ast.parse(COORDINATOR_PATH.read_text())
@@ -119,6 +151,56 @@ def test_delayed_save_keeps_yesterday_date_after_midnight():
     assert persisted["date"] == "2026-06-30"
     assert persisted["month"] == "2026-06"
     assert persisted["solar_kwh"] > 0
+
+
+@pytest.mark.parametrize("grid_kw,buy,sell", [(-12.0, 0.30, 0.25), (12.0, -0.25, 0.05)])
+def test_continuous_amber_cost_updates_checkpoint_before_hard_restart(grid_kw, buy, sell):
+    """Regular telemetry must not defer every write until graceful shutdown."""
+    clock = _Clock(datetime(2026, 11, 6, 18, 0))
+    store = _DebouncedStore(clock)
+    accumulator = _new_accumulator(clock, store)
+    accumulator.update(0.0, grid_kw, 0.0, 1.0, buy, sell)
+
+    # Poll for 20 minutes without pausing. Run due timers between polls, as
+    # HA's event loop does; neither unload nor final-write is invoked.
+    for _ in range(40):
+        clock.current += timedelta(seconds=30)
+        store.run_due()
+        accumulator.update(0.0, grid_kw, 0.0, 1.0, buy, sell)
+
+    assert len(store.writes) >= 3
+    saved = store.data
+    live = accumulator.as_dict()
+    restored = _new_accumulator(clock, _Store(saved))
+    asyncio.run(restored.async_restore())
+    recovered = restored.as_dict()
+    # At most one five-minute checkpoint window may be missing. Both export
+    # income and negative import prices can make the day's net cost negative.
+    for key in ("import_cost_today", "export_earnings_today", "mtd_import_cost", "mtd_export_earnings"):
+        assert recovered[key] == saved[key]
+        assert abs(live[key] - recovered[key]) <= 0.25 + 1e-4
+    assert saved["date"] == "2026-11-06"
+    assert saved["month"] == "2026-11"
+    # The first new sample must preserve recovered daily and monthly costs.
+    restored.update(0.0, grid_kw, 0.0, 1.0, buy, sell)
+    assert restored.as_dict() == recovered
+
+
+def test_explicit_flush_allows_next_periodic_checkpoint():
+    clock = _Clock(datetime(2026, 11, 6, 18, 0))
+    store = _DebouncedStore(clock)
+    accumulator = _new_accumulator(clock, store)
+    accumulator.update(0.0, -12.0, 0.0, 1.0, 0.30, 0.25)
+    clock.current += timedelta(seconds=30)
+    accumulator.update(0.0, -12.0, 0.0, 1.0, 0.30, 0.25)
+    asyncio.run(accumulator.async_flush())
+    flushed_earnings = store.data["export_earnings_today"]
+    for _ in range(12):
+        clock.current += timedelta(seconds=30)
+        store.run_due()
+        accumulator.update(0.0, -12.0, 0.0, 1.0, 0.30, 0.25)
+    assert len(store.writes) == 2
+    assert store.data["export_earnings_today"] > flushed_earnings
 
 
 def test_flush_then_restore_drops_stale_day_before_first_update():
