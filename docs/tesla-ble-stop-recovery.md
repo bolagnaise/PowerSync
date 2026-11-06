@@ -133,7 +133,9 @@ held. Keep the returned reason and the recovery records for support.
 
 If another uncertain Stop was recorded during an interrupted attempt, repeating
 the same complete inventory includes that additional Stop after checking its
-original bridge and vehicle binding. PowerSync preserves the earlier scope and
+original bridge and vehicle binding. This also covers an original quarantine
+preserved under a history key when a later Stop reused its previous key.
+PowerSync preserves the earlier scope and
 requires fresh proof from every bridge before retiring any record. Missing old
 records, changed bindings and non-Stop commands still require support review.
 

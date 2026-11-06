@@ -266,6 +266,82 @@ async def test_new_unknown_stop_during_recovery_can_retry_complete_inventory(inv
     assert new_record["recovery_retired"]["incident_id"] == incident_id
 
 
+async def _interrupt_with_rekeyed_quarantine(c):
+    prefix = "bridge_a"
+    route = {"kind": "ble", "prefix": prefix,
+             "entity_id": f"switch.{prefix}_charger"}
+    original = await recovery.async_begin_attempt(
+        c.hass, c.entry, c.aliases[prefix], route, "stop", route["entity_id"])
+    assert await recovery.async_finish_attempt(original, "sent_unknown")
+    assert not await recovery.async_isolate_ble(original, authorize=True)
+    added, incident_id, original_refs = await _interrupt_with_added_stop(c)
+    # Normal containment reuses ble:<prefix>; the durable merge preserves
+    # the original quarantine at ble:<prefix>@<original attempt>.
+    assert not await recovery.async_isolate_ble(added, authorize=True)
+    current = stop._live_refs(c.runtime)
+    old_hazard = next(ref for ref in original_refs
+                      if ref.get("hazard_id") == f"ble:{prefix}")
+    moved = [ref for ref in current if ref.get("hazard_id")
+             and ref.get("attempt_id") == original.attempt_id]
+    assert len(moved) == 1
+    assert moved[0]["hazard_id"] != old_hazard["hazard_id"]
+    assert {k: v for k, v in moved[0].items() if k != "hazard_id"} == {
+        k: v for k, v in old_hazard.items() if k != "hazard_id"}
+    return incident_id, original_refs, current, moved[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reload", [False, True])
+@pytest.mark.parametrize("history_suffix", ["", "#2"])
+async def test_retry_recovers_quarantine_preserved_under_history_key(inventory, reload, history_suffix):
+    c = inventory
+    incident_id, original_refs, current, moved = await _interrupt_with_rekeyed_quarantine(c)
+    if history_suffix:
+        c.runtime[recovery.RECOVERY_KEY] = deepcopy(stop._retained_root(c.runtime))
+        for root in (c.runtime[recovery.RECOVERY_KEY], c.runtime[recovery._SIDECAR_STATE_KEY]["recovery"]):
+            hazards = root["vehicles"][moved["vehicle_id"]]["hazards"]
+            hazards[moved["hazard_id"] + history_suffix] = hazards.pop(moved["hazard_id"])
+    if reload:
+        c.runtime.pop(recovery.RECOVERY_KEY)
+        c.runtime.pop("_tesla_ev_recovery_sidecar_loaded")
+        assert await recovery.async_load_recovery_state(c.hass, c.entry)
+    result = await recover(c)
+    assert result == {"success": True, "incident_id": incident_id}
+    saved = c.store.value["incidents"][incident_id]
+    assert saved["scope_refreshes"][0]["previous_liability_refs"] == original_refs
+    assert len(saved["liability_refs"]) == len(current)
+    assert not stop._live_refs(c.runtime)
+    assert all(receipt["m"] == "r" for receipt in c.receipts.values())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("variant", ["missing", "binding", "attempt", "ambiguous", "arbitrary_key"])
+async def test_rekeyed_quarantine_requires_unique_exact_original_evidence(inventory, variant):
+    c = inventory
+    incident_id, _, _, moved = await _interrupt_with_rekeyed_quarantine(c)
+    c.runtime[recovery.RECOVERY_KEY] = deepcopy(stop._retained_root(c.runtime))
+    for root in (c.runtime[recovery.RECOVERY_KEY], c.runtime[recovery._SIDECAR_STATE_KEY]["recovery"]):
+        hazards = root["vehicles"][moved["vehicle_id"]]["hazards"]
+        record = hazards[moved["hazard_id"]]
+        if variant == "missing":
+            hazards.pop(moved["hazard_id"])
+        elif variant == "binding":
+            record["binding"]["entities"]["charger"]["unique_id"] = "replacement"
+        elif variant == "attempt":
+            record["attempt_id"] = "missing-old-stop"
+        elif variant == "arbitrary_key":
+            hazards["unproven-rename"] = hazards.pop(moved["hazard_id"])
+        else:
+            hazards[moved["hazard_id"] + "#2"] = deepcopy(record)
+    before = deepcopy(c.runtime[recovery._SIDECAR_STATE_KEY]["incidents"][incident_id])
+    calls_before = len(c.calls)
+    with pytest.raises(stop.StopRecoveryRefused):
+        await recover(c)
+    assert len(c.calls) == calls_before
+    assert c.runtime[recovery._SIDECAR_STATE_KEY]["incidents"][incident_id] == before
+    assert stop._live_refs(c.runtime)
+
+
 @pytest.mark.asyncio
 async def test_scope_refresh_save_failure_preserves_old_scope_and_can_retry(inventory):
     c = inventory

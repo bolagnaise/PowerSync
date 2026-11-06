@@ -393,10 +393,29 @@ async def _refresh_held_scope(hass, entry, runtime, incident_id, inventory, brid
         def binding(ref):
             return {key: value for key, value in ref.items() if key not in {"outcome", "state"}}
 
+        def retained(ref):
+            if not isinstance(ref, Mapping):
+                return False
+            exact = current.get(identity(ref))
+            if exact is not None:
+                return binding(ref) == binding(exact)
+            # Containment reuses ble:<prefix>. The durable union moves its
+            # previous quarantine to a history key. Require the exact original
+            # attempt and complete binding, never adopt the new stable-key row.
+            if (not isinstance(ref.get("hazard_id"), str) or not ref["hazard_id"]
+                    or not isinstance(ref.get("attempt_id"), str) or not ref["attempt_id"]):
+                return False
+            historical = {key: value for key, value in binding(ref).items() if key != "hazard_id"}
+            history_key = re.escape(f"{ref['hazard_id']}@{ref['attempt_id']}") + r"(?:#(?:[2-9]|[1-9][0-9]+))?"
+            matches = [candidate for candidate in refs
+                       if isinstance(candidate.get("hazard_id"), str)
+                       and re.fullmatch(history_key, candidate["hazard_id"])
+                       and {key: value for key, value in binding(candidate).items()
+                            if key != "hazard_id"} == historical]
+            return len(matches) == 1
+
         current = {identity(ref): ref for ref in refs}
-        if (len(current) != len(refs) or any(not isinstance(ref, Mapping)
-                or identity(ref) not in current or binding(ref) != binding(current[identity(ref)])
-                for ref in previous)):
+        if len(current) != len(refs) or any(not retained(ref) for ref in previous):
             # Do not erase a missing old liability or adopt a rebound hazard.
             raise StopRecoveryRefused("retained_recovery_scope_changed")
         liability = state["liabilities"].get(incident_id)
