@@ -235,6 +235,16 @@ class NativeMaxChargeSession:
             self.record["handoff_phase"] = "tariff"
         elif kind == "local_confirmed":
             self.record.pop("local_acceptance_until", None)
+        elif kind == "normal_tariff_retry":
+            if (self.record.get("phase") != "restoring"
+                    or self.record.get("tariff_intent") != "baseline"
+                    or not isinstance(value, dict) or value.get("code") != "POWER_SYNC:AMBER"
+                    or self.record.get("normal_tariff", {}).get("code") != "POWER_SYNC:AMBER"):
+                raise NativeMaxChargeError("Native Max normal tariff retry intent is invalid")
+            # Persist the fresh target without a gap in the uncertain normal
+            # intent. A crash before POST can retry from normal Amber or the
+            # exact owned force readback; it never replays the old rates.
+            self.record["normal_tariff"] = deepcopy(value)
         elif kind == "normal_tariff":
             if not isinstance(value, dict) or not value or self.record.get("tariff_intent"):
                 raise NativeMaxChargeError("Native Max normal tariff replacement is invalid")
