@@ -209,6 +209,8 @@ async def test_scope_change_during_prepare_aborts_all_retirement(inventory, vari
     with pytest.raises(stop.StopRecoveryRefused): await recover(c)
     assert not any(x[1] == "commit" for x in c.calls)
     assert stop._live_refs(c.runtime)
+    if variant == "phase_token":
+        assert next(iter(c.runtime[recovery._SIDECAR_STATE_KEY]["incidents"].values()))["phase_token"] == "foreign"
 
 
 @pytest.mark.asyncio
@@ -303,3 +305,20 @@ async def test_cancellation_after_prepare_preserves_exact_scope_and_contains(inv
     assert all(i["phase"] == "held" for i in c.store.value["incidents"].values())
     assert c.calls[1][1] == "hold"
     assert stop.ACTIVE_KEY not in c.runtime
+
+
+@pytest.mark.asyncio
+async def test_old_ha_receipt_time_does_not_renew_native_proof(inventory, monkeypatch):
+    c = inventory
+    monkeypatch.setattr(stop,"_fresh_state_at",lambda _: 1.0)
+    with pytest.raises(stop.StopRecoveryRefused,match="proof_unavailable"): await recover(c)
+    assert not any(x[1] == "commit" for x in c.calls)
+
+
+@pytest.mark.asyncio
+async def test_shared_producer_liability_in_another_entry_refuses(inventory):
+    c = inventory
+    c.hass.data["power_sync"]["foreign-entry"] = {
+        recovery.RECOVERY_KEY: deepcopy(c.runtime[recovery.RECOVERY_KEY])}
+    with pytest.raises(stop.StopRecoveryRefused,match="another_entry"): await recover(c)
+    assert c.calls == []

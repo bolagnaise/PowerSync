@@ -482,7 +482,12 @@ async def _run_inventory(hass, entry, runtime, bridges, refs, affected, config, 
                     await asyncio.shield(bridge.contain())
                 except BaseException:
                     pass # durable incident remains held even if containment fails
-            await manager._mark_recovery_failure(hass, entry, runtime, incident_id, "ble_stop_inventory_incomplete")
+            incident = runtime.get(manager._SIDECAR_STATE_KEY, {}).get("incidents", {}).get(incident_id, {})
+            if (manager._runtime(hass, entry) is runtime
+                    and incident.get("phase_token") == token
+                    and incident.get("generation") == generations
+                    and all(manager.current_vehicle_generation(hass, entry, vid) == gen for vid, gen in generations.items())):
+                await manager._mark_recovery_failure(hass, entry, runtime, incident_id, "ble_stop_inventory_incomplete")
         if runtime.get(ACTIVE_KEY, {}).get("token") == token:
             runtime.pop(ACTIVE_KEY, None)
 
