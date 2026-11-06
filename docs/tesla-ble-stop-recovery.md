@@ -31,6 +31,13 @@ A PowerSync Stop request interrupts recovery and retains its existing native
 provider path where configured. The companion bridge remains protected until
 recovery completes; an interrupted run cannot unlock from earlier samples.
 
+The v2.12.1647 companion fixes recovery queries being deferred while a vehicle
+is asleep. An explicit recovery can use the existing authenticated wake path
+to obtain fresh readings; ordinary background polling still lets sleeping cars
+sleep. Existing v2.12.1641 companion installations must update both PowerSync
+references below and rebuild each original bridge for this fix. Updating only
+the HA integration does not change bridge firmware or release a hold.
+
 1. Update PowerSync through HACS and restart HA.
 2. In **each affected bridge's existing YAML**, preserve its device name, VIN,
    BLE address, credentials, board settings and keys. Pin the four PedroKTFC
@@ -50,7 +57,7 @@ Merge these substitutions with your existing ones:
 
 ```yaml
 substitutions:
-  tesla_ble_component: github://bolagnaise/PowerSync@v2.12.1641
+  tesla_ble_component: github://bolagnaise/PowerSync@v2.12.1647
   BLE_library: https://github.com/PedroKTFC/tesla-ble.git#969f05f9dfdd5bfb9f3da5ad6b9f5c2265be133b
 
 packages:
@@ -64,7 +71,7 @@ packages:
       - packages/client.yml
   powersync_stop_recovery:
     url: https://github.com/bolagnaise/PowerSync/
-    ref: v2.12.1641
+    ref: v2.12.1647
     files:
       - esphome/stop-recovery.yaml
 ```

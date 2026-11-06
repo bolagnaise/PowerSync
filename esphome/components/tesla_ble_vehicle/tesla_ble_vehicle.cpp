@@ -121,7 +121,12 @@ namespace esphome
          * If the car is asleep and the command is an Infotainment data request (identified by a "get" in the execute_name
          * field), then ignore the request as we don't want to risk waking the car.
          */
-        if (binary_sensors_[static_cast<size_t>(BinarySensorId::IsAsleep)]->state && (current_command.execute_name.find("get") == 0))
+        // Explicit recovery needs new vehicle proof. Let its exact read reach
+        // the existing auth/wake path; ordinary sleeping polls still defer.
+        if (binary_sensors_[static_cast<size_t>(BinarySensorId::IsAsleep)]->state
+            && (current_command.execute_name.find("get") == 0)
+            && !(recovery_proof_ && stop_recovery_.reading()
+                 && current_command.action == BLE_CarServer_VehicleAction::GET_CHARGE_STATE))
         {
           ESP_LOGI(TAG, "[%s] Car is asleep, don't wake for a 'get' command", current_command.execute_name.c_str());
           pop_command_and_tidy_up ();
