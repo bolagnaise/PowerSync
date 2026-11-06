@@ -273,7 +273,8 @@ async def test_durable_only_stop_is_retired_without_resurrection(inventory):
 
 
 @pytest.mark.asyncio
-async def test_recovery_waits_for_real_submission_to_drain(inventory):
+@pytest.mark.parametrize("physical_vin", [False, True])
+async def test_recovery_waits_for_real_submission_to_drain(inventory, physical_vin):
     import asyncio
     c = inventory
     started, finish = asyncio.Event(), asyncio.Event()
@@ -281,7 +282,7 @@ async def test_recovery_waits_for_real_submission_to_drain(inventory):
         started.set()
         await finish.wait()
     submission = asyncio.create_task(recovery.async_track_submission(c.hass,c.entry,submit,0,
-        vehicle_id=c.aliases["bridge_a"],operation="stop"))
+        vehicle_id=VIN_A if physical_vin else c.aliases["bridge_a"],operation="stop"))
     await started.wait()
     task = asyncio.create_task(recover(c))
     for _ in range(50):

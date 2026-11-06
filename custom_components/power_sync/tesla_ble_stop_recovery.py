@@ -431,7 +431,9 @@ async def _run_inventory(hass, entry, runtime, bridges, refs, affected, config, 
     succeeded = False
     try:
         await phase("quiescing")
-        if not current() or not await manager.async_drain_submissions(hass, entry, vehicle_ids=tuple(affected.values())) or not current():
+        # This is a complete-entry inventory. Drain every actual submission,
+        # including metadata keyed by a physical VIN rather than a legacy alias.
+        if not current() or not await manager.async_drain_submissions(hass, entry) or not current():
             raise StopRecoveryRefused("submission_drain_or_scope_failed")
         await phase("reset_pending")
         for bridge in bridges.values():
