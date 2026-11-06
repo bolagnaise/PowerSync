@@ -2287,6 +2287,7 @@ def _get_ev_vehicles_status(hass, entry, *, include_control_evidence=False) -> l
         coalesce_vehicle_observations,
     )
     from .ev_load import (
+        EV_STALE_CHARGING_CLAIM_MAX_AGE,
         EV_TELEMETRY_LIVE_MAX_AGE,
         is_current_ev_power_observation,
         is_ev_power_contradicted_by_state,
@@ -2579,6 +2580,7 @@ def _get_ev_vehicles_status(hass, entry, *, include_control_evidence=False) -> l
             vehicle_connected_observed_at = connected_observed_at
 
         power_available_override = None
+        stale_charging_claim = False
         if native_connectivity is not None and native_connectivity[0] == "asleep":
             # A sleeping car cannot be charging. Its retained charging/power
             # sensors keep their last awake values (and a reload re-stamps
@@ -2615,6 +2617,21 @@ def _get_ev_vehicles_status(hass, entry, *, include_control_evidence=False) -> l
                 )
                 else "stale"
             )
+            if (is_charging and latest_report_at is not None
+                    and not is_current_ev_power_observation(
+                        latest_report_at, max_age=EV_STALE_CHARGING_CLAIM_MAX_AGE
+                    )):
+                # "Online" can itself be a frozen restored value: the whole
+                # device stops reporting when HA cannot reach Tesla. A charging
+                # car is re-reported every poll, so a long silence leaves the
+                # session unknown -- never measured charging, never a stop.
+                is_charging = False
+                charging_state_known = False
+                ev_power_kw = 0.0
+                power_available_override = False
+                vehicle_observed_at = None
+                charging_observed_at = None
+                stale_charging_claim = True
         if (power_available_override is not None
                 and charging_state_evidence is not None
                 and charging_state_evidence.get("charging") is True):
@@ -2661,6 +2678,10 @@ def _get_ev_vehicles_status(hass, entry, *, include_control_evidence=False) -> l
             vehicle_status["power_available"] = False
         if power_available_override is not None:
             vehicle_status["power_available"] = power_available_override
+        if stale_charging_claim:
+            # Not displayed as charging, but the car may still be drawing:
+            # keep EV load (and an includes-EV Home Load) unknown, not 0 kW.
+            vehicle_status["_power_activity_unknown"] = True
         if site_presence is not None:
             vehicle_status["site_presence"] = site_presence
         if site_presence_observed_at is not None:
@@ -2948,6 +2969,7 @@ def _get_ev_vehicles_status(hass, entry, *, include_control_evidence=False) -> l
                     continue
                 activity_unknown = bool(
                     fleet_vehicle.get("is_charging")
+                    or fleet_vehicle.get("_power_activity_unknown")
                     or (fleet_vehicle.get("ev_power_kw") or 0) > 0.05
                 )
                 fleet_vehicle.update({

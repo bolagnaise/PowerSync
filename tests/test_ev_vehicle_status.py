@@ -473,7 +473,9 @@ def test_wall_connector_refreshes_sleeping_or_offline_vehicle_telemetry(
         assert loadpoint["observed_at"] == (None if status == "unknown" else previous.isoformat())
 
 
-@pytest.mark.parametrize("age,expected", [(timedelta(0), "live"), (timedelta(hours=2), "stale")])
+@pytest.mark.parametrize(
+    "age,expected", [(timedelta(0), "live"), (timedelta(minutes=20), "stale")],
+)
 def test_car_without_status_sensor_keeps_charging_and_reports_freshness(age, expected):
     from power_sync.automations.loadpoint_status import build_loadpoint_status
 
@@ -495,6 +497,43 @@ def test_car_without_status_sensor_keeps_charging_and_reports_freshness(age, exp
     assert loadpoint["actual_charging"] is True
     assert loadpoint["telemetry_state"] == expected
     assert loadpoint["observed_at"] == observed.isoformat()
+
+
+@pytest.mark.parametrize("keep_status_sensor", [True, False])
+def test_frozen_online_fleet_charging_claim_expires_to_unknown(keep_status_sensor):
+    """W3RT1E recurrence: a Fleet device frozen since an HA restart.
+
+    HA restored ``status=on`` and ``charging``/2 kW at 03:01 and Tesla Fleet
+    never refreshed the car again (no BLE, no Wall Connector). A charging car
+    is re-reported every poll, so 6.5 h of silence must not read as Charging
+    -- but nor as a measured stop: the possible EV load stays unknown.
+    """
+    from power_sync.automations.loadpoint_status import build_loadpoint_status
+
+    power_sync = _power_sync_module()
+    observed = datetime.now(timezone.utc) - timedelta(hours=6, minutes=30)
+    states = [
+        state for state in _restored_charging_w3rt1e(
+            "on", restored_at=observed, asleep_at=observed,
+        )
+        if keep_status_sensor or not state.entity_id.endswith("_status")
+    ]
+    hass = _tesla_hass(states)
+
+    vehicle = power_sync._get_ev_vehicles_status(
+        hass, _Entry(), include_control_evidence=True,
+    )[0]
+    assert vehicle["is_charging"] is False
+    assert vehicle["telemetry_state"] == "stale"
+    assert vehicle["power_available"] is False
+    assert vehicle["_power_activity_unknown"] is True
+    evidence = vehicle.get("_boost_charging_state_evidence")
+    assert evidence is None or evidence["charging"] is not True
+
+    loadpoint = build_loadpoint_status({}, [vehicle])[0]
+    assert loadpoint["actual_charging"] is False
+    assert loadpoint["status"] != "charging"
+    assert loadpoint["current_power_kw"] is None
 
 
 def _w3rt1e_and_live_charging_hass(status: str, *, restored_at, now) -> _Hass:

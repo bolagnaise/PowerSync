@@ -38,6 +38,11 @@ EV_POWER_MAX_AGE = timedelta(seconds=90)
 # ``telemetry_state``). Polled Fleet data arrives minutes apart, so this is
 # deliberately looser than the control/accounting power window above.
 EV_TELEMETRY_LIVE_MAX_AGE = timedelta(minutes=15)
+# An online vehicle's integration re-reports a charging car on every poll
+# (Tesla Fleet: 10 min; Teslemetry: 1 min). Three missed polls means the
+# Charging claim is a frozen value -- e.g. restored at an HA restart while the
+# integration could not reach Tesla -- and no longer proves an active session.
+EV_STALE_CHARGING_CLAIM_MAX_AGE = timedelta(minutes=30)
 
 # Vehicle-reported states that explicitly assert "not charging".  Shared so the
 # display and control paths cannot disagree about what disproves a watt value.
