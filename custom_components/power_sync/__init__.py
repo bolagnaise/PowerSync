@@ -19663,6 +19663,41 @@ class VehicleChargingConfigView(HomeAssistantView):
                 "error": str(e)
             }, status=500)
 
+    async def _remove_persisted_vehicle_schedule(self, vehicle_ids: set[str]) -> bool:
+        """Retire exact schedule IDs from the entry store used at restart.
+
+        This is separate from AutomationStore. Prune under the shared store
+        lock rather than saving an executor snapshot over other entry fields.
+        Also permits retrying a deletion completed by an older version that
+        removed the profile but left its schedule behind.
+        """
+        removed = False
+        profile_store = self._get_store()
+        for entry_data in self._hass.data.get(DOMAIN, {}).values():
+            if (
+                not isinstance(entry_data, dict)
+                or entry_data.get("automation_store") is not profile_store
+            ):
+                continue
+            settings_store = entry_data.get("store")
+            if settings_store is None:
+                continue
+
+            def prune(data):
+                changes = {}
+                for key in ("auto_schedule_settings", "cached_vehicle_soc"):
+                    values = data.get(key)
+                    if isinstance(values, dict) and vehicle_ids.intersection(values):
+                        changes[key] = {
+                            vid: value for vid, value in values.items()
+                            if vid not in vehicle_ids
+                        }
+                return changes or None
+
+            if await _update_powerwall_store(settings_store, prune):
+                removed = True
+        return removed
+
     async def delete(self, request: web.Request) -> web.Response:
         """Handle DELETE request - remove a vehicle charging config."""
         try:
@@ -19688,18 +19723,21 @@ class VehicleChargingConfigView(HomeAssistantView):
             )
             updated = [c for c in vehicle_configs if c.get("vehicle_id") != vehicle_id]
 
-            if len(updated) == len(vehicle_configs):
-                return web.json_response({
-                    "success": False,
-                    "error": f"Vehicle {vehicle_id} not found"
-                }, status=404)
-
             cleanup_ids = {vehicle_id}
             if removed_config:
                 if removed_config.get("charger_type") == "generic":
                     cleanup_ids.add("generic_ev")
                 if removed_config.get("ocpp_charger_id"):
                     cleanup_ids.add(f"ocpp_{removed_config['ocpp_charger_id']}")
+
+            # Retire the durable schedule before removing the retryable profile.
+            # A failed write must not report successful deletion.
+            removed_schedule = await self._remove_persisted_vehicle_schedule(cleanup_ids)
+            if len(updated) == len(vehicle_configs) and not removed_schedule:
+                return web.json_response({
+                    "success": False,
+                    "error": f"Vehicle {vehicle_id} not found"
+                }, status=404)
 
             store._data["vehicle_charging_configs"] = updated
             from .automations.ev_loadpoint_profiles import prune_connected_ev_selections
