@@ -2658,20 +2658,25 @@ class SolcastForecaster:
         hass.data["solcast_solar"] is typically a dict of {entry_id: coordinator}.
         """
         try:
-            def parse_cached_forecasts(source: Any) -> list[float] | None:
+            async def parse_cached_forecasts(source: Any) -> list[float] | None:
                 """Parse the full cached forecast exposed by current Solcast releases."""
                 cached = getattr(source, "data_forecasts", None)
                 if not isinstance(cached, (list, tuple)) or not cached:
                     return None
-                parsed = self._parse_detailed_forecast(
-                    list(cached), start_time, n_intervals
+                # Read provider state on HA's loop, then parse a solve-local
+                # snapshot in the executor. Resampling a full multi-day cache
+                # can otherwise delay unrelated HA callbacks on smaller hosts.
+                snapshot = [dict(period) for period in cached]
+                parsed = await self.hass.async_add_executor_job(
+                    self._parse_detailed_forecast,
+                    snapshot, start_time, n_intervals,
                 )
                 return parsed if parsed else None
 
             # The integration may store a coordinator or direct data
             # Try common data structures used by solcast_solar integration
 
-            result = parse_cached_forecasts(solcast_data)
+            result = await parse_cached_forecasts(solcast_data)
             if result:
                 return result
 
@@ -2692,13 +2697,13 @@ class SolcastForecaster:
 
                 # Not forecast data — iterate values looking for coordinators or nested dicts
                 for value in solcast_data.values():
-                    result = parse_cached_forecasts(value)
+                    result = await parse_cached_forecasts(value)
                     if result:
                         return result
                     # Also check the coordinator's solcast attribute (Solcast Solar v4+)
                     if hasattr(value, 'solcast'):
                         solcast_api = value.solcast
-                        result = parse_cached_forecasts(solcast_api)
+                        result = await parse_cached_forecasts(solcast_api)
                         if result:
                             return result
                         # Try get_forecast_list() method if available

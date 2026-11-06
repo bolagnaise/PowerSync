@@ -1529,6 +1529,7 @@ def test_solcast_external_zero_forecast_remains_a_valid_provider(monkeypatch):
     module = _load_estimator_module(monkeypatch)
     start = datetime(2026, 5, 9, 10, 0, tzinfo=timezone.utc)
     hass = SimpleNamespace(
+        async_add_executor_job=_fake_executor,
         data={
             "solcast_solar": {
                 "entry-1": SimpleNamespace(
@@ -1693,6 +1694,7 @@ def test_solcast_prefers_full_integration_forecast_over_two_daily_sensors(monkey
         ],
     )
     hass = SimpleNamespace(
+        async_add_executor_job=_fake_executor,
         data={"solcast_solar": {"solcast": solcast_api}},
         states=_FakeStates(
             [today_state, tomorrow_state],
@@ -1730,6 +1732,7 @@ def test_solcast_prefers_nested_full_cache_over_partial_coordinator_data(monkeyp
         ),
     )
     hass = SimpleNamespace(
+        async_add_executor_job=_fake_executor,
         data={"solcast_solar": {"entry-1": coordinator}},
         states=_FakeStates(),
     )
@@ -1773,6 +1776,7 @@ def test_solcast_prefers_v46_runtime_cache_over_partial_daily_sensors(monkeypatc
         ),
     )
     hass = SimpleNamespace(
+        async_add_executor_job=_fake_executor,
         data={},
         config_entries=SimpleNamespace(async_entries=lambda domain: [entry]),
         states=_FakeStates(
@@ -1800,6 +1804,80 @@ def test_solar_forecast_invalid_provider_normalizes_to_solcast(monkeypatch):
     )
 
     assert forecaster.provider_preference == "solcast"
+
+
+@pytest.mark.parametrize("storage", ["runtime", "legacy"])
+@pytest.mark.parametrize("cache_type", [list, tuple])
+def test_solcast_cached_parse_preserves_loop_progress_and_snapshot(
+    monkeypatch, storage, cache_type,
+):
+    """A slow full-cache parse must not delay unrelated HA callbacks."""
+    import asyncio
+    import threading
+
+    module = _load_estimator_module(monkeypatch)
+    start = datetime(2026, 11, 6, 11, 50, tzinfo=timezone.utc)
+    cached = [
+        {"period_start": start, "pv_estimate": 2.0, "pv_estimate10": 1.0},
+        {"period_start": start + timedelta(hours=36),
+         "pv_estimate": 4.0, "pv_estimate10": 3.0},
+    ]
+    progress = []
+    cache_threads = []
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        loop_thread = threading.get_ident()
+
+        class SolcastApi:
+            @property
+            def data_forecasts(self):
+                cache_threads.append(threading.get_ident())
+                return cache_type(cached)
+
+        api = SolcastApi()
+
+        async def executor(func, *args):
+            # A provider update after dispatch must not change this solve's
+            # snapshot, including the dictionaries inside the cache list.
+            cached[0]["pv_estimate10"] = 99.0
+            cached.clear()
+            return await asyncio.to_thread(func, *args)
+
+        hass = SimpleNamespace(
+            data={"solcast_solar": {"entry": api}} if storage == "legacy" else {},
+            config_entries=SimpleNamespace(async_entries=lambda domain: [
+                SimpleNamespace(runtime_data=SimpleNamespace(
+                    coordinator=SimpleNamespace(solcast=api),
+                )),
+            ] if storage == "runtime" and domain == "solcast_solar" else []),
+            states=_FakeStates(), async_add_executor_job=executor,
+        )
+        forecaster = module.SolcastForecaster(
+            hass, interval_minutes=5, estimate_type="estimate10",
+        )
+        original = forecaster._parse_detailed_forecast
+
+        def parse_while_callback_is_pending(*args):
+            callback_ran = threading.Event()
+            loop.call_soon_threadsafe(callback_ran.set)
+            progress.append(callback_ran.wait(1.0))
+            return original(*args)
+
+        monkeypatch.setattr(
+            forecaster, "_parse_detailed_forecast", parse_while_callback_is_pending,
+        )
+        forecast = await forecaster.get_forecast(48, start)
+
+        assert progress == [True], "forecast parsing prevented an unrelated HA callback"
+        assert cache_threads == [loop_thread], "provider access must stay on HA's loop"
+        assert len(forecast) == 576
+        assert forecast[:6] == [1000.0] * 6
+        assert forecast[432:438] == [3000.0] * 6
+        assert sum(forecast) == 24000.0
+        assert forecaster.last_forecast_source == "solcast"
+
+    asyncio.run(scenario())
 
 
 def test_open_meteo_sensor_watts_attributes_are_used_without_hass_data(monkeypatch):

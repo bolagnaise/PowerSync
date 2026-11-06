@@ -7,6 +7,12 @@ forecast, household load forecast, battery limits, and configured reserve floors
 Solar forecasting via Solcast or Open-Meteo Solar Forecast should be configured
 for accurate schedules.
 
+## Solcast forecast refreshes
+
+PowerSync processes Solcast's full cached forecast in the background so that
+refreshing a plan, including after a manual force command, can keep Home
+Assistant responsive on smaller hosts. No forecast settings need to change.
+
 ## Historical charging in the optimizer plan
 
 The dashboard labels measured battery charging as **Solar charge** when recorded
