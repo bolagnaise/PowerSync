@@ -214,6 +214,131 @@ async def test_scope_change_during_prepare_aborts_all_retirement(inventory, vari
         assert next(iter(c.runtime[recovery._SIDECAR_STATE_KEY]["incidents"].values()))["phase_token"] == "foreign"
 
 
+async def _interrupt_with_added_stop(c):
+    added = None
+
+    async def stop_during_prepare(prefix, action):
+        nonlocal added
+        if action != "prepare" or added is not None:
+            return
+        route = {"kind": "ble", "prefix": prefix,
+                 "entity_id": f"switch.{prefix}_charger"}
+        added = await recovery.async_begin_attempt(
+            c.hass, c.entry, c.aliases[prefix], route, "stop", route["entity_id"])
+        assert added
+        assert await recovery.async_finish_attempt(added, "sent_unknown")
+        c.runtime[stop.ACTIVE_KEY]["interrupted"] = True
+
+    c.hook["call"] = stop_during_prepare
+    with pytest.raises(stop.StopRecoveryRefused, match="recovery_scope_changed"):
+        await recover(c)
+    assert added is not None
+    incident = next(iter(c.store.value["incidents"].values()))
+    incident_id = incident["incident_id"]
+    original_refs = deepcopy(incident["liability_refs"])
+    assert len(stop._live_refs(c.runtime)) == len(original_refs) + 1
+    assert incident["phase"] == "held"
+    assert not any(action == "commit" for _, action, _ in c.calls)
+    c.hook["call"] = None
+    return added, incident_id, original_refs
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reload", [False, True])
+async def test_new_unknown_stop_during_recovery_can_retry_complete_inventory(inventory, reload):
+    c = inventory
+    added, incident_id, original_refs = await _interrupt_with_added_stop(c)
+    if reload:
+        c.runtime.pop(recovery.RECOVERY_KEY)
+        c.runtime.pop("_tesla_ev_recovery_sidecar_loaded")
+        assert await recovery.async_load_recovery_state(c.hass, c.entry)
+    c.hook["call"] = None
+    result = await recover(c)
+    assert result == {"success": True, "incident_id": incident_id}
+    saved = c.store.value["incidents"][incident_id]
+    assert len(saved["liability_refs"]) == len(original_refs) + 1
+    assert c.store.value["liabilities"][incident_id]["references"] == saved["liability_refs"]
+    assert saved["scope_refreshes"][0]["previous_liability_refs"] == original_refs
+    assert not stop._live_refs(c.runtime)
+    assert all(receipt["m"] == "r" for receipt in c.receipts.values())
+    new_record = c.store.value["recovery"]["vehicles"][added.vehicle_id]["attempts"][added.attempt_id]
+    assert new_record["outcome"] == "sent_unknown"
+    assert new_record["recovery_retired"]["incident_id"] == incident_id
+
+
+@pytest.mark.asyncio
+async def test_scope_refresh_save_failure_preserves_old_scope_and_can_retry(inventory):
+    c = inventory
+    _, incident_id, original_refs = await _interrupt_with_added_stop(c)
+    calls_before = len(c.calls)
+    original_save = c.store.async_save
+
+    async def fail_refresh(value):
+        if value["incidents"][incident_id].get("scope_refreshes"):
+            return False
+        return await original_save(value)
+
+    c.store.async_save = fail_refresh
+    with pytest.raises(stop.StopRecoveryRefused, match="scope_not_persisted"):
+        await recover(c)
+    assert len(c.calls) == calls_before
+    assert c.runtime[recovery._SIDECAR_STATE_KEY]["incidents"][incident_id]["liability_refs"] == original_refs
+    assert c.store.value["incidents"][incident_id]["liability_refs"] == original_refs
+    assert c.store.value["liabilities"][incident_id]["references"] == original_refs
+    assert stop._live_refs(c.runtime)
+    c.store.async_save = original_save
+    assert (await recover(c))["success"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("variant", ["positive", "old_binding", "missing_old", "producer", "inventory", "missing_liability"])
+async def test_added_stop_retry_cannot_adopt_unsafe_scope(inventory, variant):
+    c = inventory
+    added, incident_id, _ = await _interrupt_with_added_stop(c)
+    state = c.runtime[recovery._SIDECAR_STATE_KEY]
+    incident = state["incidents"][incident_id]
+    if variant == "positive":
+        for root in (c.runtime[recovery.RECOVERY_KEY], state["recovery"]):
+            root["vehicles"][added.vehicle_id]["attempts"][added.attempt_id]["operation"] = "start"
+    elif variant == "old_binding":
+        incident["liability_refs"][0]["route"]["entity_identity"]["unique_id"] = "foreign"
+    elif variant == "missing_old":
+        incident["liability_refs"][0]["attempt_id"] = "missing-old-stop"
+    elif variant == "producer":
+        c.registrations["switch.bridge_a_charger"].unique_id = "replacement"
+    elif variant == "missing_liability":
+        state["liabilities"].pop(incident_id)
+    else:
+        c.declared.pop()
+    before = deepcopy(incident)
+    calls_before = len(c.calls)
+    with pytest.raises(stop.StopRecoveryRefused):
+        await recover(c)
+    assert len(c.calls) == calls_before
+    assert state["incidents"][incident_id] == before
+    assert stop._live_refs(c.runtime)
+
+
+@pytest.mark.asyncio
+async def test_refreshed_scope_still_requires_fresh_proof_from_every_bridge(inventory):
+    c = inventory
+    _, incident_id, _ = await _interrupt_with_added_stop(c)
+    c.frozen.add("bridge_b")
+    with pytest.raises(stop.StopRecoveryRefused, match="proof_unavailable"):
+        await recover(c)
+    assert c.store.value["incidents"][incident_id]["phase"] == "held"
+    assert not any(action == "commit" for _, action, _ in c.calls)
+    assert stop._live_refs(c.runtime)
+    c.runtime.pop(recovery.RECOVERY_KEY)
+    c.runtime.pop("_tesla_ev_recovery_sidecar_loaded")
+    assert await recovery.async_load_recovery_state(c.hass, c.entry)
+    loaded = c.runtime[recovery._SIDECAR_STATE_KEY]
+    assert loaded["incidents"][incident_id]["scope_refreshes"]
+    assert loaded["liabilities"][incident_id]["references"] == loaded["incidents"][incident_id]["liability_refs"]
+    c.frozen.clear()
+    assert (await recover(c))["success"]
+
+
 @pytest.mark.asyncio
 async def test_failed_release_save_never_unlocks_and_retry_preserves_unknown_outcomes(inventory):
     c = inventory

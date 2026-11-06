@@ -345,6 +345,8 @@ async def async_recover_ble_stops(hass, entry, inventory, *, confirm_complete_hi
             )
         if incident is None:
             raise StopRecoveryRefused("recovery_scope_not_persisted")
+        await _refresh_held_scope(hass, entry, runtime, incident["incident_id"],
+                                  inventory, bridges, refs, affected)
         snapshot = manager.recovery_sidecar_snapshot(hass, entry)
         incident = await manager.async_confirm_recovery_scope(
             hass, entry, incident["incident_id"], expected_revision=snapshot["revision"],
@@ -354,6 +356,71 @@ async def async_recover_ble_stops(hass, entry, inventory, *, confirm_complete_hi
             raise StopRecoveryRefused("historical_inventory_not_confirmed")
         return await _run_inventory(hass, entry, runtime, bridges, refs, affected, config, owners,
                                     scope_digest, incident["incident_id"])
+
+
+async def _refresh_held_scope(hass, entry, runtime, incident_id, inventory, bridges, refs, affected):
+    """Reconfirm added Stops on an explicit retry, never alter a running scope."""
+    from . import tesla_ev_recovery as manager
+
+    async with manager._journal_lock(runtime):
+        state = runtime[manager._SIDECAR_STATE_KEY]
+        selected = state["incidents"][incident_id]
+        if selected.get("phase") != "held":
+            raise StopRecoveryRefused("recovery_already_running")
+        basis = selected.get("scope_basis") or {}
+        if (basis.get("kind") != "ble_stop_inventory_v2"
+                or basis.get("inventory_digest") != manager._digest(inventory)
+                or basis.get("complete_affected_inventory") != inventory
+                or selected.get("current_candidate_producers") != [b.identity for b in bridges.values()]
+                or selected.get("current_candidate_vehicles") != list(affected.values())
+                or not all(b.current() for b in bridges.values())):
+            raise StopRecoveryRefused("recovery_scope_changed")
+        # Repeat exact Stop-only/binding validation against the authoritative
+        # union while holding the persistence lock. A new Stop must not make an
+        # old incident permanently unretryable, or permit an unvalidated writer.
+        _, current_refs, current_affected = _resolve_inventory(hass, entry, inventory, bridges)
+        if current_refs != refs or current_affected != affected:
+            raise StopRecoveryRefused("recovery_scope_changed")
+        previous = selected.get("liability_refs")
+        if previous == refs:
+            return
+        if not isinstance(previous, list) or not previous:
+            raise StopRecoveryRefused("invalid_retained_history")
+
+        def identity(ref):
+            return ref.get("vehicle_id"), ref.get("attempt_id"), ref.get("hazard_id")
+
+        def binding(ref):
+            return {key: value for key, value in ref.items() if key not in {"outcome", "state"}}
+
+        current = {identity(ref): ref for ref in refs}
+        if (len(current) != len(refs) or any(not isinstance(ref, Mapping)
+                or identity(ref) not in current or binding(ref) != binding(current[identity(ref)])
+                for ref in previous)):
+            # Do not erase a missing old liability or adopt a rebound hazard.
+            raise StopRecoveryRefused("retained_recovery_scope_changed")
+        liability = state["liabilities"].get(incident_id)
+        if not isinstance(liability, dict):
+            raise StopRecoveryRefused("invalid_retained_history")
+        before = deepcopy(state)
+        selected.setdefault("scope_refreshes", []).append({
+            "previous_liability_refs": deepcopy(previous),
+            "previous_covered_attempts": deepcopy(selected.get("covered_attempts")),
+            "previous_operator_confirmation": deepcopy(selected.get("operator_scope_confirmation")),
+            "refreshed_at": time.time(),
+        })
+        selected["liability_refs"] = deepcopy(refs)
+        selected["covered_attempts"] = deepcopy(refs)
+        liability["references"] = deepcopy(refs)
+        selected["scope_closed"] = False
+        selected["operator_scope_confirmation"] = None
+        manager._next_revision(state)
+        try:
+            if not await manager._save_sidecar(hass, entry, runtime, state):
+                raise StopRecoveryRefused("recovery_scope_not_persisted")
+        except BaseException:
+            manager._restore_sidecar_state(state, before)
+            raise
 
 
 async def _run_inventory(hass, entry, runtime, bridges, refs, affected, config, owners, scope_digest, incident_id):

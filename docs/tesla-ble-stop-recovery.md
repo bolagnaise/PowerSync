@@ -131,6 +131,12 @@ previous samples cannot release it. If the vehicle is charging, native fields
 are unavailable, or the bridge cannot provide the required proof, recovery stays
 held. Keep the returned reason and the recovery records for support.
 
+If another uncertain Stop was recorded during an interrupted attempt, repeating
+the same complete inventory includes that additional Stop after checking its
+original bridge and vehicle binding. PowerSync preserves the earlier scope and
+requires fresh proof from every bridge before retiring any record. Missing old
+records, changed bindings and non-Stop commands still require support review.
+
 Rollback: keep held bridges and EV automations contained and contact support
 before restoring older firmware. A downgrade removes the companion firmware's
 persistent read-only enforcement; it is not a recovery method. No customer
