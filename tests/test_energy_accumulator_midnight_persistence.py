@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import json
 from datetime import datetime, timedelta
 import math
 from pathlib import Path
@@ -201,6 +202,31 @@ def test_explicit_flush_allows_next_periodic_checkpoint():
         accumulator.update(0.0, -12.0, 0.0, 1.0, 0.30, 0.25)
     assert len(store.writes) == 2
     assert store.data["export_earnings_today"] > flushed_earnings
+
+
+def test_energy_checkpoints_with_upstream_ha_storage_methods(tmp_path):
+    """Use the existing verbatim HA Store fixture and a real JSON disk file."""
+    from test_optimizer_persistence_cadence import _environment
+
+    async def run():
+        storage, hass, _ = _environment(tmp_path, upstream=True)
+        store = storage._cost_store
+        start = datetime(2026, 11, 6, 18, 0)
+        clock = _Clock(start)
+        accumulator = _new_accumulator(clock, store)
+        for second in range(0, 1201, 30):
+            clock.current = start + timedelta(seconds=second)
+            await hass.loop.advance(second)
+            accumulator.update(0.0, -12.0, 0.0, 1.0, 0.30, 0.25)
+        assert [second for second, _ in store.writes] == [330, 630, 930]
+        saved = json.loads(store.path.read_text())["data"]
+        assert saved["export_earnings_today"] == pytest.approx(0.75)
+        assert saved["mtd_export_earnings"] == pytest.approx(0.75)
+        restored = _new_accumulator(clock, _Store(saved))
+        await restored.async_restore()
+        assert restored.as_dict()["export_earnings_today"] == 0.75
+
+    asyncio.run(run())
 
 
 def test_flush_then_restore_drops_stale_day_before_first_update():

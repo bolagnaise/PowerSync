@@ -60,8 +60,10 @@ interval dates, channels and coverage in a sanitized diagnostic artifact.
 
 ## Validation
 
-The three added regression cases fail on the prior source (zero checkpoints)
-and pass with the fix. Focused and adjacent energy, daily-cost, Amber usage and
-optimizer refresh tests pass: **94 passed**. Release additionally requires the
+The virtual-clock regression cases fail on the prior source (zero checkpoints)
+and pass with the fix. A further test uses the existing verbatim Home Assistant
+Store fixture and a real JSON file to verify checkpoints and restored earnings.
+Focused and adjacent energy, daily-cost, Amber usage, optimizer refresh and
+storage-cadence tests pass: **109 passed**. Release additionally requires the
 audited full suite and matching trusted main CI evidence under
 `docs/regression-release-gate.md`.
