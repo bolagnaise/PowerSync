@@ -28,6 +28,7 @@ _STUB_MODULE_NAMES = (
     "power_sync.optimization.battery_efficiency",
     "power_sync.optimization.battery_optimizer",
     "power_sync.optimization.schedule_reader",
+    "power_sync.solar_production",
 )
 
 
@@ -4068,6 +4069,98 @@ def test_pre_export_fill_target_leaves_room_for_forecast_solar(
     assert result.schedule.actions[3].soc >= 0.895
     early_grid_import_kwh = sum(result.grid_import_w[:2]) / 1000
     assert early_grid_import_kwh <= 1.2
+
+
+@pytest.mark.parametrize("starting_soc", [0.45, 0.99])
+@pytest.mark.parametrize("deadline", [None, 120])
+def test_curtailment_forecast_preserves_solar_for_the_chosen_dispatch(
+    battery_optimizer_module, monkeypatch, starting_soc, deadline,
+):
+    """A hypothetical full battery must not erase usable future solar.
+
+    Exercise the shipped coordinator input block and real solver together:
+    two sunny days, a cheap midday import period and premium evening export.
+    Curtailment can discard surplus after filling, but is not a forecast loss
+    that needs to be replaced with paid grid charging.
+    """
+    import logging
+    import math
+    from types import SimpleNamespace
+
+    source = (COMPONENT_ROOT / "optimization/coordinator.py").read_text()
+    method = next(
+        node for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "_run_optimization"
+    )
+    body = next(
+        node.body for node in method.body if isinstance(node, ast.Try)
+        and any(isinstance(child, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == "solar_forecast"
+            for target in child.targets
+        ) for child in node.body)
+    )
+    def assigns(node, name):
+        return isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == name
+            for target in node.targets
+        )
+    start = next(i for i, node in enumerate(body) if assigns(node, "solar_forecast"))
+    end = next(i for i, node in enumerate(body) if assigns(node, "solver_solar_forecast"))
+
+    # Only the curtailment configuration transport is faked. The forecast
+    # preparation, explicit production-stop projection and LP are real code.
+    const = types.ModuleType("power_sync.const")
+    for name in ("AC_INVERTER", "BATTERY", "SIGENERGY_DC"):
+        key = f"CONF_{name}_CURTAILMENT_ENABLED"
+        setattr(const, key, key.lower())
+    monkeypatch.setitem(sys.modules, "power_sync.const", const)
+    curtail_config = types.ModuleType("power_sync.curtailment_config")
+    curtail_config.get_curtailment_price_thresholds = lambda entry: (0.0, 0.2)
+    monkeypatch.setitem(sys.modules, "power_sync.curtailment_config", curtail_config)
+
+    solar, load, imports, exports = [], [], [], []
+    for slot in range(576):
+        hour = (6 + slot / 12) % 24
+        solar.append(max(0.0, min(10.0, 11 * math.sin(math.pi * (hour - 6) / 12))))
+        load.append(1.0 if hour < 17 else 2.5)
+        imports.append(0.10 if 11 <= hour < 14 else 0.30)
+        exports.append(0.27 if 18 <= hour < 20 else -0.02)
+    coordinator = SimpleNamespace(
+        _entry=SimpleNamespace(entry_id="test", options={
+            const.CONF_AC_INVERTER_CURTAILMENT_ENABLED: True,
+        }),
+        _config=SimpleNamespace(max_charge_w=15000, battery_capacity_wh=27000,
+                                interval_minutes=5),
+        _observe_solar_forecast_accuracy=lambda forecast, soc: None,
+        _apply_solar_nowcast_derate=lambda forecast, soc: list(forecast),
+        hass=SimpleNamespace(data={}),
+    )
+    namespace = dict(self=coordinator, solar=[v * 1000 for v in solar],
+                     load=[v * 1000 for v in load], soc=starting_soc,
+                     export_prices=exports, import_prices=imports,
+                     DOMAIN="power_sync", _LOGGER=logging.getLogger(__name__),
+                     __package__="power_sync.optimization")
+    exec(compile(ast.Module(body=body[start:end + 1], type_ignores=[]),
+                 "coordinator_solar_inputs", "exec"), namespace)
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=27000, max_charge_w=15000, max_discharge_w=10000,
+        backup_reserve=0.20, hardware_reserve=0.05,
+        interval_minutes=5, horizon_hours=48,
+    )
+    optimizer.pre_window_slot = deadline
+    optimizer.pre_window_soc_target = 1.0 if deadline else 0.0
+    result = optimizer.optimize(
+        import_prices=imports, export_prices=exports,
+        solar_forecast=namespace["solver_solar_forecast"], load_forecast=load,
+        current_soc=starting_soc, acquisition_cost_kwh=0.05,
+    )
+
+    assert result.feasible is True
+    assert result.solver_used == "highs"
+    assert not any(action.action == "charge" for action in result.schedule.actions)
+    assert namespace["solver_solar_forecast"] == pytest.approx(solar)
+    if deadline:
+        assert result.schedule.actions[deadline - 1].soc >= 0.99
 
 
 def test_pre_export_fill_uses_learned_kwh_shortfall_when_confident(
