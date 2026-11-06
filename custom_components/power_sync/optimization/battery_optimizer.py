@@ -7419,10 +7419,11 @@ class BatteryOptimizer:
         planned_load_output_kwh = [0.0] * n
         planned_export_output_kwh = [0.0] * n
 
-        def _projected_soc_before(slot: int) -> float:
-            """Project assigned actions chronologically up to ``slot``."""
+        def _projected_soc_path(stop: int) -> list[float]:
+            """Project assigned actions in time order, including the initial SOC."""
             projected_soc = soc_0
-            for idx in range(slot):
+            path = [projected_soc]
+            for idx in range(stop):
                 charge_kw, discharge_kw = actions.get(idx, (0.0, 0.0))
                 charge_kw = min(
                     max(0.0, charge_kw),
@@ -7445,6 +7446,13 @@ class BatteryOptimizer:
                     )
                 charge_kw = solar_charge_kw + grid_charge_kw
                 net_home_kw = max(0.0, load[idx] - solar[idx])
+                if (
+                    disable_idle
+                    and manual_control_slots[idx] is None
+                    and charge_kw <= 0.01
+                    and discharge_kw <= net_home_kw
+                ):
+                    discharge_kw = min(self.max_discharge_kw, net_home_kw)
                 discharge_floor = self_consumption_floor
                 if manual_control_slots[idx] == "export":
                     discharge_floor = self_consumption_floor
@@ -7468,23 +7476,44 @@ class BatteryOptimizer:
                     self_consumption_floor,
                     min(1.0, projected_soc),
                 )
-            return projected_soc
+                path.append(projected_soc)
+            return path
 
-        for _, t, net_load in sorted(
-            spreads,
+        def _projected_soc_before(slot: int) -> float:
+            return _projected_soc_path(slot)[-1]
+
+        # Solar and grid are separate purchasing opportunities. Sorting whole
+        # slots by the retail tariff lets an early paid top-up consume demand
+        # that later, cheaper solar could have served. Keep source ordering
+        # global while retaining chronological eligibility for each output.
+        charge_opportunities = [
+            (t, solar_only)
+            for t in range(n)
+            for solar_only in (True, False)
+            if not solar_only or solar[t] > load[t]
+        ]
+        for t, solar_only in sorted(
+            charge_opportunities,
             key=lambda item: (
                 0
                 if import_bonus_cap_total_kwh > 0
-                and import_bonus_prices[item[1]] > 0
+                and not item[1]
+                and import_bonus_prices[item[0]] > 0
                 else 1,
-                item[1]
+                item[0]
                 if import_bonus_cap_total_kwh > 0
-                and import_bonus_prices[item[1]] > 0
-                else import_prices[item[1]],
-                item[1],
+                and not item[1]
+                and import_bonus_prices[item[0]] > 0
+                else (
+                    max(0.0, export_prices[item[0]])
+                    if item[1] else import_prices[item[0]]
+                ),
+                item[0],
+                not item[1],
             ),
         ):
-            if t in actions:
+            existing_charge_kw, existing_discharge_kw = actions.get(t, (0.0, 0.0))
+            if manual_control_slots[t] is not None or existing_discharge_kw > 0.0:
                 continue
             battery_export_allowed = (
                 allow_battery_export[t] and not below_optimizer_reserve
@@ -7510,19 +7539,33 @@ class BatteryOptimizer:
                 )
             ):
                 continue
-            projected_soc = _projected_soc_before(t)
+            projected_path = _projected_soc_path(n)
+            projected_soc = projected_path[t]
+            # Extra energy must fit until its assigned output, not just at
+            # purchase time. Otherwise an early purchase displaces cheaper
+            # already allocated solar when the battery fills before that load.
+            output_headroom_kwh = [0.0] * n
+            headroom_kwh = float("inf")
+            for future_idx in range(t + 1, n):
+                headroom_kwh = min(
+                    headroom_kwh,
+                    max(0.0, 1.0 - projected_path[future_idx]) * cap * eff,
+                )
+                output_headroom_kwh[future_idx] = headroom_kwh
             charge_room = (1.0 - projected_soc) * cap / (eff * dt)
             charge_limit = self._charge_limit_kw(
                 load[t], solar[t], allow_grid_charge and grid_charge_allowed[t]
             )
-            charge_limit = min(charge_limit, max(0, charge_room))
+            charge_limit = max(
+                0.0, min(charge_limit, max(0, charge_room)) - existing_charge_kw,
+            )
             if charge_limit <= 0.01:
                 continue
 
             total_charge_input_capacity_kwh = charge_limit * dt
             solar_charge_input_capacity_kwh = min(
                 total_charge_input_capacity_kwh,
-                max(0.0, solar[t] - load[t]) * dt,
+                max(0.0, solar[t] - load[t] - existing_charge_kw) * dt,
             )
             grid_charge_input_capacity_kwh = max(
                 0.0,
@@ -7563,14 +7606,14 @@ class BatteryOptimizer:
                     bonus_available_for_charge_kwh,
                 )
             charge_tiers = []
-            if solar_charge_input_capacity_kwh > 1e-9:
+            if solar_only and solar_charge_input_capacity_kwh > 1e-9:
                 charge_tiers.append((
                     max(0.0, export_prices[t]),
                     solar_charge_input_capacity_kwh,
                     False,
                     False,
                 ))
-            if bonus_input_capacity_kwh > 1e-9:
+            if not solar_only and bonus_input_capacity_kwh > 1e-9:
                 charge_tiers.append((
                     max(0.0, import_prices[t] - import_bonus_prices[t]),
                     bonus_input_capacity_kwh,
@@ -7580,7 +7623,7 @@ class BatteryOptimizer:
             base_input_capacity_kwh = (
                 grid_charge_input_capacity_kwh - bonus_input_capacity_kwh
             )
-            if base_input_capacity_kwh > 1e-9:
+            if not solar_only and base_input_capacity_kwh > 1e-9:
                 charge_tiers.append((
                     import_prices[t],
                     base_input_capacity_kwh,
@@ -7653,6 +7696,12 @@ class BatteryOptimizer:
                     take = min(
                         remaining_kwh,
                         delivered_capacity_kwh - delivered_kwh,
+                        max(
+                            0.0,
+                            output_headroom_kwh[future_idx]
+                            - charged_input_kwh * eff * eff
+                            - delivered_kwh,
+                        ),
                     )
                     if kind == "rebated_load":
                         remaining_rebated_load_kwh[future_idx] -= take
@@ -7712,7 +7761,7 @@ class BatteryOptimizer:
 
             charge_kw = charged_input_kwh / max(1e-9, dt)
             if charge_kw > 0.01:
-                actions[t] = (charge_kw, 0.0)
+                actions[t] = (existing_charge_kw + charge_kw, 0.0)
 
         # Pair below-acquisition priority export with actual future recharge.
         # This is deliberately quantity-aware: a one-kWh cheap/rebated slot can
@@ -8182,6 +8231,17 @@ class BatteryOptimizer:
                     self.max_discharge_kw,
                     max(0.0, net_load),
                 )
+
+            if (
+                disable_idle
+                and manual_mode is None
+                and charge_kw <= 0.01
+                and discharge_kw <= max(0.0, net_load)
+            ):
+                # A partially funded household output still emits native
+                # self-consumption, which serves the full load. Project that
+                # draw before applying floors and deadline protection below.
+                discharge_kw = min(self.max_discharge_kw, max(0.0, net_load))
 
             max_charge_room_kw = max(0.0, (1.0 - soc) * cap / (eff * dt))
             charge_kw = min(charge_kw, max_charge_room_kw)

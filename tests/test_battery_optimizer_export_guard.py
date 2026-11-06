@@ -847,6 +847,108 @@ def test_highs_charge_by_time_deadline_protects_near_full_high_load_variant(
     assert result.schedule.actions[1].soc >= 0.995 - 1e-4
 
 
+@pytest.mark.parametrize("timeout", [False, True])
+@pytest.mark.parametrize("cost_neutral", [False, True])
+def test_greedy_uses_solar_before_paid_morning_topup(
+    battery_optimizer_module, monkeypatch, timeout, cost_neutral,
+):
+    """Ticket 410: a lower morning retail price must not outrank free PV."""
+    module = battery_optimizer_module
+    monkeypatch.setattr(module, "HIGHS_AVAILABLE", timeout)
+    if timeout:
+        monkeypatch.setattr(module, "_solve_lp_highs", lambda *args, **kwargs:
+            types.SimpleNamespace(success=False, x=None, fun=None, status=13,
+                                  message="Time limit reached"))
+    optimizer = module.BatteryOptimizer(
+        capacity_wh=24180, max_charge_w=12600, max_discharge_w=14400,
+        backup_reserve=0.05, hardware_reserve=0.05,
+        interval_minutes=5, horizon_hours=1, terminal_weight=0.0,
+    )
+    result = optimizer.optimize(
+        import_prices=[0.091, 0.20, 0.30, 0.30],
+        export_prices=[0.0] * 4,
+        solar_forecast=[0.0, 10.0, 0.0, 0.0],
+        load_forecast=[0.0, 1.0, 6.0, 0.0],
+        current_soc=0.052, allow_battery_export=False, disable_idle=True,
+        cost_neutral_earnings_cap=1.87 if cost_neutral else None,
+        cost_neutral_slots=[True] * 4,
+    )
+    assert result.solver_used == "greedy"
+    assert result.grid_import_w == pytest.approx([0.0] * 4, abs=0.1)
+    assert all(action.action != "charge" for action in result.schedule.actions)
+    assert result.schedule.actions[2].battery_discharge_w == pytest.approx(6000)
+
+
+@pytest.mark.parametrize("cost_neutral", [False, True])
+def test_greedy_sunny_48h_plan_keeps_deadline_without_grid_topups(
+    battery_optimizer_module, monkeypatch, cost_neutral,
+):
+    """The reported two-day geometry must not displace midday PV with grid."""
+    module = battery_optimizer_module
+    monkeypatch.setattr(module, "HIGHS_AVAILABLE", True)
+    monkeypatch.setattr(module, "_solve_lp_highs", lambda *args, **kwargs:
+        types.SimpleNamespace(success=False, x=None, fun=None, status=13,
+                              message="Time limit reached"))
+    fixture = json.loads((ROOT / "tests/fixtures/ticket_410_sunny_fallback.json").read_text())
+    rows = [row[1:] for row in fixture["runs"] for _ in range(row[0])]
+    imports, exports, solar, load = map(list, zip(*rows))
+    start = datetime.fromisoformat(fixture["start"])
+    timestamps = [start + timedelta(minutes=5 * idx) for idx in range(len(rows))]
+    deadline = next(idx for idx, ts in enumerate(timestamps) if ts.hour == 16 and ts.minute == 0)
+    optimizer = module.BatteryOptimizer(
+        capacity_wh=24180, max_charge_w=12600, max_discharge_w=14400,
+        max_grid_export_w=5000, backup_reserve=0.05, hardware_reserve=0.05,
+        interval_minutes=5, horizon_hours=48,
+    )
+    optimizer.pre_window_slot = deadline
+    optimizer.pre_window_soc_target = 1.0
+    plan = module.CostNeutralPlan(
+        day_ids=[ts.date().isoformat() for ts in timestamps],
+        earnings_caps_by_day={"2026-11-07": 1.841568, "2026-11-08": 0.0, "2026-11-09": 1.87},
+        forecast_import_costs_by_day={}, fixed_cost_allowances_by_day={},
+        settlement_import_prices=imports, settlement_export_prices=exports,
+        current_day="2026-11-07",
+    ) if cost_neutral else None
+    result = optimizer.optimize(
+        import_prices=imports, export_prices=exports,
+        solar_forecast=solar, load_forecast=load, current_soc=0.052,
+        allow_battery_export=cost_neutral, disable_idle=True,
+        schedule_timestamps=timestamps, cost_neutral_plan=plan,
+    )
+    assert result.solver_used == "greedy"
+    assert result.feasible
+    assert result.schedule.actions[deadline - 1].soc >= 0.995 - 1e-4
+    assert all(a.action != "charge" for a in result.schedule.actions[:deadline])
+    assert result.grid_import_w[:deadline] == pytest.approx([0.0] * deadline, abs=0.1)
+
+
+@pytest.mark.parametrize("solar,blocked", [
+    ([0.0, 3.0, 0.0, 0.0], False),
+    ([0.0, 0.0, 0.0, 10.0], False),
+    ([0.0, 10.0, 0.0, 0.0], True),
+])
+def test_greedy_keeps_paid_charge_when_solar_cannot_serve_load(
+    battery_optimizer_module, monkeypatch, solar, blocked,
+):
+    """Insufficient, late or blocked PV must not erase a useful grid purchase."""
+    module = battery_optimizer_module
+    monkeypatch.setattr(module, "HIGHS_AVAILABLE", False)
+    optimizer = module.BatteryOptimizer(
+        capacity_wh=24180, max_charge_w=12600, max_discharge_w=14400,
+        backup_reserve=0.05, hardware_reserve=0.05,
+        interval_minutes=5, horizon_hours=1, terminal_weight=0.0,
+    )
+    result = optimizer.optimize(
+        import_prices=[0.091, 0.20, 0.30, 0.30], export_prices=[0.0] * 4,
+        solar_forecast=solar, load_forecast=[0.0, 1.0, 6.0, 0.0],
+        current_soc=0.052, disable_idle=True,
+        block_battery_charge=[False, blocked, False, False],
+    )
+    assert result.schedule.actions[0].action == "charge"
+    assert result.grid_import_w[0] > 100.0
+    assert result.grid_import_w[2] == pytest.approx(0.0, abs=0.1)
+
+
 def test_greedy_charge_by_time_preserves_rolling_target_margin(
     battery_optimizer_module, monkeypatch
 ):
@@ -5177,8 +5279,12 @@ def test_greedy_manual_solar_credit_is_limited_by_actual_charge_room(
         acquisition_cost_known_zero=True,
         allow_battery_export=[False] * 36 + [True] * 12 + [False] * 12,
         manual_control={
-            "mode_slots": [None] * 24 + ["charge"] * 12 + [None] * 24,
-            "required_charge_kw": [0.0] * 24 + [5.0] * 12 + [0.0] * 24,
+            # Explicit grid prefill establishes partial PV headroom without
+            # relying on the fallback making an unnecessary paid purchase.
+            "mode_slots": ["charge"] * 12 + [None] * 12
+            + ["charge"] * 12 + [None] * 24,
+            "required_charge_kw": [5.0] * 12 + [0.0] * 12
+            + [5.0] * 12 + [0.0] * 24,
         },
     )
     assert result.solver_used == "greedy"
