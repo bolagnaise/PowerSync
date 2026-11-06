@@ -7,6 +7,17 @@ forecast, household load forecast, battery limits, and configured reserve floors
 Solar forecasting via Solcast or Open-Meteo Solar Forecast should be configured
 for accurate schedules.
 
+### Tesla force-discharge prices
+
+From v2.12.1642, configure **Force-discharge buy price ($/kWh)** and **Force-discharge sell price ($/kWh)** under **Settings > Devices & Services > PowerSync > Configure > Smart Optimization > Dispatch behaviour**. These fields appear only for Tesla Powerwall sites and have moved out of Tesla API connection. Existing saved values are retained.
+
+These are temporary prices sent to Tesla to trigger force discharge for both optimiser and manual sessions. They are not retail/feed-in tariffs or price thresholds for the optimiser's charge/discharge decisions. Changes apply to the next force-discharge session. Force charge continues to use fixed $0/kWh buy and sell prices.
+
+| Control | Default | Allowed values |
+| --- | --- | --- |
+| Force-discharge buy price ($/kWh) | $0.55/kWh | $0–$99/kWh |
+| Force-discharge sell price ($/kWh) | $25.00/kWh | Above the buy price, up to $99/kWh |
+
 ## Solcast forecast refreshes
 
 PowerSync processes Solcast's full cached forecast in the background so that

@@ -9,13 +9,13 @@
   },
   "source_state": {
     "components": {
-      "config_flow.py": "87a1825b30bdf180803c9c47b97523f93cff7c812ea6dd97decbebdbfdf2b2ec",
+      "config_flow.py": "d6aeab08102c41e0d5c128efa54106176f192746519ace7cabf47b2b4a1a50d0",
       "const.py": "767a6a9dd0a051c625f80ec7899ebd810c4f7d17af9f4ea527ffa14bbcdea870",
       "battery_backend/profiles.py": "d308ecc78740d8dfc9cd895e4b9750a02859d46e5f0863dd5c098b8aaab2bcc2",
       "battery_backend/discovery.py": "3a8c88c00d6c57f6101d55056968524d7971d1ac3b8e16365923bca978f9489b",
       "settings_metadata.py": "deea4c452dd3cd334d5e1b9348e0ead03891542128c4061c368ad6e1c012ffd9",
-      "strings.json": "eaae07cebed0017beab9524b16e6474d2cd5151847af2a9c9705f57750945b69",
-      "translations/en.json": "f99c712d7c163bc17da632d26f608a5f43b2c877dc958ec109b04a78f91e99c2",
+      "strings.json": "483eb1be00bfc7769db5b53d90d4dbd4d1ae0cbdfdcf923278f7633279adff68",
+      "translations/en.json": "ef35db2899dd2b66f8890c8a192075f3a12d36745a23da42cce6547be78a337b",
       "services.yaml": "c7ea47087517440830059ac333ec6c0ec92cb9b4df5669b8c45693a14c3d06bb",
       "switch.py": "47862ce86c00f58c880b4450bbcd1fa1ef81aa195ff736fa64e67e5ca8475c48",
       "select.py": "8d5d7dbd06e0919d3ba84b52660f342dde1583bf9d8d57c2bb5bcbd2ca655d99",
@@ -526,8 +526,6 @@
       "config.tesla_ev_teslemetry_token.tesla_ev_teslemetry_token": "Teslemetry API token",
       "config.tesla_provider.tesla_api_provider": "Powerwall API provider",
       "config.tesla_provider.tesla_ev_api_provider": "Vehicle API provider",
-      "config.tesla_provider.tesla_force_discharge_buy_price": "Force-discharge buy price ($/kWh)",
-      "config.tesla_provider.tesla_force_discharge_sell_price": "Force-discharge sell price ($/kWh)",
       "config.teslemetry.teslemetry_api_token": "API token",
       "config.teslemetry_reauth.teslemetry_api_token": "Teslemetry API token",
       "config.weather_setup.openweathermap_api_key": "OpenWeatherMap API key",
@@ -958,6 +956,8 @@
       "options.optimization.optimization_spread_export_enabled": "Spread export across window",
       "options.optimization.optimization_spread_import_enabled": "Spread import across window",
       "options.optimization.profit_max_enabled": "Enable Profit Max",
+      "options.optimization.tesla_force_discharge_buy_price": "Force-discharge buy price ($/kWh)",
+      "options.optimization.tesla_force_discharge_sell_price": "Force-discharge sell price ($/kWh)",
       "options.optimizer_access.action": "Action",
       "options.options_tesla_ev_token.tesla_ev_teslemetry_token": "Teslemetry API token",
       "options.powersync_token.teslemetry_api_token": "PowerSync token",
@@ -1006,8 +1006,6 @@
       "options.tesla_connection.powerwall_local_ip": "Powerwall gateway IP address",
       "options.tesla_connection.tesla_api_provider": "Powerwall API provider",
       "options.tesla_connection.tesla_ev_api_provider": "Vehicle API provider",
-      "options.tesla_connection.tesla_force_discharge_buy_price": "Force-discharge buy price ($/kWh)",
-      "options.tesla_connection.tesla_force_discharge_sell_price": "Force-discharge sell price ($/kWh)",
       "options.tesla_connection.update_teslemetry_token": "New API token (leave blank to keep current)",
       "options.tesla_site.tesla_energy_site_id": "Tesla energy site",
       "options.teslemetry_token.teslemetry_api_token": "API token",
@@ -3718,20 +3716,20 @@
     {
       "scope": "config",
       "form": "tesla_provider",
-      "field": "tesla_force_discharge_buy_price",
-      "label": "Force-discharge buy price ($/kWh)",
+      "field": "tesla_api_provider",
+      "label": "Powerwall API provider",
       "page": "Battery-Tesla-Powerwall.md",
-      "source_line": 6398,
+      "source_line": 6381,
       "group": null,
       "rendering": "conditional union; see page availability notes"
     },
     {
       "scope": "config",
       "form": "tesla_provider",
-      "field": "tesla_force_discharge_sell_price",
-      "label": "Force-discharge sell price ($/kWh)",
+      "field": "tesla_ev_api_provider",
+      "label": "Vehicle API provider",
       "page": "Battery-Tesla-Powerwall.md",
-      "source_line": 6405,
+      "source_line": 6389,
       "group": null,
       "rendering": "conditional union; see page availability notes"
     },
@@ -3758,26 +3756,6 @@
     {
       "scope": "config",
       "form": "tesla_provider",
-      "field": "tesla_force_discharge_buy_price",
-      "label": "Force-discharge buy price ($/kWh)",
-      "page": "Battery-Tesla-Powerwall.md",
-      "source_line": 6398,
-      "group": null,
-      "rendering": "conditional union; see page availability notes"
-    },
-    {
-      "scope": "config",
-      "form": "tesla_provider",
-      "field": "tesla_force_discharge_sell_price",
-      "label": "Force-discharge sell price ($/kWh)",
-      "page": "Battery-Tesla-Powerwall.md",
-      "source_line": 6405,
-      "group": null,
-      "rendering": "conditional union; see page availability notes"
-    },
-    {
-      "scope": "config",
-      "form": "tesla_provider",
       "field": "tesla_api_provider",
       "label": "Powerwall API provider",
       "page": "Battery-Tesla-Powerwall.md",
@@ -3798,26 +3776,6 @@
     {
       "scope": "config",
       "form": "tesla_provider",
-      "field": "tesla_force_discharge_buy_price",
-      "label": "Force-discharge buy price ($/kWh)",
-      "page": "Battery-Tesla-Powerwall.md",
-      "source_line": 6398,
-      "group": null,
-      "rendering": "conditional union; see page availability notes"
-    },
-    {
-      "scope": "config",
-      "form": "tesla_provider",
-      "field": "tesla_force_discharge_sell_price",
-      "label": "Force-discharge sell price ($/kWh)",
-      "page": "Battery-Tesla-Powerwall.md",
-      "source_line": 6405,
-      "group": null,
-      "rendering": "conditional union; see page availability notes"
-    },
-    {
-      "scope": "config",
-      "form": "tesla_provider",
       "field": "tesla_api_provider",
       "label": "Powerwall API provider",
       "page": "Battery-Tesla-Powerwall.md",
@@ -3832,66 +3790,6 @@
       "label": "Vehicle API provider",
       "page": "Battery-Tesla-Powerwall.md",
       "source_line": 6389,
-      "group": null,
-      "rendering": "conditional union; see page availability notes"
-    },
-    {
-      "scope": "config",
-      "form": "tesla_provider",
-      "field": "tesla_force_discharge_buy_price",
-      "label": "Force-discharge buy price ($/kWh)",
-      "page": "Battery-Tesla-Powerwall.md",
-      "source_line": 6398,
-      "group": null,
-      "rendering": "conditional union; see page availability notes"
-    },
-    {
-      "scope": "config",
-      "form": "tesla_provider",
-      "field": "tesla_force_discharge_sell_price",
-      "label": "Force-discharge sell price ($/kWh)",
-      "page": "Battery-Tesla-Powerwall.md",
-      "source_line": 6405,
-      "group": null,
-      "rendering": "conditional union; see page availability notes"
-    },
-    {
-      "scope": "config",
-      "form": "tesla_provider",
-      "field": "tesla_api_provider",
-      "label": "Powerwall API provider",
-      "page": "Battery-Tesla-Powerwall.md",
-      "source_line": 6381,
-      "group": null,
-      "rendering": "conditional union; see page availability notes"
-    },
-    {
-      "scope": "config",
-      "form": "tesla_provider",
-      "field": "tesla_ev_api_provider",
-      "label": "Vehicle API provider",
-      "page": "Battery-Tesla-Powerwall.md",
-      "source_line": 6389,
-      "group": null,
-      "rendering": "conditional union; see page availability notes"
-    },
-    {
-      "scope": "config",
-      "form": "tesla_provider",
-      "field": "tesla_force_discharge_buy_price",
-      "label": "Force-discharge buy price ($/kWh)",
-      "page": "Battery-Tesla-Powerwall.md",
-      "source_line": 6398,
-      "group": null,
-      "rendering": "conditional union; see page availability notes"
-    },
-    {
-      "scope": "config",
-      "form": "tesla_provider",
-      "field": "tesla_force_discharge_sell_price",
-      "label": "Force-discharge sell price ($/kWh)",
-      "page": "Battery-Tesla-Powerwall.md",
-      "source_line": 6405,
       "group": null,
       "rendering": "conditional union; see page availability notes"
     },
@@ -5132,26 +5030,6 @@
       "label": "Powerwall gateway IP address",
       "page": "Battery-Tesla-Powerwall.md",
       "source_line": 10464,
-      "group": null,
-      "rendering": "conditional union; see page availability notes"
-    },
-    {
-      "scope": "options",
-      "form": "tesla_connection",
-      "field": "tesla_force_discharge_buy_price",
-      "label": "Force-discharge buy price ($/kWh)",
-      "page": "Battery-Tesla-Powerwall.md",
-      "source_line": 10468,
-      "group": null,
-      "rendering": "conditional union; see page availability notes"
-    },
-    {
-      "scope": "options",
-      "form": "tesla_connection",
-      "field": "tesla_force_discharge_sell_price",
-      "label": "Force-discharge sell price ($/kWh)",
-      "page": "Battery-Tesla-Powerwall.md",
-      "source_line": 10475,
       "group": null,
       "rendering": "conditional union; see page availability notes"
     },
@@ -8834,6 +8712,26 @@
       "source_line": 2099,
       "group": null,
       "rendering": "conditional union; see page availability notes"
+    },
+    {
+      "scope": "options",
+      "form": "optimization",
+      "field": "tesla_force_discharge_buy_price",
+      "label": "Force-discharge buy price ($/kWh)",
+      "page": "Optimization-Settings.md",
+      "source_line": 13298,
+      "group": "dispatch_behaviour",
+      "rendering": "Tesla Powerwall only; also available with native optimization mode"
+    },
+    {
+      "scope": "options",
+      "form": "optimization",
+      "field": "tesla_force_discharge_sell_price",
+      "label": "Force-discharge sell price ($/kWh)",
+      "page": "Optimization-Settings.md",
+      "source_line": 13305,
+      "group": "dispatch_behaviour",
+      "rendering": "Tesla Powerwall only; also available with native optimization mode"
     }
   ],
   "profiles": [
@@ -10964,14 +10862,6 @@
       "page": "Battery-Tesla-Powerwall",
       "status": "documented"
     },
-    "config.tesla_provider.tesla_force_discharge_buy_price": {
-      "page": "Battery-Tesla-Powerwall",
-      "status": "documented"
-    },
-    "config.tesla_provider.tesla_force_discharge_sell_price": {
-      "page": "Battery-Tesla-Powerwall",
-      "status": "documented"
-    },
     "config.teslemetry.teslemetry_api_token": {
       "page": "Battery-Tesla-Powerwall",
       "status": "documented"
@@ -12884,14 +12774,6 @@
       "page": "Battery-Tesla-Powerwall",
       "status": "documented"
     },
-    "options.tesla_connection.tesla_force_discharge_buy_price": {
-      "page": "Battery-Tesla-Powerwall",
-      "status": "documented"
-    },
-    "options.tesla_connection.tesla_force_discharge_sell_price": {
-      "page": "Battery-Tesla-Powerwall",
-      "status": "documented"
-    },
     "options.tesla_connection.update_teslemetry_token": {
       "status": "source_text_only",
       "reason": "Not in the active source-schema field reference; legacy/helper/conditional text is not proof of a visible control. Review this exclusion on source change."
@@ -12958,6 +12840,14 @@
     },
     "options.zaptec_cloud_options.zaptec_username": {
       "page": "EV-Smart-Charging",
+      "status": "documented"
+    },
+    "options.optimization.tesla_force_discharge_buy_price": {
+      "page": "Optimization-Settings",
+      "status": "documented"
+    },
+    "options.optimization.tesla_force_discharge_sell_price": {
+      "page": "Optimization-Settings",
       "status": "documented"
     }
   }
