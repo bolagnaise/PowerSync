@@ -355,7 +355,7 @@ namespace esphome
             int wakeVehicle(void);
             int lockVehicle (VCSEC_RKEAction_E lock);
             void placeAtFrontOfQueue (UniversalMessage_Domain domain, std::function<int()> execute, std::string execute_name, BLE_CarServer_VehicleAction action = BLE_CarServer_VehicleAction::DO_NOTHING);
-    
+
             int sendVCSECActionMessage(VCSEC_RKEAction_E action);
             int sendVCSECClosureMoveRequestMessage (int moveWhat, VCSEC_ClosureMoveType_E moveType);
             int sendCarServerVehicleActionMessage(BLE_CarServer_VehicleAction action, int param, uint64_t long_param = 0);

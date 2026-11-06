@@ -206,7 +206,7 @@ async def to_code(config):
     if CONF_CABIN_OVERHEAT_LIMIT in config:
         sel = await cg.get_variable(config[CONF_CABIN_OVERHEAT_LIMIT])
         cg.add(var.set_cabin_overheat_temp_select(sel))
-        
+
     # 🔁 Auto-register all sensors
     for key, spec in SENSORS.items():
         if key not in config:

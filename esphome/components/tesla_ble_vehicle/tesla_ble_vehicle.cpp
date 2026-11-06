@@ -319,7 +319,7 @@ namespace esphome
           pop_command_and_tidy_up ();
           return;
         }
-        else if ((current_command.done_times == 0) and ((now - current_command.last_tx_at) > RX_TIMEOUT)) 
+        else if ((current_command.done_times == 0) and ((now - current_command.last_tx_at) > RX_TIMEOUT))
         { // Allow some time for the (un)lock command to do its thing before checking if it's worked
           int result = this->sendVCSECInformationRequest();
           if (result != 0)
@@ -501,7 +501,7 @@ namespace esphome
       int return_code = tesla_ble_client_->parseUniversalMessageBLE (this->ble_read_buffer_.data(), this->ble_read_buffer_.size(), &read_queue_message_);
       if (return_code != 0)
       {
-        this->ble_read_buffer_.clear();         // This will set the size to 0 
+        this->ble_read_buffer_.clear();         // This will set the size to 0
         ESP_LOGW(TAG, "BLE RX: Failed to parse incoming message");
         return; // Parsing has failed so don't add it to the response queue and let the command time out
       }
@@ -1006,7 +1006,7 @@ namespace esphome
 
         ESP_LOGI (TAG, "Reading INFOTAINMENT, previous_asleep_state_=%d, car_just_woken_=%d, car_is_charging_=%d, Unlocked=%d, User=%d, fast_poll_if_unlocked_=%d",
                   previous_asleep_state_, car_just_woken_, car_is_charging_, binary_sensors_[static_cast<size_t>(BinarySensorId::IsUnlocked)]->state, binary_sensors_[static_cast<size_t>(BinarySensorId::IsUserPresent)]->state, fast_poll_if_unlocked_);
-        
+
         //if (car_just_woken_ or OneOffUpdate or car_is_charging_ or this->is_unlocked_->state or this->is_user_present_->state)
         if (one_off_update_ or (binary_sensors_[static_cast<size_t>(BinarySensorId::IsUnlocked)]->state and (fast_poll_if_unlocked_ > 0)) or binary_sensors_[static_cast<size_t>(BinarySensorId::IsUserPresent)]->state)
         { // For these fastest poll rate is used
@@ -1494,7 +1494,7 @@ namespace esphome
           return -1;
       }
       ESP_LOGI(TAG, "Adding %s command to queue", lock_command.c_str());
-      placeAtFrontOfQueue (UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY, 
+      placeAtFrontOfQueue (UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY,
         [this, lock]()
         {
           int return_code = this->sendVCSECActionMessage(lock);
@@ -1778,7 +1778,7 @@ namespace esphome
               ESP_LOGI (TAG, "No data to set car battery level");
             }
             if (carserver_response.response_msg.vehicleData.charge_state.which_optional_charger_actual_current)
-            {            
+            {
               publishSensor (NumericSensorId::ChargeCurrent, carserver_response.response_msg.vehicleData.charge_state.optional_charger_actual_current.charger_actual_current);
             }
             else
@@ -1786,7 +1786,7 @@ namespace esphome
               ESP_LOGI (TAG, "No data to set actual current");
             }
             if (carserver_response.response_msg.vehicleData.charge_state.which_optional_charger_voltage)
-            {            
+            {
               publishSensor (NumericSensorId::ChargeVoltage, carserver_response.response_msg.vehicleData.charge_state.optional_charger_voltage.charger_voltage);
             }
             else
@@ -1794,7 +1794,7 @@ namespace esphome
               ESP_LOGI (TAG, "No data to set charger voltage");
             }
             if (carserver_response.response_msg.vehicleData.charge_state.which_optional_charger_power)
-            {            
+            {
               publishSensor (NumericSensorId::ChargePower, carserver_response.response_msg.vehicleData.charge_state.optional_charger_power.charger_power);
             }
             else
@@ -1802,7 +1802,7 @@ namespace esphome
               ESP_LOGI (TAG, "No data to set charger power");
             }
             if (carserver_response.response_msg.vehicleData.charge_state.which_optional_charge_limit_soc)
-            {            
+            {
               publishSensor (NumericSensorId::MaxSoc, carserver_response.response_msg.vehicleData.charge_state.optional_charge_limit_soc.charge_limit_soc);
             }
             else
@@ -1810,7 +1810,7 @@ namespace esphome
               ESP_LOGI (TAG, "No data to set soc limit");
             }
             if (carserver_response.response_msg.vehicleData.charge_state.which_optional_charging_amps)
-            {            
+            {
               publishSensor (NumericSensorId::MaxAmps, carserver_response.response_msg.vehicleData.charge_state.optional_charging_amps.charging_amps);
             }
             else
@@ -1818,7 +1818,7 @@ namespace esphome
               ESP_LOGI (TAG, "No data to set charging amps");
             }
             if (carserver_response.response_msg.vehicleData.charge_state.which_optional_minutes_to_charge_limit)
-            {            
+            {
               publishSensor (NumericSensorId::MinsToLimit, carserver_response.response_msg.vehicleData.charge_state.optional_minutes_to_charge_limit.minutes_to_charge_limit);
             }
             else
@@ -1826,7 +1826,7 @@ namespace esphome
               ESP_LOGI (TAG, "No data to set minutes to charge limit");
             }
             if (carserver_response.response_msg.vehicleData.charge_state.which_optional_battery_range)
-            {            
+            {
               publishSensor (NumericSensorId::BatteryRange, carserver_response.response_msg.vehicleData.charge_state.optional_battery_range.battery_range);
             }
             else
@@ -1834,7 +1834,7 @@ namespace esphome
               ESP_LOGI (TAG, "No data to set battery range");
             }
             if (carserver_response.response_msg.vehicleData.charge_state.which_optional_charge_energy_added)
-            {            
+            {
               publishSensor (NumericSensorId::ChargeEnergyAdded, carserver_response.response_msg.vehicleData.charge_state.optional_charge_energy_added.charge_energy_added);
             }
             else
@@ -1842,7 +1842,7 @@ namespace esphome
               ESP_LOGI (TAG, "No data to set energy added");
             }
             if (carserver_response.response_msg.vehicleData.charge_state.which_optional_charge_miles_added_ideal)
-            {            
+            {
               publishSensor (NumericSensorId::ChargeDistanceAdded, carserver_response.response_msg.vehicleData.charge_state.optional_charge_miles_added_ideal.charge_miles_added_ideal);
             }
             else
@@ -1850,7 +1850,7 @@ namespace esphome
               ESP_LOGI (TAG, "No data to set miles added");
             }
             if (carserver_response.response_msg.vehicleData.charge_state.which_optional_charger_phases)
-            {            
+            {
               publishSensor (NumericSensorId::ChargerPhases, carserver_response.response_msg.vehicleData.charge_state.optional_charger_phases.charger_phases);
             }
             else
@@ -1858,7 +1858,7 @@ namespace esphome
               ESP_LOGI (TAG, "No data to set charger phases");
             }
             if (carserver_response.response_msg.vehicleData.charge_state.which_optional_charge_rate_mph)
-            {            
+            {
               publishSensor (NumericSensorId::ChargeRate, carserver_response.response_msg.vehicleData.charge_state.optional_charge_rate_mph.charge_rate_mph);
             }
             else
@@ -1895,7 +1895,7 @@ namespace esphome
               ESP_LOGI (TAG, "No data to set charging state");
             }
             if (carserver_response.response_msg.vehicleData.charge_state.has_charge_port_latch)
-            {            
+            {
               std::string charge_port_latch_state_text = lookup_charge_port_latch_state (carserver_response.response_msg.vehicleData.charge_state.charge_port_latch.which_type);
               publishSensor (TextSensorId::ChargePortLatchState, charge_port_latch_state_text.c_str());
             }
@@ -2123,7 +2123,7 @@ namespace esphome
                     {"schedules", schedules_json_} });
           }
           break;
-        case 0: // No data in the response but presumably otherwise ok (controls) 
+        case 0: // No data in the response but presumably otherwise ok (controls)
           break;
         default:
           ESP_LOGW (TAG, "[handleInfoCarServerResponse] Non vehicle data response %d", carserver_response.which_response_msg);

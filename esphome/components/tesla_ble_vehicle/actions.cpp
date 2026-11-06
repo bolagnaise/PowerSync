@@ -91,7 +91,7 @@ int TeslaBLEVehicle::actions_buildCarServerVehicleActionMessage (
 	auto& vehicle_action_msg_ = actions_action_message_.action_msg.vehicleAction.vehicle_action_msg; // For legibility
 	switch (which_tag)
 	{
-	case CarServer_VehicleAction_setChargingAmpsAction_tag: 
+	case CarServer_VehicleAction_setChargingAmpsAction_tag:
 		vehicle_action_msg_.setChargingAmpsAction               = CarServer_SetChargingAmpsAction_init_default;
 		vehicle_action_msg_.setChargingAmpsAction.charging_amps = set_value;
 		break;
@@ -276,7 +276,7 @@ int TeslaBLEVehicle::actions_setChargeSchedule (
         schedule.latitude =       latitude;
         schedule.longitude =      longitude;
 
-  		ESP_LOGW (TAG,
+        ESP_LOGW (TAG,
           "Schedule details to create:\n"
           " id = %" PRIu64 "\n"
           " name = %s\n"
@@ -310,15 +310,15 @@ int TeslaBLEVehicle::actions_setChargeSchedule (
             auto session = tesla_ble_client_->getPeer (UniversalMessage_Domain_DOMAIN_INFOTAINMENT);
             if (status == TeslaBLE::TeslaBLE_Status_E_ERROR_INVALID_SESSION)
             {
-            	invalidateSession (UniversalMessage_Domain_DOMAIN_INFOTAINMENT);
+                invalidateSession (UniversalMessage_Domain_DOMAIN_INFOTAINMENT);
             }
             return status;
         }
         status = writeBLE (static_message_buffer_, message_length, ESP_GATT_WRITE_TYPE_NO_RSP, ESP_GATT_AUTH_REQ_NONE);
         if (status != 0)
         {
-          	ESP_LOGE (TAG, "Failed to send set charge schedule message");
-        	return status;
+            ESP_LOGE (TAG, "Failed to send set charge schedule message");
+            return status;
         }
         return static_cast<int>(TeslaBLE::TeslaBLE_Status_E_OK);
       };
