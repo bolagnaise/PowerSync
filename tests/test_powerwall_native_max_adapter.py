@@ -1700,10 +1700,14 @@ async def test_amber_uncertain_replacement_survives_restart_without_overtaking(s
         restarted = type(s.session)(s.adapter, s.store, clock=lambda: s.state.at,
                                     monotonic=lambda: s.state.at)
         s.adapter.upload = original_upload
-        async def no_second_fetch(): raise AssertionError('Uncertain upload must reconcile first')
-        s.adapter.normal_tariff_source = no_second_fetch
+        retry_target = {**fresh, 'name': 'New Amber prices after failed normal replacement'}
+        async def current_source():
+            if arrived or not live:
+                raise AssertionError('Confirmed target or unavailable capability must not fetch again')
+            return deepcopy(retry_target), lambda: True
+        s.adapter.normal_tariff_source = current_source
         s.adapter.normal_tariff_allowed = lambda: live
-        if not arrived:
+        if not arrived and not live:
             with pytest.raises(s.m.NativeMaxChargeError): await restarted.recover()
             assert s.budget.native_max_claim('site')
             assert s.store.data['tariff_intent'] == 'baseline'
@@ -1711,6 +1715,181 @@ async def test_amber_uncertain_replacement_survives_restart_without_overtaking(s
         assert await restarted.recover()
         assert s.store.data is None and s.budget.native_max_claim('site') is None
         assert calls == [fresh]
+        assert s.state.tariff == (retry_target if not arrived and live else fresh)
+    finally:
+        await recovered._cancel_watch()
+        if 'restarted' in locals(): await restarted._cancel_watch()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('restart', [False, True])
+async def test_amber_failed_normal_upload_retries_fresh_schedule_under_owned_force(setup, restart):
+    s = setup
+    recovered, old_normal = await live_amber_recovery(s)
+    original_upload = s.adapter.upload
+    s.state.upload_ok = False
+    try:
+        with pytest.raises(s.m.NativeMaxChargeError):
+            await recovered.recover()
+        assert s.store.data['tariff_intent'] == 'baseline'
+        assert s.store.data['normal_tariff'] == old_normal
+        assert s.state.tariff == s.session.record['baseline']['forcing_tariff']
+        await recovered._cancel_watch()
+        fresh = {**old_normal, 'name': 'Amber schedule rebuilt after failed upload'}
+        async def source(): return deepcopy(fresh), lambda: True
+        s.adapter.normal_tariff_source = source
+        s.adapter.upload = original_upload
+        s.state.upload_ok = True
+        s.state.events.clear()
+        controller = type(s.session)(s.adapter, s.store, clock=lambda:s.state.at,
+                                     monotonic=lambda:s.state.at) if restart else recovered
+        assert await controller.recover()
+        assert s.state.tariff == fresh
+        assert [value for kind,value in s.state.events if kind == 'tariff'] == [fresh]
+        assert s.store.data is None and not s.budget.native_max_claim('site')
+    finally:
+        await recovered._cancel_watch()
+        if 'controller' in locals(): await controller._cancel_watch()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('observed', ['foreign_force', 'foreign_normal', 'missing', 'invalid'])
+async def test_amber_pending_normal_retry_preserves_unknown_or_foreign_tariff(setup, observed):
+    s = setup
+    recovered, old_normal = await live_amber_recovery(s)
+    s.state.upload_ok = False
+    try:
+        with pytest.raises(s.m.NativeMaxChargeError): await recovered.recover()
+        await recovered._cancel_watch()
+        s.state.tariff = {'foreign_force': {'code': 'CHARGE_FORCE_other'},
+                         'foreign_normal': {'code': 'REAL'}, 'missing': None,
+                         'invalid': {'code': 'POWER_SYNC:AMBER', 'broken': True}}[observed]
+        s.adapter.restorable = lambda t: isinstance(t, dict) and not t.get('broken') and t.get('code') in {'REAL', 'POWER_SYNC:AMBER'}
+        async def forbidden(): raise AssertionError('Foreign or unavailable readback cannot authorize fresh retry')
+        s.adapter.normal_tariff_source = forbidden
+        s.state.events.clear()
+        with pytest.raises(s.m.NativeMaxChargeError): await recovered.recover()
+        assert s.store.data['tariff_intent'] == 'baseline'
+        assert s.store.data['normal_tariff'] == old_normal
+        assert s.budget.native_max_claim('site') and not s.state.events
+    finally:
+        await recovered._cancel_watch()
+
+
+@pytest.mark.asyncio
+async def test_amber_uncertain_forcing_upload_still_waits_for_exact_force_readback(setup):
+    s = setup
+    recovered, _ = await live_amber_recovery(s)
+    s.store.data['tariff_intent'] = 'forcing'
+    s.state.tariff = {'code': 'POWER_SYNC:AMBER', 'name': 'Prior normal tariff'}
+    async def forbidden(): raise AssertionError('Uncertain forcing cannot be overtaken')
+    s.adapter.normal_tariff_source = forbidden
+    s.state.events.clear()
+    try:
+        with pytest.raises(s.m.NativeMaxChargeError): await recovered.recover()
+        assert s.store.data['tariff_intent'] == 'forcing'
+        assert s.budget.native_max_claim('site')
+        assert not [event for event in s.state.events if event[0] == 'tariff']
+        assert s.state.config == s.original[0]
+    finally:
+        await recovered._cancel_watch()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('stage', ['source_pairing', 'source_claim', 'source_disabled',
+                                  'source_foreign', 'saved_foreign', 'saved_claim'])
+async def test_amber_pending_normal_retry_rechecks_before_post(setup, stage):
+    s = setup
+    recovered, old_normal = await live_amber_recovery(s)
+    s.state.upload_ok = False
+    enabled = [True]
+    try:
+        with pytest.raises(s.m.NativeMaxChargeError): await recovered.recover()
+        await recovered._cancel_watch()
+        fresh = {**old_normal, 'name': 'Fresh retry target'}
+        def change():
+            if stage.endswith('pairing'): s.state.identity = 'replacement'
+            elif stage.endswith('claim'): s.budget.entries['native_max:battery']['native_max']['token'] = 'other'
+            elif stage.endswith('disabled'): enabled[0] = False
+            else: s.state.tariff = {'code': 'CHARGE_FORCE_other'}
+        async def source():
+            if stage.startswith('source_'): change()
+            return deepcopy(fresh), lambda: True
+        s.adapter.normal_tariff_source = source
+        s.adapter.normal_tariff_allowed = lambda: enabled[0]
+        save = s.store.async_save
+        async def changed_save(data):
+            await save(data)
+            if data and data.get('normal_tariff') == fresh and stage.startswith('saved_'): change()
+        s.store.async_save = changed_save
+        s.state.upload_ok = True
+        s.state.events.clear()
+        with pytest.raises(s.m.NativeMaxChargeError): await recovered.recover()
+        assert s.store.data['tariff_intent'] == 'baseline'
+        assert s.budget.native_max_claim('site') and not s.state.events
+    finally:
+        await recovered._cancel_watch()
+
+
+@pytest.mark.asyncio
+async def test_amber_interrupted_retry_rebuilds_when_prior_normal_target_arrives(setup):
+    s = setup
+    recovered, old_normal = await live_amber_recovery(s)
+    s.state.upload_ok = False
+    try:
+        with pytest.raises(s.m.NativeMaxChargeError): await recovered.recover()
+        await recovered._cancel_watch()
+        persisted = {**old_normal, 'name': 'New target persisted before interrupted POST'}
+        await recovered._write_intent('normal_tariff_retry', persisted)
+        s.state.tariff = deepcopy(old_normal)  # Earlier normal POST arrives.
+        restarted = type(s.session)(s.adapter, s.store, clock=lambda:s.state.at, monotonic=lambda:s.state.at)
+        newest = {**old_normal, 'name': 'Current prices after restart'}
+        async def source(): return deepcopy(newest), lambda: True
+        s.adapter.normal_tariff_source = source
+        s.state.upload_ok = True
+        s.state.events.clear()
+        assert await restarted.recover()
+        assert s.state.tariff == newest
+        assert [v for k,v in s.state.events if k == 'tariff'] == [newest]
+        assert s.store.data is None and not s.budget.native_max_claim('site')
+    finally:
+        await recovered._cancel_watch()
+        if 'restarted' in locals(): await restarted._cancel_watch()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('failure', ['unconfirmed', 'exception'])
+async def test_amber_retry_keeps_fresh_intent_through_repeated_upload_failure(setup, failure):
+    s = setup
+    recovered, old_normal = await live_amber_recovery(s)
+    s.state.upload_ok = False
+    original_upload = s.adapter.upload
+    try:
+        with pytest.raises(s.m.NativeMaxChargeError): await recovered.recover()
+        await recovered._cancel_watch()
+        fresh = {**old_normal, 'name': 'Current retry target'}
+        async def source(): return deepcopy(fresh), lambda: True
+        s.adapter.normal_tariff_source = source
+        if failure == 'exception':
+            async def uncertain(tariff, before_write):
+                fence = await before_write()
+                fence()
+                raise OSError('lost retry acknowledgement')
+            s.adapter.upload = uncertain
+        with pytest.raises((s.m.NativeMaxChargeError, OSError)): await recovered.recover()
+        assert s.store.data['tariff_intent'] == 'baseline'
+        assert s.store.data['normal_tariff'] == fresh
+        assert s.budget.native_max_claim('site')
+        await recovered._cancel_watch()
+        newest = {**fresh, 'name': 'Current prices after provider recovers'}
+        async def newest_source(): return deepcopy(newest), lambda: True
+        s.adapter.normal_tariff_source = newest_source
+        s.adapter.upload = original_upload
+        s.state.upload_ok = True
+        restarted = type(s.session)(s.adapter, s.store, clock=lambda:s.state.at, monotonic=lambda:s.state.at)
+        assert await restarted.recover()
+        assert s.state.tariff == newest
+        assert s.store.data is None and not s.budget.native_max_claim('site')
     finally:
         await recovered._cancel_watch()
         if 'restarted' in locals(): await restarted._cancel_watch()

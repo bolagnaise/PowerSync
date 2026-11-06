@@ -84,8 +84,13 @@ Monitoring Mode and Amber SmartShift retain their existing ownership rules.
 The replacement includes the current price, forecast and configured tariff
 adjustments. Failed Amber refreshes retain recovery for retry without replaying
 old prices. A submitted replacement is saved before sending and confirmed after
-upload; an uncertain request must be reconciled before another is submitted.
-Pairing/site ownership, mode/reserve cleanup and physical settling still apply.
+upload. If a normal Amber replacement remains unconfirmed, cleanup can build and
+retry current prices while fresh readback still shows this session's exact force
+tariff or a recognized normal Amber tariff. This also recovers an interrupted
+retry after restart. Missing readback, foreign tariffs and uncertain forcing
+requests remain pending. Pairing/site ownership, mode/reserve cleanup and physical
+settling still apply, and the pending intent is retained until readback confirms
+the replacement.
 
 Cloud Max charging has a separate implementation and delivery history. This section describes the Home Assistant control path.
 

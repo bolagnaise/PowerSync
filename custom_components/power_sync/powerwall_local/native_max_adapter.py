@@ -1104,6 +1104,16 @@ class NativeMaxChargeAdapter:
         rather than the provider's current prices or temporary tariff code.
         """
         fresh_current = None
+        retry_normal = False
+
+        def amber_normal(tariff):
+            return (isinstance(tariff, dict) and tariff.get("code") == "POWER_SYNC:AMBER"
+                    and bool(self.restorable(tariff)))
+
+        def retry_basis(observed):
+            return (self._matches(baseline["forcing_tariff"], observed)
+                    or amber_normal(observed))
+
         # Optimizer refreshes may shorten the journal's stop deadline without
         # extending or replacing its durable site lease. Pin that exact lease
         # throughout cleanup, and require it to contain the earlier stop time.
@@ -1135,33 +1145,49 @@ class NativeMaxChargeAdapter:
                 fence()
                 allowed()
             checked()
+            if retry_normal:
+                # A fresh configured normal tariff may replace this owner's
+                # force or another normal Amber revision, never a foreign
+                # temporary tariff or an unreadable provider state.
+                observed = await self.read_tariff()
+                checked()
+                if not retry_basis(observed):
+                    raise NativeMaxChargeError("Native Max normal tariff retry readback changed")
             return checked
 
         await before_normal_upload()
         pending = baseline.get("_tariff_intent")
         previous = baseline.get("_normal_tariff")
         if pending:
-            # Do not let another upload overtake an uncertain earlier POST.
+            # An uncertain force POST must reconcile before any replacement.
+            # A failed normal Amber replacement can retry under this exact
+            # owner when fresh readback is owned force or normal Amber. Both
+            # normal revisions relinquish forcing; keep the intent until the
+            # newly persisted target has actually been confirmed.
             target = (baseline["forcing_tariff"] if pending == "forcing"
                       else previous or baseline["tariff"])
             observed = await self.read_tariff()
             await before_normal_upload()
-            if not self._matches(target, observed):
+            if self._matches(target, observed):
+                await write_intent("tariff_confirmed")
+                if pending == "baseline" and previous:
+                    return True
+            elif pending == "baseline" and amber_normal(previous) and retry_basis(observed):
+                retry_normal = True
+            else:
                 return False
-            await write_intent("tariff_confirmed")
-            if pending == "baseline" and previous:
-                return True
 
         result = await asyncio.wait_for(self.normal_tariff_source(), timeout=20)
         if not isinstance(result, tuple) or len(result) != 2 or not callable(result[1]):
             raise NativeMaxChargeError("Current normal tariff is unavailable")
         tariff, fresh_current = result
         await before_normal_upload()
-        if not isinstance(tariff, dict) or not tariff or not self.restorable(tariff):
+        if (not isinstance(tariff, dict) or not tariff or not self.restorable(tariff)
+                or (retry_normal and not amber_normal(tariff))):
             raise NativeMaxChargeError("Current normal tariff is unavailable")
         # Persist the exact replacement before recording submission, so a
         # restart can reconcile that POST without replaying yesterday's rates.
-        await write_intent("normal_tariff", tariff)
+        await write_intent("normal_tariff_retry" if retry_normal else "normal_tariff", tariff)
         return await self._upload(deepcopy(tariff), "baseline", before_normal_upload, write_intent)
 
     async def restore(self, baseline, before_write, *, write_intent):
