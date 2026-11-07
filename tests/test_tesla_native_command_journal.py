@@ -150,7 +150,7 @@ def _journal_mocks(monkeypatch, *, ticket=None, on_begin=None):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("platform", ["tesla_fleet", "teslemetry"])
+@pytest.mark.parametrize("platform", ["tesla_fleet", "teslemetry", "tessie"])
 async def test_native_ack_is_journaled_without_physical_confirmation(monkeypatch, platform):
     hass = _native_hass(monkeypatch, platform)
     finished = _journal_mocks(monkeypatch)
@@ -175,6 +175,43 @@ async def test_native_ack_is_journaled_without_physical_confirmation(monkeypatch
     assert "_tesla_transport_recovery_pending" not in params
     # The wrapper records provider acknowledgement only; the action layer owns
     # its existing physical Start readback requirement.
+
+
+@pytest.mark.asyncio
+async def test_tessie_completed_price_level_stop_reaches_native_service(monkeypatch):
+    """Ticket #410: a tracked completed EV must not be stranded before Stop."""
+    hass = _native_hass(monkeypatch, "tessie")
+    hass.states._states["sensor.car_charging"] = _State("sensor.car_charging", "complete")
+    finished = _journal_mocks(monkeypatch)
+    monkeypatch.setattr(actions, "_get_ev_config", lambda _entry: {
+        "ev_provider": actions.EV_PROVIDER_FLEET_API,
+    })
+    monkeypatch.setattr(actions, "_resolve_ble_prefix_for_vehicle", lambda *_args: "ble")
+    monkeypatch.setattr(actions, "_tesla_transport_route", AsyncMock(return_value=None))
+    monkeypatch.setattr(actions, "_tesla_transport_authority", lambda *a, **kw: lambda: True)
+    monkeypatch.setattr(actions, "_get_tesla_ev_entity", AsyncMock(side_effect=lambda h, pattern, vin: (
+        "sensor.car_charging" if pattern.startswith("sensor") else ENTITY
+    )))
+    monkeypatch.setattr(actions, "_is_api_credit_available", lambda *_args: True)
+    monkeypatch.setattr(actions, "_wake_tesla_ev_for_command", AsyncMock(return_value=True))
+    params = {"vehicle_vin": VIN, "stop_untracked": True}
+
+    assert await actions._action_stop_ev_charging.__wrapped__(hass, _Entry(), params) is True
+    assert hass.services.calls == [("switch", "turn_off", {"entity_id": ENTITY})]
+    assert finished == ["accepted_unconfirmed"]
+
+
+@pytest.mark.parametrize("change", ["vin", "disabled", "provider"])
+def test_tessie_native_binding_retains_identity_refusals(monkeypatch, change):
+    hass = _native_hass(monkeypatch, "tessie")
+    registration = hass.entity_registry.entities[ENTITY]
+    if change == "vin":
+        hass.device_registry.devices["tessie-device"].identifiers = {("tessie", "5YJ3E1EA7NF0000B2")}
+    elif change == "disabled":
+        registration.disabled_by = "user"
+    else:
+        registration.platform = "tesla_fleet"
+    assert actions._tesla_native_binding(hass, ENTITY, VIN) is None
 
 
 @pytest.mark.asyncio
@@ -905,7 +942,7 @@ async def test_native_structured_range_validation_is_the_only_retryable_error(mo
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("platform", ["tesla_fleet", "teslemetry"])
+@pytest.mark.parametrize("platform", ["tesla_fleet", "teslemetry", "tessie"])
 async def test_native_unknown_survives_reload_and_stop_without_another_start(monkeypatch, platform):
     """Exercise the real recovery journal, replacement runtime and service count."""
     import importlib
@@ -1292,7 +1329,7 @@ async def test_native_service_domain_mismatch_cannot_reach_a_provider(monkeypatc
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("platform", ["tesla_fleet", "teslemetry"])
+@pytest.mark.parametrize("platform", ["tesla_fleet", "teslemetry", "tessie"])
 async def test_terminal_native_command_does_not_pin_future_commands_away_from_ble(monkeypatch, platform):
     """A completed fallback must return the next request to configured routing."""
     import importlib
@@ -1412,7 +1449,7 @@ async def test_native_dispatch_keeps_the_value_admitted_before_journal_await(mon
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("platform", ["tesla_fleet", "teslemetry"])
+@pytest.mark.parametrize("platform", ["tesla_fleet", "teslemetry", "tessie"])
 async def test_native_start_anchor_routes_initial_rate_without_ble(monkeypatch, platform):
     """The transient Start binding wins before dynamic ownership is claimed."""
     import importlib

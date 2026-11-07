@@ -357,7 +357,7 @@ def _native_entity_for_anchor(hass, anchor, operation: str) -> str | None:
         ]
         return matches[0].entity_id if len(matches) == 1 else None
 
-    if platform != "tesla_fleet":
+    if platform not in {"tesla_fleet", "tessie"}:
         return None
     vin = _entity_vin(hass, anchor, platform)
     entry_id = getattr(anchor, "config_entry_id", None)

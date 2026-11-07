@@ -302,7 +302,8 @@ def test_native_command_entity_requires_shared_vehicle_identity(harness, operati
     assert MODULE.native_command_entity(harness.hass, command) is None
 
 
-def test_native_command_entity_resolves_exact_provider_anchor_for_all_operations(harness):
+@pytest.mark.parametrize("platform", ["tesla_fleet", "tessie"])
+def test_native_command_entity_resolves_exact_provider_anchor_for_all_operations(harness, platform):
     fleet_entry = SimpleNamespace(entry_id="fleet-a", domain="tesla_fleet")
     harness.hass.config_entries._entries.append(fleet_entry)
     fleet_device = SimpleNamespace(
@@ -321,12 +322,23 @@ def test_native_command_entity_resolves_exact_provider_anchor_for_all_operations
     ]
     harness.entities.extend(fleet_entities)
     harness.registry.entities.update({entity.entity_id: entity for entity in fleet_entities})
+    # Tessie exposes the same native switch/number controls. The provider
+    # identity must remain pinned rather than falling through to Teslemetry.
+    fleet_device.identifiers = {(platform, VIN_A)}
+    fleet_entry.domain = platform
+    for entity in fleet_entities:
+        entity.platform = platform
 
     assert MODULE.native_command_entity(harness.hass, "switch.fleet_charge", "start") == "switch.fleet_charge"
     assert MODULE.native_command_entity(harness.hass, "switch.fleet_charge", "stop") == "switch.fleet_charge"
     assert MODULE.native_command_entity(harness.hass, "number.fleet_charge_current", "rate") == "number.fleet_charge_current"
     assert MODULE.native_command_entity(harness.hass, "number.fleet_charge_limit", "limit") == "number.fleet_charge_limit"
     assert MODULE.native_command_entity(harness.hass, "number.native_current_0001", "rate") == "number.native_current_0001"
+
+    # Same-VIN entities belonging to another provider are already in the
+    # harness. Never switch to them if the selected provider loses its VIN.
+    fleet_device.identifiers = {("unrelated_provider", VIN_A)}
+    assert MODULE.native_command_entity(harness.hass, "switch.fleet_charge", "stop") is None
 
 
 @pytest.mark.parametrize(

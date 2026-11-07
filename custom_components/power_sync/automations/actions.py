@@ -6209,7 +6209,7 @@ def _tesla_native_binding(hass: HomeAssistant, entity_id: str, vehicle: Any):
     if not snapshot or len(snapshot) != 1 or len(snapshot[0]) != 6:
         return None
     identity = snapshot[0]
-    if identity[5] is not None or identity[1] not in {"tesla_fleet", "teslemetry"}:
+    if identity[5] is not None or identity[1] not in {"tesla_fleet", "teslemetry", "tessie"}:
         return None
     if any(not isinstance(value, str) or not value.strip() for value in identity[1:5]):
         return None
