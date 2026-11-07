@@ -59,6 +59,13 @@ entry and vehicle device before duplicate checks. Fleet and Teslemetry can
 publish the same VIN-derived unique IDs without masking each other's controls.
 Multiple candidates within the exact authorized scope still fail closed.
 
+Tessie native charging switches and current/limit numbers use the same exact
+provider, configuration-entry, device and VIN checks. A completed Price-Level
+session can therefore submit its cleanup Stop through Tessie instead of being
+rejected before the service call. This compatibility repair does not retire an
+uncertain earlier command or qualify Tessie for the Fleet/Teslemetry-only native
+cloud recovery observer described above.
+
 For an uncertain ESPHome mutation, PowerSync retains the exact attempt and
 quarantines its producer. It supports two recovery mechanisms: an explicit
 nonce-bound producer-fence receipt, or a qualified stock-node restart followed
