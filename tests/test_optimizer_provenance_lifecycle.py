@@ -409,3 +409,128 @@ def test_shutdown_success_flushes_without_changing_monitoring_contract(opt_modul
     asyncio.run(coordinator.disable())
     coordinator._executor.stop.assert_awaited_once_with(restore_normal=not monitoring)
     coordinator._battery_provenance_store.async_save.assert_awaited_once()
+
+
+class _MeasuredEnergySource:
+    def __init__(self):
+        self.listeners = []
+
+    def async_add_listener(self, listener):
+        self.listeners.append(listener)
+        return lambda: self.listeners.remove(listener)
+
+    def publish(self):
+        for listener in list(self.listeners):
+            listener()
+
+
+@pytest.mark.parametrize("local", [False, True])
+@pytest.mark.parametrize("charging_first", [True, False])
+def test_measured_updates_preserve_both_directions_between_solves(
+    opt_module, monkeypatch, local, charging_first
+):
+    """Ticket #154: a new mode must not price the preceding five minutes."""
+    clock = {"now": datetime(2026, 11, 7, 14, tzinfo=timezone.utc),
+             "data": {"battery_level": 50.0, "battery_power": -10.0,
+                      "grid_power": 10.0, "solar_power": 0.0}}
+    coordinator = _charging_solve_coordinator(opt_module, monkeypatch, clock)
+    source = _MeasuredEnergySource()
+    cloud = _MeasuredEnergySource() if local else source
+    coordinator.energy_coordinator = cloud
+    coordinator.hass.data["power_sync"] = {
+        coordinator.entry_id: {"powerwall_local": {"coordinator": source} if local else {}}
+    }
+    coordinator._restore_cost_data = AsyncMock()
+    coordinator._restore_battery_provenance = AsyncMock()
+    coordinator._battery_provenance_available = True
+    coordinator._battery_provenance_grid_kwh = 13.5
+    coordinator._battery_provenance_grid_cost = 1.35
+    assert asyncio.run(_setup_persistence_tail(opt_module)(coordinator))
+    coordinator._track_actual_cost()  # First observation seeds the clock.
+    energy = 13.5
+    charge, discharge, grid_cost = 0.0, 0.0, 0.0
+    for index in range(1, 103):  # 306 s, with 3 s observed samples.
+        power = -10.0 if (index <= 100) == charging_first else 2.75
+        clock["now"] += timedelta(seconds=3)
+        clock["data"].update(battery_power=power, grid_power=max(0.0, -power),
+                             last_update=clock["now"])
+        delta = power * 3 / 3600
+        energy -= delta
+        charge += max(0.0, -delta)
+        discharge += max(0.0, delta)
+        grid_cost += max(0.0, -delta) * 0.093
+        clock["data"]["battery_level"] = energy / 27 * 100
+        source.publish()
+        cloud.publish()  # Same snapshot cannot be counted twice.
+    _run_to_acquisition_cost(coordinator)
+    assert coordinator._actual_charge_kwh_today == pytest.approx(charge)
+    assert coordinator._actual_discharge_kwh_today == pytest.approx(discharge)
+    assert coordinator._actual_grid_charge_cost_today == pytest.approx(grid_cost)
+    assert coordinator._actual_import_kwh_today == pytest.approx(charge)
+    assert coordinator._battery_provenance_unknown_kwh == pytest.approx(0.0, abs=1e-9)
+    assert coordinator._battery_provenance_grid_kwh == pytest.approx(energy)
+    coordinator._stop_cost_tracking_listeners()
+    assert not source.listeners
+    assert not cloud.listeners
+
+
+def test_cost_sampling_rebinds_replaced_local_source_without_duplicate_listeners(opt_module):
+    coordinator = _shutdown_coordinator(opt_module)
+    cloud, first, replacement = (_MeasuredEnergySource() for _ in range(3))
+    coordinator.energy_coordinator = cloud
+    runtime = {"powerwall_local": {"coordinator": first}}
+    coordinator.hass.data["power_sync"] = {coordinator.entry_id: runtime}
+    calls = []
+    coordinator._track_actual_cost = lambda **kw: calls.append(kw)
+    coordinator._sync_cost_tracking_listeners()
+    coordinator._sync_cost_tracking_listeners()
+    assert len(cloud.listeners) == len(first.listeners) == 1
+    late_callback = first.listeners[0]
+    runtime["powerwall_local"]["coordinator"] = replacement
+    coordinator._sync_cost_tracking_listeners()
+    assert not first.listeners
+    assert len(replacement.listeners) == 1
+    cloud.publish()
+    replacement.publish()
+    assert calls == [{"force": True}, {"force": True}]
+    # Shutdown removes callbacks even if hardware restoration subsequently fails.
+    coordinator._executor.stop.side_effect = RuntimeError("restore unavailable")
+    with pytest.raises(RuntimeError, match="restore unavailable"):
+        asyncio.run(coordinator.disable())
+    assert not cloud.listeners
+    assert not replacement.listeners
+    late_callback()
+    assert len(calls) == 2
+    coordinator._sync_cost_tracking_listeners()
+    assert not cloud.listeners
+
+
+def test_cost_sampling_registers_shared_source_only_once(opt_module):
+    coordinator = _shutdown_coordinator(opt_module)
+    source = _MeasuredEnergySource()
+    coordinator.energy_coordinator = source
+    coordinator.hass.data["power_sync"] = {
+        coordinator.entry_id: {"powerwall_local": {"coordinator": source}}
+    }
+    coordinator._sync_cost_tracking_listeners()
+    assert len(source.listeners) == 1
+    coordinator._stop_cost_tracking_listeners()
+    assert not source.listeners
+
+
+
+def test_cost_sampling_failure_does_not_abort_other_telemetry_listeners(opt_module):
+    coordinator = _shutdown_coordinator(opt_module)
+    source = _MeasuredEnergySource()
+    coordinator.energy_coordinator = source
+    coordinator._sync_cost_tracking_listeners()
+    delivered = []
+    source.async_add_listener(lambda: delivered.append("telemetry delivered"))
+
+    def failed_accounting(**_kwargs):
+        raise ValueError("invalid measured power")
+
+    coordinator._track_actual_cost = failed_accounting
+    source.publish()
+    assert delivered == ["telemetry delivered"]
+    coordinator._stop_cost_tracking_listeners()

@@ -899,6 +899,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Price monitoring
         self._is_dynamic_pricing = False
         self._price_listener_unsub: Callable | None = None
+        self._cost_tracking_listeners: dict[int, Callable] = {}
+        self._cost_tracking_stopping = False
         # Secondary listener used only for Octopus on a non-dynamic tariff:
         # re-checks the live tariff_code on each refresh and promotes to
         # dynamic pricing if the user moves onto AGILE/FLUX/COSY.
@@ -5902,6 +5904,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 return False
 
         self._enabled = True
+        self._cost_tracking_stopping = False
+        self._sync_cost_tracking_listeners()
         self._ev_preserve_refresh_stopping = False
         _LOGGER.info("Optimization enabled (built-in LP)")
         initial_delay = max(0.0, float(INITIAL_OPTIMIZATION_DELAY_SECONDS))
@@ -6295,6 +6299,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     @restoration_work
     async def disable(self, *, licensing: bool = False) -> None:
         """Disable optimization."""
+        self._stop_cost_tracking_listeners()
         # Drain this producer before restoration, so a queued EV transition
         # cannot race shutdown cleanup or reapply a hold after it completes.
         self._ev_preserve_refresh_stopping = True
@@ -19528,6 +19533,48 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         schedule.actions = result
         return schedule
 
+    def _sync_cost_tracking_listeners(self) -> None:
+        """Consume observed energy updates between five-minute optimizer solves."""
+        if not getattr(self, "_enabled", False) or getattr(
+            self, "_cost_tracking_stopping", False
+        ):
+            return
+        runtime = self.hass.data.get(DOMAIN, {}).get(self.entry_id, {})
+        local = (runtime.get("powerwall_local") or {}).get("coordinator")
+        sources = {
+            id(source): source
+            for source in (getattr(self, "energy_coordinator", None), local)
+            if callable(getattr(source, "async_add_listener", None))
+        }
+        listeners = getattr(self, "_cost_tracking_listeners", None)
+        if listeners is None:
+            listeners = self._cost_tracking_listeners = {}
+        # Pairing can replace the local coordinator without an optimizer reload.
+        for key in list(listeners):
+            if key not in sources:
+                listeners.pop(key)()
+        for key, source in sources.items():
+            if key not in listeners:
+                listeners[key] = source.async_add_listener(self._on_cost_energy_update)
+
+    def _stop_cost_tracking_listeners(self) -> None:
+        """Stop passive accounting before awaited shutdown and final persistence."""
+        self._cost_tracking_stopping = True
+        listeners = getattr(self, "_cost_tracking_listeners", {})
+        for unsubscribe in list(listeners.values()):
+            unsubscribe()
+        listeners.clear()
+
+    def _on_cost_energy_update(self) -> None:
+        """Integrate each measured sample; never solve or issue a battery command."""
+        if getattr(self, "_cost_tracking_stopping", False):
+            return
+        try:
+            self._track_actual_cost(force=True)
+        except Exception:
+            # Accounting must not abort the provider's telemetry notification.
+            _LOGGER.exception("Measured cost tracking failed for energy update")
+
     def _track_actual_cost(self, *, force: bool = False) -> None:
         """Track actual electricity cost using real elapsed time.
 
@@ -19537,8 +19584,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         when called from multiple triggers (DataUpdateCoordinator, polling
         loop, price updates). A solve forces settlement of short positive
         intervals before reconciling battery provenance against current SOC.
+        Fresh energy callbacks also force settlement so a mode reversal cannot
+        assign the whole solve interval to its final power reading.
         Resets automatically at midnight.
         """
+        self._sync_cost_tracking_listeners()
         now = dt_util.now()
         data = self._get_energy_data()
         tracking_time = now
