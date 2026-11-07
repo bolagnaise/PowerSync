@@ -16,7 +16,9 @@ from .native_rate_telemetry import _native_charge_source, native_charge_setting
 from .tesla_ev_observation import async_read_independent_tesla_vehicle
 
 READ_TIMEOUT = 8
-SETTLE_SECONDS = 3
+# Allow healthy two-second meter polls to satisfy the existing >=3s
+# acquisition-progress proof even when explicit refreshes are debounced.
+SETTLE_SECONDS = 5
 COOLDOWN_SECONDS = 60
 
 

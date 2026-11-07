@@ -79,11 +79,12 @@ async def recover(c, **kwargs):
 
 
 @pytest.mark.asyncio
-async def test_explicit_recovery_clears_restored_start_durably_without_stream_update(recovery_case):
+@pytest.mark.parametrize('other_site', ['site', 'another-site'])
+async def test_explicit_recovery_clears_restored_start_durably_without_stream_update(recovery_case, other_site):
     c = recovery_case
     assert c.a.budget.managed[VIN]['reserved_w'] == 18400
     other = deepcopy(c.a.budget.managed[VIN])
-    other.update(entry_id='other', site='another-site', identity='other:provider:device:entity')
+    other.update(entry_id='other', site=other_site, identity='other:provider:device:entity')
     c.a.budget.managed['OTHER'] = deepcopy(other)
     assert await recover(c) == dict(success=True, vin=VIN, reservation_cleared=True)
     assert len(c.reads) == len(c.meters) == 2
@@ -281,3 +282,19 @@ async def test_registered_routed_action_targets_exact_entry_and_returns_result(r
     with pytest.raises(ValueError, match='control_entry_not_available'):
         await handlers['recover_ev_headroom'](NS(data=dict(entry_id='missing', vin=VIN,
                                                           allow_provider_refresh=True)))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('phase', [0.2, 0.8, 1.2, 1.8])
+async def test_recovery_accepts_healthy_two_second_meter_cadence(recovery_case, phase):
+    c = recovery_case
+    c.now[0] += phase
+    async def periodic_meter():
+        # A debounced request can return the latest ordinary successful poll.
+        # Its acquisition time must remain real, not the service request time.
+        c.a.local.last_success_ts = NOW + int((c.now[0] - NOW) // 2) * 2
+    c.hooks['meter'] = periodic_meter
+    answer = await recover(c)
+    assert answer['success'], answer
+    assert VIN not in c.a.store.data['managed']
+    assert len(c.reads) == 2

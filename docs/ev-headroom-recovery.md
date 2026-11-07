@@ -19,7 +19,8 @@ data:
 ```
 
 The action requests up to two independent native vehicle charge reports and two
-local Powerwall meter updates, with a three-second settling interval. Each round
+local Powerwall meter updates, with a five-second interval so normal two-second
+meter polling can satisfy the unchanged three-second acquisition-progress check. Each round
 has an eight-second read timeout. There is a one-minute cooldown per vehicle
 after an attempted recovery. There are no automatic paid retries or background
 changes. The car must be able to provide fresh data; the action does not wake it.
