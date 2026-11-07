@@ -2048,6 +2048,48 @@ def test_unconfirmed_tesla_dynamic_start_creates_no_runtime_or_ownership(
     assert "compensating stop request accepted" in command["reason"]
 
 
+def test_manual_solar_policy_acceptance_can_wait_without_positive_commands(monkeypatch):
+    """Solar policy success arms a controller, without proving vehicle Start."""
+    from power_sync.ev_policy import build_ev_policy_action
+
+    hass = _Hass([])
+    vin = "5YJTEST00000000A1"
+    start = AsyncMock(return_value=True)
+    rate = AsyncMock(return_value=True)
+    monkeypatch.setattr(actions, "_action_start_ev_charging", start)
+    monkeypatch.setattr(actions, "_set_vehicle_amps", rate)
+    monkeypatch.setattr(actions, "_tesla_vehicle_away_location", AsyncMock(return_value=None))
+    monkeypatch.setattr(actions, "_resolve_tesla_charge_current_entity", AsyncMock(return_value=None))
+    monkeypatch.setattr(actions, "_resolve_tesla_active_charger_capability", AsyncMock(return_value={
+        "association_known": True,
+        "capability_known": True,
+        "max_charge_amps": 32,
+        "max_charge_amps_source": "active_charger",
+        "voltage": 240,
+        "phases": 1,
+    }))
+    monkeypatch.setattr(actions, "async_track_time_interval", lambda *_args, **_kwargs: lambda: None)
+    action = build_ev_policy_action("solar_only", 60)
+
+    accepted = asyncio.run(actions._action_start_ev_charging_dynamic(
+        hass, _Entry(), {
+            **action.params,
+            "charger_type": "tesla",
+            "vehicle_id": vin,
+            "vehicle_vin": vin,
+        },
+    ))
+
+    assert accepted is True
+    state = actions._dynamic_ev_state["entry-1"][vin]
+    assert state["active"] is True
+    assert state["charging_started"] is False
+    assert state["current_amps"] == 0
+    assert state["params"]["owner_mode"] == "manual_solar_surplus"
+    start.assert_not_awaited()
+    rate.assert_not_awaited()
+
+
 def test_uncertain_tesla_dynamic_start_keeps_owned_pending_plan(monkeypatch):
     """An unknown BLE start keeps one managed plan for a bounded retry."""
     vin = "5YJTEST00000000A1"

@@ -67,7 +67,7 @@ def build_ev_policy_action(policy_value: Any, duration_value: Any) -> EVPolicyAc
                 "owner_mode": "manual_solar_surplus",
                 "notify_on_start": False,
             },
-            label="Solar-only EV charging started",
+            label="Solar-only EV charging request accepted",
         )
 
     if policy == EV_POLICY_LIMITED_GRID_SOLAR:
@@ -79,7 +79,7 @@ def build_ev_policy_action(policy_value: Any, duration_value: Any) -> EVPolicyAc
                 "owner_mode": "manual_limited_grid_solar",
                 "notify_on_start": False,
             },
-            label="Limited grid + solar EV charging started",
+            label="Limited grid + solar EV charging request accepted",
         )
 
     return EVPolicyAction(

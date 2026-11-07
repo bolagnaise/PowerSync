@@ -178,6 +178,75 @@ def test_manual_start_returns_the_safe_generic_failure_to_the_ui():
     assert message == "Generic Charger switch service for switch.garage_ev failed"
 
 
+@pytest.mark.parametrize("policy,label", [
+    ("solar_only", "Solar-only EV charging request accepted"),
+    ("limited_grid_solar", "Limited grid + solar EV charging request accepted"),
+])
+@pytest.mark.parametrize("accepted", [True, False])
+def test_dynamic_policy_response_distinguishes_acceptance_from_charging(policy, label, accepted):
+    """An armed controller can wait without any positive vehicle command."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "manual_policy_response_helpers", INIT_PATH.with_name("ev_policy.py")
+    )
+    policy_module = importlib.util.module_from_spec(spec)
+    # dataclasses resolves annotations through the module registry.
+    import sys
+    sys.modules[spec.name] = policy_module
+    try:
+        spec.loader.exec_module(policy_module)
+    finally:
+        sys.modules.pop(spec.name, None)
+
+    now = datetime(2026, 11, 7, 4, 2, tzinfo=timezone.utc)
+    start = _command_view_method("_start_policy_charging", {
+        "build_ev_policy_action": policy_module.build_ev_policy_action,
+        "dt_util": SimpleNamespace(utcnow=lambda: now),
+        "timedelta": timedelta,
+        "_LOGGER": SimpleNamespace(info=lambda *_args: None),
+    })
+    actions = []
+    deadlines = []
+
+    class View:
+        def _active_non_manual_owner_message(self, _vehicle):
+            return None
+
+        def _manual_action_params(self, _vehicle):
+            return {"charger_type": "tesla"}
+
+        async def _loadpoint_ready_for_manual_start(self, *_args):
+            return True, ""
+
+        async def _execute_manual_ev_action(self, action, vehicle, params, _reason):
+            actions.append((action, vehicle, params))
+            # Dynamic action success means registration, including a pending
+            # transport hold or waiting for solar; it need not issue Start.
+            return accepted, ""
+
+        def _schedule_policy_quick_stop(self, vehicle, duration, source, *, stops_at):
+            deadlines.append((vehicle, duration, source, stops_at))
+            return stops_at.isoformat()
+
+        def _manual_loadpoint_id(self, vehicle):
+            return vehicle
+
+    success, message = asyncio.run(start(View(), policy, "VIN", 60))
+
+    assert success is accepted
+    assert len(actions) == 1
+    assert actions[0][0:2] == ("start_ev_charging_dynamic", "VIN")
+    assert actions[0][2]["expires_at"] == (now + timedelta(hours=1)).isoformat()
+    if accepted:
+        assert message == f"{label} for 60 minutes"
+        assert "started" not in message.lower()
+        assert deadlines == [("VIN", 60, policy, now + timedelta(hours=1))]
+    else:
+        assert message == f"Failed to start {policy} charging"
+        assert deadlines == []
+
+
 def test_known_manual_command_rejection_is_a_resolved_application_response():
     """Keep a safe action failure visible to the dashboard's response branch."""
     class _Logger:
