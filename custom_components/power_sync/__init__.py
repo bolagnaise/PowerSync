@@ -46024,6 +46024,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             "recovery": recovery_sidecar_snapshot(hass, entry),
         }
 
+    async def handle_recover_ev_headroom(call: ServiceCall) -> dict[str, Any]:
+        """Read fresh stop proof for an exact retained EV reservation."""
+        from .ev_headroom_recovery import async_recover_ev_headroom
+
+        try:
+            return await async_recover_ev_headroom(
+                hass, entry, call.data.get("vin"),
+                allow_provider_refresh=call.data.get("allow_provider_refresh", False),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _LOGGER.exception("EV headroom recovery remains held")
+            return {"success": False, "error": "recovery_failed"}
+
     async def handle_recover_ble_stop_history(call: ServiceCall) -> dict[str, Any]:
         """Recover an explicitly declared complete inventory of held BLE Stops."""
         from .tesla_ble_stop_recovery import async_recover_ble_stops, StopRecoveryRefused
@@ -46085,6 +46100,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         'resume_powerwall_settings': handle_resume_powerwall_settings,
         'recover_max_backup': handle_recover_max_backup,
         'recover_ev_transport': handle_recover_ev_transport,
+        'recover_ev_headroom': handle_recover_ev_headroom,
         'recover_ble_stop_history': handle_recover_ble_stop_history,
         'set_operation_mode': handle_set_operation_mode,
         'set_grid_charging': handle_set_grid_charging,
@@ -46103,6 +46119,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.services.async_register(
         DOMAIN, "recover_ev_transport",
         routed_handler(hass, entry.entry_id, "recover_ev_transport", handle_recover_ev_transport),
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+    hass.services.async_register(
+        DOMAIN, "recover_ev_headroom",
+        routed_handler(hass, entry.entry_id, "recover_ev_headroom", handle_recover_ev_headroom),
         supports_response=SupportsResponse.OPTIONAL,
     )
     hass.services.async_register(

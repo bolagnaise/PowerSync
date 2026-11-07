@@ -55,6 +55,30 @@ recover_ev_transport:
       selector:
         text:
 
+recover_ev_headroom:
+  name: Recover EV charging headroom
+  description: Request fresh Tesla vehicle and local Powerwall meter readings to recover a retained EV reservation blocking battery grid charging. Makes up to two vehicle reads; Teslemetry refreshes can use credits. Does not wake the car, change charging settings, or start battery charging. Unproven reservations remain held.
+  fields:
+    vin:
+      name: Vehicle VIN
+      description: Exact 17-character VIN of the vehicle with a retained reservation.
+      required: true
+      selector:
+        text:
+    allow_provider_refresh:
+      name: Allow provider refresh
+      description: Allow this attempt to request fresh vehicle data, including credit-consuming Teslemetry refreshes.
+      required: true
+      default: false
+      selector:
+        boolean:
+    entry_id:
+      name: Entry ID
+      description: PowerSync configuration entry ID. Specify this when more than one PowerSync entry is installed.
+      required: false
+      selector:
+        text:
+
 recover_ble_stop_history:
   name: Recover held BLE Stops
   description: Recover Stop-only history using the PowerSync companion BLE firmware. Restarts every declared bridge and verifies fresh stopped, zero-current and zero-power readings. Read the recovery guide before confirming the complete historical vehicle inventory.
