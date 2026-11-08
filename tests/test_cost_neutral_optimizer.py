@@ -1701,6 +1701,70 @@ def test_multiday_greedy_fallback_uses_the_same_daily_guards(
     }
 
 
+@pytest.mark.parametrize("use_greedy", [False, True])
+@pytest.mark.parametrize("interval_minutes", [5, 60])
+def test_cost_neutral_preserves_energy_for_later_higher_value_export(
+    optimizer_module, monkeypatch, use_greedy, interval_minutes,
+):
+    """Surplus energy must not make an early 2c slot consume the daily cap."""
+    module = optimizer_module
+    monkeypatch.setattr(module, "HIGHS_AVAILABLE", not use_greedy)
+    optimizer = module.BatteryOptimizer(
+        capacity_wh=40_000, max_charge_w=5_000, max_discharge_w=5_000,
+        efficiency=1.0, backup_reserve=0.3, hardware_reserve=0.0,
+        interval_minutes=interval_minutes, horizon_hours=4, terminal_weight=0.0,
+    )
+    cap = 0.27 * interval_minutes / 60.0
+    start = _timestamps(1)[0]
+    result = optimizer.optimize(
+        import_prices=[0.45] * 4, export_prices=[0.02, 0.02, 0.27, 0.27],
+        solar_forecast=[0.0] * 4, load_forecast=[0.0] * 4,
+        current_soc=0.6, allow_grid_charge=False, allow_battery_export=True,
+        schedule_timestamps=[start + timedelta(minutes=interval_minutes * i) for i in range(4)],
+        cost_neutral_earnings_cap=cap,
+        cost_neutral_slots=[True] * 4,
+    )
+    assert result.solver_used == ("greedy" if use_greedy else "highs")
+    assert result.feasible
+    assert result.schedule.battery_export_w[:2] == pytest.approx([0.0, 0.0])
+    assert sum(result.schedule.battery_export_w[2:]) == pytest.approx(1_000.0)
+    assert result.lp_stats["cost_neutral_planned_earnings"] == pytest.approx(cap, abs=1e-6)
+
+
+@pytest.mark.parametrize("boundary", ["days", "manual", "bonus"])
+def test_greedy_price_preference_preserves_settlement_boundaries(
+    optimizer_module, boundary,
+):
+    module = optimizer_module
+    optimizer = _optimizer(module)
+    start = _timestamps(1)[0]
+    schedule = module.OptimizationSchedule(
+        actions=[module.ScheduleAction(
+            timestamp=start + timedelta(hours=i), action="export", power_w=1_000,
+            soc=0.5, battery_discharge_w=1_000,
+            control_source="manual" if boundary == "manual" and i == 1 else "optimizer",
+        ) for i in range(2)],
+        predicted_cost=0.0, predicted_savings=0.0, last_updated=start,
+    )
+    kwargs = dict(export_prices=[0.02, 0.27], solar=[0.0]*2, load=[0.0]*2,
+                  earnings_cap=0.02, cost_neutral_slots=[True]*2)
+    if boundary == "days":
+        kwargs['cost_neutral_plan'] = module.CostNeutralPlan(
+            day_ids=['today', 'tomorrow'],
+            earnings_caps_by_day={'today': 0.02, 'tomorrow': 0.27},
+            forecast_import_costs_by_day={}, fixed_cost_allowances_by_day={},
+        )
+    elif boundary == "bonus":
+        kwargs.update(export_bonus_prices=[0.5, 0.5], export_bonus_cap_kwh=0.5)
+    chronological, earned = optimizer.enforce_cost_neutral_schedule(schedule, **kwargs)
+    preferred, preferred_earned = optimizer.enforce_cost_neutral_schedule(
+        schedule, **kwargs, prefer_higher_prices=True,
+    )
+    assert preferred.actions == chronological.actions
+    assert preferred_earned == pytest.approx(earned)
+    assert [a.timestamp for a in preferred.actions] == [a.timestamp for a in schedule.actions]
+
+
 def test_multiday_greedy_cost_neutral_can_use_low_value_export_slot(
     optimizer_module,
     monkeypatch,

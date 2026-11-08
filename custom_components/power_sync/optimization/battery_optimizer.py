@@ -8698,6 +8698,7 @@ class BatteryOptimizer:
                 export_bonus_group_ids=self._quota_export_group_ids,
                 export_bonus_caps_by_group=self._quota_export_caps_by_group,
                 cost_neutral_plan=cost_neutral_plan,
+                prefer_higher_prices=True,
             )
         else:
             import_basis_schedule = candidate_schedule
@@ -8737,6 +8738,7 @@ class BatteryOptimizer:
             cost_neutral_plan=cost_neutral_plan,
             earnings_caps_by_day=effective_cost_neutral_caps,
             planned_earnings_by_day=planned_cost_neutral_by_day,
+            prefer_higher_prices=True,
         )
 
         grid_import, grid_export = self._grid_flows_from_schedule(
@@ -9989,6 +9991,7 @@ class BatteryOptimizer:
         cost_neutral_plan: CostNeutralPlan | None = None,
         earnings_caps_by_day: dict[str, float] | None = None,
         planned_earnings_by_day: dict[str, float] | None = None,
+        prefer_higher_prices: bool = False,
     ) -> tuple[OptimizationSchedule, float]:
         """Trim discretionary battery export to a chronological earnings cap.
 
@@ -10044,11 +10047,23 @@ class BatteryOptimizer:
             else {"__all__": max(0.0, float(export_bonus_cap_kwh or 0.0))}
         )
         planned_earnings = 0.0
-        trimmed: list[ScheduleAction] = []
-        for idx, action in enumerate(schedule.actions or []):
+        trimmed = list(schedule.actions or [])
+        indexed_actions = list(enumerate(trimmed))
+        # Greedy assigns more candidate exports than the daily cap needs.
+        # Keep the most valuable candidates before trimming, rather than
+        # spending the cap on early low-rate exports that use more energy.
+        # Quota settlement and manual ownership retain chronological priority.
+        if (
+            prefer_higher_prices
+            and not any(value > 0 for value in bonus_remaining_by_group.values())
+            and not any(action.control_source == "manual" for _, action in indexed_actions)
+        ):
+            indexed_actions.sort(key=lambda item: -float(
+                export_prices[item[0]] if item[0] < len(export_prices) else 0.0
+            ))
+        for idx, action in indexed_actions:
             day = slots_by_day[idx] if idx < len(slots_by_day) else None
             if day is None or day not in remaining_by_day:
-                trimmed.append(action)
                 continue
             remaining = remaining_by_day[day]
             solar_w = max(0.0, float(solar[idx] if idx < len(solar) else 0.0)) * 1000
@@ -10110,10 +10125,8 @@ class BatteryOptimizer:
                     planned_earnings_by_day[day] = (
                         planned_earnings_by_day.get(day, 0.0) + earned
                     )
-                trimmed.append(action)
                 continue
             if battery_export_w <= 0:
-                trimmed.append(action)
                 continue
 
             available_kwh = battery_export_w / 1000.0 * self.dt_hours
@@ -10179,12 +10192,12 @@ class BatteryOptimizer:
             # Restamp one slot rather than rebuild it: replace() carries every
             # field this branch does not name. Listing them by hand dropped
             # ev_charge_w the moment that field was added.
-            trimmed.append(replace(
+            trimmed[idx] = replace(
                 action,
                 action=emitted_action,
                 power_w=round(power_w, 1),
                 battery_discharge_w=round(new_discharge_w, 1),
-            ))
+            )
         return OptimizationSchedule(
             actions=trimmed,
             predicted_cost=schedule.predicted_cost,
