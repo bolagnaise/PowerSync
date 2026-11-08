@@ -1,0 +1,50 @@
+{
+  "synthetic": true,
+  "contract_digest": "d805ec6495a3abd2941df131f118b2f3b6a98c45cdd671e657c64bdb98d66c98",
+  "registration": {
+    "scope": {
+      "schema_version": 1,
+      "session_id": "5ee1821e574e4b3f8dee82f794eca29b",
+      "entry_ref": "entry_reference_00000001",
+      "boot": "a398213e5d0a4317a2f52e709d51c31f",
+      "generation": 1,
+      "categories": [
+        "entities"
+      ],
+      "history_start": 1799999400,
+      "expires_at": 1800003600,
+      "ha_recorder": false
+    },
+    "scope_digest": "1743fc625e4f89a1f3deaea87a49601b54affdbea48bb25422e0cd2ba6040c5c",
+    "public_key": "BdhscqTGF43rMrlJH3J8r0gXkN6xFqAHI1O-dOF9G3U"
+  },
+  "result": {
+    "schema_version": 1,
+    "category": "entities",
+    "captured_at": 1800000000,
+    "source": "ha_cache",
+    "coherence": "mixed",
+    "installation_assurance": "self_asserted",
+    "records": [
+      {
+        "role": "battery_power",
+        "ref": "battery_power",
+        "value": 500,
+        "unit": "W",
+        "source_time": null,
+        "reported_at": null,
+        "observed_at": 1800000000,
+        "age_s": null,
+        "availability": "available",
+        "freshness": "unknown",
+        "timestamp_quality": "ha_cache_only"
+      }
+    ],
+    "availability": "available",
+    "truncated": false
+  },
+  "packet": {
+    "signed": "eyJjYXB0dXJlZF9hdCI6MTgwMDAwMDAwMCwia2luZCI6InJlc3VsdCIsInJlcXVlc3RfaWQiOiJyZXF1ZXN0X2lkZW50aWZpZXJfMDAwMDAwMSIsInJlc3VsdCI6eyJhdmFpbGFiaWxpdHkiOiJhdmFpbGFibGUiLCJjYXB0dXJlZF9hdCI6MTgwMDAwMDAwMCwiY2F0ZWdvcnkiOiJlbnRpdGllcyIsImNvaGVyZW5jZSI6Im1peGVkIiwiaW5zdGFsbGF0aW9uX2Fzc3VyYW5jZSI6InNlbGZfYXNzZXJ0ZWQiLCJyZWNvcmRzIjpbeyJhZ2VfcyI6bnVsbCwiYXZhaWxhYmlsaXR5IjoiYXZhaWxhYmxlIiwiZnJlc2huZXNzIjoidW5rbm93biIsIm9ic2VydmVkX2F0IjoxODAwMDAwMDAwLCJyZWYiOiJiYXR0ZXJ5X3Bvd2VyIiwicmVwb3J0ZWRfYXQiOm51bGwsInJvbGUiOiJiYXR0ZXJ5X3Bvd2VyIiwic291cmNlX3RpbWUiOm51bGwsInRpbWVzdGFtcF9xdWFsaXR5IjoiaGFfY2FjaGVfb25seSIsInVuaXQiOiJXIiwidmFsdWUiOjUwMH1dLCJzY2hlbWFfdmVyc2lvbiI6MSwic291cmNlIjoiaGFfY2FjaGUiLCJ0cnVuY2F0ZWQiOmZhbHNlfSwicmVzdWx0X2RpZ2VzdCI6IjZhZjNhYWMwZjhlNmY1NTI3ZDVmNWEzYTRmZmZiZWNkNWIwYjc5MWY5ODllYzQ0MjNlODFmZWE2ZWU0ZGNjNzIiLCJzY29wZV9kaWdlc3QiOiIxNzQzZmM2MjVlNGY4OWExZjNkZWFlYTg3YTQ5NjAxYjU0YWZmZGJlYTQ4YmIyNTQyMmUwY2QyYmE2MDQwYzVjIiwic2Vzc2lvbl9pZCI6IjVlZTE4MjFlNTc0ZTRiM2Y4ZGVlODJmNzk0ZWNhMjliIn0",
+    "signature": "C6g7d1_xL4lRbTM0H5ZH8Uj2rNDGvGaOJ7oPAOAwZ5mCGxE-hBrzoZItLqHQ4K5GS1Eqat1LHFBrP5c4_4XfDA"
+  }
+}

@@ -50398,6 +50398,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await _start_tesla_native_rate(hass, entry)
 
     _LOGGER.info("=" * 60)
+    # Optional diagnostics must never make successful energy setup fail.
+    try:
+        from .support.ha import setup as _setup_support
+        await _setup_support(hass, entry)
+    except Exception:
+        _LOGGER.warning("PowerSync support diagnostics unavailable; core integration remains active")
+
     _LOGGER.info("PowerSync integration setup complete!")
     _LOGGER.info("Domain '%s' registered successfully", DOMAIN)
     _LOGGER.info("Mobile app should now detect the integration")
@@ -52210,6 +52217,13 @@ class OptimizationAISummaryView(HomeAssistantView):
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
     hass.data.get(DOMAIN, {}).get(entry.entry_id, {})["powerwall_local_dispatch_stopping"] = True
+    # Fence disclosure synchronously. Diagnostic disk cleanup waits until the
+    # existing hardware/coordinator shutdown has completed below.
+    try:
+        if support_runtime := hass.data.get("power_sync_support", {}).get(entry.entry_id):
+            support_runtime.session.close("unloaded")
+    except Exception:
+        _LOGGER.warning("PowerSync support consent cleanup unavailable")
     from .tesla_native_rate import async_stop as _stop_tesla_native_rate
     await _stop_tesla_native_rate(hass, entry)
     if license_manager := hass.data.get("power_sync_license_manager"):
@@ -52753,6 +52767,12 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Unload platforms
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
+    try:
+        from .support.ha import unload as _unload_support
+        await _unload_support(hass, entry)
+    except Exception:
+        _LOGGER.warning("PowerSync support diagnostics cleanup unavailable")
+
     if unload_ok:
         hass.data[DOMAIN].pop(entry.entry_id)
 
@@ -52771,7 +52791,12 @@ async def async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
 
 
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Best-effort revoke ChatGPT access and erase the entry's private store."""
+    """Best-effort revoke remote access and erase the entry's private stores."""
+    try:
+        from .support.ha import remove as _remove_support
+        await _remove_support(hass, entry)
+    except Exception:
+        _LOGGER.warning("PowerSync support removal cleanup unavailable")
     warning = False
     try:
         from homeassistant.helpers.storage import Store

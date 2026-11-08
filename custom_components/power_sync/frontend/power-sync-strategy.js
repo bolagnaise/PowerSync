@@ -1,3 +1,5 @@
+// Optional consent UI loads independently of the energy dashboard.
+if (typeof document !== 'undefined') import('./power-sync-support.js').catch(() => {});
 /**
  * PowerSync Dynamic Dashboard Strategy
  *
@@ -8620,6 +8622,8 @@ function _boardCards(ctx) {
   }
 
   add({ key: 'ev', title: 'Car charging', card: _evPanel(), ownHeader: true });
+
+  if (hass.user?.is_admin) add({ key: 'support', title: 'Support', native: 'ps-support-card' });
 
   if (hasTesla) {
     const vpp = findVppSwitches().map(entity => ({ kind: 'switch', entity }));
