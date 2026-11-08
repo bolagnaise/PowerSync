@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib
 import inspect
 import json
+import math
 import sys
 import types
 from datetime import datetime, timedelta, timezone
@@ -228,6 +229,148 @@ def test_benchmark_corpus_keeps_actual_capture_length_and_full_horizons(
     assert cases["cost-neutral-ledger-48h"].inputs[
         "cost_neutral_plan"
     ].forecast_natural_export_earnings_by_day
+    plans = cases["multi-ev-deadlines-48h"].inputs["ev_plan"]
+    assert len(plans) == 2
+    assert plans[0].deadline_index < plans[1].deadline_index
+    assert not any(cases["ev-permissions-floor-48h"].inputs["ev_plan"].allow_battery)
+
+
+@pytest.mark.parametrize("empty_rhs", [1.0, -1.0])
+def test_bulk_solver_preserves_integrality_infinite_bounds_and_empty_rows(
+    optimizer_module, empty_rhs,
+):
+    module = optimizer_module
+    equality = module._LpMatrix((1, 2))
+    equality[0, 0] = equality[0, 1] = 1.0
+    inequality = module._LpMatrix((2, 2))
+    inequality[0, 1] = -1.0
+    result = module._solve_lp_highs(
+        [-1.0, 0.0], inequality, [0.0, empty_rhs], equality, [3.5],
+        [(0.0, None), (None, 4.0)], 30.0, integer_indices=[0],
+    )
+    if empty_rhs < 0:
+        assert not result.success
+        assert "infeasible" in result.message.lower()
+    else:
+        assert result.success
+        assert result.x == pytest.approx([3.0, 0.5])
+        assert result.fun == pytest.approx(-3.0)
+        assert result.stats["packing_time_s"] >= 0
+        assert result.stats["mip_dual_bound"] == pytest.approx(-3.0)
+
+
+def test_bulk_loading_error_cannot_return_a_previous_success(
+    optimizer_module, monkeypatch,
+):
+    module = optimizer_module
+    h = module.highspy.Highs()
+    h.setOptionValue("output_flag", False)
+    h.addCol(1.0, 1.0, 2.0, 0, [], [])
+    h.run()
+
+    class FailedLoad:
+        def __getattr__(self, name):
+            return getattr(h, name)
+
+        def passModel(self, model):
+            return module.highspy.HighsStatus.kError
+
+    monkeypatch.setattr(module.highspy, "Highs", FailedLoad)
+    with pytest.raises(RuntimeError, match="rejected"):
+        module._solve_lp_highs([1.0], module._LpMatrix((0, 1)), [],
+                               module._LpMatrix((0, 1)), [], [(0.0, 2.0)], 30.0)
+
+
+@pytest.mark.parametrize("start,expected", [
+    ([1.0], "submitted"), ([0.25], "invalid"),
+    ([float("nan")], "invalid"), ([1.0, 2.0], "invalid"),
+])
+def test_optional_full_start_is_validated_and_cold_solve_remains_available(
+    optimizer_module, start, expected,
+):
+    module = optimizer_module
+    equality = module._LpMatrix((1, 1))
+    equality[0, 0] = 1.0
+    result = module._solve_lp_highs(
+        [1.0], module._LpMatrix((0, 1)), [], equality, [1.0],
+        [(0.0, 2.0)], 30.0, integer_indices=[0], initial_solution=start,
+    )
+    assert result.success
+    assert result.x == pytest.approx([1.0])
+    assert result.stats["start"] == expected
+
+
+def test_rejected_start_uses_a_fresh_cold_solver(optimizer_module, monkeypatch):
+    module = optimizer_module
+    constructor = module.highspy.Highs
+    instances = []
+
+    class RejectStart:
+        def __init__(self):
+            self.native = constructor()
+            instances.append(self)
+
+        def __getattr__(self, name):
+            return getattr(self.native, name)
+
+        def setSolution(self, solution):
+            raise RuntimeError("unsupported start overload")
+
+    monkeypatch.setattr(module.highspy, "Highs", RejectStart)
+    result = module._solve_lp_highs(
+        [1.0], module._LpMatrix((0, 1)), [], module._LpMatrix((0, 1)), [],
+        [(1.0, 2.0)], 30.0, initial_solution=[1.0],
+    )
+    assert result.success
+    assert result.x == pytest.approx([1.0])
+    assert len(instances) == 2
+    assert result.stats["start"] == "not_requested"
+
+
+@pytest.mark.parametrize("failure", ["exception", "invalid_point"])
+def test_optional_tiebreak_failure_keeps_primary_plan(optimizer_module, monkeypatch, failure):
+    module = optimizer_module
+    solve = module._solve_lp_highs
+    attempts = []
+
+    def fail_preference(*args, **kwargs):
+        if kwargs.get("solve_role") == "tiebreak":
+            attempts.append(failure)
+            if failure == "exception":
+                raise RuntimeError("secondary API failed")
+            point = list(kwargs["initial_solution"])
+            point[0] = float("nan")
+            return module._HighsResult(point, True, "Optimal", 7, 0.0)
+        return solve(*args, **kwargs)
+
+    monkeypatch.setattr(module, "_solve_lp_highs", fail_preference)
+    result = _optimizer(module).optimize(
+        import_prices=[0.31, 0.31, 0.0, 0.0], export_prices=[0.0]*4,
+        solar_forecast=[0.0]*4, load_forecast=[0.5]*4,
+        current_soc=0.2, allow_battery_export=False,
+        schedule_timestamps=_timestamps(4), cost_neutral_earnings_cap=0.2,
+        cost_neutral_slots=[True]*4,
+    )
+    assert attempts
+    assert result.solver_used == "highs"
+    assert result.feasible
+    assert result.lp_stats["cost_neutral_charging_tiebreak_used"] is False
+    assert all(math.isfinite(a.soc) for a in result.schedule.actions)
+    if failure == "exception":
+        assert result.lp_stats["charging_tiebreak_solver"]["error"] == "RuntimeError"
+
+
+def test_economic_tiebreak_row_is_independent_of_primary_model(optimizer_module):
+    module = optimizer_module
+    primary = module._LpMatrix((1, 2))
+    primary[0, 0] = 2.0
+    secondary = primary.with_row([1.0, 0.0])
+    secondary[0, 0] = 3.0
+    assert primary.shape == (1, 2)
+    assert primary[0, 0] == 2.0
+    assert secondary[1, 0] == 1.0
+    assert secondary[1, 1] == 0.0
+
 
 
 @pytest.mark.parametrize("disable_idle", [False, True])

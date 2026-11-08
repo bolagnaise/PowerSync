@@ -113,6 +113,43 @@ def _flows(result, dt_hours=1.0):
     ]
 
 
+@pytest.mark.parametrize("initially_charging", [False, True])
+def test_ev_start_remains_exact_without_redundant_integer_columns(
+    optimizer_module, monkeypatch, initially_charging,
+):
+    import inspect
+
+    module = optimizer_module
+    real_solve = module._solve_lp_highs
+    checked = []
+
+    def inspect_solution(*args, **kwargs):
+        scope = inspect.currentframe().f_back.f_locals
+        result = real_solve(*args, **kwargs)
+        if not result.success:
+            return result
+        n = scope["p_n"]
+        on = scope["ev_on_binary_offset"]
+        start = scope["ev_start_binary_offset"]
+        integers = set(kwargs.get("integer_indices", ()))
+        assert all(on+t in integers for t in range(n))
+        assert all(start+t not in integers for t in range(n))
+        for t in range(n):
+            previous = result.x[on+t-1] if t else float(initially_charging)
+            expected = max(0.0, result.x[on+t]-previous)
+            assert result.x[start+t] == pytest.approx(expected, abs=1e-6)
+        checked.append(n)
+        return result
+
+    monkeypatch.setattr(module, "_solve_lp_highs", inspect_solution)
+    result = _optimizer(module).optimize(
+        **_kwargs(), ev_plan=_ev_plan(module, initially_charging=initially_charging),
+    )
+    assert result.solver_used == "highs"
+    assert result.feasible
+    assert checked
+
+
 def test_battery_and_ev_together_respect_the_site_import_limit(optimizer_module):
     optimizer = _optimizer(optimizer_module)
 

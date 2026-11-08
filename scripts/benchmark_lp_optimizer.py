@@ -82,6 +82,20 @@ def _cases(module):
             "current_soc":0.2, "allow_grid_charge":False}),
         "ev-48h": Case({**base, "ev_plan":ev}),
     }
+    second_ev = module.EVChargePlan(
+        vehicle_id="second", max_power_kw=(0.0,)*72+(3.6,)*72+(0.0,)*(n-144),
+        energy_needed_kwh=7.0, min_power_kw=1.4,
+    )
+    cases["multi-ev-deadlines-48h"] = Case({**base, "ev_plan":[ev, second_ev]})
+    policy_ev = module.EVChargePlan(
+        vehicle_id="source-policy", max_power_kw=(3.6,)*72+(0.0,)*(n-72),
+        energy_needed_kwh=5.0, min_power_kw=1.4,
+        allow_grid=(True,)*n, allow_solar=(False,)*n, allow_battery=(False,)*n,
+        battery_floor_soc=(0.4,)*n, preserve_home_battery=(True,)*n,
+    )
+    cases["ev-permissions-floor-48h"] = Case({**base, "ev_plan":policy_ev})
+    cases["battery-deadline-48h"] = Case(base,
+        attributes=dict(pre_window_slot=72, pre_window_soc_target=0.9))
     # Fixed deterministic full-horizon profiles; never pad a short saved capture.
     hours = [(i % 288)/12 for i in range(n)]
     imports = [0.0 if 12 <= h < 14 else 0.1 if h < 6 else 0.35 for h in hours]
@@ -142,6 +156,16 @@ def _cases(module):
         config=dict(capacity_wh=54000, max_charge_w=14700, max_discharge_w=21000,
                     max_grid_import_w=15000, max_grid_export_w=10000,
                     backup_reserve=0.38, hardware_reserve=0.0))
+    cases["free-charge-small"] = Case(dict(
+        import_prices=[0.31, 0.31, 0.0, 0.0], export_prices=[0.0]*4,
+        solar_forecast=[0.0]*4, load_forecast=[0.5]*4,
+        current_soc=0.2, allow_battery_export=False,
+        schedule_timestamps=[datetime(2026, 11, 7, 20, tzinfo=timezone.utc)
+                             + timedelta(hours=i) for i in range(4)],
+        cost_neutral_earnings_cap=0.2, cost_neutral_slots=[True]*4),
+        config=dict(capacity_wh=10000, max_charge_w=5000, max_discharge_w=5000,
+                    efficiency=1.0, backup_reserve=0.0, hardware_reserve=0.0,
+                    interval_minutes=60, horizon_hours=4, terminal_weight=0.0))
     return cases
 
 
@@ -200,24 +224,85 @@ def _observe_native(module, seed, incumbents):
         module.highspy.Highs=constructor
 
 
-def _run_case(module, case, *, seed=0, incumbents=False):
+@contextmanager
+def _audit_models(module, tolerance, model_directory=None):
+    """Independent original-row residual checks, identical for both versions."""
+    original = module._solve_lp_highs
+    checks = []
+    def checked(c, A_ub, b_ub, A_eq, b_eq, bounds, time_limit,
+                integer_indices=None, **kwargs):
+        result = original(c, A_ub, b_ub, A_eq, b_eq, bounds, time_limit,
+                          integer_indices=integer_indices, **kwargs)
+        record = {"success":result.success, "status":result.status}
+        checks.append(record)
+        if model_directory is not None:
+            model_directory.mkdir(parents=True,exist_ok=True)
+            model = dict(c=c,bounds=bounds,integer_indices=integer_indices,
+                b_eq=b_eq,b_ub=b_ub,
+                equality=[dict(zip(columns,values)) for _,columns,values in A_eq.iter_rows()],
+                inequality=[dict(zip(columns,values)) for _,columns,values in A_ub.iter_rows()],
+                x=result.x,status=result.status)
+            target=model_directory/f"model-{len(checks)-1}.json"
+            target.write_text(json.dumps(model,allow_nan=False)+"\n")
+            record["model_file"]=str(target)
+        if result.success:
+            x=result.x
+            finite = x is not None and len(x)==len(c) and all(math.isfinite(v) for v in x)
+            record.update(finite=finite,tolerance=tolerance)
+            if finite:
+                bound_error=max([0.0]+[max(
+                    (lo-v if lo is not None else 0.0),
+                    (v-hi if hi is not None else 0.0)) for v,(lo,hi) in zip(x,bounds)])
+                integer_error=max([0.0]+[abs(x[i]-round(x[i])) for i in integer_indices or ()])
+                errors=[]
+                for matrix,rhs,equality in ((A_eq,b_eq,True),(A_ub,b_ub,False)):
+                    maximum=0.0
+                    for row,columns,values in matrix.iter_rows():
+                        terms=[x[column]*value for column,value in zip(columns,values)]
+                        difference=math.fsum(terms)-rhs[row]
+                        residual=abs(difference) if equality else max(0.0,difference)
+                        rounding=8*math.ulp(max(1.0,math.fsum(abs(v) for v in terms)))
+                        maximum=max(maximum,residual-rounding)
+                    errors.append(maximum)
+                record.update(bound_error=bound_error,integer_error=integer_error,
+                              equality_error=errors[0],inequality_error=errors[1])
+                record["valid"]=max(bound_error,integer_error,*errors)<=tolerance
+            else:
+                record["valid"]=False
+        return result
+    module._solve_lp_highs=checked
+    try:
+        yield checks
+    finally:
+        module._solve_lp_highs=original
+
+
+def _run_case(module, case, *, seed=0, incumbents=False, model_directory=None):
     optimizer=module.BatteryOptimizer(**{
         "capacity_wh":13500,"max_charge_w":7000,"max_discharge_w":7000,
         "backup_reserve":0.2,"interval_minutes":5,"horizon_hours":48,
         **(case.config or {})})
     for name,value in (case.attributes or {}).items():
         setattr(optimizer,name,value)
-    with _observe_native(module,seed,incumbents) as native:
+    options=module.highspy.Highs()
+    tolerance=max(options.getOptionValue(name)[1] for name in
+                  ("primal_feasibility_tolerance","mip_feasibility_tolerance"))
+    with _observe_native(module,seed,incumbents) as native, \
+            _audit_models(module,tolerance,model_directory) as checks:
         started=time.monotonic()
         result=optimizer.optimize(**case.inputs)
         elapsed=time.monotonic()-started
     if not native:
         raise RuntimeError("Benchmark did not exercise the native HiGHS backend")
     return dict(total_time_s=elapsed,input_slots=len(case.inputs["import_prices"]),
-        input_hours=len(case.inputs["import_prices"])/12,seed=seed,
-        configured_horizon_hours=48,solver_used=result.solver_used,
+        input_hours=len(case.inputs["import_prices"])*optimizer.interval_minutes/60,seed=seed,
+        configured_horizon_hours=optimizer.horizon_hours,solver_used=result.solver_used,
         feasible=result.feasible,predicted_cost=result.schedule.predicted_cost,
-        native=native,lp_stats=result.lp_stats,
+        ev_charge_by_vehicle_w=result.ev_charge_by_vehicle_w,
+        ev_source_by_vehicle_w=result.ev_source_by_vehicle_w,
+        native=native,model_checks=checks,
+        model_validation_passed=all(c.get("valid",True) for c in checks),
+        lp_stats=result.lp_stats,
         schedule=[a.to_dict() for a in result.schedule.actions])
 
 
@@ -231,6 +316,7 @@ def main(argv=None):
     parser.add_argument("--jsonl",type=Path)
     parser.add_argument("--component-root",type=Path,default=COMPONENT_ROOT)
     parser.add_argument("--list-cases",action="store_true")
+    parser.add_argument("--model-dir",type=Path,help="Save exact sparse synthetic models and primal vectors")
     args=parser.parse_args(argv)
     if args.runs<1:
         parser.error("--runs must be positive")
@@ -251,9 +337,12 @@ def main(argv=None):
         seeds=[int(value) for value in args.seeds.split(",")]
     except ValueError:
         parser.error("--seeds must be comma-separated integers")
+    if not seeds or any(seed<0 or seed>2147483647 for seed in seeds):
+        parser.error("seeds must be in the supported non-negative integer range")
     metadata=dict(python=platform.python_version(),platform=platform.platform(),
         highs=module.highspy.Highs().version(),component_root=str(COMPONENT_ROOT),
         source_sha256=hashlib.sha256((COMPONENT_ROOT/"optimization/battery_optimizer.py").read_bytes()).hexdigest(),
+        benchmark_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         callbacks=args.incumbents)
     output=args.jsonl.open("w") if args.jsonl else None
     failures=0
@@ -264,8 +353,11 @@ def main(argv=None):
                 for seed in seeds:
                     record=dict(case=name,repeat=repeat,environment=metadata)
                     try:
-                        record.update(_run_case(module,cases[name],seed=seed,incumbents=args.incumbents))
+                        record.update(_run_case(module,cases[name],seed=seed,incumbents=args.incumbents,
+                            model_directory=(args.model_dir/f"{name}-{repeat}-{seed}" if args.model_dir else None)))
                         elapsed.append(record["total_time_s"])
+                        if not record["model_validation_passed"]:
+                            failures+=1
                     except Exception as error:
                         record.update(error=type(error).__name__,message=str(error),seed=seed)
                         failures+=1

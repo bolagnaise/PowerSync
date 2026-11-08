@@ -470,6 +470,14 @@ class _LpMatrix:
     def tocsr(self) -> "_LpMatrix":
         return self
 
+    def with_row(self, coefficients):
+        """Copy the sparse rows once and append an independent dense-vector row."""
+        copied = _LpMatrix((self.shape[0] + 1, self.shape[1]))
+        copied._rows = [row.copy() for row in self._rows]
+        copied._rows.append({i: float(value) for i, value in enumerate(coefficients)
+                             if value != 0.0})
+        return copied
+
     def iter_rows(self):
         """Yield (row_index, [col indices], [values]) for non-trivial use."""
         for i, row in enumerate(self._rows):
@@ -515,6 +523,8 @@ def _record_optimizer_cycle(method):
                 "subsolve_count": len(trace["solves"]),
                 "formulation_time_s": sum(p.get("formulation_time_s", 0.0)
                                           for p in trace["passes"]),
+                "packing_time_s": sum(s.get("packing_time_s", 0.0)
+                                      for s in trace["solves"]),
                 "load_time_s": sum(s.get("load_time_s", 0.0)
                                    for s in trace["solves"]),
                 "native_time_s": sum(s.get("native_time_s", 0.0)
@@ -608,126 +618,221 @@ class _HighsResult:
         self.stats = stats or {}
 
 
+def _check_highs_status(status):
+    """Warnings can carry valid limited incumbents; API errors cannot."""
+    error = getattr(getattr(highspy, "HighsStatus", None), "kError", None)
+    if error is not None and status == error:
+        raise RuntimeError("HiGHS rejected the model or solver operation")
+
+
+def _load_highs_model(h, c, A_ub, b_ub, A_eq, b_eq, bounds, integer_indices):
+    """Preserve column/row order and empty constraints when loading in bulk."""
+    inf = highspy.kHighsInf
+    if len(bounds) != len(c):
+        raise ValueError("LP column bounds do not match the objective")
+    for matrix, rhs in ((A_eq, b_eq), (A_ub, b_ub)):
+        if matrix.shape != (len(rhs), len(c)):
+            raise ValueError("LP constraint dimensions do not match their bounds")
+    if hasattr(highspy, "HighsLp") and hasattr(h, "passModel"):
+        started = time.monotonic()
+        model = highspy.HighsLp()
+        model.num_col_ = len(c)
+        model.num_row_ = len(b_eq) + len(b_ub)
+        model.col_cost_ = c
+        model.col_lower_ = [-inf if lo is None else lo for lo, _ in bounds]
+        model.col_upper_ = [inf if hi is None else hi for _, hi in bounds]
+        model.row_lower_ = [*b_eq, *([-inf] * len(b_ub))]
+        model.row_upper_ = [*b_eq, *b_ub]
+        starts, indices, values = [0], [], []
+        for matrix in (A_eq, A_ub):
+            for _, columns, coefficients in matrix.iter_rows():
+                indices.extend(columns)
+                values.extend(coefficients)
+                starts.append(len(indices))
+        model.a_matrix_.format_ = highspy.MatrixFormat.kRowwise
+        model.a_matrix_.start_ = starts
+        model.a_matrix_.index_ = indices
+        model.a_matrix_.value_ = values
+        if integer_indices:
+            integers = set(integer_indices)
+            model.integrality_ = [
+                highspy.HighsVarType.kInteger if i in integers
+                else highspy.HighsVarType.kContinuous for i in range(len(c))
+            ]
+        packing_time = time.monotonic() - started
+        _check_highs_status(h.passModel(model))
+        return packing_time
+
+    # Capability fallback for older bindings and lightweight test doubles.
+    for j, coefficient in enumerate(c):
+        lo, hi = bounds[j]
+        _check_highs_status(h.addCol(float(coefficient),
+            -inf if lo is None else float(lo), inf if hi is None else float(hi),
+            0, [], []))
+    for index in integer_indices or ():
+        _check_highs_status(h.setInteger(int(index)))
+    for matrix, rhs, equality in ((A_eq, b_eq, True), (A_ub, b_ub, False)):
+        for i, columns, coefficients in matrix.iter_rows():
+            value = float(rhs[i])
+            _check_highs_status(h.addRow(value if equality else -inf, value,
+                                        len(columns), columns, coefficients))
+    return 0.0
+
+
+def _solver_point_is_feasible(point, A_ub, b_ub, A_eq, b_eq, bounds,
+                              integer_indices, tolerance):
+    """Validate a complete start/result against the original, unscaled model."""
+    if point is None or len(point) != len(bounds) or tolerance is None:
+        return False
+    if not all(math.isfinite(value) for value in point):
+        return False
+    for value, (lower, upper) in zip(point, bounds):
+        if lower is not None and value < lower - tolerance:
+            return False
+        if upper is not None and value > upper + tolerance:
+            return False
+    if any(abs(point[i] - round(point[i])) > tolerance for i in integer_indices or ()):
+        return False
+    for matrix, rhs, equality in ((A_eq, b_eq, True), (A_ub, b_ub, False)):
+        for row, columns, coefficients in matrix.iter_rows():
+            terms = [coefficient * point[column]
+                     for column, coefficient in zip(columns, coefficients)]
+            if not all(math.isfinite(term) for term in terms):
+                return False
+            try:
+                value = math.fsum(terms)
+                magnitude = math.fsum(abs(t) for t in terms)
+            except OverflowError:
+                return False
+            # Only account for floating-point summation error beyond the
+            # solver's effective feasibility tolerance, not a policy allowance.
+            rounding = 8 * math.ulp(max(1.0, magnitude))
+            difference = value - rhs[row]
+            if (abs(difference) if equality else difference) > tolerance + rounding:
+                return False
+    return True
+
+
+def _effective_feasibility_tolerance(h, integer_indices):
+    if not hasattr(h, "getOptionValue"):
+        return None
+    values = []
+    names = ["primal_feasibility_tolerance"]
+    if integer_indices:
+        names.append("mip_feasibility_tolerance")
+    for name in names:
+        try:
+            status, value = h.getOptionValue(name)
+            _check_highs_status(status)
+            if not math.isfinite(value) or value <= 0:
+                return None
+            values.append(value)
+        except (AttributeError, TypeError, ValueError, RuntimeError):
+            return None
+    return max(values)
+
+
 def _solve_lp_highs(
     c, A_ub, b_ub, A_eq, b_eq, bounds, time_limit, integer_indices=None,
-    *, solve_role="primary",
+    *, solve_role="primary", initial_solution=None,
 ):
-    """Solve a standard-form LP with HiGHS and return a linprog-like result.
-
-    minimize  c·x   s.t.   A_ub·x <= b_ub,  A_eq·x == b_eq,  bounds[j] on x[j].
-
-    Mirrors ``scipy.optimize.linprog(method="highs")``: an optimal solve sets
-    ``success=True``, and so does a time/iteration-limited solve that still
-    holds a feasible incumbent (that incumbent is returned instead of being
-    discarded); infeasible/unbounded — and limited solves with no feasible
-    incumbent — report success=False with a message string (``"infeasible"``
-    substring preserved so the caller's self-consumption fallback still
-    triggers).
-    """
-    stats = {"role": solve_role, "integer_columns": len(set(integer_indices or ())),
-             "fixed_integer_columns": sum(bounds[i][0] == bounds[i][1]
-                                          for i in set(integer_indices or ()))}
+    """Solve the complete model, accepting feasible limited incumbents too."""
+    integers = set(integer_indices or ())
+    stats = {"role": solve_role, "integer_columns": len(integers),
+             "fixed_integer_columns": sum(bounds[i][0] == bounds[i][1] for i in integers)}
     trace = _SOLVER_CYCLE.get()
     if trace is not None:
         stats.update({"id": len(trace["solves"]), "chain": trace.get("chain"),
                       "pass": trace.get("pass")})
         trace["solves"].append(stats)
-    load_started = time.monotonic()
-    inf = highspy.kHighsInf
-    h = highspy.Highs()
-    h.setOptionValue("output_flag", False)
-    h.setOptionValue("log_to_console", False)
-    h.setOptionValue("time_limit", float(time_limit))
-    benchmark = _SOLVER_BENCHMARK.get()
-    if benchmark is not None:
-        h.setOptionValue("random_seed", benchmark["seed"])
-        stats["seed"] = benchmark["seed"]
-        if benchmark["incumbents"]:
-            events = stats["incumbents"] = []
-            callback = getattr(h, "cbMipImprovingSolution", None)
-            if callback is not None:
-                def on_incumbent(event):
-                    data = event.data_out
-                    events.append({
-                        "time_s": _finite_stat(data.running_time),
-                        "objective": _finite_stat(data.mip_primal_bound),
-                        "bound": _finite_stat(data.mip_dual_bound),
-                        "gap": _finite_stat(data.mip_gap),
-                    })
-                callback.subscribe(on_incumbent)
-            else:
-                stats["incumbents_unavailable"] = True
-
-    # Columns carry the objective coefficients and variable bounds; constraint
-    # coefficients are supplied row-by-row below, so each column starts empty.
-    for j in range(len(c)):
-        lo, hi = bounds[j]
-        lo = -inf if lo is None else float(lo)
-        hi = inf if hi is None else float(hi)
-        h.addCol(float(c[j]), lo, hi, 0, [], [])
-    for index in integer_indices or ():
-        h.setInteger(int(index))
-
-    # Equality rows: lower == upper == b_eq[i].
-    for i, idx, val in A_eq.iter_rows():
-        rhs = float(b_eq[i])
-        h.addRow(rhs, rhs, len(idx), idx, val)
-
-    # Inequality rows: -inf <= row·x <= b_ub[i].
-    for i, idx, val in A_ub.iter_rows():
-        h.addRow(-inf, float(b_ub[i]), len(idx), idx, val)
-
-    stats["load_time_s"] = time.monotonic() - load_started
-    native_started = time.monotonic()
+    started = time.monotonic()
     try:
-        h.run()
+        h = highspy.Highs()
+        for name, value in (("output_flag", False), ("log_to_console", False),
+                            ("time_limit", float(time_limit))):
+            _check_highs_status(h.setOptionValue(name, value))
+        benchmark = _SOLVER_BENCHMARK.get()
+        if benchmark is not None:
+            _check_highs_status(h.setOptionValue("random_seed", benchmark["seed"]))
+            stats["seed"] = benchmark["seed"]
+            if benchmark["incumbents"]:
+                events = stats["incumbents"] = []
+                callback = getattr(h, "cbMipImprovingSolution", None)
+                if callback is not None:
+                    def on_incumbent(event):
+                        data = event.data_out
+                        events.append({"time_s": _finite_stat(data.running_time),
+                            "objective": _finite_stat(data.mip_primal_bound),
+                            "bound": _finite_stat(data.mip_dual_bound),
+                            "gap": _finite_stat(data.mip_gap)})
+                    callback.subscribe(on_incumbent)
+                else:
+                    stats["incumbents_unavailable"] = True
+        packing_time = _load_highs_model(h, c, A_ub, b_ub, A_eq, b_eq, bounds,
+                                        integer_indices)
+        stats["packing_time_s"] = packing_time
+        stats["load_time_s"] = time.monotonic() - started - packing_time
+        tolerance = _effective_feasibility_tolerance(h, integer_indices)
+        stats["feasibility_tolerance"] = tolerance
+        stats["start"] = "not_requested"
+        if initial_solution is not None:
+            if not hasattr(highspy, "HighsSolution") or not hasattr(h, "setSolution"):
+                stats["start"] = "unsupported"
+            elif not _solver_point_is_feasible(initial_solution, A_ub, b_ub,
+                    A_eq, b_eq, bounds, integer_indices, tolerance):
+                stats["start"] = "invalid"
+            else:
+                try:
+                    solution = highspy.HighsSolution()
+                    solution.col_value = list(initial_solution)
+                    if hasattr(solution, "value_valid"):
+                        solution.value_valid = True
+                    _check_highs_status(h.setSolution(solution))
+                    # API submission is not proof that search used this point.
+                    stats["start"] = "submitted"
+                except (AttributeError, TypeError, ValueError, RuntimeError) as error:
+                    stats["start"] = "rejected"
+                    stats["start_error"] = type(error).__name__
+                    # Discard this instance: a failed mutation must never expose
+                    # a partial or stale solution as the current model's result.
+                    return _solve_lp_highs(c, A_ub, b_ub, A_eq, b_eq, bounds,
+                        time_limit, integer_indices=integer_indices,
+                        solve_role=solve_role)
+        native_started = time.monotonic()
+        try:
+            _check_highs_status(h.run())
+        finally:
+            stats["native_time_s"] = time.monotonic() - native_started
+        model_status = h.getModelStatus()
+        message = h.modelStatusToString(model_status)
+        info = h.getInfo()
+        stats.update({"status": int(model_status), "message": message,
+                      "time_limit_s": float(time_limit)})
+        for name in ("mip_gap", "mip_dual_bound", "mip_node_count",
+                     "simplex_iteration_count", "max_primal_infeasibility",
+                     "max_integrality_violation"):
+            value = _finite_stat(getattr(info, name, None))
+            if name.startswith("mip_") and (not integers or (
+                name != "mip_dual_bound" and value is not None and value < 0
+            )):
+                value = None
+            stats[name] = value
+        optimal = model_status == highspy.HighsModelStatus.kOptimal
+        limited = model_status in (highspy.HighsModelStatus.kTimeLimit,
+                                   highspy.HighsModelStatus.kIterationLimit)
+        feasible = (getattr(info, "primal_solution_status", None)
+                    == highspy.kSolutionStatusFeasible)
+        success = optimal or limited and feasible
+        x = list(h.getSolution().col_value) if success else None
+        fun = float(h.getObjectiveValue()) if success else None
+        stats["objective"] = _finite_stat(fun)
+        return _HighsResult(x=x, success=success, message=message,
+                            status=int(model_status), fun=fun, stats=stats)
     except Exception as error:
         stats["error"] = type(error).__name__
         raise
     finally:
-        stats["native_time_s"] = time.monotonic() - native_started
-
-    model_status = h.getModelStatus()
-    message = h.modelStatusToString(model_status)
-    optimal = model_status == highspy.HighsModelStatus.kOptimal
-    info = h.getInfo()
-    stats.update({"status": int(model_status), "message": message,
-                  "time_limit_s": float(time_limit)})
-    for name in ("mip_gap", "mip_dual_bound", "mip_node_count",
-                 "simplex_iteration_count", "max_primal_infeasibility",
-                 "max_integrality_violation"):
-        stats[name] = _finite_stat(getattr(info, name, None))
-
-    # A time/iteration-limited solve can still hold a usable feasible
-    # incumbent — use it instead of discarding it and forcing the caller's
-    # greedy fallback.
-    usable_incumbent = False
-    if not optimal and model_status in (
-        highspy.HighsModelStatus.kTimeLimit,
-        highspy.HighsModelStatus.kIterationLimit,
-    ):
-        info = h.getInfo()
-        usable_incumbent = (
-            getattr(info, "primal_solution_status", None)
-            == highspy.kSolutionStatusFeasible
-        )
-
-    success = optimal or usable_incumbent
-    if success:
-        x = list(h.getSolution().col_value)
-        fun = float(h.getObjectiveValue())
-        stats["objective"] = _finite_stat(fun)
-    else:
-        x = None
-        fun = None
-    return _HighsResult(
-        x=x,
-        success=success,
-        message=message,
-        status=int(model_status),
-        fun=fun,
-        stats=stats,
-    )
+        stats["total_time_s"] = time.monotonic() - started
 
 # Action detection threshold (W) — below this, treat as idle to avoid rapid switching
 ACTION_THRESHOLD_W = 100.0
@@ -1422,6 +1527,7 @@ class BatteryOptimizer:
             else None
         )
 
+        fallback_details = {"fallback_reason": "highs_unavailable"}
         try:
             if HIGHS_AVAILABLE:
                 try:
@@ -1621,6 +1727,11 @@ class BatteryOptimizer:
                     return result
                 except Exception as e:
                     _LOGGER.error(f"LP solver failed, falling back to greedy: {e}")
+                    fallback_details = {
+                        "fallback_reason": "lp_exception",
+                        "error": type(e).__name__,
+                        "message": str(e),
+                    }
 
             # Greedy fallback
             result = self._solve_greedy(
@@ -1654,6 +1765,7 @@ class BatteryOptimizer:
                 manual_required_discharge_kw,
                 ev_plan,
             )
+            result.lp_stats.update(fallback_details)
             result.solve_time_s = time.monotonic() - start_time
             result.modeled_backup_reserve = modeled_backup_reserve
             result.modeled_export_reserve_floor = modeled_export_reserve_floor
@@ -6089,12 +6201,10 @@ class BatteryOptimizer:
                     ev_on_binary_offset + n_ev_vehicles * p_n,
                 )
             )
-            integer_indices.extend(
-                range(
-                    ev_start_binary_offset,
-                    ev_start_binary_offset + n_ev_vehicles * p_n,
-                )
-            )
+            # Start is implied integral by the three transition rows and the
+            # binary on/off states (including the initial state). Keep its
+            # bounds and every start/SOC policy row, but avoid a redundant
+            # branching decision.
             integer_indices.extend(
                 range(
                     ev_battery_available_binary_offset,
@@ -6126,6 +6236,8 @@ class BatteryOptimizer:
                 *solve_args,
                 time_limit=LP_SOLVER_TIME_LIMIT_SECONDS,
             )
+        primary_solver_stats = dict(getattr(result, "stats", {}))
+        charging_tiebreak_stats = None
         charging_tiebreak_used = False
         if cost_neutral_free_charge_tiebreak and result.success:
             remaining_time = LP_SOLVER_TIME_LIMIT_SECONDS - (
@@ -6136,26 +6248,32 @@ class BatteryOptimizer:
                 # solve. An epsilon preference can fill a free window without
                 # trading away import/export money to do so.
                 economic_limit = float(result.fun) + 1e-6
-                tiebreak_constraints = _LpMatrix(
-                    (A_ub.shape[0] + 1, num_vars), dtype=float,
-                )
-                for row, indices, values in A_ub.iter_rows():
-                    for index, value in zip(indices, values):
-                        tiebreak_constraints[row, index] = value
-                for index, coefficient in enumerate(c):
-                    tiebreak_constraints[A_ub.shape[0], index] = coefficient
-                preferred = _solve_lp_highs(
-                    charging_tiebreak_objective,
-                    tiebreak_constraints,
-                    [*b_ub, economic_limit],
-                    A_eq,
-                    b_eq,
-                    bounds,
-                    time_limit=remaining_time,
-                    integer_indices=integer_indices,
-                    solve_role="tiebreak",
-                )
-                if preferred.success:
+                tiebreak_constraints = A_ub.with_row(c)
+                preferred = None
+                try:
+                    preferred = _solve_lp_highs(
+                        charging_tiebreak_objective,
+                        tiebreak_constraints,
+                        [*b_ub, economic_limit],
+                        A_eq,
+                        b_eq,
+                        bounds,
+                        time_limit=remaining_time,
+                        integer_indices=integer_indices,
+                        solve_role="tiebreak",
+                        initial_solution=result.x,
+                    )
+                    charging_tiebreak_stats = dict(getattr(preferred, "stats", {}))
+                except Exception as error:
+                    # The optional preference must not discard the valid
+                    # primary economic result when its solver operation fails.
+                    charging_tiebreak_stats = {"error": type(error).__name__}
+                    _LOGGER.warning("Free-charge preference failed; using the primary plan: %s", error)
+                if preferred is not None and preferred.success and _solver_point_is_feasible(
+                    preferred.x, tiebreak_constraints, [*b_ub, economic_limit],
+                    A_eq, b_eq, bounds, integer_indices,
+                    charging_tiebreak_stats.get("feasibility_tolerance", 1e-7),
+                ):
                     preferred_economic_cost = math.fsum(
                         coefficient * value
                         for coefficient, value in zip(c, preferred.x)
@@ -6178,6 +6296,8 @@ class BatteryOptimizer:
             "status": getattr(result, "status", None),
             "message": getattr(result, "message", ""),
             "cost_neutral_charging_tiebreak_used": charging_tiebreak_used,
+            "primary_solver": primary_solver_stats,
+            "charging_tiebreak_solver": charging_tiebreak_stats,
             "battery_export_constraints": battery_export_constraints,
         }
         if pre_window_effective_target is not None:
