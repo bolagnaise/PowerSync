@@ -3884,13 +3884,20 @@ class BatteryOptimizer:
         if cost_neutral_active:
             next_offset += p_n
         cost_neutral_surplus_offset = next_offset
+        if cost_neutral_active and ev_charge_active:
+            next_offset += p_n
         cost_neutral_surplus_sign_offset = next_offset
+        if cost_neutral_active and ev_charge_active:
+            next_offset += p_n
         cost_neutral_min_surplus_offset = next_offset
+        if cost_neutral_active and ev_charge_active:
+            next_offset += p_n
         cost_neutral_min_power_offset = next_offset
+        if cost_neutral_active and ev_charge_active:
+            next_offset += p_n
         cost_neutral_min_capacity_offset = next_offset
         if cost_neutral_active and ev_charge_active:
             next_offset += p_n
-            next_offset += 4 * p_n
         cost_neutral_saturation_offset = next_offset
         if cost_neutral_active and not ev_charge_active:
             next_offset += p_n

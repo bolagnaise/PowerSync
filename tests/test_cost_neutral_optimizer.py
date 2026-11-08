@@ -81,6 +81,100 @@ def _timestamps(n: int) -> list[datetime]:
     return [start + timedelta(hours=idx) for idx in range(n)]
 
 
+def test_cost_neutral_ev_uses_distinct_surplus_and_selector_columns(
+    optimizer_module, monkeypatch,
+):
+    """Continuous PV surplus must not alias any of its four binary witnesses."""
+    module = optimizer_module
+    original = module._solve_lp_highs
+    captured = []
+
+    def capture(*args, **kwargs):
+        scope = inspect.currentframe().f_back.f_locals
+        names = (
+            "cost_neutral_surplus_offset", "cost_neutral_surplus_sign_offset",
+            "cost_neutral_min_surplus_offset", "cost_neutral_min_power_offset",
+            "cost_neutral_min_capacity_offset",
+        )
+        captured.append((
+            {name: scope[name] for name in names}, scope["p_n"],
+            args[5], list(kwargs.get("integer_indices", ())),
+            args[1], scope["cost_neutral_natural_periods"],
+        ))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(module, "_solve_lp_highs", capture)
+    optimizer = _optimizer(module)
+    ev = module.EVChargePlan(
+        vehicle_id="car", max_power_kw=(1.0,) * 2,
+        energy_needed_kwh=1.0, charge_efficiency=1.0, min_power_kw=0.5,
+    )
+    optimizer.optimize(
+        import_prices=[0.25] * 2, export_prices=[0.08] * 2,
+        solar_forecast=[4.25, 0.0], load_forecast=[0.7] * 2,
+        current_soc=0.5, allow_battery_export=True,
+        schedule_timestamps=_timestamps(2), cost_neutral_earnings_cap=1.0,
+        cost_neutral_slots=[True, False], ev_plan=ev,
+    )
+    assert captured
+    for offsets, n, bounds, integers, matrix, natural in captured:
+        blocks = [set(range(offset, offset + n)) for offset in offsets.values()]
+        assert len(set.union(*blocks)) == 5 * n
+        assert len(integers) == len(set(integers))
+        surplus, *selectors = offsets.values()
+        assert all(surplus + t not in integers for t in range(n))
+        for selector in selectors:
+            assert all(selector + t in integers for t in range(n))
+            assert all(bounds[selector + t] in ((0.0, 0.0), (0.0, 1.0))
+                       for t in range(n))
+        for t in natural:
+            assert any(
+                row.get(surplus + t) == 1.0
+                and selectors[0] + t in row
+                for row in matrix._rows
+            )
+            assert any(
+                all(row.get(selector + t) == 1.0 for selector in selectors[1:])
+                for row in matrix._rows
+            )
+
+
+@pytest.mark.parametrize("solar,soc,expected_charge", [
+    (1.95, 0.2, 0.75),  # PV surplus binds, including a fractional kW.
+    (4.75, 0.2, 2.0),   # Native charging power binds.
+    (4.75, 0.95, 0.5),  # Remaining battery capacity binds.
+    (1.2, 0.2, 0.0),    # EV demand consumes all available surplus.
+])
+def test_cost_neutral_ev_native_absorption_matches_all_minimum_branches(
+    optimizer_module, solar, soc, expected_charge,
+):
+    module = optimizer_module
+    optimizer = module.BatteryOptimizer(
+        capacity_wh=10_000, max_charge_w=2_000, max_discharge_w=2_000,
+        efficiency=1.0, backup_reserve=0.0, hardware_reserve=0.0,
+        interval_minutes=60, horizon_hours=1, terminal_weight=0.0,
+    )
+    ev = module.EVChargePlan(
+        vehicle_id="car", max_power_kw=(0.5,), energy_needed_kwh=0.5,
+        charge_efficiency=1.0, min_power_kw=0.5,
+        allow_grid=(True,), allow_solar=(True,), allow_battery=(False,),
+    )
+    result = optimizer.optimize(
+        import_prices=[0.25], export_prices=[0.08], solar_forecast=[solar],
+        load_forecast=[0.7], current_soc=soc, allow_battery_export=False,
+        allow_grid_charge=False, schedule_timestamps=_timestamps(1), ev_plan=ev,
+        cost_neutral_earnings_cap=0.0, cost_neutral_slots=[True],
+    )
+    assert result.solver_used == "highs"
+    assert result.feasible
+    action = result.schedule.actions[0]
+    assert action.ev_charge_w == pytest.approx(500.0, abs=0.1)
+    assert action.battery_charge_w == pytest.approx(expected_charge * 1000, abs=0.1)
+    assert result.grid_export_w[0] == pytest.approx(
+        max(0.0, solar - 0.7 - 0.5 - expected_charge) * 1000, abs=0.1,
+    )
+
+
 @pytest.mark.parametrize("disable_idle", [False, True])
 def test_cost_neutral_waits_for_free_window_without_paid_topups(
     optimizer_module, disable_idle,
