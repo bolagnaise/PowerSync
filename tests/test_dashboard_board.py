@@ -268,6 +268,47 @@ def test_schedule_actions_and_windows():
     assert out["keys"] == ["charge", "self", "hold", "self", "export", ""]
 
 
+def test_plan_window_shows_varying_targets_instead_of_only_peak_power():
+    """Ticket 155: a 100 W slot inside a 5 kW run must remain visible."""
+    out = _run_board(r"""
+  const start = Math.ceil(Date.now() / 3600000) * 3600000;
+  function render(powers, kind = 'export') {
+    const ts = powers.map((_, i) => new Date(start + i * 300000).toISOString());
+    const zeros = powers.map(() => 0);
+    const data = { enabled: true, schedule: {
+      timestamps: ts, soc: powers.map((_, i) => 0.8 - i * 0.01),
+      charge_w: kind === 'export' ? zeros : powers,
+      discharge_w: kind === 'export' ? powers : zeros,
+      battery_export_w: kind === 'export' ? powers : zeros,
+      battery_consume_w: zeros,
+      grid_import_w: kind === 'charge' ? powers : zeros,
+      import_price: powers.map(() => 0.45), export_price: powers.map(() => 0.27),
+    } };
+    const card = new T.PsPlanCard();
+    card._hass = { states: {}, locale: { time_format: '24' }, config: { currency: 'AUD' } };
+    card._config = { entities: {} };
+    card._api = () => data;
+    card._loadHistory = () => {};
+    card.querySelector = () => ({ addEventListener() {} });
+    card._render();
+    return card.innerHTML.match(/<div class="d">([^<]*)<\/div>/g);
+  }
+  console.log(JSON.stringify({
+    variable: render([5000, 100.13731406, 100.12845288, 5000]),
+    constant: render([5000, 5000, 5000]),
+    rounding: render([5000, 4999.98, 4999.97]),
+    charge: render([2000, 5000, 3000], 'charge'),
+    solar: render([200, 1000, 500], 'solar'),
+  }));
+""")
+    assert "100 W–5.0 kW" in out["variable"][0]
+    assert "0.85 kWh" in out["variable"][0]
+    assert "5.0 kW" in out["constant"][0] and "–" not in out["constant"][0]
+    assert "5.0 kW" in out["rounding"][0] and "–" not in out["rounding"][0]
+    assert "2.0 kW–5.0 kW" in out["charge"][0]
+    assert "200 W–1.0 kW" in out["solar"][0]
+
+
 def test_plan_separates_solar_charge_from_paid_grid_share_and_capped_export_value():
     """Ticket 133: natural solar at 8am must not become paid grid charging.
 

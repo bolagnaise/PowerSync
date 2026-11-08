@@ -2377,8 +2377,14 @@ class PsPlanCard extends PsCardBase {
       const socText = Number.isFinite(soc0) && Number.isFinite(soc1)
         ? (Math.abs(soc1 - soc0) < 1 ? `holds ${Math.round(soc0)}%` : `${Math.round(soc0)}% to ${Math.round(soc1)}%`) : '';
       const peak = Math.max(0, ...kw);
+      const low = Math.max(0, Math.min(...kw));
+      const peakText = psKwText(peak);
+      const lowText = psKwText(low);
+      // A contiguous action can have a different target in every slot. Showing
+      // only its peak makes a varying export look like a steady power request.
+      const powerText = peak > 0 ? (lowText === peakText ? peakText : `${lowText}–${peakText}`) : '';
       const gridText = charging && gridKnown && gridKwh > 0 && gridKwh < kwh - 0.01 ? `${psFix(gridKwh)} kWh from grid` : '';
-      const desc = [psDuration((w.end - w.start) / 60_000), socText, peak ? psKwText(peak) : '', `${psFix(kwh, kwh < 1 ? 2 : 1)} kWh`, gridText].filter(Boolean).join(', ');
+      const desc = [psDuration((w.end - w.start) / 60_000), socText, powerText, `${psFix(kwh, kwh < 1 ? 2 : 1)} kWh`, gridText].filter(Boolean).join(', ');
       return `<div class="win"><span class="tag ${w.kind}">${PS_ACT[w.kind][0]}</span><div><b>${psEsc(psWhen(hass, w.start))}–${psEsc(psTime(hass, w.end))}</b><div class="d">${psEsc(desc)}</div></div><div class="c">${psEsc(psMoney(hass, hasPrice || gridKnown && gridKwh === 0 ? money : NaN))}${Number.isFinite(avg) ? `<small>${avg.toFixed(1)} ${unit} avg</small>` : ''}</div></div>`;
     }).join('') || '<p class="empty">No charge or export windows planned in the next day and a half.</p>';
 

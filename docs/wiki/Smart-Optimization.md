@@ -7,6 +7,13 @@ forecast, household load forecast, battery limits, and configured reserve floors
 Solar forecasting via Solcast or Open-Meteo Solar Forecast should be configured
 for accurate schedules.
 
+## Planned power ranges
+
+The dashboard groups consecutive slots with the same action into one window.
+When their planned power varies, the window shows the lowest and highest rates,
+for example **100 W–5.0 kW**. A single rate means all slots round to that displayed
+rate. The range describes the plan; it does not establish measured output.
+
 ## Sungrow optimizer export targets
 
 On Sungrow SH Modbus systems, optimizer export power is a grid-export target.
