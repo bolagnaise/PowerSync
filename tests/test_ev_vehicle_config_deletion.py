@@ -123,6 +123,21 @@ def test_previously_deleted_profile_can_retire_orphan_schedule(deletion):
     assert "generic_ev" not in durable.data["auto_schedule_settings"]
 
 
+def test_legacy_delete_preserves_shared_vehicle_profiles_and_schedule(deletion):
+    view, profiles, durable, executor = deletion()
+    profiles._data["shared_generic_charger"] = {
+        "selected_vehicle_id": "byd",
+        "profiles": [{"id": "byd", "schedule": {"enabled": True}}],
+    }
+    before_profiles = copy.deepcopy(profiles._data)
+    before_schedule = copy.deepcopy(durable.data)
+    response = asyncio.run(view.delete(SimpleNamespace(query={"vehicle_id": "generic_ev"})))
+    assert response.status == 409
+    assert profiles._data == before_profiles
+    assert durable.data == before_schedule
+    assert "generic_ev" in executor._settings
+
+
 def test_durable_write_failure_does_not_report_deleted_or_remove_profile(deletion):
     view, profiles, durable, _ = deletion()
     durable.fail = True

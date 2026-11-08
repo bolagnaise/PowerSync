@@ -5395,8 +5395,9 @@ class AutoScheduleExecutor:
         try:
             from .. import _update_powerwall_store
 
-            from .shared_generic_charger import save_selected_schedule
-            await save_selected_schedule(self)
+            if "generic_ev" in self._settings and getattr(self, "hass", None) is not None:
+                from .shared_generic_charger import save_selected_schedule
+                await save_selected_schedule(self)
 
             auto_schedule_data = {}
             for vehicle_id, settings in self._settings.items():
@@ -5411,9 +5412,10 @@ class AutoScheduleExecutor:
             _LOGGER.debug(f"Saved auto-schedule settings for {len(self._settings)} vehicles")
         except Exception as e:
             _LOGGER.error(f"Failed to save auto-schedule settings: {e}")
-            from .shared_generic_charger import shared_data
-            if shared_data(getattr(self, "hass", None), getattr(self, "config_entry", None)) is not None:
-                raise
+            if "generic_ev" in getattr(self, "_settings", {}) and getattr(self, "hass", None) is not None:
+                from .shared_generic_charger import shared_data
+                if shared_data(self.hass, getattr(self, "config_entry", None)) is not None:
+                    raise
 
     def get_settings(self, vehicle_id: str) -> AutoScheduleSettings:
         """Get settings for a vehicle, creating defaults if needed."""

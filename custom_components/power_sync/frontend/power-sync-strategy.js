@@ -6527,13 +6527,14 @@ class PowerSyncEVPanel extends HTMLElement {
       const enabled = !!vehicle.enabled;
       const loadpoint = this._loadpoints().find((lp) => lp.loadpoint_id === vehicleId);
       const sharedVehicle = vehicleId === 'generic_ev' && this._data?.sharedCharger?.enabled;
-      const name = sharedVehicle ? (vehicle.display_name || 'Shared charger') : (loadpoint
+      const name = sharedVehicle ? (vehicle.display_name || 'Shared charger') : loadpoint
         ? this._loadpointLabel(loadpoint)
-        : (vehicle.display_name || vehicleId));
+        : (vehicle.display_name || vehicleId);
       const departure = vehicle.departure_time || Object.values(vehicle.departure_times || {})[0] || 'Not set';
       const departureTimes = vehicle.departure_times || {};
       const config = vehicleConfigs.find((item) => item.vehicle_id === vehicleId) || {};
-      const effectiveCapacity = config.effective_battery_capacity_kwh ?? vehicle.effective_battery_capacity_kwh;
+      const effectiveCapacity = sharedVehicle ? vehicle.effective_battery_capacity_kwh
+        : (config.effective_battery_capacity_kwh ?? vehicle.effective_battery_capacity_kwh);
       const capacitySource = config.battery_capacity_source || vehicle.battery_capacity_source || 'default_estimate';
       const manualCapacity = config.battery_capacity_kwh
         ?? (capacitySource === 'charger_fallback' ? effectiveCapacity : '');
@@ -6543,7 +6544,7 @@ class PowerSyncEVPanel extends HTMLElement {
           <div class="smart-details">
             <div class="smart-name">${this._escHtml(name)}</div>
             <div class="smart-meta">Target ${this._escHtml(vehicle.target_soc ?? '--')}% | Departure ${this._escHtml(departure)}</div>
-            <div class="smart-meta">Usable capacity ${this._escHtml(sharedVehicle ? vehicle.effective_battery_capacity_kwh : (effectiveCapacity ?? 60))} kWh | ${this._escHtml(sharedVehicle ? 'Selected vehicle' : sourceLabel)}</div>
+            <div class="smart-meta">Usable capacity ${this._escHtml(effectiveCapacity ?? 60)} kWh | ${this._escHtml(sharedVehicle ? 'Selected vehicle' : sourceLabel)}</div>
             <div class="capacity-editor">
               <label>Target SOC (%)<input type="number" min="1" max="100" step="1" data-target-input="${this._escAttr(vehicleId)}" value="${this._escAttr(vehicle.target_soc ?? 80)}"></label>
               <button class="command" data-target-save="${this._escAttr(vehicleId)}" ${this._savingKey ? 'disabled' : ''}>Save target</button>

@@ -19767,8 +19767,7 @@ class VehicleChargingConfigView(HomeAssistantView):
             )
             updated = [c for c in vehicle_configs if c.get("vehicle_id") != vehicle_id]
 
-            from .automations.shared_generic_charger import context_for_options
-            if vehicle_id == "generic_ev" and context_for_options(self._hass, self._get_powersync_config()) is not None:
+            if vehicle_id == "generic_ev" and isinstance(stored_data.get("shared_generic_charger"), dict):
                 return web.json_response({"success": False, "error": "Manage shared-charger vehicles in EV Charging."}, status=409)
 
             cleanup_ids = {vehicle_id}

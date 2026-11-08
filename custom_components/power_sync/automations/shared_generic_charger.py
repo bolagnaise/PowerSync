@@ -227,6 +227,11 @@ async def update(hass: Any, entry: Any, executor: Any, payload: dict) -> dict:
         if reason:
             raise ValueError(reason)
         await save_selected_schedule(executor)
+        # Controls and telemetry may advance while the old schedule is saved.
+        # Recheck before changing identity, then fence commands until committed.
+        reason = selection_block_reason(hass, entry, executor)
+        if reason:
+            raise ValueError(reason)
         original = copy.deepcopy(store._data.get(KEY))
         data = copy.deepcopy(store._data.get(KEY) or {"profiles": [], "selected_vehicle_id": None})
         data["charger_switch_entity"] = opts.get("generic_charger_switch_entity")

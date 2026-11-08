@@ -207,6 +207,33 @@ async def test_entity_command_keeps_selection_fixed_across_await(env):
 
 
 @pytest.mark.asyncio
+async def test_selection_rechecks_ownership_after_saving_previous_schedule(env):
+    e = env
+    byd = await add(e)
+    zeekr = await add(e, "Zeekr", "sensor.zeekr_soc", 86)
+    entered, release = asyncio.Event(), asyncio.Event()
+    save = e.store.async_save
+
+    async def paused_save():
+        entered.set()
+        await release.wait()
+        await save()
+
+    e.store.async_save = paused_save
+    task = asyncio.create_task(e.shared.update(
+        e.hass, e.entry, e.executor, {"operation": "select", "vehicle_id": zeekr},
+    ))
+    await asyncio.wait_for(entered.wait(), 1)
+    # A controller may acquire ownership during the awaited storage operation.
+    e.lease.update(owner="powersync")
+    release.set()
+    with pytest.raises(ValueError, match="release the current charging session"):
+        await asyncio.wait_for(task, 1)
+    assert e.shared.selected_profile(e.shared.shared_data(e.hass, e.entry))["id"] == byd
+    assert e.executor._settings["generic_ev"].display_name == "BYD"
+
+
+@pytest.mark.asyncio
 async def test_stale_schedule_start_token_cannot_control_newly_selected_car(env):
     e = env
     byd = await add(e)
