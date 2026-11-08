@@ -21,6 +21,22 @@ LIMIT_ENTITY = "number.car_charge_limit"
 def _native_hass(monkeypatch, platform: str, entity_id=ENTITY):
     import importlib
 
+    # Other full-suite fixtures replace these lazy-import views at runtime.
+    # Keep native journal/finite-entrypoint tests on their own real fake HA
+    # registry and usable persistence contract, independent of worker history.
+    class NativeStore:
+        def __init__(self, *_args, **_kwargs):
+            self.value = None
+
+        async def async_load(self):
+            return deepcopy(self.value)
+
+        async def async_save(self, value):
+            self.value = deepcopy(value)
+
+    storage = importlib.import_module("homeassistant.helpers.storage")
+    monkeypatch.setattr(storage, "Store", NativeStore)
+
     registration = SimpleNamespace(
         entity_id=entity_id,
         platform=platform,
@@ -53,6 +69,8 @@ def _native_hass(monkeypatch, platform: str, entity_id=ENTITY):
         "dr",
         SimpleNamespace(async_get=lambda _hass: hass.device_registry),
     )
+    recovery = importlib.import_module("power_sync.tesla_ev_recovery")
+    monkeypatch.setattr(recovery, "_registry", lambda _hass: hass.entity_registry)
     # ``teslemetry_bluetooth_commands`` resolves the registry lazily through
     # Home Assistant imports.  Collection fixtures can leave those import
     # views pointing at another fake registry even though the action module
