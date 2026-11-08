@@ -299,7 +299,7 @@ async def test_profiles_are_available_before_late_automation_engine_registration
 
 
 @pytest.mark.asyncio
-async def test_physical_charger_remains_visible_and_metered_without_selected_soc(env):
+async def test_physical_charger_remains_visible_and_metered_without_selected_soc(env, monkeypatch):
     e = env
     await add(e)
     await e.shared.update(e.hass, e.entry, e.executor, {"operation": "select", "vehicle_id": None})
@@ -307,6 +307,13 @@ async def test_physical_charger_remains_visible_and_metered_without_selected_soc
     for name in ("AMPS", "ENABLED", "POWER", "STATUS", "SWITCH"):
         setattr(const, f"CONF_GENERIC_CHARGER_{name}_ENTITY" if name != "ENABLED" else "CONF_GENERIC_CHARGER_ENABLED",
                 f"generic_charger_{name.lower()}_entity" if name != "ENABLED" else "generic_charger_enabled")
+    # Import the real status producer in an isolated module slot: its ownership
+    # dependency is intentionally faked by this fixture and must not leak into
+    # whichever file a full-suite worker executes next.
+    status = types.ModuleType("power_sync.automations.loadpoint_status")
+    status.__package__ = "power_sync.automations"
+    monkeypatch.setitem(sys.modules, status.__name__, status)
+    exec(compile((ROOT / "automations/loadpoint_status.py").read_text(), "real_loadpoint_status", "exec"), vars(status))
     tree = ast.parse((ROOT / "__init__.py").read_text())
     node = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_generic_charger_observation_from_config")
     namespace = {"__package__": "power_sync", "_kw_from_power_state": lambda state: float(state.state)}
