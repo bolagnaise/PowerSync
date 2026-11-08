@@ -212,7 +212,7 @@ def guard_ev_control(func):
             # Interrupt read-only reconciliation before waiting on the normal
             # ownership lock held by its initiating positive request. Without
             # this early signal, Stop cannot reach its own dispatch fence.
-            runtime = hass.data.get("power_sync", {}).get(entry.entry_id, {})
+            runtime = getattr(hass, "data", {}).get("power_sync", {}).get(entry.entry_id, {})
             recovery = runtime.get("_tesla_native_reconciliation")
             if isinstance(recovery, dict) and (not vin or str(vin).upper() == recovery.get("vehicle_id")):
                 recovery["interrupted"] = True
