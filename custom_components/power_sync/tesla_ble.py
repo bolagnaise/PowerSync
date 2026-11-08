@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 from datetime import datetime, timezone
 from typing import Any
@@ -28,12 +29,36 @@ def get_tesla_ble_observed_at(hass: Any, state: Any) -> datetime | None:
     The optional charging-freshness package publishes ``<entity>_received``
     timestamp values on raw samples, including equal measurements which HA's
     ESPHome integration suppresses. Its state value is the receipt, not its HA
-    update time. Once present, an invalid receipt must fail closed. Older
+    update time. The newer ``<entity>_sample`` packet pairs a raw value and
+    its timestamp; a mismatched filtered value is not fresh evidence.
+    Once present, an invalid receipt must fail closed. Older
     bridges without these entities retain their existing HA timestamp contract.
     """
     if state is None:
         return None
     entity_id = getattr(state, "entity_id", "")
+    sample = hass.states.get(f"{entity_id}_sample") if entity_id else None
+    if sample is not None:
+        # Separate HA entities can arrive in either order. Never join a new
+        # receipt to an older value while the filtered sensor is catching up.
+        try:
+            packet = json.loads(sample.state)
+            if not isinstance(packet, dict) or type(packet.get("v")) is not int or packet["v"] != 1:
+                return None
+            native = packet["x"]
+            if type(native) in (int, float):
+                current = float(state.state)
+                if not math.isfinite(native) or not math.isfinite(current) or not math.isclose(native, current, rel_tol=1e-6, abs_tol=1e-6):
+                    return None
+            elif not isinstance(native, str) or native != state.state:
+                return None
+            observed = datetime.fromisoformat(packet["t"].replace("Z", "+00:00"))
+            if observed.tzinfo is None or observed.utcoffset() is None:
+                return None
+            observed = observed.astimezone(timezone.utc)
+            return observed if observed <= datetime.now(timezone.utc) else None
+        except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
+            return None
     receipt = hass.states.get(f"{entity_id}_received") if entity_id else None
     if receipt is not None:
         try:

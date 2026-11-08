@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import sys
 import types
+import time
 
 import pytest
 import pytest_asyncio
@@ -25,6 +26,16 @@ async def inventory(harness, monkeypatch):
     monkeypatch.setattr(mapping, "resolve_ble_prefixes", lambda *_: ["bridge_a", "bridge_b"])
     monkeypatch.setattr(stop, "POLL_SECONDS", 0.001)
     monkeypatch.setattr(stop, "TIMEOUT", 0.04)
+    # Protocol deadlines advance deterministically with polling rather than
+    # the host's CPU load. The native sample timestamps and all assertions
+    # still exercise the production verifier; a slow full-suite worker cannot
+    # consume a 40ms fixture budget during exact inventory validation.
+    ticks = [0.0]
+    def monotonic():
+        ticks[0] += 0.001
+        return ticks[0]
+    monkeypatch.setattr(stop, "time", types.SimpleNamespace(
+        time=time.time, monotonic=monotonic))
     entry.data.update(ev_provider="tesla_ble", tesla_ble_entity_prefix="bridge_a,bridge_b")
     config_entries = {}
     receipts, aliases = {}, {"bridge_a": "ble_bridge_a", "bridge_b": "ble_bridge_b"}
@@ -524,4 +535,62 @@ async def test_shared_producer_liability_in_another_entry_refuses(inventory):
     c.hass.data["power_sync"]["foreign-entry"] = {
         recovery.RECOVERY_KEY: deepcopy(c.runtime[recovery.RECOVERY_KEY])}
     with pytest.raises(stop.StopRecoveryRefused,match="another_entry"): await recover(c)
+    assert c.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["stop", "start", "rate", "limit"])
+async def test_read_only_recovery_status_preserves_every_retained_record(inventory, operation):
+    from power_sync.tesla_ble_recovery_status import ble_recovery_status
+    c = inventory
+    for root in (c.runtime[recovery.RECOVERY_KEY], c.runtime[recovery._SIDECAR_STATE_KEY]["recovery"]):
+        next(iter(root["vehicles"][c.aliases["bridge_a"]]["attempts"].values()))["operation"] = operation
+    before_runtime, before_store = deepcopy(c.runtime[recovery.RECOVERY_KEY]), deepcopy(c.store.value)
+    status = ble_recovery_status(c.hass, c.entry)
+    assert status["success"] and status["controls_issued"] is False
+    assert len(status["retained_history"]) == 35
+    assert status["recovery"]["general_ble_recovery_available"] is False
+    assert status["recovery"]["candidate_service"] == (
+        "power_sync.recover_ble_stop_history" if operation == "stop" else None)
+    assert status["recovery"]["reason"] == (
+        "complete_inventory_and_native_stop_proof_required" if operation == "stop"
+        else "vehicle_execution_fence_unproven")
+    assert c.calls == [] and c.store.value == before_store
+    assert c.runtime[recovery.RECOVERY_KEY] == before_runtime
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("requested", [None, "other-entry", 12, "missing-entry"])
+async def test_status_service_routes_exact_entry_without_manual_control_cleanup(inventory, requested):
+    import ast
+    from typing import Any
+    from conftest import load_source_node
+    c = inventory
+    root = Path(__file__).resolve().parents[1]
+    node = load_source_node(root / "custom_components/power_sync/__init__.py", "handle_get_ble_recovery_status")
+    scope = {"__name__": "power_sync", "__package__": "power_sync",
+             "hass": c.hass, "entry": c.entry, "DOMAIN": "power_sync", "ServiceCall": object, "Any": Any}
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[node], type_ignores=[])), "status-handler", "exec"), scope)
+    other_calls = []
+    async def other(call):
+        other_calls.append(call.data)
+        return {"other_entry": True}
+    c.hass.data["power_sync"]["other-entry"] = {"licensing_control_handlers": {"get_ble_recovery_status": other}}
+    call = types.SimpleNamespace(data={"entry_id": requested})
+    if requested in (12, "missing-entry"):
+        with pytest.raises(ValueError):
+            await scope["handle_get_ble_recovery_status"](call)
+        assert not other_calls
+    else:
+        result = await scope["handle_get_ble_recovery_status"](call)
+        assert result.get("other_entry", False) is (requested == "other-entry")
+    # The registration must use this read-only handler directly. The normal
+    # control router finalises a manual command and must not wrap an inspection.
+    source = ast.parse((root / "custom_components/power_sync/__init__.py").read_text())
+    registration = next(n for n in ast.walk(source) if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Attribute) and n.func.attr == "async_register"
+        and len(n.args) > 2 and isinstance(n.args[1], ast.Constant)
+        and n.args[1].value == "get_ble_recovery_status")
+    assert isinstance(registration.args[2], ast.Name)
+    assert registration.args[2].id == "handle_get_ble_recovery_status"
     assert c.calls == []

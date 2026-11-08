@@ -9697,6 +9697,7 @@ def test_tesla_ble_stop_service_acceptance_requires_fresh_stopped_readback(monke
 
     monkeypatch.setattr(actions, "_wake_tesla_ble", fake_wake)
     monkeypatch.setattr(actions, "_TESLA_BLE_COMMAND_CONFIRMATION_SECONDS", 0)
+    monkeypatch.setattr(actions, "_TESLA_BLE_SESSION_PROBE_SECONDS", 0)
     hass = _Hass([
         _State("switch.car_charger", "on"),
         _State(
@@ -13764,6 +13765,7 @@ def test_ble_start_requires_fresh_vehicle_readback(monkeypatch, telemetry):
         return True
     monkeypatch.setattr(actions, "_wake_tesla_ble", awake)
     monkeypatch.setattr(actions, "_TESLA_BLE_COMMAND_CONFIRMATION_SECONDS", 0, raising=False)
+    monkeypatch.setattr(actions, "_TESLA_BLE_SESSION_PROBE_SECONDS", 0)
     hass = _Hass([
         _State("switch.car_charger", "off"),
         _State("sensor.car_charging_state", telemetry,
@@ -13782,6 +13784,7 @@ def test_ble_start_accepts_fresh_vehicle_charging_state(monkeypatch, state_suffi
         return True
     monkeypatch.setattr(actions, "_wake_tesla_ble", awake)
     monkeypatch.setattr(actions, "_TESLA_BLE_COMMAND_CONFIRMATION_SECONDS", 0, raising=False)
+    monkeypatch.setattr(actions, "_TESLA_BLE_SESSION_PROBE_SECONDS", 0)
     hass = _Hass([_State("switch.car_charger", "off")])
     _add_ble_session_snapshot(hass, current=str(draw))
     async def confirmed_call(domain, service, data, **kwargs):
@@ -13838,6 +13841,7 @@ def test_ble_rate_update_uses_fresh_charging_telemetry_without_wake(monkeypatch)
 
     monkeypatch.setattr(actions, "_wake_tesla_ble", must_not_wake)
     monkeypatch.setattr(actions, "_TESLA_BLE_COMMAND_CONFIRMATION_SECONDS", 0)
+    monkeypatch.setattr(actions, "_TESLA_BLE_SESSION_PROBE_SECONDS", 0)
     hass.services.async_call = write
 
     assert asyncio.run(actions._set_ev_charging_amps_ble(hass, "car", 13)) is True
@@ -13872,6 +13876,7 @@ def test_ble_rate_update_uses_fresh_power_when_charging_state_is_unchanged(monke
 
     monkeypatch.setattr(actions, "_wake_tesla_ble", must_not_wake)
     monkeypatch.setattr(actions, "_TESLA_BLE_COMMAND_CONFIRMATION_SECONDS", 0)
+    monkeypatch.setattr(actions, "_TESLA_BLE_SESSION_PROBE_SECONDS", 0)
     hass.services.async_call = write
 
     assert asyncio.run(actions._set_ev_charging_amps_ble(hass, "car", 8)) is True
@@ -13953,6 +13958,7 @@ def test_ble_number_command_requires_matching_readback(monkeypatch, kind, confir
         return True
     monkeypatch.setattr(actions, "_wake_tesla_ble", awake)
     monkeypatch.setattr(actions, "_TESLA_BLE_COMMAND_CONFIRMATION_SECONDS", 0)
+    monkeypatch.setattr(actions, "_TESLA_BLE_SESSION_PROBE_SECONDS", 0)
     entity_id = f"number.car_charging_{kind}"
     value = 16 if kind == "amps" else 70
     hass = _Hass([_State(entity_id, "unknown", {"min": 1, "max": 32})])
@@ -14025,6 +14031,7 @@ def test_both_mode_ble_start_distinguishes_preflight_and_unconfirmed_write(monke
     monkeypatch.setattr(actions, "_resolve_teslemetry_bt_prefix", lambda *args: None)
     monkeypatch.setattr(actions, "_is_api_credit_available", lambda *args: True)
     monkeypatch.setattr(actions, "_TESLA_BLE_COMMAND_CONFIRMATION_SECONDS", 0)
+    monkeypatch.setattr(actions, "_TESLA_BLE_SESSION_PROBE_SECONDS", 0)
     assert asyncio.run(actions._action_start_ev_charging(
         hass, entry, {"vehicle_vin": vin, "charger_type": "tesla"}, {}
     )) is (True if not wake_confirmed or settled else None)
@@ -14202,6 +14209,7 @@ def test_both_mode_unconfirmed_ble_number_does_not_fall_through(monkeypatch, kin
         raise AssertionError("An unconfirmed BLE write must not fall through")
     monkeypatch.setattr(actions, "_wake_tesla_ble", awake)
     monkeypatch.setattr(actions, "_TESLA_BLE_COMMAND_CONFIRMATION_SECONDS", 0)
+    monkeypatch.setattr(actions, "_TESLA_BLE_SESSION_PROBE_SECONDS", 0)
     monkeypatch.setattr(actions, "_get_tesla_ev_entity", unexpected_fallback)
     value = 16 if kind == "amps" else 70
     action = actions._action_set_ev_charging_amps if kind == "amps" else actions._action_set_ev_charge_limit
@@ -14817,6 +14825,7 @@ def test_battery_floor_stop_does_not_settle_a_replacement_session(monkeypatch, p
 def test_ble_stop_confirmation_stays_prefix_and_timestamp_scoped(monkeypatch, confirmation):
     monkeypatch.setattr(actions, "_wake_tesla_ble", AsyncMock(return_value=True))
     monkeypatch.setattr(actions, "_TESLA_BLE_COMMAND_CONFIRMATION_SECONDS", 0)
+    monkeypatch.setattr(actions, "_TESLA_BLE_SESSION_PROBE_SECONDS", 0)
     old = datetime.now(timezone.utc) - timedelta(minutes=10)
     hass = _Hass([
         _State("switch.car_charger", "on"),
@@ -14929,6 +14938,7 @@ def test_ble_user_stop_dispatches_switch_off_through_an_armed_backoff(monkeypatc
     monkeypatch.setattr(
         actions, "_TESLA_BLE_COMMAND_CONFIRMATION_SECONDS", 0, raising=False
     )
+    monkeypatch.setattr(actions, "_TESLA_BLE_SESSION_PROBE_SECONDS", 0)
 
     async def _no_sleep(_seconds):
         return None
@@ -15043,6 +15053,7 @@ def test_ble_user_stop_dispatches_when_an_awake_car_cannot_acknowledge_a_wake(
     monkeypatch.setattr(
         actions, "_TESLA_BLE_COMMAND_CONFIRMATION_SECONDS", 0, raising=False
     )
+    monkeypatch.setattr(actions, "_TESLA_BLE_SESSION_PROBE_SECONDS", 0)
     hass, _asleep = _awake_charging_ble_hass()
     monkeypatch.setattr(actions, "_wake_tesla_ble", AsyncMock(return_value=False))
     stream, handler, logger, old_level, old_propagate = _captured_actions_logs(
@@ -15083,6 +15094,7 @@ def test_ble_automatic_stop_also_dispatches_on_measured_charging_evidence(
     monkeypatch.setattr(
         actions, "_TESLA_BLE_COMMAND_CONFIRMATION_SECONDS", 0, raising=False
     )
+    monkeypatch.setattr(actions, "_TESLA_BLE_SESSION_PROBE_SECONDS", 0)
     hass, _asleep = _awake_charging_ble_hass(charging_state_age_seconds=5)
 
     async def run():
@@ -16084,6 +16096,7 @@ def test_ble_mutation_blocks_after_wake_without_fresh_charge_snapshot(monkeypatc
     ])
     _add_ble_force_data_update(hass)
     monkeypatch.setattr(actions, "_TESLA_BLE_COMMAND_CONFIRMATION_SECONDS", 0)
+    monkeypatch.setattr(actions, "_TESLA_BLE_SESSION_PROBE_SECONDS", 0)
     monkeypatch.setattr(actions, "_wake_tesla_ble", AsyncMock(return_value=True))
 
     result = asyncio.run(actions._start_ev_charging_ble(hass, "car"))
@@ -16101,6 +16114,7 @@ def test_ble_mutation_allows_fresh_zero_snapshot_after_force_refresh(monkeypatch
     _add_ble_force_data_update(hass)
     _ble_refresh_call(hass, charging_state="Stopped", current="0")
     monkeypatch.setattr(actions, "_TESLA_BLE_COMMAND_CONFIRMATION_SECONDS", 0)
+    monkeypatch.setattr(actions, "_TESLA_BLE_SESSION_PROBE_SECONDS", 0)
     monkeypatch.setattr(actions, "_wake_tesla_ble", AsyncMock(return_value=True))
     refresh_call = hass.services.async_call
 
@@ -16134,6 +16148,7 @@ def test_ble_healthy_snapshot_fast_path_does_not_wake_or_refresh(monkeypatch):
     ])
     monkeypatch.setattr(actions, "_wake_tesla_ble", AsyncMock(side_effect=AssertionError("healthy BLE must not wake")))
     monkeypatch.setattr(actions, "_TESLA_BLE_COMMAND_CONFIRMATION_SECONDS", 0)
+    monkeypatch.setattr(actions, "_TESLA_BLE_SESSION_PROBE_SECONDS", 0)
 
     async def write(domain, service, data, **kwargs):
         hass.services.calls.append((domain, service, data))
@@ -16165,6 +16180,7 @@ def test_ble_zero_snapshot_accepts_newer_stopped_state(monkeypatch):
         AsyncMock(side_effect=AssertionError("fresh zero receipt must not wake")),
     )
     monkeypatch.setattr(actions, "_TESLA_BLE_COMMAND_CONFIRMATION_SECONDS", 0)
+    monkeypatch.setattr(actions, "_TESLA_BLE_SESSION_PROBE_SECONDS", 0)
 
     async def write(domain, service, data, **kwargs):
         hass.services.calls.append((domain, service, data))
@@ -16213,6 +16229,7 @@ def test_ble_force_refresh_rejects_future_or_stale_raw_receipt(monkeypatch):
         disabled_by=None,
     )
     monkeypatch.setattr(actions, "_TESLA_BLE_COMMAND_CONFIRMATION_SECONDS", 0)
+    monkeypatch.setattr(actions, "_TESLA_BLE_SESSION_PROBE_SECONDS", 0)
     monkeypatch.setattr(actions, "_wake_tesla_ble", AsyncMock(return_value=True))
 
     result = asyncio.run(actions._set_ev_charging_amps_ble(hass, "car", 8))
@@ -16227,6 +16244,7 @@ def test_ble_force_refresh_rejects_rebound_other_device(monkeypatch):
     hass = _Hass([_State("number.car_charging_amps", "5", {"min": 1, "max": 32})])
     _add_ble_force_data_update(hass, device_id="other-device")
     monkeypatch.setattr(actions, "_TESLA_BLE_COMMAND_CONFIRMATION_SECONDS", 0)
+    monkeypatch.setattr(actions, "_TESLA_BLE_SESSION_PROBE_SECONDS", 0)
     monkeypatch.setattr(actions, "_wake_tesla_ble", AsyncMock(return_value=True))
 
     result = asyncio.run(actions._set_ev_charging_amps_ble(hass, "car", 8))
@@ -16249,6 +16267,7 @@ def test_ble_force_refresh_rebind_is_known_not_sent(monkeypatch):
 
     hass.services.async_call = rebind_after_refresh
     monkeypatch.setattr(actions, "_TESLA_BLE_COMMAND_CONFIRMATION_SECONDS", 0)
+    monkeypatch.setattr(actions, "_TESLA_BLE_SESSION_PROBE_SECONDS", 0)
     monkeypatch.setattr(actions, "_wake_tesla_ble", AsyncMock(return_value=True))
 
     result = asyncio.run(actions._set_ev_charging_amps_ble(hass, "car", 8))
@@ -16340,6 +16359,7 @@ def test_ble_unavailable_charge_alias_does_not_mask_valid_alias(monkeypatch):
     unavailable.device_id = "other-device"
     unavailable.config_entry_id = "other-entry"
     monkeypatch.setattr(actions, "_TESLA_BLE_COMMAND_CONFIRMATION_SECONDS", 0)
+    monkeypatch.setattr(actions, "_TESLA_BLE_SESSION_PROBE_SECONDS", 0)
 
     async def write(domain, service, data, **kwargs):
         hass.services.calls.append((domain, service, data))
@@ -16358,6 +16378,7 @@ def test_ble_force_refresh_requires_shared_config_entry(monkeypatch):
     hass.entity_registry.entities["number.car_charging_amps"].config_entry_id = None
     _add_ble_force_data_update(hass)
     monkeypatch.setattr(actions, "_TESLA_BLE_COMMAND_CONFIRMATION_SECONDS", 0)
+    monkeypatch.setattr(actions, "_TESLA_BLE_SESSION_PROBE_SECONDS", 0)
     monkeypatch.setattr(actions, "_wake_tesla_ble", AsyncMock(return_value=True))
 
     result = asyncio.run(actions._set_ev_charging_amps_ble(hass, "car", 8))
@@ -16372,6 +16393,7 @@ def test_ble_force_refresh_requires_esphome_target_platform(monkeypatch):
     hass.entity_registry.entities["number.car_charging_amps"].platform = "tesla_fleet"
     _add_ble_force_data_update(hass)
     monkeypatch.setattr(actions, "_TESLA_BLE_COMMAND_CONFIRMATION_SECONDS", 0)
+    monkeypatch.setattr(actions, "_TESLA_BLE_SESSION_PROBE_SECONDS", 0)
     monkeypatch.setattr(actions, "_wake_tesla_ble", AsyncMock(return_value=True))
 
     result = asyncio.run(actions._set_ev_charging_amps_ble(hass, "car", 8))
@@ -16390,6 +16412,7 @@ def test_ble_force_refresh_is_exact_prefix_for_two_cars(monkeypatch):
     _add_ble_force_data_update(hass, "car_b")
     _ble_refresh_call(hass, "car_b", charging_state="Stopped", current="0")
     monkeypatch.setattr(actions, "_TESLA_BLE_COMMAND_CONFIRMATION_SECONDS", 0)
+    monkeypatch.setattr(actions, "_TESLA_BLE_SESSION_PROBE_SECONDS", 0)
     monkeypatch.setattr(actions, "_wake_tesla_ble", AsyncMock(return_value=True))
 
     result = asyncio.run(actions._set_ev_charging_amps_ble(hass, "car_a", 8))
@@ -16900,6 +16923,7 @@ def test_legacy_bridge_without_radio_entity_remains_available():
 def test_owned_ble_stop_cleanup_remains_dispatchable_when_radio_is_off(monkeypatch):
     """A negative cleanup Stop may use its existing exact scope when radio is off."""
     monkeypatch.setattr(actions, "_TESLA_BLE_COMMAND_CONFIRMATION_SECONDS", 0)
+    monkeypatch.setattr(actions, "_TESLA_BLE_SESSION_PROBE_SECONDS", 0)
     hass = _Hass([
         _State("switch.car_charger", "on"),
         _State("switch.car_ble_connection", "off"),
@@ -17533,6 +17557,7 @@ def test_sparse_stock_health_allows_ble_write_but_keeps_readback_strict(monkeypa
 
     monkeypatch.setattr(actions, "_wake_tesla_ble", wake_and_advance)
     monkeypatch.setattr(actions, "_TESLA_BLE_COMMAND_CONFIRMATION_SECONDS", 0)
+    monkeypatch.setattr(actions, "_TESLA_BLE_SESSION_PROBE_SECONDS", 0)
 
     result = asyncio.run(actions._set_ev_charging_amps_ble(hass, "car", 5))
 
@@ -17574,3 +17599,78 @@ def test_ble_wake_rejects_charge_evidence_binding_change(monkeypatch, mutation):
     assert hass.services.calls == [
         ("button", "press", {"entity_id": "button.car_wake_up"})
     ]
+
+
+@pytest.mark.parametrize("outcome", ["delayed", "timeout", "preempt", "rebind", "other_car"])
+def test_ble_confirmation_acquires_bounded_exact_bridge_readback(monkeypatch, outcome):
+    """A late sample can confirm once; reads cannot renew authority or write."""
+    clock = [0.0]
+    since = datetime.now(timezone.utc) - timedelta(seconds=1)
+    hass = _Hass([
+        _State("switch.car_charger", "on"),
+        _State("button.car_force_data_update", "unknown"),
+        _State("sensor.car_charging_state", "Stopped", last_updated=since - timedelta(seconds=1)),
+        _State("sensor.car_charge_current", "0", last_updated=since - timedelta(seconds=1)),
+        _State("sensor.other_charging_state", "Charging", last_updated=datetime.now(timezone.utc)),
+        _State("sensor.other_charge_current", "5", last_updated=datetime.now(timezone.utc)),
+    ])
+    identity = actions._tesla_legacy_entity_identity(hass, ("switch.car_charger",))
+    binding = actions._tesla_ble_charge_data_binding(hass, "car", "switch.car_charger")
+    authorized = [True]
+
+    async def sleep(seconds):
+        clock[0] += seconds
+        if clock[0] >= 11:
+            if outcome == "delayed":
+                for suffix, value in (("charging_state", "Charging"), ("charge_current", "5")):
+                    hass.states._states[f"sensor.car_{suffix}"] = _State(
+                        f"sensor.car_{suffix}", value, last_updated=datetime.now(timezone.utc))
+            elif outcome == "preempt":
+                authorized[0] = False
+            elif outcome == "rebind":
+                hass.entity_registry.async_get("button.car_force_data_update").unique_id = "replaced"
+
+    monkeypatch.setattr(actions, "asyncio", SimpleNamespace(
+        get_running_loop=lambda: SimpleNamespace(time=lambda: clock[0]),
+        sleep=sleep, timeout=asyncio.timeout,
+    ))
+    result = asyncio.run(actions._wait_for_ble_command_readback(
+        hass, "sensor.car_charging_state", "Charging", since,
+        charging_prefix="car", charge_binding=binding,
+        charge_binding_target="switch.car_charger", charge_binding_prefix="car",
+        authorize=lambda: authorized[0], expected_identity=identity,
+    ))
+    assert result is (outcome == "delayed")
+    assert len(hass.services.calls) == (3 if outcome in {"timeout", "other_car"} else 1)
+    assert all(call == ("button", "press", {"entity_id": "button.car_force_data_update"})
+               for call in hass.services.calls)
+    assert clock[0] <= 35
+
+
+@pytest.mark.parametrize("handover_seconds,expected", [(0, True), (34, False)])
+def test_ble_start_keeps_one_confirmation_deadline_and_never_repeats_write(monkeypatch, handover_seconds, expected):
+    clock = [0.0]
+    hass = _Hass([_State("switch.car_charger", "off"),
+                  _State("button.car_force_data_update", "unknown")])
+    _add_ble_session_snapshot(hass, charging_state="Stopped", current="0")
+    async def awake(*args, **kwargs):
+        return True
+    async def sleep(seconds):
+        clock[0] += seconds
+    async def call(domain, service, data, **kwargs):
+        hass.services.calls.append((domain, service, data))
+        if domain == "switch":
+            clock[0] += handover_seconds
+        elif clock[0] >= 12:
+            _add_ble_session_snapshot(hass, charging_state="Charging", current="5")
+    hass.services.async_call = call
+    monkeypatch.setattr(actions, "_wake_tesla_ble", awake)
+    monkeypatch.setattr(actions, "asyncio", SimpleNamespace(
+        get_running_loop=lambda: SimpleNamespace(time=lambda: clock[0]),
+        sleep=sleep, timeout=asyncio.timeout,
+    ))
+    result = asyncio.run(actions._start_ev_charging_ble(hass, "car"))
+    assert result is (True if expected else None)
+    assert [c for c in hass.services.calls if c[0] == "switch"] == [
+        ("switch", "turn_on", {"entity_id": "switch.car_charger"})]
+    assert clock[0] <= 35

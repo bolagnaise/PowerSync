@@ -79,6 +79,17 @@ recover_ev_headroom:
       selector:
         text:
 
+get_ble_recovery_status:
+  name: Inspect BLE recovery status
+  description: Show native charging-data freshness capabilities and retained command recovery requirements. Reads existing HA data without sending vehicle commands, restarting bridges, or clearing holds.
+  fields:
+    entry_id:
+      name: Entry ID
+      description: PowerSync configuration entry ID. Specify this when more than one PowerSync entry is installed.
+      required: false
+      selector:
+        text:
+
 recover_ble_stop_history:
   name: Recover held BLE Stops
   description: Recover Stop-only history using the PowerSync companion BLE firmware. Restarts every declared bridge and verifies fresh stopped, zero-current and zero-power readings. Read the recovery guide before confirming the complete historical vehicle inventory.

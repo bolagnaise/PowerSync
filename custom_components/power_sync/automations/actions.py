@@ -2835,7 +2835,11 @@ def _is_ble_available(hass: HomeAssistant, ble_prefix: str) -> bool:
     )
 
 
-_TESLA_BLE_COMMAND_CONFIRMATION_SECONDS = 10
+# One finite post-write budget: the Pedro command queue itself can spend 30s
+# completing a command. Keep the pre-write health probe separate and short.
+_TESLA_BLE_COMMAND_CONFIRMATION_SECONDS = 35
+_TESLA_BLE_SESSION_PROBE_SECONDS = 10
+_TESLA_BLE_READBACK_REFRESH_AT = (2.0, 12.0, 24.0)
 _TESLA_BLE_WAKE_FRESHNESS_SECONDS = 120
 # The generic ESPHome Tesla BLE package exposes this as a button.  Keep this
 # exact entity separate from the broad Tesla button resolver: a force-update
@@ -2896,12 +2900,12 @@ def _tesla_ble_charge_data_entity_ids(
         if state is None or not _tesla_ble_charge_state_is_present(state):
             continue
         entity_ids.append(entity_id)
-        receipt_id = f"{entity_id}_received"
-        if hass.states.get(receipt_id) is not None:
-            # The receipt companion overrides HA's state timestamp whenever it
-            # exists, including when its value is invalid. Pin its registry
-            # identity so another provider cannot freshen this entity id.
-            entity_ids.append(receipt_id)
+        for suffix in ("received", "sample"):
+            receipt_id = f"{entity_id}_{suffix}"
+            if hass.states.get(receipt_id) is not None:
+                # Pin both timestamp and paired-value companions, including
+                # invalid values. A different producer cannot renew freshness.
+                entity_ids.append(receipt_id)
     return tuple(entity_ids)
 
 
@@ -2946,7 +2950,7 @@ def _tesla_ble_charge_data_binding(
         state = hass.states.get(entity_id)
         if state is None:
             continue
-        if not entity_id.endswith("_received") and not _tesla_ble_charge_state_is_present(state):
+        if not entity_id.endswith(("_received", "_sample")) and not _tesla_ble_charge_state_is_present(state):
             continue
         registration = registry.async_get(entity_id)
         if registration is None or getattr(registration, "disabled_by", None) is not None:
@@ -3327,13 +3331,36 @@ async def _wait_for_ble_command_readback(
     charge_binding: tuple[tuple[str, tuple[Any, ...]], ...] | None | object = _TESLA_BLE_BINDING_UNSET,
     charge_binding_target: str | None = None,
     charge_binding_prefix: str | None = None,
+    authorize: Optional[Callable[[], Any]] = None,
+    expected_identity: tuple[tuple[Any, ...], ...] | None = None,
+    stock_token: Any = None,
+    confirmation_deadline: float | None = None,
 ) -> bool:
-    """Confirm a BLE write from fresh vehicle state, plus draw for a start."""
+    """Acquire readback without repeating a write or extending its authority."""
     from ..tesla_ble import get_tesla_ble_charge_current_state, get_tesla_ble_charge_power_state
 
     entity_ids = (entity_id,) if isinstance(entity_id, str) else entity_id
-    deadline = asyncio.get_running_loop().time() + _TESLA_BLE_COMMAND_CONFIRMATION_SECONDS
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    deadline = min(started + _TESLA_BLE_COMMAND_CONFIRMATION_SECONDS,
+                   confirmation_deadline if confirmation_deadline is not None else float("inf"))
+    refresh_binding = (
+        _tesla_ble_force_data_update_binding(hass, charge_binding_prefix, charge_binding_target)
+        if charge_binding_prefix and charge_binding_target else None
+    )
+    refresh_index = 0
+
+    async def scope_current():
+        return await _tesla_ble_scope_current(
+            hass, charge_binding_target or entity_ids[0], expected_identity,
+            authorize, stock_token,
+        )
+
     while True:
+        if not await scope_current():
+            return False
+        if _TESLA_BLE_COMMAND_CONFIRMATION_SECONDS > 0 and loop.time() >= deadline:
+            return False
         if charge_binding is not _TESLA_BLE_BINDING_UNSET:
             if (
                 charge_binding is None
@@ -3381,10 +3408,31 @@ async def _wait_for_ble_command_readback(
                         return True
                 except (TypeError, ValueError):
                     continue
-        remaining = deadline - asyncio.get_running_loop().time()
+        remaining = deadline - loop.time()
         if remaining <= 0:
             _LOGGER.warning("Tesla BLE command not confirmed by fresh vehicle readback from %s", entity_ids)
             return False
+        if (refresh_binding is not None and refresh_index < len(_TESLA_BLE_READBACK_REFRESH_AT)
+                and loop.time() - started >= _TESLA_BLE_READBACK_REFRESH_AT[refresh_index]):
+            refresh_index += 1
+            # Capture before awaiting and revalidate the exact producer. A read
+            # must not follow a renamed/rebound button onto another vehicle.
+            if (_tesla_ble_force_data_update_binding(
+                    hass, charge_binding_prefix, charge_binding_target) != refresh_binding
+                    or not await scope_current()):
+                return False
+            try:
+                async with asyncio.timeout(remaining):
+                    await hass.services.async_call("button", "press", {
+                        "entity_id": refresh_binding[0],
+                    }, blocking=True)
+            except TimeoutError:
+                return False
+            except Exception as error:
+                _LOGGER.debug("Tesla BLE readback refresh unavailable: %s", error)
+            if not await scope_current() or loop.time() >= deadline:
+                return False
+            continue
         await asyncio.sleep(min(1, remaining))
 
 
@@ -4025,7 +4073,7 @@ async def _tesla_ble_prepare_mutation(
         )
         return False
 
-    deadline = asyncio.get_running_loop().time() + _TESLA_BLE_COMMAND_CONFIRMATION_SECONDS
+    deadline = asyncio.get_running_loop().time() + _TESLA_BLE_SESSION_PROBE_SECONDS
     while True:
         if not await scope_current() or _tesla_legacy_entity_identity(
             hass, (force_entity,)
@@ -4513,6 +4561,8 @@ async def _start_ev_charging_ble(
         if charge_binding is None:
             return False
         command_started_at = datetime.now(dt_timezone.utc)
+        confirmation_deadline = (asyncio.get_running_loop().time()
+                                 + _TESLA_BLE_COMMAND_CONFIRMATION_SECONDS)
         hass.data.setdefault(DOMAIN, {}).setdefault("_ev_ble_start_dispatched_at", {})[ble_prefix] = command_started_at
         command_dispatched = True
         _tesla_ble_mark_mutation_submitted()
@@ -4538,6 +4588,10 @@ async def _start_ev_charging_ble(
             charge_binding=charge_binding,
             charge_binding_target=charger_entity,
             charge_binding_prefix=ble_prefix,
+            authorize=authorize,
+            expected_identity=expected_identity,
+            stock_token=stock_token,
+            confirmation_deadline=confirmation_deadline,
         )
         return True if confirmed else None
     except Exception as e:
@@ -4627,6 +4681,8 @@ async def _stop_ev_charging_ble(
         if charge_binding is None and not allow_cleanup_without_session:
             return False
         command_started_at = datetime.now(dt_timezone.utc)
+        confirmation_deadline = (asyncio.get_running_loop().time()
+                                 + _TESLA_BLE_COMMAND_CONFIRMATION_SECONDS)
         command_dispatched = True
         _tesla_ble_mark_mutation_submitted()
         await _tesla_call_service(
@@ -4647,6 +4703,9 @@ async def _stop_ev_charging_ble(
             charge_binding=charge_binding,
             charge_binding_target=charger_entity,
             charge_binding_prefix=ble_prefix,
+            authorize=authorize,
+            expected_identity=expected_identity,
+            confirmation_deadline=confirmation_deadline,
         )
         if confirmed:
             _LOGGER.info(f"Stopped EV charging via Tesla BLE: {charger_entity}")
@@ -4714,6 +4773,8 @@ async def _set_ev_charge_limit_ble(
         if not _tesla_ble_effect_bound_allows_submission("limit", int(percent)):
             return False
         command_started_at = datetime.now(dt_timezone.utc)
+        confirmation_deadline = (asyncio.get_running_loop().time()
+                                 + _TESLA_BLE_COMMAND_CONFIRMATION_SECONDS)
         command_dispatched = True
         _tesla_ble_mark_mutation_submitted()
         stock_submission_token = _tesla_ble_stock_submission_scope.set(
@@ -4737,6 +4798,10 @@ async def _set_ev_charge_limit_ble(
             charge_binding=charge_binding,
             charge_binding_target=limit_entity,
             charge_binding_prefix=ble_prefix,
+            authorize=authorize,
+            expected_identity=expected_identity,
+            stock_token=stock_token,
+            confirmation_deadline=confirmation_deadline,
         )
         return True if confirmed else None
     except Exception as e:
@@ -4851,6 +4916,8 @@ async def _set_ev_charging_amps_ble(
         if not _tesla_ble_effect_bound_allows_submission("rate", capped_amps):
             return False
         command_started_at = datetime.now(dt_timezone.utc)
+        confirmation_deadline = (asyncio.get_running_loop().time()
+                                 + _TESLA_BLE_COMMAND_CONFIRMATION_SECONDS)
         command_dispatched = True
         _tesla_ble_mark_mutation_submitted()
         stock_submission_token = _tesla_ble_stock_submission_scope.set(
@@ -4874,6 +4941,10 @@ async def _set_ev_charging_amps_ble(
             charge_binding=charge_binding,
             charge_binding_target=amps_entity,
             charge_binding_prefix=ble_prefix,
+            authorize=authorize,
+            expected_identity=expected_identity,
+            stock_token=stock_token,
+            confirmation_deadline=confirmation_deadline,
         )
         return True if confirmed else None
     except Exception as e:
@@ -4952,6 +5023,10 @@ async def _set_ev_charging_amps_ble(
                     charge_binding=charge_binding,
                     charge_binding_target=amps_entity,
                     charge_binding_prefix=ble_prefix,
+                    authorize=authorize,
+                    expected_identity=expected_identity,
+                    stock_token=stock_token,
+                    confirmation_deadline=confirmation_deadline,
                 ):
                     return None
                 if params is not None:

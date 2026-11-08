@@ -31,7 +31,7 @@ A PowerSync Stop request interrupts recovery and retains its existing native
 provider path where configured. The companion bridge remains protected until
 recovery completes; an interrupted run cannot unlock from earlier samples.
 
-The v2.12.1647 companion fixes recovery queries being deferred while a vehicle
+The v2.12.1647 companion fixed recovery queries being deferred while a vehicle
 is asleep. An explicit recovery can use the existing authenticated wake path
 to obtain fresh readings; ordinary background polling still lets sleeping cars
 sleep. Existing v2.12.1641 companion installations must update both PowerSync
@@ -57,7 +57,7 @@ Merge these substitutions with your existing ones:
 
 ```yaml
 substitutions:
-  tesla_ble_component: github://bolagnaise/PowerSync@v2.12.1647
+  tesla_ble_component: github://bolagnaise/PowerSync@v2.12.1652
   BLE_library: https://github.com/PedroKTFC/tesla-ble.git#969f05f9dfdd5bfb9f3da5ad6b9f5c2265be133b
 
 packages:
@@ -71,10 +71,12 @@ packages:
       - packages/client.yml
   powersync_stop_recovery:
     url: https://github.com/bolagnaise/PowerSync/
-    ref: v2.12.1647
+    ref: v2.12.1652
     files:
       - esphome/stop-recovery.yaml
 ```
+
+The v2.12.1652 recovery package also includes native charging receipt and paired-value entities automatically; do not add a second freshness package. See [BLE reliability](tesla-ble-reliability.md) for firmware-family compatibility and the separate unresolved general-recovery requirement.
 
 The companion component is separately licensed under AGPL-3.0; see
 [its source and notice](../esphome/NOTICE.md). Existing upstream binaries do not

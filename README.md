@@ -173,6 +173,9 @@ An explicit EV session limit can reduce the site limit but cannot increase it.
 Whole-site power balancing uses site power telemetry.
 Optional per-phase current protection additionally requires fresh mains-current sensors in amps; a grid-power sensor in kW cannot be selected as a phase-current sensor.
 
+For Tesla BLE bridges, see [charging freshness and command confirmation](docs/tesla-ble-reliability.md)
+for the PedroKTFC and yoziru firmware packages, recovery inspection, and held-command requirements.
+
 ### Custom tariff daily supply charge
 
 For a static custom tariff uploaded to Tesla, `daily_supply_charge` is an

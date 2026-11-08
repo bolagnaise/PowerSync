@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Add AFTER the pinned PedroKTFC packages. Install only after reviewing the
 # operator inventory and rollback instructions in docs/tesla-ble-stop-recovery.md.
+packages:
+  powersync_charging_freshness: !include charging-freshness-pedro.yaml
+
 substitutions:
   BLE_library: "https://github.com/PedroKTFC/tesla-ble.git#969f05f9dfdd5bfb9f3da5ad6b9f5c2265be133b"
 text_sensor:

@@ -46039,6 +46039,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.exception("EV headroom recovery remains held")
             return {"success": False, "error": "recovery_failed"}
 
+    async def handle_get_ble_recovery_status(call: ServiceCall) -> dict[str, Any]:
+        """Inspect BLE capabilities and holds without issuing device commands."""
+        from .tesla_ble_recovery_status import ble_recovery_status
+
+        requested = call.data.get("entry_id")
+        if requested is not None and not isinstance(requested, str):
+            raise ValueError("invalid_control_entry")
+        if requested and requested != entry.entry_id:
+            handler = hass.data.get(DOMAIN, {}).get(requested, {}).get(
+                "licensing_control_handlers", {}).get("get_ble_recovery_status")
+            if handler is None:
+                raise ValueError("control_entry_not_available")
+            return await handler(call)
+        return ble_recovery_status(hass, entry)
+
     async def handle_recover_ble_stop_history(call: ServiceCall) -> dict[str, Any]:
         """Recover an explicitly declared complete inventory of held BLE Stops."""
         from .tesla_ble_stop_recovery import async_recover_ble_stops, StopRecoveryRefused
@@ -46102,6 +46117,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         'recover_ev_transport': handle_recover_ev_transport,
         'recover_ev_headroom': handle_recover_ev_headroom,
         'recover_ble_stop_history': handle_recover_ble_stop_history,
+        'get_ble_recovery_status': handle_get_ble_recovery_status,
         'set_operation_mode': handle_set_operation_mode,
         'set_grid_charging': handle_set_grid_charging,
         'set_grid_export': handle_set_grid_export,
@@ -46125,6 +46141,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         DOMAIN, "recover_ev_headroom",
         routed_handler(hass, entry.entry_id, "recover_ev_headroom", handle_recover_ev_headroom),
         supports_response=SupportsResponse.OPTIONAL,
+    )
+    hass.services.async_register(
+        DOMAIN, "get_ble_recovery_status",
+        handle_get_ble_recovery_status,
+        supports_response=SupportsResponse.ONLY,
     )
     hass.services.async_register(
         DOMAIN, "recover_ble_stop_history",

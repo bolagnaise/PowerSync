@@ -394,3 +394,35 @@ def test_ble_without_receipt_keeps_legacy_observation_timestamp():
     power = SimpleNamespace(entity_id="sensor.car_charge_power", state="7.0", last_reported=now)
     hass = SimpleNamespace(states=SimpleNamespace(get=lambda _: None))
     assert get_tesla_ble_observed_at(hass, power) == now
+
+
+@pytest.mark.parametrize("native,reported,valid", [(2, "2.0", True), (0, "0", True),
+    (0, "2", False), (2, "0", False), (True, "1", False),
+    ("Charging", "Charging", True), ("Stopped", "Charging", False)])
+def test_paired_native_sample_cannot_refresh_an_older_value(native, reported, valid):
+    from datetime import timedelta, timezone
+    import json
+    from power_sync.tesla_ble import get_tesla_ble_observed_at
+    now = datetime.now(timezone.utc)
+    stamp = now - timedelta(seconds=5)
+    state = SimpleNamespace(entity_id="sensor.car_charge_power", state=reported,
+                            last_reported=now)
+    states = {state.entity_id: state,
+        state.entity_id + "_sample": SimpleNamespace(state=json.dumps({"v": 1, "t": stamp.isoformat(), "x": native})),
+        state.entity_id + "_received": SimpleNamespace(state=now.isoformat())}
+    hass = SimpleNamespace(states=SimpleNamespace(get=states.get))
+    assert get_tesla_ble_observed_at(hass, state) == (stamp if valid else None)
+
+
+@pytest.mark.parametrize("packet", ['unavailable', '{}', '{"v":true}',
+    '{"v":1,"x":2,"t":"2026-11-08T00:00:00"}',
+    '{"v":1,"x":2,"t":"2999-01-01T00:00:00Z"}',
+    '{"v":1,"x":NaN,"t":"2026-11-08T00:00:00Z"}'])
+def test_invalid_paired_sample_never_falls_back_to_ha_or_receipt(packet):
+    from datetime import timezone
+    from power_sync.tesla_ble import get_tesla_ble_observed_at
+    now = datetime.now(timezone.utc)
+    power = SimpleNamespace(entity_id="sensor.car_charge_power", state="2", last_reported=now)
+    states = {power.entity_id + "_sample": SimpleNamespace(state=packet),
+              power.entity_id + "_received": SimpleNamespace(state=now.isoformat())}
+    assert get_tesla_ble_observed_at(SimpleNamespace(states=SimpleNamespace(get=states.get)), power) is None
