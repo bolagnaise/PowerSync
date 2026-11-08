@@ -1,5 +1,7 @@
 # Dashboard Setup
 
+The **Tariff today** card matches period names to both the import and export rates. For AGL Battery Rewards, an ordinary period that shares the reward period's import price keeps its own name; check the Export column for the reward rate and its hours.
+
 PowerSync includes an **auto-generated Lovelace dashboard** that adapts to your configuration. The dashboard checks which entities exist and only builds cards for features you have set up.
 
 In the **Right now** tile, active Solar, Home, Battery, and Grid state labels use the same bright colour as their power readings. Idle and unavailable flow states stay muted.

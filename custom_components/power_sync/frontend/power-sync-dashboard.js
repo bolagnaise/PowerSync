@@ -2658,11 +2658,13 @@ class PsTariffCard extends PsCardBase {
     const buys = periods.map(p => p.buy);
     const maxBuy = Math.max(...buys), minBuy = Math.min(...buys);
     const nameMap = {};
-    (attrs.tou_schedule || []).forEach(p => { nameMap[Number(p.buy).toFixed(2)] = p.period; });
+    // AGL reward periods can share an import price with ordinary periods.
+    const rateKey = p => `${Number(p.buy).toFixed(2)}|${Number(p.sell).toFixed(2)}`;
+    (attrs.tou_schedule || []).forEach(p => { nameMap[rateKey(p)] = p.period; });
     const pretty = raw => String(raw).replace(/_/g, ' ').toLowerCase().replace(/^\w/, c => c.toUpperCase());
     const label = p => {
       if (p.buy <= 0.001) return ['Free', '--green', 1];
-      const named = nameMap[p.buy.toFixed(2)];
+      const named = nameMap[rateKey(p)];
       if (p.buy === maxBuy && maxBuy > minBuy) return [named ? pretty(named) : 'Peak', '--red', 1];
       if (p.buy === minBuy && maxBuy > minBuy) return [named ? pretty(named) : 'Off-peak', '--green', 0.8];
       return [named ? pretty(named) : 'Shoulder', '--cyan', 0.45];

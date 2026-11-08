@@ -327,6 +327,42 @@ def test_plan_separates_solar_charge_from_paid_grid_share_and_capped_export_valu
     assert "not total export" in out["html"]
 
 
+def test_tariff_names_distinguish_agl_reward_by_export_rate():
+    out = _run_board(r"""
+  const tou = [
+    {period: 'OFF_PEAK', buy: 6.6, sell: 2},
+    {period: 'PEAK_2', buy: 45, sell: 2},
+    {period: 'PEAK_2_AGL_REWARD', buy: 45, sell: 27},
+    {period: 'PEAK', buy: 45.4, sell: 2},
+    {period: 'PEAK_AGL_REWARD', buy: 45.4, sell: 27},
+    {period: 'SHOULDER', buy: 24, sell: 2},
+  ];
+  const attrs = {tou_schedule: tou, schedule: [
+    {time: '00:00', buy: 0.24, sell: 0.02},
+    {time: '11:00', buy: 0.066, sell: 0.02},
+    {time: '15:00', buy: 0.45, sell: 0.02},
+    {time: '17:00', buy: 0.454, sell: 0.27},
+    {time: '21:00', buy: 0.24, sell: 0.02},
+  ]};
+  const card = new T.PsTariffCard();
+  card._hass = {config: {currency: 'AUD', time_zone: 'UTC'},
+    states: {tariff: {state: 'peak', attributes: attrs}}};
+  card._config = {entities: {tariff: 'tariff'}};
+  card._render();
+  const forward = card.innerHTML;
+  attrs.tou_schedule = [...tou].reverse();
+  card._render();
+  console.log(JSON.stringify({forward, reverse: card.innerHTML}));
+""")
+    for html in out.values():
+        assert 'Peak 2 agl reward' not in html
+        assert 'Peak 2' in html
+        assert 'Peak agl reward' in html
+        assert html.count('agl reward') == 1
+        assert '<span class="i">45.0</span><span class="e">2.0</span>' in html
+        assert '<span class="i">45.4</span><span class="e">27.0</span>' in html
+
+
 def test_super_export_offer_is_separate_from_base_in_tariff_and_plan():
     out = _run_board(r"""
   class FixedDate extends Date {
