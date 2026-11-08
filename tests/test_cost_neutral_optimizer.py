@@ -175,6 +175,61 @@ def test_cost_neutral_ev_native_absorption_matches_all_minimum_branches(
     )
 
 
+def test_cycle_diagnostics_keep_discarded_projection_and_reset_between_calls(
+    optimizer_module, monkeypatch,
+):
+    module = optimizer_module
+    real_solve = module._solve_lp_highs
+    calls = 0
+
+    def later_timeout(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            return module._HighsResult(None, False, "Time limit reached", 13, None)
+        return real_solve(*args, **kwargs)
+
+    monkeypatch.setattr(module, "_solve_lp_highs", later_timeout)
+    inputs = dict(import_prices=[0.25]*2, export_prices=[0.08]*2,
+                  solar_forecast=[0.0]*2, load_forecast=[0.7]*2,
+                  current_soc=0.5, schedule_timestamps=_timestamps(2))
+    result = _optimizer(module).optimize(**inputs)
+    cycle = result.lp_stats["cycle"]
+    assert result.solver_used == "highs"
+    assert cycle["selected_pass"] == 0
+    assert cycle["pass_count"] == 2
+    assert cycle["passes"][1]["status"] == 13
+    assert cycle["native_time_s"] > 0
+    assert cycle["stages"]["schedule_build_time_s"] > 0
+    assert module._SOLVER_CYCLE.get() is None
+    json.dumps(cycle, allow_nan=False)
+
+    monkeypatch.setattr(module, "_solve_lp_highs", real_solve)
+    second = _optimizer(module).optimize(**inputs).lp_stats["cycle"]
+    assert second is not cycle
+    assert second["passes"][0]["id"] == 0
+    assert second["passes"] is not cycle["passes"]
+    assert len(cycle["passes"]) == 2
+
+
+def test_benchmark_corpus_keeps_actual_capture_length_and_full_horizons(
+    optimizer_module,
+):
+    import runpy
+
+    benchmark = runpy.run_path(str(ROOT / "scripts/benchmark_lp_optimizer.py"))
+    cases = benchmark["_cases"](optimizer_module)
+    assert len(cases["sunny-cost-neutral"].inputs["import_prices"]) == 250
+    for name in ("cost-neutral-48h", "cost-neutral-ev-48h", "cost-neutral-ledger-48h"):
+        case = cases[name]
+        assert len(case.inputs["import_prices"]) == 576
+        assert len(case.inputs["cost_neutral_plan"].day_ids) == 576
+    assert cases["cost-neutral-ev-48h"].inputs["ev_plan"].energy_needed_kwh > 0
+    assert cases["cost-neutral-ledger-48h"].inputs[
+        "cost_neutral_plan"
+    ].forecast_natural_export_earnings_by_day
+
+
 @pytest.mark.parametrize("disable_idle", [False, True])
 def test_cost_neutral_waits_for_free_window_without_paid_topups(
     optimizer_module, disable_idle,

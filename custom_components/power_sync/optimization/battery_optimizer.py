@@ -19,6 +19,9 @@ from __future__ import annotations
 import logging
 import math
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
+from functools import wraps
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import Any
@@ -473,21 +476,141 @@ class _LpMatrix:
             yield i, list(row.keys()), list(row.values())
 
 
+# A cycle can run several reconciliation chains and projection passes. Keep
+# diagnostic state local to the calling thread/context, never on the optimizer
+# instance or in a previous result that a later pass may replace.
+_SOLVER_CYCLE = ContextVar("power_sync_solver_cycle", default=None)
+_SOLVER_BENCHMARK = ContextVar("power_sync_solver_benchmark", default=None)
+
+
+def _finite_stat(value):
+    return value if isinstance(value, (int, float)) and math.isfinite(value) else None
+
+
+@contextmanager
+def solver_benchmark_diagnostics(*, seed=0, incumbents=False):
+    """Opt-in observational diagnostics; production solver options stay intact."""
+    token = _SOLVER_BENCHMARK.set({"seed": int(seed), "incumbents": incumbents})
+    try:
+        yield
+    finally:
+        _SOLVER_BENCHMARK.reset(token)
+
+
+def _record_optimizer_cycle(method):
+    @wraps(method)
+    def run(self, *args, **kwargs):
+        trace = {"chains": [], "passes": [], "solves": []}
+        token = _SOLVER_CYCLE.set(trace)
+        started = time.monotonic()
+        try:
+            result = method(self, *args, **kwargs)
+            cycle = {key: trace[key] for key in ("chains", "passes", "solves")}
+            cycle["stages"] = trace.get("stages", {})
+            cycle.update({
+                "total_time_s": time.monotonic() - started,
+                "selected_pass": result.lp_stats.get("solve_attempt_id"),
+                "chain_count": len(trace["chains"]),
+                "pass_count": len(trace["passes"]),
+                "subsolve_count": len(trace["solves"]),
+                "formulation_time_s": sum(p.get("formulation_time_s", 0.0)
+                                          for p in trace["passes"]),
+                "load_time_s": sum(s.get("load_time_s", 0.0)
+                                   for s in trace["solves"]),
+                "native_time_s": sum(s.get("native_time_s", 0.0)
+                                     for s in trace["solves"]),
+                "selected_solver": result.solver_used,
+                "fallback_reason": result.lp_stats.get("fallback_reason"),
+            })
+            result.lp_stats["cycle"] = cycle
+            return result
+        finally:
+            _SOLVER_CYCLE.reset(token)
+    return run
+
+
+def _record_lp_chain(method):
+    @wraps(method)
+    def run(self, *args, **kwargs):
+        trace = _SOLVER_CYCLE.get()
+        if trace is None:
+            return method(self, *args, **kwargs)
+        entry = {"id": len(trace["chains"])}
+        trace["chains"].append(entry)
+        previous = trace.get("chain")
+        trace["chain"] = entry["id"]
+        started = time.monotonic()
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            entry["total_time_s"] = time.monotonic() - started
+            trace["chain"] = previous
+    return run
+
+
+def _record_lp_pass(method):
+    @wraps(method)
+    def run(self, *args, **kwargs):
+        trace = _SOLVER_CYCLE.get()
+        if trace is None:
+            return method(self, *args, **kwargs)
+        entry = {"id": len(trace["passes"]), "chain": trace.get("chain")}
+        trace["passes"].append(entry)
+        previous = trace.get("pass")
+        trace["pass"] = entry["id"]
+        started = time.monotonic()
+        try:
+            result = method(self, *args, **kwargs)
+            entry.update({key: result.lp_stats[key] for key in (
+                "formulation_time_s", "solver_time_s", "base_steps", "period_count",
+                "variables", "constraints", "nonzeros", "status", "message",
+                "fallback_reason",
+            ) if key in result.lp_stats})
+            entry["solver_used"] = result.solver_used
+            result.lp_stats["solve_attempt_id"] = entry["id"]
+            return result
+        except Exception as error:
+            entry["error"] = type(error).__name__
+            raise
+        finally:
+            entry["total_time_s"] = time.monotonic() - started
+            trace["pass"] = previous
+    return run
+
+
+def _record_schedule_stage(name):
+    def decorate(method):
+        @wraps(method)
+        def run(self, *args, **kwargs):
+            started = time.monotonic()
+            try:
+                return method(self, *args, **kwargs)
+            finally:
+                trace = _SOLVER_CYCLE.get()
+                if trace is not None:
+                    stages = trace.setdefault("stages", {})
+                    stages[name] = stages.get(name, 0.0) + time.monotonic() - started
+        return run
+    return decorate
+
+
 class _HighsResult:
     """linprog-compatible result wrapper so the solve call site is unchanged."""
 
-    __slots__ = ("x", "success", "message", "status", "fun")
+    __slots__ = ("x", "success", "message", "status", "fun", "stats")
 
-    def __init__(self, x, success, message, status, fun):
+    def __init__(self, x, success, message, status, fun, stats=None):
         self.x = x
         self.success = success
         self.message = message
         self.status = status
         self.fun = fun
+        self.stats = stats or {}
 
 
 def _solve_lp_highs(
-    c, A_ub, b_ub, A_eq, b_eq, bounds, time_limit, integer_indices=None
+    c, A_ub, b_ub, A_eq, b_eq, bounds, time_limit, integer_indices=None,
+    *, solve_role="primary",
 ):
     """Solve a standard-form LP with HiGHS and return a linprog-like result.
 
@@ -501,11 +624,39 @@ def _solve_lp_highs(
     substring preserved so the caller's self-consumption fallback still
     triggers).
     """
+    stats = {"role": solve_role, "integer_columns": len(set(integer_indices or ())),
+             "fixed_integer_columns": sum(bounds[i][0] == bounds[i][1]
+                                          for i in set(integer_indices or ()))}
+    trace = _SOLVER_CYCLE.get()
+    if trace is not None:
+        stats.update({"id": len(trace["solves"]), "chain": trace.get("chain"),
+                      "pass": trace.get("pass")})
+        trace["solves"].append(stats)
+    load_started = time.monotonic()
     inf = highspy.kHighsInf
     h = highspy.Highs()
     h.setOptionValue("output_flag", False)
     h.setOptionValue("log_to_console", False)
     h.setOptionValue("time_limit", float(time_limit))
+    benchmark = _SOLVER_BENCHMARK.get()
+    if benchmark is not None:
+        h.setOptionValue("random_seed", benchmark["seed"])
+        stats["seed"] = benchmark["seed"]
+        if benchmark["incumbents"]:
+            events = stats["incumbents"] = []
+            callback = getattr(h, "cbMipImprovingSolution", None)
+            if callback is not None:
+                def on_incumbent(event):
+                    data = event.data_out
+                    events.append({
+                        "time_s": _finite_stat(data.running_time),
+                        "objective": _finite_stat(data.mip_primal_bound),
+                        "bound": _finite_stat(data.mip_dual_bound),
+                        "gap": _finite_stat(data.mip_gap),
+                    })
+                callback.subscribe(on_incumbent)
+            else:
+                stats["incumbents_unavailable"] = True
 
     # Columns carry the objective coefficients and variable bounds; constraint
     # coefficients are supplied row-by-row below, so each column starts empty.
@@ -526,11 +677,26 @@ def _solve_lp_highs(
     for i, idx, val in A_ub.iter_rows():
         h.addRow(-inf, float(b_ub[i]), len(idx), idx, val)
 
-    h.run()
+    stats["load_time_s"] = time.monotonic() - load_started
+    native_started = time.monotonic()
+    try:
+        h.run()
+    except Exception as error:
+        stats["error"] = type(error).__name__
+        raise
+    finally:
+        stats["native_time_s"] = time.monotonic() - native_started
 
     model_status = h.getModelStatus()
     message = h.modelStatusToString(model_status)
     optimal = model_status == highspy.HighsModelStatus.kOptimal
+    info = h.getInfo()
+    stats.update({"status": int(model_status), "message": message,
+                  "time_limit_s": float(time_limit)})
+    for name in ("mip_gap", "mip_dual_bound", "mip_node_count",
+                 "simplex_iteration_count", "max_primal_infeasibility",
+                 "max_integrality_violation"):
+        stats[name] = _finite_stat(getattr(info, name, None))
 
     # A time/iteration-limited solve can still hold a usable feasible
     # incumbent — use it instead of discarding it and forcing the caller's
@@ -550,6 +716,7 @@ def _solve_lp_highs(
     if success:
         x = list(h.getSolution().col_value)
         fun = float(h.getObjectiveValue())
+        stats["objective"] = _finite_stat(fun)
     else:
         x = None
         fun = None
@@ -559,6 +726,7 @@ def _solve_lp_highs(
         message=message,
         status=int(model_status),
         fun=fun,
+        stats=stats,
     )
 
 # Action detection threshold (W) — below this, treat as idle to avoid rapid switching
@@ -950,6 +1118,7 @@ class BatteryOptimizer:
                 floor = max(floor, max(0.0, min(1.0, max(active))))
         return floor
 
+    @_record_optimizer_cycle
     def optimize(
         self,
         import_prices: list[float],
@@ -2679,6 +2848,7 @@ class BatteryOptimizer:
             return False
         return projected_soc >= target_soc - 0.0001
 
+    @_record_lp_chain
     def _solve_lp(
         self,
         n: int,
@@ -3094,6 +3264,7 @@ class BatteryOptimizer:
             )
         return recovered
 
+    @_record_lp_pass
     def _solve_lp_inner(
         self,
         n: int,
@@ -5982,6 +6153,7 @@ class BatteryOptimizer:
                     bounds,
                     time_limit=remaining_time,
                     integer_indices=integer_indices,
+                    solve_role="tiebreak",
                 )
                 if preferred.success:
                     preferred_economic_cost = math.fsum(
@@ -8650,6 +8822,7 @@ class BatteryOptimizer:
             },
         )
 
+    @_record_schedule_stage("schedule_build_time_s")
     def _build_schedule(
         self,
         n: int,
@@ -9899,6 +10072,7 @@ class BatteryOptimizer:
             last_updated=schedule.last_updated,
         ), planned_earnings
 
+    @_record_schedule_stage("schedule_reconciliation_time_s")
     def reconcile_result_with_schedule(
         self,
         result: OptimizerResult,
