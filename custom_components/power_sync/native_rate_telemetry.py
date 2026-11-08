@@ -13,16 +13,17 @@ from .const import (
 from .optimization.tesla_schedules import _section, _timestamp
 
 
-def vehicle_sources(hass, vin):
+def vehicle_sources(hass, vin, *, include_tessie=False):
     """Return matching Fleet/Teslemetry vehicle coordinators only."""
     normalized = str(vin or "").upper()
     sources = []
-    for domain in ("teslemetry", "tesla_fleet"):
+    domains = ("teslemetry", "tesla_fleet", "tessie") if include_tessie else ("teslemetry", "tesla_fleet")
+    for domain in domains:
         for entry in hass.config_entries.async_entries(domain):
             for vehicle in getattr(getattr(entry, "runtime_data", None), "vehicles", ()):
                 if str(getattr(vehicle, "vin", "")).upper() != normalized:
                     continue
-                coordinator = getattr(vehicle, "coordinator", None)
+                coordinator = getattr(vehicle, "data_coordinator" if domain == "tessie" else "coordinator", None)
                 if coordinator is not None:
                     sources.append((domain, entry, vehicle, coordinator))
     return sources

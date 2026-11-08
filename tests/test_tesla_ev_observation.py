@@ -31,14 +31,14 @@ def stub_native_vehicle_sources(monkeypatch):
 
     native = types.ModuleType("power_sync.native_rate_telemetry")
 
-    def vehicle_sources(hass, vin):
+    def vehicle_sources(hass, vin, *, include_tessie=False):
         matches = []
-        for domain in ("teslemetry", "tesla_fleet"):
+        for domain in (("teslemetry", "tesla_fleet", "tessie") if include_tessie else ("teslemetry", "tesla_fleet")):
             for entry in hass.config_entries.async_entries(domain):
                 for vehicle in getattr(getattr(entry, "runtime_data", None), "vehicles", ()):
                     if str(getattr(vehicle, "vin", "")).upper() != str(vin).upper():
                         continue
-                    coordinator = getattr(vehicle, "coordinator", None)
+                    coordinator = getattr(vehicle, "data_coordinator" if domain == "tessie" else "coordinator", None)
                     if coordinator is not None:
                         matches.append((domain, entry, vehicle, coordinator))
         return matches
@@ -846,6 +846,12 @@ def independent_source(monkeypatch):
             self.refresh_response = {"response": True}
             self.before_refresh_return = None
 
+        async def state(self, *, use_cache=True):
+            self.calls.append({"use_cache": use_cache})
+            if self.before_return is not None:
+                await self.before_return()
+            return deepcopy(self.response)
+
         async def vehicle_data(self, *, endpoints):
             self.calls.append(endpoints)
             if self.before_return is not None:
@@ -877,6 +883,7 @@ def independent_source(monkeypatch):
     for domain, coordinator_name, api_module, api_name in (
         ("tesla_fleet", "TeslaFleetVehicleDataCoordinator", "tesla_fleet_api.tesla", "VehicleFleet"),
         ("teslemetry", "TeslemetryVehicleDataCoordinator", "tesla_fleet_api.teslemetry", "Vehicle"),
+        ("tessie", "TessieStateUpdateCoordinator", "tesla_fleet_api.tessie", "Vehicle"),
     ):
         module = types.ModuleType(f"homeassistant.components.{domain}.coordinator")
         setattr(module, coordinator_name, NativeCoordinator)
@@ -891,6 +898,9 @@ def independent_source(monkeypatch):
     def make(domain="tesla_fleet"):
         coordinator = NativeCoordinator()
         vehicle = _vehicle(VIN_A, coordinator, "device-a", domain)
+        if domain == "tessie":
+            vehicle.data_coordinator = coordinator
+            del vehicle.coordinator
         # Native Teslemetry commands can use a BLE/cloud router while the
         # coordinator retains the separate cloud Vehicle client.
         vehicle.api = object()
@@ -1899,3 +1909,29 @@ async def test_independent_cloud_wake_cancellation_does_not_release_as_success(
     with pytest.raises(asyncio.CancelledError):
         await task
     release.set()
+
+
+@pytest.mark.asyncio
+async def test_tessie_recovery_reads_source_state_without_coordinator_cache_or_wake(independent_source):
+    hass, entry, vehicle, coordinator = independent_source("tessie")
+    assert not hasattr(vehicle, "coordinator") # HA uses data_coordinator here
+    first = await observation.async_read_independent_tesla_vehicle(hass, VIN_A)
+    assert first is not None and first.domain == "tessie" and first.origin == "native_cloud"
+    assert coordinator.api.calls == [{"use_cache": False}]
+    assert coordinator.refreshes == 0 and not coordinator.api.wake_calls
+    assert await observation.async_read_independent_tesla_vehicle(hass, VIN_A) is None
+    coordinator.api.response["charge_state"]["timestamp"] += 1
+    second = await observation.async_read_independent_tesla_vehicle(hass, VIN_A, updated_after=first.source_charge_timestamp)
+    assert second is not None and second.source_charge_timestamp > first.source_charge_timestamp
+    assert first.source_charge_timestamp == 2_000_000_000
+
+
+@pytest.mark.asyncio
+async def test_tessie_coordinator_refresh_uses_advancing_charge_timestamp(independent_source):
+    hass, entry, vehicle, coordinator = independent_source("tessie")
+    assert await observation.async_read_tesla_vehicle(hass, VIN_A) is None
+    async def refresh(coord): coord.data = deepcopy(coord.api.response)
+    coordinator.refresh = refresh
+    result = await observation.async_read_tesla_vehicle(hass, VIN_A)
+    assert result is not None and result.domain == "tessie"
+    assert await observation.async_read_tesla_vehicle(hass, VIN_A) is None

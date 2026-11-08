@@ -1690,7 +1690,7 @@ def _unresolved_liabilities(runtime: dict[str, Any]) -> list[dict[str, Any]]:
         attempts = ledger.get("attempts", {})
         if isinstance(attempts, Mapping):
             for attempt_id, record in attempts.items():
-                if (isinstance(record, Mapping)
+                if (isinstance(record, Mapping) and not record.get("recovery_retired")
                         and record.get("outcome", "pending") in ("pending", "sent_unknown")):
                     result.append({
                         "vehicle_id": str(vid),
@@ -1702,7 +1702,8 @@ def _unresolved_liabilities(runtime: dict[str, Any]) -> list[dict[str, Any]]:
         hazards = ledger.get("hazards", {})
         if isinstance(hazards, Mapping):
             for hazard_id, hazard in hazards.items():
-                if isinstance(hazard, Mapping) and hazard.get("state") in ("pending", "isolated"):
+                if (isinstance(hazard, Mapping) and not hazard.get("recovery_retired")
+                        and hazard.get("state") in ("pending", "isolated")):
                     result.append({
                         "vehicle_id": str(vid),
                         "hazard_id": str(hazard_id),
@@ -2031,6 +2032,15 @@ def recovery_control_allowed(
             return False
         return True
     operation_name = str(operation or "").strip().lower()
+    reconciliation = runtime.get("_tesla_native_reconciliation")
+    if isinstance(reconciliation, dict) and reconciliation.get("vehicle_id") == str(vehicle_id):
+        if operation_name in {"stop", "cleanup_stop", "force_stop"}:
+            reconciliation["interrupted"] = True
+            event = reconciliation.get("interrupt_event")
+            if isinstance(event, asyncio.Event):
+                event.set()
+        else:
+            return False
     # A caller holding the old lifecycle generation must not mutate (or even
     # create a pending record for) the sidecar while unload is fencing it.
     # The replacement runtime will re-open only a durable held workflow.
@@ -2047,7 +2057,7 @@ def recovery_control_allowed(
     state = runtime[_SIDECAR_STATE_KEY]
     for incident in state.get("incidents", {}).values():
         if (not isinstance(incident, Mapping)
-                or incident.get("phase") == "released"
+                or (incident.get("phase") == "released" and not incident.get("activation_pending"))
                 or not _incident_covers_vehicle(incident, str(vehicle_id))):
             continue
         return False
@@ -3037,6 +3047,15 @@ async def async_begin_attempt(
     if runtime.get(_RECOVERY_STOPPING_KEY) is True:
         return None
     operation_name = operation.strip().lower()
+    reconciliation = runtime.get("_tesla_native_reconciliation")
+    if isinstance(reconciliation, dict) and reconciliation.get("vehicle_id") == vid:
+        if operation_name == "stop":
+            reconciliation["interrupted"] = True
+            event = reconciliation.get("interrupt_event")
+            if isinstance(event, asyncio.Event):
+                event.set()
+        else:
+            return None
     route_for_pin = dict(route)
     # Only a native Start can establish a new session route. A standalone
     # native Rate/Limit command must remain ephemeral for the next session.
@@ -3724,6 +3743,11 @@ def ev_recovery_status(hass: Any, entry: Any, vehicle_id: Any) -> dict[str, Any]
         "malformed_recovery" if malformed else
         _unresolved_route_reason(routes) if routes else "no_retained_history"
     )
+    activation_pending = any(isinstance(item, Mapping) and item.get("activation_pending") is True
+        and _incident_covers_vehicle(item, vehicle_id)
+        for item in (state.get("incidents", {}) if isinstance(state, Mapping) else {}).values())
+    if available and not malformed and activation_pending:
+        reason = "ble_recovery_commit_pending"
     return {
         "success": available and not malformed, "controls_issued": False,
         "entry_id": entry.entry_id, "vehicle_id": vehicle_id,
@@ -3731,12 +3755,25 @@ def ev_recovery_status(hass: Any, entry: Any, vehicle_id: Any) -> dict[str, Any]
         "generation": current_vehicle_generation(hass, entry, vehicle_id),
         "journal_revision": state.get("revision") if isinstance(state, Mapping) else None,
         "retained_attempts": rows, "reason": reason,
-        "recovery_required": malformed or bool(routes) if available else None,
+        "recovery_required": malformed or bool(routes) or activation_pending if available else None,
         "native_retirement_available": False,
+        "native_state_reconciliation_available": reason == "native_recovery",
+        "native_last_reconciliation": deepcopy(state.get("native_reconciliation", {}).get(vehicle_id))
+            if isinstance(state, Mapping) else None,
+        "native_settling": deepcopy(state.get("native_reconciliation_settling", {}).get(vehicle_id))
+            if isinstance(state, Mapping) else None,
+        "historical_unknown_attempts": [
+            {"attempt_id": aid, "operation": row.get("operation"), "outcome": row.get("outcome"),
+             "operationally_reconciled": bool(row.get("recovery_retired")),
+             "recovery": deepcopy(row.get("recovery_retired"))}
+            for aid, row in ledger.get("attempts", {}).items()
+            if isinstance(row, Mapping) and row.get("outcome") in {"pending", "sent_unknown"}
+        ] if isinstance(ledger, Mapping) and not malformed else [],
         "missing_evidence": (
             "loaded_recovery_history" if not available else
             "valid_retained_history" if malformed else
-            "original_attempt_terminal_or_no_late_effect_proof" if routes else None
+            "fresh_advancing_stopped_vehicle_reports" if reason == "native_recovery" else
+            "producer_recovery_and_fresh_vehicle_reports" if routes else None
         ),
     }
 
@@ -3748,6 +3785,11 @@ def get_vehicle_route(hass: Any, entry: Any, vehicle_id: Any) -> dict[str, Any] 
         return None
     if _journal_malformed(runtime, vid):
         return _blocked(vid, None, "malformed_recovery")
+    state = runtime.get(_SIDECAR_STATE_KEY, {})
+    for incident in state.get("incidents", {}).values():
+        if (isinstance(incident, Mapping) and incident.get("activation_pending") is True
+                and _incident_covers_vehicle(incident, vid)):
+            return _blocked(vid, None, "ble_recovery_commit_pending")
     ledger = _ledger(runtime, vid) if runtime else None
     if ledger is None:
         return None

@@ -1,7 +1,7 @@
 """Read-only BLE capabilities and retained-history recovery requirements.
 
-Present telemetry cannot qualify an older positive command's execution fence.
-This endpoint never refreshes, restarts, unlocks or retires a producer.
+Historical uncertainty and current admission blockers are reported separately.
+This endpoint never refreshes, restarts, unlocks or reconciles a producer.
 """
 from __future__ import annotations
 
@@ -61,16 +61,36 @@ def ble_recovery_status(hass: Any, entry: Any) -> dict[str, Any]:
             "power_sample_fresh": age is not None and 0 <= age <= 90,
             "stop_recovery_protocol": protocol,
         })
+    sidecar = runtime.get("_tesla_ev_recovery_sidecar", {})
+    pending = [item for item in sidecar.get("incidents", {}).values()
+               if isinstance(item, dict) and item.get("activation_pending") is True]
+    pending_service = ("power_sync.recover_ble_command_history"
+                       if any((item.get("scope_basis") or {}).get("kind") == "ble_command_inventory_v2"
+                              for item in pending) else "power_sync.recover_ble_stop_history")
+    historical = [
+        {"vehicle_id": vid, "attempt_id": aid, "operation": row.get("operation"),
+         "outcome": row.get("outcome"), "operationally_reconciled": bool(row.get("recovery_retired"))}
+        for vid, ledger in root.get("vehicles", {}).items()
+        for aid, row in ledger.get("attempts", {}).items()
+        if row.get("outcome") in {"pending", "sent_unknown"}
+    ]
+    charging_history = bool(rows) and all(row["operation"] in {"start", "stop", "rate", "limit"}
+                                        and row["transport"] == "ble" for row in rows)
     return {
         "success": True, "controls_issued": False, "bridges": bridges,
-        "retained_history": rows,
+        "retained_history": rows, "historical_unknown_attempts": historical,
         "recovery": {
-            "required": bool(rows), "operations": operations,
-            "candidate_service": "power_sync.recover_ble_stop_history" if stop_only else None,
-            "general_ble_recovery_available": False,
+            "required": bool(rows or pending), "operations": operations,
+            "pending_commit_incidents": [item["incident_id"] for item in pending],
+            "candidate_service": (pending_service if pending else
+                                  "power_sync.recover_ble_stop_history" if stop_only else
+                                  "power_sync.recover_ble_command_history" if charging_history else None),
+            "general_ble_recovery_available": bool(bridges)
+                and all(b["stop_recovery_protocol"] == 2 for b in bridges),
             "reason": (
-                "complete_inventory_and_native_stop_proof_required" if stop_only
-                else "vehicle_execution_fence_unproven" if rows else "no_retained_history"
+                "bridge_commit_pending" if pending else
+                "complete_inventory_and_native_stop_proof_required" if charging_history
+                else "unsupported_or_ambiguous_history" if rows else "no_retained_history"
             ),
         },
     }

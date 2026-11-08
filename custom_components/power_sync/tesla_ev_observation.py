@@ -331,7 +331,7 @@ def _fleet_command_source(
 def _sources(hass: Any, vin: str) -> list[_Source]:
     try:
         from .native_rate_telemetry import vehicle_sources
-        matches = vehicle_sources(hass, vin)
+        matches = vehicle_sources(hass, vin, include_tessie=True)
     except (ImportError, AttributeError, TypeError):
         # Discovery belongs to native_rate_telemetry.  A missing provider
         # module is an unavailable source, never a reason to inspect entries
@@ -693,6 +693,7 @@ def _cloud_contract(source: _Source) -> tuple[Any, Any, Any] | None:
     contracts = {
         "tesla_fleet": ("TeslaFleetVehicleDataCoordinator", "tesla_fleet_api.tesla", "VehicleFleet"),
         "teslemetry": ("TeslemetryVehicleDataCoordinator", "tesla_fleet_api.teslemetry", "Vehicle"),
+        "tessie": ("TessieStateUpdateCoordinator", "tesla_fleet_api.tessie", "Vehicle"),
     }
     contract = contracts.get(source.domain)
     if contract is None:
@@ -722,7 +723,7 @@ def _cloud_contract(source: _Source) -> tuple[Any, Any, Any] | None:
         debouncer = source.coordinator._debounced_refresh
         if (type(source.coordinator) is not coordinator_class
                 or type(api) not in api_classes
-                or not callable(getattr(type(api), "vehicle_data", None))
+                or not callable(getattr(type(api), "state" if source.domain == "tessie" else "vehicle_data", None))
                 or not callable(getattr(debouncer, "async_lock", None))):
             return None
         return api, debouncer, endpoint
@@ -1033,7 +1034,13 @@ async def async_read_independent_tesla_vehicle(
                         return None
                     # Call the known cloud class method on the existing client;
                     # an instance command router override is never selected.
-                    response = await type(api).vehicle_data(api, endpoints=[endpoint])
+                    if source.domain == "tessie":
+                        # Tessie's ordinary coordinator explicitly uses its
+                        # cache. This bounded recovery read obtains current
+                        # source data through the inspected GET state API.
+                        response = {"response": await type(api).state(api, use_cache=False)}
+                    else:
+                        response = await type(api).vehicle_data(api, endpoints=[endpoint])
                     if not current():
                         return None
                     result = parse(response)

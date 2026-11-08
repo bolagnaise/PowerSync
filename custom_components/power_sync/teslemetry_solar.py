@@ -208,6 +208,17 @@ def guard_ev_control(func):
             "_action_stop_ev_charging_dynamic",
             "_action_stop_ev_boost_cleanup",
         }
+        if func.__name__ in stop_functions:
+            # Interrupt read-only reconciliation before waiting on the normal
+            # ownership lock held by its initiating positive request. Without
+            # this early signal, Stop cannot reach its own dispatch fence.
+            runtime = hass.data.get("power_sync", {}).get(entry.entry_id, {})
+            recovery = runtime.get("_tesla_native_reconciliation")
+            if isinstance(recovery, dict) and (not vin or str(vin).upper() == recovery.get("vehicle_id")):
+                recovery["interrupted"] = True
+                event = recovery.get("interrupt_event")
+                if isinstance(event, asyncio.Event):
+                    event.set()
         cleanup_only = bool(
             params.get("_ev_cleanup_only")
             and str(params.get("charger_type") or "tesla").lower() == "tesla"

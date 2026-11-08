@@ -129,7 +129,7 @@ def signed_fleet(monkeypatch):
         registration if entity_id == registration.entity_id else None
     )
 
-    def vehicle_sources(_hass, vin):
+    def vehicle_sources(_hass, vin, *, include_tessie=False):
         if vin == VIN:
             return [("tesla_fleet", entry, vehicle, coordinator)]
         return []

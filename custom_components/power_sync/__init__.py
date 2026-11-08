@@ -46078,6 +46078,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             return await handler(call)
         return ble_recovery_status(hass, entry)
 
+    async def handle_recover_ble_command_history(call: ServiceCall) -> dict[str, Any]:
+        """Reconcile held stateful BLE commands for the complete declared inventory."""
+        from .tesla_ble_stop_recovery import async_recover_ble_history, StopRecoveryRefused
+
+        try:
+            return await async_recover_ble_history(
+                hass, entry, call.data.get("inventory"),
+                confirm_complete_history=call.data.get("confirm_complete_history", False),
+            )
+        except StopRecoveryRefused as error:
+            return {"success": False, "error": str(error)}
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _LOGGER.exception("BLE command recovery remains held")
+            return {"success": False, "error": "recovery_failed"}
+
     async def handle_recover_ble_stop_history(call: ServiceCall) -> dict[str, Any]:
         """Recover an explicitly declared complete inventory of held BLE Stops."""
         from .tesla_ble_stop_recovery import async_recover_ble_stops, StopRecoveryRefused
@@ -46141,6 +46158,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         'recover_ev_transport': handle_recover_ev_transport,
         'recover_ev_headroom': handle_recover_ev_headroom,
         'recover_ble_stop_history': handle_recover_ble_stop_history,
+        'recover_ble_command_history': handle_recover_ble_command_history,
         'get_ble_recovery_status': handle_get_ble_recovery_status,
         'get_ev_recovery_status': handle_get_ev_recovery_status,
         'set_operation_mode': handle_set_operation_mode,
@@ -46176,6 +46194,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         DOMAIN, "get_ble_recovery_status",
         handle_get_ble_recovery_status,
         supports_response=SupportsResponse.ONLY,
+    )
+    hass.services.async_register(
+        DOMAIN, "recover_ble_command_history",
+        routed_handler(hass, entry.entry_id, "recover_ble_command_history", handle_recover_ble_command_history),
+        supports_response=SupportsResponse.OPTIONAL,
     )
     hass.services.async_register(
         DOMAIN, "recover_ble_stop_history",

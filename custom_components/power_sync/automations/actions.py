@@ -5635,6 +5635,9 @@ async def _tesla_transport_route(hass, entry, params, operation):
             return {"kind": "ha"}
         return {"kind": "blocked", "reason": "ble_stop_recovery_active"}
     route = get_vehicle_route(hass, entry, vehicle)
+    if (operation != "stop" and route and route.get("reason") == "native_recovery"):
+        await _tesla_reconcile_native_history(hass, entry, params)
+        route = get_vehicle_route(hass, entry, vehicle)
     if route is None and operation in {"rate", "limit", "stop"}:
         anchor = params.get("_tesla_command_entity_id")
         if anchor:
@@ -7308,6 +7311,33 @@ async def _run_modern_teslemetry_bluetooth(hass, entry, params, operation, value
     return True, False
 
 
+async def _tesla_reconcile_native_history(hass, entry, params):
+    """Attempt bounded recovery under this request's existing authority."""
+    from ..tesla_native_recovery import async_reconcile_native_history
+    from ..tesla_ev_recovery import get_vehicle_route
+
+    vehicle = str(params.get("vehicle_vin") or params.get("vehicle_id") or "")
+    route = get_vehicle_route(hass, entry, vehicle)
+    if not route or route.get("reason") != "native_recovery":
+        return False
+
+    deadline_token = _tesla_native_deadline_token(params.get("_boost_start_deadline"))
+    authority = _tesla_transport_authority(
+        hass, entry, params, operation="start", ignore_recovery_gate=True,
+    )
+    def request_current():
+        return (str(params.get("vehicle_vin") or params.get("vehicle_id") or "") == vehicle
+                and _tesla_native_deadline_token(params.get("_boost_start_deadline")) == deadline_token)
+
+    result = await async_reconcile_native_history(
+        hass, entry, vehicle, authorize=lambda: request_current() and authority(),
+    )
+    if not request_current():
+        from ..tesla_ev_recovery import RecoverySubmissionDenied
+        raise RecoverySubmissionDenied("Tesla recovery request changed before dispatch")
+    return result
+
+
 async def _tesla_ha_command_entity(hass, entry, params, operation):
     """Keep a selected native producer bound across all command operations."""
     from ..tesla_ev_recovery import get_vehicle_route
@@ -7319,6 +7349,9 @@ async def _tesla_ha_command_entity(hass, entry, params, operation):
             return None
         return native_command_entity(hass, target, operation)
     route = get_vehicle_route(hass, entry, vehicle)
+    if operation != "stop" and route and route.get("reason") == "native_recovery":
+        await _tesla_reconcile_native_history(hass, entry, params)
+        route = get_vehicle_route(hass, entry, vehicle)
     if route and route.get("kind") == "ha":
         entity_id = route.get("entity_id")
         # A durable cleanup-only route is an exact negative producer fence.
@@ -9950,6 +9983,9 @@ async def _action_start_ev_charging(
     vehicle_vin = params.get("vehicle_vin")
     ble_prefix = _resolve_ble_prefix_for_vehicle(hass, config_entry, vehicle_vin)
     stop_outside_window = params.get("stop_outside_window", False)
+    # Reconciliation advances the producer generation. Capture this new
+    # request's authority afterwards; an older closure must stay revoked.
+    await _tesla_reconcile_native_history(hass, config_entry, params)
     request_authority = _tesla_transport_authority(
         hass, config_entry, params, operation="start"
     )
@@ -10599,6 +10635,9 @@ async def _action_set_ev_charge_limit(
     ev_provider = ev_config["ev_provider"]
     vehicle_vin = params.get("vehicle_vin")
     ble_prefix = _resolve_ble_prefix_for_vehicle(hass, config_entry, vehicle_vin)
+    # Reconciliation advances the producer generation. Capture this new
+    # request's authority afterwards; an older closure must stay revoked.
+    await _tesla_reconcile_native_history(hass, config_entry, params)
     request_authority = _tesla_transport_authority(
         hass, config_entry, params, operation="limit"
     )
@@ -10773,6 +10812,9 @@ async def _action_set_ev_charging_amps(
     ev_provider = ev_config["ev_provider"]
     vehicle_vin = params.get("vehicle_vin")
     ble_prefix = _resolve_ble_prefix_for_vehicle(hass, config_entry, vehicle_vin)
+    # Reconciliation advances the producer generation. Capture this new
+    # request's authority afterwards; an older closure must stay revoked.
+    await _tesla_reconcile_native_history(hass, config_entry, params)
     request_authority = _tesla_transport_authority(
         hass, config_entry, params, operation="rate"
     )

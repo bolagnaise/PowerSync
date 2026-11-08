@@ -713,7 +713,7 @@ def _install_fleet_observation_source(monkeypatch, hass, vin, *, state="ASLEEP")
     )
     native = types.ModuleType("power_sync.native_rate_telemetry")
 
-    def vehicle_sources(hass_arg, requested_vin):
+    def vehicle_sources(hass_arg, requested_vin, *, include_tessie=False):
         matches = []
         for domain in ("teslemetry", "tesla_fleet"):
             for entry in hass_arg.config_entries.async_entries(domain):
@@ -2568,7 +2568,7 @@ def test_tesla_fleet_charge_switch_starts_without_separate_wake_button(monkeypat
     monkeypatch.setattr(actions, "_wake_tesla_ev", unexpected_separate_wake)
     native = types.ModuleType("power_sync.native_rate_telemetry")
 
-    def vehicle_sources(hass_arg, requested_vin):
+    def vehicle_sources(hass_arg, requested_vin, *, include_tessie=False):
         matches = []
         for domain in ("teslemetry", "tesla_fleet"):
             for entry in hass_arg.config_entries.async_entries(domain):

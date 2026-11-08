@@ -1,4 +1,4 @@
-"""Operator-scoped recovery of Stop-only BLE history using producer protocol 2.
+"""Operator-scoped charging-history recovery using producer protocol 2.
 
 This is separate from stock/native-cloud recovery. A current VIN never becomes
 a reconstructed historical identity. Legacy aliases require an explicit closed
@@ -247,7 +247,7 @@ def _inventory_bridges(hass, entry, inventory):
     return bridges
 
 
-def _resolve_inventory(hass, entry, inventory, bridges=None):
+def _resolve_inventory(hass, entry, inventory, bridges=None, *, allow_positive=False):
     from . import tesla_ev_recovery as manager
 
     bridges = bridges or _inventory_bridges(hass, entry, inventory)
@@ -265,7 +265,7 @@ def _resolve_inventory(hass, entry, inventory, bridges=None):
         bridge = bridges[prefix]
         ledger = root["vehicles"][ref["vehicle_id"]]
         record = ledger.get("attempts", {}).get(ref.get("attempt_id"))
-        if (not isinstance(record, Mapping) or record.get("operation") != "stop"
+        if (not isinstance(record, Mapping) or record.get("operation") not in ({"start", "stop", "rate", "limit"} if allow_positive else {"stop"})
                 or not manager._record_compatible(hass, entry, runtime, ref["vehicle_id"], record)
                 or not manager._liability_matches_stock_scope(ref, bridge.identity)):
             raise StopRecoveryRefused("non_stop_or_unproven_history")
@@ -296,7 +296,19 @@ def _check_other_entries(hass, runtime, bridges):
                 raise StopRecoveryRefused("producer_shared_with_another_entry")
 
 
-async def async_recover_ble_stops(hass, entry, inventory, *, confirm_complete_history=False):
+async def async_recover_ble_history(hass, entry, inventory, *, confirm_complete_history=False):
+    """Recover all stateful charging operations after a producer reset and native readback.
+
+    Operational convergence does not reconstruct an old command's outcome.
+    """
+    return await async_recover_ble_stops(
+        hass, entry, inventory, confirm_complete_history=confirm_complete_history,
+        _allow_positive=True,
+    )
+
+
+async def async_recover_ble_stops(hass, entry, inventory, *, confirm_complete_history=False,
+                                  _allow_positive=False):
     """Recover the whole operator-confirmed affected inventory, or retain it."""
     from . import tesla_ev_recovery as manager
 
@@ -317,7 +329,7 @@ async def async_recover_ble_stops(hass, entry, inventory, *, confirm_complete_hi
         bridges = _inventory_bridges(hass, entry, inventory)
         if not _live_refs(runtime):
             return await _resume_released(hass, entry, runtime, bridges, inventory)
-        bridges, refs, affected = _resolve_inventory(hass, entry, inventory, bridges)
+        bridges, refs, affected = _resolve_inventory(hass, entry, inventory, bridges, allow_positive=_allow_positive)
         config = deepcopy(_configuration(entry))
         owners = {vid: manager._owner_snapshot(hass, entry, vid) for vid in affected.values()}
         scope_digest = manager._digest(refs)
@@ -327,7 +339,7 @@ async def async_recover_ble_stops(hass, entry, inventory, *, confirm_complete_hi
         for candidate in snapshot["incidents"].values():
             if candidate.get("phase") != "released":
                 basis = candidate.get("scope_basis") or {}
-                if basis.get("kind") != "ble_stop_inventory_v2" or basis.get("inventory_digest") != inventory_digest:
+                if basis.get("kind") not in {"ble_stop_inventory_v2", "ble_command_inventory_v2"} or basis.get("inventory_digest") != inventory_digest:
                     raise StopRecoveryRefused("another_recovery_scope_is_held")
                 if incident is not None:
                     raise StopRecoveryRefused("ambiguous_recovery_incidents")
@@ -339,14 +351,14 @@ async def async_recover_ble_stops(hass, entry, inventory, *, confirm_complete_hi
                 candidate_vehicles=list(affected.values()),
                 surviving_facts=[{"prefix": p, "journal_vehicle_id": affected[p], "declared_physical_vin": b.vin}
                                  for p, b in bridges.items()],
-                scope_basis={"kind": "ble_stop_inventory_v2", "inventory_digest": inventory_digest,
+                scope_basis={"kind": "ble_command_inventory_v2" if _allow_positive else "ble_stop_inventory_v2", "inventory_digest": inventory_digest,
                              "historical_identity_reconstructed": False,
                              "complete_affected_inventory": deepcopy(inventory)},
             )
         if incident is None:
             raise StopRecoveryRefused("recovery_scope_not_persisted")
         await _refresh_held_scope(hass, entry, runtime, incident["incident_id"],
-                                  inventory, bridges, refs, affected)
+                                  inventory, bridges, refs, affected, allow_positive=_allow_positive)
         snapshot = manager.recovery_sidecar_snapshot(hass, entry)
         incident = await manager.async_confirm_recovery_scope(
             hass, entry, incident["incident_id"], expected_revision=snapshot["revision"],
@@ -358,7 +370,7 @@ async def async_recover_ble_stops(hass, entry, inventory, *, confirm_complete_hi
                                     scope_digest, incident["incident_id"])
 
 
-async def _refresh_held_scope(hass, entry, runtime, incident_id, inventory, bridges, refs, affected):
+async def _refresh_held_scope(hass, entry, runtime, incident_id, inventory, bridges, refs, affected, *, allow_positive=False):
     """Reconfirm added Stops on an explicit retry, never alter a running scope."""
     from . import tesla_ev_recovery as manager
 
@@ -368,17 +380,17 @@ async def _refresh_held_scope(hass, entry, runtime, incident_id, inventory, brid
         if selected.get("phase") != "held":
             raise StopRecoveryRefused("recovery_already_running")
         basis = selected.get("scope_basis") or {}
-        if (basis.get("kind") != "ble_stop_inventory_v2"
+        if (basis.get("kind") not in {"ble_stop_inventory_v2", "ble_command_inventory_v2"}
                 or basis.get("inventory_digest") != manager._digest(inventory)
                 or basis.get("complete_affected_inventory") != inventory
                 or selected.get("current_candidate_producers") != [b.identity for b in bridges.values()]
                 or selected.get("current_candidate_vehicles") != list(affected.values())
                 or not all(b.current() for b in bridges.values())):
             raise StopRecoveryRefused("recovery_scope_changed")
-        # Repeat exact Stop-only/binding validation against the authoritative
+        # Repeat exact operation/binding validation against the authoritative
         # union while holding the persistence lock. A new Stop must not make an
         # old incident permanently unretryable, or permit an unvalidated writer.
-        _, current_refs, current_affected = _resolve_inventory(hass, entry, inventory, bridges)
+        _, current_refs, current_affected = _resolve_inventory(hass, entry, inventory, bridges, allow_positive=allow_positive)
         if current_refs != refs or current_affected != affected:
             raise StopRecoveryRefused("recovery_scope_changed")
         previous = selected.get("liability_refs")
@@ -545,7 +557,8 @@ async def _run_inventory(hass, entry, runtime, bridges, refs, affected, config, 
                 manager._retire_recovery_liabilities(runtime, refs, incident_id, {"protocol": 2, "proofs": evidence})
                 for vid in affected.values():
                     manager._ledger(runtime, vid)["route"] = None
-                selected.update(phase="released", phase_token=uuid4().hex, released_at=time.time(), historical_outcome="unknown")
+                selected.update(phase="released", phase_token=uuid4().hex, released_at=time.time(),
+                                historical_outcome="unknown", activation_pending=True)
                 state["obligations"][incident_id].update(phase="released", phase_token=selected["phase_token"])
                 state["liabilities"][incident_id].update(state="retained_reconciled", historical_outcome="unknown")
                 if not manager._sync_sidecar_projection(runtime, state):
@@ -588,7 +601,7 @@ async def _resume_released(hass, entry, runtime, bridges, inventory, *, expected
     state = runtime[manager._SIDECAR_STATE_KEY]
     matches = [item for item in state["incidents"].values()
         if item.get("phase") == "released"
-        and (item.get("scope_basis") or {}).get("kind") == "ble_stop_inventory_v2"
+        and (item.get("scope_basis") or {}).get("kind") in {"ble_stop_inventory_v2", "ble_command_inventory_v2"}
         and item["scope_basis"].get("inventory_digest") == manager._digest(inventory)
         and (expected_incident is None or item.get("incident_id") == expected_incident)]
     if not matches or any(item.get("phase") != "released" for item in state["incidents"].values()):
@@ -646,6 +659,23 @@ async def _resume_released(hass, entry, runtime, bridges, inventory, *, expected
             bridge.nonce, bridge.started, bridge.prepared = old["n"], time.time(), True
             fresh = await bridge.wait_verified(current)
             await bridge.unlock(fresh, current)
+        # Keep normal admission closed across HA restarts until every
+        # firmware commit is acknowledged and this installation is durable.
+        async with manager._journal_lock(runtime):
+            if not current():
+                raise StopRecoveryRefused("completed_recovery_scope_changed")
+            state = runtime[manager._SIDECAR_STATE_KEY]
+            selected = state["incidents"][incident_id]
+            before = deepcopy(state)
+            selected["activation_pending"] = False
+            selected["activated_at"] = time.time()
+            manager._next_revision(state)
+            try:
+                if not await manager._save_sidecar(hass, entry, runtime, state):
+                    raise StopRecoveryRefused("recovery_activation_not_persisted")
+            except BaseException:
+                manager._restore_sidecar_state(state, before)
+                raise
         return {"success": True, "incident_id": incident_id}
     finally:
         if runtime.get(ACTIVE_KEY, {}).get("token") == token:

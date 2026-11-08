@@ -45,7 +45,7 @@ The PowerSync [Stop recovery companion](tesla-ble-stop-recovery.md) now includes
 this package automatically. Use either the standalone freshness package or the
 companion's inclusion. Replace a separate upstream `charging-freshness.yml`
 include rather than stacking duplicate callbacks. Freshness does not grant
-permission to recover an uncertain Start.
+recovery by itself; the general command-history action also needs the complete producer reset and readback transaction.
 
 ### yoziru
 
@@ -71,9 +71,10 @@ packages:
 
 This family uses `charger_power`, preserves `tesla_charger_power_sensor`, and
 adds Charger Power Received and Charger Power Sample. It opts into repeated
-native power reports; estimated power is excluded. It does not add the Pedro
-Stop recovery protocol or reliable receipt timestamps for every other field.
-The upstream PR remains a separate publication/merge dependency.
+native power reports; estimated power is excluded. Freshness alone does not add recovery. The optional yoziru recovery adapter
+below supplies its own producer hold and correlated native samples. The upstream
+PRs remain separate merge dependencies; the immutable owner-fork revisions can
+be built without waiting for those merges.
 
 Both combined packages were compile checked for ESP32 and ESP32-S3 with
 ESPHome 2026.10.2. Compilation is not installation or hardware verification.
@@ -101,42 +102,72 @@ needed, the exact PowerSync `entry_id`. It reports:
 
 - Each configured bridge's receipt capability and current power freshness.
 - The retained attempt/hazard operations from the authoritative history union.
-- Whether Stop-only recovery is a candidate requiring full inventory/proof.
-- `vehicle_execution_fence_unproven` for positive or unknown retained history.
+- Which whole-inventory recovery action applies to Stop-only or mixed charging history.
+- Whether the configured bridges expose the companion recovery protocol.
 
 This action reads existing HA data only. It does not refresh telemetry, restart
 bridges, change settings, clear journals or unlock control.
 
-## General recovery remains an open requirement
+## Recovering uncertain charging commands
 
-The existing v2 action remains Stop-only. An uncertain Start, Rate or Limit
-cannot be released merely by installing freshness firmware or extending the
-confirmation window. A safe general recovery needs three separate facts:
+The companion firmware's protocol-2 whole-inventory transaction can now reconcile
+Start, Stop, current and charge-limit history through
+`power_sync.recover_ble_command_history`. The existing Stop-only action remains
+available. See the [complete recovery procedure](tesla-ble-stop-recovery.md).
 
-1. All original producers and retry builders can no longer emit old work.
-2. No old signed envelope can be accepted later.
-3. Work already accepted by the vehicle has completed or been cancelled.
+Recovery freezes writers, drains actual HA submissions, restarts the original
+bridges into persistent read-only mode, obtains advancing native stopped/zero
+reports from every declared vehicle, and saves the exact release before firmware
+unlock. It preserves original unknown outcomes and never replays an old Start.
+A failed read, changed identity, interrupted Stop or save failure retains the hold.
 
-A persistent lock and verified bridge reboot address producer work. Tesla's
-[protocol specification](https://github.com/teslamotors/vehicle-command/blob/main/pkg/protocol/protocol.md)
-allows out-of-order infotainment counters. A higher-counter Stop is therefore
-not a general cancellation watermark. The pinned Pedro library's five-second
-expiry uses a wall-clock/session offset; it does not retrospectively establish
-a real five-second bound for an older uncaptured command.
+This is operational state reconciliation, not an OEM assertion that no historical
+vehicle command can ever produce a delayed effect. It follows the stateful
+command recovery model also used for native providers. Normal setting admission,
+current regulation and command confirmation remain in force. Freshness firmware
+alone does not implement this transaction; the Pedro companion is not compatible
+with the yoziru family. Use the corresponding adapter below; an integration
+update alone cannot add firmware recovery capability.
 
-A fresh authenticated epoch change can invalidate old envelopes. The reference
-[verifier](https://github.com/teslamotors/vehicle-command/blob/main/internal/authentication/verifier.go)
-can rotate epochs without an application reset, so epoch change alone does not
-prove cancellation of already accepted charging work. Public APIs reviewed do
-not establish that execution fence. This is an evidence gap, not an observed
-case of a Tesla executing indefinitely delayed work.
+### Yoziru recovery adapter
 
-To complete general recovery, qualify an OEM-supported execution-reset/drain
-procedure or a supported acceptance-to-final-effect bound for the relevant
-vehicle/software profile. The evidence must cover forwarded and persistent
-work, preserve pairing, identify completion and specify surviving settings.
-Then bind that evidence to the original producer inventory, reconcile fresh
-native settings/zero draw, durably retire covered liabilities, and unlock the
-same recovery generation. An operator checkbox, a new Stop acknowledgement,
-repeated zeros, a touchscreen reboot or unplugging alone cannot supply the
-missing contract. Preserve existing holds until it is established.
+Preserve the existing board, VIN, BLE address, device name, entity IDs and keys.
+Replace the component source with the matching immutable revision:
+
+```yaml
+external_components:
+  - source:
+      type: git
+      url: https://github.com/bolagnaise/esphome-tesla-ble
+      ref: 1a807b0b8abe55452ebbbece3e7c68d28155ace6
+    components: [tesla_ble_vehicle, tesla_ble_listener]
+
+esp32:
+  framework:
+    components:
+      - name: tesla-ble
+        source: https://github.com/bolagnaise/tesla-ble-yoziru.git
+        ref: 544a8fb2a35ea141946a640117b605fe17141cf3
+
+packages:
+  powersync_recovery: !include /config/esphome/stop-recovery-yoziru.yaml
+```
+
+Use `esphome/stop-recovery-yoziru.yaml` from the same PowerSync source as this
+guide. It includes the paired freshness package; remove a separate freshness
+include to avoid duplicate IDs. Keep the existing `tesla_ble_vehicle_id` used by
+the client package. The companion creates the same HA proof/request entity names
+and uses the same complete-inventory action as Pedro.
+
+The component refuses recovery builds with an incompatible TeslaBLE library.
+Its optional callback accepts only an active matching native request UUID;
+unsolicited notifications and completed-request replay cannot renew recovery.
+The original producers are frozen before reboot, the read-only hold survives
+NVS, and firmware commit failure remains held. See
+[component PR287](https://github.com/yoziru/esphome-tesla-ble/pull/287) and
+[library PR126](https://github.com/yoziru/tesla-ble/pull/126).
+
+ESP32 and ESP32-S3 builds with ESPHome 2026.10.2 pass. The source/build fixtures
+use dummy identities and must not be uploaded to a real bridge. Build each
+bridge from its own preserved configuration. No firmware upload or live recovery
+is implied by those checks.

@@ -2197,3 +2197,49 @@ async def test_ble_rate_native_satisfaction_requires_authority_and_binding(monke
     assert await actions._set_ev_charging_amps_ble(
         hass, "ble", 16, params=params, authorize=lambda: True
     ) is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["start", "rate", "limit"])
+async def test_recovered_request_captures_new_generation_before_real_native_dispatch(monkeypatch, operation):
+    """Recovery must not consume the initiating request's authority closure."""
+    import importlib
+    entity = {"start": ENTITY, "rate": AMPS_ENTITY, "limit": LIMIT_ENTITY}[operation]
+    hass = _native_hass(monkeypatch, "tesla_fleet", entity_id=entity)
+    if operation != "start":
+        hass.states._states[entity] = _State(entity, "6" if operation == "rate" else "80",
+                                           {"min": 1, "max": 80 if operation == "rate" else 100})
+    entry = _Entry()
+    recovery = importlib.import_module("power_sync.tesla_ev_recovery")
+    generation, captured = [0], []
+
+    async def reconcile(*_args):
+        generation[0] = 1
+        return True
+
+    def authority(*_args, **_kwargs):
+        expected = generation[0]
+        captured.append(expected)
+        return lambda: generation[0] == expected
+
+    monkeypatch.setattr(actions, "_tesla_reconcile_native_history", reconcile)
+    monkeypatch.setattr(actions, "_tesla_transport_authority", authority)
+    monkeypatch.setattr(recovery, "current_vehicle_generation", lambda *_: generation[0])
+    monkeypatch.setattr(recovery, "get_vehicle_route", lambda *_: None)
+    monkeypatch.setattr(actions, "_get_ev_config", lambda _: {"ev_provider": actions.EV_PROVIDER_FLEET_API})
+    monkeypatch.setattr(actions, "_resolve_ble_prefix_for_vehicle", lambda *_: None)
+    monkeypatch.setattr(actions, "_is_api_credit_available", lambda *_: True)
+    monkeypatch.setattr(actions, "_wake_tesla_ev_for_command", AsyncMock(return_value=True))
+    monkeypatch.setattr(actions, "prepare_ev_submission", AsyncMock(return_value=True))
+    entity = {"start": ENTITY, "rate": AMPS_ENTITY, "limit": LIMIT_ENTITY}[operation]
+    monkeypatch.setattr(actions, "_get_tesla_ev_entity", AsyncMock(return_value=entity))
+    finished = _journal_mocks(monkeypatch)
+    params = {"vehicle_vin": VIN, "amps": 6, "percent": 80}
+    handler = {"start": actions._action_start_ev_charging,
+               "rate": actions._action_set_ev_charging_amps,
+               "limit": actions._action_set_ev_charge_limit}[operation]
+    assert await handler.__wrapped__(hass, entry, params) is True
+    assert captured and all(value == 1 for value in captured)
+    assert finished == ["accepted_unconfirmed"]
+    assert len(hass.services.calls) == 1
+    assert hass.services.calls[0][2]["entity_id"] == entity

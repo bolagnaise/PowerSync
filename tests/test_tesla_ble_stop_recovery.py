@@ -549,12 +549,10 @@ async def test_read_only_recovery_status_preserves_every_retained_record(invento
     status = ble_recovery_status(c.hass, c.entry)
     assert status["success"] and status["controls_issued"] is False
     assert len(status["retained_history"]) == 35
-    assert status["recovery"]["general_ble_recovery_available"] is False
+    assert status["recovery"]["general_ble_recovery_available"] is True
     assert status["recovery"]["candidate_service"] == (
-        "power_sync.recover_ble_stop_history" if operation == "stop" else None)
-    assert status["recovery"]["reason"] == (
-        "complete_inventory_and_native_stop_proof_required" if operation == "stop"
-        else "vehicle_execution_fence_unproven")
+        "power_sync.recover_ble_stop_history" if operation == "stop" else "power_sync.recover_ble_command_history")
+    assert status["recovery"]["reason"] == "complete_inventory_and_native_stop_proof_required"
     assert c.calls == [] and c.store.value == before_store
     assert c.runtime[recovery.RECOVERY_KEY] == before_runtime
 
@@ -594,3 +592,69 @@ async def test_status_service_routes_exact_entry_without_manual_control_cleanup(
     assert isinstance(registration.args[2], ast.Name)
     assert registration.args[2].id == "handle_get_ble_recovery_status"
     assert c.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["start", "rate", "limit"])
+async def test_general_recovery_accepts_positive_history_only_after_all_native_proofs(inventory, operation):
+    c = inventory
+    for root in (c.runtime[recovery.RECOVERY_KEY], c.runtime[recovery._SIDECAR_STATE_KEY]["recovery"]):
+        next(iter(root["vehicles"][c.aliases["bridge_a"]]["attempts"].values()))["operation"] = operation
+    before = deepcopy(c.runtime[recovery.RECOVERY_KEY])
+    result = await stop.async_recover_ble_history(c.hass, c.entry, c.declared, confirm_complete_history=True)
+    assert result["success"]
+    assert [x[1] for x in c.calls] == ["prepare", "prepare", "commit", "commit"]
+    for vid, ledger in c.store.value["recovery"]["vehicles"].items():
+        for aid, record in ledger["attempts"].items():
+            assert record["outcome"] == before["vehicles"][vid]["attempts"][aid]["outcome"] == "sent_unknown"
+            assert record["recovery_retired"]["incident_id"] == result["incident_id"]
+    assert not stop._live_refs(c.runtime)
+    c.runtime.pop(recovery.RECOVERY_KEY)
+    c.runtime.pop(recovery._SIDECAR_LOADED_KEY)
+    assert await recovery.async_load_recovery_state(c.hass, c.entry)
+    assert not stop._live_refs(c.runtime)
+    assert (await stop.async_recover_ble_history(c.hass, c.entry, c.declared,
+                                              confirm_complete_history=True))["success"]
+    assert len(c.calls) == 4
+
+
+@pytest.mark.asyncio
+async def test_general_positive_recovery_does_not_release_any_vehicle_on_missing_proof(inventory):
+    c = inventory
+    for root in (c.runtime[recovery.RECOVERY_KEY], c.runtime[recovery._SIDECAR_STATE_KEY]["recovery"]):
+        next(iter(root["vehicles"][c.aliases["bridge_a"]]["attempts"].values()))["operation"] = "start"
+    c.frozen.add("bridge_b")
+    with pytest.raises(stop.StopRecoveryRefused, match="proof_unavailable"):
+        await stop.async_recover_ble_history(c.hass, c.entry, c.declared, confirm_complete_history=True)
+    assert not any(x[1] == "commit" for x in c.calls)
+    assert stop._live_refs(c.runtime)
+
+
+@pytest.mark.asyncio
+async def test_restart_between_release_and_bridge_commit_keeps_positive_admission_closed(inventory):
+    c = inventory
+    async def interrupted(prefix, action):
+        if action == "commit":
+            raise stop.StopRecoveryRefused("connection_lost")
+    c.hook["call"] = interrupted
+    with pytest.raises(stop.StopRecoveryRefused, match="connection_lost"):
+        await stop.async_recover_ble_history(c.hass, c.entry, c.declared, confirm_complete_history=True)
+    assert not stop._live_refs(c.runtime)
+    assert all(i["activation_pending"] for i in c.store.value["incidents"].values())
+    c.runtime.pop(recovery.RECOVERY_KEY)
+    c.runtime.pop(recovery._SIDECAR_LOADED_KEY)
+    assert await recovery.async_load_recovery_state(c.hass, c.entry)
+    for vid in c.aliases.values():
+        generation = recovery.current_vehicle_generation(c.hass, c.entry, vid)
+        assert not recovery.recovery_control_allowed(c.hass, c.entry, vid, generation, "start")
+        assert recovery.get_vehicle_route(c.hass, c.entry, vid)["reason"] == "ble_recovery_commit_pending"
+        assert recovery.recovery_control_allowed(c.hass, c.entry, vid, generation, "stop")
+    from power_sync.tesla_ble_recovery_status import ble_recovery_status
+    status = ble_recovery_status(c.hass, c.entry)
+    assert status["recovery"]["required"] is True
+    assert status["recovery"]["reason"] == "bridge_commit_pending"
+    assert status["recovery"]["candidate_service"] == "power_sync.recover_ble_command_history"
+    c.hook["call"] = None
+    assert (await stop.async_recover_ble_history(c.hass, c.entry, c.declared, confirm_complete_history=True))["success"]
+    assert all(i["activation_pending"] is False for i in c.store.value["incidents"].values())
+    assert len([x for x in c.calls if x[1] == "prepare"]) == 2

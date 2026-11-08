@@ -1,6 +1,6 @@
-# Recovering held Stops on a BLE-only Tesla bridge
+# Recovering held charging commands on a BLE-only Tesla bridge
 
-PowerSync can recover **Stop-only** retained history without Tesla Fleet or
+PowerSync can reconcile retained **Start, Stop, current and charge-limit** history without Tesla Fleet or
 Teslemetry when every affected ESPHome bridge runs the companion recovery
 component below. This is an operator-triggered recovery; updating PowerSync
 alone does not clear a held command.
@@ -8,8 +8,9 @@ It does not establish why an earlier Stop went unconfirmed or guarantee that
 the original communication failure will not recur.
 
 This route covers exact original bridge/device/entity bindings and an explicitly
-confirmed complete vehicle inventory. It refuses Start, Rate, Limit, unknown
-operations, conflicting identity, omitted vehicles and changed pairing. A legacy
+confirmed complete vehicle inventory. It refuses unknown operations, conflicting identity, omitted vehicles and changed pairing.
+The compatibility action `recover_ble_stop_history` remains restricted to Stops;
+use `recover_ble_command_history` for an inventory containing positive commands. A legacy
 bridge alias remains a journal alias; the VIN you supply is a declaration of the
 physical vehicle, not reconstructed historical evidence.
 
@@ -76,7 +77,7 @@ packages:
       - esphome/stop-recovery.yaml
 ```
 
-The v2.12.1652 recovery package also includes native charging receipt and paired-value entities automatically; do not add a second freshness package. See [BLE reliability](tesla-ble-reliability.md) for firmware-family compatibility and the separate unresolved general-recovery requirement.
+The v2.12.1652 recovery package also includes native charging receipt and paired-value entities automatically; do not add a second freshness package. See [BLE reliability](tesla-ble-reliability.md) for firmware-family compatibility, the matching yoziru recovery adapter, and the operational recovery policy.
 
 The companion component is separately licensed under AGPL-3.0; see
 [its source and notice](../esphome/NOTICE.md). Existing upstream binaries do not
@@ -86,13 +87,13 @@ changes, while it collects proof.
 
 ## Confirm the entire affected inventory
 
-In HA **Developer tools → Actions**, run `power_sync.recover_ble_stop_history`
+In HA **Developer tools → Actions**, run `power_sync.recover_ble_command_history`
 using YAML mode. Replace the example prefixes and VINs with your actual values.
 The prefix is the existing entity prefix, without `switch.` or `_charger`.
 Include **every affected bridge and vehicle** in this entry in one call.
 
 ```yaml
-action: power_sync.recover_ble_stop_history
+action: power_sync.recover_ble_command_history
 data:
   entry_id: YOUR_POWERSYNC_ENTRY_ID
   confirm_complete_history: true
@@ -118,7 +119,7 @@ state or a timer cannot substitute for these responses.
 
 All declared bridges must pass before **any** covered record is retired.
 PowerSync saves the proof and release before unlocking the bridges. The original
-unknown Stop outcomes remain unknown in history. Recovery does not replay a
+unknown command outcomes remain unknown in history. Recovery does not replay a
 saved Start or claim that an earlier Stop succeeded. Normal automation can issue
 new commands after successful recovery; resume paused automations deliberately.
 
@@ -146,10 +147,28 @@ original bridge and vehicle binding. This also covers an original quarantine
 preserved under a history key when a later Stop reused its previous key.
 PowerSync preserves the earlier scope and
 requires fresh proof from every bridge before retiring any record. Missing old
-records, changed bindings and non-Stop commands still require support review.
+records, changed bindings and unsupported command operations still require support review.
 
 Rollback: keep held bridges and EV automations contained and contact support
 before restoring older firmware. A downgrade removes the companion firmware's
 persistent read-only enforcement; it is not a recovery method. No customer
 firmware installation, charging command or live recovery is performed by the
 release itself.
+
+## Operational recovery policy
+
+The general action uses protocol 2 to retire executable bridge work through a
+persistent read-only lock and verified reboot, then checks new source-native
+stopped/zero reports for every declared vehicle. It records operational
+reconciliation while retaining each historical outcome as unknown. It does not
+claim a later Stop cancelled an earlier command, or that the vehicle provides a
+public queue-drain guarantee. Subsequent controls use normal ownership, current
+limits, site headroom and confirmation.
+
+The existing companion firmware already supplies the needed producer reset and
+read-only acquisition transaction; no pairing change or protocol upgrade is
+required. Firmware without this protocol must use its separately supported stock
+recovery route or install the compatible companion. Pedro and yoziru packages
+are different firmware families. Use the [yoziru adapter and matching library
+pins](tesla-ble-reliability.md#yoziru-recovery-adapter) for that family; do not
+flash the Pedro component onto yoziru.

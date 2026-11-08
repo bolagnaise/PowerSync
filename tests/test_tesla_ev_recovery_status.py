@@ -40,7 +40,7 @@ def test_status_preserves_six_legacy_unknowns_and_other_vehicle(monkeypatch, leg
     assert all(row["target"] is None and row["original_deadline"] is None
         and row["command_request"] is None for row in status["retained_attempts"])
     assert not status["native_retirement_available"] and not status["controls_issued"]
-    assert status["missing_evidence"] == "original_attempt_terminal_or_no_late_effect_proof"
+    assert status["missing_evidence"] == "fresh_advancing_stopped_vehicle_reports"
     status["retained_attempts"][0]["producer_identity"]["unique_id"] = "changed-response"
     assert runtime[key] == before and set(runtime) == keys
     assert not hass.services.calls

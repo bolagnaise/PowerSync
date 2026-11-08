@@ -130,6 +130,29 @@ recover_ble_stop_history:
       selector:
         text:
 
+recover_ble_command_history:
+  name: Recover held BLE charging commands
+  description: Reconcile Start, Stop, current and charge-limit history using the PowerSync companion BLE firmware. Restarts every declared bridge and verifies fresh stopped, zero-current and zero-power readings. Read the recovery guide before confirming the complete historical vehicle inventory.
+  fields:
+    inventory:
+      name: Complete affected vehicle inventory
+      description: List every affected bridge and physical vehicle as prefix and vin pairs, including vehicles previously paired during the held history. Incomplete or ambiguous history must remain held.
+      required: true
+      selector:
+        object:
+    confirm_complete_history:
+      name: Confirm complete historical inventory
+      description: Confirm this list covers every physical vehicle and producer involved in the held history. Do not confirm if a bridge was moved to a different vehicle or the history is uncertain.
+      required: true
+      default: false
+      selector:
+        boolean:
+    entry_id:
+      name: Entry ID
+      required: false
+      selector:
+        text:
+
 preview_history_relink:
   name: Preview History Relink
   description: Preview Sungrow mkaiser-to-PowerSync entity relinks without changing entities.

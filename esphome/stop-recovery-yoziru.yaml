@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# The yoziru adapter requires the matching PowerSync component/library revisions.
+# Preserve the existing VIN, device name, BLE address, keys and board settings.
+packages:
+  powersync_charging_freshness: !include charging-freshness-yoziru.yaml
+
+text_sensor:
+  - platform: template
+    id: powersync_recovery_proof
+    name: "PowerSync Recovery Proof"
+    entity_category: diagnostic
+    update_interval: never
+
+text:
+  - platform: template
+    name: "PowerSync Recovery Request"
+    entity_category: config
+    mode: text
+    min_length: 0
+    max_length: 64
+    optimistic: true
+    restore_value: false
+    set_action:
+      - lambda: |-
+          id(tesla_ble_vehicle_id)->request_stop_recovery(x);
+
+tesla_ble_vehicle:
+  recovery_proof: powersync_recovery_proof
