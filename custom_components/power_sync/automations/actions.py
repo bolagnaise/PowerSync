@@ -6511,6 +6511,39 @@ def _tesla_quick_control_binding_current(
     return True
 
 
+def _tesla_quick_control_binding_refusal(hass, entry, params) -> str:
+    """Explain failed admission without turning a missing selection into a rebind."""
+    changed = "Tesla finite EV producer binding changed before dispatch"
+    expected = params.get("_quick_control_binding")
+    vehicle = str(params.get("vehicle_vin") or params.get("vehicle_id") or "").strip()
+    if (
+        not isinstance(expected, Mapping)
+        or "native_entity" not in expected
+        or expected.get("native_entity") is not None
+    ):
+        return changed
+    # Keep every provider, pairing and other producer identity check. Only the
+    # unavailable native selection is diagnosed separately from a real rebind.
+    identity_only = {key: value for key, value in expected.items() if key != "native_entity"}
+    if not _tesla_quick_control_binding_current(
+        hass, entry, {**params, "_quick_control_binding": identity_only}
+    ):
+        return changed
+    from ..tesla_ev_recovery import get_vehicle_route
+
+    route = get_vehicle_route(hass, entry, vehicle)
+    reason = route.get("reason") if isinstance(route, Mapping) else None
+    if reason == "native_recovery":
+        return "Tesla finite EV control held by unresolved native command outcomes; recovery required"
+    if reason in {"ble_recovery", "transport_recovery"}:
+        return "Tesla finite EV control held by unresolved transport outcomes; recovery required"
+    if reason == "malformed_recovery":
+        return "Tesla finite EV control held by invalid retained recovery history"
+    if reason == "route_identity_changed":
+        return changed
+    return "Tesla finite EV native command entity unavailable or disabled before dispatch"
+
+
 def _tesla_native_anchor_entity(
     hass: HomeAssistant,
     params: Mapping[str, Any],
@@ -6585,7 +6618,15 @@ def _tesla_native_service_shape(
         and entity_id.startswith(f"{domain}.")
         and isinstance(service_data, Mapping)
         and service_data.get("entity_id") == entity_id
-        and (operation in {"start", "stop"} or "value" in service_data)
+        and (
+            operation in {"start", "stop"}
+            or (
+                type(service_data.get("value")) in (int, float)
+                and math.isfinite(service_data["value"])
+                and service_data["value"] >= 0
+                and (operation != "limit" or service_data["value"] <= 100)
+            )
+        )
     )
 
 
@@ -6655,6 +6696,13 @@ async def _run_native_tesla_service_command(
     ):
         return _TeslaNativeMutationResult("not_sent")
     command_data = dict(service_data)
+    # This is the requested HA service value, not a qualified physical bound
+    # or readback. Provider/vehicle conversions need their own qualification.
+    command_request = (
+        {"operation": operation, "value": command_data["value"],
+         "unit": "A" if operation == "rate" else "%"}
+        if operation in {"rate", "limit"} else None
+    )
     deadline_token = _tesla_native_deadline_token(params.get("_boost_start_deadline"))
     pinned_vehicle = str(vehicle).strip().upper()
     ticket = None
@@ -6668,6 +6716,8 @@ async def _run_native_tesla_service_command(
             return _TeslaNativeMutationResult("not_sent")
         command_route = {"kind": "ha", "entity_id": entity_id}
         command_route.update(_tesla_cleanup_route_metadata(params))
+        if command_request is not None:
+            command_route["command_request"] = dict(command_request)
         try:
             ticket = await async_begin_attempt(
                 hass,
@@ -6772,6 +6822,8 @@ async def _run_native_tesla_service_command(
 
     async def final_submission_guard():
         """Recheck authority, generation, deadline, and exact native binding."""
+        if command_request is not None and command_data.get("value") != command_request["value"]:
+            return False
         if not await _tesla_native_authority_current(authorize):
             return False
         current_vehicle = str(
@@ -18596,7 +18648,7 @@ async def _action_start_ev_charging_dynamic_locked(
                     vehicle_id,
                     command=f"start_{owner_mode}",
                     success=False,
-                    reason="Tesla finite EV producer binding changed before dispatch",
+                    reason=_tesla_quick_control_binding_refusal(hass, config_entry, params),
                 )
                 return False
         quick_control_obligation = await async_begin_ev_quick_control_obligation(
@@ -18633,7 +18685,7 @@ async def _action_start_ev_charging_dynamic_locked(
                 vehicle_id,
                 command=f"start_{owner_mode}",
                 success=False,
-                reason="Tesla finite EV producer binding changed before dispatch",
+                reason=_tesla_quick_control_binding_refusal(hass, config_entry, params),
             )
             return False
     self_stopped_during_teardown = bool(

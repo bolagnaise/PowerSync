@@ -79,6 +79,23 @@ recover_ev_headroom:
       selector:
         text:
 
+get_ev_recovery_status:
+  name: Inspect Tesla EV recovery status
+  description: Inspect retained command attempts for one exact vehicle. Uses existing HA data without refreshing or waking the car, sending controls, or clearing recovery holds.
+  fields:
+    vin:
+      name: Vehicle VIN
+      description: Exact uppercase 17-character VIN of the affected vehicle.
+      required: true
+      selector:
+        text:
+    entry_id:
+      name: Entry ID
+      description: PowerSync configuration entry ID. Required when more than one PowerSync entry is loaded.
+      required: false
+      selector:
+        text:
+
 get_ble_recovery_status:
   name: Inspect BLE recovery status
   description: Show native charging-data freshness capabilities and retained command recovery requirements. Reads existing HA data without sending vehicle commands, restarting bridges, or clearing holds.

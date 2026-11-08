@@ -151,6 +151,131 @@ def _journal_mocks(monkeypatch, *, ticket=None, on_begin=None):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("platform", ["tesla_fleet", "teslemetry", "tessie"])
+@pytest.mark.parametrize("operation,entity,target", [
+    ("rate", AMPS_ENTITY, 17), ("limit", LIMIT_ENTITY, 80),
+])
+async def test_native_numeric_target_is_durable_before_handoff_and_after_reload(
+    monkeypatch, platform, operation, entity, target,
+):
+    """A lost reply must retain the value actually handed to the provider."""
+    import importlib
+
+    recovery = importlib.import_module("power_sync.tesla_ev_recovery")
+    hass = _native_hass(monkeypatch, platform, entity)
+    entry = _Entry()
+    saved = {}
+    handoffs = []
+
+    async def persist(_hass, _entry, runtime):
+        saved.clear()
+        saved.update(deepcopy(runtime[recovery.RECOVERY_KEY]))
+        return True
+
+    async def lost_reply(domain, service, data, **kwargs):
+        handoffs.append((deepcopy(data), deepcopy(saved)))
+        raise TimeoutError("provider reply lost")
+
+    monkeypatch.setattr(recovery, "_persist", persist)
+    monkeypatch.setattr(recovery, "_registry", lambda h: h.entity_registry)
+    hass.services.async_call = lost_reply
+    request = {"entity_id": entity, "value": target}
+
+    async def authorize():
+        # Awaiting authority must not alter the captured command or journal.
+        request["value"] = 99
+        await asyncio.sleep(0)
+        return True
+
+    result = await actions._run_native_tesla_service_command(
+        hass, entry, {"vehicle_vin": VIN}, operation, entity,
+        "number", "set_value", request, authorize,
+    )
+    assert result.outcome == "sent_unknown"
+    assert len(handoffs) == 1
+    data, at_handoff = handoffs[0]
+    assert data == {"entity_id": entity, "value": target}
+    attempt = next(iter(at_handoff["vehicles"][VIN]["attempts"].values()))
+    assert attempt["operation"] == operation
+    assert attempt["route"]["command_request"] == {
+        "operation": operation, "value": target, "unit": "A" if operation == "rate" else "%",
+    }
+    retained = deepcopy(saved["vehicles"][VIN]["attempts"])
+    assert next(iter(retained.values()))["route"]["command_request"]["value"] == target
+    hass.data["power_sync"][entry.entry_id] = {
+        recovery.RECOVERY_KEY: deepcopy(saved),
+    }
+    assert recovery.get_vehicle_route(hass, entry, VIN)["kind"] == "blocked"
+    assert hass.data["power_sync"][entry.entry_id][recovery.RECOVERY_KEY]["vehicles"][VIN]["attempts"] == retained
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", [None, True, "17", float("nan"), float("inf"), -1])
+@pytest.mark.parametrize("operation,entity", [("rate", AMPS_ENTITY), ("limit", LIMIT_ENTITY)])
+async def test_native_invalid_numeric_request_never_reaches_journal_or_provider(
+    monkeypatch, value, operation, entity,
+):
+    import importlib
+    recovery = importlib.import_module("power_sync.tesla_ev_recovery")
+    begin = AsyncMock()
+    monkeypatch.setattr(recovery, "async_begin_attempt", begin)
+    hass = _native_hass(monkeypatch, "tesla_fleet", entity)
+    result = await actions._run_native_tesla_service_command(
+        hass, _Entry(), {"vehicle_vin": VIN}, operation, entity,
+        "number", "set_value", {"entity_id": entity, "value": value}, lambda: True,
+    )
+    assert result.outcome == "not_sent"
+    begin.assert_not_awaited()
+    assert not hass.services.calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure,reason", [
+    ("missing", "Tesla finite EV native command entity unavailable or disabled before dispatch"),
+    ("disabled", "Tesla finite EV native command entity unavailable or disabled before dispatch"),
+    ("malformed", "Tesla finite EV control held by invalid retained recovery history"),
+    ("rebound", "Tesla finite EV producer binding changed before dispatch"),
+])
+async def test_finite_native_refusal_identifies_admission_failure(monkeypatch, failure, reason):
+    from datetime import datetime, timedelta, timezone
+    from power_sync.automations import ev_ownership
+
+    hass = _native_hass(monkeypatch, "tesla_fleet")
+    entry = _Entry()
+    if failure == "missing":
+        hass.entity_registry.entities.clear()
+    elif failure == "disabled":
+        hass.entity_registry.entities[ENTITY].disabled_by = "user"
+    elif failure == "malformed":
+        hass.data["power_sync"][entry.entry_id]["ev_transport_recovery"] = "invalid"
+    else:
+        original = actions._tesla_ha_command_entity
+
+        async def rebind_after_discovery(*args):
+            entity = await original(*args)
+            entry.options = {"ev_provider": "tesla_ble"}
+            return entity
+
+        monkeypatch.setattr(actions, "_tesla_ha_command_entity", rebind_after_discovery)
+    expiry = datetime.now(timezone.utc) + timedelta(minutes=3)
+    params = {
+        "vehicle_vin": VIN, "vehicle_id": VIN, "charger_type": "tesla",
+        "dynamic_mode": "solar_surplus", "owner_mode": "manual_solar_surplus",
+        "quick_control": True, "duration_minutes": 3,
+        "expires_at": expiry.isoformat(), "_boost_start_deadline": expiry.timestamp(),
+        "_user_initiated": True,
+    }
+    actions._dynamic_ev_state.clear()
+    try:
+        assert not await actions._action_start_ev_charging_dynamic(hass, entry, params)
+        assert ev_ownership.get_ev_last_commands(hass, entry)[VIN]["reason"] == reason
+        assert not ev_ownership.get_ev_quick_control_obligation(hass, entry, VIN)
+        assert not hass.services.calls
+    finally:
+        actions._dynamic_ev_state.clear()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform", ["tesla_fleet", "teslemetry", "tessie"])
 async def test_native_ack_is_journaled_without_physical_confirmation(monkeypatch, platform):
     hass = _native_hass(monkeypatch, platform)
     finished = _journal_mocks(monkeypatch)
@@ -1062,6 +1187,7 @@ async def test_native_unknown_rate_allows_exact_stop_after_lease_transition(
     assert len(original_attempts) == 1
     unknown = next(iter(original_attempts.values()))
     assert unknown["operation"] == "rate" and unknown["target"] is None
+    assert unknown["route"]["command_request"] == {"operation": "rate", "value": 17, "unit": "A"}
     assert unknown["route"]["session_anchor"]["entity_id"] == ENTITY
 
     if lease_transition == "released":
@@ -1092,6 +1218,29 @@ async def test_native_unknown_rate_allows_exact_stop_after_lease_transition(
     assert persisted["vehicles"][VIN]["route"]["session_scope"]["session_id"] == "old-session"
     assert (await native("start", ENTITY, "switch", "turn_on")).outcome == "not_sent"
     assert recovery.get_vehicle_route(hass, entry, "5YJ3E1EA7NF0000B2") is None
+
+    # Finite controls must explain the retained hold without claiming that
+    # this unchanged producer was rebound, and must not write a Start.
+    from datetime import datetime, timedelta, timezone
+    actions._dynamic_ev_state.clear()
+    before = len(hass.services.calls)
+    expiry = datetime.now(timezone.utc) + timedelta(minutes=3)
+    finite_params = {
+        **params, "vehicle_id": VIN, "dynamic_mode": "solar_surplus",
+        "owner_mode": "manual_solar_surplus", "quick_control": True,
+        "duration_minutes": 3, "expires_at": expiry.isoformat(),
+        "_boost_start_deadline": expiry.timestamp(), "_user_initiated": True,
+    }
+    try:
+        assert not await actions._action_start_ev_charging_dynamic(hass, entry, finite_params)
+        assert ev_ownership.get_ev_last_commands(hass, entry)[VIN]["reason"] == (
+            "Tesla finite EV control held by unresolved native command outcomes; recovery required"
+        )
+        assert not ev_ownership.get_ev_quick_control_obligation(hass, entry, VIN)
+        assert hass.services.calls[before:] == []
+        assert persisted["vehicles"][VIN]["attempts"] == original_attempts
+    finally:
+        actions._dynamic_ev_state.clear()
 
 
 @pytest.mark.asyncio

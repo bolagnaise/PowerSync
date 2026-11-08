@@ -1955,8 +1955,9 @@ async def test_live_projection_updates_sidecar_and_reload_keeps_terminal_retirem
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("outcome", ("accepted_unconfirmed", "not_sent", "confirmed"))
+@pytest.mark.parametrize("command_value", (None, 80))
 async def test_terminal_finish_removal_survives_stale_projection_and_reload(
-    harness, outcome,
+    harness, outcome, command_value,
 ):
     hass, entry, store, registrations, owners = _sidecar_harness(harness)
     registrations["number.fallback_limit"] = _Entity(
@@ -1966,6 +1967,8 @@ async def test_terminal_finish_removal_survives_stale_projection_and_reload(
     owners.pop(VIN_A)
     assert await recovery.async_load_recovery_state(hass, entry)
     route = {"kind": "ha", "entity_id": "number.fallback_limit"}
+    if command_value is not None:
+        route["command_request"] = {"operation": "limit", "value": command_value, "unit": "%"}
     ticket = await recovery.async_begin_attempt(
         hass, entry, VIN_A, route, "limit", route["entity_id"],
     )
@@ -1999,6 +2002,13 @@ async def test_terminal_finish_removal_survives_stale_projection_and_reload(
     assert durable["attempts"] == {}
     proof = store.value["recovery"]["terminal_removals"][VIN_A][loaded_ticket.attempt_id]
     assert proof["outcome"] == outcome
+    if command_value is not None:
+        assert pending["route"]["command_request"]["value"] == command_value
+        changed_value = deepcopy(pending)
+        changed_value["route"]["command_request"]["value"] = command_value + 1
+        assert not recovery._terminal_removal_matches(changed_value, proof)
+    else:
+        assert "command_request" not in pending["route"]  # Preserve legacy proof digests.
 
     # A late automation projection may still contain the pre-finish pending
     # record.  The exact proof removes only that matching record.

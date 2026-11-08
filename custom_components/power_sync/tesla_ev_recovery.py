@@ -9,6 +9,7 @@ import hashlib
 import inspect
 import json
 import math
+import re
 import time
 from typing import Any, Mapping
 from uuid import uuid4
@@ -3665,6 +3666,81 @@ def _unresolved_ble(ledger: Mapping[str, Any]) -> Mapping[str, Any] | None:
     return None
 
 
+def _unresolved_route_reason(routes: list[Mapping[str, Any]]) -> str:
+    kinds = {route.get("kind") for route in routes}
+    if kinds == {"ha"}:
+        return "native_recovery"
+    return "ble_recovery" if kinds == {"ble"} else "transport_recovery"
+
+
+def ev_recovery_status(hass: Any, entry: Any, vehicle_id: Any) -> dict[str, Any]:
+    """Inspect one VIN without migrating, refreshing or changing its history."""
+    if not isinstance(vehicle_id, str) or not re.fullmatch(r"[A-HJ-NPR-Z0-9]{17}", vehicle_id):
+        raise ValueError("invalid_vehicle_vin")
+    runtime = _runtime(hass, entry)
+    if runtime is None:
+        raise ValueError("control_entry_not_available")
+    available = RECOVERY_KEY in runtime or LEGACY_RECOVERY_KEY in runtime
+    malformed = _journal_malformed(runtime, vehicle_id)
+    root = runtime.get(RECOVERY_KEY, runtime.get(LEGACY_RECOVERY_KEY, {}))
+    vehicles = root.get("vehicles", {}) if isinstance(root, Mapping) else {}
+    ledger = vehicles.get(vehicle_id, {}) if isinstance(vehicles, Mapping) else {}
+    rows = []
+    if isinstance(ledger, Mapping) and not malformed:
+        for attempt_id, record in ledger.get("attempts", {}).items():
+            if record.get("recovery_retired") or record.get("outcome", "pending") not in {"pending", "sent_unknown"}:
+                continue
+            route = record["route"]
+            entity_id = str(record.get("entity_id") or "")
+            expected = route.get("entity_identity")
+            current = _identity(hass, entity_id) if route.get("kind") == "ha" else None
+            registry = _registry(hass) if route.get("kind") == "ha" else None
+            registration = registry.async_get(entity_id) if registry is not None else None
+            rows.append({
+                "attempt_id": attempt_id, "operation": record.get("operation"),
+                "outcome": record.get("outcome", "pending"), "transport": route.get("kind"),
+                "submitted_epoch": record.get("submitted_epoch"),
+                "original_deadline": record.get("original_deadline"),
+                "target": deepcopy(record.get("target")),
+                "command_request": deepcopy(route.get("command_request")),
+                "effect_bound": deepcopy(route.get("effect_bound")),
+                "producer_identity": deepcopy(expected),
+                "current_producer_identity": deepcopy(current),
+                "producer_state": (
+                    "not_native" if route.get("kind") != "ha" else
+                    "missing" if registration is None else
+                    "disabled" if getattr(registration, "disabled_by", None) is not None else
+                    "current" if current == expected else "identity_changed"
+                ),
+                "producer_identity_matches": (
+                    current == expected if isinstance(expected, Mapping) and current is not None else None
+                ),
+            })
+    routes = _unresolved_routes(ledger) if isinstance(ledger, Mapping) and not malformed else []
+    state = runtime.get(_SIDECAR_STATE_KEY)
+    config = {**getattr(entry, "data", {}), **getattr(entry, "options", {})}
+    reason = (
+        "recovery_history_unavailable" if not available else
+        "malformed_recovery" if malformed else
+        _unresolved_route_reason(routes) if routes else "no_retained_history"
+    )
+    return {
+        "success": available and not malformed, "controls_issued": False,
+        "entry_id": entry.entry_id, "vehicle_id": vehicle_id,
+        "configured_provider": config.get("ev_provider", "fleet_api"),
+        "generation": current_vehicle_generation(hass, entry, vehicle_id),
+        "journal_revision": state.get("revision") if isinstance(state, Mapping) else None,
+        "retained_attempts": rows, "reason": reason,
+        "recovery_required": malformed or bool(routes) if available else None,
+        "native_retirement_available": False,
+        "missing_evidence": (
+            "loaded_recovery_history" if not available else
+            "valid_retained_history" if malformed else
+            "original_attempt_terminal_or_no_late_effect_proof" if routes else None
+        ),
+    }
+
+
 def get_vehicle_route(hass: Any, entry: Any, vehicle_id: Any) -> dict[str, Any] | None:
     vid = str(vehicle_id or "")
     runtime = _runtime(hass, entry)
@@ -3678,7 +3754,7 @@ def get_vehicle_route(hass: Any, entry: Any, vehicle_id: Any) -> dict[str, Any] 
     route = ledger.get("route")
     if not isinstance(route, Mapping):
         unresolved = _unresolved_routes(ledger)
-        return _blocked(vid, unresolved[0] if unresolved else None, "ble_recovery") if unresolved else None
+        return _blocked(vid, unresolved[0], _unresolved_route_reason(unresolved)) if unresolved else None
     if route.get("kind") not in ROUTE_KINDS:
         return _blocked(vid, route, "malformed_recovery")
     for hazard in _hazards(ledger):
@@ -3698,7 +3774,7 @@ def get_vehicle_route(hass: Any, entry: Any, vehicle_id: Any) -> dict[str, Any] 
         if (route.get("kind") != "ha"
                 or any(item.get("kind") != "ble" for item in unresolved)
                 or not _ha_fallback_allowed(hass, ledger, route)):
-            return _blocked(vid, unresolved[0], "ble_recovery")
+            return _blocked(vid, unresolved[0], _unresolved_route_reason(unresolved))
     if not _compatible(hass, entry, runtime, vid, route):
         return _blocked(vid, route, "route_identity_changed")
     return deepcopy(dict(route))

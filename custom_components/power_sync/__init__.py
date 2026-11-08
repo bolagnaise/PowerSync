@@ -46039,6 +46039,30 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.exception("EV headroom recovery remains held")
             return {"success": False, "error": "recovery_failed"}
 
+    async def handle_get_ev_recovery_status(call: ServiceCall) -> dict[str, Any]:
+        """Inspect one exact entry/VIN without manual-control finalization."""
+        from .tesla_ev_recovery import ev_recovery_status
+
+        requested = call.data.get("entry_id")
+        if requested is not None and (not isinstance(requested, str) or not requested):
+            raise ValueError("invalid_control_entry")
+        candidates = {
+            key: runtime.get("licensing_control_handlers", {}).get("get_ev_recovery_status")
+            for key, runtime in hass.data.get(DOMAIN, {}).items()
+            if isinstance(runtime, dict)
+            and runtime.get("licensing_control_handlers", {}).get("get_ev_recovery_status") is not None
+        }
+        if requested is None:
+            if len(candidates) != 1:
+                raise ValueError("entry_id_required")
+            requested = next(iter(candidates))
+        target = candidates.get(requested)
+        if target is None:
+            raise ValueError("control_entry_not_available")
+        if requested != entry.entry_id:
+            return await target(call)
+        return ev_recovery_status(hass, entry, call.data.get("vin"))
+
     async def handle_get_ble_recovery_status(call: ServiceCall) -> dict[str, Any]:
         """Inspect BLE capabilities and holds without issuing device commands."""
         from .tesla_ble_recovery_status import ble_recovery_status
@@ -46118,6 +46142,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         'recover_ev_headroom': handle_recover_ev_headroom,
         'recover_ble_stop_history': handle_recover_ble_stop_history,
         'get_ble_recovery_status': handle_get_ble_recovery_status,
+        'get_ev_recovery_status': handle_get_ev_recovery_status,
         'set_operation_mode': handle_set_operation_mode,
         'set_grid_charging': handle_set_grid_charging,
         'set_grid_export': handle_set_grid_export,
@@ -46141,6 +46166,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         DOMAIN, "recover_ev_headroom",
         routed_handler(hass, entry.entry_id, "recover_ev_headroom", handle_recover_ev_headroom),
         supports_response=SupportsResponse.OPTIONAL,
+    )
+    hass.services.async_register(
+        DOMAIN, "get_ev_recovery_status",
+        handle_get_ev_recovery_status,
+        supports_response=SupportsResponse.ONLY,
     )
     hass.services.async_register(
         DOMAIN, "get_ble_recovery_status",
