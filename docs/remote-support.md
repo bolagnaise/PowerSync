@@ -75,7 +75,8 @@ retention remains under HA control.
 ## Live results and separately retained archives
 
 Live evidence stages for at most 60 seconds. Every page requires a new signed
-five-second HA release, so disconnected HA cannot disclose staged bytes to staff.
+five-second HA release. Disconnecting HA prevents new permits; a permit already
+issued remains usable only until its original five-second expiry.
 Requests expire after 30 seconds; collection has a five-second deadline. Results
 are capped at 256 KiB and pages normally at 32 KiB; rows are never split. A large
 single row can exceed the page target, within the result cap. Session upload

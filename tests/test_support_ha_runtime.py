@@ -316,3 +316,17 @@ async def test_never_shared_archive_slots_do_not_survive_session_close(runtime):
     rt.request=AsyncMock(side_effect=AssertionError('no remote archive ever existed'))
     await rt.drain_archives()
     assert rt.archives=={}
+
+
+
+def test_diagnostic_cleanup_does_not_delay_existing_hardware_unload():
+    source=(ROOT.parent/'__init__.py').read_text()
+    tree=ast.parse(source)
+    node=next(n for n in tree.body if isinstance(n,ast.AsyncFunctionDef) and n.name=='async_unload_entry')
+    awaits=sorted((n for n in ast.walk(node) if isinstance(n,ast.Await)),key=lambda n:n.lineno)
+    assert ast.unparse(awaits[0].value).startswith('_stop_tesla_native_rate(')
+    close=next(n for n in ast.walk(node) if isinstance(n,ast.Call) and ast.unparse(n.func)=='support_runtime.session.close')
+    assert close.lineno<awaits[0].lineno
+    platform=next(n for n in awaits if 'async_unload_platforms' in ast.unparse(n.value))
+    diagnostic=next(n for n in awaits if ast.unparse(n.value).startswith('_unload_support('))
+    assert diagnostic.lineno>platform.lineno

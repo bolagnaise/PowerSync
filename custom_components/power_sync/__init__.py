@@ -52217,12 +52217,13 @@ class OptimizationAISummaryView(HomeAssistantView):
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
     hass.data.get(DOMAIN, {}).get(entry.entry_id, {})["powerwall_local_dispatch_stopping"] = True
-    # Close diagnostic consent before the first hardware/lifecycle await.
+    # Fence disclosure synchronously. Diagnostic disk cleanup waits until the
+    # existing hardware/coordinator shutdown has completed below.
     try:
-        from .support.ha import unload as _unload_support
-        await _unload_support(hass, entry)
+        if support_runtime := hass.data.get("power_sync_support", {}).get(entry.entry_id):
+            support_runtime.session.close("unloaded")
     except Exception:
-        _LOGGER.warning("PowerSync support diagnostics cleanup unavailable")
+        _LOGGER.warning("PowerSync support consent cleanup unavailable")
     from .tesla_native_rate import async_stop as _stop_tesla_native_rate
     await _stop_tesla_native_rate(hass, entry)
     if license_manager := hass.data.get("power_sync_license_manager"):
@@ -52765,6 +52766,12 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Unload platforms
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+
+    try:
+        from .support.ha import unload as _unload_support
+        await _unload_support(hass, entry)
+    except Exception:
+        _LOGGER.warning("PowerSync support diagnostics cleanup unavailable")
 
     if unload_ok:
         hass.data[DOMAIN].pop(entry.entry_id)
