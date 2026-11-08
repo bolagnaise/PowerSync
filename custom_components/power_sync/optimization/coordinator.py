@@ -8771,6 +8771,16 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     provenance.curtailment_values_kw
                 )
 
+            # Optional diagnostic observation after the final solve/overlay commit.
+            # Failure is expendable and must never change execution or cleanup.
+            support_observer = getattr(self, "_support_plan_observer", None)
+            if support_observer is not None:
+                try:
+                    support_observer(result.schedule, import_prices, export_prices,
+                                     solar_forecast, load_forecast, self._config, result)
+                except Exception:
+                    pass
+
             # Track actual cost for this interval (midnight-to-midnight daily cost)
             self._track_actual_cost()
 
