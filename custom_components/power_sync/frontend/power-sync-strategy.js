@@ -8732,7 +8732,8 @@ function _boardCards(ctx) {
   const hasDC = hasE('solar_curtailment');
   const hasAC = hasE('inverter_status');
   if (hasDC || hasAC) add({ key: 'curtail', title: 'Solar curtailment', card: _curtailmentStatus(e, hasDC, hasAC) });
-  if (hasAC) add({ key: 'acinv', title: 'AC inverter', card: _acInverterControls(e) });
+  if (hasAC) add({ key: 'acinv', title: 'AC inverter', native: 'ps-inverter-controls-card',
+    config: { entities: { inverter: e('inverter_status') } } });
   add(_boardEntry('pv', 'Solar strings', _pvStringSensors(e, hass, findSensor)));
 
   if (hasE('in_demand_charge_period')) add(_boardEntry('demand', 'Demand charge', _demandCharge(e)));

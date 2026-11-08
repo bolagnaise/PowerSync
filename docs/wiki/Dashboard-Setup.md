@@ -60,6 +60,10 @@ Hover over or tap the **Prices today**, **Energy since midnight**, **Load foreca
 
 The **Planned battery power** graph leaves out time labels that would overlap, including midnight close to the start of the plan. Labels adapt to the card width; hover, tap, or use the arrow keys to see the exact time for any bar.
 
+### Solar inverter controls
+
+The **AC inverter** card provides **Load Follow**, **Stop**, and **Restore** directly in the dashboard, without requiring the HACS button-card. Load Follow requests home-load following or zero export, depending on the inverter; Stop requests zero output; Restore returns normal operation. Tap an action twice to confirm. Controls are disabled when inverter status is unknown, unavailable, offline, or in error. A sent request does not confirm a physical change: check inverter status and measured solar power.
+
 ### Cards
 
 Cards appear only when the matching feature or entities exist.

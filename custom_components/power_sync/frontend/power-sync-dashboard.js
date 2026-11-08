@@ -1911,6 +1911,62 @@ class PsNowCard extends PsCardBase {
   }
 }
 
+// Manual AC inverter controls use the same services as the classic dashboard.
+// Keep them native so they remain available without a HACS button-card.
+class PsInverterControlsCard extends PsCardBase {
+  constructor() {
+    super();
+    this.addEventListener('click', e => this._onClick(e));
+  }
+
+  disconnectedCallback() {
+    super.disconnectedCallback();
+    clearTimeout(this._confirmTimer);
+    this._confirm = null;
+  }
+
+  _available() {
+    const state = psState(this._hass, this.ents.inverter)?.state?.toLowerCase();
+    return !!state && !['unknown', 'unavailable', 'offline', 'error'].includes(state);
+  }
+
+  _render() {
+    const state = psState(this._hass, this.ents.inverter);
+    const available = this._available();
+    if (!available) this._confirm = null;
+    const buttons = [['load_following', 'Load Follow', 'amber'], ['shutdown', 'Stop', 'danger'], ['restore', 'Restore', 'quiet']];
+    this.innerHTML = `
+      <div class="row2"><span class="lab">Inverter status</span><span>${psEsc(state?.state || 'Unavailable')}</span></div>
+      <div class="actions">${buttons.map(([action, label, cls]) => `<button type="button" class="btn ${cls}${action === 'restore' ? ' full' : ''}" data-inverter-action="${action}" ${!available || this._busy ? 'disabled' : ''}>${this._busy === action ? 'Sending…' : this._confirm === action ? `Confirm ${label.toLowerCase()}` : label}</button>`).join('')}</div>
+      <p class="hint">Load Follow limits solar to home load or zero export, depending on the inverter. Stop requests zero output; Restore returns normal operation. Tap twice to confirm.</p>`;
+  }
+
+  async _onClick(e) {
+    const button = e.target.closest('button[data-inverter-action]');
+    const action = button?.dataset.inverterAction;
+    if (!button || button.disabled || this._busy || !this._available()
+      || !['load_following', 'shutdown', 'restore'].includes(action)) return;
+    clearTimeout(this._confirmTimer);
+    if (this._confirm !== action) {
+      this._confirm = action;
+      this._confirmTimer = setTimeout(() => { this._confirm = null; this._render(); }, PS_CONFIRM_MS);
+      this._render();
+      return;
+    }
+    this._confirm = null;
+    this._busy = action;
+    this._render();
+    try {
+      const ok = await this._call('power_sync', action === 'restore' ? 'restore_inverter' : 'curtail_inverter',
+        action === 'restore' ? {} : { mode: action });
+      if (ok) this._toast('Request sent. Check inverter status and measured solar power for the result.');
+    } finally {
+      this._busy = null;
+      this._render();
+    }
+  }
+}
+
 // ─── Battery controls ────────────────────────────────────────────
 
 const PS_DURATIONS = [5, 15, 30, 60, 120, 240];
@@ -3025,6 +3081,7 @@ const PS_ELEMENTS = {
   'ps-missing-cards': PsMissingCards,
   'ps-now-card': PsNowCard,
   'ps-controls-card': PsControlsCard,
+  'ps-inverter-controls-card': PsInverterControlsCard,
   'ps-plan-card': PsPlanCard,
   'ps-tariff-card': PsTariffCard,
   'ps-prices-card': PsPricesCard,
