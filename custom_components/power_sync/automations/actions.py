@@ -362,6 +362,10 @@ def _generic_charger_effective_integer_bounds(
     return effective_min, effective_max, valid_positive_range
 
 
+from .shared_generic_charger import generic_entity_command
+
+
+@generic_entity_command
 async def _set_generic_charger_amps_entity(
     hass: HomeAssistant,
     entity_id: str,
@@ -423,6 +427,16 @@ def _record_manual_generic_failure(
         manual_failure.setdefault("entity_id", str(entity_id).strip())
 
 
+@generic_entity_command
+async def _stop_generic_charger_switch(hass: HomeAssistant, entity_id: str) -> bool:
+    """Keep the physical profile fixed until a switch-off call completes."""
+    await hass.services.async_call(
+        "switch", "turn_off", {"entity_id": str(entity_id).strip()}, blocking=True
+    )
+    return True
+
+
+@generic_entity_command
 async def _start_generic_charger_switch(
     hass: HomeAssistant,
     entity_id: str,
@@ -9848,6 +9862,10 @@ async def _action_start_ev_charging(
     params.pop("_tesla_stock_recovery_attempted", None)
     charger_type = params.get("charger_type", "tesla")
 
+    from .shared_generic_charger import start_allowed
+    if not start_allowed(hass, config_entry, params):
+        return False
+
     if charger_type == "tesla" and not params.get("vehicle_vin") and params.get(
         "vehicle_id"
     ) in (None, DEFAULT_VEHICLE_ID):
@@ -10317,6 +10335,9 @@ async def _action_stop_ev_charging(
     Dispatches based on charger_type parameter.
     Also cancels any scheduled stop from stop_outside_window.
     """
+    from .shared_generic_charger import stop_allowed
+    if not stop_allowed(hass, config_entry, params):
+        return False
     entry_id = config_entry.entry_id
     charger_type = params.get("charger_type", "tesla")
     force_tesla_stop_request = bool(
@@ -10388,7 +10409,8 @@ async def _action_stop_ev_charging(
             _LOGGER.error("Generic charger stop: switch entity %s is not available", switch_entity)
             return False
         try:
-            await hass.services.async_call("switch", "turn_off", {"entity_id": switch_entity}, blocking=True)
+            if not await _stop_generic_charger_switch(hass, switch_entity):
+                return False
             _LOGGER.info("Generic charger stopped via %s", switch_entity)
             return True
         except Exception as e:
@@ -12579,6 +12601,11 @@ async def _set_vehicle_amps(
     params: dict,
 ) -> bool:
     """Apply the final per-phase clamp to an owned rate command."""
+    from .shared_generic_charger import start_allowed, stop_allowed
+    if amps <= 0 and config_entry is not None and not stop_allowed(hass, config_entry, params):
+        return False
+    if amps > 0 and config_entry is not None and not start_allowed(hass, config_entry, params):
+        return False
     # A shared physical charger is intentionally inert until the user chooses
     # one connected profile.  Explicit/manual commands retain their historical
     # behavior, but background controllers must never apply one profile's
@@ -12832,11 +12859,8 @@ async def _set_vehicle_amps_unchecked(
             if amps == 0:
                 # Stop/pause charging
                 if switch_entity:
-                    await hass.services.async_call(
-                        "switch", "turn_off",
-                        {"entity_id": str(switch_entity).strip()},
-                        blocking=True
-                    )
+                    if not await _stop_generic_charger_switch(hass, switch_entity):
+                        return False
                 elif amps_entity and not await _set_generic_charger_amps_entity(
                     hass, amps_entity, 0, manual_failure
                 ):
@@ -17842,7 +17866,14 @@ async def _action_start_ev_charging_dynamic(
     """
     from ..const import DOMAIN
 
+    from .shared_generic_charger import shared_data, selected_profile, start_allowed
+    if params.get("charger_type") == "generic":
+        profile = selected_profile(shared_data(hass, config_entry))
+        params = dict(params)
+        params.setdefault("_shared_generic_profile_id", profile["id"] if profile else None)
     async with _start_dynamic_lock:
+        if not start_allowed(hass, config_entry, params):
+            return False
         return await _action_start_ev_charging_dynamic_locked(
             hass, config_entry, params, context
         )

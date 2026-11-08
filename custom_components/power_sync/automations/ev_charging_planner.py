@@ -1574,6 +1574,9 @@ async def get_ev_battery_level(
         opts = {**config_entry.data, **config_entry.options}
         if opts.get(CONF_GENERIC_CHARGER_ENABLED):
             level = resolve_generic_charger_soc(hass, opts)
+            from .shared_generic_charger import context_for_options
+            if context_for_options(hass, opts) is not None:
+                return level
             if level is not None:
                 _LOGGER.debug("Generic charger SoC resolved: %.1f%%", level)
                 return level
@@ -5198,6 +5201,7 @@ class AutoScheduleExecutor:
         charger_type = _effective_auto_schedule_charger_type(settings, opts)
         params = {
             "owner_mode": "smart_schedule",
+            "_shared_generic_profile_id": getattr(settings, "shared_charger_profile_id", None),
             "current_charge_amps": current_amps,
             "vehicle_vin": vehicle_vin,
             "amps": target_amps,
@@ -5374,6 +5378,9 @@ class AutoScheduleExecutor:
                 soc_summary = ', '.join(f"{v}={d.get('soc')}%" for v, d in self._cached_soc.items())
                 _LOGGER.info(f"Restored cached SoC for {len(self._cached_soc)} vehicles: {soc_summary}")
 
+            from .shared_generic_charger import restore_schedule
+            restore_schedule(self)
+
             needs_save = storage_changed
             if needs_save:
                 await self.save_settings(store)
@@ -5388,6 +5395,9 @@ class AutoScheduleExecutor:
         try:
             from .. import _update_powerwall_store
 
+            from .shared_generic_charger import save_selected_schedule
+            await save_selected_schedule(self)
+
             auto_schedule_data = {}
             for vehicle_id, settings in self._settings.items():
                 auto_schedule_data[vehicle_id] = settings.to_dict()
@@ -5401,6 +5411,9 @@ class AutoScheduleExecutor:
             _LOGGER.debug(f"Saved auto-schedule settings for {len(self._settings)} vehicles")
         except Exception as e:
             _LOGGER.error(f"Failed to save auto-schedule settings: {e}")
+            from .shared_generic_charger import shared_data
+            if shared_data(getattr(self, "hass", None), getattr(self, "config_entry", None)) is not None:
+                raise
 
     def get_settings(self, vehicle_id: str) -> AutoScheduleSettings:
         """Get settings for a vehicle, creating defaults if needed."""
@@ -5427,6 +5440,10 @@ class AutoScheduleExecutor:
             getattr(self, "_fleet_vins", ()),
             getattr(self, "_resolved_ble_prefixes", ()),
         )
+        from .shared_generic_charger import entry_runtime, shared_data
+        if vehicle_id == "generic_ev" and shared_data(getattr(self, "hass", None), getattr(self, "config_entry", None)) is not None:
+            if entry_runtime(self.hass, self.config_entry).get("_shared_generic_switching"):
+                raise ValueError("Shared charger selection is changing.")
         settings = self.get_settings(vehicle_id)
 
         for key, value in updates.items():
@@ -5659,6 +5676,11 @@ class AutoScheduleExecutor:
                 live_soc = int(generic_soc)
                 _LOGGER.debug("Found generic charger SoC: %s%%", live_soc)
                 break
+
+        from .shared_generic_charger import shared_data, profile_soc
+        shared = shared_data(getattr(self, "hass", None), getattr(self, "config_entry", None))
+        if vehicle_id in ("generic_ev", "_default", "ev") and shared is not None:
+            return profile_soc(self.hass, shared)
 
         # Method 1: Check Tesla BLE sensor with configured prefix
         config = {}
@@ -6225,6 +6247,8 @@ class AutoScheduleExecutor:
         """Resolve and publish one vehicle's usable planning capacity."""
         settings = settings or self.get_settings(vehicle_id)
         self._sync_charger_params_from_vehicle_configs(vehicle_id, settings)
+        from .shared_generic_charger import apply_profile
+        apply_profile(self, vehicle_id, settings)
 
         from ..const import CONF_GENERIC_CHARGER_BATTERY_CAPACITY_KWH
 
@@ -6274,8 +6298,23 @@ class AutoScheduleExecutor:
         current_price_cents: Optional[float],
     ) -> None:
         """Evaluate and control charging for a single vehicle."""
+        from .shared_generic_charger import shared_data, profile_soc, apply_profile
+        shared = shared_data(getattr(self, "hass", None), getattr(self, "config_entry", None))
+        if vehicle_id == "generic_ev" and shared is not None:
+            state = self.get_state(vehicle_id)
+            if profile_soc(self.hass, shared) is None:
+                state.current_plan = None
+                state.current_window = None
+                if state.is_charging:
+                    await self._stop_charging(vehicle_id, settings, state, reason="Selected vehicle SOC unavailable")
+                state.last_decision = "soc_unavailable"
+                state.last_decision_reason = "Select a vehicle with an available SOC sensor"
+                return
+            apply_profile(self, vehicle_id, settings)
+
         # Sync charger params from vehicle_charging_configs (source of truth)
         self._sync_charger_params_from_vehicle_configs(vehicle_id, settings)
+        apply_profile(self, vehicle_id, settings)
 
         state = self.get_state(vehicle_id)
         now = datetime.now()
@@ -7052,6 +7091,12 @@ class AutoScheduleExecutor:
         # done so for availability/target checks.
         if current_soc is None:
             current_soc = await self._get_vehicle_soc(vehicle_id)
+        if current_soc is None:
+            state.current_plan = None
+            state.current_window = None
+            state.last_decision = "soc_unavailable"
+            state.last_decision_reason = "Selected vehicle SOC unavailable"
+            return
 
         try:
             resolved_capacity = self.resolve_vehicle_capacity(vehicle_id, settings)
@@ -8026,6 +8071,12 @@ class AutoScheduleExecutor:
         force_max_rate: bool = False,
     ) -> bool:
         """Coalesce one full dynamic start transaction per physical vehicle."""
+        from .shared_generic_charger import start_allowed
+        if not start_allowed(getattr(self, "hass", None), getattr(self, "config_entry", None), {
+            "charger_type": getattr(settings, "charger_type", "tesla"),
+            "_shared_generic_profile_id": getattr(settings, "shared_charger_profile_id", None),
+        }):
+            return False
         failure = getattr(self, "_start_failure_state", {}).get(vehicle_id)
         if failure:
             _count, retry_at = failure
@@ -8190,6 +8241,7 @@ class AutoScheduleExecutor:
             "vehicle_id": vehicle_id,
             "vehicle_vin": vehicle_vin,
             "vehicle_name": settings.display_name,
+            "_shared_generic_profile_id": getattr(settings, "shared_charger_profile_id", None),
             "dynamic_mode": dynamic_mode,
             "owner_mode": "smart_schedule_solar_surplus" if source == "solar_surplus" else "smart_schedule",
             "allow_ownership_takeover": True,
@@ -8454,6 +8506,12 @@ class AutoScheduleExecutor:
     ) -> bool:
         """Stop charging for the vehicle and report the decision reason."""
         from ..const import DOMAIN
+        from .shared_generic_charger import stop_allowed
+        if not stop_allowed(getattr(self, "hass", None), getattr(self, "config_entry", None), {
+            "charger_type": getattr(settings, "charger_type", "tesla"),
+            "_shared_generic_profile_id": getattr(settings, "shared_charger_profile_id", None),
+        }):
+            return False
 
         opts = {**self.config_entry.data, **self.config_entry.options}
         vehicle_vin = (
@@ -10438,6 +10496,9 @@ class PriceLevelChargingExecutor:
                 if not opts.get(CONF_GENERIC_CHARGER_ENABLED):
                     continue
                 generic_soc = resolve_generic_charger_soc(self.hass, opts)
+                from .shared_generic_charger import context_for_options
+                if context_for_options(self.hass, opts) is not None:
+                    return int(generic_soc) if generic_soc is not None else None
                 if generic_soc is not None:
                     return int(generic_soc)
                 break

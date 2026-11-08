@@ -1541,3 +1541,52 @@ def test_plan_requests_solar_history_and_preserves_unavailable_gaps():
 """)
     assert "sensor.solar" in out["requested"]
     assert out["values"] == [3000, None, None]
+
+
+def test_shared_charger_selector_and_vehicle_editor_send_profile_scoped_payloads():
+    script = (
+        "const fs = require('fs'); const vm = require('vm');"
+        + BROWSER_STUBS
+        + "vm.createContext(context);"
+        + f"vm.runInContext(fs.readFileSync({json.dumps(str(STRATEGY_PATH))}, 'utf8'), context);"
+        + r"""
+  (async () => {
+    const Panel = vm.runInContext('PowerSyncEVPanel', context);
+    const panel = new Panel();
+    panel._data = {sharedCharger: {available: true, enabled: true, selection_allowed: true,
+      selected_vehicle_id: 'byd', profiles: [
+        {id: 'byd', name: 'BYD <ATTO>', soc_entity: 'sensor.byd_soc', battery_capacity_kwh: 60},
+        {id: 'zeekr', name: 'Zeekr', soc_entity: 'sensor.zeekr_soc', battery_capacity_kwh: 86}
+      ]}};
+    const html = panel._sharedChargerHtml();
+    const canStartSelected = panel._canStart({loadpoint_id: 'generic_ev', connected: true});
+    panel._data.sharedCharger.selected_vehicle_id = null;
+    const canStartUnselected = panel._canStart({loadpoint_id: 'generic_ev', connected: true});
+    panel._data.sharedCharger.selected_vehicle_id = 'byd';
+    const calls = [];
+    panel._runCommand = (...args) => calls.push(args);
+    panel.shadowRoot.querySelector = selector => ({value: {
+      '[data-shared-name]': 'Zeekr', '[data-shared-soc]': 'sensor.zeekr_soc',
+      '[data-shared-capacity]': '86'
+    }[selector]});
+    await panel._saveSharedVehicle(true);
+    await panel._saveSharedVehicle(false);
+    panel._data.sharedCharger.selection_allowed = false;
+    panel._data.sharedCharger.selection_block_reason = 'Stop charging first';
+    const blocked = panel._sharedChargerHtml();
+    console.log(JSON.stringify({html, calls, blocked, canStartSelected, canStartUnselected}));
+  })();
+"""
+    )
+    out = _run(script)
+    assert out["canStartSelected"] is True and out["canStartUnselected"] is False
+    assert 'value="byd" selected' in out["html"]
+    assert 'value="zeekr"' in out["html"]
+    assert "BYD &lt;ATTO&gt;" in out["html"]
+    assert out["calls"][0][2] == {
+        "operation": "save", "vehicle_id": None, "name": "Zeekr",
+        "soc_entity": "sensor.zeekr_soc", "battery_capacity_kwh": 86,
+    }
+    assert out["calls"][1][2]["vehicle_id"] == "byd"
+    assert 'data-connected-vehicle disabled' in out["blocked"]
+    assert 'Stop charging first' in out["blocked"]

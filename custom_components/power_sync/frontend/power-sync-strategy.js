@@ -5210,6 +5210,7 @@ const EV_PANEL_PATHS = {
   autoStatus: 'power_sync/ev/auto_schedule/status',
   autoSettings: 'power_sync/ev/auto_schedule/settings',
   autoToggle: 'power_sync/ev/auto_schedule/toggle',
+  sharedCharger: 'power_sync/ev/shared_charger',
   vehicleConfig: 'power_sync/ev/vehicle_config',
   vehicles: 'power_sync/ev/vehicles',
   boost: 'power_sync/ev/boost',
@@ -5377,13 +5378,14 @@ class PowerSyncEVPanel extends HTMLElement {
       throw new Error(status.error || 'EV status API unavailable');
     }
 
-    const [solar, price, scheduled, autoStatus, vehicleConfig, vehicles] = await Promise.allSettled([
+    const [solar, price, scheduled, autoStatus, vehicleConfig, vehicles, sharedCharger] = await Promise.allSettled([
       this._hass.callApi('GET', EV_PANEL_PATHS.solar),
       this._hass.callApi('GET', EV_PANEL_PATHS.price),
       this._hass.callApi('GET', EV_PANEL_PATHS.scheduled),
       this._hass.callApi('GET', EV_PANEL_PATHS.autoStatus),
       this._hass.callApi('GET', EV_PANEL_PATHS.vehicleConfig),
       this._hass.callApi('GET', EV_PANEL_PATHS.vehicles),
+      this._hass.callApi('GET', EV_PANEL_PATHS.sharedCharger),
     ]);
 
     const modeErrors = [];
@@ -5416,6 +5418,7 @@ class PowerSyncEVPanel extends HTMLElement {
       autoStatus: autoScheduleStatus,
       vehicleConfigs: unwrap(vehicleConfig, 'configs', []),
       vehicles: unwrap(vehicles, 'vehicles', []),
+      sharedCharger: unwrap(sharedCharger, 'shared_charger', null),
       modeErrors,
       fetchedAt: new Date().toISOString(),
     };
@@ -5509,6 +5512,8 @@ class PowerSyncEVPanel extends HTMLElement {
   _canStart(loadpoint) {
     // Manual Start is an explicit takeover. Backend ownership arbitration
     // remains authoritative for all safety and availability checks.
+    const shared = this._data?.sharedCharger;
+    if (loadpoint?.loadpoint_id === 'generic_ev' && shared?.enabled && !shared.selected_vehicle_id) return false;
     return !!loadpoint && loadpoint.connected && !this._savingKey;
   }
 
@@ -6081,6 +6086,7 @@ class PowerSyncEVPanel extends HTMLElement {
         ${selected ? this._controlsHtml(loadpoints, selected, canStart, canStop) : ''}
         ${selected && !selected.connected ? this._noticeHtml('warn', 'EV is disconnected. Start is disabled until the charger reports a connected vehicle.') : ''}
         ${conflict ? this._noticeHtml('warn', `${this._ownerLabel(selected.owner_mode)} currently controls this loadpoint. Manual Start will take over.`) : ''}
+        ${this._sharedChargerHtml()}
         ${this._bydVehiclesHtml()}
         ${this._modeSectionsHtml()}
       </ha-card>
@@ -6177,6 +6183,53 @@ class PowerSyncEVPanel extends HTMLElement {
     const label = presentation.status === 'active' ? 'Smart Schedule window active' : 'Next Smart Schedule window';
     const source = this._title(window.source || 'unknown');
     return `<div class="planned-window" role="status" aria-label="${this._escAttr(`${label}: ${this._formatPlannedWindowTime(window.start_time)} to ${this._formatPlannedWindowTime(window.end_time)}, ${source}. Planned information only; it does not confirm a charger command.`)}">${this._escHtml(label)}: ${this._escHtml(this._formatPlannedWindowTime(window.start_time))}–${this._escHtml(this._formatPlannedWindowTime(window.end_time))} (${this._escHtml(source)}). Planned information only; charger measurements remain authoritative.</div>`;
+  }
+
+  _sharedChargerHtml() {
+    const shared = this._data?.sharedCharger;
+    if (!shared?.available) return '';
+    const profiles = shared.profiles || [];
+    const selected = profiles.find((profile) => profile.id === shared.selected_vehicle_id);
+    const disabled = this._savingKey || !shared.selection_allowed;
+    return `
+      <div class="byd-vehicles" data-shared-charger>
+        <div class="byd-title">Shared charger vehicles</div>
+        <div class="byd-subtitle">Choose the car before plugging it in. Each car keeps its own SOC, battery capacity and Smart Schedule.</div>
+        ${shared.selection_block_reason ? this._noticeHtml('warn', shared.selection_block_reason) : ''}
+        ${profiles.length ? `<div class="field"><label for="connected-vehicle">Connected vehicle</label>
+          <select id="connected-vehicle" data-connected-vehicle ${disabled ? 'disabled' : ''}>
+            <option value="">No vehicle selected</option>
+            ${profiles.map((profile) => `<option value="${this._escAttr(profile.id)}" ${profile.id === shared.selected_vehicle_id ? 'selected' : ''}>${this._escHtml(profile.name)}</option>`).join('')}
+          </select></div>` : ''}
+        <details><summary>${selected ? 'Edit selected vehicle or add another' : 'Add a vehicle'}</summary>
+          <div class="departure-grid">
+            <label>Vehicle name<input data-shared-name maxlength="80" value="${this._escAttr(selected?.name || '')}"></label>
+            <label>SOC entity<input data-shared-soc placeholder="sensor.car_battery_level" value="${this._escAttr(selected?.soc_entity || '')}"></label>
+            <label>Usable capacity (kWh)<input data-shared-capacity type="number" min="1" max="250" step="0.1" value="${this._escAttr(selected?.battery_capacity_kwh || '')}"></label>
+          </div>
+          <div class="departure-actions">
+            ${selected ? `<button class="command" data-shared-save="edit" ${disabled ? 'disabled' : ''}>Save vehicle</button>` : ''}
+            <button class="command" data-shared-save="new" ${disabled ? 'disabled' : ''}>Add vehicle</button>
+            ${selected ? `<button class="command" data-shared-delete="${this._escAttr(selected.id)}" ${disabled ? 'disabled' : ''}>Remove selected vehicle</button>` : ''}
+          </div>
+        </details>
+      </div>`;
+  }
+
+  async _saveSharedVehicle(create) {
+    const shared = this._data?.sharedCharger;
+    const name = this.shadowRoot.querySelector('[data-shared-name]')?.value.trim();
+    const socEntity = this.shadowRoot.querySelector('[data-shared-soc]')?.value.trim();
+    const capacity = Number(this.shadowRoot.querySelector('[data-shared-capacity]')?.value);
+    if (!name || !/^(sensor|input_number)\.[a-z0-9_]+$/.test(socEntity || '') || !Number.isFinite(capacity) || capacity < 1 || capacity > 250) {
+      this._notice = { type: 'error', message: 'Enter a vehicle name, SOC entity ID and capacity between 1 and 250 kWh.' };
+      this._scheduleRender();
+      return;
+    }
+    await this._runCommand('shared:save', EV_PANEL_PATHS.sharedCharger, {
+      operation: 'save', vehicle_id: create ? null : shared.selected_vehicle_id,
+      name, soc_entity: socEntity, battery_capacity_kwh: capacity,
+    }, 'Vehicle saved. Select it before connecting, then set its Smart Schedule.');
   }
 
   _bydVehiclesHtml() {
@@ -6329,7 +6382,7 @@ class PowerSyncEVPanel extends HTMLElement {
           <button class="command danger" data-action="stop" ${canStop ? '' : 'disabled'}>
             <ha-icon icon="mdi:stop"></ha-icon><span>Stop</span>
           </button>
-          <button class="command" data-action="boost" ${selected && selected.connected && !this._savingKey ? '' : 'disabled'}>
+          <button class="command" data-action="boost" ${canStart ? '' : 'disabled'}>
             <ha-icon icon="mdi:flash"></ha-icon><span>Boost</span>
           </button>
         </div>
@@ -6473,9 +6526,10 @@ class PowerSyncEVPanel extends HTMLElement {
     const rows = entries.length ? entries.map(([vehicleId, vehicle]) => {
       const enabled = !!vehicle.enabled;
       const loadpoint = this._loadpoints().find((lp) => lp.loadpoint_id === vehicleId);
-      const name = loadpoint
+      const sharedVehicle = vehicleId === 'generic_ev' && this._data?.sharedCharger?.enabled;
+      const name = sharedVehicle ? (vehicle.display_name || 'Shared charger') : (loadpoint
         ? this._loadpointLabel(loadpoint)
-        : (vehicle.display_name || vehicleId);
+        : (vehicle.display_name || vehicleId));
       const departure = vehicle.departure_time || Object.values(vehicle.departure_times || {})[0] || 'Not set';
       const departureTimes = vehicle.departure_times || {};
       const config = vehicleConfigs.find((item) => item.vehicle_id === vehicleId) || {};
@@ -6489,14 +6543,18 @@ class PowerSyncEVPanel extends HTMLElement {
           <div class="smart-details">
             <div class="smart-name">${this._escHtml(name)}</div>
             <div class="smart-meta">Target ${this._escHtml(vehicle.target_soc ?? '--')}% | Departure ${this._escHtml(departure)}</div>
-            <div class="smart-meta">Usable capacity ${this._escHtml(effectiveCapacity ?? 60)} kWh | ${this._escHtml(sourceLabel)}</div>
+            <div class="smart-meta">Usable capacity ${this._escHtml(sharedVehicle ? vehicle.effective_battery_capacity_kwh : (effectiveCapacity ?? 60))} kWh | ${this._escHtml(sharedVehicle ? 'Selected vehicle' : sourceLabel)}</div>
             <div class="capacity-editor">
+              <label>Target SOC (%)<input type="number" min="1" max="100" step="1" data-target-input="${this._escAttr(vehicleId)}" value="${this._escAttr(vehicle.target_soc ?? 80)}"></label>
+              <button class="command" data-target-save="${this._escAttr(vehicleId)}" ${this._savingKey ? 'disabled' : ''}>Save target</button>
+            </div>
+            ${sharedVehicle ? '' : `<div class="capacity-editor">
               <label>Capacity override (kWh)
                 <input type="number" min="1" max="250" step="0.1" inputmode="decimal" data-capacity-input="${this._escAttr(vehicleId)}" value="${this._escAttr(manualCapacity)}" placeholder="Automatic">
               </label>
               <button class="command" data-capacity-save="${this._escAttr(vehicleId)}" ${this._savingKey ? 'disabled' : ''}>Save</button>
               <button class="command" data-capacity-clear="${this._escAttr(vehicleId)}" ${this._savingKey || manualCapacity === '' ? 'disabled' : ''}>Clear</button>
-            </div>
+            </div>`}
           </div>
           <button class="command" data-smart-toggle="${this._escAttr(vehicleId)}" data-enabled="${enabled ? 'false' : 'true'}" ${this._savingKey ? 'disabled' : ''}>
             <ha-icon icon="${enabled ? 'mdi:toggle-switch' : 'mdi:toggle-switch-off-outline'}"></ha-icon><span>${enabled ? 'On' : 'Off'}</span>
@@ -6533,6 +6591,26 @@ class PowerSyncEVPanel extends HTMLElement {
   }
 
   _attachEvents() {
+    this.shadowRoot.querySelector('[data-connected-vehicle]')?.addEventListener('change', (event) => {
+      this._runCommand('shared:select', EV_PANEL_PATHS.sharedCharger,
+        { operation: 'select', vehicle_id: event.target.value || null }, 'Connected vehicle selected');
+    });
+    this.shadowRoot.querySelectorAll('[data-shared-save]').forEach((button) => {
+      button.addEventListener('click', () => this._saveSharedVehicle(button.dataset.sharedSave === 'new'));
+    });
+    this.shadowRoot.querySelector('[data-shared-delete]')?.addEventListener('click', (event) => {
+      this._runCommand('shared:delete', EV_PANEL_PATHS.sharedCharger,
+        { operation: 'delete', vehicle_id: event.currentTarget.dataset.sharedDelete }, 'Vehicle removed');
+    });
+    this.shadowRoot.querySelectorAll('[data-target-save]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const vehicleId = button.dataset.targetSave;
+        const target = Number(this.shadowRoot.querySelector(`[data-target-input="${CSS.escape(vehicleId)}"]`)?.value);
+        if (!Number.isInteger(target) || target < 1 || target > 100) return;
+        this._runCommand(`target:${vehicleId}`, EV_PANEL_PATHS.autoSettings,
+          { vehicle_id: vehicleId, target_soc: target }, 'Charge target updated');
+      });
+    });
     this.shadowRoot.querySelector('[data-action="refresh"]')?.addEventListener('click', () => this._refresh());
     this.shadowRoot.querySelector('[data-action="toggle-modes"]')?.addEventListener('click', () => this._toggleModes());
     this.shadowRoot.querySelector('[data-control="loadpoint"]')?.addEventListener('change', (event) => {

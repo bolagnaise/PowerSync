@@ -577,3 +577,11 @@ Charge By Time settings.
 In **Settings → Devices & services → PowerSync → Configure → Smart Optimization → AI Plan Explanation**, enable **Automatically refresh explanations** and set **Minimum automatic explanation interval (minutes)**. The interval accepts **5–1440 minutes** and defaults to **5** for existing and new installations; choose **30** to reduce requests when prices change every five minutes.
 
 Automatic requests explain the newest materially changed committed plan after the interval, with a short debounce. Optimizer refreshes and battery controls continue independently. Manual **Refresh Explanation** remains immediate, and an older explanation stays marked stale when the plan changes. Changing AI settings cancels queued automatic work; restarting Home Assistant resets the timer.
+
+## Multiple cars sharing one generic charger
+
+In **EV Charging → Shared charger vehicles**, add each car with its SOC sensor and usable battery capacity. Each car keeps its own Smart Schedule target and weekly departure times. Select the car before plugging it in; selecting it restores those saved settings.
+
+Stop charging, unplug the current car and wait for a fresh disconnected charger reading before changing the selection. PowerSync refuses a change while a charger command, charging session or recovery is still active. Vehicle identification is manual. Missing selection or unavailable selected-car SOC blocks Smart Schedule charging rather than borrowing another car's battery percentage.
+
+The configured power meter and connector-status sensor must describe the physical charger. That meter contributes once to EV/Home load accounting whichever car is connected. Existing single-car setups continue to work until shared-charger profiles are configured. Update through HACS and restart Home Assistant to use this feature.

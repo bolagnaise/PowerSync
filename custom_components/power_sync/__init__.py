@@ -1888,8 +1888,13 @@ def _generic_charger_observation_from_config(
     status_state = hass.states.get(status_entity) if status_entity else None
     power_state = hass.states.get(power_entity) if power_entity else None
     resolved_soc = resolve_generic_charger_soc(hass, config)
+    from .automations.shared_generic_charger import context_for_options, selected_profile
+    shared = context_for_options(hass, config)
+    if shared is not None:
+        profile = selected_profile(shared)
+        vehicle_name = profile["name"] if profile else "Shared charger — select vehicle"
 
-    return build_generic_charger_observation(
+    observation = build_generic_charger_observation(
         vehicle_name=vehicle_name,
         switch_state=switch_state.state if switch_state else None,
         amps_value=amps_state.state if amps_state else None,
@@ -1897,6 +1902,9 @@ def _generic_charger_observation_from_config(
         power_value=_kw_from_power_state(power_state) if power_state else None,
         soc_value=resolved_soc,
     )
+    if shared is not None:
+        observation["include_idle"] = True
+    return observation
 
 
 def _generic_charger_charging_state(observation: dict) -> str:
@@ -16816,7 +16824,7 @@ class EVVehiclesView(HomeAssistantView):
                     "id": "generic_ev",
                     "vehicle_id": "generic_ev",
                     "vin": None,
-                    "display_name": "EV",
+                    "display_name": observation.get("vehicle_name") or "EV",
                     "model": None,
                     "battery_level": battery_level,
                     "charging_state": charging_state,
@@ -17792,6 +17800,10 @@ class EVVehicleCommandView(HomeAssistantView):
         charger_type = params.get("charger_type", "tesla")
 
         if charger_type == "generic":
+            from .automations.shared_generic_charger import start_allowed
+            entry = getattr(self, "_get_powersync_entry", lambda: None)()
+            if entry is not None and not start_allowed(self._hass, entry, params):
+                return False, "Select the connected vehicle in EV Charging before starting."
             ready, message = self._generic_charger_ready_for_start(params)
             if not ready:
                 return False, message
@@ -18991,6 +19003,38 @@ class SolarSurplusStatusView(HomeAssistantView):
             }, status=500)
 
 
+class SharedGenericChargerView(HomeAssistantView):
+    """Manage vehicle profiles without creating another physical controller."""
+
+    url = "/api/power_sync/ev/shared_charger"
+    name = "api:power_sync:ev:shared_charger"
+    requires_auth = True
+
+    def __init__(self, hass, entry):
+        self._hass = hass
+        self._config_entry = entry
+
+    async def get(self, request):
+        from .automations.shared_generic_charger import snapshot
+        from .automations.ev_charging_planner import get_auto_schedule_executor
+        return web.json_response({"success": True, "shared_charger": snapshot(self._hass, self._config_entry, get_auto_schedule_executor())})
+
+    async def post(self, request):
+        from .automations.shared_generic_charger import update
+        from .automations.ev_charging_planner import get_auto_schedule_executor
+        try:
+            payload = await request.json()
+            if not isinstance(payload, dict):
+                raise ValueError("Expected a JSON object.")
+            result = await update(self._hass, self._config_entry, get_auto_schedule_executor(), payload)
+            return web.json_response({"success": True, "shared_charger": result})
+        except ValueError as err:
+            return web.json_response({"success": False, "error": str(err)}, status=409)
+        except Exception:
+            _LOGGER.exception("Could not persist shared charger vehicle settings")
+            return web.json_response({"success": False, "error": "Vehicle settings could not be saved."}, status=503)
+
+
 class VehicleChargingConfigView(HomeAssistantView):
     """HTTP view to manage vehicle charging configurations."""
 
@@ -19722,6 +19766,10 @@ class VehicleChargingConfigView(HomeAssistantView):
                 None,
             )
             updated = [c for c in vehicle_configs if c.get("vehicle_id") != vehicle_id]
+
+            from .automations.shared_generic_charger import context_for_options
+            if vehicle_id == "generic_ev" and context_for_options(self._hass, self._get_powersync_config()) is not None:
+                return web.json_response({"success": False, "error": "Manage shared-charger vehicles in EV Charging."}, status=409)
 
             cleanup_ids = {vehicle_id}
             if removed_config:
@@ -21224,6 +21272,14 @@ class ChargingBoostView(HomeAssistantView):
                     CONF_GENERIC_CHARGER_SWITCH_ENTITY,
                 )
 
+                from .automations.shared_generic_charger import shared_data, selected_profile, start_allowed
+                shared = shared_data(self._hass, self._config_entry)
+                profile = selected_profile(shared)
+                if shared is not None:
+                    if not start_allowed(self._hass, self._config_entry, {"charger_type": "generic"}):
+                        return web.json_response({"success": False, "error": "Select the connected vehicle before starting Boost."}, status=409)
+                    action_params["_shared_generic_profile_id"] = profile["id"]
+                    action_params["vehicle_name"] = profile["name"]
                 action_vehicle_vin = None
                 action_params.update({
                     "charger_type": "generic",
@@ -22790,6 +22846,10 @@ class AutoScheduleToggleView(HomeAssistantView):
                     "error": "Auto-schedule executor not initialized"
                 }, status=503)
 
+            from .automations.shared_generic_charger import entry_runtime, shared_data
+            if vehicle_id in ("generic_ev", "_default", "ev") and shared_data(self._hass, self._config_entry) is not None:
+                if entry_runtime(self._hass, self._config_entry).get("_shared_generic_switching"):
+                    return web.json_response({"success": False, "error": "Shared charger selection is changing."}, status=409)
             settings = executor.get_settings(vehicle_id)
 
             if enabled is not None:
@@ -23886,6 +23946,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     automation_store = AutomationStore(hass)
     await automation_store.async_load()
+    from .automations.shared_generic_charger import bind_profile_store
+    bind_profile_store(hass, entry, automation_store)
     if electricity_provider == "agl":
         from .agl import async_prepare_agl_startup_tariff
 
@@ -47317,6 +47379,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data[DOMAIN][entry.entry_id]["ev_vehicle_command_view"] = ev_vehicle_command_view
     hass.http.register_view(SolarSurplusStatusView(hass))
     hass.http.register_view(VehicleChargingConfigView(hass))
+    hass.http.register_view(SharedGenericChargerView(hass, entry))
     hass.http.register_view(SolarSurplusConfigView(hass))
     hass.http.register_view(ChargingSessionsView(hass))
     hass.http.register_view(ChargingStatisticsView(hass))
@@ -48818,12 +48881,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if target_entry is None:
             raise HomeAssistantError("PowerSync config entry was not found")
         try:
-            selected = await async_set_connected_ev(
-                hass,
-                target_entry,
-                call.data.get("loadpoint_id"),
-                call.data.get("vehicle_id"),
-            )
+            from .automations.shared_generic_charger import shared_data, update
+            if call.data.get("loadpoint_id") == "generic_ev" and shared_data(hass, target_entry) is not None:
+                from .automations.ev_charging_planner import get_auto_schedule_executor
+                result = await update(hass, target_entry, get_auto_schedule_executor(), {"operation": "select", "vehicle_id": call.data.get("vehicle_id")})
+                selected = result["selected_vehicle_id"]
+            else:
+                selected = await async_set_connected_ev(
+                    hass, target_entry, call.data.get("loadpoint_id"), call.data.get("vehicle_id"),
+                )
         except ValueError as err:
             raise HomeAssistantError(str(err)) from err
         return {

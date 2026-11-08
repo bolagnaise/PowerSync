@@ -41,6 +41,11 @@ def _valid_soc(value: Any) -> float | None:
 
 def resolve_generic_charger_soc(hass: Any, opts: Mapping[str, Any]) -> float | None:
     """Return the first valid generic charger SOC from primary then fallback."""
+    from .shared_generic_charger import context_for_options, profile_soc
+
+    shared = context_for_options(hass, opts)
+    if shared is not None:
+        return profile_soc(hass, shared)
     for entity_id in generic_charger_soc_entities(opts):
         state = hass.states.get(entity_id)
         if state is None:
