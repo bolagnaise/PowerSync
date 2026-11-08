@@ -37218,13 +37218,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     )
             sungrow_coord = entry_data.get("sungrow_coordinator")
             if sungrow_coord:
-                opt_coord = entry_data.get("optimization_coordinator")
-                spread_export_active = bool(
+                optimizer_grid_export_active = bool(
                     source == "optimizer"
-                    and getattr(opt_coord, "spread_export_enabled", False)
                     and hasattr(sungrow_coord, "force_grid_export")
+                    and not getattr(sungrow_coord, "native_ihomemanager", False)
                 )
-                if spread_export_active:
+                if optimizer_grid_export_active:
                     sungrow_result = await _guarded_force_discharge_write(
                         lambda guarded_w: sungrow_coord.force_grid_export(
                             duration,
@@ -38166,13 +38165,28 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     return
 
                 power_w = command_power_w
-                discharge_result = await _guarded_force_discharge_write(
-                    lambda guarded_w: sungrow_coord.force_discharge(
-                        duration,
-                        power_w=guarded_w,
-                        **({"source": source} if getattr(sungrow_coord, "native_ihomemanager", False) else {}),
+                if (
+                    source == "optimizer"
+                    and hasattr(sungrow_coord, "force_grid_export")
+                    and not getattr(sungrow_coord, "native_ihomemanager", False)
+                ):
+                    # Optimizer power is grid export, not battery output. The
+                    # separate site limit also honors targets below Sungrow's
+                    # forced battery-power minimum while serving home load.
+                    discharge_result = await _guarded_force_discharge_write(
+                        lambda guarded_w: sungrow_coord.force_grid_export(
+                            duration,
+                            export_limit_w=guarded_w,
+                        )
                     )
-                )
+                else:
+                    discharge_result = await _guarded_force_discharge_write(
+                        lambda guarded_w: sungrow_coord.force_discharge(
+                            duration,
+                            power_w=guarded_w,
+                            **({"source": source} if getattr(sungrow_coord, "native_ihomemanager", False) else {}),
+                        )
+                    )
 
                 if discharge_result:
                     force_discharge_state["active"] = True
@@ -38232,6 +38246,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     })
                     await persist_force_mode_state()
                     _LOGGER.error("Sungrow force discharge failed")
+                    if source == "optimizer":
+                        raise HomeAssistantError("Sungrow optimizer force discharge was not confirmed")
                     if getattr(sungrow_coord, "native_ihomemanager", False):
                         raise HomeAssistantError("Native iHomeManager force discharge was not confirmed")
                 return
@@ -38247,6 +38263,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 await persist_force_mode_state()
                 _LOGGER.error(f"Error in Sungrow force discharge: {e}", exc_info=True)
                 hass.async_create_task(_notify_api_error(hass, "Force Discharge Failed", "Sungrow Modbus communication error"))
+                if source == "optimizer":
+                    raise HomeAssistantError("Sungrow optimizer force discharge was not confirmed") from e
                 if getattr(sungrow_coord, "native_ihomemanager", False):
                     raise HomeAssistantError("Native iHomeManager force discharge was not confirmed") from e
                 return

@@ -382,7 +382,8 @@ def test_rejected_replacement_cannot_change_existing_optimizer_lease_authority(i
 @pytest.mark.parametrize("action", ["charge", "discharge"])
 @pytest.mark.parametrize("native", [True, False])
 @pytest.mark.parametrize("failure", ["rejected", "exception"])
-def test_native_service_failure_is_propagated_without_marking_force_active(action, native, failure):
+@pytest.mark.parametrize("source", ["optimizer", "manual"])
+def test_native_service_failure_is_propagated_without_marking_force_active(action, native, failure, source):
     tree = ast.parse((COMPONENT / "__init__.py").read_text())
     handler = next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef) and n.name == f"handle_force_{action}")
     branch = next(n for n in handler.body if isinstance(n, ast.If) and isinstance(n.test, ast.Name) and n.test.id == "is_sungrow")
@@ -403,7 +404,7 @@ def test_native_service_failure_is_propagated_without_marking_force_active(actio
     hass = SimpleNamespace(data={"power_sync": {"entry": {"sungrow_coordinator": Coordinator()}}},
                            async_create_task=lambda coro: coro.close())
     namespace = dict(is_sungrow=True, hass=hass, DOMAIN="power_sync", entry=SimpleNamespace(entry_id="entry"),
-                     force_charge_state=dict(state), force_discharge_state=dict(state), source="optimizer",
+                     force_charge_state=dict(state), force_discharge_state=dict(state), source=source,
                      duration=60, power_w=5000, command_power_w=5000,
                      _guarded_force_discharge_write=guarded, persist_force_mode_state=no_op,
                      _notify_api_error=no_op, async_dispatcher_send=lambda *args: None,
@@ -413,7 +414,7 @@ def test_native_service_failure_is_propagated_without_marking_force_active(actio
     function = ast.AsyncFunctionDef(name="invoke", args=ast.arguments(posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]),
                                    body=[branch], decorator_list=[])
     exec(compile(ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[])), "native-service-failure", "exec"), namespace)
-    if native:
+    if native or (source == "optimizer" and action == "discharge"):
         with pytest.raises(ControlError, match="not confirmed"):
             asyncio.run(namespace["invoke"]())
     else:

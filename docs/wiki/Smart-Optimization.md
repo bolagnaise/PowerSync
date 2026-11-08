@@ -7,6 +7,15 @@ forecast, household load forecast, battery limits, and configured reserve floors
 Solar forecasting via Solcast or Open-Meteo Solar Forecast should be configured
 for accurate schedules.
 
+## Sungrow optimizer export targets
+
+On Sungrow SH Modbus systems, optimizer export power is a grid-export target.
+PowerSync applies the separate export limit while leaving battery power available
+to serve the house. This also covers small Cost Neutral export slots when Spread
+Export is off. Temporary limits are restored when export control ends. Native
+iHomeManager uses its own dispatch route; manual force-discharge power remains a
+battery-output setting.
+
 ### Tesla force-discharge prices
 
 From v2.12.1642, configure **Force-discharge buy price ($/kWh)** and **Force-discharge sell price ($/kWh)** under **Settings > Devices & Services > PowerSync > Configure > Smart Optimization > Dispatch behaviour**. These fields appear only for Tesla Powerwall sites and have moved out of Tesla API connection. Existing saved values are retained.

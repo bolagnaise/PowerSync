@@ -10670,6 +10670,16 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def _export_command_power_w(self, action: Any) -> float:
         """Return the hardware export command power for an optimizer action."""
+        if self.battery_system == "sungrow" and not getattr(
+            getattr(self, "energy_coordinator", None), "native_ihomemanager", False
+        ):
+            # SH optimizer dispatch uses the site export-limit register. Keep
+            # natural PV export alongside the battery contribution; the Sungrow
+            # coordinator applies the battery discharge ceiling separately.
+            command_w = self._solved_grid_export_power_w(action)
+            if self._config.max_grid_export_w is not None:
+                command_w = min(command_w, float(self._config.max_grid_export_w))
+            return command_w
         command_w = self._native_powerwall_safety_power_w(float(self._config.max_discharge_w))
         if self._supports_target_export_power():
             if self.battery_system == "foxess":

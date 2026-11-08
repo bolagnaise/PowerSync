@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import ast
 from datetime import datetime
 import importlib
 import importlib.util
@@ -2720,6 +2721,163 @@ def test_sungrow_spread_export_uses_export_limit_not_discharge_cap():
     assert fake_controller.restore_normal_calls == 1
     assert fake_controller.discharge_rate_limits == [7.9, 7.9]
     assert fake_controller.export_limits == [4400, 5000]
+
+
+@pytest.mark.parametrize("refresh", [False, True])
+@pytest.mark.parametrize("source", ["optimizer", "manual"])
+@pytest.mark.parametrize("target_w", [100.1, 1000.0])
+@pytest.mark.parametrize("native", [False, True])
+def test_sungrow_service_preserves_optimizer_grid_export_target(refresh, source, target_w, native):
+    """Exercise the real service routing up to its hardware call, without HA."""
+    from types import SimpleNamespace
+    import logging
+
+    tree = ast.parse((COMPONENT_ROOT / "__init__.py").read_text())
+    handler = next(node for node in ast.walk(tree)
+                   if isinstance(node, ast.AsyncFunctionDef)
+                   and node.name == "handle_force_discharge")
+    if refresh:
+        # This is the hardware-only refresh branch, including its capability
+        # selection and acknowledgement check. Its successful path returns.
+        branch = next(node for node in ast.walk(handler)
+                      if isinstance(node, ast.If)
+                      and isinstance(node.test, ast.Name)
+                      and node.test.id == "sungrow_coord")
+        body = branch.body
+    else:
+        branch = next(node for node in ast.walk(handler)
+                      if isinstance(node, ast.If)
+                      and isinstance(node.test, ast.Name)
+                      and node.test.id == "is_sungrow")
+        # Isolate dispatch from the subsequent force timer/persistence code.
+        body = []
+        for statement in branch.body[0].body:
+            if isinstance(statement, ast.If) and ast.unparse(statement.test) == "discharge_result":
+                break
+            body.append(statement)
+    function = ast.AsyncFunctionDef(
+        name="dispatch", args=ast.arguments(posonlyargs=[], args=[], kwonlyargs=[],
+                                            kw_defaults=[], defaults=[]),
+        body=body, decorator_list=[],
+    )
+    calls = []
+
+    async def force_discharge(duration, **kwargs):
+        calls.append(("battery", duration, kwargs))
+        return True
+
+    async def force_grid_export(duration, **kwargs):
+        calls.append(("grid", duration, kwargs))
+        return True
+
+    async def guard(writer):
+        return await writer(target_w)
+
+    coordinator = SimpleNamespace(force_discharge=force_discharge,
+                                  force_grid_export=force_grid_export,
+                                  native_ihomemanager=native)
+    entry_data = {"sungrow_coordinator": coordinator,
+                  "optimization_coordinator": SimpleNamespace(spread_export_enabled=False)}
+    namespace = {
+        "sungrow_coord": coordinator, "source": source, "duration": 10,
+        "command_power_w": target_w, "power_w": target_w,
+        "entry_data": entry_data, "entry": SimpleNamespace(entry_id="test"),
+        "hass": SimpleNamespace(data={"power_sync": {"test": entry_data}}),
+        "DOMAIN": "power_sync", "_guarded_force_discharge_write": guard,
+        "_LOGGER": logging.getLogger(__name__), "HomeAssistantError": RuntimeError,
+        "force_discharge_state": {},
+    }
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[])),
+                 "<sungrow service dispatch>", "exec"), namespace)
+    asyncio.run(namespace["dispatch"]())
+    if source == "optimizer" and not native:
+        assert calls == [("grid", 10, {"export_limit_w": target_w})]
+    else:
+        kwargs = {"power_w": target_w}
+        if native:
+            kwargs["source"] = source
+        assert calls == [("battery", 10, kwargs)]
+
+
+def test_sungrow_small_grid_export_restores_limits_after_serving_house():
+    """A 100 W site target must not become a 100/200 W battery ceiling."""
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    async def run_cycle():
+        controller = _FakeSungrowController()
+        controller.battery_data = {
+            "discharge_rate_limit_kw": 5.0,
+            "export_limit_enabled": True, "export_limit_w": 5000,
+        }
+        coordinator = _new_sungrow_coordinator(SungrowEnergyCoordinator, controller)
+        coordinator.data = dict(controller.battery_data, battery_max_discharge_power_w=5000)
+        assert await coordinator.force_grid_export(10, export_limit_w=100.1)
+        # With a 600 W house load, the forced battery ceiling leaves enough
+        # room for the house plus the separately limited 100 W grid export.
+        assert controller.force_discharge_power_w[-1] >= 600 + 100
+        assert controller.export_limits[-1] == 100
+        assert await coordinator.restore_normal()
+        assert controller.export_limits[-1] == 5000
+        assert controller.restore_normal_calls == 1
+
+    try:
+        asyncio.run(run_cycle())
+    finally:
+        restore()
+
+
+@pytest.mark.parametrize("raises", [False, True])
+def test_sungrow_initial_optimizer_export_failure_is_not_acknowledged(raises):
+    from types import SimpleNamespace
+    import logging
+
+    tree = ast.parse((COMPONENT_ROOT / "__init__.py").read_text())
+    handler = next(node for node in ast.walk(tree)
+                   if isinstance(node, ast.AsyncFunctionDef)
+                   and node.name == "handle_force_discharge")
+    branch = next(node for node in ast.walk(handler)
+                  if isinstance(node, ast.If) and isinstance(node.test, ast.Name)
+                  and node.test.id == "is_sungrow")
+    function = ast.AsyncFunctionDef(
+        name="dispatch", args=ast.arguments(posonlyargs=[], args=[], kwonlyargs=[],
+                                            kw_defaults=[], defaults=[]),
+        body=branch.body, decorator_list=[],
+    )
+
+    async def reject(*args, **kwargs):
+        if raises:
+            raise OSError("write failed")
+        return False
+
+    async def guard(writer):
+        return await writer(100.1)
+
+    async def persist():
+        pass
+
+    async def notify(*args):
+        pass
+
+    coordinator = SimpleNamespace(force_grid_export=reject, force_discharge=reject)
+    entry_data = {"sungrow_coordinator": coordinator}
+    force_state = {"active": True}
+    namespace = {
+        "source": "optimizer", "duration": 10, "command_power_w": 100.1,
+        "entry": SimpleNamespace(entry_id="test"),
+        "hass": SimpleNamespace(data={"power_sync": {"test": entry_data}},
+                                async_create_task=lambda coro: coro.close()),
+        "DOMAIN": "power_sync", "_guarded_force_discharge_write": guard,
+        "_LOGGER": logging.getLogger(__name__), "HomeAssistantError": RuntimeError,
+        "force_discharge_state": force_state, "persist_force_mode_state": persist,
+        "async_dispatcher_send": lambda *args: None, "_notify_api_error": notify,
+    }
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[])),
+                 "<sungrow initial service>", "exec"), namespace)
+    with pytest.raises(RuntimeError, match="not confirmed"):
+        asyncio.run(namespace["dispatch"]())
+    assert force_state["active"] is False
+    assert force_state["expires_at"] is None
+    assert force_state["hardware_expires_at"] is None
 
 
 def test_sungrow_curtailment_limit_recovers_after_reload_without_mode_restore():

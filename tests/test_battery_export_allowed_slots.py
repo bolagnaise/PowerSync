@@ -11583,6 +11583,30 @@ def test_export_command_power_respects_grid_export_cap(opt_module):
     assert battery.force_discharge_calls == [(15, 5000, False, None)]
 
 
+@pytest.mark.parametrize("native", [False, True])
+@pytest.mark.parametrize("solved_export_w", [100.1, 1100.1, 9000])
+@pytest.mark.parametrize("export_cap_w", [None, 500])
+def test_sungrow_export_command_preserves_solar_in_site_target(
+    opt_module, native, solved_export_w, export_cap_w,
+):
+    coordinator = _execution_coordinator(opt_module, _FakeBattery(), soc=0.80)
+    coordinator.battery_system = "sungrow"
+    coordinator.energy_coordinator = SimpleNamespace(native_ihomemanager=native)
+    coordinator._config.max_discharge_w = 5000
+    coordinator._config.max_grid_export_w = export_cap_w
+    action = SimpleNamespace(
+        action="export", power_w=100.1, battery_discharge_w=100.1,
+        timestamp=datetime(2026, 11, 8, 16, 50, tzinfo=timezone.utc),
+    )
+    coordinator._last_optimizer_result = SimpleNamespace(
+        schedule=SimpleNamespace(actions=[action]), grid_export_w=[solved_export_w],
+    )
+    expected = 100.1 if native else solved_export_w
+    if export_cap_w is not None:
+        expected = min(expected, export_cap_w)
+    assert coordinator._export_command_power_w(action) == pytest.approx(expected)
+
+
 @pytest.mark.parametrize(
     ("configured_cap_w", "expected_pcc_w"),
     [(None, 9000), (5000, 5000), (0, 0)],
