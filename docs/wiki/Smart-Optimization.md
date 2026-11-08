@@ -154,6 +154,23 @@ released when an export action prevents battery charging, reducing unnecessary
 small battery-export windows. Small exports can still be planned while costs
 remain uncovered, and unavoidable surplus solar export remains uncapped.
 
+## Solver timing and EV charging
+
+Each inner HiGHS solve has a 30-second allowance. Command-mode checks and Cost
+Neutral budget reconciliation can run additional solves, so a complete cycle
+can take longer. Reaching the allowance does not automatically select the
+backup planner: a feasible incumbent can still be used after the normal
+schedule checks.
+
+Cost Neutral planning alongside EV charging keeps the limits from available
+solar, battery charging power and remaining battery capacity separate.
+Free-charge preferences keep the primary economic plan if the optional
+preference solve fails or returns an invalid result.
+
+Cycle diagnostics include all solve attempts, including discarded passes, and
+identify the selected result and fallback reason.
+
+
 ## Core controls
 
 ### Enable Smart Optimization
