@@ -194,7 +194,9 @@ class SupportRuntime:
             coordinator._support_plan_observer = self.publish_plan
             self.observer_owner = coordinator
         self.ready = True
-        self.task = self.hass.async_create_task(self.record_loop())
+        # Lifetime loops must not enter HA's startup task barrier.
+        self.task = self.hass.async_create_background_task(
+            self.record_loop(), f"power_sync_support_recorder_{self.entry.entry_id}")
         for event_type in ("power_sync_optimizer_action", "power_sync_ev_command"):
             self.unsubs.append(self.hass.bus.async_listen(event_type, self.observe))
 
@@ -288,7 +290,8 @@ class SupportRuntime:
         # Delete-only capabilities are durable before an archive may ever be uploaded.
         await self.save()
         self.error = None
-        self.transport_task = self.hass.async_create_task(self.poll_loop(generation))
+        self.transport_task = self.hass.async_create_background_task(
+            self.poll_loop(generation), f"power_sync_support_poll_{self.entry.entry_id}")
 
     async def confirm(self, owner, descriptor_digest):
         if self.descriptor is None or self.policy is None:

@@ -68,7 +68,9 @@ def runtime(monkeypatch):
     def listen(name, callback): return lambda:unsubscribed.append(name)
     hass=SimpleNamespace(data={'power_sync':{'entry-one':{'optimization_coordinator':Optimizer()}}},states=SimpleNamespace(get=states.get),
         services=SimpleNamespace(async_call=AsyncMock(side_effect=AssertionError('service call forbidden'))),bus=SimpleNamespace(async_listen=listen),
-        async_create_task=asyncio.create_task,http=SimpleNamespace(register_view=lambda view:None),
+        async_create_task=asyncio.create_task,
+        async_create_background_task=lambda coro, name: asyncio.create_task(coro, name=name),
+        http=SimpleNamespace(register_view=lambda view:None),
         async_add_executor_job=AsyncMock(side_effect=lambda func,*args:func(*args)))
     entry=SimpleNamespace(entry_id='entry-one',data={'monitoring_mode':True,'api_key':'CANARY_SECRET'},options={})
     rt=namespace['SupportRuntime'](hass,entry);rt.version='2.12.1657'
@@ -161,6 +163,34 @@ async def test_restart_restores_recording_but_never_support_access_and_unsubscri
     await rt.stop()
     assert rt.task.done()
     assert sorted(unsubscribed)==['power_sync_ev_command','power_sync_optimizer_action']
+
+
+@pytest.mark.asyncio
+async def test_recorder_does_not_block_ha_startup_and_unload_cancels_it(runtime):
+    rt, _, _, _, _ = runtime
+    startup_tasks = set()
+    background_tasks = set()
+
+    def track(coro, name=None, *, tasks):
+        task = asyncio.create_task(coro, name=name)
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
+        return task
+
+    # HA core tracks ordinary tasks for async_block_till_done; background
+    # tasks are excluded from that barrier and cancelled on shutdown.
+    rt.hass.async_create_task = lambda coro: track(coro, tasks=startup_tasks)
+    rt.hass.async_create_background_task = lambda coro, name: track(coro, name, tasks=background_tasks)
+    try:
+        await rt.setup()
+        await asyncio.sleep(0)
+        assert not startup_tasks, 'lifetime recorder must not enter HA startup barrier'
+        assert rt.task in background_tasks and not rt.task.done()
+        assert rt.ready and rt.session.state == 'closed'
+    finally:
+        await rt.stop()
+    assert rt.task.done()
+    assert not background_tasks
 
 
 def test_existing_event_observer_filters_entry_and_never_copies_identifiers(runtime):
