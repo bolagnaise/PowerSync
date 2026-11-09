@@ -1,4 +1,10 @@
-<!-- release: v2.12.1664 -->
+<!-- release: v2.12.1665 -->
+
+## Better Cost Neutral export choices in longer plans
+
+Cost Neutral now correctly favours higher-rate battery exports in full-day and two-day plans when they can cover the same daily costs using less stored energy. An earlier-slot preference could otherwise make the main planner sell extra battery energy at low rates.
+
+Small low-rate exports can still be useful for solar headroom or when the higher-rate window cannot cover that day's costs. Update through HACS and restart Home Assistant.
 
 ## More time to connect read-only support
 
