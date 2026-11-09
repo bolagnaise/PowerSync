@@ -2966,6 +2966,104 @@ def test_ev_vehicle_status_prefers_wall_connector_power_for_single_charging_tesl
     assert power_sync._get_external_tesla_ev_power_kw(hass, _Entry()) == 3.4
 
 
+@pytest.mark.parametrize("vehicle_current", ["0", "39.1"])
+@pytest.mark.parametrize("vehicle_name", ["PRIMARY EV", "Tesla EV"])
+@pytest.mark.parametrize("fleet_power,meter_power,raw_load", [(9.0, 8.7, 9.3), (5.1, 5.1, 5.7)])
+def test_wall_connector_vehicle_current_does_not_duplicate_fleet_load(
+    monkeypatch, vehicle_current, vehicle_name, fleet_power, meter_power, raw_load,
+):
+    """#454: HA's vehicle_current sensor is amperage, not a vehicle identifier."""
+    power_sync = _power_sync_module()
+    now = datetime.now(timezone.utc)
+    hass = _tesla_hass([
+        _State("sensor.primary_ev_charger_power", str(fleet_power),
+               {"unit_of_measurement": "kW"}, last_updated=now - timedelta(seconds=5)),
+        _State("sensor.primary_ev_charging", "charging", last_updated=now),
+        _State("binary_sensor.primary_ev_charge_cable", "on", last_updated=now),
+        _State("device_tracker.primary_ev_location", "home", last_updated=now),
+    ])
+    hass.device_registry.devices["device-1"].name = vehicle_name
+    for state in [
+        _State("sensor.wall_connector_vehicle_current", vehicle_current,
+               {"unit_of_measurement": "A", "device_class": "current"}, last_updated=now),
+        _State("sensor.wall_connector_total_power", str(meter_power * 1000),
+               {"unit_of_measurement": "W"}, last_updated=now),
+    ]:
+        hass.states._states[state.entity_id] = state
+        hass.entity_registry.entities[state.entity_id] = _entity(state.entity_id, "wall-connector")
+
+    async def no_sigenergy_state(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(power_sync, "_read_sigenergy_charger_state_for_entry", no_sigenergy_state)
+    vehicles = power_sync._get_ev_vehicles_status(hass, _Entry())
+    observations = asyncio.run(power_sync._get_ev_load_observations(hass, _Entry(), vehicles))
+    ev_load = importlib.import_module("power_sync.ev_load")
+    snapshot = ev_load.aggregate_ev_load(observations)
+    normalized = ev_load.normalize_energy_data(
+        {"load_power": 0.0, "raw_home_load_power": raw_load},
+        battery_system="sigenergy", ev_load=snapshot,
+    )
+
+    assert len(vehicles) == 1
+    assert vehicles[0]["vehicle_id"] == "5YJTEST0000000001"
+    assert snapshot.power_kw == pytest.approx(meter_power)
+    assert snapshot.quality == ev_load.EvLoadQuality.COMPLETE
+    assert normalized["load_power"] == pytest.approx(0.6)
+
+
+def test_wall_connector_fresh_current_does_not_refresh_stale_power():
+    """A fresh amperage reading cannot renew a stale connector watt sample."""
+    power_sync = _power_sync_module()
+    now = datetime.now(timezone.utc)
+    hass = _tesla_hass([
+        _State("sensor.primary_ev_charger_power", "9", {"unit_of_measurement": "kW"}, last_updated=now),
+        _State("sensor.primary_ev_charging", "charging", last_updated=now),
+        _State("device_tracker.primary_ev_location", "home", last_updated=now),
+    ])
+    for state in [
+        _State("sensor.wall_connector_vehicle_current", "39", {"unit_of_measurement": "A"}, last_updated=now),
+        _State("sensor.wall_connector_total_power", "8700", {"unit_of_measurement": "W"},
+               last_updated=now - timedelta(minutes=5)),
+    ]:
+        hass.states._states[state.entity_id] = state
+        hass.entity_registry.entities[state.entity_id] = _entity(state.entity_id, "wall-connector")
+
+    vehicles = power_sync._get_ev_vehicles_status(hass, _Entry())
+
+    assert len(vehicles) == 1
+    assert vehicles[0]["ev_power_kw"] == 9.0
+
+
+def test_wall_connector_current_does_not_merge_two_distinct_charging_vehicles():
+    """Without an identity match, two active cars plus a meter stay distinct."""
+    power_sync = _power_sync_module()
+    now = datetime.now(timezone.utc)
+    hass = _tesla_hass([
+        _State("sensor.primary_ev_charger_power", "9", {"unit_of_measurement": "kW"}, last_updated=now),
+        _State("sensor.primary_ev_charging", "charging", last_updated=now),
+        _State("device_tracker.primary_ev_location", "home", last_updated=now),
+    ])
+    hass.device_registry.devices["second-ev"] = SimpleNamespace(
+        id="second-ev", name="SECOND EV", identifiers={("teslemetry", "5YJTEST0000000002")},
+    )
+    for state, device_id in [
+        (_State("sensor.second_ev_charger_power", "3", {"unit_of_measurement": "kW"}, last_updated=now), "second-ev"),
+        (_State("sensor.second_ev_charging", "charging", last_updated=now), "second-ev"),
+        (_State("device_tracker.second_ev_location", "home", last_updated=now), "second-ev"),
+        (_State("sensor.wall_connector_vehicle_current", "39", {"unit_of_measurement": "A"}, last_updated=now), "wall-connector"),
+        (_State("sensor.wall_connector_total_power", "8700", {"unit_of_measurement": "W"}, last_updated=now), "wall-connector"),
+    ]:
+        hass.states._states[state.entity_id] = state
+        hass.entity_registry.entities[state.entity_id] = _entity(state.entity_id, device_id)
+
+    vehicles = power_sync._get_ev_vehicles_status(hass, _Entry())
+
+    assert {vehicle["vehicle_id"]: vehicle["ev_power_kw"] for vehicle in vehicles} == {
+        "5YJTEST0000000001": 9.0, "5YJTEST0000000002": 3.0, "wall_connector_ha": 8.7,
+    }
+
+
 def test_ev_vehicle_status_drops_stale_power_for_connected_idle_state():
     power_sync = _power_sync_module()
     hass = _tesla_hass([

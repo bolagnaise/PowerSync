@@ -3212,8 +3212,15 @@ def _get_ev_vehicles_status(hass, entry, *, include_control_evidence=False) -> l
             device_id = getattr(registry_entity, "device_id", None)
             if device_id:
                 wc_device_ids.add(device_id)
-            # Wall Connector vehicle sensor: "disconnected", "charging", "connected", etc.
-            if "vehicle" in eid and "power" not in eid:
+            # Vehicle-current and other measured sensors are electrical
+            # telemetry, not a connected state or VIN. In particular, HA's
+            # vehicle_current sensor must not turn amperage into an explicit
+            # vehicle identifier and prevent single-vehicle meter matching.
+            if (
+                "vehicle" in eid
+                and "power" not in eid
+                and not state_obj.attributes.get("unit_of_measurement")
+            ):
                 wc_observed_at = _latest_ev_observed_at(
                     wc_observed_at,
                     getattr(state_obj, "last_updated", None),
