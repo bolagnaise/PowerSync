@@ -107,13 +107,31 @@ class FroniusController(InverterController):
         self._native_export = None
         self._native_ac_cleared = False
         self.native_export_control = False
+        self._simple_restore = None
+        self.simple_restore_blocked = False
         if hass is not None and entry_id:
             from .fronius_native import FroniusNativeExportLimit
+            from .fronius_simple import FroniusSimpleRestore
 
             self._native_export = FroniusNativeExportLimit(
                 hass, entry_id, host, port, slave_id
             )
             self._request_lock = self._native_export.request_lock
+            if not load_following:
+                self._simple_restore = FroniusSimpleRestore(
+                    hass, entry_id, host, port, slave_id
+                )
+
+    async def has_pending_simple_restore(self) -> bool:
+        """Read ownership and fresh device controls without issuing any command."""
+        async with self._request_lock:
+            return await self._has_pending_simple_restore_locked()
+
+    async def _has_pending_simple_restore_locked(self) -> bool:
+        if self._simple_restore is None:
+            return False
+        saved = await self._simple_restore.load()
+        return bool(saved) and await self._simple_restore.validate(self, saved) == 0
 
     async def connect(self) -> bool:
         """Connect to the Fronius inverter via Modbus TCP."""
@@ -527,6 +545,16 @@ class FroniusController(InverterController):
                     f"(requires 0W soft export limit configured)"
                 )
 
+                if self._simple_restore is not None:
+                    try:
+                        await self._simple_restore.prepare(self)
+                        self._simple_restore.check_current()
+                        self.simple_restore_blocked = False
+                    except Exception as err:
+                        self.simple_restore_blocked = True
+                        _LOGGER.warning("Fronius simple-mode ownership deferred: %s", err)
+                        return False
+
                 # Disable power limiting - inverter falls back to soft export limit
                 success = await self._write_register(self.REG_WMAXLIM_ENA, 0)
                 if not success:
@@ -562,6 +590,15 @@ class FroniusController(InverterController):
     async def restore(self) -> bool:
         """Serialize and verify restoration of unrestricted output."""
         async with self._request_lock:
+            saved_simple = None
+            if self._simple_restore is not None:
+                try:
+                    saved_simple = await self._simple_restore.load()
+                    if saved_simple:
+                        enabled = await self._simple_restore.validate(self, saved_simple)
+                except Exception as err:
+                    _LOGGER.warning("Fronius simple-mode restore pending: %s", err)
+                    return False
             if self._native_export is not None:
                 try:
                     has_snapshot = await self._native_export.has_snapshot()
@@ -575,8 +612,15 @@ class FroniusController(InverterController):
                     if not await self._native_export.restore():
                         return False
                     self._native_ac_cleared = False
+                    if saved_simple:
+                        return await self._simple_restore.clear()
                     return True
-            return await self._restore_locked()
+            if saved_simple and enabled == 1:
+                return await self._simple_restore.clear()
+            success = await self._restore_locked()
+            if success and saved_simple:
+                return await self._simple_restore.clear()
+            return success
 
     async def _restore_locked(self) -> bool:
         """Restore normal operation of the Fronius inverter.
@@ -600,6 +644,8 @@ class FroniusController(InverterController):
             # Some inverters don't apply new limit values while enabled
 
             # Step 1: Disable power limiting first
+            if self._simple_restore is not None:
+                self._simple_restore.check_current()
             success = await self._write_register(self.REG_WMAXLIM_ENA, 0)
             if not success:
                 _LOGGER.warning("Failed to disable power limiting before restore")
@@ -607,6 +653,8 @@ class FroniusController(InverterController):
             await asyncio.sleep(0.1)
 
             # Step 2: Set power limit to 100%
+            if self._simple_restore is not None:
+                self._simple_restore.check_current()
             success = await self._write_register(self.REG_WMAXLIMPCT, 10000)
             if not success:
                 _LOGGER.error("Failed to set power limit to 100%")
@@ -616,6 +664,8 @@ class FroniusController(InverterController):
 
             # Step 3: Re-enable power limiting at 100%
             # This overrides the soft export limit and allows full export
+            if self._simple_restore is not None:
+                self._simple_restore.check_current()
             success = await self._write_register(self.REG_WMAXLIM_ENA, 1)
             if not success:
                 _LOGGER.error("Failed to enable power limiting")
@@ -709,6 +759,10 @@ class FroniusController(InverterController):
             state_regs = await self._read_register(self.REG_STATUS, 1)
             status = InverterStatus.ONLINE
             is_curtailed = False
+            if await self._has_pending_simple_restore_locked():
+                is_curtailed = True
+                if status == InverterStatus.ONLINE:
+                    status = InverterStatus.CURTAILED
 
             if state_regs:
                 state_value = state_regs[0]

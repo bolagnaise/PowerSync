@@ -136,6 +136,278 @@ def test_restore_clears_the_recorded_device_limit():
     assert controller.last_curtail_limit_w is None
 
 
+@pytest.fixture
+def simple_site(monkeypatch):
+    """A shared persistent store and device survive replacement controllers."""
+    saved = {}
+    faults = {"save": False, "read": False, "write": False, "swap_on_save": False}
+
+    class MemoryStore:
+        def __init__(self, _hass, _version, key, **_kwargs):
+            self.key = key
+
+        async def async_load(self):
+            return saved.get(self.key)
+
+        async def async_save(self, data):
+            if faults["save"]:
+                raise OSError("storage unavailable")
+            saved[self.key] = dict(data)
+            if data and faults["swap_on_save"]:
+                serial[0] += 1
+
+    storage = types.ModuleType("homeassistant.helpers.storage")
+    storage.Store = MemoryStore
+    monkeypatch.setitem(sys.modules, "homeassistant.helpers.storage", storage)
+    hass = SimpleNamespace(data={"power_sync": {"entry-id": {}}})
+    registers = {40236: 1, 40232: 10000}
+    serial = [0x4142] * 16
+    writes = []
+
+    async def connect(self):
+        return True
+
+    async def disconnect(self):
+        pass
+
+    async def read(self, address, count=1):
+        if faults["read"]:
+            return None
+        if address == 40052:
+            return list(serial)
+        return [registers.get(address, 0)]
+
+    async def write(self, address, value):
+        # The obligation must be durable BEFORE touching hardware.
+        assert any(saved.values())
+        writes.append((address, value))
+        if faults["write"]:
+            return False
+        registers[address] = value
+        return True
+
+    monkeypatch.setattr(FroniusController, "connect", connect)
+    monkeypatch.setattr(FroniusController, "disconnect", disconnect)
+    monkeypatch.setattr(FroniusController, "_read_register", read)
+    monkeypatch.setattr(FroniusController, "_write_register", write)
+    from power_sync.inverters.fronius_native import FroniusNativeExportLimit
+    monkeypatch.setattr(FroniusNativeExportLimit, "_surface", lambda self: None)
+
+    def make_controller(**kwargs):
+        controller = FroniusController(
+            kwargs.pop("host", "192.0.2.1"), hass=hass,
+            entry_id=kwargs.pop("entry_id", "entry-id"), **kwargs,
+        )
+        return controller
+
+    return SimpleNamespace(saved=saved, hass=hass, registers=registers,
+                           writes=writes, serial=serial, faults=faults,
+                           make=make_controller)
+
+
+def test_simple_mode_restart_retains_restore_obligation(simple_site):
+    """Ticket #157: a new controller/runtime must not forget its own Ena=0."""
+    site = simple_site
+
+    async def scenario():
+        before_restart = site.make()
+        assert await before_restart.curtail() is True
+        assert site.registers[40236] == 0
+        site.hass.data["power_sync"]["entry-id"] = {}
+        after_restart = site.make()
+        state = await after_restart.get_status()
+        assert state.is_curtailed is True
+        assert await after_restart.restore() is True
+        assert site.registers[40236] == 1
+        assert site.registers[40232] == 10000
+        assert await after_restart.has_pending_simple_restore() is False
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("fault", ["serial", "read", "limit", "owner", "stopping"])
+def test_simple_recovery_mismatch_never_writes_or_discards_obligation(simple_site, fault):
+    site = simple_site
+
+    async def scenario():
+        assert await site.make().curtail() is True
+        site.writes.clear()
+        if fault == "serial":
+            site.serial[0] += 1
+        elif fault == "read":
+            site.faults["read"] = True
+        elif fault == "limit":
+            site.registers[40232] = 5000
+        elif fault == "owner":
+            next(v for v in site.saved.values() if v)["owner_entry_id"] = "another-entry"
+        elif fault == "stopping":
+            site.hass.data["power_sync"]["entry-id"]["aemo_dispatch_stopping"] = True
+        assert await site.make().restore() is False
+        assert not site.writes
+        assert any(site.saved.values())
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("fault", ["save", "write"])
+def test_simple_curtailment_and_restore_failures_retain_safe_boundary(simple_site, fault):
+    site = simple_site
+
+    async def scenario():
+        if fault == "save":
+            site.faults["save"] = True
+            controller = site.make()
+            assert await controller.curtail() is False
+            assert controller.simple_restore_blocked is True
+            assert not site.writes
+        else:
+            assert await site.make().curtail() is True
+            site.faults["write"] = True
+            assert await site.make().restore() is False
+            assert any(site.saved.values())
+            site.faults["write"] = False
+            assert await site.make().restore() is True
+            assert not any(site.saved.values())
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("change", ["none", "host", "slave", "mode", "disabled", "unowned"])
+def test_startup_recovers_only_matching_owned_simple_mode_without_writes(simple_site, change):
+    from power_sync.inverters.fronius_simple import async_recover_simple_curtailment
+
+    site = simple_site
+    entry = SimpleNamespace(entry_id="entry-id", data={}, options={
+        "inverter_brand": "fronius", "inverter_host": "192.0.2.1",
+        "ac_inverter_curtailment_enabled": True,
+    })
+
+    async def scenario():
+        assert await site.make().curtail() is True
+        site.hass.data["power_sync"]["entry-id"] = {}
+        site.writes.clear()
+        if change == "host":
+            entry.options["inverter_host"] = "192.0.2.2"
+        elif change == "slave":
+            entry.options["inverter_slave_id"] = 2
+        elif change == "mode":
+            entry.options["fronius_load_following"] = True
+        elif change == "disabled":
+            entry.options["ac_inverter_curtailment_enabled"] = False
+        elif change == "unowned":
+            site.saved.clear()  # A pre-upgrade Ena=0 has no provenance.
+        saved_before = dict(site.saved)
+        await async_recover_simple_curtailment(site.hass, entry)
+        runtime = site.hass.data["power_sync"]["entry-id"]
+        assert (runtime.get("inverter_last_state") == "curtailed") is (change == "none")
+        assert not site.writes
+        assert site.saved == saved_before
+        if change == "none":
+            assert runtime["inverter_curtailment_device_limit_confirmed"] is False
+            assert runtime.get("inverter_curtailment_physical_converged") is None
+
+    asyncio.run(scenario())
+
+
+def test_smart_restore_after_restart_reaches_actual_modbus_restore(simple_site):
+    site = simple_site
+    assert asyncio.run(site.make().curtail()) is True
+    site.hass.data["power_sync"]["entry-id"] = {}
+    state = _run_fronius_curtailment(
+        load_following=False, should_curtail_result=False,
+        controller_override=site.make(),
+    )
+    assert state["control_mode"] == "normal"
+    assert site.registers[40236] == 1
+    assert not any(site.saved.values())
+
+
+def test_recovery_readback_mismatch_does_not_escalate_to_offgrid(simple_site):
+    site = simple_site
+    assert asyncio.run(site.make().curtail()) is True
+    site.serial[0] += 1
+    site.writes.clear()
+    recorded = _run_fronius_curtailment(
+        load_following=False, controller_override=site.make(),
+        expected_result=False, expect_state=False,
+    )
+    assert recorded["fallback_calls"] == []
+    assert recorded["restore_calls"] == 0
+    assert not site.writes
+
+
+def test_already_restored_device_retires_journal_without_control_write(simple_site):
+    site = simple_site
+    assert asyncio.run(site.make().curtail()) is True
+    site.registers[40236] = 1
+    site.writes.clear()
+    assert asyncio.run(site.make().restore()) is True
+    assert not site.writes
+    assert not any(site.saved.values())
+
+
+def test_restore_journal_failure_is_retryable_without_replaying_control(simple_site):
+    site = simple_site
+    assert asyncio.run(site.make().curtail()) is True
+    site.faults["save"] = True
+    assert asyncio.run(site.make().restore()) is False
+    assert site.registers[40236] == 1
+    assert any(site.saved.values())
+    site.faults["save"] = False
+    site.writes.clear()
+    assert asyncio.run(site.make().restore()) is True
+    assert not site.writes
+
+
+@pytest.mark.parametrize("enabled,limit", [(0, 10000), (1, 5000)])
+def test_unowned_disabled_setting_or_user_cap_is_never_adopted(simple_site, enabled, limit):
+    site = simple_site
+    site.registers.update({40236: enabled, 40232: limit})
+    controller = site.make()
+    assert asyncio.run(controller.curtail()) is False
+    assert controller.simple_restore_blocked is True
+    assert not site.writes
+    assert not any(site.saved.values())
+
+
+def test_device_swap_during_durable_save_never_reaches_control(simple_site):
+    site = simple_site
+    site.faults["swap_on_save"] = True
+    assert asyncio.run(site.make().curtail()) is False
+    assert not site.writes
+    assert any(site.saved.values())
+
+
+@pytest.mark.parametrize("tracked,battery_w,grid_w,import_c,export_c,expected", [
+    (True, 0, 100, 14, -1, True),
+    (True, -60, 100, 14, -1, False),
+    (False, 0, 100, 14, -1, False),
+    (False, 0, -101, 14, -1, True),
+    (True, 0, 100, 14, 13.1, False),
+    (True, -60, 100, -1, -1, True),
+])
+def test_low_soc_alone_does_not_override_negative_export_ownership(
+    tracked, battery_w, grid_w, import_c, export_c, expected,
+):
+    """Replay the secondary claim without weakening the deliberate hold policy."""
+    runtime = {"inverter_last_state": "curtailed"} if tracked else {}
+
+    async def live():
+        return {"battery_soc": 6, "battery_power": battery_w, "grid_power": grid_w,
+                "solar_power": 400, "load_power": 400}
+
+    namespace = {
+        "_aemo_dispatch_entry_data": lambda: runtime,
+        "get_live_status": live, "_LOGGER": _Logger(),
+        "entry": SimpleNamespace(options={"inverter_restore_soc": 98}, data={}),
+        "CONF_INVERTER_RESTORE_SOC": "inverter_restore_soc",
+        "DEFAULT_INVERTER_RESTORE_SOC": 98,
+        "export_earnings_are_uneconomic": lambda value, *_args: value < 0,
+    }
+    exec(_function_source("should_curtail_ac_coupled"), namespace)
+    assert asyncio.run(namespace["should_curtail_ac_coupled"](import_c, export_c)) is expected
+
+
 def _function_source(name: str) -> str:
     source = INIT_PATH.read_text()
     module = ast.parse(source)
@@ -178,6 +450,8 @@ def _run_fronius_curtailment(
     inverter_last_state: str | None = None,
     expect_state: bool = True,
     native_result: bool | None = None,
+    controller_override=None,
+    expected_result=True,
 ) -> dict:
     """Drive the real apply_inverter_curtailment() fronius success branch."""
     entry_id = "entry-id"
@@ -199,6 +473,8 @@ def _run_fronius_curtailment(
     recorded: dict = {"state": None, "constructed": 0, "restore_calls": 0, "fallback_calls": []}
 
     controller, _writes = _recording_controller(load_following=load_following)
+    if controller_override is not None:
+        controller = controller_override
     original_restore = controller.restore
 
     async def _record_restore():
@@ -244,6 +520,7 @@ def _run_fronius_curtailment(
         return False
 
     def _record_state(control_mode, target_power_w=None, **kwargs):
+        entry_data["inverter_last_state"] = "normal" if control_mode == "normal" else "curtailed"
         recorded["state"] = {
             "control_mode": control_mode,
             "target_power_w": target_power_w,
@@ -299,7 +576,7 @@ def _run_fronius_curtailment(
     exec(_function_source("apply_inverter_curtailment"), namespace)
     result = asyncio.run(namespace["apply_inverter_curtailment"](True, 10.67, 0.14))
 
-    assert result is (native_result is not False)
+    assert result is (expected_result and native_result is not False)
     assert recorded["constructed"] == 1
     if expect_state:
         assert recorded["state"] is not None

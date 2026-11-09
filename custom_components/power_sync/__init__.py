@@ -28086,6 +28086,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             # Cache controller for fast load-following updates
             entry_data["inverter_controller"] = controller
 
+            # Recover only our durable simple-mode command. A register value
+            # alone cannot establish ownership after a restart. Reject an
+            # identity/readback mismatch without off-grid escalation.
+            recover_simple = getattr(controller, "has_pending_simple_restore", None)
+            if recover_simple is not None:
+                try:
+                    pending_simple = await recover_simple()
+                except Exception as err:
+                    _LOGGER.warning("Fronius simple-mode recovery deferred: %s", err)
+                    return False
+                if _aemo_dispatch_entry_data() is not entry_data:
+                    return False
+                if pending_simple:
+                    _set_inverter_control_state(
+                        INVERTER_CONTROL_MODE_CURTAILED,
+                        device_limit_confirmed=False,
+                    )
+
             if curtail:
                 # Use smart AC-coupled curtailment logic
                 # Only curtail if import price is negative or export earnings are negative.
@@ -28243,6 +28261,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     await _powerwall_curtailment_fallback(False, "inverter_took_over")
                 else:
                     _LOGGER.error(f"❌ Failed to curtail inverter")
+                    if getattr(controller, "simple_restore_blocked", False):
+                        return False
                     if inverter_brand == "fronius":
                         entry_data[
                             "inverter_curtailment_device_limit_confirmed"
@@ -48290,6 +48310,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     solar_production_runtime.after_restore = _reconcile_export_after_production_restore
     await solar_production_runtime.tick()
+
+    # Metadata and fresh register reads only. Seed the existing restore gates
+    # after production/manual ownership has been reconciled; never restore at
+    # startup merely because SunSpec limiting is disabled.
+    if not solar_production_runtime.blocks_export_control and not ac_inverter_is_same_hybrid():
+        from .inverters.fronius_simple import async_recover_simple_curtailment
+
+        await async_recover_simple_curtailment(hass, entry)
 
     # Set up fast load-following update for responsive power limiting.
     # Enphase DPEL can time out quickly, so it is checked every 15 seconds;

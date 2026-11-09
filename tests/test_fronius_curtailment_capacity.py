@@ -220,7 +220,7 @@ def native_site(monkeypatch):
     storage = types.ModuleType("homeassistant.helpers.storage")
 
     class Store:
-        def __init__(self, hass, version, key):
+        def __init__(self, hass, version, key, **kwargs):
             self.key = key
         async def async_load(self):
             return saved.get(self.key)
