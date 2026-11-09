@@ -8,7 +8,7 @@ import uuid
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
-from .protocol import CATEGORIES, SupportError, b64, digest, encode, identifier, number, query, validate_evidence
+from .protocol import CATEGORIES, SETUP_WINDOW_SECONDS, SupportError, b64, digest, encode, identifier, number, query, validate_evidence
 
 
 class Session:
@@ -50,7 +50,7 @@ class Session:
         self.scope_digest = digest(self.scope)
         self.deadline = self.mono() + duration
         self.state = "pending"
-        self.pending_deadline = self.mono() + 300
+        self.pending_deadline = self.mono() + SETUP_WINDOW_SECONDS
         self.requests = {}
         self.retired = set()
         self.uploaded = 0

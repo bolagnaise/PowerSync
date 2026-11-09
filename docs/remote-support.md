@@ -18,12 +18,13 @@ integration diagnostics uses the same allowlisted collector.
 For a remote session:
 
 1. The investigator verifies the reporter and assignment in the private Discord
-   ticket, then creates a five-minute invitation in the protected operator viewer.
+   ticket, then creates a 30-minute invitation in the protected operator viewer.
 2. Paste that invitation into HA. Select categories, history range and duration.
    The default is one hour; explicitly selected sessions can last up to eight
    hours. Only one entry may have a local session at a time.
 3. Send the displayed pairing code through the same private ticket. Claiming it
-   does not authorize diagnostic reads.
+   does not authorize diagnostic reads. Complete pairing and HA approval within
+   30 minutes of preparing the session; the selected session deadline still applies.
 4. Refresh HA status, review the named investigator, reporter, ticket, phrase,
    exact scope and processing disclosure, then check consent and approve.
 5. Revoke in HA when the investigation ends. HA destroys its live key before any

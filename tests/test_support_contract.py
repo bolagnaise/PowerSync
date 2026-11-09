@@ -89,6 +89,48 @@ def test_clock_rollback_cannot_extend_session_and_restart_has_no_key(session):
     assert s.Session().boot != owner.boot
 
 
+@pytest.mark.parametrize("confirm_early", [False, True])
+def test_pairing_allows_thirty_minutes_but_requires_owner_consent(confirm_early):
+    clock = {"wall": 1_800_000_000.0, "mono": 100.0}
+    owner = s.Session(wall=lambda: clock["wall"], mono=lambda: clock["mono"])
+    owner.begin("owner", "entry_reference_00000001", ["entities"], clock["wall"], 3600)
+    descriptor = {"actor": "investigator@example.invalid", "ticket": "discord:12345678901234567",
+        "reporter": "12345678901234568", "phrase": "A123B456", "scope_digest": owner.scope_digest,
+        "policy_digest": "a" * 64}
+    if confirm_early:
+        owner.confirm("owner", descriptor, policy_digest="a" * 64)
+    clock["wall"] += 1799
+    clock["mono"] += 1799
+    owner.check(active=False)
+    with pytest.raises(p.SupportError, match="session_inactive"):
+        owner.admit(job(owner, clock))
+    owner.confirm("owner", descriptor, policy_digest="a" * 64)
+    owner.activated()
+    owner.admit(job(owner, clock))
+
+
+@pytest.mark.parametrize("rollback", [False, True])
+def test_pairing_expires_at_thirty_minutes_even_if_wall_clock_rolls_back(rollback):
+    clock = {"wall": 1_800_000_000.0, "mono": 100.0}
+    owner = s.Session(wall=lambda: clock["wall"], mono=lambda: clock["mono"])
+    owner.begin("owner", "entry_reference_00000001", ["entities"], clock["wall"], 3600)
+    clock["wall"] += -60 if rollback else 1800
+    clock["mono"] += 1800
+    with pytest.raises(p.SupportError, match="pairing_expired"):
+        owner.check(active=False)
+    assert owner.key is None
+
+
+def test_longer_pairing_window_does_not_extend_the_selected_session_duration():
+    clock = {"wall": 1_800_000_000.0, "mono": 100.0}
+    owner = s.Session(wall=lambda: clock["wall"], mono=lambda: clock["mono"])
+    owner.begin("owner", "entry_reference_00000001", ["entities"], clock["wall"], 60)
+    clock["wall"] += 60
+    clock["mono"] += 60
+    with pytest.raises(p.SupportError, match="session_expired"):
+        owner.check(active=False)
+
+
 def test_expired_and_reused_request_ids_do_not_collect_new_evidence(session):
     owner, clock, _ = session
     request = job(owner, clock)

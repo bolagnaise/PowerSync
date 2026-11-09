@@ -65,7 +65,7 @@ class PowerSyncSupportCard extends HTMLElement {
       this.node('small', 'A pairing code prepares access only. You must review the investigator, ticket and processing policy and confirm below before any diagnostic query is permitted.', box);
       button('Prepare invitation', () => this.run('start', { invitation_token: invitation.value.trim(), categories: Object.keys(cats).filter(k => cats[k].checked), duration: Number(duration.value), history_seconds: Number(history.value), ha_recorder: haRecorder.checked }));
     }
-    if (status.code) this.node('pre', `Pairing code: ${status.code}\nGive this code only to your investigator in your private support ticket. It expires after five minutes.`, box);
+    if (status.code) this.node('pre', `Pairing code: ${status.code}\nGive this code only to your investigator in your private support ticket. Complete pairing and approval within 30 minutes.`, box);
     if (status.invitation) {
       this.node('h4', 'Investigator and ticket', box);
       this.node('pre', JSON.stringify(status.invitation, null, 2), box);

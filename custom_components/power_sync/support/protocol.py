@@ -8,6 +8,7 @@ import math
 import re
 
 VERSION = 1
+SETUP_WINDOW_SECONDS = 30 * 60
 CATEGORIES = frozenset({"system", "entities", "optimizer", "control_trace", "logs", "history"})
 MAX_RESULT = 256 * 1024
 MAX_REQUEST = 16 * 1024
