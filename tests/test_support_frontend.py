@@ -33,5 +33,9 @@ def test_support_card_requires_admin_and_reviewed_scope_before_confirmation():
     assert.ok(!nodes.some(x=>x.tag==='textarea'),'no customer question surface');
     card._status={state:'closed',archive_expires_at:1800000000,archive_pending:true};card.render();
     nodes=card.shadowRoot.querySelectorAll();assert.ok(nodes.some(x=>x.textContent==='Revoke shared archive'),'archive remains revocable after live closure');
+    assert.ok(nodes.some(x=>x.tag==='input'&&x.attributes['aria-label']==='Support invitation'),'closed status restores invitation input after registration failure');
+    card._status={state:'pending',code:'PAIRING'};card.render();nodes=card.shadowRoot.querySelectorAll();
+    assert.ok(nodes.some(x=>x.textContent?.includes('Pairing code: PAIRING')),'successful preparation displays the code');
+    assert.ok(!nodes.some(x=>x.textContent==='Approve read-only access'),'a code alone never permits approval');
     '''
     subprocess.run(['node', '-e', script, str(path)], check=True)

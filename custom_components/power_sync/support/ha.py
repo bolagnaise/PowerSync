@@ -273,7 +273,14 @@ class SupportRuntime:
         generation = self.session.generation
         self.policy = policy
         self.descriptor = self.code = None
-        reply = await self.request("/support/v1/register", {**scope, "policy_digest": policy["policy_digest"], "contract_digest": CONTRACT_DIGEST, "invitation_token": body.get("invitation_token")})
+        try:
+            reply = await self.request("/support/v1/register", {**scope, "policy_digest": policy["policy_digest"], "contract_digest": CONTRACT_DIGEST, "invitation_token": body.get("invitation_token")})
+        except (Exception, asyncio.CancelledError):
+            # No pairing code or poller exists yet. Return to preparation rather
+            # than leaving an unusable pending session after a rejected/lost reply.
+            if generation == self.session.generation:
+                self.session.close("registration_failed")
+            raise
         self.session.check(active=False)
         if generation != self.session.generation or self.closed:
             raise SupportError("session_replaced")

@@ -323,6 +323,83 @@ async def test_recorder_import_is_bounded_and_excludes_changed_identity(runtime,
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('failure', [p.SupportError('support_service_unavailable'), OSError('offline'), asyncio.CancelledError()])
+async def test_failed_registration_restores_preparation_without_granting_access(runtime, failure):
+    rt, _, _, ns, _ = runtime
+    body = {'action': 'start', 'entry_id': rt.entry.entry_id, 'categories': ['entities', 'system'],
+            'duration': 3600, 'history_seconds': 0, 'invitation_token': 'synthetic'}
+    rt.request = AsyncMock(side_effect=[{'disclosure': 'synthetic', 'policy_digest': 'policy'}, failure])
+    if isinstance(failure, asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError):
+            await rt.start('owner', body)
+    else:
+        view = ns['SupportView'](rt.hass)
+        # The actual HTTP adapter uses both mapping access and a streamed body.
+        class Request(dict):
+            content = SimpleNamespace(read=AsyncMock(side_effect=[json.dumps(body).encode(), b'']))
+        response = await view.post(Request(hass_user=SimpleNamespace(is_admin=True, id='owner')))
+        assert response.status in {409, 503}
+    status = rt.status()
+    assert status['state'] == 'closed', 'failed registration must reveal the invitation form again'
+    assert status['code'] is None and status['invitation'] is None
+    assert rt.session.key is None and rt.session.token is None
+    assert rt.transport_task is None
+    with pytest.raises(p.SupportError, match='invitation_not_claimed'):
+        await rt.confirm('owner', None)
+    rt.hass.services.async_call.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_registration_can_retry_after_failure_and_still_requires_claim_and_consent(runtime):
+    rt, *_ = runtime
+    body = {'categories': ['entities', 'system'], 'duration': 3600, 'history_seconds': 0,
+            'invitation_token': 'synthetic'}
+    policy = {'disclosure': 'synthetic', 'policy_digest': 'policy'}
+    rt.request = AsyncMock(side_effect=[policy, OSError('offline'), policy,
+        {'token': 'transport', 'code': 'PAIRING', 'live_revoke_token': 'delete-live', 'archive_revoke_token': 'delete-archive'}])
+    with pytest.raises(OSError):
+        await rt.start('owner', body)
+    first_id = rt.session.id
+    # Hold the real background transport before any synthetic broker polling.
+    waiting = asyncio.Event()
+    async def poll(generation):
+        await waiting.wait()
+    rt.poll_loop = poll
+    try:
+        await rt.start('owner', body)
+        status = rt.status()
+        assert rt.session.id != first_id
+        assert status['state'] == 'pending' and status['code'] == 'PAIRING'
+        assert status['invitation'] is None
+        with pytest.raises(p.SupportError, match='invitation_not_claimed'):
+            await rt.confirm('owner', None)
+        with pytest.raises(p.SupportError, match='session_inactive'):
+            rt.session.check()
+        assert rt.transport_task is not None
+    finally:
+        await rt.revoke()
+
+
+@pytest.mark.asyncio
+async def test_old_registration_failure_cannot_close_a_replacement_session(runtime):
+    rt, *_ = runtime
+    replacement_id = None
+    async def request(path, body=None, **kwargs):
+        nonlocal replacement_id
+        if path.endswith('/policy'):
+            return {'disclosure': 'synthetic', 'policy_digest': 'policy'}
+        rt.session.begin('other-owner', 'replacement_reference', ['system'], time.time(), 3600)
+        replacement_id = rt.session.id
+        rt.session.token = 'replacement-transport'
+        raise OSError('old request failed')
+    rt.request = request
+    with pytest.raises(OSError):
+        await rt.start('owner', {'categories': ['entities'], 'duration': 3600, 'history_seconds': 0})
+    assert rt.session.id == replacement_id and rt.session.state == 'pending'
+    assert rt.session.token == 'replacement-transport' and rt.session.key is not None
+
+
+@pytest.mark.asyncio
 async def test_simultaneous_starts_on_two_entries_only_register_one(runtime):
     rt,_,_,ns,_=runtime
     other=ns['SupportRuntime'](rt.hass,SimpleNamespace(entry_id='entry-two',data={},options={}))

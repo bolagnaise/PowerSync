@@ -75,6 +75,11 @@ retention remains under HA control.
 
 ## Live results and separately retained archives
 
+If preparing an invitation fails before a pairing code is received, support
+access closes locally and the invitation form becomes available again. No
+diagnostic reads are permitted. An expired or already-used invitation requires
+a fresh invitation from support; do not share invitation tokens publicly.
+
 Live evidence stages for at most 60 seconds. Every page requires a new signed
 five-second HA release. Disconnecting HA prevents new permits; a permit already
 issued remains usable only until its original five-second expiry.
