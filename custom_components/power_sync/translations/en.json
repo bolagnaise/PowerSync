@@ -1323,7 +1323,11 @@
       "invalid_ac_power_members": "Select the local AC power sensors for the inverters at this site, or clear the list for a single inverter.",
       "solar_production_grid_status_required": "Select a sensor that confirms the utility grid is connected before stopping solar.",
       "amber_smartshift_auth": "Amber sign-in failed. Check your email and password. Unsupported sign-in challenges require completing sign-in with Amber.",
-      "amber_smartshift_connection": "Unable to connect the Amber battery. Confirm Smart Shift enrollment, matching Amber pricing site, required meters for automatic operation, and that previous PowerSync overrides have finished cleanup."
+      "amber_smartshift_connection": "Unable to connect the Amber battery. Confirm Smart Shift enrollment, matching Amber pricing site, required meters for automatic operation, and that previous PowerSync overrides have finished cleanup.",
+      "additional_solar_source_required": "Select a registered solar power sensor from another integration. PowerSync totals cannot be used as their own input.",
+      "additional_solar_already_included": "This source is already covered by the primary solar reading or whole-site override. Leave additional solar disabled.",
+      "additional_solar_invalid_load_basis": "Choose a supported Home Load source.",
+      "additional_solar_unsupported_source": "Use whole-site meter inputs with Amber Smart Shift; additive solar accounting needs a local battery coordinator."
     },
     "step": {
       "optimizer_access": {
@@ -1385,6 +1389,7 @@
           "back": "Back to PowerSync settings",
           "network_export": "Network export limits / Flexible Exports",
           "inverter": "AC inverter curtailment",
+          "solar_accounting": "Additional solar accounting",
           "curtailment": "Curtailment settings",
           "demand_charges": "Demand charge tracking",
           "weather": "Weather & solar forecast",
@@ -2822,6 +2827,21 @@
         },
         "data_description": {
           "inverter_brand": "The brand of your AC-coupled solar inverter. PowerSync uses brand-specific protocols for shutdown commands."
+        },
+        "submit": "Save"
+      },
+      "solar_accounting": {
+        "title": "Additional solar accounting",
+        "description": "Include a separate AC-coupled array that your primary Solar reading excludes. These settings affect energy accounting only and do not enable inverter controls. Existing totals are retained; additional generation is counted from activation onward.",
+        "data": {
+          "additional_solar_enabled": "Include additional solar generation",
+          "additional_solar_power_entity": "Additional solar power sensor",
+          "additional_solar_load_basis": "Home Load source"
+        },
+        "data_description": {
+          "additional_solar_enabled": "Enable only when this array is NOT already included in your primary Solar reading, whole-site sensor or AC/CT2 meter. Adds fresh readings to Solar and future energy totals; it does not change inverter controls or reconstruct past generation.",
+          "additional_solar_power_entity": "Select the separate array's registered W or kW power sensor, for example the GoodWe PV power sensor. Use the array output, not a whole-site total. Missing or stale readings make site Solar unavailable while valid grid and battery accounting continues.",
+          "additional_solar_load_basis": "Keep measured Home Load when your meter already measures all household consumption. Choose site power balance only if the primary load is calculated from solar that excludes this array; the grid meter must cover the whole property. EV charging is excluded once."
         },
         "submit": "Save"
       },

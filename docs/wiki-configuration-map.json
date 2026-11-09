@@ -9,18 +9,18 @@
   },
   "source_state": {
     "components": {
-      "config_flow.py": "d6aeab08102c41e0d5c128efa54106176f192746519ace7cabf47b2b4a1a50d0",
-      "const.py": "43e7a43b40cfb74b0c5e311f3a08a4bf0149b14e4be65c5c4b1d752bfc97b8ba",
+      "config_flow.py": "0b9ef70cccde7773aea2b525340c7438cac221d7c6f6622276a3ac29d231fd49",
+      "const.py": "9f664376370ba765182d062955214700c2abeed55fcec98b7f3586895765fcd1",
       "battery_backend/profiles.py": "d308ecc78740d8dfc9cd895e4b9750a02859d46e5f0863dd5c098b8aaab2bcc2",
       "battery_backend/discovery.py": "3a8c88c00d6c57f6101d55056968524d7971d1ac3b8e16365923bca978f9489b",
       "settings_metadata.py": "deea4c452dd3cd334d5e1b9348e0ead03891542128c4061c368ad6e1c012ffd9",
-      "strings.json": "483eb1be00bfc7769db5b53d90d4dbd4d1ae0cbdfdcf923278f7633279adff68",
-      "translations/en.json": "ef35db2899dd2b66f8890c8a192075f3a12d36745a23da42cce6547be78a337b",
+      "strings.json": "0298f002cf975c8b9ea549e54ffc601bc0524b73083c86725bf2a1adafe28a47",
+      "translations/en.json": "117d8aa30b2770f4514c059abc150c67641ea32bf74791f73c7c73e5e3b7a50a",
       "services.yaml": "094cb66a11a4c1fdfcb800a7e6c4a6e1b4cd278b6d6ea15749e72ce9d33b7c8a",
       "switch.py": "47862ce86c00f58c880b4450bbcd1fa1ef81aa195ff736fa64e67e5ca8475c48",
       "select.py": "8d5d7dbd06e0919d3ba84b52660f342dde1583bf9d8d57c2bb5bcbd2ca655d99",
       "number.py": "738171cc9d2c8f71f84a38402a737eaf9ca2a1b56de1cb0c0eb18886ceb9b595",
-      "sensor.py": "1b012c72866b7b91c4584d61302e4845f3c58f805793f56c73e7bd7a3e7df75a",
+      "sensor.py": "7e5f6309daba1aa78333304c5c61dacdd72410f217b55a77ec3733694544e173",
       "binary_sensor.py": "cad335bcce4d56edb1121bc08a6bbe34d55cad991ce31a34547d150ec4898704",
       "button.py": "69368d0dc0f8a1a9e336fed0da117103676670003db81d3360fc24bc0e6123b0",
       "automations/actions.py": "181fa92d19dce7cf776a7c1ccabffd0289ad8952d360cf772713908fccc7a296",
@@ -151,6 +151,7 @@
       "PowerSyncOptionsFlow.async_step_provider_portal",
       "PowerSyncOptionsFlow.async_step_saj_h2_connection",
       "PowerSyncOptionsFlow.async_step_sigenergy_connection",
+      "PowerSyncOptionsFlow.async_step_solar_accounting",
       "PowerSyncOptionsFlow.async_step_solaredge_connection",
       "PowerSyncOptionsFlow.async_step_solax_battery_options",
       "PowerSyncOptionsFlow.async_step_sungrow_connection",
@@ -976,6 +977,9 @@
       "options.sigenergy_connection.sigenergy_password": "Password",
       "options.sigenergy_connection.sigenergy_station_id": "Station ID",
       "options.sigenergy_connection.sigenergy_username": "Email address",
+      "options.solar_accounting.additional_solar_enabled": "Include additional solar generation",
+      "options.solar_accounting.additional_solar_load_basis": "Home Load source",
+      "options.solar_accounting.additional_solar_power_entity": "Additional solar power sensor",
       "options.solax_battery_options.solax_battery_capacity_kwh": "Battery capacity",
       "options.solax_battery_options.solax_battery_nominal_v": "Battery nominal voltage",
       "options.solax_battery_options.solax_config_entry_id": "Solax integration",
@@ -1928,6 +1932,13 @@
       "owner": "PowerSyncOptionsFlow.async_step_amber_smartshift",
       "pages": [
         "Amber-Smart-Shift"
+      ],
+      "disposition": "document_current_route"
+    },
+    {
+      "owner": "PowerSyncOptionsFlow.async_step_solar_accounting",
+      "pages": [
+        "Additional-Solar-Accounting"
       ],
       "disposition": "document_current_route"
     }
@@ -8732,6 +8743,36 @@
       "source_line": 13305,
       "group": "dispatch_behaviour",
       "rendering": "Tesla Powerwall only; also available with native optimization mode"
+    },
+    {
+      "scope": "options",
+      "form": "solar_accounting",
+      "field": "additional_solar_enabled",
+      "label": "Include additional solar generation",
+      "page": "Additional-Solar-Accounting.md",
+      "source_line": 13624,
+      "group": null,
+      "rendering": "optional opt-in; see page coverage and source identity notes"
+    },
+    {
+      "scope": "options",
+      "form": "solar_accounting",
+      "field": "additional_solar_power_entity",
+      "label": "Additional solar power sensor",
+      "page": "Additional-Solar-Accounting.md",
+      "source_line": 13624,
+      "group": null,
+      "rendering": "optional opt-in; see page coverage and source identity notes"
+    },
+    {
+      "scope": "options",
+      "form": "solar_accounting",
+      "field": "additional_solar_load_basis",
+      "label": "Home Load source",
+      "page": "Additional-Solar-Accounting.md",
+      "source_line": 13624,
+      "group": null,
+      "rendering": "optional opt-in; see page coverage and source identity notes"
     }
   ],
   "profiles": [
@@ -9133,6 +9174,11 @@
       "menu": "init",
       "entry": "amber_smartshift",
       "label": "Amber Smart Shift connection and control owner"
+    },
+    {
+      "menu": "advanced",
+      "entry": "solar_accounting",
+      "label": "Additional solar accounting"
     }
   ],
   "compatibility_anchors": {
@@ -12848,6 +12894,18 @@
     },
     "options.optimization.tesla_force_discharge_sell_price": {
       "page": "Optimization-Settings",
+      "status": "documented"
+    },
+    "options.solar_accounting.additional_solar_enabled": {
+      "page": "Additional-Solar-Accounting",
+      "status": "documented"
+    },
+    "options.solar_accounting.additional_solar_load_basis": {
+      "page": "Additional-Solar-Accounting",
+      "status": "documented"
+    },
+    "options.solar_accounting.additional_solar_power_entity": {
+      "page": "Additional-Solar-Accounting",
       "status": "documented"
     }
   }

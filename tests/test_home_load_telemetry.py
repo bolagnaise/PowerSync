@@ -911,6 +911,42 @@ def test_teslemetry_sse_snapshot_maps_directly_and_skips_repeat_rest_poll():
     assert len(coordinator._energy_acc.updates) == 1
 
 
+def test_teslemetry_additional_pv_refreshes_without_readding_old_total():
+    """A new supplemental observation can arrive between primary SSE events."""
+    coordinator = _new_stream_tesla_coordinator()
+    coordinator._additional_solar_enabled = True
+    coordinator._local_powerwall_energy_data = lambda: None
+    extra = [3.0]
+    observations = []
+
+    def prepare(accumulator, solar, grid, battery, load, **metadata):
+        observations.append(metadata)
+        return solar + extra[0], load
+
+    coordinator._energy_acc._site_solar_policy = types.SimpleNamespace(prepare=prepare)
+    coordinator._energy_acc.publish_site_solar = lambda data: data
+    coordinator._get_current_token = lambda: (_ for _ in ()).throw(AssertionError("REST read"))
+
+    async def refresh():
+        pass
+
+    coordinator.async_request_refresh = refresh
+    event = {"createdAt": "2026-07-08T00:59:30.000Z", "site_id": "12345",
+             "live_status": {"solar_power": 2400, "grid_power": -300,
+                             "battery_power": 1100, "load_power": 900,
+                             "percentage_charged": 82.5, "grid_status": "Active"}}
+    asyncio.run(coordinator._async_handle_teslemetry_stream_event(event))
+    first = asyncio.run(coordinator._async_update_data())
+    coordinator.data = first
+    assert first["solar_power"] == pytest.approx(5.4)
+    extra[0] = 4.0
+    second = asyncio.run(coordinator._async_update_data())
+    assert second["solar_power"] == pytest.approx(6.4)
+    assert len(observations) == 2
+    assert observations[-1]["primary_source"] == "tesla_cloud"
+    assert observations[-1]["primary_observed_at"] == datetime(2026, 7, 8, 0, 59, 30, tzinfo=timezone.utc)
+
+
 def test_tesla_coordinator_ignores_non_terminal_grid_status_transitions():
     unknown_statuses = (
         "SystemIslandedReady",

@@ -21904,6 +21904,10 @@ class EVLoadpointStatusView(HomeAssistantView):
             "sigenergy_coordinator",
             "sungrow_coordinator",
             "foxess_coordinator",
+            "goodwe_coordinator", "alphaess_coordinator", "esy_sunhome_coordinator",
+            "solax_coordinator", "saj_h2_coordinator", "fronius_reserva_coordinator",
+            "neovolt_coordinator", "solaredge_coordinator", "anker_solix_coordinator",
+            "custom_energy_coordinator",
         ):
             coordinator = entry_data.get(key)
             if coordinator and isinstance(coordinator.data, dict):
@@ -25701,6 +25705,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "Powerwall local coordinator early warmup skipped before Tesla refresh: %s",
                 _err,
             )
+
+    # Additional generation is an explicit accounting declaration. Read HA
+    # telemetry only: never construct a controller or enable a control route.
+    if entry.options.get("additional_solar_enabled", entry.data.get("additional_solar_enabled", False)):
+        from .site_solar import SiteSolarPolicy
+        solar_policy = SiteSolarPolicy(hass, entry, battery_system=active_battery_system)
+        for solar_coordinator in (
+            tesla_coordinator, sigenergy_coordinator, sungrow_coordinator,
+            foxess_coordinator, goodwe_coordinator, alphaess_coordinator,
+            esy_sunhome_coordinator, solax_coordinator, saj_h2_coordinator,
+            fronius_reserva_coordinator, neovolt_coordinator,
+            solaredge_coordinator, anker_solix_coordinator, custom_energy_coordinator,
+        ):
+            # A dual Sungrow site adds the component on its grid-facing primary
+            # only; the secondary remains its own measured source.
+            primary = getattr(solar_coordinator, "_coord1", solar_coordinator)
+            accumulator = getattr(primary, "_energy_acc", None)
+            if accumulator is not None:
+                primary._additional_solar_enabled = True
+                accumulator._site_solar_policy = solar_policy
+                accumulator._site_solar_coordinator = primary
 
     # Fetch initial data
     if amber_smartshift_coordinator:
@@ -52736,6 +52761,23 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.debug("Error shutting down powerwall_local coordinator: %s", e)
         pw_local["coordinator"] = None
         _LOGGER.debug("Stopped Powerwall local (TEDAPI) coordinator")
+
+    # Checkpoint active/mixed solar segments while their controllers and child
+    # coordinators still belong to this runtime. Other installs retain the
+    # existing shutdown path without loading the accounting extension.
+    solar_checkpoint_needed = False
+    for solar_candidate in entry_data.values():
+        solar_primary = getattr(solar_candidate, "_coord1", solar_candidate)
+        solar_accumulator = getattr(solar_primary, "_energy_acc", None)
+        if (
+            getattr(solar_primary, "_additional_solar_enabled", False) is True
+            or getattr(solar_accumulator, "_solar_segment_seen", False) is True
+        ):
+            solar_checkpoint_needed = True
+            break
+    if solar_checkpoint_needed:
+        from .site_solar import checkpoint_solar
+        await checkpoint_solar(hass, entry)
 
     # Flush energy accumulator so the next restore has the latest values
     # (prevents total_increasing sensors from going backwards after reload)

@@ -38,7 +38,10 @@ def coordinator_data_to_ev_live_status(data: dict[str, Any]) -> dict[str, Any]:
     return {
         "battery_soc": data.get("battery_level", 0),
         "grid_power": _kw_to_w(data.get("grid_power", 0)),
-        "solar_power": _kw_to_w(data.get("solar_power", 0)),
+        "solar_power": (
+            None if data.get("solar_power_valid") is False
+            else _kw_to_w(data.get("solar_power", 0))
+        ),
         "battery_power": _kw_to_w(data.get("battery_power", 0)),
         # Home Load deliberately becomes unavailable when an active EV power
         # observation is stale.  Preserve that absence: zero is a real

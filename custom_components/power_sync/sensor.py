@@ -3290,7 +3290,13 @@ class TeslaEnergySensor(PowerSyncCurrencyMixin, CoordinatorEntity, RestoredNumer
         the last successful snapshot. Without this guard, sensors would
         cling to that stale value indefinitely.
         """
-        if self.entity_description.key in _LOCAL_OVERRIDABLE:
+        solar_entry = getattr(self, "_entry", None)
+        additional_solar = getattr(solar_entry, "options", {}).get(
+            "additional_solar_enabled", getattr(solar_entry, "data", {}).get("additional_solar_enabled", False))
+        if self.entity_description.key in _LOCAL_OVERRIDABLE and not (
+            additional_solar and self.entity_description.key in (
+                SENSOR_TYPE_SOLAR_POWER, SENSOR_TYPE_HOME_LOAD)
+        ):
             local_coord = self._local_coordinator()
             if local_coord is not None and _local_data_is_fresh(local_coord):
                 ev_snapshot = self._observed_ev_snapshot()
@@ -3309,7 +3315,13 @@ class TeslaEnergySensor(PowerSyncCurrencyMixin, CoordinatorEntity, RestoredNumer
             value = self.entity_description.value_fn(energy_data)
             if (
                 self.entity_description.key == SENSOR_TYPE_SOLAR_POWER
+                and (energy_data or {}).get("solar_power_valid") is False
+            ):
+                return None
+            if (
+                self.entity_description.key == SENSOR_TYPE_SOLAR_POWER
                 and value is not None
+                and not additional_solar
                 and (
                     not energy_data
                     or "ac_inverter_solar_power" not in energy_data
@@ -3361,6 +3373,18 @@ class TeslaEnergySensor(PowerSyncCurrencyMixin, CoordinatorEntity, RestoredNumer
             attrs = {}
         if self.entity_description.key == SENSOR_TYPE_SOLAR_POWER:
             coordinator_data = energy_data
+            if "additional_solar_power" in coordinator_data:
+                attrs.update({
+                    "primary_solar_power_kw": coordinator_data.get("primary_solar_power"),
+                    "additional_solar_power_kw": coordinator_data.get("additional_solar_power"),
+                    "total_solar_power_kw": coordinator_data.get("solar_power"),
+                    "solar_power_valid": coordinator_data.get("solar_power_valid"),
+                    "solar_accounting_reason": coordinator_data.get("solar_accounting_reason"),
+                    "solar_source_entity": coordinator_data.get("solar_source_entity"),
+                    "solar_observed_at": coordinator_data.get("solar_observed_at"),
+                    "solar_accounting_coverage": (coordinator_data.get("energy_summary") or {}).get("solar_accounting_coverage"),
+                })
+                return attrs
             has_coordinator_breakdown = (
                 "ac_inverter_solar_power" in coordinator_data
             )

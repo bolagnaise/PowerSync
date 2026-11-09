@@ -440,6 +440,14 @@ class EnergyAccumulator:
         self._last_update: datetime | None = None
         self._last_date: Any = None
         self.solar_kwh: float = 0.0
+        self._solar_segment: str | None = None
+        self._solar_interval_valid = True
+        self._solar_segment_seen = False
+        self._solar_partial_today = False
+        self._solar_partial_mtd = False
+        self._solar_valid_until: float | None = None
+        self._solar_cutover_pending = False
+        self._solar_load_interval_valid = True
         self.grid_import_kwh: float = 0.0
         self.grid_export_kwh: float = 0.0
         self.battery_charge_kwh: float = 0.0
@@ -511,6 +519,12 @@ class EnergyAccumulator:
             stored_schema = 0
         if stored_date == today:
             self.solar_kwh = float(data.get("solar_kwh", 0.0))
+            self._solar_segment = data.get("solar_segment")
+            self._solar_segment_seen = bool(data.get("solar_segment_seen", False))
+            self._solar_partial_today = bool(data.get("solar_partial_today", False))
+        if data.get("month") == now.strftime("%Y-%m"):
+            self._solar_partial_mtd = bool(data.get("solar_partial_mtd", False))
+        if stored_date == today:
             self.grid_import_kwh = float(data.get("grid_import_kwh", 0.0))
             self.grid_export_kwh = float(data.get("grid_export_kwh", 0.0))
             self.battery_charge_kwh = float(data.get("battery_charge_kwh", 0.0))
@@ -577,7 +591,7 @@ class EnergyAccumulator:
             )
             _LOGGER.info(
                 "Restored energy accumulator: solar=%.2f grid_in=%.2f grid_out=%.2f "
-                "charge=%.2f discharge=%.2f load=%.2f kWh, cost=$%.2f earn=$%.2f (date=%s)",
+                "charge=%.2f discharge=%.2f load=%s kWh, cost=$%.2f earn=$%.2f (date=%s)",
                 self.solar_kwh, self.grid_import_kwh, self.grid_export_kwh,
                 self.battery_charge_kwh, self.battery_discharge_kwh, self.load_kwh,
                 self.import_cost_today, self.export_earnings_today,
@@ -768,6 +782,10 @@ class EnergyAccumulator:
                 if self._daily_cost_tracker is not None else self._daily_cost_state
             ),
             "solar_kwh": round(self.solar_kwh, 4),
+            "solar_segment": self._solar_segment,
+            "solar_segment_seen": self._solar_segment_seen,
+            "solar_partial_today": self._solar_partial_today,
+            "solar_partial_mtd": self._solar_partial_mtd,
             "grid_import_kwh": round(self.grid_import_kwh, 4),
             "grid_export_kwh": round(self.grid_export_kwh, 4),
             "battery_charge_kwh": round(self.battery_charge_kwh, 4),
@@ -845,6 +863,23 @@ class EnergyAccumulator:
             sell_price_per_kwh: current export/feed-in price in $/kWh (None = skip cost tracking)
         """
         now = dt_util.now()  # Local time for midnight reset
+        solar_sample = getattr(self, "_site_solar_sample", None)
+        solar_segment = solar_sample.segment if solar_sample is not None else None
+        solar_valid = solar_sample.valid if solar_sample is not None else True
+        if solar_sample is not None:
+            solar_valid = solar_valid and solar_sample.valid_until is not None and now.timestamp() <= solar_sample.valid_until
+        solar_valid = solar_valid and not self._solar_cutover_pending
+        solar_changed = solar_segment != self._solar_segment
+        solar_interval_valid = (
+            solar_valid and self._solar_interval_valid and not solar_changed
+            and (solar_sample is None or (
+                self._solar_valid_until is not None and now.timestamp() <= self._solar_valid_until))
+        )
+        incoming_load_valid = load_kw is not None
+        if solar_sample is not None and solar_sample.load_is_derived and (
+            not solar_interval_valid or not self._solar_load_interval_valid
+        ):
+            load_kw = None
         if self._hass is not None and self._entry_id:
             from .daily_cost import configure_tracker
             self._daily_cost_tracker = configure_tracker(
@@ -866,6 +901,7 @@ class EnergyAccumulator:
         current_month = now.strftime("%Y-%m")
         if self._last_month is not None and current_month != self._last_month:
             self.mtd_solar_kwh = 0.0
+            self._solar_partial_mtd = False
             self.mtd_grid_import_kwh = 0.0
             self.mtd_grid_export_kwh = 0.0
             self.mtd_battery_charge_kwh = 0.0
@@ -889,12 +925,14 @@ class EnergyAccumulator:
         if self._last_date is not None and now.date() != self._last_date:
             _LOGGER.info(
                 "Energy accumulator midnight reset: solar=%.2f grid_in=%.2f grid_out=%.2f "
-                "charge=%.2f discharge=%.2f load=%.2f kWh, cost=$%.2f earn=$%.2f",
+                "charge=%.2f discharge=%.2f load=%s kWh, cost=$%.2f earn=$%.2f",
                 self.solar_kwh, self.grid_import_kwh, self.grid_export_kwh,
                 self.battery_charge_kwh, self.battery_discharge_kwh, self.load_kwh,
                 self.import_cost_today, self.export_earnings_today,
             )
             self.solar_kwh = 0.0
+            self._solar_partial_today = False
+            self._solar_segment_seen = solar_sample is not None
             self.grid_import_kwh = 0.0
             self.grid_export_kwh = 0.0
             self.battery_charge_kwh = 0.0
@@ -924,7 +962,19 @@ class EnergyAccumulator:
             self._hardware_daily_export_coverage_partial = False
             self._load_accounting_partial_today = False
 
-        # Integrate power × time
+        if solar_changed:
+            self._solar_partial_today = True
+            self._solar_partial_mtd = True
+            self._solar_segment_seen = True
+        if solar_sample is not None and (
+            self._last_update is None
+            or (now.timestamp() - self._last_update.timestamp()) >= 360
+        ):
+            self._solar_partial_today = True
+            self._solar_partial_mtd = True
+        # Integrate power × time. Solar has its own continuity gate: an invalid
+        # AC observation must not discard valid grid, battery or billing data,
+        # nor be backfilled by the first valid sample after recovery.
         if self._last_update is not None:
             delta_h = (now.timestamp() - self._last_update.timestamp()) / 3600
             if 0 < delta_h < 0.1:  # Sanity: skip if > 6 min gap (stale/restart)
@@ -933,7 +983,11 @@ class EnergyAccumulator:
                 # A crossing sample belongs only to the current local day.
                 delta_h = min(delta_h, (now.timestamp() - now.replace(
                     hour=0, minute=0, second=0, microsecond=0).timestamp()) / 3600)
-                self.solar_kwh += max(0, solar_kw) * delta_h
+                if solar_interval_valid:
+                    self.solar_kwh += max(0, solar_kw) * delta_h
+                else:
+                    self._solar_partial_today = True
+                    self._solar_partial_mtd = True
                 self.grid_import_kwh += max(0, grid_kw) * delta_h
                 self.grid_export_kwh += max(0, -grid_kw) * delta_h
                 self.battery_charge_kwh += max(0, -battery_kw) * delta_h
@@ -950,7 +1004,8 @@ class EnergyAccumulator:
                     self.export_earnings_today += export_kwh * sell_price_per_kwh
                     self.export_earnings_covered_kwh += export_kwh
                 # MTD accumulation
-                self.mtd_solar_kwh += max(0, solar_kw) * mtd_delta_h
+                if solar_interval_valid:
+                    self.mtd_solar_kwh += max(0, solar_kw) * mtd_delta_h
                 self.mtd_grid_import_kwh += max(0, grid_kw) * mtd_delta_h
                 self.mtd_grid_export_kwh += max(0, -grid_kw) * mtd_delta_h
                 self.mtd_battery_charge_kwh += max(0, -battery_kw) * mtd_delta_h
@@ -986,6 +1041,10 @@ class EnergyAccumulator:
                 import_kw=grid_kw,
             )
         self._last_update = now
+        self._solar_segment = solar_segment
+        self._solar_interval_valid = solar_valid
+        self._solar_valid_until = solar_sample.valid_until if solar_sample is not None and solar_valid else None
+        self._solar_load_interval_valid = incoming_load_valid
         self._last_date = now.date()
         self._last_month = current_month
 
@@ -1087,10 +1146,45 @@ class EnergyAccumulator:
             "mtd_load_kwh": round(self.mtd_load_kwh, 3),
             "avg_cost_per_kwh_mtd": avg_mtd,
         }
+        if self._solar_segment_seen:
+            summary["solar_accounting_coverage"] = (
+                "partial" if self._solar_partial_today else "complete"
+            )
+            summary["solar_accounting_coverage_mtd"] = (
+                "partial" if self._solar_partial_mtd else "complete"
+            )
         return (
             self._daily_cost_tracker.summary(summary)
             if self._daily_cost_tracker is not None else summary
         )
+
+    def invalidate_site_solar(self, data: dict[str, Any] | None) -> dict[str, Any]:
+        """Do not reuse a composed snapshot after a failed primary read."""
+        self._solar_interval_valid = False
+        result = dict(data or {})
+        result.update(solar_power=None, solar_power_valid=False,
+                      telemetry_ready=False, solar_accounting_reason="primary_unavailable")
+        sample = getattr(self, "_site_solar_sample", None)
+        if sample is not None and sample.load_is_derived:
+            result.update(load_power=None, raw_home_load_power=None, site_load_power=None)
+        return result
+
+    def publish_site_solar(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Publish the resolved power and keep primary-only counters out of it."""
+        policy = getattr(self, "_site_solar_policy", None)
+        if policy is not None:
+            return policy.publish(self, data)
+        if self._solar_segment_seen:
+            data = dict(data)
+            if self._solar_cutover_pending:
+                data.update(solar_power=None, solar_power_valid=False,
+                            solar_accounting_reason="configuration_changed")
+            data["energy_summary"] = {
+                **(data.get("energy_summary") or {}),
+                "pv_today_kwh": self.as_dict()["pv_today_kwh"],
+                "solar_accounting_coverage": "partial",
+            }
+        return data
 
     def reconcile_hardware_daily_coverage(
         self,
@@ -2907,7 +3001,8 @@ def _update_energy_accumulator_with_ev_load(
         solar_kw,
         grid_kw,
         battery_kw,
-        max(0.0, raw_load_kw - ev_power_kw) if complete else None,
+        max(0.0, raw_load_kw - ev_power_kw)
+        if complete and raw_load_kw is not None else None,
         buy,
         sell,
     )
@@ -3256,6 +3351,14 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         grid_kw = _kw(getattr(snap, "grid_w", None))
         battery_kw = _kw(getattr(snap, "battery_w", None))
         raw_load_kw = _kw(getattr(snap, "load_w", None))
+        if getattr(self, "_additional_solar_enabled", False) is True:
+            solar_kw, raw_load_kw = self._energy_acc._site_solar_policy.prepare(
+                self._energy_acc, solar_kw, grid_kw, battery_kw, raw_load_kw,
+                already_included=False,
+                primary_source="tesla_local",
+                primary_observed_at=dt_util.utcnow() - timedelta(seconds=age),
+                primary_valid=True,
+            )
 
         # The raw gateway load (snap.load_w) includes EV charging power (eg a
         # Tesla Wall Connector), same as Tesla cloud's live_status.load_power
@@ -3282,11 +3385,11 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
                 ev_load_complete = False
         load_kw = (
             max(0.0, raw_load_kw - ev_power_kw)
-            if ev_load_complete
+            if ev_load_complete and raw_load_kw is not None
             else None
         )
 
-        if load_kw is not None:
+        if load_kw is not None or getattr(self, "_additional_solar_enabled", False) is True:
             buy, sell = _get_current_prices(self.hass, self._entry_id)
             self._energy_acc.update(
                 max(0, solar_kw), grid_kw, battery_kw, load_kw, buy, sell
@@ -3333,7 +3436,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         if energy_left_kwh is not None and load_kw and load_kw > 0.05:
             backup_hours = round(min(999.0, energy_left_kwh / load_kw), 1)
 
-        return {
+        site_solar_data = {
             "solar_power": solar_kw,
             "grid_power": grid_kw,
             "battery_power": battery_kw,
@@ -3363,6 +3466,9 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
             "lifetime_totals": self._lifetime_totals,
             "data_source": "powerwall_local",
         }
+        if getattr(self, "_additional_solar_enabled", False) is True or getattr(self._energy_acc, "_solar_segment_seen", False) is True:
+            return self._energy_acc.publish_site_solar(site_solar_data)
+        return site_solar_data
 
     def _get_current_token(self) -> str | None:
         """Get the current API token, fetching fresh if token_getter is available.
@@ -3465,6 +3571,13 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         if not self._lifetime_totals_restored:
             await self.async_restore_lifetime_totals()
 
+        if getattr(self, "_additional_solar_enabled", False) is True:
+            # Use the same local-first primary selection for canonical Solar,
+            # Home Load and their accounting rather than a later sensor sum.
+            local_energy_data = self._local_powerwall_energy_data()
+            if local_energy_data is not None:
+                return local_energy_data
+
         stream_snapshot = self._fresh_teslemetry_stream_snapshot()
         stream_generation: int | None = None
         stream_created_at: datetime | None = None
@@ -3478,10 +3591,13 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
                     0,
                 )
                 and getattr(self, "data", None)
+                and getattr(self, "_additional_solar_enabled", False) is not True
             ):
                 # The 15-second coordinator timer remains the failover health
                 # check, but a healthy stream must not produce another REST
                 # request or integrate the same power sample twice.
+                if getattr(self, "_additional_solar_enabled", False) is True:
+                    return self._energy_acc.invalidate_site_solar(self.data)
                 return self.data
             current_token = None
             headers = None
@@ -3684,9 +3800,17 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
             grid_kw = live_status.get("grid_power", 0) / 1000
             battery_kw = battery_power_w / 1000
             raw_load_kw = live_status.get("load_power", 0) / 1000
+            if getattr(self, "_additional_solar_enabled", False) is True:
+                solar_kw, raw_load_kw = self._energy_acc._site_solar_policy.prepare(
+                    self._energy_acc, solar_kw, grid_kw, battery_kw, raw_load_kw,
+                    already_included=False,
+                    primary_source="tesla_cloud",
+                    primary_observed_at=stream_created_at or sample_observed_at,
+                    primary_valid=_finite_float(live_status.get("solar_power")) is not None,
+                )
             load_kw = (
                 max(0.0, raw_load_kw - ev_power_kw)
-                if ev_load_complete
+                if ev_load_complete and raw_load_kw is not None
                 else None
             )
 
@@ -3705,7 +3829,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
 
             # Accumulate daily energy from power readings (with cost tracking)
             buy, sell = _get_current_prices(self.hass, self._entry_id)
-            if load_kw is not None:
+            if load_kw is not None or getattr(self, "_additional_solar_enabled", False) is True:
                 self._energy_acc.update(
                     max(0, solar_kw), grid_kw, battery_kw, load_kw, buy, sell
                 )
@@ -3841,7 +3965,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
                 "home_load_normalization_quality": (
                     "complete" if ev_load_complete else "incomplete"
                 ),
-                "site_load_power": max(0.0, raw_load_kw),
+                "site_load_power": max(0.0, raw_load_kw) if raw_load_kw is not None else None,
                 "battery_level": soc_pct,
                 "grid_status": grid_status,
                 "ev_power": ev_power_kw,
@@ -3914,6 +4038,8 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
                     stream_generation,
                 )
 
+            if getattr(self, "_additional_solar_enabled", False) is True or getattr(self._energy_acc, "_solar_segment_seen", False) is True:
+                return self._energy_acc.publish_site_solar(energy_data)
             return energy_data
 
         except ConfigEntryAuthFailed:
@@ -5890,6 +6016,8 @@ class SigenergyEnergyCoordinator(DataUpdateCoordinator):
                     _LOGGER.warning(
                         "Sigenergy Modbus returned no battery data — keeping previous readings"
                     )
+                    if getattr(self, "_additional_solar_enabled", False) is True:
+                        return self._energy_acc.invalidate_site_solar(self.data)
                     return self.data
                 raise UpdateFailed("Sigenergy Modbus connection failed — no data available")
 
@@ -5933,6 +6061,12 @@ class SigenergyEnergyCoordinator(DataUpdateCoordinator):
             # by the HA sensors. The legacy EVDC/Tesla values remain a startup
             # fallback until the provider-neutral snapshot has polled.
             raw_load_kw = solar_kw + grid_kw + battery_kw
+            if getattr(self, "_additional_solar_enabled", False) is True:
+                solar_kw, raw_load_kw = self._energy_acc._site_solar_policy.prepare(
+                    self._energy_acc, solar_kw, grid_kw, battery_kw, raw_load_kw,
+                    already_included=False, load_basis="balance",
+                    primary_valid=_finite_float(attrs.get("pv_power_kw")) is not None,
+                )
             fallback_ev_power_kw = (
                 evdc_power_kw + max(0.0, external_ev_power_kw)
             )
@@ -5943,13 +6077,13 @@ class SigenergyEnergyCoordinator(DataUpdateCoordinator):
             )
             load_kw = (
                 max(0.0, raw_load_kw - observed_ev_power_kw)
-                if ev_load_complete
+                if ev_load_complete and raw_load_kw is not None
                 else None
             )
 
             # Accumulate daily energy from power readings (with cost tracking)
             buy, sell = _get_current_prices(self.hass, self._entry_id)
-            if load_kw is not None:
+            if load_kw is not None or getattr(self, "_additional_solar_enabled", False) is True:
                 self._energy_acc.update(
                     max(0, solar_kw), grid_kw, battery_kw, load_kw, buy, sell
                 )
@@ -5988,7 +6122,7 @@ class SigenergyEnergyCoordinator(DataUpdateCoordinator):
                 "home_load_normalization_quality": (
                     "complete" if ev_load_complete else "incomplete"
                 ),
-                "site_load_power": max(0.0, raw_load_kw),
+                "site_load_power": max(0.0, raw_load_kw) if raw_load_kw is not None else None,
                 "ev_power": observed_ev_power_kw,
                 "ev_power_kw": observed_ev_power_kw,
                 "ev_charger_type": evdc_state.charger_type if evdc_state else None,
@@ -6023,7 +6157,7 @@ class SigenergyEnergyCoordinator(DataUpdateCoordinator):
             }
 
             _LOGGER.debug(
-                "Sigenergy data: solar=%.2f kW (dc=%.2f, ac=%.2f), grid=%.2f kW, battery=%.2f kW (%.0f%%), evdc=%.2f kW, load=%.2f kW, curtailed=%s",
+                "Sigenergy data: solar=%.2f kW (dc=%.2f, ac=%.2f), grid=%.2f kW, battery=%.2f kW (%.0f%%), evdc=%.2f kW, load=%s kW, curtailed=%s",
                 energy_data["solar_power"],
                 dc_solar_kw,
                 ac_solar_kw,
@@ -6035,6 +6169,8 @@ class SigenergyEnergyCoordinator(DataUpdateCoordinator):
                 energy_data["is_curtailed"],
             )
 
+            if getattr(self, "_additional_solar_enabled", False) is True or getattr(self._energy_acc, "_solar_segment_seen", False) is True:
+                return self._energy_acc.publish_site_solar(energy_data)
             return energy_data
 
         except Exception as err:
@@ -6201,6 +6337,8 @@ class AlphaESSEnergyCoordinator(DataUpdateCoordinator):
                     raise UpdateFailed("AlphaESS cloud returned no battery data")
             except Exception as cloud_err:
                 if self.data:
+                    if getattr(self, "_additional_solar_enabled", False) is True:
+                        return self._energy_acc.invalidate_site_solar(self.data)
                     return self.data
                 raise UpdateFailed(
                     f"AlphaESS cloud telemetry failed: {cloud_err}"
@@ -6234,6 +6372,8 @@ class AlphaESSEnergyCoordinator(DataUpdateCoordinator):
                     except Exception as cloud_err:
                         _LOGGER.error("AlphaESS cloud fallback also failed: %s", cloud_err)
                         if self.data:
+                            if getattr(self, "_additional_solar_enabled", False) is True:
+                                return self._energy_acc.invalidate_site_solar(self.data)
                             return self.data
                         raise UpdateFailed(
                             f"AlphaESS Modbus and cloud both failed: "
@@ -6241,6 +6381,8 @@ class AlphaESSEnergyCoordinator(DataUpdateCoordinator):
                         ) from modbus_err
                 else:
                     if self.data:
+                        if getattr(self, "_additional_solar_enabled", False) is True:
+                            return self._energy_acc.invalidate_site_solar(self.data)
                         return self.data
                     raise UpdateFailed(
                         f"AlphaESS Modbus failed: {modbus_err}"
@@ -6253,6 +6395,12 @@ class AlphaESSEnergyCoordinator(DataUpdateCoordinator):
 
         # Load from balance: solar + grid + battery (with sign conventions above)
         load_kw = solar_kw + grid_kw + battery_kw
+        if getattr(self, "_additional_solar_enabled", False) is True:
+            solar_kw, load_kw = self._energy_acc._site_solar_policy.prepare(
+                self._energy_acc, solar_kw, grid_kw, battery_kw, load_kw,
+                already_included=False, load_basis="balance",
+                primary_valid=_finite_float(attrs.get("pv_power_kw")) is not None,
+            )
 
         buy, sell = _get_current_prices(self.hass, self._entry_id)
         _update_energy_accumulator_with_ev_load(
@@ -6298,7 +6446,7 @@ class AlphaESSEnergyCoordinator(DataUpdateCoordinator):
 
         _LOGGER.debug(
             "AlphaESS (%s): solar=%.2f kW, grid=%.2f kW, battery=%.2f kW (%.1f%%), "
-            "load=%.2f kW, curtailed=%s",
+            "load=%s kW, curtailed=%s",
             source,
             energy_data["solar_power"],
             energy_data["grid_power"],
@@ -6307,6 +6455,8 @@ class AlphaESSEnergyCoordinator(DataUpdateCoordinator):
             energy_data["load_power"],
             energy_data["is_curtailed"],
         )
+        if getattr(self, "_additional_solar_enabled", False) is True or getattr(self._energy_acc, "_solar_segment_seen", False) is True:
+            return self._energy_acc.publish_site_solar(energy_data)
         return energy_data
 
     async def set_backup_mode(self) -> bool:
@@ -7011,6 +7161,8 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
                     )
                     stale_data = dict(self.data)
                     stale_data["telemetry_ready"] = False
+                    if getattr(self, "_additional_solar_enabled", False) is True:
+                        return self._energy_acc.invalidate_site_solar(stale_data)
                     return stale_data
                 raise UpdateFailed("Sungrow Modbus connection failed — no data available")
 
@@ -7043,6 +7195,8 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
                                 )
                                 stale_data = dict(self.data)
                                 stale_data["telemetry_ready"] = False
+                                if getattr(self, "_additional_solar_enabled", False) is True:
+                                    return self._energy_acc.invalidate_site_solar(stale_data)
                                 return stale_data
                             raise UpdateFailed(
                                 "Sungrow Modbus connection failed after export-control "
@@ -7141,6 +7295,12 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
                 if combined_load_kw > load_kw:
                     load_kw = combined_load_kw
 
+            if getattr(self, "_additional_solar_enabled", False) is True:
+                site_solar_kw, load_kw = self._energy_acc._site_solar_policy.prepare(
+                    self._energy_acc, site_solar_kw, grid_kw, battery_kw, load_kw,
+                    already_included=not has_direct_hybrid_pv or bool(self._ac_inverter_source_id),
+                    primary_valid=_finite_float(pv_power_w) is not None,
+                )
             # Accumulate daily energy from power readings (with cost tracking)
             buy, sell = _get_current_prices(self.hass, self._entry_id)
             _update_energy_accumulator_with_ev_load(
@@ -7250,8 +7410,8 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
 
             es = energy_data["energy_summary"]
             _LOGGER.debug(
-                "Sungrow data: solar=%.2f kW, grid=%.2f kW, battery=%.2f kW (%.0f%%), load=%.2f kW | "
-                "daily: pv=%.2f import=%.2f export=%.2f charge=%.2f discharge=%.2f load=%.2f kWh",
+                "Sungrow data: solar=%.2f kW, grid=%.2f kW, battery=%.2f kW (%.0f%%), load=%s kW | "
+                "daily: pv=%.2f import=%.2f export=%.2f charge=%.2f discharge=%.2f load=%s kWh",
                 energy_data["solar_power"],
                 energy_data["grid_power"],
                 energy_data["battery_power"],
@@ -7265,6 +7425,8 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
                 es.get("load_today_kwh", 0),
             )
 
+            if getattr(self, "_additional_solar_enabled", False) is True or getattr(self._energy_acc, "_solar_segment_seen", False) is True:
+                return self._energy_acc.publish_site_solar(energy_data)
             return energy_data
 
         except Exception as err:
@@ -8295,6 +8457,9 @@ class DualSungrowCoordinator(DataUpdateCoordinator):
         solar = (d1.get("solar_power", 0) or 0) + (d2.get("solar_power", 0) or 0)
         battery = (d1.get("battery_power", 0) or 0) + (d2.get("battery_power", 0) or 0)
         load = (d1.get("load_power", 0) or 0) + (d2.get("load_power", 0) or 0)
+        if any(d.get("solar_power_valid") is False and d.get("load_power") is None
+               for d in (d1, d2)):
+            load = None
         # Grid: use primary only (it's the grid-facing inverter)
         grid = d1.get("grid_power", 0) or 0
 
@@ -8392,7 +8557,11 @@ class DualSungrowCoordinator(DataUpdateCoordinator):
 
         return {
             "telemetry_ready": self._children_control_ready(),
-            "solar_power": max(0, solar),
+            "solar_power": (
+                None if d1.get("solar_power_valid") is False or d2.get("solar_power_valid") is False
+                else max(0, solar)
+            ),
+            "solar_power_valid": d1.get("solar_power_valid") is not False and d2.get("solar_power_valid") is not False,
             "grid_power": grid,
             "battery_power": battery,
             "load_power": load,
@@ -8644,6 +8813,12 @@ class FoxESSEnergyCoordinator(DataUpdateCoordinator):
             total_solar_kw = solar_kw + max(0, ct2_kw)
 
             # Accumulate daily energy from power readings (with cost tracking)
+            if getattr(self, "_additional_solar_enabled", False) is True:
+                total_solar_kw, load_kw = self._energy_acc._site_solar_policy.prepare(
+                    self._energy_acc, total_solar_kw, grid_kw, battery_kw, load_kw,
+                    already_included=ct2_kw > 0,
+                    primary_valid=_finite_float(attrs.get("pv_power_kw")) is not None,
+                )
             buy, sell = _get_current_prices(self.hass, self._entry_id)
             _update_energy_accumulator_with_ev_load(
                 self._energy_acc,
@@ -8703,7 +8878,7 @@ class FoxESSEnergyCoordinator(DataUpdateCoordinator):
                 energy_data["battery_max_discharge_power"] = round(_nominal_w / 1000.0, 2)
 
             _LOGGER.debug(
-                "FoxESS data: solar=%.2f kW, grid=%.2f kW, battery=%.2f kW (%.0f%%), load=%.2f kW, mode=%s",
+                "FoxESS data: solar=%.2f kW, grid=%.2f kW, battery=%.2f kW (%.0f%%), load=%s kW, mode=%s",
                 energy_data["solar_power"],
                 energy_data["grid_power"],
                 energy_data["battery_power"],
@@ -8712,6 +8887,8 @@ class FoxESSEnergyCoordinator(DataUpdateCoordinator):
                 energy_data.get("work_mode_name", "?"),
             )
 
+            if getattr(self, "_additional_solar_enabled", False) is True or getattr(self._energy_acc, "_solar_segment_seen", False) is True:
+                return self._energy_acc.publish_site_solar(energy_data)
             return energy_data
 
         except Exception as err:
@@ -8971,6 +9148,12 @@ class CustomEntityEnergyCoordinator(DataUpdateCoordinator):
         battery_kw *= self._power_multipliers.get("battery_power", 1.0)
         battery_level = max(0.0, min(100.0, raw_values["battery_level"]))
 
+        if getattr(self, "_additional_solar_enabled", False) is True:
+            solar_kw, load_kw = self._energy_acc._site_solar_policy.prepare(
+                self._energy_acc, solar_kw, grid_kw, battery_kw, load_kw,
+                already_included=False,
+                primary_valid=True,
+            )
         buy, sell = _get_current_prices(self.hass, self._entry_id)
         _update_energy_accumulator_with_ev_load(
             self._energy_acc,
@@ -8995,13 +9178,15 @@ class CustomEntityEnergyCoordinator(DataUpdateCoordinator):
         }
         _LOGGER.debug(
             "Custom entity data: solar=%.2f kW, grid=%.2f kW, "
-            "battery=%.2f kW (%.0f%%), load=%.2f kW",
+            "battery=%.2f kW (%.0f%%), load=%s kW",
             solar_kw,
             grid_kw,
             battery_kw,
             battery_level,
             load_kw,
         )
+        if getattr(self, "_additional_solar_enabled", False) is True or getattr(self._energy_acc, "_solar_segment_seen", False) is True:
+            return self._energy_acc.publish_site_solar(data)
         return data
 
 
@@ -9195,6 +9380,8 @@ class FoxESSEntityEnergyCoordinator(
                     "FoxESS entity bridge read failed, returning stale data: %s",
                     exc,
                 )
+                if getattr(self, "_additional_solar_enabled", False) is True:
+                    return self._energy_acc.invalidate_site_solar(stale)
                 return stale
             raise UpdateFailed(f"FoxESS entity bridge read failed: {exc}") from exc
 
@@ -9208,6 +9395,12 @@ class FoxESSEntityEnergyCoordinator(
         )
         battery_kw = status.get("battery_power", 0.0) or 0.0
         load_kw = status.get("load_power", 0.0) or 0.0
+        if getattr(self, "_additional_solar_enabled", False) is True:
+            solar_kw, load_kw = self._energy_acc._site_solar_policy.prepare(
+                self._energy_acc, solar_kw, grid_kw, battery_kw, load_kw,
+                already_included=False,
+                primary_valid=telemetry_ready and status.get("solar_power_valid") is not False,
+            )
         soc = status.get("battery_level")
 
         if telemetry_ready:
@@ -9274,7 +9467,7 @@ class FoxESSEntityEnergyCoordinator(
                     data[key] = status[key]
 
         _LOGGER.debug(
-            "FoxESS entity data: solar=%.2f kW, grid=%.2f kW, battery=%.2f kW (%.0f%%), load=%.2f kW, mode=%s",
+            "FoxESS entity data: solar=%.2f kW, grid=%.2f kW, battery=%.2f kW (%.0f%%), load=%s kW, mode=%s",
             data["solar_power"],
             data["grid_power"],
             data["battery_power"],
@@ -9283,6 +9476,8 @@ class FoxESSEntityEnergyCoordinator(
             data.get("work_mode_name", "?"),
         )
 
+        if getattr(self, "_additional_solar_enabled", False) is True or getattr(self._energy_acc, "_solar_segment_seen", False) is True:
+            return self._energy_acc.publish_site_solar(data)
         return data
 
     async def force_charge(
@@ -9543,11 +9738,19 @@ class FoxESSCloudEnergyCoordinator(DataUpdateCoordinator):
                     stale_data = dict(self.data)
                     stale_data["telemetry_ready"] = False
                     stale_data["grid_power_valid"] = False
+                    if getattr(self, "_additional_solar_enabled", False) is True:
+                        return self._energy_acc.invalidate_site_solar(stale_data)
                     return stale_data
                 raise UpdateFailed(
                     "FoxESS Cloud realtime returned no battery SoC — no data available"
                 )
 
+            if getattr(self, "_additional_solar_enabled", False) is True:
+                solar_kw, load_kw = self._energy_acc._site_solar_policy.prepare(
+                    self._energy_acc, solar_kw, grid_kw, battery_kw, load_kw,
+                    already_included=False,
+                    primary_valid=_finite_float(_first_present("pvPower", "generationPower")) is not None,
+                )
             buy, sell = _get_current_prices(self.hass, self._entry_id)
             _update_energy_accumulator_with_ev_load(
                 self._energy_acc,
@@ -9581,10 +9784,12 @@ class FoxESSCloudEnergyCoordinator(DataUpdateCoordinator):
                 "cloud_backend": True,
             }
             _LOGGER.debug(
-                "FoxESS Cloud data: solar=%.2f kW, grid=%.2f kW, battery=%.2f kW, load=%.2f kW, soc=%.0f%%",
+                "FoxESS Cloud data: solar=%.2f kW, grid=%.2f kW, battery=%.2f kW, load=%s kW, soc=%.0f%%",
                 data["solar_power"], data["grid_power"], data["battery_power"],
                 data["load_power"], data["battery_level"],
             )
+            if getattr(self, "_additional_solar_enabled", False) is True or getattr(self._energy_acc, "_solar_segment_seen", False) is True:
+                return self._energy_acc.publish_site_solar(data)
             return data
         except Exception as err:
             raise UpdateFailed(f"Error fetching FoxESS Cloud energy data: {err}") from err
@@ -9884,6 +10089,12 @@ class GoodWeEnergyCoordinator(
                     battery_kw,
                 )
 
+            if getattr(self, "_additional_solar_enabled", False) is True:
+                solar_kw, load_kw = self._energy_acc._site_solar_policy.prepare(
+                    self._energy_acc, solar_kw, grid_kw, battery_kw, load_kw,
+                    already_included=False,
+                    primary_valid=telemetry_ready and solar_power_valid and data.get("solar_power_valid") is not False,
+                )
             # Accumulate daily energy from power readings (with cost tracking)
             if telemetry_ready and solar_power_valid:
                 buy, sell = _get_current_prices(self.hass, self._entry_id)
@@ -9951,7 +10162,7 @@ class GoodWeEnergyCoordinator(
                     energy_data["energy_summary"][summary_key] = round(float(value), 3)
 
             _LOGGER.debug(
-                "GoodWe data%s: solar=%.2f kW, grid=%.2f kW, battery=%.2f kW (%.0f%%), load=%.2f kW",
+                "GoodWe data%s: solar=%.2f kW, grid=%.2f kW, battery=%.2f kW (%.0f%%), load=%s kW",
                 " (entity telemetry)" if self._using_entity_telemetry else "",
                 energy_data["solar_power"],
                 energy_data["grid_power"],
@@ -9960,6 +10171,8 @@ class GoodWeEnergyCoordinator(
                 energy_data["load_power"],
             )
 
+            if getattr(self, "_additional_solar_enabled", False) is True or getattr(self._energy_acc, "_solar_segment_seen", False) is True:
+                return self._energy_acc.publish_site_solar(energy_data)
             return energy_data
 
         except Exception as err:
@@ -9973,6 +10186,8 @@ class GoodWeEnergyCoordinator(
                     "GoodWe entity telemetry read failed, returning stale data: %s",
                     err,
                 )
+                if getattr(self, "_additional_solar_enabled", False) is True:
+                    return self._energy_acc.invalidate_site_solar(stale)
                 return stale
             if self._using_entity_telemetry:
                 self._telemetry_validated = False
@@ -10348,6 +10563,8 @@ class SolaxBatteryEnergyCoordinator(
             stale = self._native_stale_data()
             if stale:
                 _LOGGER.warning("Solax entity read failed, returning stale data: %s", exc)
+                if getattr(self, "_additional_solar_enabled", False) is True:
+                    return self._energy_acc.invalidate_site_solar(stale)
                 return stale
             raise UpdateFailed(f"Solax entity read failed: {exc}") from exc
 
@@ -10356,6 +10573,12 @@ class SolaxBatteryEnergyCoordinator(
         grid_kw = status.get("grid_power", 0.0) or 0.0
         battery_kw = status.get("battery_power", 0.0) or 0.0
         load_kw = status.get("load_power", 0.0) or 0.0
+        if getattr(self, "_additional_solar_enabled", False) is True:
+            solar_kw, load_kw = self._energy_acc._site_solar_policy.prepare(
+                self._energy_acc, solar_kw, grid_kw, battery_kw, load_kw,
+                already_included=False,
+                primary_valid=telemetry_ready and status.get("solar_power_valid") is not False,
+            )
         soc = status.get("battery_level")
 
         if telemetry_ready:
@@ -10383,7 +10606,7 @@ class SolaxBatteryEnergyCoordinator(
             if isinstance(value, (int, float)) and value >= 0:
                 energy_summary[summary_key] = round(float(value), 3)
 
-        return {
+        site_solar_data = {
             "telemetry_ready": telemetry_ready,
             "solar_power": solar_kw,
             "grid_power": grid_kw,
@@ -10405,6 +10628,9 @@ class SolaxBatteryEnergyCoordinator(
             "min_soc": status.get("min_soc"),
             "energy_summary": energy_summary,
         }
+        if getattr(self, "_additional_solar_enabled", False) is True or getattr(self._energy_acc, "_solar_segment_seen", False) is True:
+            return self._energy_acc.publish_site_solar(site_solar_data)
+        return site_solar_data
 
     async def force_charge(self, duration_minutes: int, power_w: int) -> bool:
         if not self._native_control_allowed("SolaX force_charge"):
@@ -10520,6 +10746,8 @@ class SolarEdgeEnergyCoordinator(
                     "SolarEdge entity bridge read failed, returning stale data: %s",
                     exc,
                 )
+                if getattr(self, "_additional_solar_enabled", False) is True:
+                    return self._energy_acc.invalidate_site_solar(stale)
                 return stale
             raise UpdateFailed(f"SolarEdge entity bridge read failed: {exc}") from exc
 
@@ -10528,6 +10756,12 @@ class SolarEdgeEnergyCoordinator(
         grid_kw = status.get("grid_power", 0.0) or 0.0
         battery_kw = status.get("battery_power", 0.0) or 0.0
         load_kw = status.get("load_power", 0.0) or 0.0
+        if getattr(self, "_additional_solar_enabled", False) is True:
+            solar_kw, load_kw = self._energy_acc._site_solar_policy.prepare(
+                self._energy_acc, solar_kw, grid_kw, battery_kw, load_kw,
+                already_included=False,
+                primary_valid=telemetry_ready and status.get("solar_power_valid") is not False,
+            )
         soc = status.get("battery_level")
         ev_power_kw = status.get("ev_power")
 
@@ -10591,7 +10825,7 @@ class SolarEdgeEnergyCoordinator(
                 data[key] = status[key]
 
         _LOGGER.debug(
-            "SolarEdge entity data: solar=%.2f kW, grid=%.2f kW, battery=%.2f kW (%s%%), load=%.2f kW",
+            "SolarEdge entity data: solar=%.2f kW, grid=%.2f kW, battery=%.2f kW (%s%%), load=%s kW",
             data["solar_power"],
             data["grid_power"],
             data["battery_power"],
@@ -10599,6 +10833,8 @@ class SolarEdgeEnergyCoordinator(
             data["load_power"],
         )
 
+        if getattr(self, "_additional_solar_enabled", False) is True or getattr(self._energy_acc, "_solar_segment_seen", False) is True:
+            return self._energy_acc.publish_site_solar(data)
         return data
 
     async def _restore_daily_total_baselines(self) -> None:
@@ -11022,6 +11258,8 @@ class SajH2EnergyCoordinator(
             stale = self._native_stale_data()
             if stale:
                 _LOGGER.warning("SAJ H2 entity read failed, returning stale data: %s", exc)
+                if getattr(self, "_additional_solar_enabled", False) is True:
+                    return self._energy_acc.invalidate_site_solar(stale)
                 return stale
             raise UpdateFailed(f"SAJ H2 entity read failed: {exc}") from exc
 
@@ -11030,6 +11268,12 @@ class SajH2EnergyCoordinator(
         grid_kw = status.get("grid_power", 0.0) or 0.0
         battery_kw = status.get("battery_power", 0.0) or 0.0
         load_kw = status.get("load_power", 0.0) or 0.0
+        if getattr(self, "_additional_solar_enabled", False) is True:
+            solar_kw, load_kw = self._energy_acc._site_solar_policy.prepare(
+                self._energy_acc, solar_kw, grid_kw, battery_kw, load_kw,
+                already_included=False,
+                primary_valid=telemetry_ready and status.get("solar_power_valid") is not False,
+            )
         soc = status.get("battery_level")
 
         if telemetry_ready:
@@ -11055,7 +11299,7 @@ class SajH2EnergyCoordinator(
             if isinstance(value, (int, float)) and value >= 0:
                 energy_summary[summary_key] = round(float(value), 3)
 
-        return {
+        site_solar_data = {
             "telemetry_ready": telemetry_ready,
             "solar_power": solar_kw,
             "grid_power": grid_kw,
@@ -11073,6 +11317,9 @@ class SajH2EnergyCoordinator(
             "app_mode": status.get("app_mode"),
             "energy_summary": energy_summary,
         }
+        if getattr(self, "_additional_solar_enabled", False) is True or getattr(self._energy_acc, "_solar_segment_seen", False) is True:
+            return self._energy_acc.publish_site_solar(site_solar_data)
+        return site_solar_data
 
     async def force_charge(self, duration_minutes: int, power_w: int) -> bool:
         if not self._native_control_allowed("SAJ H2 force_charge"):
@@ -11161,6 +11408,8 @@ class FroniusReservaEnergyCoordinator(
             stale = self._native_stale_data()
             if stale:
                 stale["upstream_integration"] = upstream
+                if getattr(self, "_additional_solar_enabled", False) is True:
+                    return self._energy_acc.invalidate_site_solar(stale)
                 return stale
             raise UpdateFailed(
                 "Fronius GEN24 storage upstream integration is not loaded "
@@ -11174,6 +11423,8 @@ class FroniusReservaEnergyCoordinator(
             stale = self._native_stale_data()
             if stale:
                 _LOGGER.warning("Fronius GEN24 storage entity read failed, returning stale data: %s", exc)
+                if getattr(self, "_additional_solar_enabled", False) is True:
+                    return self._energy_acc.invalidate_site_solar(stale)
                 return stale
             raise UpdateFailed(f"Fronius GEN24 storage entity read failed: {exc}") from exc
 
@@ -11182,6 +11433,12 @@ class FroniusReservaEnergyCoordinator(
         grid_kw = status.get("grid_power", 0.0) or 0.0
         battery_kw = status.get("battery_power", 0.0) or 0.0
         load_kw = status.get("load_power", 0.0) or 0.0
+        if getattr(self, "_additional_solar_enabled", False) is True:
+            solar_kw, load_kw = self._energy_acc._site_solar_policy.prepare(
+                self._energy_acc, solar_kw, grid_kw, battery_kw, load_kw,
+                already_included=False,
+                primary_valid=telemetry_ready and status.get("solar_power_valid") is not False,
+            )
         soc = status.get("battery_level")
         if soc is None and self.data:
             soc = self.data.get("battery_level")
@@ -11205,7 +11462,7 @@ class FroniusReservaEnergyCoordinator(
                 sell,
             )
 
-        return {
+        site_solar_data = {
             "telemetry_ready": telemetry_ready,
             "telemetry_observed_at": status.get("telemetry_observed_at", {}),
             "solar_power": solar_kw,
@@ -11236,6 +11493,9 @@ class FroniusReservaEnergyCoordinator(
             "upstream_integration": status.get("upstream_integration", upstream),
             "energy_summary": self._energy_acc.as_dict(),
         }
+        if getattr(self, "_additional_solar_enabled", False) is True or getattr(self._energy_acc, "_solar_segment_seen", False) is True:
+            return self._energy_acc.publish_site_solar(site_solar_data)
+        return site_solar_data
 
     def _native_control_surface_ready(self) -> bool:
         """Require the selected upstream config entry to remain loaded."""
@@ -11343,6 +11603,8 @@ class NeovoltEnergyCoordinator(
             stale = self._native_stale_data()
             if stale:
                 _LOGGER.warning("Neovolt entity read failed, returning stale data: %s", exc)
+                if getattr(self, "_additional_solar_enabled", False) is True:
+                    return self._energy_acc.invalidate_site_solar(stale)
                 return stale
             raise UpdateFailed(f"Neovolt entity read failed: {exc}") from exc
 
@@ -11360,6 +11622,12 @@ class NeovoltEnergyCoordinator(
         grid_kw = status.get("grid_power", 0.0) or 0.0
         battery_kw = status.get("battery_power", 0.0) or 0.0
         load_kw = status.get("load_power", 0.0) or 0.0
+        if getattr(self, "_additional_solar_enabled", False) is True:
+            solar_kw, load_kw = self._energy_acc._site_solar_policy.prepare(
+                self._energy_acc, solar_kw, grid_kw, battery_kw, load_kw,
+                already_included=False,
+                primary_valid=telemetry_ready and status.get("solar_power_valid") is not False,
+            )
         soc = status.get("battery_level")
 
         if telemetry_ready:
@@ -11376,7 +11644,7 @@ class NeovoltEnergyCoordinator(
                 sell,
             )
 
-        return {
+        site_solar_data = {
             "telemetry_ready": telemetry_ready,
             "solar_power": solar_kw,
             "grid_power": grid_kw,
@@ -11390,6 +11658,9 @@ class NeovoltEnergyCoordinator(
             "neovolt_surplus_balancer": surplus_balancer,
             "energy_summary": self._energy_acc.as_dict(),
         }
+        if getattr(self, "_additional_solar_enabled", False) is True or getattr(self._energy_acc, "_solar_segment_seen", False) is True:
+            return self._energy_acc.publish_site_solar(site_solar_data)
+        return site_solar_data
 
     async def force_charge(
         self,
@@ -11519,7 +11790,11 @@ class AnkerSolixEnergyCoordinator(
             if self.data:
                 _LOGGER.warning("Anker Solix read failed, returning stale data: %s", exc)
                 if self._native_integration_enabled():
+                    if getattr(self, "_additional_solar_enabled", False) is True:
+                        return self._energy_acc.invalidate_site_solar(self._native_stale_data() or self.data)
                     return self._native_stale_data() or self.data
+                if getattr(self, "_additional_solar_enabled", False) is True:
+                    return self._energy_acc.invalidate_site_solar(self.data)
                 return self.data
             raise UpdateFailed(f"Anker Solix read failed: {exc}") from exc
 
@@ -11532,6 +11807,12 @@ class AnkerSolixEnergyCoordinator(
         grid_kw = status.get("grid_power", 0.0) or 0.0
         battery_kw = status.get("battery_power", 0.0) or 0.0
         load_kw = status.get("load_power", 0.0) or 0.0
+        if getattr(self, "_additional_solar_enabled", False) is True:
+            solar_kw, load_kw = self._energy_acc._site_solar_policy.prepare(
+                self._energy_acc, solar_kw, grid_kw, battery_kw, load_kw,
+                already_included=False,
+                primary_valid=telemetry_ready and status.get("solar_power_valid") is not False,
+            )
         soc = status.get("battery_level")
 
         if telemetry_ready:
@@ -11565,6 +11846,8 @@ class AnkerSolixEnergyCoordinator(
         }
         if self._native_integration_enabled():
             data["telemetry_ready"] = telemetry_ready
+        if getattr(self, "_additional_solar_enabled", False) is True or getattr(self._energy_acc, "_solar_segment_seen", False) is True:
+            return self._energy_acc.publish_site_solar(data)
         return data
 
     async def force_charge(self, duration_minutes: int, power_w: int) -> bool:
@@ -11774,6 +12057,8 @@ class ESYSunhomeEnergyCoordinator(
         if not self._entity_map:
             if self.data:
                 _LOGGER.warning("ESY Sunhome: entity map empty, returning stale data")
+                if getattr(self, "_additional_solar_enabled", False) is True:
+                    return self._energy_acc.invalidate_site_solar(self.data)
                 return self.data
             raise UpdateFailed("ESY Sunhome entities not yet available — is esy_sunhome integration running?")
 
@@ -11794,6 +12079,12 @@ class ESYSunhomeEnergyCoordinator(
         grid_kw = grid_w / 1000.0
         battery_kw = battery_w / 1000.0
         load_kw = load_w / 1000.0
+        if getattr(self, "_additional_solar_enabled", False) is True:
+            solar_kw, load_kw = self._energy_acc._site_solar_policy.prepare(
+                self._energy_acc, solar_kw, grid_kw, battery_kw, load_kw,
+                already_included=False,
+                primary_valid=self._native_live_telemetry_ready(),
+            )
         battery_level = self._state_float("batterySoc")
         telemetry_ready = self._native_live_telemetry_ready()
 
@@ -11820,11 +12111,11 @@ class ESYSunhomeEnergyCoordinator(
             )
 
         _LOGGER.debug(
-            "ESY Sunhome data: solar=%.2f kW, grid=%.2f kW, battery=%.2f kW (%.0f%%), load=%.2f kW",
+            "ESY Sunhome data: solar=%.2f kW, grid=%.2f kW, battery=%.2f kW (%.0f%%), load=%s kW",
             solar_kw, grid_kw, battery_kw, battery_level or 0.0, load_kw,
         )
 
-        return {
+        site_solar_data = {
             "telemetry_ready": telemetry_ready,
             "solar_power": solar_kw,
             "grid_power": grid_kw,
@@ -11854,6 +12145,9 @@ class ESYSunhomeEnergyCoordinator(
             "daily_battery_discharge_kwh": self._state_float("dailyBattDischarge"),
             "energy_summary": self._energy_acc.as_dict(),
         }
+        if getattr(self, "_additional_solar_enabled", False) is True or getattr(self._energy_acc, "_solar_segment_seen", False) is True:
+            return self._energy_acc.publish_site_solar(site_solar_data)
+        return site_solar_data
 
     async def _set_mode(self, option: str) -> bool:
         """Switch the ESY operating mode via its mode-select entity."""

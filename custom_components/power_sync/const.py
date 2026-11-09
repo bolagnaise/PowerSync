@@ -269,6 +269,10 @@ CONF_CUSTOM_BATTERY_LEVEL_ENTITY = "custom_battery_level_entity"
 CONF_CUSTOM_BATTERY_POWER_ENTITY = "custom_battery_power_entity"
 CONF_CUSTOM_GRID_POWER_ENTITY = "custom_grid_power_entity"
 CONF_CUSTOM_SOLAR_POWER_ENTITY = "custom_solar_power_entity"
+CONF_ADDITIONAL_SOLAR_ENABLED = "additional_solar_enabled"
+CONF_ADDITIONAL_SOLAR_POWER_ENTITY = "additional_solar_power_entity"
+CONF_ADDITIONAL_SOLAR_SOURCE_IDENTITY = "additional_solar_source_identity"
+CONF_ADDITIONAL_SOLAR_LOAD_BASIS = "additional_solar_load_basis"
 CONF_CUSTOM_LOAD_POWER_ENTITY = "custom_load_power_entity"
 
 # Sungrow SH-series Battery System Configuration (Modbus TCP)

@@ -405,6 +405,10 @@ from .const import (
     CONF_FORCE_TARIFF_MODE_TOGGLE,
     # Inverter curtailment configuration
     CONF_AC_INVERTER_CURTAILMENT_ENABLED,
+    CONF_ADDITIONAL_SOLAR_ENABLED,
+    CONF_ADDITIONAL_SOLAR_POWER_ENTITY,
+    CONF_ADDITIONAL_SOLAR_SOURCE_IDENTITY,
+    CONF_ADDITIONAL_SOLAR_LOAD_BASIS,
     CONF_INVERTER_BRAND,
     CONF_INVERTER_MODEL,
     CONF_INVERTER_HOST,
@@ -8761,6 +8765,7 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
             "back",
             "network_export",
             "inverter",
+            "solar_accounting",
             "curtailment",
             "demand_charges",
             "weather",
@@ -8769,6 +8774,9 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
         ]
         if self._effective_battery_system() == BATTERY_SYSTEM_SUNGROW:
             menu_options.append("history_relink")
+
+        if self._effective_battery_system() == "amber_smartshift":
+            menu_options.remove("solar_accounting")
 
         return self.async_show_menu(
             step_id="advanced",
@@ -13611,6 +13619,54 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
                     "Configured" if current_ai_key_configured else "Not configured"
                 ),
             },
+        )
+
+    async def async_step_solar_accounting(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Account for an explicitly separate PV source without enabling controls."""
+        from .site_solar import configuration_error, source_identity, checkpoint_solar
+        errors = {}
+        if user_input is not None:
+            saved = {
+                CONF_ADDITIONAL_SOLAR_ENABLED: user_input.get(CONF_ADDITIONAL_SOLAR_ENABLED, False),
+                CONF_ADDITIONAL_SOLAR_POWER_ENTITY: user_input.get(CONF_ADDITIONAL_SOLAR_POWER_ENTITY, ""),
+                CONF_ADDITIONAL_SOLAR_LOAD_BASIS: user_input.get(CONF_ADDITIONAL_SOLAR_LOAD_BASIS, "measured"),
+                CONF_ADDITIONAL_SOLAR_SOURCE_IDENTITY: None,
+            }
+            if saved[CONF_ADDITIONAL_SOLAR_ENABLED]:
+                from homeassistant.helpers import entity_registry as er
+                source = er.async_get(self.hass).async_get(saved[CONF_ADDITIONAL_SOLAR_POWER_ENTITY])
+                error = configuration_error(
+                    {**self.config_entry.data, **self.config_entry.options, **saved,
+                     "battery_system": self._effective_battery_system()}, source)
+                if error:
+                    errors["base"] = error
+                else:
+                    saved[CONF_ADDITIONAL_SOLAR_SOURCE_IDENTITY] = source_identity(source)
+            if not errors:
+                if (saved[CONF_ADDITIONAL_SOLAR_ENABLED] or self._get_option(
+                    CONF_ADDITIONAL_SOLAR_ENABLED, False)) and any(
+                    self._get_option(key) != value for key, value in saved.items()
+                ):
+                    await checkpoint_solar(self.hass, self.config_entry, force=True)
+                return self._save_and_finish(saved)
+        return self.async_show_form(
+            step_id="solar_accounting",
+            data_schema=vol.Schema({
+                vol.Optional(CONF_ADDITIONAL_SOLAR_ENABLED, default=self._get_option(
+                    CONF_ADDITIONAL_SOLAR_ENABLED, False)): BooleanSelector(),
+                vol.Optional(CONF_ADDITIONAL_SOLAR_POWER_ENTITY, description={
+                    "suggested_value": self._get_option(CONF_ADDITIONAL_SOLAR_POWER_ENTITY, "")
+                }): EntitySelector(EntitySelectorConfig(domain="sensor")),
+                vol.Optional(CONF_ADDITIONAL_SOLAR_LOAD_BASIS, default=self._get_option(
+                    CONF_ADDITIONAL_SOLAR_LOAD_BASIS, "measured")): SelectSelector(
+                        SelectSelectorConfig(options=[
+                            SelectOptionDict(value="measured", label="Keep measured Home Load"),
+                            SelectOptionDict(value="balance", label="Calculate Home Load from site power balance"),
+                        ], mode=SelectSelectorMode.DROPDOWN)),
+            }),
+            errors=errors,
         )
 
     async def async_step_inverter(
