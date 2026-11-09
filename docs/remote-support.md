@@ -19,18 +19,31 @@ For a remote session:
 
 1. The investigator verifies the reporter and assignment in the private Discord
    ticket, then creates a 30-minute invitation in the protected operator viewer.
-2. Paste that invitation into HA. Select categories, history range and duration.
-   The default is one hour; explicitly selected sessions can last up to eight
-   hours. Only one entry may have a local session at a time.
-3. Send the displayed pairing code through the same private ticket. Claiming it
+2. Paste that invitation into the full-width **Support invitation** field and
+   select **Get pairing code**. The default shares versions, safe settings and
+   energy readings for one hour, with no past history. **Choose what to share**
+   lets you change categories, history range and duration (up to eight hours).
+   Only one entry may have a local session at a time.
+3. Select **Copy pairing code** and send it through the same private ticket.
+   The code can also be selected and copied manually. Claiming it
    does not authorize diagnostic reads. Complete pairing and HA approval within
    30 minutes of preparing the session; the selected session deadline still applies.
-4. Refresh HA status, review the named investigator, reporter, ticket, phrase,
-   exact scope and processing disclosure, then check consent and approve.
-5. Revoke in HA when the investigation ends. HA destroys its live key before any
+4. While the card is open it checks status every five seconds. When support
+   claims the code, **Review and approve** shows the investigator, reporter,
+   ticket, matching phrase, exact sharing scope and expanded processing policy.
+   Review them, check consent and select **Approve read-only access**. The
+   30-minute setup window is a time limit, not a waiting period. Refreshing status
+   never approves access for you; changed identity or scope requires fresh review.
+5. Select **Stop support access** in HA when the investigation ends (or **Cancel
+   setup** before approval). HA destroys its live key before any
    network request. The page distinguishes a local stop from a central revoke
    still awaiting connectivity. A restart, unload or mapping change closes local
    consent; restart never restores a live session.
+
+Optional recording and local downloads are under **Local diagnostics and
+recording**. Access receipts and queries are under **Recent support activity**.
+Archive sharing needs its own approval; **Revoke shared archive** remains
+available after live access ends.
 
 There is no shell, arbitrary file/URL/entity query, prompt, service call, device
 refresh or control API. Reading diagnostics does not change battery, inverter,
