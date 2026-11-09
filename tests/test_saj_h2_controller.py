@@ -7,6 +7,8 @@ from pathlib import Path
 import sys
 import types
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parent.parent
 COMPONENT_ROOT = ROOT / "custom_components" / "power_sync"
@@ -386,6 +388,117 @@ def test_status_rejects_non_numeric_startup_telemetry():
 
     assert status["telemetry_ready"] is False
     assert status["battery_level"] is None
+
+
+@pytest.mark.parametrize("source", ["Bat", "Grid"])
+@pytest.mark.parametrize(
+    ("unit", "value", "expected_w"),
+    [
+        (None, "500", 5000),
+        (None, "100", 1000),
+        (None, "50", 500),
+        (None, "1100", 11000),
+        (None, "0", 0),
+        ("", "500", 5000),
+        ("%", "50", 5000),
+        ("%", "5", 500),
+        ("%", "110", 11000),
+        ("%", "0", 0),
+    ],
+)
+def test_discovered_power_limits_support_raw_registers_and_legacy_percentages(
+    source, unit, value, expected_w
+):
+    states = []
+    entries = []
+    for direction in ("Charge", "Discharge"):
+        entity_id = f"sensor.renamed_{direction.lower()}_limit"
+        state = _FakeState(entity_id, value)
+        if unit is not None:
+            state.attributes["unit_of_measurement"] = unit
+        states.append(state)
+        entries.append((f"custom_hub_{source}{direction}Power", entity_id))
+    hass = _FakeHass(states, registry_entries={"saj-entry": entries})
+    controller = SajH2BatteryController(hass, saj_entry_id="saj-entry")
+    controller._discover_entities()
+
+    status = controller.get_status()
+
+    assert status["battery_max_charge_power_w"] == pytest.approx(expected_w)
+    assert status["battery_max_discharge_power_w"] == pytest.approx(expected_w)
+    assert hass.services.calls == []
+
+
+def test_power_limit_format_is_read_per_sensor_on_every_update():
+    charge = _FakeState("sensor.charge_limit", "50")
+    charge.attributes["unit_of_measurement"] = "%"
+    discharge = _FakeState("sensor.discharge_limit", "250")
+    hass = _FakeHass([charge, discharge])
+    controller = SajH2BatteryController(hass, saj_entry_id="saj-entry", inverter_rated_kw=8)
+    controller._entity_map = {
+        "battery_max_charge_power_w": charge.entity_id,
+        "battery_max_discharge_power_w": discharge.entity_id,
+    }
+
+    status = controller.get_status()
+    assert status["battery_max_charge_power_w"] == 4000
+    assert status["battery_max_discharge_power_w"] == 2000
+
+    # Upstream reload changes both value and unit without changing the entity ID.
+    charge.state = "500"
+    charge.attributes.clear()
+    assert controller.get_status()["battery_max_charge_power_w"] == 4000
+    assert hass.services.calls == []
+
+
+@pytest.mark.parametrize(
+    ("unit", "value"),
+    [
+        (None, "unknown"),
+        (None, "unavailable"),
+        (None, "nan"),
+        (None, "inf"),
+        (None, "-1"),
+        (None, "1101"),
+        ("%", "111"),
+        ("A", "50"),
+    ],
+)
+def test_invalid_power_limits_keep_the_configured_rating_fallback(unit, value):
+    state = _FakeState("sensor.charge_limit", value)
+    state.attributes["unit_of_measurement"] = unit
+    hass = _FakeHass([state])
+    controller = SajH2BatteryController(hass, saj_entry_id="saj-entry", inverter_rated_kw=8)
+    controller._entity_map["battery_max_charge_power_w"] = state.entity_id
+
+    status = controller.get_status()
+
+    assert status["battery_max_charge_power_w"] == 8000
+    assert status["battery_max_discharge_power_w"] == 8000
+    assert hass.services.calls == []
+
+
+def test_current_limit_sensors_are_not_discovered_as_power_percentages():
+    hass = _FakeHass(
+        [
+            _FakeState("sensor.current_charge", "50"),
+            _FakeState("sensor.current_discharge", "60"),
+        ],
+        registry_entries={
+            "saj-entry": [
+                ("saj_BatChaCurrLimit", "sensor.current_charge"),
+                ("saj_BatDisCurrLimit", "sensor.current_discharge"),
+            ]
+        },
+    )
+    controller = SajH2BatteryController(hass, saj_entry_id="saj-entry")
+    controller._discover_entities()
+
+    status = controller.get_status()
+
+    assert status["battery_max_charge_power_w"] == 10000
+    assert status["battery_max_discharge_power_w"] == 10000
+    assert hass.services.calls == []
 
 
 def test_config_entry_discovery_prefers_grid_load_power_and_current_daily_keys():

@@ -93,8 +93,10 @@ _SENSOR_KEYS: dict[str, tuple[str, ...]] = {
     "battery_temperature":         ("BatTemp", "Bat1Temperature"),
     "battery_soh":                 ("Bat1SOH",),
     "app_mode":                    ("AppMode",),
-    "battery_max_charge_power_w":  ("BatChargePower", "GridChargePower", "BatChaCurrLimit"),
-    "battery_max_discharge_power_w": ("BatDischargePower", "GridDischargePower", "BatDisCurrLimit"),
+    # These are power-setting registers. BatCha/DisCurrLimit report current,
+    # so they cannot be substituted for a percentage of inverter rated power.
+    "battery_max_charge_power_w":  ("BatChargePower", "GridChargePower"),
+    "battery_max_discharge_power_w": ("BatDischargePower", "GridDischargePower"),
     # Direction sensors — 1=discharging/export, -1=charging/import, 0=idle
     "direction_battery":           ("directionBattery",),
     "direction_grid":              ("directionGrid",),
@@ -402,22 +404,8 @@ class SajH2BatteryController:
         else:
             grid_kw = grid_w_raw / 1000.0
 
-        # battery_max_*_power_w: derived from inverter rated × user-configured
-        # power_limit percentage. The stanus74 BatChargePower / BatDischargePower
-        # sensors return a percentage (0-100), not watts — using them directly
-        # gave the LP wrong values and broke discharge/charge rate math.
-        max_charge_pct = self._read_float("battery_max_charge_power_w")
-        max_discharge_pct = self._read_float("battery_max_discharge_power_w")
-        max_charge_w = (
-            self._inverter_rated_w * (max_charge_pct / 100.0)
-            if max_charge_pct is not None and 0 < max_charge_pct <= 110
-            else self._inverter_rated_w
-        )
-        max_discharge_w = (
-            self._inverter_rated_w * (max_discharge_pct / 100.0)
-            if max_discharge_pct is not None and 0 < max_discharge_pct <= 110
-            else self._inverter_rated_w
-        )
+        max_charge_w = self._read_power_limit_w("battery_max_charge_power_w")
+        max_discharge_w = self._read_power_limit_w("battery_max_discharge_power_w")
         pv1_w = self._read_float("pv1_power") or 0.0
         pv2_w = self._read_float("pv2_power") or 0.0
         pv3_w = self._read_float("pv3_power") or 0.0
@@ -968,6 +956,30 @@ class SajH2BatteryController:
     async def disconnect(self) -> None:
         """No persistent connection to close."""
         return None
+
+    def _read_power_limit_w(self, key: str) -> float:
+        """Convert upstream power settings to watts using their declared format."""
+        value = self._read_float(key)
+        entity_id = self._entity_map.get(key)
+        state = self.hass.states.get(entity_id) if entity_id else None
+        if value is None or state is None:
+            return self._inverter_rated_w
+
+        # Before saj_h2_modbus 3.1.3 these sensors exposed percentages with a
+        # '%' unit. Since 3.1.3 they expose unitless raw register values:
+        # 500 = 50%, 1100 = 110%. Values <= 110 can occur in either format,
+        # so magnitude alone cannot identify the scale. Check on every read
+        # so an upstream reload can change the format without rediscovery.
+        unit = state.attributes.get("unit_of_measurement")
+        if unit == "%":
+            full_scale = 100.0
+        elif unit in (None, ""):
+            full_scale = 1000.0
+        else:
+            return self._inverter_rated_w
+        if not 0 <= value <= full_scale * 1.1:
+            return self._inverter_rated_w
+        return self._inverter_rated_w * (value / full_scale)
 
     def _read_float(self, key: str) -> float | None:
         entity_id = self._entity_map.get(key)
