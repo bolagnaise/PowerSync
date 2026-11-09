@@ -121,3 +121,9 @@ lock-order and real EV-loop/native-handler package passed 28 tests after the
 last safety adjustment. The fetched intervening changes were a separate support
 registration repair and release metadata; rebasing required no conflict or
 change to the EV implementation.
+
+The audited four-worker local full suite passed 12,559 tests with zero skips.
+A later current-main solar-accounting addition merged cleanly; 161 focused
+post-merge checks passed, including its shared live-status and source-accounting
+paths. The final combined content is subject to fresh protected-main full-suite
+evidence before publication.
