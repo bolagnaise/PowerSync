@@ -122,6 +122,86 @@ def test_sungrow_curtailment_releases_limit_for_active_solar_surplus_ev():
     assert "curtail=should_curtail_for_price" in handler
 
 
+@pytest.mark.parametrize("change_at", ["plug", "soc"])
+@pytest.mark.parametrize("change", ["stopped", "paused", "replaced", "disabled", "entry_replaced", "owner_changed"])
+def test_ev_headroom_does_not_survive_session_change_during_read(change_at, change):
+    """An awaited plug/SOC read cannot authorize a stale export-limit release."""
+    solar_config = {"enabled": True}
+    state = {"active": True, "params": {"dynamic_mode": "solar_surplus"}}
+    vehicles = {"VIN-A": state}
+    entry_data = {}
+    hass = SimpleNamespace(data={"power_sync": {"entry-id": entry_data}})
+
+    def mutate(stage):
+        if stage != change_at:
+            return
+        if change == "stopped":
+            state["active"] = False
+        elif change == "paused":
+            state["paused"] = True
+        elif change == "replaced":
+            vehicles["VIN-A"] = dict(state)
+        elif change == "disabled":
+            solar_config["enabled"] = False
+        elif change == "owner_changed":
+            state["params"] = {"dynamic_mode": "battery_target", "owner_mode": "manual"}
+        else:
+            hass.data["power_sync"]["entry-id"] = {}
+
+    async def plugged(*_args, **_kwargs):
+        mutate("plug")
+        return True
+
+    async def soc(*_args, **_kwargs):
+        mutate("soc")
+        return None
+
+    tree = ast.parse(textwrap.dedent(_function_source(
+        "_active_solar_surplus_ev_needs_inverter_headroom"
+    )))
+
+    class StripImports(ast.NodeTransformer):
+        def visit_ImportFrom(self, node):
+            return ast.copy_location(ast.Pass(), node)
+
+    namespace = {
+        "hass": hass,
+        "entry": SimpleNamespace(entry_id="entry-id"),
+        "DOMAIN": "power_sync",
+        "DEFAULT_VEHICLE_ID": "_default",
+        "_dynamic_ev_state": {"entry-id": vehicles},
+        "get_stored_solar_surplus_config": lambda _data: solar_config,
+        "is_solar_surplus_owner_mode": lambda mode: mode == "solar_surplus",
+        "is_ev_plugged_in": plugged,
+        "get_ev_battery_level": soc,
+        "_LOGGER": SimpleNamespace(debug=lambda *a: None, info=lambda *a: None),
+    }
+    exec(compile(ast.fix_missing_locations(StripImports().visit(tree)), "<headroom>", "exec"), namespace)
+
+    assert asyncio.run(namespace["_active_solar_surplus_ev_needs_inverter_headroom"](("VIN-A", state))) is False
+
+
+def test_curtailment_cached_status_preserves_native_zero_export_with_normal_ac():
+    namespace = {
+        "DOMAIN": "power_sync", "Any": object,
+        "hass": SimpleNamespace(data={"power_sync": {"entry-id": {
+            "sigenergy_coordinator": SimpleNamespace(data={"is_curtailed": True}),
+            "inverter_last_state": "normal",
+        }}}),
+        "entry": SimpleNamespace(entry_id="entry-id"),
+        "_LOGGER": SimpleNamespace(debug=lambda *a: None),
+        "coordinator_data_to_ev_live_status": lambda data: dict(data),
+    }
+    tree = ast.parse(textwrap.dedent(_function_source("_get_cached_live_status")))
+
+    class StripImports(ast.NodeTransformer):
+        def visit_ImportFrom(self, node):
+            return ast.copy_location(ast.Pass(), node)
+
+    exec(compile(ast.fix_missing_locations(StripImports().visit(tree)), "<cached-status>", "exec"), namespace)
+    assert namespace["_get_cached_live_status"]()["is_curtailed"] is True
+
+
 def test_ev_live_status_does_not_force_cached_sungrow_curtailment_state():
     source = _actions_function_source("_get_tesla_live_status")
 

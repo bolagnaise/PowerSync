@@ -12072,14 +12072,20 @@ def _curtailed_full_battery_idle_ev_probe_kw(
         battery_soc = float(battery_soc) if battery_soc is not None else None
     except (TypeError, ValueError):
         battery_soc = None
-    if battery_soc is None or battery_soc < _BATTERY_FULL_RESERVE_BYPASS_SOC:
+    if battery_soc is None or not math.isfinite(battery_soc) or battery_soc < _BATTERY_FULL_RESERVE_BYPASS_SOC:
         return 0.0
 
-    solar_kw = (live_status.get("solar_power") or 0) / 1000
+    # A probe must not turn missing telemetry or battery-supported load into
+    # apparent solar. These values are admission evidence, not display defaults.
+    readings = [live_status.get(key) for key in ("solar_power", "grid_power", "battery_power")]
+    if any(isinstance(value, bool) or not isinstance(value, (int, float))
+           or not math.isfinite(value) for value in readings):
+        return 0.0
+    solar_kw, grid_kw, battery_kw = (value / 1000 for value in readings)
     if solar_kw <= 0.05:
         return 0.0
-
-    grid_kw = (live_status.get("grid_power") or 0) / 1000
+    if battery_kw > 0.05:
+        return 0.0
     grid_import_tolerance_kw = config.get("grid_import_tolerance_kw", 0.1)
     if grid_kw > grid_import_tolerance_kw:
         return 0.0
@@ -12205,20 +12211,8 @@ def _calculate_solar_surplus(
             f"available={available_kw:.2f}kW"
         )
 
-    probe_kw = _curtailed_full_battery_idle_ev_probe_kw(
-        live_status,
-        current_ev_power_kw,
-        config,
-        hass,
-    )
-    if probe_kw > available_kw:
-        _LOGGER.debug(
-            f"Surplus calc: curtailment/full-battery idle EV probe available={probe_kw:.2f}kW "
-            f"(calculated={available_kw:.2f}kW)"
-        )
-        available_kw = probe_kw
-
-    # Apply buffer and ensure non-negative
+    # Speculative discovery belongs to the bounded controller path. Never
+    # replace measured surplus with a charger's minimum electrical load.
     return available_kw
 
 
@@ -13359,8 +13353,9 @@ async def _get_tesla_live_status(hass: HomeAssistant, config_entry: ConfigEntry)
             live_status = coordinator_data_to_ev_live_status(coordinator.data)
             if entry_data.get("inverter_last_state") == "curtailed":
                 live_status["is_curtailed"] = True
-            elif entry_data.get("inverter_last_state") in ("normal", "running"):
-                live_status["is_curtailed"] = False
+                live_status["ac_production_curtailed"] = True
+            # A separate AC inverter being normal does not release a native
+            # hybrid's site-export limit. Preserve its coordinator readback.
             return live_status
 
     # A configured but unhealthy coordinator must not be bypassed by a raw
@@ -15667,6 +15662,82 @@ async def _dynamic_ev_update_surplus(
             executable_available_amps,
             optimizer_ceiling_amps,
         )
+
+    entry_data = hass.data.get("power_sync", {}).get(entry_id, {})
+    headroom = entry_data.get("solar_ev_headroom")
+    if headroom is not None:
+        lease = headroom.lease
+        if lease and lease["candidate"][0] == vehicle_id and lease["candidate"][1] is state:
+            await headroom.observe(
+                lease["candidate"], live_status, power_kw=observed_current_power_kw,
+                power_available=current_vehicle_power_available,
+                safe_amps=int(max(0, executable_available_amps)),
+            )
+            if _session_was_replaced("headroom observation"):
+                return
+            if headroom.lease is not lease or headroom.phase == "closing":
+                return  # Wait for a post-closure sample before another command.
+        elif (not lease and optimizer_ceiling_amps != 0
+              and executable_available_amps < effective_current_amps + 1
+              and (effective_current_amps == 0 or current_vehicle_power_available)
+              and effective_current_amps < max_amps):
+            if effective_current_amps == 0 and await _is_vehicle_charge_complete(
+                hass, vehicle_id, params.get("tesla_charging_state_entity")
+            ):
+                if _session_was_replaced("headroom completion check"):
+                    return
+                return
+            if _session_was_replaced("headroom admission"):
+                return
+            from ..solar_ev_headroom import candidate_token
+            candidate = (vehicle_id, state, candidate_token(state))
+            if await headroom.request(
+                candidate, live_status,
+                sustained_seconds=max(0, float(params.get("sustained_surplus_minutes", 2))) * 60,
+                baseline_amps=effective_current_amps if observed_current_power_kw > 0.05 else 0,
+                baseline_power_kw=observed_current_power_kw if current_vehicle_power_available else 0,
+            ):
+                if not _session_was_replaced("headroom discovery"):
+                    state["reason"] = "Discovering solar headroom under a bounded export-limit lease"
+                return
+
+    load_probe_amps = None
+    from ..solar_surplus_config import get_stored_solar_surplus_config
+    legacy_probe_allowed = headroom is None or (
+        not get_stored_solar_surplus_config(entry_data).get("enabled", False)
+        and headroom.lease is None and not headroom.saved.get("pending")
+    )
+    if legacy_probe_allowed and optimizer_ceiling_amps != 0:
+        from ..solar_ev_headroom import idle_load_probe
+
+        def _schedule_load_probe(record, seconds):
+            def expired(_when):
+                if (hass.data.get("power_sync", {}).get(entry_id) is not entry_data
+                        or entry_data.get("solar_ev_load_probe") is not record):
+                    return
+                record["phase"] = "expired"
+                if (_dynamic_ev_state.get(entry_id) or {}).get(vehicle_id) is state:
+                    hass.async_create_task(_dynamic_ev_update(hass, config_entry, entry_id, vehicle_id))
+            return async_track_point_in_time(
+                hass, expired, datetime.now(dt_timezone.utc) + timedelta(seconds=seconds)
+            )
+
+        load_probe_amps = idle_load_probe(
+            entry_data, vehicle_id, state, live_status,
+            eligible=_curtailed_full_battery_idle_ev_probe_kw(
+                live_status, current_ev_kw, params, hass
+            ) > 0,
+            min_amps=min_amps, power_kw=observed_current_power_kw,
+            power_available=current_vehicle_power_available,
+            clock=time.monotonic, utcnow=lambda: datetime.now(dt_timezone.utc),
+            schedule=_schedule_load_probe,
+        )
+        if load_probe_amps:
+            # This is explicitly a finite experiment, never measured surplus.
+            executable_available_amps = max(executable_available_amps, min(load_probe_amps, max_amps))
+            if optimizer_ceiling_amps is not None:
+                executable_available_amps = min(executable_available_amps, optimizer_ceiling_amps)
+
     new_amps = int(round(max(0, min(max_amps, executable_available_amps))))
 
     # Hysteresis: don't start unless we have sustained surplus
@@ -15676,7 +15747,7 @@ async def _dynamic_ev_update_surplus(
     # Keep the existing nearest-amp targeting once charging is viable, but do
     # not let rounding manufacture the minimum needed to start or continue.
     # For example, 5.5 A of physical surplus cannot satisfy a 6 A floor.
-    if optimizer_ceiling_amps == 0:
+    if optimizer_ceiling_amps == 0 or load_probe_amps == 0:
         # An exact LP zero is a slot boundary, not a transient solar dip. Pause
         # immediately while leaving the owned controller alive for a later
         # positive slot.
@@ -15742,6 +15813,11 @@ async def _dynamic_ev_update_surplus(
                 start_params = dict(params)
                 if start_params.get("charger_type") in {"sigenergy", "tesla"}:
                     start_params["amps"] = new_amps
+                if headroom is not None and headroom.lease:
+                    trial = headroom.lease["candidate"]
+                    if trial[0] == vehicle_id and trial[1] is state:
+                        if not await headroom.command_started(trial, new_amps * voltage * phases / 1000) or _session_was_replaced("headroom trial persistence"):
+                            return
                 if params.get("charger_type", "tesla") == "tesla":
                     start_success = await _restart_owned_tesla(
                         hass, config_entry, vehicle_id, state, new_amps)
@@ -15788,7 +15864,8 @@ async def _dynamic_ev_update_surplus(
                         await _send_expo_push(
                             hass,
                             "EV Charging",
-                            f"{vehicle_name} started - {surplus_kw:.1f}kW solar"
+                            (f"{vehicle_name}: solar availability trial started"
+                             if load_probe_amps else f"{vehicle_name} started - {surplus_kw:.1f}kW solar")
                         )
                     except Exception as e:
                         _LOGGER.debug(f"Could not send solar start notification: {e}")
@@ -15806,6 +15883,8 @@ async def _dynamic_ev_update_surplus(
         f"Surplus: {surplus_kw:.1f}kW, Allocated: {my_surplus_kw:.1f}kW, "
         f"Battery: {battery_soc:.0f}%, Target: {new_amps}A"
     )
+    if load_probe_amps is not None:
+        state["reason"] = "Bounded solar availability trial; " + state["reason"]
 
     # Update charging session with current power reading
     if effective_current_amps > 0 and not _session_energy_tracked_by_charger_poll(params):
@@ -15834,7 +15913,12 @@ async def _dynamic_ev_update_surplus(
             return
 
     # Only update if change is significant (>= 1 amp)
-    if abs(new_amps - effective_current_amps) >= 1:
+    if abs(new_amps - effective_current_amps) >= 1 or load_probe_amps == 0:
+        if new_amps > 0 and headroom is not None and headroom.lease:
+            trial = headroom.lease["candidate"]
+            if trial[0] == vehicle_id and trial[1] is state:
+                if not await headroom.command_started(trial, new_amps * voltage * phases / 1000) or _session_was_replaced("headroom rate persistence"):
+                    return
         _LOGGER.info(
             f"⚡ Solar surplus EV: {effective_current_amps}A -> {new_amps}A "
             f"(surplus={my_surplus_kw:.1f}kW, battery={battery_soc:.0f}%)"
@@ -17251,7 +17335,14 @@ async def _dynamic_ev_update(
         async with update_lock:
             if not _session_is_current():
                 return
-            await _dynamic_ev_update_surplus(hass, config_entry, entry_id, vehicle_id)
+            try:
+                await _dynamic_ev_update_surplus(hass, config_entry, entry_id, vehicle_id)
+            finally:
+                headroom = hass.data.get("power_sync", {}).get(entry_id, {}).get("solar_ev_headroom")
+                lease = headroom.lease if headroom is not None else None
+                if lease and lease["candidate"][0] == vehicle_id:
+                    if not await headroom.eligible(lease["candidate"]):
+                        await headroom.close()
         return
 
     if await _release_dynamic_tesla_if_away(
@@ -19881,6 +19972,10 @@ async def _action_stop_ev_charging_dynamic(
             hass.data[DOMAIN][entry_id].pop("dynamic_ev_state", None)
 
     # Stop EV charging if requested
+    headroom = hass.data.get(DOMAIN, {}).get(entry_id, {}).get("solar_ev_headroom")
+    if headroom is not None and headroom.lease:
+        if headroom.lease["candidate"][0] in vehicle_ids_to_stop:
+            await headroom.close()
     if stop_charging and vehicle_ids_to_stop:
         physical_stop_failed = False
         for vid_to_stop in vehicle_ids_to_stop:

@@ -3317,7 +3317,7 @@ def test_solar_surplus_curtailed_full_battery_keeps_active_ev_headroom():
     assert surplus_kw == 5.61
 
 
-def test_solar_surplus_curtailed_full_battery_probes_idle_ev_start():
+def test_solar_surplus_keeps_idle_probe_separate_from_measured_capacity():
     surplus_kw = actions._calculate_solar_surplus(
         {
             "battery_soc": 100,
@@ -3340,7 +3340,151 @@ def test_solar_surplus_curtailed_full_battery_probes_idle_ev_start():
         },
     )
 
-    assert surplus_kw == 1.2
+    assert surplus_kw == 0
+
+
+@pytest.mark.parametrize("potential_solar_kw,expect_charge", [(6.0, True), (1.35, False)])
+@pytest.mark.parametrize("sustained_minutes", [0, 2])
+def test_native_headroom_discovery_preserves_bootstrap_ramp_and_closes_export(
+    monkeypatch, potential_solar_kw, expect_charge, sustained_minutes,
+):
+    """Real EV loop + native handler: strong PV ramps; ticket160 stays at zero."""
+    import ast
+    from power_sync.solar_ev_headroom import SolarEVHeadroom, candidate_token
+
+    hass = _Hass([])
+    entry = SimpleNamespace(entry_id="entry-1", data={}, options={"sigenergy_dc_curtailment_enabled": True})
+    entry_data = hass.data["power_sync"][entry.entry_id]
+    entry_data["automation_store"]._data["solar_surplus_config"] = {
+        "enabled": True, "household_buffer_kw": 1.0, "sustained_surplus_minutes": sustained_minutes,
+    }
+    vehicle_id = "sigenergy_charger"
+    state = _solar_surplus_state(current_amps=0)
+    state["charging_started"] = False
+    state["params"].update(charger_type="sigenergy", min_charge_amps=6, max_charge_amps=16,
+                           sustained_surplus_minutes=sustained_minutes, household_buffer_kw=1.0)
+    actions._dynamic_ev_state.clear()
+    actions._dynamic_ev_state[entry.entry_id] = {vehicle_id: state}
+    plant = {"export_limit": 0, "ev_kw": 0.0, "seconds": 0.0}
+    base = datetime.now(timezone.utc)
+    rates = []
+    writes = []
+    persisted = []
+
+    def utcnow():
+        return base + timedelta(seconds=plant["seconds"])
+
+    class SimDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            value = utcnow()
+            return value.astimezone(tz) if tz is not None else value.replace(tzinfo=None)
+
+    monkeypatch.setattr(actions, "datetime", SimDatetime)
+
+    def snapshot():
+        pv = min(potential_solar_kw, 1.2 + plant["ev_kw"]) if plant["export_limit"] == 0 else potential_solar_kw
+        return {
+            "battery_soc": 100, "solar_power": pv * 1000,
+            "grid_power": (1.2 + plant["ev_kw"] - pv) * 1000,
+            "battery_power": 0, "load_power": 1200,
+            "is_curtailed": plant["export_limit"] == 0,
+            "native_zero_export": plant["export_limit"] == 0,
+            "site_observed_at": utcnow(),
+        }
+
+    _install_solar_surplus_runtime_stubs(monkeypatch, snapshot())
+    monkeypatch.setattr(actions, "_get_tesla_live_status", AsyncMock(side_effect=lambda *_a: snapshot()))
+    monkeypatch.setattr(actions, "_read_sigenergy_charger_power_kw", AsyncMock(side_effect=lambda *_a: plant["ev_kw"]))
+    monkeypatch.setattr(actions, "_get_observed_ev_power_reading_kw", AsyncMock(side_effect=lambda *_a, **_k: (plant["ev_kw"], True)))
+    monkeypatch.setattr(actions, "_clear_ble_dynamic_session_if_unplugged", AsyncMock(return_value=False))
+    monkeypatch.setattr(actions, "_is_vehicle_charge_complete", AsyncMock(return_value=False))
+
+    async def start(*_args, **_kwargs):
+        return True
+
+    async def set_amps(_hass, _entry, _vehicle, amps, _params):
+        rates.append(amps)
+        plant["ev_kw"] = amps * 0.24
+        return True
+
+    monkeypatch.setattr(actions, "_action_start_ev_charging", start)
+    monkeypatch.setattr(actions, "_set_vehicle_amps", set_amps)
+
+    class Controller:
+        async def restore(self):
+            plant["export_limit"] = 12600
+            writes.append("release")
+            return True
+
+        async def curtail(self):
+            plant["export_limit"] = 0
+            writes.append("zero-export")
+            return True
+
+    coordinator = SimpleNamespace(_controller=Controller(), data={"grid_power": 0})
+    entry_data.update(sigenergy_coordinator=coordinator, sigenergy_curtailment_state="curtailed")
+    source = (ROOT / "__init__.py").read_text()
+    handler_node = next(n for n in ast.walk(ast.parse(source))
+                        if isinstance(n, ast.AsyncFunctionDef) and n.name == "handle_sigenergy_curtailment")
+    runtime = None
+
+    async def permits():
+        return runtime.permits()
+
+    ns = {
+        "hass": hass, "entry": entry, "DOMAIN": "power_sync", "_LOGGER": logging.getLogger(__name__),
+        "CONF_SIGENERGY_DC_CURTAILMENT_ENABLED": "sigenergy_dc_curtailment_enabled",
+        "export_earnings_are_uneconomic": lambda value, *_args: value < 0,
+        "_direct_dc_curtailment_write_allowed": lambda: True,
+        "_active_solar_surplus_ev_needs_inverter_headroom": permits,
+    }
+    exec(ast.get_source_segment(source, handler_node), ns)
+
+    async def persist(record):
+        persisted.append(dict(record))
+
+    async def eligible(candidate):
+        return (actions._dynamic_ev_state[entry.entry_id].get(candidate[0]) is candidate[1]
+                and candidate_token(candidate[1]) == candidate[2])
+
+    async def reconcile(*, opening):
+        await ns["handle_sigenergy_curtailment"](feedin_price=0.77)
+        return plant["export_limit"] > 0 if opening else plant["export_limit"] == 0
+
+    async def abort(lease):
+        await set_amps(hass, entry, vehicle_id, 0, state["params"])
+        state["current_amps"] = 0
+        return True
+
+    runtime = SolarEVHeadroom(
+        identity=["sigenergy", "site", 502, 1], saved=None, persist=persist,
+        eligible=eligible, reconcile=reconcile, abort=abort,
+        schedule=lambda *_args: lambda: None, current=lambda: True,
+        clock=lambda: plant["seconds"], utcnow=utcnow,
+    )
+    entry_data["solar_ev_headroom"] = runtime
+
+    async def scenario():
+        for _ in range(16):
+            await actions._dynamic_ev_update_surplus(hass, entry, entry.entry_id, vehicle_id)
+            plant["seconds"] += 10
+        if not expect_charge:
+            assert rates == []
+            plant["seconds"] = runtime.lease["deadline"]
+            await runtime.expire()
+        assert plant["export_limit"] == 0
+        assert persisted[-1]["pending"] is False
+        if expect_charge:
+            assert max(rates) > 6
+            accepted = plant["ev_kw"]
+            await actions._dynamic_ev_update_surplus(hass, entry, entry.entry_id, vehicle_id)
+            assert plant["ev_kw"] == accepted
+        else:
+            assert rates == []  # Expiry cannot stop an EV we never started.
+        assert writes == ["release", "zero-export"]
+
+    asyncio.run(scenario())
 
 
 def test_solar_surplus_curtailed_full_battery_idle_probe_requires_solar():
@@ -3388,6 +3532,26 @@ def test_solar_surplus_curtailed_full_battery_idle_probe_blocks_grid_import():
     )
 
     assert surplus_kw == 0
+
+
+@pytest.mark.parametrize("override", [
+    {"battery_soc": float("nan")},
+    {"battery_soc": float("inf")},
+    {"grid_power": None},
+    {"grid_power": float("nan")},
+    {"battery_power": None},
+    {"battery_power": 1000},
+    {"solar_power": float("inf")},
+])
+def test_curtailment_idle_probe_requires_finite_non_battery_supported_site_data(override):
+    status = {
+        "battery_soc": 100, "grid_power": 0, "battery_power": 0,
+        "solar_power": 100, "is_curtailed": True,
+    }
+    status.update(override)
+    assert actions._curtailed_full_battery_idle_ev_probe_kw(
+        status, 0, {"min_charge_amps": 6, "voltage": 240, "phases": 1}
+    ) == 0
 
 
 def test_solar_surplus_full_battery_topoff_does_not_reserve_battery_charge_rate():

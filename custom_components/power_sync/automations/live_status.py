@@ -3,6 +3,22 @@
 from __future__ import annotations
 
 from typing import Any
+import math
+
+
+def _native_zero_export(data: dict[str, Any]) -> bool:
+    """Recognize an actual site-export register readback, including WiNet-S's floor."""
+    for key, scale, enabled in (
+        ("export_limit_kw", 1000.0, True),
+        ("export_limit_w", 1.0, data.get("export_limit_enabled") is True),
+    ):
+        value = data.get(key)
+        if not enabled or isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        watts = value * scale
+        if math.isfinite(watts) and 0 <= watts <= 50:
+            return True
+    return False
 
 
 def _kw_to_w(value: Any) -> float:
@@ -35,6 +51,7 @@ def coordinator_data_to_ev_live_status(data: dict[str, Any]) -> dict[str, Any]:
         if "site_load_power" in data
         else load_power
     )
+    native_zero_export = _native_zero_export(data)
     return {
         "battery_soc": data.get("battery_level", 0),
         "grid_power": _kw_to_w(data.get("grid_power", 0)),
@@ -55,5 +72,8 @@ def coordinator_data_to_ev_live_status(data: dict[str, Any]) -> dict[str, Any]:
             data.get("ev_power_at_site_sample")
         ),
         "home_load_basis": data.get("home_load_basis", "includes_ev"),
-        "is_curtailed": bool(data.get("is_curtailed", False)),
+        "is_curtailed": bool(data.get("is_curtailed", False)) or native_zero_export,
+        "native_zero_export": native_zero_export,
+        "ac_production_curtailed": False,
+        "site_observed_at": data.get("last_update"),
     }

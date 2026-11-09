@@ -27234,8 +27234,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 inverter_last_state = entry_data.get("inverter_last_state")
                 if inverter_last_state == "curtailed":
                     live_status["is_curtailed"] = True
-                elif inverter_last_state in ("normal", "running"):
-                    live_status["is_curtailed"] = False
+                    live_status["ac_production_curtailed"] = True
+                # External AC production and the hybrid's native export limit
+                # are independent; normal AC must not erase native readback.
                 _LOGGER.debug("Live status from %s", coord_key)
                 return live_status
         except Exception as e:
@@ -31278,152 +31279,161 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             feedin_price: Current feed-in price in c/kWh (None to fetch from Amber)
             import_price: Current import price in c/kWh (for logging only)
         """
-        # Check Sigenergy-specific DC curtailment toggle
-        dc_curtailment_enabled = entry.options.get(
-            CONF_SIGENERGY_DC_CURTAILMENT_ENABLED,
-            entry.data.get(CONF_SIGENERGY_DC_CURTAILMENT_ENABLED, False)
-        )
-        if not dc_curtailment_enabled:
-            _LOGGER.debug("Sigenergy DC curtailment is disabled, skipping")
+        import asyncio as _curtailment_asyncio
+        _writer_entry = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+        if _writer_entry is None:
             return
-
-        entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
-        current_state = entry_data.get("sigenergy_curtailment_state", "normal")
-
-        # Get prices from any available price coordinator if not provided
-        if feedin_price is None:
-            feedin_price, import_price, price_source = get_current_prices_for_curtailment(
-                entry_data,
-                (
-                    amber_coordinator,
-                    localvolts_coordinator,
-                    aemo_sensor_coordinator,
-                    flow_power_kwatch_coordinator,
-                    octopus_coordinator,
-                ),
+        async with _writer_entry.setdefault("_native_solar_curtailment_lock", _curtailment_asyncio.Lock()):
+            if hass.data.get(DOMAIN, {}).get(entry.entry_id) is not _writer_entry:
+                return
+            # Check Sigenergy-specific DC curtailment toggle
+            dc_curtailment_enabled = entry.options.get(
+                CONF_SIGENERGY_DC_CURTAILMENT_ENABLED,
+                entry.data.get(CONF_SIGENERGY_DC_CURTAILMENT_ENABLED, False)
             )
-            if price_source == "tariff_schedule":
-                _LOGGER.debug("Sigenergy curtailment using feed-in price from tariff schedule")
-
-        if feedin_price is None:
-            _LOGGER.warning("Sigenergy curtailment: no feed-in price available")
-            return
-
-        export_earnings = -feedin_price
-        _LOGGER.info(
-            "Sigenergy curtailment check: export_earnings=%.2fc/kWh, import=%.2fc/kWh, state=%s",
-            export_earnings, import_price or 0, current_state,
-        )
-
-        # The shared predicate is strict at the standard negative-price boundary
-        # and retains hysteresis for explicit non-default thresholds.
-        export_uneconomic = export_earnings_are_uneconomic(
-            export_earnings,
-            entry_data.get("sigenergy_curtail_export_uneconomic", False),
-            entry,
-        )
-        entry_data["sigenergy_curtail_export_uneconomic"] = export_uneconomic
-
-        # Get Sigenergy controller from coordinator
-        sig_coord = entry_data.get("sigenergy_coordinator")
-        if not sig_coord or not hasattr(sig_coord, '_controller') or not sig_coord._controller:
-            _LOGGER.debug("Sigenergy curtailment: no controller available")
-            return
-
-        controller = sig_coord._controller
-
-        try:
-            ev_needs_headroom = (
-                await _active_solar_surplus_ev_needs_inverter_headroom()
-            )
-            if export_uneconomic and ev_needs_headroom:
-                if current_state != "normal":
-                    _LOGGER.info(
-                        "Sigenergy curtailment RESTORED: solar surplus EV needs PV "
-                        "headroom (export_earnings=%.2fc)",
-                        export_earnings,
-                    )
-                    if not _direct_dc_curtailment_write_allowed():
-                        return
-                    success = await controller.restore()
-                    if success:
-                        entry_data["sigenergy_curtailment_state"] = "normal"
-                        entry_data.pop("_last_sigenergy_curtailment_reapply", None)
-                    else:
-                        _LOGGER.error("Sigenergy restore() for solar surplus EV headroom failed")
-                else:
-                    _LOGGER.debug(
-                        "Sigenergy normal export retained: solar surplus EV needs PV headroom"
-                    )
+            if not dc_curtailment_enabled:
+                _LOGGER.debug("Sigenergy DC curtailment is disabled, skipping")
                 return
 
-            if export_uneconomic:
-                import time as _time_mod
+            entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+            current_state = entry_data.get("sigenergy_curtailment_state", "normal")
 
-                _sigenergy_reapply_interval = 900
-                _last_reapply = entry_data.get("_last_sigenergy_curtailment_reapply", 0)
-                _now = _time_mod.monotonic()
-                _elapsed_since_reapply = _now - _last_reapply
-                _live_export_reapply = False
-                try:
-                    coord_data = getattr(sig_coord, "data", None) or {}
-                    grid_power_kw = float(coord_data.get("grid_power", 0) or 0)
-                    grid_export_w = max(0, int(abs(grid_power_kw) * 1000)) if grid_power_kw < -0.25 else 0
-                    if current_state == "curtailed" and grid_export_w > 250:
-                        _live_export_reapply = True
-                        _LOGGER.info(
-                            "Sigenergy curtailment RE-APPLY: cached curtailed but grid export is %dW",
-                            grid_export_w,
-                        )
-                except (TypeError, ValueError):
-                    pass
-                _needs_reapply = (
-                    current_state == "curtailed"
-                    and _elapsed_since_reapply >= _sigenergy_reapply_interval
-                ) or _live_export_reapply
+            # Get prices from any available price coordinator if not provided
+            if feedin_price is None:
+                feedin_price, import_price, price_source = get_current_prices_for_curtailment(
+                    entry_data,
+                    (
+                        amber_coordinator,
+                        localvolts_coordinator,
+                        aemo_sensor_coordinator,
+                        flow_power_kwatch_coordinator,
+                        octopus_coordinator,
+                    ),
+                )
+                if price_source == "tariff_schedule":
+                    _LOGGER.debug("Sigenergy curtailment using feed-in price from tariff schedule")
 
-                # Negative or near-zero export earnings → zero-export curtailment
-                if current_state != "curtailed" or _needs_reapply:
-                    if current_state == "curtailed":
+            if feedin_price is None:
+                _LOGGER.warning("Sigenergy curtailment: no feed-in price available")
+                return
+
+            export_earnings = -feedin_price
+            _LOGGER.info(
+                "Sigenergy curtailment check: export_earnings=%.2fc/kWh, import=%.2fc/kWh, state=%s",
+                export_earnings, import_price or 0, current_state,
+            )
+
+            # The shared predicate is strict at the standard negative-price boundary
+            # and retains hysteresis for explicit non-default thresholds.
+            export_uneconomic = export_earnings_are_uneconomic(
+                export_earnings,
+                entry_data.get("sigenergy_curtail_export_uneconomic", False),
+                entry,
+            )
+            entry_data["sigenergy_curtail_export_uneconomic"] = export_uneconomic
+
+            # Get Sigenergy controller from coordinator
+            sig_coord = entry_data.get("sigenergy_coordinator")
+            if not sig_coord or not hasattr(sig_coord, '_controller') or not sig_coord._controller:
+                _LOGGER.debug("Sigenergy curtailment: no controller available")
+                return
+
+            controller = sig_coord._controller
+
+            try:
+                ev_needs_headroom = (
+                    await _active_solar_surplus_ev_needs_inverter_headroom()
+                )
+                if hass.data.get(DOMAIN, {}).get(entry.entry_id) is not entry_data:
+                    return
+                if export_uneconomic and ev_needs_headroom:
+                    if current_state != "normal":
                         _LOGGER.info(
-                            "Sigenergy curtailment RE-APPLY: export_earnings=%.2fc (below threshold), %ds since last apply",
+                            "Sigenergy curtailment RESTORED: solar surplus EV needs PV "
+                            "headroom (export_earnings=%.2fc)",
                             export_earnings,
-                            int(_elapsed_since_reapply),
                         )
+                        if not _direct_dc_curtailment_write_allowed():
+                            return
+                        success = await controller.restore()
+                        if success:
+                            entry_data["sigenergy_curtailment_state"] = "normal"
+                            entry_data.pop("_last_sigenergy_curtailment_reapply", None)
+                        else:
+                            _LOGGER.error("Sigenergy restore() for solar surplus EV headroom failed")
                     else:
+                        _LOGGER.debug(
+                            "Sigenergy normal export retained: solar surplus EV needs PV headroom"
+                        )
+                    return
+
+                if export_uneconomic:
+                    import time as _time_mod
+
+                    _sigenergy_reapply_interval = 900
+                    _last_reapply = entry_data.get("_last_sigenergy_curtailment_reapply", 0)
+                    _now = _time_mod.monotonic()
+                    _elapsed_since_reapply = _now - _last_reapply
+                    _live_export_reapply = False
+                    try:
+                        coord_data = getattr(sig_coord, "data", None) or {}
+                        grid_power_kw = float(coord_data.get("grid_power", 0) or 0)
+                        grid_export_w = max(0, int(abs(grid_power_kw) * 1000)) if grid_power_kw < -0.25 else 0
+                        if current_state == "curtailed" and grid_export_w > 250:
+                            _live_export_reapply = True
+                            _LOGGER.info(
+                                "Sigenergy curtailment RE-APPLY: cached curtailed but grid export is %dW",
+                                grid_export_w,
+                            )
+                    except (TypeError, ValueError):
+                        pass
+                    _needs_reapply = (
+                        current_state == "curtailed"
+                        and _elapsed_since_reapply >= _sigenergy_reapply_interval
+                    ) or _live_export_reapply
+
+                    # Negative or near-zero export earnings → zero-export curtailment
+                    if current_state != "curtailed" or _needs_reapply:
+                        if current_state == "curtailed":
+                            _LOGGER.info(
+                                "Sigenergy curtailment RE-APPLY: export_earnings=%.2fc (below threshold), %ds since last apply",
+                                export_earnings,
+                                int(_elapsed_since_reapply),
+                            )
+                        else:
+                            _LOGGER.info(
+                                "Sigenergy curtailment TRIGGERED: export_earnings=%.2fc (below threshold) → zero export",
+                                export_earnings,
+                            )
+                        if not _direct_dc_curtailment_write_allowed():
+                            return
+                        success = await controller.curtail()
+                        if success:
+                            entry_data["sigenergy_curtailment_state"] = "curtailed"
+                            entry_data["_last_sigenergy_curtailment_reapply"] = _now
+                        else:
+                            _LOGGER.error("Sigenergy curtail() failed")
+                    else:
+                        _LOGGER.debug("Sigenergy already curtailed (zero export), no action needed")
+                else:
+                    # Positive export earnings → restore
+                    if current_state != "normal":
                         _LOGGER.info(
-                            "Sigenergy curtailment TRIGGERED: export_earnings=%.2fc (below threshold) → zero export",
+                            "Sigenergy curtailment RESTORED: export_earnings=%.2fc (at or above threshold) → normal export",
                             export_earnings,
                         )
-                    if not _direct_dc_curtailment_write_allowed():
-                        return
-                    success = await controller.curtail()
-                    if success:
-                        entry_data["sigenergy_curtailment_state"] = "curtailed"
-                        entry_data["_last_sigenergy_curtailment_reapply"] = _now
+                        if not _direct_dc_curtailment_write_allowed():
+                            return
+                        success = await controller.restore()
+                        if success:
+                            entry_data["sigenergy_curtailment_state"] = "normal"
+                            entry_data.pop("_last_sigenergy_curtailment_reapply", None)
+                        else:
+                            _LOGGER.error("Sigenergy restore() failed")
                     else:
-                        _LOGGER.error("Sigenergy curtail() failed")
-                else:
-                    _LOGGER.debug("Sigenergy already curtailed (zero export), no action needed")
-            else:
-                # Positive export earnings → restore
-                if current_state != "normal":
-                    _LOGGER.info(
-                        "Sigenergy curtailment RESTORED: export_earnings=%.2fc (at or above threshold) → normal export",
-                        export_earnings,
-                    )
-                    if not _direct_dc_curtailment_write_allowed():
-                        return
-                    success = await controller.restore()
-                    if success:
-                        entry_data["sigenergy_curtailment_state"] = "normal"
-                        entry_data.pop("_last_sigenergy_curtailment_reapply", None)
-                    else:
-                        _LOGGER.error("Sigenergy restore() failed")
-                else:
-                    _LOGGER.debug("Sigenergy already in normal mode, no action needed")
-        except Exception as e:
-            _LOGGER.error("Sigenergy curtailment error: %s", e, exc_info=True)
+                        _LOGGER.debug("Sigenergy already in normal mode, no action needed")
+            except Exception as e:
+                _LOGGER.error("Sigenergy curtailment error: %s", e, exc_info=True)
 
     async def handle_alphaess_curtailment(feedin_price=None, import_price=None) -> None:
         """Handle AlphaESS DC curtailment via Modbus with zero-export.
@@ -32144,8 +32154,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         except Exception as e:
             _LOGGER.error("GoodWe curtailment error: %s", e, exc_info=True)
 
-    async def _active_solar_surplus_ev_needs_inverter_headroom() -> bool:
-        """Return true when a plugged-in solar-surplus EV should release curtailment."""
+    async def _active_solar_surplus_ev_needs_inverter_headroom(candidate=None) -> bool:
+        """Validate the exact EV behind a bounded discovery permission."""
         try:
             from .automations.actions import DEFAULT_VEHICLE_ID, _dynamic_ev_state
             from .automations.ev_charging_planner import (
@@ -32154,6 +32164,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
             from .automations.ev_ownership import is_solar_surplus_owner_mode
             from .solar_surplus_config import get_stored_solar_surplus_config
+            from .solar_ev_headroom import candidate_token
         except Exception as err:
             _LOGGER.debug("Solar surplus EV headroom check unavailable: %s", err)
             return False
@@ -32162,9 +32173,40 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         solar_config = get_stored_solar_surplus_config(entry_data)
         if not solar_config.get("enabled", False):
             return False
+        lease_required = candidate is None
+        if candidate is None:
+            runtime = entry_data.get("solar_ev_headroom")
+            candidate = runtime.candidate if runtime is not None else None
+        if candidate is None:
+            return False
 
-        for vehicle_id, state in (_dynamic_ev_state.get(entry.entry_id, {}) or {}).items():
+        def session_current(vehicle_id, state):
+            if lease_required and runtime.candidate is not candidate:
+                return False
+            if hass.data.get(DOMAIN, {}).get(entry.entry_id) is not entry_data:
+                return False
+            if not get_stored_solar_surplus_config(entry_data).get("enabled", False):
+                return False
+            if (_dynamic_ev_state.get(entry.entry_id) or {}).get(vehicle_id) is not state:
+                return False
+            if vehicle_id != candidate[0] or state is not candidate[1]:
+                return False
+            if len(candidate) > 2 and candidate_token(state) != candidate[2]:
+                return False
+            if not state.get("active") or state.get("paused"):
+                return False
+            if state.get("stop_outcome") or state.get("transport_recovery_pending") or state.get("external_manual_override"):
+                return False
+            current_params = state.get("params") or {}
+            current_mode = current_params.get("dynamic_mode")
+            return current_mode == "solar_surplus" or is_solar_surplus_owner_mode(
+                current_params.get("owner_mode") or current_mode
+            )
+
+        for vehicle_id, state in list((_dynamic_ev_state.get(entry.entry_id, {}) or {}).items()):
             if not state or not state.get("active") or state.get("paused"):
+                continue
+            if not session_current(vehicle_id, state):
                 continue
 
             params = state.get("params") or {}
@@ -32179,8 +32221,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
             if not await is_ev_plugged_in(hass, entry, vehicle_vin=vehicle_vin):
                 continue
+            if not session_current(vehicle_id, state):
+                continue
 
             ev_soc = await get_ev_battery_level(hass, entry, vehicle_vin=vehicle_vin)
+            if not session_current(vehicle_id, state):
+                continue
             if ev_soc is not None and ev_soc >= 100:
                 continue
 
@@ -32199,184 +32245,193 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         Uses load-following when live load data is available so the inverter can
         keep powering the house and charging the battery while blocking exports.
         """
-        entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
-        current_state = entry_data.get("sungrow_curtailment_state", "normal")
-
-        if feedin_price is None:
-            feedin_price, import_price, price_source = get_current_prices_for_curtailment(
-                entry_data,
-                (
-                    amber_coordinator,
-                    localvolts_coordinator,
-                    aemo_sensor_coordinator,
-                    flow_power_kwatch_coordinator,
-                    octopus_coordinator,
-                ),
-            )
-            if price_source == "tariff_schedule":
-                _LOGGER.debug("Sungrow curtailment using feed-in price from tariff schedule")
-
-        if feedin_price is None:
-            _LOGGER.warning("Sungrow curtailment: no feed-in price available")
+        import asyncio as _curtailment_asyncio
+        _writer_entry = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+        if _writer_entry is None:
             return
+        async with _writer_entry.setdefault("_native_solar_curtailment_lock", _curtailment_asyncio.Lock()):
+            if hass.data.get(DOMAIN, {}).get(entry.entry_id) is not _writer_entry:
+                return
+            entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+            current_state = entry_data.get("sungrow_curtailment_state", "normal")
 
-        export_earnings = -feedin_price
-        _LOGGER.info(
-            "Sungrow curtailment check: export_earnings=%.2fc/kWh, import=%.2fc/kWh, state=%s",
-            export_earnings, import_price or 0, current_state,
-        )
+            if feedin_price is None:
+                feedin_price, import_price, price_source = get_current_prices_for_curtailment(
+                    entry_data,
+                    (
+                        amber_coordinator,
+                        localvolts_coordinator,
+                        aemo_sensor_coordinator,
+                        flow_power_kwatch_coordinator,
+                        octopus_coordinator,
+                    ),
+                )
+                if price_source == "tariff_schedule":
+                    _LOGGER.debug("Sungrow curtailment using feed-in price from tariff schedule")
 
-        # The shared predicate is strict at the standard negative-price boundary
-        # and retains hysteresis for explicit non-default thresholds.
-        export_uneconomic = export_earnings_are_uneconomic(
-            export_earnings,
-            entry_data.get("sungrow_curtail_export_uneconomic", False),
-            entry,
-        )
-        entry_data["sungrow_curtail_export_uneconomic"] = export_uneconomic
+            if feedin_price is None:
+                _LOGGER.warning("Sungrow curtailment: no feed-in price available")
+                return
 
-        sungrow_coord = entry_data.get("sungrow_coordinator")
-        native_available = bool(
-            sungrow_coord and hasattr(sungrow_coord, "set_export_limit")
-        )
-        if not native_available:
-            _LOGGER.debug("Sungrow curtailment: no coordinator export-limit control available")
-
-        try:
-            ev_needs_headroom = (
-                await _active_solar_surplus_ev_needs_inverter_headroom()
+            export_earnings = -feedin_price
+            _LOGGER.info(
+                "Sungrow curtailment check: export_earnings=%.2fc/kWh, import=%.2fc/kWh, state=%s",
+                export_earnings, import_price or 0, current_state,
             )
-            should_curtail_for_price = export_uneconomic and not ev_needs_headroom
 
-            if native_available and export_uneconomic and ev_needs_headroom:
-                if current_state != "normal":
-                    _LOGGER.info(
-                        "Sungrow curtailment RESTORED: solar surplus EV needs PV headroom "
-                        "(export_earnings=%.2fc)",
-                        export_earnings,
+            # The shared predicate is strict at the standard negative-price boundary
+            # and retains hysteresis for explicit non-default thresholds.
+            export_uneconomic = export_earnings_are_uneconomic(
+                export_earnings,
+                entry_data.get("sungrow_curtail_export_uneconomic", False),
+                entry,
+            )
+            entry_data["sungrow_curtail_export_uneconomic"] = export_uneconomic
+
+            sungrow_coord = entry_data.get("sungrow_coordinator")
+            native_available = bool(
+                sungrow_coord and hasattr(sungrow_coord, "set_export_limit")
+            )
+            if not native_available:
+                _LOGGER.debug("Sungrow curtailment: no coordinator export-limit control available")
+
+            try:
+                ev_needs_headroom = (
+                    await _active_solar_surplus_ev_needs_inverter_headroom()
+                )
+                if hass.data.get(DOMAIN, {}).get(entry.entry_id) is not entry_data:
+                    return
+                should_curtail_for_price = export_uneconomic and not ev_needs_headroom
+
+                if native_available and export_uneconomic and ev_needs_headroom:
+                    if current_state != "normal":
+                        _LOGGER.info(
+                            "Sungrow curtailment RESTORED: solar surplus EV needs PV headroom "
+                            "(export_earnings=%.2fc)",
+                            export_earnings,
+                        )
+                        success = await sungrow_coord.restore_curtailment_export_limit()
+                        if success:
+                            entry_data[
+                                "sungrow_curtailment_state"
+                            ] = "normal"
+                            entry_data["sungrow_power_limit_w"] = (
+                                None
+                            )
+                        else:
+                            _LOGGER.error("Sungrow set_export_limit(None) failed")
+                    else:
+                        _LOGGER.debug(
+                            "Sungrow normal export retained: solar surplus EV needs PV headroom"
+                        )
+                elif native_available and should_curtail_for_price:
+                    live_status = await get_live_status()
+                    home_load_w = 0
+                    if live_status and live_status.get("load_power"):
+                        home_load_w = int(live_status.get("load_power", 0))
+                        battery_power = live_status.get("battery_power", 0) or 0
+                        battery_charge_w = max(0, -int(battery_power))
+                        if battery_charge_w > 50:
+                            home_load_w += battery_charge_w
+                            _LOGGER.info(
+                                "Sungrow load-following limit: home=%dW + battery charging=%dW = %dW",
+                                int(live_status.get("load_power", 0)),
+                                battery_charge_w,
+                                home_load_w,
+                            )
+                        else:
+                            _LOGGER.info(
+                                "Sungrow load-following limit: home load=%dW",
+                                home_load_w,
+                            )
+                    else:
+                        _LOGGER.info(
+                            "Sungrow load-following data unavailable, using zero-export limit"
+                        )
+
+                    # On SH hybrids this register is the allowed grid export, not
+                    # the PV output target. A zero site-export limit lets the
+                    # inverter load-follow internally while blocking paid export.
+                    export_limit_w = 0
+                    current_limit = entry_data.get("sungrow_power_limit_w")
+                    # The cached pair is not evidence the limit is still in force:
+                    # any optimizer restore that consumed the ownership record left
+                    # the inverter exporting while this cache still read
+                    # "curtailed", so re-apply unless PowerSync still owns it.
+                    still_owned = bool(
+                        getattr(
+                            sungrow_coord, "curtailment_export_limit_owned", True
+                        )
                     )
-                    success = await sungrow_coord.restore_curtailment_export_limit()
-                    if success:
-                        hass.data[DOMAIN][entry.entry_id][
-                            "sungrow_curtailment_state"
-                        ] = "normal"
-                        hass.data[DOMAIN][entry.entry_id]["sungrow_power_limit_w"] = (
-                            None
+                    if (
+                        current_state == "curtailed"
+                        and current_limit == export_limit_w
+                        and still_owned
+                    ):
+                        _LOGGER.debug(
+                            "Sungrow already curtailed at %dW, no action needed",
+                            export_limit_w,
                         )
                     else:
-                        _LOGGER.error("Sungrow set_export_limit(None) failed")
-                else:
-                    _LOGGER.debug(
-                        "Sungrow normal export retained: solar surplus EV needs PV headroom"
-                    )
-            elif native_available and should_curtail_for_price:
-                live_status = await get_live_status()
-                home_load_w = 0
-                if live_status and live_status.get("load_power"):
-                    home_load_w = int(live_status.get("load_power", 0))
-                    battery_power = live_status.get("battery_power", 0) or 0
-                    battery_charge_w = max(0, -int(battery_power))
-                    if battery_charge_w > 50:
-                        home_load_w += battery_charge_w
                         _LOGGER.info(
-                            "Sungrow load-following limit: home=%dW + battery charging=%dW = %dW",
-                            int(live_status.get("load_power", 0)),
-                            battery_charge_w,
+                            "Sungrow curtailment TRIGGERED: export_earnings=%.2fc (below threshold), load=%dW -> zero-export limit",
+                            export_earnings,
                             home_load_w,
                         )
-                    else:
+                        success = await sungrow_coord.set_curtailment_export_limit(export_limit_w)
+                        if success:
+                            entry_data[
+                                "sungrow_curtailment_state"
+                            ] = "curtailed"
+                            entry_data[
+                                "sungrow_power_limit_w"
+                            ] = export_limit_w
+                        else:
+                            entry_data[
+                                "sungrow_curtailment_state"
+                            ] = "pending"
+                            _LOGGER.error("Sungrow set_export_limit(%d) failed", export_limit_w)
+                elif native_available:
+                    if current_state != "normal":
                         _LOGGER.info(
-                            "Sungrow load-following limit: home load=%dW",
-                            home_load_w,
+                            "Sungrow curtailment RESTORED: export_earnings=%.2fc (at or above threshold) -> normal export",
+                            export_earnings,
                         )
-                else:
-                    _LOGGER.info(
-                        "Sungrow load-following data unavailable, using zero-export limit"
-                    )
-
-                # On SH hybrids this register is the allowed grid export, not
-                # the PV output target. A zero site-export limit lets the
-                # inverter load-follow internally while blocking paid export.
-                export_limit_w = 0
-                current_limit = entry_data.get("sungrow_power_limit_w")
-                # The cached pair is not evidence the limit is still in force:
-                # any optimizer restore that consumed the ownership record left
-                # the inverter exporting while this cache still read
-                # "curtailed", so re-apply unless PowerSync still owns it.
-                still_owned = bool(
-                    getattr(
-                        sungrow_coord, "curtailment_export_limit_owned", True
-                    )
-                )
-                if (
-                    current_state == "curtailed"
-                    and current_limit == export_limit_w
-                    and still_owned
-                ):
-                    _LOGGER.debug(
-                        "Sungrow already curtailed at %dW, no action needed",
-                        export_limit_w,
-                    )
-                else:
-                    _LOGGER.info(
-                        "Sungrow curtailment TRIGGERED: export_earnings=%.2fc (below threshold), load=%dW -> zero-export limit",
-                        export_earnings,
-                        home_load_w,
-                    )
-                    success = await sungrow_coord.set_curtailment_export_limit(export_limit_w)
-                    if success:
-                        hass.data[DOMAIN][entry.entry_id][
-                            "sungrow_curtailment_state"
-                        ] = "curtailed"
-                        hass.data[DOMAIN][entry.entry_id][
-                            "sungrow_power_limit_w"
-                        ] = export_limit_w
+                        success = await sungrow_coord.restore_curtailment_export_limit()
+                        if success:
+                            entry_data[
+                                "sungrow_curtailment_state"
+                            ] = "normal"
+                            entry_data["sungrow_power_limit_w"] = (
+                                None
+                            )
+                        else:
+                            # Leaving the state at "curtailed" latched the handler:
+                            # the apply branch then saw no work and the card kept
+                            # showing Active.  "pending" renders honestly and lets
+                            # the next negative-price window re-apply.
+                            entry_data[
+                                "sungrow_curtailment_state"
+                            ] = "pending"
+                            entry_data["sungrow_power_limit_w"] = (
+                                None
+                            )
+                            _LOGGER.error("Sungrow set_export_limit(None) failed")
                     else:
-                        hass.data[DOMAIN][entry.entry_id][
-                            "sungrow_curtailment_state"
-                        ] = "pending"
-                        _LOGGER.error("Sungrow set_export_limit(%d) failed", export_limit_w)
-            elif native_available:
-                if current_state != "normal":
-                    _LOGGER.info(
-                        "Sungrow curtailment RESTORED: export_earnings=%.2fc (at or above threshold) -> normal export",
-                        export_earnings,
-                    )
-                    success = await sungrow_coord.restore_curtailment_export_limit()
-                    if success:
-                        hass.data[DOMAIN][entry.entry_id][
-                            "sungrow_curtailment_state"
-                        ] = "normal"
-                        hass.data[DOMAIN][entry.entry_id]["sungrow_power_limit_w"] = (
-                            None
-                        )
-                    else:
-                        # Leaving the state at "curtailed" latched the handler:
-                        # the apply branch then saw no work and the card kept
-                        # showing Active.  "pending" renders honestly and lets
-                        # the next negative-price window re-apply.
-                        hass.data[DOMAIN][entry.entry_id][
-                            "sungrow_curtailment_state"
-                        ] = "pending"
-                        hass.data[DOMAIN][entry.entry_id]["sungrow_power_limit_w"] = (
-                            None
-                        )
-                        _LOGGER.error("Sungrow set_export_limit(None) failed")
-                else:
-                    _LOGGER.debug("Sungrow already in normal mode, no action needed")
+                        _LOGGER.debug("Sungrow already in normal mode, no action needed")
 
-            ac_enabled = entry.options.get(
-                CONF_AC_INVERTER_CURTAILMENT_ENABLED,
-                entry.data.get(CONF_AC_INVERTER_CURTAILMENT_ENABLED, False),
-            )
-            if ac_enabled and not ac_inverter_is_same_hybrid():
-                await apply_inverter_curtailment(
-                    curtail=should_curtail_for_price,
-                    import_price=import_price,
-                    export_earnings=export_earnings,
+                ac_enabled = entry.options.get(
+                    CONF_AC_INVERTER_CURTAILMENT_ENABLED,
+                    entry.data.get(CONF_AC_INVERTER_CURTAILMENT_ENABLED, False),
                 )
-        except Exception as e:
-            _LOGGER.error("Sungrow curtailment error: %s", e, exc_info=True)
+                if ac_enabled and not ac_inverter_is_same_hybrid():
+                    await apply_inverter_curtailment(
+                        curtail=should_curtail_for_price,
+                        import_price=import_price,
+                        export_earnings=export_earnings,
+                    )
+            except Exception as e:
+                _LOGGER.error("Sungrow curtailment error: %s", e, exc_info=True)
 
     async def handle_ac_inverter_curtailment_only(
         feedin_price=None,
@@ -48169,6 +48224,160 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _flow_power_startup_tariff_sync,
             )
 
+    # Native EV discovery is requested by the EV loop, never by price polling.
+    # A retained mutation is reconciled before a new discovery may be admitted.
+    if is_sigenergy or is_sungrow:
+        from .solar_ev_headroom import SolarEVHeadroom, candidate_token
+        from .automations.live_status import _native_zero_export
+
+        _headroom_entry = hass.data[DOMAIN][entry.entry_id]
+        _headroom_coord = _headroom_entry.get(
+            "sigenergy_coordinator" if is_sigenergy else "sungrow_coordinator"
+        )
+        _headroom_controller = getattr(_headroom_coord, "_controller", None)
+        if _headroom_controller is None:
+            _headroom_controller = getattr(getattr(_headroom_coord, "_coord1", None), "_controller", None)
+        _headroom_identity = [
+            "sigenergy" if is_sigenergy else "sungrow",
+            getattr(_headroom_controller, "host", None),
+            getattr(_headroom_controller, "port", None),
+            getattr(_headroom_controller, "slave_id", None),
+        ]
+        _headroom_key = "solar_ev_headroom_recovery"
+
+        def _headroom_current():
+            controller = getattr(_headroom_coord, "_controller", None)
+            if controller is None:
+                controller = getattr(getattr(_headroom_coord, "_coord1", None), "_controller", None)
+            return (hass.data.get(DOMAIN, {}).get(entry.entry_id) is _headroom_entry
+                    and not _headroom_entry.get("aemo_dispatch_stopping")
+                    and controller is _headroom_controller
+                    and ["sigenergy" if is_sigenergy else "sungrow",
+                         getattr(controller, "host", None), getattr(controller, "port", None),
+                         getattr(controller, "slave_id", None)] == _headroom_identity)
+
+        async def _persist_headroom(record):
+            if not _headroom_current():
+                raise RuntimeError("Headroom entry was replaced")
+            records = automation_store._data.setdefault(_headroom_key, {})
+            previous = records.get(entry.entry_id)
+            records[entry.entry_id] = record
+            try:
+                await automation_store.async_save()
+            except Exception:
+                if records.get(entry.entry_id) is record:
+                    if previous is None:
+                        records.pop(entry.entry_id, None)
+                    else:
+                        records[entry.entry_id] = previous
+                raise
+
+        async def _headroom_eligible(candidate):
+            from .automations.actions import _dynamic_ev_state
+            from .automations.ev_ownership import is_solar_surplus_owner_mode
+            from .solar_surplus_config import get_stored_solar_surplus_config
+            vehicle_id, state, token = candidate
+            params = state.get("params") or {}
+            return bool(
+                _headroom_current()
+                and not _is_monitoring_mode()
+                and _headroom_entry.get("sigenergy_curtail_export_uneconomic" if is_sigenergy
+                                        else "sungrow_curtail_export_uneconomic") is True
+                and (_direct_dc_curtailment_write_allowed() if is_sigenergy
+                     else get_effective_solar_curtailment_configuration(entry)[0])
+                and (_dynamic_ev_state.get(entry.entry_id) or {}).get(vehicle_id) is state
+                and candidate_token(state) == token
+                and get_stored_solar_surplus_config(_headroom_entry).get("enabled", False)
+                and state.get("active") and not state.get("paused")
+                and not state.get("stop_outcome") and not state.get("transport_recovery_pending")
+                and not state.get("external_manual_override")
+                and (params.get("dynamic_mode") == "solar_surplus"
+                     or is_solar_surplus_owner_mode(params.get("owner_mode")))
+            )
+
+        async def _headroom_reconcile(*, opening):
+            if not _headroom_current():
+                return False
+            await handle_solar_curtailment_check(None)
+            if not _headroom_current():
+                return False
+            prefix = "sigenergy" if is_sigenergy else "sungrow"
+            if opening:
+                return (_headroom_entry.get(f"{prefix}_curtail_export_uneconomic") is True
+                        and _headroom_entry.get(f"{prefix}_curtailment_state") == "normal")
+            # Verify a new register-backed coordinator sample after reconciliation.
+            # A successful write/cache flag alone cannot retire the pending record.
+            sampled_after = dt_util.utcnow()
+            await _headroom_coord.async_refresh()
+            if not _headroom_current() or not getattr(_headroom_coord, "last_update_success", False):
+                return False
+            snapshot = getattr(_headroom_coord, "data", None) or {}
+            observed_at = snapshot.get("last_update")
+            if (not isinstance(observed_at, datetime) or observed_at.tzinfo is None
+                    or observed_at < sampled_after):
+                return False
+            if _native_zero_export(snapshot):
+                return True
+            # A newly economic price legitimately restores export. Re-evaluate
+            # the live price rather than clearing from a stale cached predicate.
+            feedin, _import, _source = get_current_prices_for_curtailment(
+                _headroom_entry, (amber_coordinator, localvolts_coordinator,
+                aemo_sensor_coordinator, flow_power_kwatch_coordinator, octopus_coordinator),
+            )
+            return (feedin is not None and not export_earnings_are_uneconomic(
+                -feedin, _headroom_entry.get(f"{prefix}_curtail_export_uneconomic", False), entry
+            ) and _headroom_entry.get(f"{prefix}_curtailment_state") == "normal")
+
+        async def _abort_headroom_trial(lease):
+            from .automations.actions import _dynamic_ev_state, _set_vehicle_amps
+            candidate = lease.get("candidate")
+            vehicle_id = candidate[0] if candidate else lease.get("vehicle_id")
+            state = (_dynamic_ev_state.get(entry.entry_id) or {}).get(vehicle_id)
+            token = candidate[2] if candidate else tuple(lease.get("owner_token") or ())
+            if not _headroom_current():
+                return False
+            if _is_monitoring_mode():
+                return False
+            if state is None:
+                # Session teardown retains any uncertain command in its existing
+                # recovery journal. This path never retires that EV evidence.
+                return not lease.get("candidate")
+            if (candidate and state is not candidate[1]) or candidate_token(state) != token:
+                return False
+            if not state.get("active"):
+                return not state.get("stop_outcome")
+            safe_amps = max(0, min(int(lease.get("baseline_amps", 0)), int(lease.get("safe_amps", 0))))
+            from .automations.actions import _effective_min_charge_amps
+            if 0 < safe_amps < _effective_min_charge_amps(state.get("params") or {}, hass):
+                safe_amps = 0
+            state["target_amps"] = safe_amps
+            state["stop_outcome"] = {"status": "pending", "requested_at": dt_util.utcnow(),
+                                     "reason": "Solar headroom trial ended; awaiting result"}
+            success = await _set_vehicle_amps(hass, entry, vehicle_id, safe_amps, state.get("params") or {})
+            if not _headroom_current() or (_dynamic_ev_state.get(entry.entry_id) or {}).get(vehicle_id) is not state:
+                return False
+            if success:
+                state["current_amps"] = safe_amps
+                state.pop("stop_outcome", None)
+            else:
+                state["stop_outcome"]["status"] = "unconfirmed" if success is None else "failed"
+            return bool(success)
+
+        def _schedule_headroom_expiry(seconds, callback):
+            handle = hass.loop.call_later(seconds, lambda: hass.async_create_task(callback()))
+            return handle.cancel
+
+        if _headroom_controller is not None:
+            headroom_runtime = SolarEVHeadroom(
+                identity=_headroom_identity,
+                saved=(automation_store._data.get(_headroom_key) or {}).get(entry.entry_id),
+                persist=_persist_headroom, eligible=_headroom_eligible,
+                reconcile=_headroom_reconcile, abort=_abort_headroom_trial,
+                schedule=_schedule_headroom_expiry, current=_headroom_current,
+            )
+            _headroom_entry["solar_ev_headroom"] = headroom_runtime
+            await headroom_runtime.recover()
+
     # Set up automatic curtailment check every 5 minutes (same timing as TOU sync)
     # Triggers at :01:00, :06:00, :11:00, etc. - 60s after Amber price updates
     async def auto_curtailment_check(now):
@@ -48180,6 +48389,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
             return
         await handle_solar_curtailment_check(None)
+        if (headroom := hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get("solar_ev_headroom")):
+            await headroom.recover()
 
     curtailment_cancel_timer = async_track_utc_time_change(
         hass,
@@ -52293,6 +52504,10 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Tear down TOU sync hooks (AEMO dispatch subscriber + dispatch-trigger
     # coordinator + cron fallback + optional Octopus cron)
     entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+    if headroom := entry_data.get("solar_ev_headroom"):
+        await headroom.close()
+        if headroom.error:
+            _LOGGER.warning("Solar EV headroom cleanup retained: %s", headroom.error)
 
     async def stop_local_dispatch_on_unload():
         if native_max := entry_data.get("powerwall_native_max_charge"):
