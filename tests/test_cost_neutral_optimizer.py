@@ -1731,6 +1731,49 @@ def test_cost_neutral_preserves_energy_for_later_higher_value_export(
     assert result.lp_stats["cost_neutral_planned_earnings"] == pytest.approx(cap, abs=1e-6)
 
 
+@pytest.mark.parametrize("use_greedy", [False, True])
+@pytest.mark.parametrize("horizon_hours", [24, 48])
+def test_cost_neutral_long_horizon_preserves_higher_value_export(
+    optimizer_module, monkeypatch, use_greedy, horizon_hours,
+):
+    """Earlier-export tie breaking must not outweigh using less stored energy."""
+    module = optimizer_module
+    monkeypatch.setattr(module, "HIGHS_AVAILABLE", not use_greedy)
+    n = horizon_hours * 12
+    start = datetime(2026, 11, 9, 11, tzinfo=timezone(timedelta(hours=10)))
+    timestamps = [start + timedelta(minutes=5 * i) for i in range(n)]
+    day_ids = [stamp.date().isoformat() for stamp in timestamps]
+    days = set(day_ids)
+    caps = {day: 0.27 if day == day_ids[0] else 0.0 for day in days}
+    plan = module.CostNeutralPlan(
+        day_ids=day_ids, earnings_caps_by_day=caps,
+        forecast_import_costs_by_day={day: 0.0 for day in days},
+        fixed_cost_allowances_by_day=caps, current_day=day_ids[0],
+    )
+    optimizer = module.BatteryOptimizer(
+        capacity_wh=40_000, max_charge_w=5_000, max_discharge_w=5_000,
+        efficiency=0.95, backup_reserve=0.32, hardware_reserve=0.0,
+        interval_minutes=5, horizon_hours=horizon_hours, terminal_weight=0.0,
+    )
+    prices = [0.27 if 17 <= stamp.hour < 21 else 0.02 for stamp in timestamps]
+    result = optimizer.optimize(
+        import_prices=[0.45] * n, export_prices=prices,
+        solar_forecast=[0.0] * n, load_forecast=[0.0] * n,
+        current_soc=1.0, allow_grid_charge=False, allow_battery_export=True,
+        schedule_timestamps=timestamps, cost_neutral_plan=plan,
+    )
+    assert result.solver_used == ("greedy" if use_greedy else "highs")
+    assert result.feasible
+    assert sum(
+        power for power, price in zip(result.battery_to_grid_w, prices)
+        if price == 0.02
+    ) == pytest.approx(0.0, abs=0.1)
+    assert sum(result.battery_to_grid_w) / 12_000 == pytest.approx(1.0, abs=1e-5)
+    assert result.lp_stats["cost_neutral_planned_earnings_by_day"] == {
+        day: pytest.approx(cap, abs=1e-6) for day, cap in caps.items()
+    }
+
+
 @pytest.mark.parametrize("boundary", ["days", "manual", "bonus"])
 def test_greedy_price_preference_preserves_settlement_boundaries(
     optimizer_module, boundary,

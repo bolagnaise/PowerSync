@@ -4430,9 +4430,16 @@ class BatteryOptimizer:
                     * economic_loss_fraction
                     * p_dt[t]
                 )
+            export_eps = eps * (p_n - t)
+            if cost_neutral_active:
+                # A binding earnings cap makes equal-credit export plans
+                # economically equivalent. Keep the earlier-slot preference
+                # below the throughput penalty even for long horizons, so it
+                # cannot reward selling more stored energy at a lower price.
+                export_eps /= max(1, p_n)
             if p_export[t] > 0:
                 c[grid_export_var(t)] = -(
-                    p_export[t] + eps * (p_n - t)
+                    p_export[t] + export_eps
                 ) * p_dt[t]  # grid_export: prefer earlier
             elif bonus_export_active and p_export_bonus[t] > 0:
                 # ZeroHero-style capped bonuses make otherwise-zero exports
@@ -4467,7 +4474,7 @@ class BatteryOptimizer:
 
             if bonus_export_active and p_export_bonus[t] > 0:
                 c[bonus_export_var(t)] = -(
-                    p_export_bonus[t] + eps * (p_n - t)
+                    p_export_bonus[t] + export_eps
                 ) * p_dt[t]
 
             if bonus_import_active and p_import_bonus[t] > 0:

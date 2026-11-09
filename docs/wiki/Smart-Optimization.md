@@ -154,6 +154,12 @@ released when an export action prevents battery charging, reducing unnecessary
 small battery-export windows. Small exports can still be planned while costs
 remain uncovered, and unavoidable surplus solar export remains uncapped.
 
+When ordinary export rates can cover the same daily costs, both planners prefer
+the higher-rate slots to use less stored energy. This also applies to full-day
+and two-day plans. Solar headroom, export limits and separate daily budgets can
+still make some lower-rate exports useful; Cost Neutral is not a battery-life
+optimization mode.
+
 ## Solver timing and EV charging
 
 Each inner HiGHS solve has a 30-second allowance. Command-mode checks and Cost
