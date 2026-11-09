@@ -93,6 +93,24 @@ def test_real_adapter_does_not_mutate_expired_force_state_or_poll_devices(runtim
     c.validate_evidence(result)
 
 
+def test_real_adapter_preserves_power_units_represented_by_string_enums(runtime):
+    from enum import StrEnum
+
+    class PowerUnit(StrEnum):
+        WATT = 'W'
+
+    rt, _, _, _, _ = runtime
+    state = rt.hass.states.get('sensor.example_battery')
+    state.attributes['unit_of_measurement'] = PowerUnit.WATT
+    result = rt.capture()
+    assert result['entities'][0]['value'] == 300
+    assert result['entities'][0]['unit'] == 'W'
+    assert type(result['entities'][0]['unit']) is str
+    assert result['entities'][0]['availability'] == 'available'
+    rt.hass.services.async_call.assert_not_called()
+    c.validate_evidence(result)
+
+
 @pytest.mark.asyncio
 async def test_mapping_change_closes_permission_and_history_obeys_category_scope(runtime):
     rt,registry,_,_,_=runtime;rt.capture()
@@ -248,6 +266,11 @@ def test_registry_exact_identity_excludes_ev_suffix_collision(runtime):
 
 @pytest.mark.asyncio
 async def test_recorder_import_is_bounded_and_excludes_changed_identity(runtime, monkeypatch):
+    from enum import StrEnum
+
+    class PowerUnit(StrEnum):
+        WATT = 'W'
+
     rt,registry,*_=runtime;rt.capture()
     start=time.time()-600;end=time.time()
     row=registry.entities['sensor.example_battery'];row.created_at=datetime.fromtimestamp(start-100,timezone.utc);row.modified_at=row.created_at
@@ -255,12 +278,13 @@ async def test_recorder_import_is_bounded_and_excludes_changed_identity(runtime,
     calls=[]
     def read(hass,lo,hi,**kwargs):
         calls.append(kwargs)
-        return {kwargs['entity_id']:[SimpleNamespace(state='12.5',attributes={'unit_of_measurement':'W','secret':'CANARY'},last_updated=datetime.fromtimestamp(start+1,timezone.utc))]*1500}
+        return {kwargs['entity_id']:[SimpleNamespace(state='12.5',attributes={'unit_of_measurement':PowerUnit.WATT,'secret':'CANARY'},last_updated=datetime.fromtimestamp(start+1,timezone.utc))]*1500}
     history.state_changes_during_period=read;recorder.get_instance=lambda hass:hass
     monkeypatch.setitem(sys.modules,'homeassistant.components.recorder',recorder)
     monkeypatch.setitem(sys.modules,'homeassistant.components.recorder.history',history)
     result=await rt.recorder_import({'start':start,'end':end})
     assert len(result['records'])<=1000
+    assert result['records'] and all(row['value'] == 12.5 and type(row['unit']) is str and row['unit'] == 'W' for row in result['records'])
     assert calls[0]['limit']==1000 and calls[0]['include_start_time_state'] is False
     assert 'CANARY' not in json.dumps(result)
     calls.clear();row.modified_at=datetime.now(timezone.utc)

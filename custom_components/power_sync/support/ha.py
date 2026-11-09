@@ -27,6 +27,12 @@ def stamp(value):
     return value.timestamp() if isinstance(value, datetime) and value.tzinfo else None
 
 
+def state_unit(state):
+    """Copy cached string/StrEnum units into the closed primitive projection."""
+    value = state.attributes.get("unit_of_measurement")
+    return str.__str__(value) if isinstance(value, str) else None
+
+
 def fields(obj):
     """Read stored fields only, never properties or an application API getter."""
     return obj if type(obj) is dict else vars(obj) if hasattr(type(obj), "__dict__") and hasattr(obj, "__dict__") else {}
@@ -100,7 +106,7 @@ class SupportRuntime:
                 value = float(state.state)
             except (ValueError, TypeError):
                 value = None
-            entities[role] = {"value": value, "unit": state.attributes.get("unit_of_measurement"),
+            entities[role] = {"value": value, "unit": state_unit(state),
                 "source_time": None, "reported_at": stamp(getattr(state, "last_reported", None) or state.last_updated)}
         runtime = self.hass.data.get("power_sync", {}).get(self.entry.entry_id, {})
         opt = fields(runtime.get("optimization_coordinator"))
@@ -554,7 +560,7 @@ class SupportRuntime:
                         value = float(state.state)
                     except (ValueError, TypeError):
                         continue
-                    frame = snapshot({"entities": {role: {"value": value, "unit": state.attributes.get("unit_of_measurement"),
+                    frame = snapshot({"entities": {role: {"value": value, "unit": state_unit(state),
                         "source_time": None, "reported_at": stamp(state.last_updated)}}}, captured_at=stamp(state.last_updated) or q["start"], version=self.version)
                     for row in frame["entities"]:
                         size += len(encode(row))
