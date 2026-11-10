@@ -203,7 +203,14 @@ namespace esphome
       case BLECommandState::WAITING_FOR_INFOTAINMENT_AUTH:
         if (now - current_command.last_tx_at > MAX_LATENCY)
         {
-          if (!binary_sensors_[static_cast<size_t>(BinarySensorId::IsAsleep)]->state == false)
+          // A recovery reboot has no fresh sleep status yet. Its default false
+          // value must not be treated as an awake vehicle: ordinary status
+          // polling is suppressed by the recovery lock. Use the existing
+          // bounded authenticated wake path for this one recovery read.
+          if (binary_sensors_[static_cast<size_t>(BinarySensorId::IsAsleep)]->state
+              || (recovery_proof_ && stop_recovery_.reading()
+                  && current_command.action == BLE_CarServer_VehicleAction::GET_CHARGE_STATE
+                  && !binary_sensors_[static_cast<size_t>(BinarySensorId::IsAsleep)]->has_state()))
           {
             ESP_LOGW(TAG, "[%s] Car is asleep, initiating wake..", current_command.execute_name.c_str());
             current_command.state = BLECommandState::WAITING_FOR_WAKE;
@@ -264,7 +271,10 @@ namespace esphome
       case BLECommandState::WAITING_FOR_WAKE_RESPONSE:
         if ((now - current_command.last_tx_at) > MAX_LATENCY)
         {
-          if (binary_sensors_[static_cast<size_t>(BinarySensorId::IsAsleep)]->state == false)
+          if (binary_sensors_[static_cast<size_t>(BinarySensorId::IsAsleep)]->state == false
+              && (!(recovery_proof_ && stop_recovery_.reading()
+                    && current_command.action == BLE_CarServer_VehicleAction::GET_CHARGE_STATE)
+                  || binary_sensors_[static_cast<size_t>(BinarySensorId::IsAsleep)]->has_state()))
           {
             if (strcmp(current_command.execute_name.c_str(), "wake vehicle") == 0) {
               ESP_LOGD(TAG, "[%s] Vehicle is awake, command completed", current_command.execute_name.c_str());

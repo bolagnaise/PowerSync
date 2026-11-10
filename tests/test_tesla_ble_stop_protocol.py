@@ -136,7 +136,7 @@ enum class BLE_CarServer_VehicleAction { GET_CHARGE_STATE, GET_CLIMATE_STATE, SE
 enum class BLECommandState { IDLE, READY, WAITING_FOR_VCSEC_AUTH, WAITING_FOR_INFOTAINMENT_AUTH,
  WAITING_FOR_INFOTAINMENT_AUTH_RESPONSE, WAITING_FOR_WAKE, WAITING_FOR_WAKE_RESPONSE };
 enum class BinarySensorId { IsAsleep };
-struct BinarySensor { bool state{true}; };
+struct BinarySensor { bool state{true}; bool known{true}; bool has_state() const { return known; } };
 struct BLECommand {
  int domain=UniversalMessage_Domain_DOMAIN_INFOTAINMENT;
  std::string execute_name="getChargeState";
@@ -161,7 +161,7 @@ struct FakeQueue {
 #include "actual_wake_admission.inc"
   if(!vcsec_session) return -1;
   ++wake_calls;
-  if(wake_acknowledged) asleep.state=false;
+  if(wake_acknowledged) { asleep.state=false; asleep.known=true; }
   return 0;
  }
  int sendVCSECInformationRequest() { return 0; }
@@ -214,8 +214,9 @@ int main(int argc, char **argv) {
  try {
   FakeQueue f;
   f.read_only();
-  if(scenario=="sleep_recovery" || scenario=="awake_recovery") {
+  if(scenario=="sleep_recovery" || scenario=="awake_recovery" || scenario=="unknown_after_reboot") {
    if(scenario=="awake_recovery") f.asleep.state=false;
+   if(scenario=="unknown_after_reboot") { f.asleep.state=false; f.asleep.known=false; }
    require(f.admit(BLE_CarServer_VehicleAction::GET_CHARGE_STATE,"getChargeState")==0,"recovery charge query admitted");
    f.process_once();
    require(!f.command_queue_.empty(),"BUG: actual production IDLE drops recovery GET_CHARGE_STATE while asleep");
@@ -224,11 +225,12 @@ int main(int argc, char **argv) {
        && f.command_queue_.front().state!=BLECommandState::READY; ++step) f.process_once();
    require(!f.command_queue_.empty() && f.command_queue_.front().state==BLECommandState::READY,
        "actual auth/wake transitions must reach a ready charge-state query");
-   require(f.wake_calls==(scenario=="sleep_recovery" ? 1u : 0u),"wake only the sleeping recovery vehicle");
+   require(f.wake_calls==(scenario=="awake_recovery" ? 0u : 1u),"sleeping or unknown recovery vehicle needs bounded wake acquisition");
    terminal_samples(f.stop_recovery_);
-  } else if(scenario=="wake_unavailable" || scenario=="missing_vcsec_session") {
+  } else if(scenario=="wake_unavailable" || scenario=="missing_vcsec_session" || scenario=="unknown_wake_unavailable") {
+   if(scenario=="unknown_wake_unavailable") { f.asleep.state=false; f.asleep.known=false; f.wake_acknowledged=false; }
    if(scenario=="wake_unavailable") f.wake_acknowledged=false;
-   else f.vcsec_session=false;
+   else if(scenario=="missing_vcsec_session") f.vcsec_session=false;
    require(f.admit(BLE_CarServer_VehicleAction::GET_CHARGE_STATE,"getChargeState")==0,"query admitted");
    for(int step=0; step<20 && !f.command_queue_.empty(); ++step) f.process_once();
    require(f.command_queue_.empty(),"bounded failed wake must end the query");
@@ -281,6 +283,6 @@ int main(int argc, char **argv) {
 
 @pytest.mark.parametrize("scenario", ["sleep_recovery", "awake_recovery", "normal_background",
     "no_companion", "held", "pending", "unrelated_read", "write_rejected", "terminal_protocol",
-    "wake_unavailable", "missing_vcsec_session"])
+    "wake_unavailable", "missing_vcsec_session", "unknown_after_reboot", "unknown_wake_unavailable"])
 def test_production_recovery_query_admission_and_terminal_proof(recovery_sleep_binary, scenario):
     subprocess.run([str(recovery_sleep_binary), scenario], check=True, capture_output=True, text=True)
