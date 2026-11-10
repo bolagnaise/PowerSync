@@ -288,6 +288,62 @@ async def test_confirmation_requires_displayed_descriptor_digest(runtime):
     rt.request.assert_not_called()
 
 
+@pytest.mark.parametrize('state', ['pending', 'active', 'closed'])
+def test_customer_status_uses_support_contact_without_changing_authority(runtime, state):
+    rt, *_ = runtime
+    rt.session.begin('owner', 'entry_reference_00001', ['system'], time.time() - 60, 3600)
+    descriptor = {'actor': 'private-operator@example.invalid',
+        'ticket': 'discord:12345678901234567', 'reporter': '12345678901234568',
+        'phrase': 'MATCHING', 'scope_digest': rt.session.scope_digest, 'policy_digest': 'policy'}
+    rt.descriptor = descriptor
+    rt.session.descriptor = dict(descriptor)
+    # This also represents receipts restored from storage after an upgrade.
+    rt.receipt = [{'at': 123, 'event': 'ticket_verified_and_claimed', **descriptor},
+        {'at': 124, 'event': 'live_access_closed_locally', 'actor': 'ha'},
+        {'at': 125, 'event': 'session_ended', 'actor': 'authority'}]
+    before = copy.deepcopy(rt.receipt)
+    rt.session.state = state
+
+    status = rt.status()
+
+    assert 'private-operator@example.invalid' not in json.dumps(status)
+    assert status['descriptor'] == {**descriptor, 'actor': 'dev@powersync.cc'}
+    assert status['access_receipt'] == [{**before[0], 'actor': 'dev@powersync.cc'}, *before[1:]]
+    assert rt.receipt == before
+    assert rt.session.descriptor == descriptor
+    if state != 'closed':
+        assert status['invitation'] == {**descriptor, 'actor': 'dev@powersync.cc'}
+        assert status['descriptor_digest'] == p.digest(descriptor)
+        assert rt.descriptor == descriptor
+    # Display copies cannot modify retained audit records or authorization.
+    status['access_receipt'][0]['actor'] = 'changed'
+    status['descriptor']['actor'] = 'changed'
+    assert rt.receipt == before
+    assert rt.session.descriptor == descriptor
+
+
+@pytest.mark.asyncio
+async def test_branded_status_still_confirms_exact_operator_descriptor(runtime):
+    rt, *_ = runtime
+    rt.session.begin('owner', 'entry_reference_00001', ['system'], time.time() - 60, 3600)
+    rt.descriptor = {'actor': 'private-operator@example.invalid',
+        'ticket': 'discord:12345678901234567', 'reporter': '12345678901234568',
+        'phrase': 'MATCHING', 'scope_digest': rt.session.scope_digest, 'policy_digest': 'policy'}
+    rt.policy = {'policy_digest': 'policy'}
+    rt.request = AsyncMock(return_value={'scope_digest': rt.session.scope_digest})
+    status = rt.status()
+    assert status['invitation']['actor'] == 'dev@powersync.cc'
+
+    await rt.confirm('owner', status['descriptor_digest'])
+
+    assert rt.session.state == 'active'
+    assert rt.session.descriptor['actor'] == 'private-operator@example.invalid'
+    packet = rt.request.call_args.args[1]
+    signed = json.loads(p.unb64(packet['signed']))
+    rt.session.key.public_key().verify(p.unb64(packet['signature']), p.unb64(packet['signed']))
+    assert signed['descriptor_digest'] == p.digest(rt.descriptor)
+
+
 def test_registry_exact_identity_excludes_ev_suffix_collision(runtime):
     rt,registry,*_=runtime
     registry.entities['sensor.ev_battery']=SimpleNamespace(config_entry_id='entry-one',disabled_by=None,unique_id='entry-one_ev_battery_level',entity_id='sensor.ev_battery')

@@ -42,6 +42,9 @@ For a remote session:
 
 Optional recording and local downloads are under **Local diagnostics and
 recording**. Access receipts and queries are under **Recent support activity**.
+Investigator email identities in the card and its access receipts display the
+PowerSync support contact, `dev@powersync.cc`, including previously saved receipts.
+The underlying operator identity remains bound to authorization and signed consent.
 Archive sharing needs its own approval; **Revoke shared archive** remains
 available after live access ends.
 

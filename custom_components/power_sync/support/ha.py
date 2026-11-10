@@ -38,6 +38,16 @@ def fields(obj):
     return obj if type(obj) is dict else vars(obj) if hasattr(type(obj), "__dict__") and hasattr(obj, "__dict__") else {}
 
 
+def customer_support_identity(value):
+    """Project staff email identities without changing signed authority or receipts."""
+    if type(value) is dict:
+        return {key: "dev@powersync.cc" if key == "actor" and isinstance(item, str) and "@" in item
+            else customer_support_identity(item) for key, item in value.items()}
+    if type(value) is list:
+        return [customer_support_identity(item) for item in value]
+    return value
+
+
 class SupportRuntime:
     def __init__(self, hass, entry):
         self.hass, self.entry = hass, entry
@@ -603,12 +613,12 @@ class SupportRuntime:
         status = self.session.status()
         if status["state"] == "closed":
             self.code = self.descriptor = None
-        return {**status, "code": self.code, "invitation": self.descriptor, "descriptor_digest": digest(self.descriptor) if self.descriptor else None, "policy": self.policy,
+        return customer_support_identity({**status, "code": self.code, "invitation": self.descriptor, "descriptor_digest": digest(self.descriptor) if self.descriptor else None, "policy": self.policy,
             "recording": self.recording, "persistent": self.persistent, "error": self.error,
             "recorder_bytes": self.recorder.bytes, "dropped_records": self.recorder.dropped, "access_receipt": list(self.receipt), "archive_expires_at": max((x["expires_at"] for x in self.archives.values() if x.get("confirmed")), default=None),
             "archive_present": any(x.get("shared") for x in self.archives.values()),
             "archive_uncertain": any(x.get("shared") and not x.get("confirmed") for x in self.archives.values()),
-            "archive_pending": any(x.get("pending") for x in self.archives.values())}
+            "archive_pending": any(x.get("pending") for x in self.archives.values())})
 
 
 class SupportView(HomeAssistantView):
