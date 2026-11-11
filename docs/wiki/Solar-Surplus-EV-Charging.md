@@ -23,3 +23,7 @@ action: switch.turn_on
 target:
   entity_id: switch.power_sync_solar_surplus_ev_charging
 ```
+
+### Battery-powered charging near zero grid flow
+
+Scheduled charging with no grid import holds its rate while the home battery keeps measured grid flow within the configured tolerance. Small fluctuations inside that tolerance do not reduce the rate repeatedly. Inverter capacity limits and reductions for grid imports above tolerance still apply.
