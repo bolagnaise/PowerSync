@@ -15539,6 +15539,42 @@ def _normalize_solar_forecast_provider(value: Any) -> str:
     return DEFAULT_SOLAR_FORECAST_PROVIDER
 
 
+class WeatherTodayView(HomeAssistantView):
+    """HTTP view for today's weather summary (dashboard Right now card)."""
+
+    url = "/api/power_sync/weather/today"
+    name = "api:power_sync:weather_today"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant):
+        """Initialize the view."""
+        self._hass = hass
+
+    async def get(self, request: web.Request) -> web.Response:
+        """Return high/low, dawn-to-dusk cloud cover and daylight for today."""
+        from .const import CONF_WEATHER_ENTITY
+        from .weather_today import async_get_weather_today
+
+        try:
+            entries = self._hass.config_entries.async_entries(DOMAIN)
+            entry = entries[0] if entries else None
+            weather_entity = None
+            if entry is not None:
+                weather_entity = entry.options.get(
+                    CONF_WEATHER_ENTITY, entry.data.get(CONF_WEATHER_ENTITY)
+                )
+            payload = await async_get_weather_today(
+                self._hass,
+                weather_entity=weather_entity,
+                domain=DOMAIN,
+                force=request.query.get("refresh") == "1",
+            )
+            return web.json_response(payload)
+        except Exception as e:
+            _LOGGER.error("Error building today's weather: %s", e, exc_info=True)
+            return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
 class WeatherSolcastSettingsView(HomeAssistantView):
     """HTTP view to get/set weather and Solcast settings from mobile app."""
 
@@ -47265,6 +47301,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Register HTTP endpoint for current weather (for mobile app dashboard)
     hass.http.register_view(CurrentWeatherView(hass))
     hass.http.register_view(WeatherSolcastSettingsView(hass))
+    hass.http.register_view(WeatherTodayView(hass))
     _LOGGER.info("🌤️ Current weather HTTP endpoint registered at /api/power_sync/weather")
     _LOGGER.info("🌤️ Weather/Solcast settings endpoint registered at /api/power_sync/weather/settings")
 

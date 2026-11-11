@@ -2522,11 +2522,12 @@ import {
       const roofBGroup = this.shadowRoot.querySelector('#roof-array-b-group');
       const ev1 = primaryVisibleVehicle || { power: 0, batteryText: '--%', labelText: this._t('card.node.ev', 'EV'), switchOn: false, configured: false, present: false };
       const ev2 = secondaryVisibleVehicle || { power: 0, batteryText: '--%', labelText: 'EV 2', switchOn: false, configured: false, present: false };
+      // The idle renders draw no car, so a car's readings there would float over the roof.
       if (evNodeGroup) {
-        evNodeGroup.classList.toggle('ev-hidden', !ev1.configured || (evHideIdle && !(Math.abs(ev1.power) > 0 || ev1.switchOn || ev1.present)));
+        evNodeGroup.classList.toggle('ev-hidden', !ev1.configured || !evSceneActive || (evHideIdle && !(Math.abs(ev1.power) > 0 || ev1.switchOn || ev1.present)));
       }
       if (ev2NodeGroup) {
-        ev2NodeGroup.classList.toggle('ev-hidden', !ev2.configured || (evHideIdle && !(Math.abs(ev2.power) > 0 || ev2.switchOn || ev2.present)));
+        ev2NodeGroup.classList.toggle('ev-hidden', !ev2.configured || !evSceneActive || !useDualScene || (evHideIdle && !(Math.abs(ev2.power) > 0 || ev2.switchOn || ev2.present)));
       }
       if (batteryNodeGroup) {
         batteryNodeGroup.classList.toggle('battery-hidden', !batteryConfigured);

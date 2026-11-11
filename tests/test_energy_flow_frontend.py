@@ -46,7 +46,7 @@ def canonical_energy_flow_harness(tmp_path_factory):
     "enabled-config-change-in-flight", "distinct-car-power-flows",
     "reconnect-in-flight", "cache-expiry", "cache-expiry-pending",
     "connection-change-in-flight", "selector-independent",
-    "conflicting-duplicate-presence", "two-car-weather-scenes", "generated-layouts",
+    "conflicting-duplicate-presence", "two-car-weather-scenes", "generated-layouts", "no-car-render",
 ])
 def test_generated_energy_flow_uses_canonical_connected_vehicles(
     scenario, canonical_energy_flow_harness

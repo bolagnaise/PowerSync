@@ -52,6 +52,7 @@ const PS_DARK_TOKENS = `
   --border: #3b82f624; --border-hi: #3b82f647; --border-subtle: #ffffff0f; --on-accent: #0a0e1a;
   --tint-green: #00e68a12; --tint-amber: #f59e0b14; --tint-red: #ff4d6a14; --tint-cyan: #00d4ff12; --tint-blue: #3b82f614;
   --shadow: 0 1px 3px #0000004d, 0 0 0 1px #3b82f60f;
+  --pop: #121a31; --pop-shadow: 0 18px 50px #00000080, 0 2px 8px #00000060; --twilight: #3b4a7a;
   --bg-image: radial-gradient(120% 60% at 50% 0%, #3b82f608 0%, transparent 70%), linear-gradient(#060a14, #080d1a);
   color-scheme: dark;`;
 const PS_LIGHT_TOKENS = `
@@ -62,6 +63,7 @@ const PS_LIGHT_TOKENS = `
   --border: #334c7038; --border-hi: #334c7066; --border-subtle: #334c701f; --on-accent: #ffffff;
   --tint-green: #00b86b14; --tint-amber: #ef930014; --tint-red: #ff315812; --tint-cyan: #009dcc12; --tint-blue: #2878f012;
   --shadow: 0 1px 4px #1e325014, 0 0 0 1px #334c700a;
+  --pop: #ffffff; --pop-shadow: 0 18px 50px #17243a2e, 0 2px 8px #17243a1a; --twilight: #b7c4dc;
   --bg-image: linear-gradient(#f4f7fb, #eaf0f8);
   color-scheme: light;`;
 
@@ -204,6 +206,44 @@ svg.chart text { font-family: var(--mono); font-size: 10.5px; fill: var(--muted)
 .bar { display: flex; height: 8px; border-radius: 4px; overflow: hidden; gap: 2px; background: var(--border-subtle); }
 .bar span { background: var(--c); }
 
+/* Right now: today's weather */
+.now-top { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 10px; }
+.now-top .mode { margin-bottom: 0; flex: 1 1 auto; min-width: 0; }
+.wx { position: relative; margin-left: auto; }
+.wx-chip { display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--border); background: var(--bg-2); color: var(--fg); border-radius: 999px; padding: 3px 11px 3px 6px; font: inherit; font-size: 13px; cursor: pointer; white-space: nowrap; }
+.wx-chip:hover, .wx-chip[aria-expanded="true"] { border-color: var(--border-hi); background: var(--card-hi); }
+.wx-chip:focus-visible, .wx-close:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+.wx-chip svg { width: 20px; height: 20px; flex: none; }
+.wx-chip .hl { color: var(--fg-2); }
+.wx-chip .hl b { color: var(--fg); font-weight: 500; }
+.wx-pop { position: absolute; top: calc(100% + 8px); right: 0; z-index: 20; width: 340px; max-width: calc(100vw - 48px); background: var(--pop); border: 1px solid var(--border-hi); border-radius: 14px; box-shadow: var(--pop-shadow); padding: 14px 16px 12px; display: flex; flex-direction: column; gap: 14px; text-align: left; }
+.wx-pop[hidden] { display: none; }
+.wx-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.wx-head .day { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+.wx-head .cond { font-size: 16px; font-weight: 600; }
+.wx-close { border: 0; background: none; color: var(--fg-2); cursor: pointer; width: 28px; height: 28px; border-radius: 7px; font-size: 18px; line-height: 1; }
+.wx-close:hover { background: var(--bg-2); color: var(--fg); }
+.wx-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.wx-stat { background: var(--bg-2); border: 1px solid var(--border-subtle); border-radius: var(--r); padding: 8px 10px; display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.wx-stat .k { font-size: 11.5px; color: var(--fg-2); }
+.wx-stat .v { font-size: 19px; font-weight: 500; line-height: 1.2; white-space: nowrap; }
+.wx-stat .v small { font-size: 12px; color: var(--muted); font-weight: 400; margin-left: 1px; }
+.wx-stat .s { font-size: 11.5px; color: var(--muted); }
+.wx-stat.miss .v { color: var(--muted); }
+.wx-stat .hi { color: var(--amber); } .wx-stat .lo { color: var(--cyan); } .wx-stat .sep { color: var(--muted); margin: 0 3px; }
+.wx-sec { display: flex; flex-direction: column; gap: 6px; }
+.wx-sec .h { display: flex; justify-content: space-between; gap: 8px; font-size: 12.5px; color: var(--fg-2); }
+.wx-sec .h b { color: var(--fg); font-weight: 500; }
+.wx-clouds { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 2px; height: 34px; align-items: end; }
+.wx-clouds span { background: var(--fg-2); opacity: .55; border-radius: 2px 2px 0 0; min-height: 2px; }
+.wx-clouds span.now { background: var(--cyan); opacity: 1; }
+.wx-clouds-x { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 10.5px; color: var(--muted); }
+svg.wx-arc { width: 100%; height: auto; display: block; }
+svg.wx-arc text { font-family: var(--mono); font-size: 10.5px; fill: var(--muted); }
+svg.wx-arc text.strong { fill: var(--fg); font-weight: 500; }
+.wx-foot { display: flex; justify-content: space-between; gap: 8px; font-size: 11.5px; color: var(--muted); border-top: 1px solid var(--border-subtle); padding-top: 8px; min-width: 0; }
+.wx-foot code { font-family: var(--mono); font-size: 11px; overflow-wrap: anywhere; }
+
 /* Optimizer plan */
 .chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .chip { display: inline-flex; gap: 6px; align-items: baseline; font-size: 13px; padding: 4px 10px; border-radius: 8px; background: var(--bg-2); border: 1px solid var(--border-subtle); }
@@ -339,6 +379,12 @@ details.res .kv { margin-top: 10px; font-size: 13px; }
   .scrub { grid-template-columns: repeat(3, auto); gap: 8px 18px; }
   svg.dayline { height: 260px; }
   .tools { margin-left: 0; }
+  .wx-chip .hl { display: none; }
+  .now-top { position: relative; }
+  .wx { position: static; }
+  .wx-pop { left: 0; right: 0; width: auto; max-width: none; padding: 12px 12px 10px; }
+  .wx-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .wx-stat:first-child { grid-column: 1 / -1; flex-direction: row; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; }
 }
 `;
 
@@ -1755,10 +1801,205 @@ function psExportOfferHtml(hass, offer) {
   return `<p class="hint"><b>Super Export offer: ${psFix(offer.total_rate * 100)} ${psEsc(psMinorUnit(hass))}/kWh total</b>, ${psEsc(offer.window_start)}–${psEsc(offer.window_end)} (site time), for the first ${psFix(offer.cap_kwh)} kWh/day shared by solar and battery export. The base tariff applies after the allowance. Planned export values use the shared allowance; actual earnings depend on measured export.</p>`;
 }
 
+// ─── Today's weather (Right now chip) ────────────────────────────
+
+const PS_WX_PATH = 'power_sync/weather/today';
+const PS_WX_TTL_MS = 10 * 60_000;
+const PS_WX_LABEL = {
+  'clear-night': 'Clear', cloudy: 'Cloudy', exceptional: 'Severe weather', fog: 'Fog', hail: 'Hail',
+  lightning: 'Thunderstorms', 'lightning-rainy': 'Thunderstorms and rain', partlycloudy: 'Partly cloudy',
+  pouring: 'Heavy rain', rainy: 'Rain', snowy: 'Snow', 'snowy-rainy': 'Sleet', sunny: 'Sunny',
+  windy: 'Windy', 'windy-variant': 'Windy and cloudy',
+};
+const PS_WX_SUN = '<circle cx="12" cy="12" r="4.6" fill="var(--yellow)"/><g stroke="var(--yellow)" stroke-width="1.7" stroke-linecap="round"><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M5.3 18.7l1.4-1.4M17.3 6.7l1.4-1.4"/></g>';
+const PS_WX_CLOUD = '<path d="M8.5 20.5h9.2a3.6 3.6 0 0 0 .4-7.2 5 5 0 0 0-9.4 1.2 3 3 0 0 0-.2 6z" fill="var(--fg-2)" opacity=".92"/>';
+const PS_WX_RAIN = '<g stroke="var(--cyan)" stroke-width="1.6" stroke-linecap="round"><path d="M10 22.5l-.8 1.3M14 22.5l-.8 1.3M18 22.5l-.8 1.3"/></g>';
+const PS_WX_MOON = '<path d="M15.5 3.5a8.5 8.5 0 1 0 5 13.4 7 7 0 0 1-5-13.4z" fill="var(--fg-2)"/>';
+function psWxIcon(condition, night) {
+  const svg = body => `<svg viewBox="0 0 24 24" aria-hidden="true">${body}</svg>`;
+  if (condition === 'clear-night' || (night && (condition === 'sunny' || !condition))) return svg(PS_WX_MOON);
+  if (condition === 'sunny' || !condition) return svg(PS_WX_SUN);
+  if (condition === 'partlycloudy') {
+    return svg(night ? '<path d="M11 2.5a6 6 0 1 0 4 10.4 5 5 0 0 1-4-10.4z" fill="var(--fg-2)" opacity=".7"/>' + PS_WX_CLOUD
+      : '<g transform="translate(-3 -3) scale(.85)">' + PS_WX_SUN + '</g>' + PS_WX_CLOUD);
+  }
+  if (['rainy', 'pouring', 'lightning-rainy', 'snowy-rainy', 'hail'].includes(condition)) {
+    return svg('<g transform="translate(0 -3)">' + PS_WX_CLOUD + '</g>' + PS_WX_RAIN);
+  }
+  return svg(PS_WX_CLOUD);
+}
+// Number(null) is 0; a missing forecast field must stay missing.
+const psWxNum = v => (v === null || v === undefined || v === '' || typeof v === 'boolean' ? NaN : Number(v));
+const psWxDeg = v => (Number.isFinite(v) ? `${Math.round(v)}°` : '—');
+function psWxDate(v) {
+  const d = v ? new Date(v) : null;
+  return d && !Number.isNaN(d.getTime()) ? d : null;
+}
+
+function psWxDay(hass, now) {
+  try {
+  const parts = new Intl.DateTimeFormat('en-CA', {timeZone: hass?.config?.time_zone || 'UTC', year:'numeric', month:'2-digit', day:'2-digit'}).formatToParts(new Date(now));
+  const get = key => parts.find(p => p.type === key)?.value;
+  return `${get('year')}-${get('month')}-${get('day')}`;
+  } catch (_) { return null; }
+}
+function psWxTime(hass, value) {
+  const date = psWxDate(value);
+  return date ? new Intl.DateTimeFormat(hass?.locale?.language || 'en-GB', {
+    timeZone: hass?.config?.time_zone || 'UTC', hour: '2-digit', minute: '2-digit', hour12: hass?.locale?.time_format === '12',
+  }).format(date) : '—';
+}
+
+// Dawn-to-dusk band with the sun's path between sunrise and sunset.
+function psWxArc(hass, w, now) {
+  const dawn = psWxDate(w.dawn), dusk = psWxDate(w.dusk);
+  const rise = psWxDate(w.sunrise) || dawn, set = psWxDate(w.sunset) || dusk;
+  if (!dawn || !dusk || !(dusk > dawn) || !(set > rise)) return '';
+  const W = 308, base = 64, pad = 50 * 60_000, x0 = +dawn - pad, x1 = +dusk + pad;
+  const X = t => 6 + (t - x0) / (x1 - x0) * (W - 12);
+  const Y = t => base - Math.max(0, Math.sin(Math.PI * (t - rise) / (set - rise))) * 48;
+  let path = '';
+  for (let t = +rise; t <= +set; t += 10 * 60_000) path += `${path ? 'L' : 'M'}${X(t).toFixed(1)},${Y(t).toFixed(1)}`;
+  path += `L${X(+set).toFixed(1)},${Y(+set).toFixed(1)}`;
+  const n = Math.min(Math.max(now, x0), x1);
+  const up = now >= +rise && now <= +set;
+  const band = (a, b, fill, extra = '') => `<rect x="${X(a).toFixed(1)}" y="${base - 2}" width="${Math.max(0, X(b) - X(a)).toFixed(1)}" height="4" fill="${fill}"${extra}/>`;
+  return `<svg class="wx-arc" viewBox="0 0 ${W} 96" role="img" aria-label="Daylight from ${psEsc(psWxTime(hass, dawn))} to ${psEsc(psWxTime(hass, dusk))}">
+    ${band(x0, +dawn, 'var(--border-hi)')}${band(+dawn, +rise, 'var(--twilight)')}${band(+rise, +set, 'var(--yellow)', ' opacity=".85"')}${band(+set, +dusk, 'var(--twilight)')}${band(+dusk, x1, 'var(--border-hi)')}
+    <path d="${path}Z" fill="var(--yellow)" opacity=".12"/>
+    <path d="${path}" fill="none" stroke="var(--yellow)" stroke-width="1.6"/>
+    <line x1="${X(n).toFixed(1)}" x2="${X(n).toFixed(1)}" y1="${up ? (Y(now) + 6).toFixed(1) : 14}" y2="${base}" stroke="var(--fg)" stroke-width="1" stroke-dasharray="2 3" opacity=".55"/>
+    ${up ? `<circle cx="${X(now).toFixed(1)}" cy="${Y(now).toFixed(1)}" r="6" fill="var(--yellow)" stroke="var(--pop)" stroke-width="2"/>` : ''}
+    <text x="6" y="${base + 15}">dawn ${psEsc(psWxTime(hass, dawn))}</text>
+    <text x="${W - 6}" y="${base + 15}" text-anchor="end">dusk ${psEsc(psWxTime(hass, dusk))}</text>
+    ${w.sunrise && w.sunset ? `<text x="${W / 2}" y="${base + 28}" text-anchor="middle">sunrise ${psEsc(psWxTime(hass, rise))} · sunset ${psEsc(psWxTime(hass, set))}</text>` : ''}
+    <text class="strong" x="${X(n).toFixed(1)}" y="10" text-anchor="${n > (x0 + x1) / 2 ? 'end' : 'start'}">now ${psEsc(psWxTime(hass, new Date(now)))}</text>
+  </svg>`;
+}
+
+// Chip plus popover for the Right now card. Empty when the payload has
+// nothing to show (no weather entity and no location for the sun).
+function psWeatherChip(hass, w, open, now = Date.now()) {
+  if (!w || w.success !== true || w.date !== psWxDay(hass, now)) return '';
+  const temp = psWxNum(w.temperature), high = psWxNum(w.high), low = psWxNum(w.low);
+  const daylight = psWxNum(w.daylight_minutes);
+  const hasHL = Number.isFinite(high) || Number.isFinite(low);
+  if (!Number.isFinite(temp) && !hasHL && !Number.isFinite(daylight)) return '';
+  const rise = psWxDate(w.sunrise), set = psWxDate(w.sunset);
+  const night = rise && set ? now < +rise || now > +set : false;
+  const cond = PS_WX_LABEL[w.condition] || (w.condition ? String(w.condition).replace(/[-_]/g, ' ') : '');
+  const dur = m => `${Math.floor(m / 60)}<small>h</small> ${m % 60}<small>m</small>`;
+  const chipMain = Number.isFinite(temp) ? psWxDeg(temp)
+    : Number.isFinite(daylight) ? `${Math.floor(daylight / 60)} h ${daylight % 60} m` : psWxDeg(high);
+  const chipSub = hasHL ? `H <b>${psWxDeg(high)}</b> L <b>${psWxDeg(low)}</b>`
+    : Number.isFinite(temp) ? '' : 'daylight';
+  const chipLabel = [cond, Number.isFinite(temp) ? `now ${psWxDeg(temp)}` : '',
+    hasHL ? `high ${psWxDeg(high)}, low ${psWxDeg(low)}` : ''].filter(Boolean).join(', ') || 'Today’s weather';
+
+  const hours = Array.isArray(w.cloud_cover_hours) ? w.cloud_cover_hours.filter(h => Number.isFinite(psWxNum(h?.cloud)) && psWxDate(h?.time)) : [];
+  const avg = psWxNum(w.cloud_cover_avg);
+  const hasCloud = Number.isFinite(avg) && hours.length > 0;
+  const from = psWxDate(w.cloud_cover_from);
+  const cloudSub = !hasCloud ? 'Not in forecast'
+    : w.cloud_cover_complete ? 'Dawn to dusk avg' : `Partial avg from ${psWxTime(hass, from)}`;
+  const firstHour = +psWxDate(w.dawn || hours[0]?.time);
+  const lastHour = +psWxDate(w.dusk || hours[hours.length - 1]?.time);
+  const chartStart = w.cloud_cover_start ? +psWxDate(w.cloud_cover_start) : Math.floor(firstHour / 3600000) * 3600000;
+  const chartSpan = Math.max(3600000, (w.cloud_cover_end ? +psWxDate(w.cloud_cover_end) : Math.floor(lastHour / 3600000) * 3600000 + 3600000) - chartStart);
+  let peak = null;
+  for (const h of hours) if (!peak || Number(h.cloud) > Number(peak.cloud)) peak = h;
+  const mid = hours[Math.floor((hours.length - 1) / 2)];
+  const clouds = hasCloud ? `
+    <div class="wx-sec">
+      <div class="h"><span>Cloud by hour</span><span>Peak <b class="num">${Math.round(peak.cloud)}%</b> at <b class="num">${psEsc(psWxTime(hass, peak.time))}</b></span></div>
+      <div class="wx-clouds" style="position:relative" aria-hidden="true">${hours.map(h => `<span class="${now >= +psWxDate(h.time) && now < +psWxDate(h.time) + 3600000 ? 'now' : ''}" style="position:absolute;bottom:0;left:${(+psWxDate(h.time)-chartStart)/chartSpan*100}%;width:${3600000/chartSpan*100}%;height:${Math.max(4, Math.min(100, Number(h.cloud)))}%"></span>`).join('')}</div>
+      <div class="wx-clouds-x"><span>${psEsc(psWxTime(hass, hours[0].time))}</span>${hours.length > 2 ? `<span>${psEsc(psWxTime(hass, mid.time))}</span>` : ''}<span>${psEsc(psWxTime(hass, hours[hours.length - 1].time))}</span></div>
+    </div>` : '';
+  const day = (() => {
+    try {
+      return new Date(`${w.date}T12:00:00`).toLocaleDateString(hass?.locale?.language || undefined, { weekday: 'short', day: 'numeric', month: 'short' });
+    } catch (_) { return ''; }
+  })();
+  const fetched = psWxDate(w.fetched_at);
+  const source = w.source ? `From <code>${psEsc(w.source)}</code>` : '';
+
+  return `<div class="wx">
+    <button type="button" class="wx-chip" data-wx="toggle" aria-haspopup="dialog" aria-expanded="${open}" aria-controls="ps-wx-pop" aria-label="${psEsc(chipLabel)}">
+      ${psWxIcon(w.condition, night)}<span class="num">${chipMain}</span>${chipSub ? `<span class="hl num">${chipSub}</span>` : ''}
+    </button>
+    <div class="wx-pop" id="ps-wx-pop" role="dialog" aria-label="Today’s weather"${open ? '' : ' hidden'}>
+      <div class="wx-head">
+        <div><div class="day">Today${day ? ` · ${psEsc(day)}` : ''}</div><div class="cond">${psEsc(cond || 'No weather forecast')}</div></div>
+        <button type="button" class="wx-close" data-wx="close" aria-label="Close">×</button>
+      </div>
+      <div class="wx-stats">
+        <div class="wx-stat${hasHL ? '' : ' miss'}"><span class="k">High / low (${psEsc(w.temperature_unit || '°C')})</span>
+          <span class="v num">${hasHL ? `<span class="hi">${psWxDeg(high)}</span><span class="sep">/</span><span class="lo">${psWxDeg(low)}</span>` : '—'}</span>
+          <span class="s">${hasHL ? (w.high_low_source !== 'daily' ? 'Available hourly forecast' : Number.isFinite(temp) ? `Now ${psWxDeg(temp)}` : 'Forecast') : 'Needs a weather entity'}</span></div>
+        <div class="wx-stat${hasCloud ? '' : ' miss'}"><span class="k">Cloud cover</span>
+          <span class="v num">${hasCloud ? `${Math.round(avg)}<small>%</small>` : '—'}</span>
+          <span class="s">${psEsc(cloudSub)}</span></div>
+        <div class="wx-stat${Number.isFinite(daylight) ? '' : ' miss'}"><span class="k">Daylight</span>
+          <span class="v num">${Number.isFinite(daylight) ? dur(Math.round(daylight)) : '—'}</span>
+          <span class="s">Dawn to dusk</span></div>
+      </div>
+      ${w.forecast_stale ? '<p class="hint">Forecast refresh unavailable. Retained forecast values may be out of date.</p>' : ''}
+      ${clouds}
+      ${Number.isFinite(daylight) ? `<div class="wx-sec">${psWxArc(hass, w, now)}</div>` : ''}
+      ${source || fetched ? `<div class="wx-foot"><span>${source}</span>${fetched ? `<span>Updated ${psEsc(psWxTime(hass, fetched))}</span>` : ''}</div>` : ''}
+    </div>
+  </div>`;
+}
+
 class PsNowCard extends PsCardBase {
+  constructor() {
+    super();
+    this._wxOpen = false;
+    this.addEventListener('click', e => this._onWxClick(e));
+    this._wxOutside = e => {
+      if (!this._wxOpen) return;
+      const wx = this.querySelector?.('.wx');
+      if (wx && (e.composedPath?.() || []).includes(wx)) return;
+      this._setWx(false);
+    };
+    this._wxKey = e => {
+      if (this._wxOpen && e.key === 'Escape') { this._setWx(false); this.querySelector?.('.wx-chip')?.focus(); }
+    };
+  }
+
+  connectedCallback() {
+    super.connectedCallback();
+    window.addEventListener?.('click', this._wxOutside, true);
+    window.addEventListener?.('keydown', this._wxKey);
+  }
+
+  disconnectedCallback() {
+    super.disconnectedCallback();
+    window.removeEventListener?.('click', this._wxOutside, true);
+    window.removeEventListener?.('keydown', this._wxKey);
+  }
+
+  _onWxClick(e) {
+    const btn = e.target?.closest?.('[data-wx]');
+    if (!btn) return;
+    const open = btn.dataset.wx === 'toggle' ? !this._wxOpen : false;
+    this._setWx(open);
+    if (open) this.querySelector?.('.wx-close')?.focus();
+    else if (btn.dataset.wx === 'close') this.querySelector?.('.wx-chip')?.focus();
+  }
+
+  // Toggle in place so opening never waits for a re-render.
+  _setWx(open) {
+    this._wxOpen = open;
+    const pop = this.querySelector?.('.wx-pop');
+    if (pop) pop.hidden = !open;
+    this.querySelector?.('.wx-chip')?.setAttribute('aria-expanded', String(open));
+  }
+
   _signature() {
     const data = psApiPeek('power_sync/optimization');
-    return `${super._signature()}#${data?.last_optimization || ''}|${data?.current_action || ''}|${data?.planned_current_action || ''}|${data?.next_action_time || ''}|${this._hass?.config?.time_zone}|${Math.floor(Date.now() / 60000)}`;
+    const wx = psApiPeek(PS_WX_PATH);
+    return `${super._signature()}#${data?.last_optimization || ''}|${data?.current_action || ''}|${data?.planned_current_action || ''}|${data?.next_action_time || ''}|${this._hass?.config?.time_zone}|${Math.floor(Date.now() / 60000)}|${wx?.fetched_at || ''}`;
   }
 
   _render() {
@@ -1811,10 +2052,11 @@ class PsNowCard extends PsCardBase {
     const runEnd = monitoring ? null : psPlannedRunEnd(rows, interval, actKey, now);
     // Self-consumption allows solar charging as well as supplying the home.
     // Describe the measured flow rather than treating this control as discharge.
+    const solarHome = Number.isFinite(solar) && Number.isFinite(home) && home > 0.1 && solar >= home && Number.isFinite(grid) && Math.abs(grid) <= 0.1;
     const selfHeadline = !Number.isFinite(battery) ? 'Self-consumption is enabled.'
-      : battery < -0.1 ? 'The battery is charging.'
+      : battery < -0.1 ? (solarHome ? 'Solar is powering the home and charging the battery.' : 'The battery is charging.')
       : battery > 0.1 ? 'The battery is powering the home.'
-      : 'The battery is idle.';
+      : solarHome ? 'Solar is powering the home.' : 'The battery is idle.';
     let headline;
     if (restoring) headline = 'Restoring normal operation…';
     else if (starting) headline = mode === 'force_charge' ? 'Starting charge…' : 'Starting discharge…';
@@ -1825,9 +2067,7 @@ class PsNowCard extends PsCardBase {
     else if (actKey === 'export') headline = 'Exporting to the grid.';
     else if (actKey === 'hold') headline = `Holding the battery at ${psFix(soc, 0)}%.`;
     else if (actKey === 'self') headline = selfHeadline;
-    else if (Number.isFinite(battery) && battery < -0.1) headline = 'The battery is charging.';
-    else if (Number.isFinite(battery) && battery > 0.1) headline = 'The battery is powering the home.';
-    else headline = 'The battery is idle.';
+    else headline = Number.isFinite(battery) ? selfHeadline : 'Live battery power is unavailable.';
 
     // Lead: next step and the plan's low point in the next 24 hours.
     const parts = [];
@@ -1888,11 +2128,17 @@ class PsNowCard extends PsCardBase {
     const from = [['--yellow', pos(solar)], ['--green', pos(battery)], ['--cyan', pos(grid)]];
     const to = [['--purple', pos(home)], ['--green', pos(-battery)], ['--red', pos(-grid)]];
     const bar = list => list.filter(([, v]) => v > 0).map(([c, v]) => `<span style="--c:var(${c});flex:${v.toFixed(2)}"></span>`).join('');
+    const cachedWx = psApiPeek(PS_WX_PATH);
+    const wxDay = psWxDay(hass, now);
+    const refreshDay = cachedWx?.date && cachedWx.date !== wxDay && this._wxRequestedDate !== wxDay && !psApiCache.get(PS_WX_PATH)?.promise;
+    if (refreshDay) this._wxRequestedDate = wxDay;
+    const wxChip = this._config.weather === false ? ''
+      : psWeatherChip(hass, this._api(PS_WX_PATH, cachedWx?.forecast_stale ? 60000 : PS_WX_TTL_MS, refreshDay), this._wxOpen, now);
 
     this.innerHTML = `
       <div class="now-grid">
         <div>
-          ${pill ? `<div class="mode">${pill}<span>${psEsc(modeText)}</span></div>` : ''}
+          ${pill || wxChip ? `<div class="now-top">${pill ? `<div class="mode">${pill}<span>${psEsc(modeText)}</span></div>` : ''}${wxChip}</div>` : ''}
           <h1>${psEsc(headline)}</h1>
           ${lead ? `<p class="lead">${lead}</p>` : ''}
         </div>

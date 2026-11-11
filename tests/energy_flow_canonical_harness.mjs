@@ -118,6 +118,19 @@ if (scenario === 'generated-idle' || scenario === 'generated-charging') {
     assert.equal(view.hidden['#ev-node-group'], true);
     assert.ok(view.background.endsWith('_idle.png'));
   }
+} else if (scenario === 'no-car-render') {
+  // A configured car that is not charging gets the idle render, which has no car,
+  // so its readings would float over the roof.
+  const {card, config} = create(async () => snapshot([]), {manual: true});
+  delete config.entities.ev_presence;
+  delete config.entities.ev2_presence;
+  card.setConfig(config);
+  await flush();
+  const view = render(card);
+  assert.equal(view.texts['#flow-ev-label'], 'TESSY', 'the car is configured');
+  assert.ok(view.background.endsWith('_idle.png'), view.background);
+  assert.equal(view.hidden['#ev-node-group'], true);
+  assert.equal(view.hidden['#ev2-node-group'], true);
 } else if (scenario === 'unknown-power') {
   const {card} = create(async () => snapshot([
     row('vin-a', {actual_charging: true, current_power_kw: null, soc: null, confidence: 'unknown'}),

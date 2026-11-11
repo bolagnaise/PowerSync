@@ -1700,3 +1700,76 @@ def test_native_inverter_controls_serialize_requests_and_report_failure():
     assert out['busy'] is None and out['confirm'] is None
     assert len(out['messages']) == 1 and 'offline' in out['messages'][0]
     assert 'Request sent' not in out['messages'][0]
+
+
+def test_right_now_weather_chip_summarizes_today_and_degrades():
+    """Right now shows today's weather: high/low, dawn-to-dusk cloud cover and
+    daylight hours. Missing forecast fields must say why, and no payload (or a
+    failed one) must hide the chip rather than show an empty control."""
+    out = _run_board(r"""
+  const at = (h, m = 0) => { const d = new Date(); d.setUTCHours(h, m, 0, 0); return d.toISOString(); };
+  const full = {
+    success: true, date: new Date().toISOString().slice(0,10), source: 'weather.forecast_home', condition: 'partlycloudy',
+    temperature: 27.2, temperature_unit: '°C', high: 29.4, low: 19.1, high_low_source: 'daily',
+    cloud_cover_avg: 38, cloud_cover_complete: true, cloud_cover_from: at(4),
+    cloud_cover_hours: Array.from({ length: 15 }, (_, i) => ({ time: at(4 + i), cloud: i === 7 ? 70 : 30 })),
+    dawn: at(4, 28), sunrise: at(4, 52), sunset: at(18, 12), dusk: at(18, 37), daylight_minutes: 849,
+    fetched_at: at(11, 20),
+  };
+  const st = (state, attributes = {}) => ({ state: String(state), attributes, last_updated: 'x' });
+  const card = new T.PsNowCard();
+  card._config = { entities: { soc: 'sensor.soc', battery: 'sensor.batt', mode: 'sensor.mode' } };
+  const render = (wx, open = false) => {
+    if (wx === undefined) T.psApiCache.delete('power_sync/weather/today');
+    else T.psApiCache.set('power_sync/weather/today', { at: Date.now(), data: wx, promise: null });
+    card._wxOpen = open;
+    card._hass = {
+      states: { 'sensor.soc': st(60), 'sensor.batt': st(-3, { unit_of_measurement: 'kW' }), 'sensor.mode': st('normal') },
+      locale: { time_format: '24' }, config: {}, callApi: async () => null,
+    };
+    card._render();
+    return card.innerHTML;
+  };
+  const html = {
+    full: render(full), open: render(full, true),
+    yesterday: render({...full, date:'2000-01-01'}),
+    stale: render({...full, forecast_stale:true}),
+    hourly: render({...full, high_low_source:'hourly'}),
+    nocloud: render({ ...full, cloud_cover_avg: null, cloud_cover_hours: [], cloud_cover_complete: false }),
+    partial: render({ ...full, cloud_cover_complete: false, cloud_cover_from: at(11) }),
+    sunOnly: render({ ...full, source: 'sun.sun', condition: null, temperature: null, high: null, low: null,
+      cloud_cover_avg: null, cloud_cover_hours: [] }),
+    failed: render({ success: false, error: 'boom' }),
+    empty: render({ success: true, temperature: null, high: null, low: null, daylight_minutes: null }),
+  };
+  card._config.weather = false;
+  html.optOut = render(full);
+  console.log(JSON.stringify(html));
+""")
+    full = out["full"]
+    assert 'class="wx-chip"' in full and 'aria-expanded="false"' in full
+    assert 'id="ps-wx-pop" role="dialog" aria-label="Today’s weather" hidden' in full
+    assert ">27°<" in full and "H <b>29°</b> L <b>19°</b>" in full
+    assert '<span class="hi">29°</span><span class="sep">/</span><span class="lo">19°</span>' in full
+    assert "38<small>%</small>" in full and "Dawn to dusk avg" in full
+    assert "14<small>h</small> 9<small>m</small>" in full
+    assert "Peak <b class=\"num\">70%</b> at <b class=\"num\">11:00</b>" in full
+    assert "Partly cloudy" in full and "<code>weather.forecast_home</code>" in full
+    assert 'aria-label="Daylight from 04:28 to 18:37"' in full
+    assert "sunrise 04:52 · sunset 18:12" in full
+    # The mode pill still renders beside the chip.
+    assert 'class="now-top"' in full
+
+    assert 'aria-expanded="true"' in out["open"]
+    assert 'aria-label="Today’s weather" hidden' not in out["open"]
+
+    assert "Not in forecast" in out["nocloud"] and "Cloud by hour" not in out["nocloud"]
+    assert "Partial avg from 11:00" in out["partial"]
+    sun_only = out["sunOnly"]
+    assert "Needs a weather entity" in sun_only and "No weather forecast" in sun_only
+    assert ">14 h 9 m<" in sun_only and ">daylight<" in sun_only
+
+    assert "Retained forecast values" in out["stale"]
+    assert "Available hourly forecast" in out["hourly"]
+    for name in ("failed", "empty", "optOut", "yesterday"):
+        assert "wx-chip" not in out[name], name

@@ -8,6 +8,8 @@ In the **Right now** tile, active Solar, Home, Battery, and Grid state labels us
 
 In monitoring mode PowerSync plans but does not control the battery, so the **Right now** headline describes what the battery is measured doing (charging, powering the home, or idle). The plan's intended action is shown separately, for example "The plan would charge now.", and upcoming changes read "Next it would…" rather than "will".
 
+The weather chip at the top of **Right now** shows the current temperature and today's high and low. Tap it for today's summary: high and low, average cloud cover between dawn and dusk (with an hourly bar), and total daylight from dawn to dusk, with sunrise and sunset marked on the sun's path. Temperatures and cloud cover come from the Home Assistant weather entity chosen in PowerSync's weather settings (or the first available one) through `weather.get_forecasts`; dawn, sunrise, sunset and dusk come from your Home Assistant location. Without a weather entity the chip shows daylight only. If PowerSync started after dawn, the cloud average covers the forecast from that hour and says so.
+
 ## HACS Frontend Cards
 
 PowerSync bundles the dashboard strategy, price charts, and animated energy-flow card. Install these via HACS > Frontend only where noted:
@@ -176,3 +178,9 @@ https://github.com/bolagnaise/PowerSync/blob/main/blueprints/battery_health_from
 The battery controls and status summary show **Starting charge…** or **Starting discharge…** while a request awaits acknowledgement, then show the active duration. During cleanup they show **Restoring…** instead of the previous force-action countdown. Local V1R publishes pending requests before waiting for the gateway.
 
 A manual Restore no longer reports failure solely because Native Max settings were restored while physical settling is still being checked. Control ownership and recovery remain held until verification finishes; settings and readback failures still report an error. Check measured Battery Power and Grid Power to confirm physical behaviour.
+
+### Today’s weather and live power
+
+The Right now weather chip shows the site’s current temperature, forecast high and low, cloud cover by hour, and today’s dawn, sunrise, sunset and dusk. Times use Home Assistant’s timezone. Missing cloud hours are shown as gaps and a partial average; hourly temperature ranges are labelled as estimates from available forecasts. Failed forecast refreshes retain same-day values with an out-of-date notice and retry after a minute. No weather entity is required for the daylight section.
+
+The iOS and Android apps show the same weather details for Home Assistant connections after updating the integration and app. Older integrations hide the chip. Self-consumption status describes measured solar and battery flow, including solar powering the home while charging the battery. Energy-flow backgrounds without a car hide its labels.
