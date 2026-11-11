@@ -5166,6 +5166,41 @@ def test_smart_schedule_obeys_zero_then_resumes_at_tesla_one_amp(monkeypatch):
     assert state["current_amps"] == 1
 
 
+@pytest.mark.parametrize("grid_w,expected", [(30, 26), (-30, 26), (0, 26), (1000, 21)])
+def test_scheduled_battery_supply_holds_rate_inside_grid_tolerance(monkeypatch, grid_w, expected):
+    async def not_unplugged(*args, **kwargs):
+        return False
+
+    async def live_status(*args, **kwargs):
+        return {"battery_power": 6500, "grid_power": grid_w,
+                "solar_power": 0, "load_power": 300, "ev_power": 6240,
+                "battery_soc": 60}
+
+    calls = []
+
+    async def set_amps(hass, entry, vehicle_id, amps, params):
+        calls.append(amps)
+        return True
+
+    monkeypatch.setattr(actions, "_clear_ble_dynamic_session_if_unplugged", not_unplugged)
+    monkeypatch.setattr(actions, "_get_tesla_live_status", live_status)
+    monkeypatch.setattr(actions, "_set_vehicle_amps", set_amps)
+    state = {"active": True, "current_amps": 26, "target_amps": 26,
+             "params": {"dynamic_mode": "battery_target", "owner_mode": "scheduled",
+                        "charger_type": "tesla", "target_battery_charge_kw": 0,
+                        "max_grid_import_kw": 14.9, "max_inverter_kw": 14.9,
+                        "no_grid_import": True, "min_charge_amps": 5,
+                        "max_charge_amps": 32, "voltage": 240, "phases": 1}}
+    actions._dynamic_ev_state.clear()
+    actions._dynamic_ev_state["entry-1"] = {"VIN123": state}
+    # Repeated controller ticks with a battery maintaining near-zero grid flow.
+    for _ in range(4 if abs(grid_w) <= 100 else 1):
+        asyncio.run(actions._dynamic_ev_update(_Hass([]), _Entry(), "entry-1", "VIN123"))
+    assert state["current_amps"] == expected
+    if abs(grid_w) <= 100:
+        assert calls == []
+
+
 def test_dynamic_battery_target_uses_solar_and_home_load_to_preserve_grid_charge(monkeypatch):
     set_amps_calls: list[int] = []
 

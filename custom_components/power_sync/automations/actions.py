@@ -17680,7 +17680,14 @@ async def _dynamic_ev_update(
 
             # Reactive adjustment based on current grid state (excluding battery charging)
             # ev_relevant_grid_kw: positive = importing for home+EV (bad), negative = exporting (good)
-            grid_reactive_kw = -(ev_relevant_grid_kw + grid_import_tolerance_kw)
+            # A home battery regulates grid flow near zero. Treat meter noise
+            # within tolerance as balanced; subtracting the buffer on every
+            # tick otherwise ratchets battery-supplied charging down to zero.
+            grid_reactive_kw = (
+                0.0
+                if abs(ev_relevant_grid_kw) <= grid_import_tolerance_kw
+                else -(ev_relevant_grid_kw + grid_import_tolerance_kw)
+            )
 
             # Use the more conservative of the two approaches
             # - inverter_headroom: proactive limit based on known capacity
