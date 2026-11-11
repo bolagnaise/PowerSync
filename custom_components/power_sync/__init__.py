@@ -16326,10 +16326,24 @@ class EVVehiclesView(HomeAssistantView):
             charge_power_state = None
             is_plugged_in = False
             plugged_in_definitive = False
+        quarantine_log = self._hass.data.setdefault(DOMAIN, {}).setdefault(
+            "_ev_cache", {}
+        ).setdefault("ev_ble_quarantine_logged", set())
         if quarantined:
+            if prefix not in quarantine_log:
+                quarantine_log.add(prefix)
+                _LOGGER.warning(
+                    "EV BLE: bridge %s is held by retained Tesla command recovery history; "
+                    "its charging data is ignored and no charge commands are sent until "
+                    "recovered. Run power_sync.get_ble_recovery_status for the required step",
+                    prefix,
+                )
             charging_state = "Unknown"
             charger_power = None
             is_online = False
+        elif prefix in quarantine_log:
+            quarantine_log.discard(prefix)
+            _LOGGER.info("EV BLE: bridge %s recovery hold released", prefix)
 
         # Use the most recent entity update time for data freshness
         data_updated_at = status_state.last_updated if hasattr(status_state, 'last_updated') else None

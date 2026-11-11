@@ -251,6 +251,7 @@ def _ble_vehicle_report(hass, entry, vin):
         from .tesla_ble import (
             get_tesla_ble_charge_current_state,
             get_tesla_ble_charging_state,
+            get_tesla_ble_companion_state,
             get_tesla_ble_observed_at,
         )
         current = get_tesla_ble_charge_current_state(hass, prefix)
@@ -259,8 +260,8 @@ def _ble_vehicle_report(hass, entry, vin):
         # per-field receipt entities establish a new vehicle observation.
         if (not getattr(current, "entity_id", None)
                 or not getattr(charging, "entity_id", None)
-                or hass.states.get(f"{current.entity_id}_received") is None
-                or hass.states.get(f"{charging.entity_id}_received") is None):
+                or get_tesla_ble_companion_state(hass, current.entity_id, "_received") is None
+                or get_tesla_ble_companion_state(hass, charging.entity_id, "_received") is None):
             return None
         current_at = get_tesla_ble_observed_at(hass, current)
         charging_at = get_tesla_ble_observed_at(hass, charging)

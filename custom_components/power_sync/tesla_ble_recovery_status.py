@@ -10,7 +10,9 @@ from typing import Any
 
 
 def ble_recovery_status(hass: Any, entry: Any) -> dict[str, Any]:
-    from .tesla_ble import get_tesla_ble_charge_power_state, get_tesla_ble_observed_at
+    from .tesla_ble import (
+        get_tesla_ble_charge_power_state, get_tesla_ble_companion_state, get_tesla_ble_observed_at,
+    )
     from .tesla_ble_mapping import resolve_ble_prefixes
     from .tesla_ble_stop_recovery import (
         StopRecoveryRefused, _live_refs, _retained_root, decode_proof,
@@ -53,8 +55,8 @@ def ble_recovery_status(hass: Any, entry: Any) -> dict[str, Any]:
         bridges.append({
             "prefix": prefix,
             "power_receipt": (
-                "paired_native_value" if entity_id and hass.states.get(f"{entity_id}_sample") is not None
-                else "native_timestamp" if entity_id and hass.states.get(f"{entity_id}_received") is not None
+                "paired_native_value" if get_tesla_ble_companion_state(hass, entity_id, "_sample") is not None
+                else "native_timestamp" if get_tesla_ble_companion_state(hass, entity_id, "_received") is not None
                 else "legacy_ha_timestamp"
             ),
             "power_sample_age_seconds": round(age, 1) if age is not None else None,
