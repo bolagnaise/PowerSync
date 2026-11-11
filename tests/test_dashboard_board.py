@@ -1736,7 +1736,7 @@ def test_right_now_weather_chip_summarizes_today_and_degrades():
     stale: render({...full, forecast_stale:true}),
     hourly: render({...full, high_low_source:'hourly'}),
     nocloud: render({ ...full, cloud_cover_avg: null, cloud_cover_hours: [], cloud_cover_complete: false }),
-    partial: render({ ...full, cloud_cover_complete: false, cloud_cover_from: at(11) }),
+    partial: render({ ...full, cloud_cover_complete: false, cloud_cover_from: at(11), cloud_cover_hours: full.cloud_cover_hours.slice(7) }),
     sunOnly: render({ ...full, source: 'sun.sun', condition: null, temperature: null, high: null, low: null,
       cloud_cover_avg: null, cloud_cover_hours: [] }),
     failed: render({ success: false, error: 'boom' }),
@@ -1765,6 +1765,7 @@ def test_right_now_weather_chip_summarizes_today_and_degrades():
 
     assert "Not in forecast" in out["nocloud"] and "Cloud by hour" not in out["nocloud"]
     assert "Partial avg from 11:00" in out["partial"]
+    assert 'class="wx-clouds-x"><span>04:00</span><span>11:30</span><span>19:00</span>' in out["partial"]
     sun_only = out["sunOnly"]
     assert "Needs a weather entity" in sun_only and "No weather forecast" in sun_only
     assert ">14 h 9 m<" in sun_only and ">daylight<" in sun_only

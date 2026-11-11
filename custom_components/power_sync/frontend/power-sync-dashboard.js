@@ -1908,12 +1908,11 @@ function psWeatherChip(hass, w, open, now = Date.now()) {
   const chartSpan = Math.max(3600000, (w.cloud_cover_end ? +psWxDate(w.cloud_cover_end) : Math.floor(lastHour / 3600000) * 3600000 + 3600000) - chartStart);
   let peak = null;
   for (const h of hours) if (!peak || Number(h.cloud) > Number(peak.cloud)) peak = h;
-  const mid = hours[Math.floor((hours.length - 1) / 2)];
   const clouds = hasCloud ? `
     <div class="wx-sec">
       <div class="h"><span>Cloud by hour</span><span>Peak <b class="num">${Math.round(peak.cloud)}%</b> at <b class="num">${psEsc(psWxTime(hass, peak.time))}</b></span></div>
       <div class="wx-clouds" style="position:relative" aria-hidden="true">${hours.map(h => `<span class="${now >= +psWxDate(h.time) && now < +psWxDate(h.time) + 3600000 ? 'now' : ''}" style="position:absolute;bottom:0;left:${(+psWxDate(h.time)-chartStart)/chartSpan*100}%;width:${3600000/chartSpan*100}%;height:${Math.max(4, Math.min(100, Number(h.cloud)))}%"></span>`).join('')}</div>
-      <div class="wx-clouds-x"><span>${psEsc(psWxTime(hass, hours[0].time))}</span>${hours.length > 2 ? `<span>${psEsc(psWxTime(hass, mid.time))}</span>` : ''}<span>${psEsc(psWxTime(hass, hours[hours.length - 1].time))}</span></div>
+      <div class="wx-clouds-x"><span>${psEsc(psWxTime(hass, new Date(chartStart).toISOString()))}</span><span>${psEsc(psWxTime(hass, new Date(chartStart + chartSpan / 2).toISOString()))}</span><span>${psEsc(psWxTime(hass, new Date(chartStart + chartSpan).toISOString()))}</span></div>
     </div>` : '';
   const day = (() => {
     try {
