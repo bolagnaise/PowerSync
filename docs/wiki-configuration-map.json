@@ -9,13 +9,13 @@
   },
   "source_state": {
     "components": {
-      "config_flow.py": "c4e3ad92973e4c4cfda5956bca89d6acb087605b7bfa9e3b4ca16fa0357de05c",
+      "config_flow.py": "1e30971b2ad69a4599ae167d977918abe7cc4e0503aecad35052fe52c40ae1b5",
       "const.py": "9f664376370ba765182d062955214700c2abeed55fcec98b7f3586895765fcd1",
       "battery_backend/profiles.py": "d308ecc78740d8dfc9cd895e4b9750a02859d46e5f0863dd5c098b8aaab2bcc2",
       "battery_backend/discovery.py": "3a8c88c00d6c57f6101d55056968524d7971d1ac3b8e16365923bca978f9489b",
       "settings_metadata.py": "deea4c452dd3cd334d5e1b9348e0ead03891542128c4061c368ad6e1c012ffd9",
-      "strings.json": "69c073e022aa30af64602298d8007c08aa5b68973fb89ebc6df00bef0b05623d",
-      "translations/en.json": "a8ac5af709f5ef71cf388df0dd58861b2507ca91a61f37f0aaf94934a69885a5",
+      "strings.json": "22557d611af417a1385934e91bdf484eef09c2058fdd771573dd86a0f29b792b",
+      "translations/en.json": "8a4f2404cacf4866950ce79e09ec8cec01aa20789f57ffa0ac92eb486cace3f6",
       "services.yaml": "094cb66a11a4c1fdfcb800a7e6c4a6e1b4cd278b6d6ea15749e72ce9d33b7c8a",
       "switch.py": "47862ce86c00f58c880b4450bbcd1fa1ef81aa195ff736fa64e67e5ca8475c48",
       "select.py": "8d5d7dbd06e0919d3ba84b52660f342dde1583bf9d8d57c2bb5bcbd2ca655d99",

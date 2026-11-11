@@ -10037,6 +10037,10 @@ class GoodWeEnergyCoordinator(
             if value <= 0:
                 raise ValueError("rated_power_w missing")
         except Exception as exc:
+            if getattr(self._controller, "entity_ems_control", False):
+                # Shared-client discovery is metadata-only. Retry after late
+                # upstream entities/runtime arrive; never open another client.
+                self._entity_telemetry_rated_power_probe_attempted = False
             _LOGGER.debug(
                 "GoodWe entity telemetry rated-power probe failed; "
                 "continuing without direct physical discharge limit: %s",
@@ -10046,7 +10050,7 @@ class GoodWeEnergyCoordinator(
 
         self._entity_telemetry_rated_power_w = value
         _LOGGER.info(
-            "GoodWe entity telemetry cached rated_power_w=%dW from one-time direct capability probe",
+            "GoodWe entity telemetry cached rated_power_w=%dW from its control client",
             value,
         )
         return value

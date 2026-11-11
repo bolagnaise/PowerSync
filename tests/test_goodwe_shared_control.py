@@ -5,6 +5,7 @@ import asyncio
 import ast
 import copy
 import importlib
+import logging
 import sys
 from types import ModuleType, SimpleNamespace as NS
 from pathlib import Path
@@ -531,3 +532,21 @@ def test_restart_during_charge_releases_owned_export_bank_without_touching_ems(e
     assert env.inverter.frames[-1] == (47509, [0, 5000])
     assert env.inverter.registers[47511] == 2
     assert restarted.get_grid_export_restore_state() is None
+
+
+def test_nameplate_discovery_retries_late_shared_runtime_without_hardware_polling(env):
+    path = Path(__file__).parents[1] / "custom_components/power_sync/coordinator.py"
+    cls = next(n for n in ast.parse(path.read_text()).body if isinstance(n, ast.ClassDef) and n.name == "GoodWeEnergyCoordinator")
+    node = next(n for n in cls.body if isinstance(n, ast.AsyncFunctionDef) and n.name == "_probe_entity_telemetry_rated_power")
+    namespace = {"asyncio": asyncio, "_LOGGER": logging.getLogger(__name__)}
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[node], type_ignores=[])), str(path), "exec"), namespace)
+    coordinator = NS(_controller=env.controller, _entity_telemetry_rated_power_probe_attempted=False,
+                     _entity_telemetry_rated_power_w=None)
+    env.entry.state.value = "setup_in_progress"
+    assert run(namespace[node.name](coordinator)) is None
+    assert coordinator._entity_telemetry_rated_power_probe_attempted is False
+    env.entry.state.value = "loaded"
+    assert run(namespace[node.name](coordinator)) == 9999
+    assert run(namespace[node.name](coordinator)) == 9999
+    assert coordinator._entity_telemetry_rated_power_probe_attempted is True
+    assert env.inverter.events == []

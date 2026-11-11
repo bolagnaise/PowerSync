@@ -11121,7 +11121,7 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            goodwe_host = user_input.get(CONF_GOODWE_HOST, "").strip()
+            goodwe_host = (user_input.get(CONF_GOODWE_HOST) or "").strip()
             requested_control = resolve_goodwe_ems_control_mode_for_protocol(
                 self.hass,
                 user_input.get(CONF_GOODWE_EMS_CONTROL_MODE),
@@ -11219,9 +11219,9 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
             step_id="goodwe_connection_options",
             data_schema=vol.Schema(
                 {
-                    vol.Required(
+                    vol.Optional(
                         CONF_GOODWE_HOST,
-                        default=current_host,
+                        default=current_host or "",
                     ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
                     vol.Required(
                         CONF_GOODWE_PROTOCOL,
