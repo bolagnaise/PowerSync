@@ -357,6 +357,7 @@ def test_local_ble_reconciliation_requires_exact_configured_vin_mapping(admissio
     ble.get_tesla_ble_charge_current_state = lambda _hass, prefix: current if prefix == 'car_a' else None
     ble.get_tesla_ble_charging_state = lambda _hass, prefix: charging if prefix == 'car_a' else None
     ble.get_tesla_ble_observed_at = lambda _hass, state: stamp if state is not None else None
+    ble.get_tesla_ble_companion_state = lambda hass, entity_id, suffix: hass.states.get(f'{entity_id}{suffix}')
     monkeypatch.setitem(sys.modules, ble.__name__, ble)
     telemetry = importlib.import_module('managed_admission_probe.native_rate_telemetry')
     report = telemetry._ble_vehicle_report(a.hass, a.entry, VIN)

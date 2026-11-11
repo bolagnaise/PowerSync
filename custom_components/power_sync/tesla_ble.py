@@ -22,6 +22,84 @@ from .const import (
     TESLA_BLE_SENSOR_CHARGING_STATE,
 )
 
+_COMPANION_SUFFIXES = {"_sample": "sample", "_received": "received"}
+
+
+def _entity_registry(hass: Any) -> Any | None:
+    """Return HA's entity registry, or None where it is unavailable."""
+    try:
+        from homeassistant.helpers import entity_registry as er
+
+        return er.async_get(hass)
+    except Exception:  # noqa: BLE001 - registry absence keeps exact-name lookup
+        return None
+
+
+def _registry_entries_for_device(registry: Any, device_id: str) -> list[Any]:
+    entities = getattr(registry, "entities", None)
+    getter = getattr(entities, "get_entries_for_device_id", None)
+    if callable(getter):
+        try:
+            return list(getter(device_id, include_disabled_entities=False))
+        except TypeError:
+            return list(getter(device_id))
+    values = entities.values() if hasattr(entities, "values") else ()
+    return [entry for entry in values if getattr(entry, "device_id", None) == device_id]
+
+
+def _normalized_name(value: Any) -> str:
+    return " ".join(str(value or "").casefold().split())
+
+
+def get_tesla_ble_companion_state(hass: Any, entity_id: str, suffix: str) -> Any | None:
+    """Return the freshness companion (``_sample``/``_received``) of a raw entity.
+
+    The exact ``<entity>_suffix`` name is authoritative. When it is absent, the
+    companion may still exist under a different entity-ID prefix: HA names new
+    entities from the *current* device name, so a bridge renamed before the
+    freshness package was installed yields e.g. ``garage_<prefix>_charge_power_sample``
+    beside the original ``<prefix>_charge_power``. Resolve that through the
+    entity registry, restricted to the same device, and only when exactly one
+    candidate matches. The packet/value checks in ``get_tesla_ble_observed_at``
+    still fail closed on any mismatched pairing.
+    """
+    if not entity_id or suffix not in _COMPANION_SUFFIXES:
+        return None
+    exact = hass.states.get(f"{entity_id}{suffix}")
+    if exact is not None:
+        return exact
+    registry = _entity_registry(hass)
+    if registry is None:
+        return None
+    try:
+        raw_entry = registry.async_get(entity_id)
+        device_id = getattr(raw_entry, "device_id", None)
+        if raw_entry is None or not device_id:
+            return None
+        domain, _, raw_object = entity_id.partition(".")
+        raw_name = _normalized_name(
+            getattr(raw_entry, "original_name", None) or getattr(raw_entry, "name", None)
+        )
+        expected_name = f"{raw_name} {_COMPANION_SUFFIXES[suffix]}" if raw_name else None
+        matches = set()
+        for entry in _registry_entries_for_device(registry, device_id):
+            candidate = str(getattr(entry, "entity_id", "") or "")
+            cand_domain, _, cand_object = candidate.partition(".")
+            if cand_domain != domain or candidate == entity_id:
+                continue
+            if getattr(entry, "disabled_by", None) is not None:
+                continue
+            if cand_object.endswith(f"_{raw_object}{suffix}") or (
+                expected_name is not None
+                and _normalized_name(getattr(entry, "original_name", None)) == expected_name
+            ):
+                matches.add(candidate)
+        if len(matches) != 1:
+            return None
+        return hass.states.get(next(iter(matches)))
+    except Exception:  # noqa: BLE001 - registry quirks must not break telemetry reads
+        return None
+
 
 def get_tesla_ble_observed_at(hass: Any, state: Any) -> datetime | None:
     """Read a bridge's receipt time, without renewing a replayed HA value.
@@ -37,7 +115,7 @@ def get_tesla_ble_observed_at(hass: Any, state: Any) -> datetime | None:
     if state is None:
         return None
     entity_id = getattr(state, "entity_id", "")
-    sample = hass.states.get(f"{entity_id}_sample") if entity_id else None
+    sample = get_tesla_ble_companion_state(hass, entity_id, "_sample")
     if sample is not None:
         # Separate HA entities can arrive in either order. Never join a new
         # receipt to an older value while the filtered sensor is catching up.
@@ -59,7 +137,7 @@ def get_tesla_ble_observed_at(hass: Any, state: Any) -> datetime | None:
             return observed if observed <= datetime.now(timezone.utc) else None
         except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
             return None
-    receipt = hass.states.get(f"{entity_id}_received") if entity_id else None
+    receipt = get_tesla_ble_companion_state(hass, entity_id, "_received")
     if receipt is not None:
         try:
             observed = datetime.fromisoformat(str(receipt.state).replace("Z", "+00:00"))

@@ -426,3 +426,145 @@ def test_invalid_paired_sample_never_falls_back_to_ha_or_receipt(packet):
     states = {power.entity_id + "_sample": SimpleNamespace(state=packet),
               power.entity_id + "_received": SimpleNamespace(state=now.isoformat())}
     assert get_tesla_ble_observed_at(SimpleNamespace(states=SimpleNamespace(get=states.get)), power) is None
+
+
+class _FakeRegistry:
+    """Minimal HA entity registry: entities indexed by device."""
+
+    def __init__(self, entries):
+        self._entries = {entry.entity_id: entry for entry in entries}
+        registry = self
+
+        class _Items(dict):
+            def get_entries_for_device_id(self, device_id, include_disabled_entities=False):
+                return [e for e in registry._entries.values()
+                        if e.device_id == device_id
+                        and (include_disabled_entities or e.disabled_by is None)]
+
+        self.entities = _Items(self._entries)
+
+    def async_get(self, entity_id):
+        return self._entries.get(entity_id)
+
+
+def _reg(entity_id, name, device="bridge-1", disabled_by=None):
+    return SimpleNamespace(entity_id=entity_id, original_name=name, name=None,
+                           device_id=device, disabled_by=disabled_by)
+
+
+def _renamed_bridge_hass(monkeypatch, *, extra_entries=(), extra_states=None, packet_value=0):
+    """Ticket #158 layout: raw entities predate a device rename, companions do not."""
+    import json
+    from datetime import timedelta, timezone
+    import power_sync.tesla_ble as tesla_ble
+
+    now = datetime.now(timezone.utc)
+    stamp = now - timedelta(seconds=5)
+    raw = SimpleNamespace(entity_id="sensor.teslablefbd_charge_power", state="0",
+                          last_reported=now - timedelta(minutes=30))
+    sample_id = "sensor.garage_teslablefbd_charge_power_sample"
+    states = {
+        raw.entity_id: raw,
+        sample_id: SimpleNamespace(entity_id=sample_id, state=json.dumps(
+            {"v": 1, "t": stamp.strftime("%Y-%m-%dT%H:%M:%SZ"), "x": packet_value})),
+        **(extra_states or {}),
+    }
+    registry = _FakeRegistry([
+        _reg(raw.entity_id, "Charge power"),
+        _reg(sample_id, "Charge power sample"),
+        _reg("sensor.garage_teslablefbd_charge_level_sample", "Charge level sample"),
+        *extra_entries,
+    ])
+    monkeypatch.setattr(tesla_ble, "_entity_registry", lambda _hass: registry)
+    hass = SimpleNamespace(states=SimpleNamespace(get=states.get))
+    return hass, raw, stamp.replace(microsecond=0)
+
+
+def test_renamed_device_sample_companion_is_found_through_registry(monkeypatch):
+    from power_sync.tesla_ble import get_tesla_ble_observed_at
+
+    hass, raw, stamp = _renamed_bridge_hass(monkeypatch)
+    # Previously this fell back to the 30-minute-old HA timestamp.
+    assert get_tesla_ble_observed_at(hass, raw) == stamp
+
+
+def test_renamed_device_sample_still_fails_closed_on_value_mismatch(monkeypatch):
+    from power_sync.tesla_ble import get_tesla_ble_observed_at
+
+    hass, raw, _ = _renamed_bridge_hass(monkeypatch, packet_value=7)
+    assert get_tesla_ble_observed_at(hass, raw) is None
+
+
+def test_companion_match_by_original_name_when_raw_entity_was_renamed(monkeypatch):
+    import json
+    from datetime import timedelta, timezone
+    import power_sync.tesla_ble as tesla_ble
+    from power_sync.tesla_ble import get_tesla_ble_companion_state
+
+    now = datetime.now(timezone.utc)
+    raw_id = "sensor.garage_car_charging_state"
+    sample_id = "sensor.car_charging_state_sample"
+    sample = SimpleNamespace(entity_id=sample_id, state=json.dumps(
+        {"v": 1, "t": (now - timedelta(seconds=2)).isoformat(), "x": "Stopped"}))
+    registry = _FakeRegistry([_reg(raw_id, "Charging state"), _reg(sample_id, "Charging state sample")])
+    monkeypatch.setattr(tesla_ble, "_entity_registry", lambda _hass: registry)
+    hass = SimpleNamespace(states=SimpleNamespace(get={sample_id: sample}.get))
+    assert get_tesla_ble_companion_state(hass, raw_id, "_sample") is sample
+
+
+@pytest.mark.parametrize("extra", [
+    # A second candidate on the same device is ambiguous.
+    [_reg("sensor.old_teslablefbd_charge_power_sample", "Charge power sample")],
+])
+def test_ambiguous_registry_companions_fail_closed_to_legacy(monkeypatch, extra):
+    from power_sync.tesla_ble import get_tesla_ble_companion_state
+
+    hass, raw, _ = _renamed_bridge_hass(monkeypatch, extra_entries=extra)
+    assert get_tesla_ble_companion_state(hass, raw.entity_id, "_sample") is None
+
+
+def test_registry_companion_never_crosses_devices_or_uses_disabled_entries(monkeypatch):
+    import power_sync.tesla_ble as tesla_ble
+    from power_sync.tesla_ble import get_tesla_ble_companion_state
+
+    raw_id = "sensor.car_charge_power"
+    registry = _FakeRegistry([
+        _reg(raw_id, "Charge power"),
+        _reg("sensor.other_car_charge_power_sample", "Charge power sample", device="bridge-2"),
+        _reg("sensor.garage_car_charge_power_sample", "Charge power sample", disabled_by="user"),
+    ])
+    monkeypatch.setattr(tesla_ble, "_entity_registry", lambda _hass: registry)
+    states = {"sensor.other_car_charge_power_sample": SimpleNamespace(state="{}"),
+              "sensor.garage_car_charge_power_sample": SimpleNamespace(state="{}")}
+    hass = SimpleNamespace(states=SimpleNamespace(get=states.get))
+    assert get_tesla_ble_companion_state(hass, raw_id, "_sample") is None
+
+
+def test_exact_companion_name_wins_over_registry(monkeypatch):
+    import power_sync.tesla_ble as tesla_ble
+    from power_sync.tesla_ble import get_tesla_ble_companion_state
+
+    exact = SimpleNamespace(state="exact")
+    monkeypatch.setattr(tesla_ble, "_entity_registry",
+                        lambda _hass: (_ for _ in ()).throw(AssertionError("registry consulted")))
+    hass = SimpleNamespace(states=SimpleNamespace(get={"sensor.car_charge_power_sample": exact}.get))
+    assert get_tesla_ble_companion_state(hass, "sensor.car_charge_power", "_sample") is exact
+
+
+def test_ble_recovery_status_reports_renamed_companion_as_paired(monkeypatch):
+    from power_sync.tesla_ble_recovery_status import ble_recovery_status
+    import power_sync.tesla_ble_mapping as mapping
+
+    hass, raw, _ = _renamed_bridge_hass(monkeypatch)
+    hass.data = {"power_sync": {"entry": {}}}
+    monkeypatch.setattr(mapping, "resolve_ble_prefixes", lambda _h, _c: ["teslablefbd"])
+    import power_sync.tesla_ble as tesla_ble
+    monkeypatch.setattr(tesla_ble, "get_tesla_ble_charge_power_state", lambda _h, _p: raw)
+    import power_sync.tesla_ble_stop_recovery as stop_recovery
+    monkeypatch.setattr(stop_recovery, "_retained_root", lambda _runtime: {"vehicles": {}})
+    monkeypatch.setattr(stop_recovery, "_live_refs", lambda _runtime: [])
+    entry = SimpleNamespace(entry_id="entry", data={}, options={})
+    result = ble_recovery_status(hass, entry)
+    assert result["success"], result
+    assert result["bridges"][0]["power_receipt"] == "paired_native_value"
+    assert result["bridges"][0]["power_sample_fresh"] is True

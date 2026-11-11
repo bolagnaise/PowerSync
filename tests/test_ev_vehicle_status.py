@@ -5471,3 +5471,35 @@ def test_idle_wall_connector_standby_cannot_revive_stale_fleet_charging(standby_
     rows = build_loadpoint_status({}, vehicles)
     assert not any(row["actual_charging"] for row in rows)
     assert not any(row["status"] == "charging" for row in rows)
+
+
+def test_quarantined_ble_bridge_logs_hold_once_and_release(monkeypatch, caplog):
+    """Ticket #158: a held bridge silently reported charging=Unknown/online=False."""
+    import logging
+
+    power_sync = _power_sync_module()
+    recovery = importlib.import_module("power_sync.tesla_ev_recovery")
+    held = {"value": True}
+    monkeypatch.setattr(recovery, "ble_quarantined", lambda *_args: held["value"])
+    now = datetime.now(timezone.utc)
+    hass = _Hass([
+        _State("binary_sensor.home_ble_status", "on", last_updated=now),
+        _State("sensor.home_ble_charging_state", "Stopped", last_updated=now),
+        _State("binary_sensor.home_ble_charge_flap", "on", last_updated=now),
+    ])
+    view = power_sync.EVVehiclesView(hass)
+    with caplog.at_level(logging.DEBUG):
+        first = view._get_tesla_ble_vehicle("home_ble")
+        view._get_tesla_ble_vehicle("home_ble")
+    held_logs = [r for r in caplog.records if "held by retained Tesla command recovery" in r.getMessage()]
+    assert len(held_logs) == 1 and held_logs[0].levelno == logging.WARNING
+    assert "home_ble" in held_logs[0].getMessage()
+    assert first["is_online"] is False and first["is_plugged_in"] is True
+
+    caplog.clear()
+    held["value"] = False
+    with caplog.at_level(logging.DEBUG):
+        view._get_tesla_ble_vehicle("home_ble")
+        view._get_tesla_ble_vehicle("home_ble")
+    released = [r for r in caplog.records if "recovery hold released" in r.getMessage()]
+    assert len(released) == 1
