@@ -667,7 +667,7 @@
           "goodwe_ems_entity_prefix": "GoodWe entity mode prefix"
         },
         "data_description": {
-          "goodwe_host": "Local IP address of your GoodWe inverter.",
+          "goodwe_host": "Required for direct control. Leave empty to reuse your existing GoodWe Experimental Home Assistant connection.",
           "goodwe_protocol": "UDP uses direct GoodWe control on port 8899. TCP uses Modbus on port 502 for LAN/Kit-20 setups.",
           "goodwe_port": "Default: 8899 for UDP, 502 for TCP.",
           "goodwe_ems_control_mode": "Choose how PowerSync sends GoodWe EMS commands. Direct IP requires UDP 8899 control. For TCP / LAN Kit-20 setups, PowerSync auto-uses detected GoodWe Experimental EMS entities because direct operation-mode writes do not reliably control the inverter. TCP / LAN Kit-20 telemetry can also use detected GoodWe HA sensors to avoid a second direct TCP/502 polling client.",
@@ -2158,7 +2158,7 @@
           "goodwe_ems_entity_prefix": "GoodWe entity mode prefix"
         },
         "data_description": {
-          "goodwe_host": "Local IP address of your GoodWe inverter.",
+          "goodwe_host": "Required for direct control. Leave empty to reuse your existing GoodWe Experimental Home Assistant connection.",
           "goodwe_protocol": "UDP uses direct GoodWe control on port 8899. TCP uses Modbus on port 502 for LAN/Kit-20 setups.",
           "goodwe_port": "Default: 8899 for UDP, 502 for TCP.",
           "goodwe_ems_control_mode": "Choose how PowerSync sends GoodWe EMS commands. Direct IP requires UDP 8899 control. For TCP / LAN Kit-20 setups, PowerSync auto-uses detected GoodWe Experimental EMS entities because direct operation-mode writes do not reliably control the inverter. TCP / LAN Kit-20 telemetry can also use detected GoodWe HA sensors to avoid a second direct TCP/502 polling client.",
