@@ -6604,6 +6604,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def _restore_battery_provenance(self) -> None:
         """Restore the cross-day inventory, rejecting malformed provenance."""
+        self._battery_provenance_charge_run = None
         store = getattr(self, "_battery_provenance_store", None)
         if store is None:
             return
@@ -6678,6 +6679,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         soc = _nonnegative_finite_number(current_soc)
         capacity = _positive_finite_number(capacity_wh)
         if soc is None or capacity is None:
+            self._battery_provenance_charge_run = None
             self._battery_provenance_reconciliation = "invalid_soc_or_capacity"
             return
         # Power can advance while SOC retains an already-consumed snapshot.
@@ -6710,6 +6712,35 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._battery_provenance_reconciliation = f"unknown_baseline:{reason}"
             self._schedule_battery_provenance_save()
             return
+
+        charge_run = getattr(self, "_battery_provenance_charge_run", None)
+        if charge_run is not None:
+            if (
+                reason in ("measured_interval", "optimizer_run")
+                and capacity == charge_run["capacity_wh"]
+                and target_kwh >= charge_run["opening_total"] - 1e-6
+            ):
+                # SOC arrives in steps even within a fresh local snapshot.
+                # Reconcile the whole continuous charge, rather than repeatedly
+                # trimming measured origin and adding the next SOC step as unknown.
+                measured = charge_run["solar"] + charge_run["grid"]
+                supplied = charge_run["opening_total"] + measured
+                fraction = min(1.0, target_kwh / supplied) if supplied > 1e-9 else 0.0
+                self._battery_provenance_solar_kwh = (
+                    charge_run["opening_solar"] + charge_run["solar"]
+                ) * fraction
+                self._battery_provenance_grid_kwh = (
+                    charge_run["opening_grid"] + charge_run["grid"]
+                ) * fraction
+                self._battery_provenance_grid_cost = (
+                    charge_run["opening_cost"] + charge_run["cost"]
+                ) * fraction
+                self._battery_provenance_unknown_kwh = (
+                    charge_run["opening_unknown"] * fraction
+                    + max(0.0, target_kwh - supplied)
+                )
+            else:
+                self._battery_provenance_charge_run = None
 
         total = self._battery_provenance_total_kwh()
         difference = target_kwh - total
@@ -6759,6 +6790,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._schedule_battery_provenance_save()
             return
         discharge = _nonnegative_finite_number(discharge_kwh) or 0.0
+        if telemetry_gap or discharge > 1e-9:
+            self._battery_provenance_charge_run = None
         # A solar-backed export must spend its measured source, rather than
         # retaining a proportional solar credit to promise again next solve.
         # Spend it even across a gap; any replacement SOC is then unknown.
@@ -6779,6 +6812,23 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         solar_charge = _nonnegative_finite_number(solar_charge_kwh) or 0.0
         grid_charge = _nonnegative_finite_number(grid_charge_kwh) or 0.0
         grid_cost = _nonnegative_finite_number(grid_charge_cost) or 0.0
+        if discharge <= 1e-9 and solar_export <= 1e-9 and solar_charge + grid_charge > 1e-9:
+            charge_run = getattr(self, "_battery_provenance_charge_run", None)
+            if charge_run is None or charge_run["capacity_wh"] != capacity_wh:
+                charge_run = self._battery_provenance_charge_run = {
+                    "capacity_wh": capacity_wh,
+                    "opening_total": self._battery_provenance_total_kwh(),
+                    "opening_solar": self._battery_provenance_solar_kwh,
+                    "opening_grid": self._battery_provenance_grid_kwh,
+                    "opening_unknown": self._battery_provenance_unknown_kwh,
+                    "opening_cost": self._battery_provenance_grid_cost,
+                    "solar": 0.0, "grid": 0.0, "cost": 0.0,
+                }
+            charge_run["solar"] += solar_charge
+            charge_run["grid"] += grid_charge
+            charge_run["cost"] += grid_cost
+        else:
+            self._battery_provenance_charge_run = None
         self._battery_provenance_solar_kwh += solar_charge
         self._battery_provenance_grid_kwh += grid_charge
         self._battery_provenance_grid_cost += grid_cost
@@ -19704,9 +19754,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         # Need energy coordinator data and cached prices
         if not data:
+            self._battery_provenance_charge_run = None
             _LOGGER.debug("Cost tracking skipped: no energy coordinator data")
             return
         if not self._last_import_prices or not self._last_export_prices:
+            self._battery_provenance_charge_run = None
             _LOGGER.debug("Cost tracking skipped: no cached prices yet")
             return
 
@@ -19719,6 +19771,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         disp_import = self._last_display_import_prices or self._last_import_prices
         disp_export = self._last_display_export_prices or self._last_export_prices
         if not disp_import or not disp_export:
+            self._battery_provenance_charge_run = None
             _LOGGER.warning("Cost tracking skipped: empty price arrays")
             return
         import_price = disp_import[0]  # $/kWh — safe: arrays verified non-empty
@@ -19931,6 +19984,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 battery_export_kwh=min(battery_discharge_kw, grid_export_kw) * dt_hours,
             )
         else:
+            self._battery_provenance_charge_run = None
             self._battery_provenance_reconciliation = "missing_soc_telemetry"
 
         # Baseline cost: what would happen without a battery

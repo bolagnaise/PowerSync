@@ -4421,13 +4421,6 @@ def test_charging_solves_preserve_measured_origin_before_pricing(
         expected_solar += input_kwh * 0.4
         expected_grid += input_kwh * 0.6
         expected_cost += input_kwh * 0.6 * 0.093
-        ratio = (clock["data"]["battery_level"] / 100 * 27) / (
-            expected_solar + expected_grid + expected_unknown
-        )
-        expected_solar *= ratio
-        expected_grid *= ratio
-        expected_cost *= ratio
-        expected_unknown *= ratio
         _run_to_acquisition_cost(coordinator)
         coordinator._track_actual_cost()  # existing post-solve/refresh path
 
@@ -4437,6 +4430,15 @@ def test_charging_solves_preserve_measured_origin_before_pricing(
     assert coordinator._actual_grid_charge_cost_today == pytest.approx(
         6 * seconds / 60 * 0.093
     )
+    # Reconcile cumulative charge once against the opening inventory. Repeated
+    # per-sample loss trimming discarded sources before later SOC catch-up.
+    ratio = (clock["data"]["battery_level"] / 100 * 27) / (
+        opening_kwh + expected_solar + expected_grid
+    )
+    expected_solar *= ratio
+    expected_grid *= ratio
+    expected_cost *= ratio
+    expected_unknown *= ratio
     assert coordinator._battery_provenance_grid_kwh == pytest.approx(expected_grid)
     assert coordinator._battery_provenance_solar_kwh == pytest.approx(expected_solar)
     assert coordinator._battery_provenance_grid_cost == pytest.approx(expected_cost)
