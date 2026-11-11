@@ -95,6 +95,13 @@ class GoodWeEntityTelemetryController:
         """Return the resolved entity prefix."""
         return self._prefix
 
+    def control_binding_entities(self) -> tuple[str, ...]:
+        """Expose resolved upstream sensors for exact device binding checks."""
+        self._ensure_entity_map()
+        keys = ("battery_level", "battery_power", "battery_charge", "battery_discharge",
+                "grid_power", "grid_consumption", "grid_feed_in", "solar_power")
+        return tuple(self._entity_map[key] for key in keys if key in self._entity_map)
+
     async def connect(self) -> bool:
         """Validate that the required telemetry entity surface exists."""
         self._discover_entities()

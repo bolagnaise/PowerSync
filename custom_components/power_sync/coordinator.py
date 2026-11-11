@@ -9960,6 +9960,15 @@ class GoodWeEnergyCoordinator(
                 hass,
                 entity_prefix=self._entity_telemetry_prefix,
             )
+            if self._ems_prefix:
+                from .inverters.goodwe_shared import GoodWeSharedController
+
+                self._controller = GoodWeSharedController(
+                    hass, self._ems_prefix, self._telemetry_controller,
+                    curtailment_method=curtailment_method or "export_limit",
+                    entry_id=entry_id,
+                    control_allowed=lambda: self._native_control_allowed("GoodWe shared control"),
+                )
         else:
             from .inverters.goodwe_battery import GoodWeBatteryController
 
@@ -9996,6 +10005,9 @@ class GoodWeEnergyCoordinator(
     def _native_control_surface_ready(self) -> bool:
         if not self._ems_prefix:
             return True
+        checker = getattr(getattr(self, "_controller", None), "control_surface_ready", None)
+        if callable(checker) and not checker():
+            return False
         unavailable = {"", "unknown", "unavailable", "none"}
         for entity_id in (
             f"select.{self._ems_prefix}_ems_mode",
@@ -10025,6 +10037,10 @@ class GoodWeEnergyCoordinator(
             if value <= 0:
                 raise ValueError("rated_power_w missing")
         except Exception as exc:
+            if getattr(self._controller, "entity_ems_control", False):
+                # Shared-client discovery is metadata-only. Retry after late
+                # upstream entities/runtime arrive; never open another client.
+                self._entity_telemetry_rated_power_probe_attempted = False
             _LOGGER.debug(
                 "GoodWe entity telemetry rated-power probe failed; "
                 "continuing without direct physical discharge limit: %s",
@@ -10034,7 +10050,7 @@ class GoodWeEnergyCoordinator(
 
         self._entity_telemetry_rated_power_w = value
         _LOGGER.info(
-            "GoodWe entity telemetry cached rated_power_w=%dW from one-time direct capability probe",
+            "GoodWe entity telemetry cached rated_power_w=%dW from its control client",
             value,
         )
         return value
@@ -10246,6 +10262,12 @@ class GoodWeEnergyCoordinator(
         These registers accept Modbus TCP writes, unlike the standard
         operation-mode / work-mode registers which require UDP.
         """
+        controller = getattr(self, "_controller", None)
+        if getattr(controller, "entity_ems_control", False):
+            return await controller.set_ems_mode(
+                ems_option, power_w, fallback_option=fallback_option,
+                reset_power_limit=reset_power_limit,
+            )
         p = self._ems_prefix
         mode_entity = f"select.{p}_ems_mode"
         power_entity = f"number.{p}_ems_power_limit"
@@ -10447,6 +10469,8 @@ class GoodWeEnergyCoordinator(
         if self._ems_prefix:
             if power_w <= 0:
                 power_w = (self.data or {}).get("rated_power_w", 5000)
+            if getattr(getattr(self, "_controller", None), "entity_ems_control", False):
+                return await self._ems_set_mode("discharge_battery", power_w, fallback_option="sell_power")
             return await self._ems_set_mode("sell_power", power_w, fallback_option="discharge_battery")
         if self._controller is None:
             return False

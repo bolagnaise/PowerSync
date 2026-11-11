@@ -1714,7 +1714,7 @@
         },
         "data_description": {
           "goodwe_curtailment_method": "How direct GoodWe control stops uneconomic export. Export limit writes a 0 W grid export limit. EMS load following holds grid exchange at 0 W with GoodWe's EMS BuyPower mode, so solar keeps supplying the house and battery while surplus PV is reduced. Use it when the export limit is accepted but the inverter keeps exporting at full battery (seen on ESA/EHA-G20). Needs a working GoodWe meter and EMS fallback 47505 = 10.",
-          "goodwe_host": "Local IP address of your GoodWe inverter.",
+          "goodwe_host": "Required for direct control. Leave empty to reuse your existing GoodWe Experimental Home Assistant connection.",
           "goodwe_protocol": "UDP uses direct GoodWe control on port 8899. TCP uses Modbus on port 502 for LAN/Kit-20 setups.",
           "goodwe_port": "Default: 8899 for UDP, 502 for TCP.",
           "goodwe_ems_control_mode": "Choose how PowerSync sends GoodWe EMS commands. Direct IP requires UDP 8899 control. For TCP / LAN Kit-20 setups, PowerSync auto-uses detected GoodWe Experimental EMS entities because direct operation-mode writes do not reliably control the inverter. TCP / LAN Kit-20 telemetry can also use detected GoodWe HA sensors to avoid a second direct TCP/502 polling client.",
@@ -2952,6 +2952,10 @@
     }
   },
   "issues": {
+    "goodwe_recovery_identity": {
+      "title": "GoodWe recovery is waiting for its original device",
+      "description": "PowerSync has saved GoodWe settings to restore, but the selected Home Assistant device no longer matches the saved connection. Battery control is paused and the recovery record is retained. Keep the original GoodWe integration entry and restore its connection if possible. Contact PowerSync support with the GoodWe recovery warning before deleting entries or changing inverter modes. Telemetry can continue while recovery is pending."
+    },
     "powerwall_settings_uncertain": {
       "title": "Powerwall local settings recovery",
       "description": "The original local settings request for Tesla site {site_id} is {outcome}. Attempted settings: {updates}.\n\n{status}\n\nThe request contained a full configuration snapshot and, while unresolved, may still apply after newer changes. A timeout, signature expiry, matching readback or Home Assistant restart does not prove it has finished.\n\nTo resume through cloud under supervision, open **Developer tools > Actions**, select **PowerSync: Resume Powerwall settings through cloud** (`power_sync.resume_powerwall_settings`) and enter:\n\n- Entry ID: `{entry_id}`\n- Site ID: `{site_id}`\n- Incident ID: `{incident_id}`\n- Acknowledge: enabled\n\nThis action only resumes access. Then use **Restore Normal** or make the intended settings change and verify Tesla settings and measured Battery/Grid Power. The action retains the incident and original restore evidence; cloud confirmation does not settle the old request. Local settings writes remain suspended across restart. Ignoring this notice does not resume control.\n\nRestore Normal finishes a current forcing override. Once that owner has finished, the retained basis is a reference for supervised manual settings recovery and is never replayed over newer intent. If the old write later changes settings, explicitly apply the intended settings again.\n\nOriginal restore basis retained: {restore_basis}"

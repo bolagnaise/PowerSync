@@ -139,7 +139,7 @@ def _ac_state_map(prefix: str = "goodwe") -> dict[str, _State]:
 
 @pytest.mark.parametrize("initial", ["missing", "unavailable", "partial"])
 @pytest.mark.parametrize("prefix", ["goodwe", "garage"])
-def test_goodwe_ha_setup_recovers_late_telemetry_without_reload(initial, prefix):
+def test_goodwe_ha_setup_recovers_late_telemetry_without_reload(initial, prefix, monkeypatch):
     """Exercise actual setup, refresh and readiness code with late HA entities."""
     _module, restore_module = _load_goodwe_entity_module()
     try:
@@ -210,6 +210,17 @@ def test_goodwe_ha_setup_recovers_late_telemetry_without_reload(initial, prefix)
         elif initial == "partial":
             states[f"sensor.{prefix}_battery_soc"] = _State(64)
         hass = _Hass(states)
+        registry_entries = {}
+        helpers_module = types.ModuleType("homeassistant.helpers")
+        helpers_module.entity_registry = types.SimpleNamespace(
+            async_get=lambda _hass: types.SimpleNamespace(async_get=registry_entries.get))
+        helpers_module.device_registry = types.SimpleNamespace(
+            async_get=lambda _hass: types.SimpleNamespace(async_get=lambda _id:
+                types.SimpleNamespace(identifiers={("goodwe", "TEST-SERIAL")})))
+        monkeypatch.setitem(sys.modules, "homeassistant.helpers", helpers_module)
+        upstream = types.SimpleNamespace(domain="goodwe", state=types.SimpleNamespace(value="loaded"),
+            runtime_data=types.SimpleNamespace(inverter=types.SimpleNamespace(serial_number="TEST-SERIAL", rated_power=10000)))
+        hass.config_entries = types.SimpleNamespace(async_get_entry=lambda _id: upstream)
         # Include discovery without a configured prefix for the standard namespace.
         configured = prefix if prefix != "goodwe" else ""
         namespace = {
@@ -241,7 +252,8 @@ def test_goodwe_ha_setup_recovers_late_telemetry_without_reload(initial, prefix)
         async def scenario():
             coordinator = await namespace["setup_goodwe"]()
             assert coordinator is not None, "late GoodWe entities must not permanently remove the coordinator"
-            assert coordinator._controller is None  # No direct polling or fallback.
+            assert coordinator._controller.entity_ems_control is True
+            assert coordinator._controller._inverter is None  # No direct polling or fallback.
             assert coordinator.update_interval == timedelta(seconds=30)
             assert coordinator.startup_control_ready() is False
             assert await coordinator.force_charge(power_w=1000) is False
@@ -260,8 +272,12 @@ def test_goodwe_ha_setup_recovers_late_telemetry_without_reload(initial, prefix)
                 f"select.{prefix}_ems_mode": _State("auto"),
                 f"number.{prefix}_ems_power_limit": _State(32768, "W"),
             })
+            assert coordinator.startup_control_ready() is False  # Names/states alone cannot bind a device.
+            registry_entries.update({entity_id: types.SimpleNamespace(
+                config_entry_id="upstream", device_id="device", platform="goodwe")
+                for entity_id in hass.states._states})
             assert coordinator.startup_control_ready() is True
-            assert coordinator._controller is None
+            assert coordinator._controller._inverter is None
             assert hass.services.calls == []
 
         asyncio.run(scenario())
