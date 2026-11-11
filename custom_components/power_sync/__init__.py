@@ -26628,6 +26628,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "goodwe_curtailment_restore_state"
     )
     goodwe_controller = getattr(goodwe_coordinator, "_controller", None)
+    if callable(getattr(goodwe_controller, "set_restore_persistence", None)):
+        async def _persist_goodwe_shared_restore(snapshot) -> None:
+            persisted = await _update_powerwall_store(
+                store,
+                {"goodwe_curtailment_restore_state": snapshot} if snapshot else {},
+                remove=() if snapshot else ("goodwe_curtailment_restore_state",),
+                verify=True,
+            )
+            if not persisted:
+                raise RuntimeError("GoodWe recovery state could not be durably verified")
+
+        goodwe_controller.set_restore_persistence(
+            _persist_goodwe_shared_restore,
+            _direct_dc_curtailment_write_allowed,
+        )
     if stored_goodwe_curtailment_restore_state and goodwe_controller:
         restore_snapshot = getattr(
             goodwe_controller, "restore_grid_export_restore_state", None

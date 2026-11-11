@@ -298,6 +298,20 @@ _DIRECT_INPUT = {
 }
 
 
+def test_entity_options_can_select_load_following_without_a_second_ip_connection(flow):
+    entry = _Entry({"battery_system": "goodwe", "battery_connection_profile": "goodwe_ha"})
+    obj = _options_flow(flow, entry, ["async_step_goodwe_connection_options"])
+    saved = _submit(obj, "async_step_goodwe_connection_options", {
+        **_DIRECT_INPUT, "goodwe_host": "", "goodwe_protocol": "tcp", "goodwe_port": 502,
+        "goodwe_ems_control_mode": "entity", "goodwe_ems_entity_prefix": "goodwe",
+        "goodwe_curtailment_method": "ems_load_following",
+    })
+    assert saved["type"] == "create_entry"
+    assert entry.data["goodwe_curtailment_method"] == "ems_load_following"
+    assert saved["data"]["goodwe_curtailment_method"] == "ems_load_following"
+    assert entry.data["goodwe_host"] == ""
+
+
 def test_direct_options_form_offers_the_field_and_persists_it(flow):
     entry = _Entry({"battery_system": "goodwe"})
     obj = _options_flow(flow, entry, ["async_step_goodwe_connection_options"])

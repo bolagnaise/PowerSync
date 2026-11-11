@@ -3,7 +3,7 @@
 PowerSync supports GoodWe ET/EH/BT/BH and ES/EM/BP hybrid inverter-battery systems through two control paths:
 
 - **Direct GoodWe control** uses the GoodWe local protocol, typically UDP port 8899. This path controls force charge/discharge by writing GoodWe operation modes directly.
-- **Entity mode** uses the GoodWe Experimental Home Assistant integration's EMS entities. This is the required path for LAN / WiFiLAN Kit-20 setups that expose Modbus TCP on port 502 but do not support UDP control.
+- **Entity mode** uses the GoodWe Experimental Home Assistant integration's selected device and existing connection. PowerSync shares that client for EMS commands and fresh register readback, without opening another TCP connection or relying on the displayed entity value. This is the required path for LAN / WiFiLAN Kit-20 setups that expose Modbus TCP on port 502 but do not support UDP control.
 
 ## Supported models
 
@@ -70,7 +70,7 @@ Do not enter the full entity ID.
 When the prefix is set, PowerSync routes force charge/discharge through those Home Assistant EMS entities:
 
 - Force charge prefers EMS mode `charge_pv`, which keeps PV contributing first and uses grid power for the shortfall; if unavailable, PowerSync falls back to `charge_battery`
-- Force discharge prefers EMS mode `discharge_battery`, which targets battery discharge power directly
+- Force discharge on the shared connection prefers EMS mode `discharge_battery`, which targets battery discharge power directly; `sell_power` is used only if advertised as a supported alternative
 - Hold SoC uses EMS mode `conserve`, which blocks on-grid battery discharge but still allows excess solar to charge the battery
 - If the GoodWe HA integration does not expose the preferred EMS modes, PowerSync falls back to the older supported modes where available
 - Restore normal sets EMS mode to `auto`
@@ -81,7 +81,7 @@ Hold SoC requires the EMS entity path; PowerSync does not issue an unverified di
 
 ## Solar curtailment method (direct control)
 
-Direct GoodWe control curtails uneconomic export in one of two ways. Choose it
+Direct and supported shared GoodWe control curtail uneconomic export in one of two ways. Choose it
 under **GoodWe connection** → **Solar curtailment method**. Saving reloads the
 integration.
 
@@ -104,8 +104,9 @@ ESA/EHA-G20. Requirements and safeguards:
 - EMS fallback (47505) must read **10**, the factory default: keep the last
   mode. PowerSync refuses to start load following if it reads another value or
   cannot be read. It never changes the fallback.
-- If the inverter was already left in BuyPower 0 W, or its EMS mode was never
-  set, release returns it to self-use (EMS mode 1).
+- A new shared-client hold requires on-grid self-use. An already active
+  BuyPower hold is recoverable only with PowerSync's saved device-bound record.
+  The older direct route can reconcile an unset or leftover mode to self-use.
 - If SEMS, an EMS entity command or a force mode has already replaced the hold,
   PowerSync releases its claim without overwriting that setting.
 - Force charge and force discharge release the hold first. Curtailment does
@@ -115,6 +116,38 @@ ESA/EHA-G20. Requirements and safeguards:
 
 The card still reports **Active** only after fresh telemetry shows export below
 the 250 W tolerance.
+
+### Shared connection requirements and recovery
+
+The EMS select, EMS power number and selected telemetry sensors must belong to
+the same GoodWe device and integration entry. The upstream integration must be
+loaded and expose its inverter client. PowerSync checks the device serial and
+the supported register map before issuing commands. Unsupported or unavailable
+clients remain Pending; PowerSync does not open a fallback connection.
+
+The shared route supports force charge, force discharge, Hold SoC, restore
+normal, verified on-grid backup reserve, and both curtailment methods described
+above. Setting backup reserve leaves off-grid DOD unchanged. An unchanged
+reserve is not rewritten. Battery targets and mode are sent together using the
+documented multi-register write, including an explicit zero-watt target for
+BuyPower. Register readback confirms settings, not physical performance.
+
+Before curtailment, PowerSync durably saves the original settings and the exact
+device binding. It starts a new hold only from on-grid self-use and refuses an
+EMS mode already owned by another controller. Interrupted writes and restores
+remain recoverable after restart. A different device or re-created upstream
+entry cannot inherit the old recovery record. If recovery is Pending, keep the
+original entry and report the diagnostic warning rather than deleting it.
+
+Keep SEMS, SmartShift and other EMS-writing automations from competing with
+PowerSync. A Modbus connection has no exclusive ownership mechanism. When a
+fresh read shows that another writer replaced the held settings, PowerSync
+retires its claim without overwriting those settings. It never changes meter,
+fallback, grid-code or off-grid configuration to enable curtailment.
+
+Software tests cover these paths; physical BuyPower behavior on ESA/EHA-G20
+still requires a separately agreed supervised test. Confirm that the inverter
+meter measures whole-site grid exchange before interpreting a zero target.
 
 ## Whole-site solar for AC-coupled arrays
 
@@ -153,11 +186,12 @@ the normal inverter-only telemetry.
 
 ### DC curtailment remains Pending
 
-For direct GoodWe control, PowerSync verifies the export-limit setting and
+For direct and supported shared GoodWe control, PowerSync verifies the setting and
 requires fresh site telemetry below the 250 W export tolerance before reporting
 Active. An accepted zero-watt setting can still remain Pending if the inverter
-continues exporting. Entity-only battery profiles without an export-limit
-actuator also remain Pending.
+continues exporting. Missing upstream clients, mismatched device identities,
+unsupported register maps and telemetry-only profiles also remain Pending;
+the diagnostic warning identifies the missing prerequisite.
 
 Automatic price and timer checks run one GoodWe curtailment or restore transition
 at a time. A newer price callback waits for the current transition and then
