@@ -152,6 +152,10 @@ jobs:
           echo "--- Release notes ---"
           head -30 /tmp/release_notes.md
 
+      - name: Package diagnostic clients and private runner
+        if: steps.check_tag.outputs.exists == 'false'
+        run: python3 scripts/package_diagnostics.py --output /tmp/powersync-diagnostics --require-clean
+
       - name: Create tag and release
         if: steps.check_tag.outputs.exists == 'false'
         env:
@@ -164,6 +168,9 @@ jobs:
           git tag "v$VERSION"
           git push origin "v$VERSION"
           gh release create "v$VERSION" \
+            /tmp/powersync-diagnostics/powersync-diagnostics-bridge.zip \
+            /tmp/powersync-diagnostics/powersync-private-runner.tar \
+            /tmp/powersync-diagnostics/diagnostics-artifacts.json \
             --title "PowerSync v$VERSION" \
             --notes-file /tmp/release_notes.md
           echo "Created release v$VERSION"

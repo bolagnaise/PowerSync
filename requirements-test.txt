@@ -27,3 +27,6 @@ typing_extensions==4.15.0
 tzdata==2026.6
 voluptuous==0.15.2
 yarl==1.23.0
+SQLAlchemy==2.0.54
+PyYAML==6.0.3
+greenlet==3.5.6

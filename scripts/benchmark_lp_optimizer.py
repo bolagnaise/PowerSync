@@ -24,28 +24,17 @@ import platform
 import statistics
 import sys
 import time
-import types
 
 ROOT = Path(__file__).resolve().parent.parent
 COMPONENT_ROOT = ROOT / "custom_components" / "power_sync"
 
 
 def _install_stubs() -> None:
-    ha = types.ModuleType("homeassistant")
-    util = types.ModuleType("homeassistant.util")
-    dt = types.ModuleType("homeassistant.util.dt")
-    dt.now = lambda *args, **kwargs: datetime(2026, 11, 7, tzinfo=timezone.utc)
-    dt.utcnow = dt.now
-    dt.UTC = timezone.utc
-    util.dt = dt
-    ha.util = util
-    sys.modules.update({"homeassistant": ha, "homeassistant.util": util,
-                        "homeassistant.util.dt": dt})
-    for name, path in (("power_sync", COMPONENT_ROOT),
-                       ("power_sync.optimization", COMPONENT_ROOT / "optimization")):
-        package = types.ModuleType(name)
-        package.__path__ = [str(path)]
-        sys.modules[name] = package
+    try:
+        from regression_runner.runtime import install_stubs
+    except ModuleNotFoundError:
+        from scripts.regression_runner.runtime import install_stubs
+    install_stubs(COMPONENT_ROOT, datetime(2026, 11, 7, tzinfo=timezone.utc))
 
 
 @dataclass

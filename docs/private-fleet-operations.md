@@ -1,0 +1,167 @@
+# Ongoing diagnostics and private regression operations
+
+The released software is disabled until configured and approved. HA diagnostic
+reads, optimizer contribution, Codex and Claude Code each have their own grant.
+Installing/updating PowerSync does not create those grants.
+
+## Delivery and acceptance
+
+Keep separate receipts for HA source/publication, the isolated Worker deployment,
+bridge compatibility, private runner activation, each owner's consent, actual
+participation, measured physical calibration and seven elapsed observation days.
+Synthetic virtual-time tests establish software behavior. They cannot populate
+the real calibration or observation acceptance fields.
+
+The supported local clients were checked with Codex CLI 0.166.0 app-server and
+Claude Code 2.1.319. The HA adapter API baseline is Core 2026.11.1. Capabilities
+show optional/unavailable sources and unsupported HA minor versions explicitly.
+The pilot uses local stdio bridges and signed outbound HTTPS.
+
+## Isolated authority deployment
+
+The Cloud repository contains `worker/wrangler.diagnostics.toml` and the manual
+**Deploy isolated HA diagnostics** workflow. Its default is disabled, with empty
+operator/key configuration. The deployment has only its own Durable Object and
+rate limiter. It has no product database, vendor credentials, actuator binding,
+raw object storage or payload logging.
+
+Before enabling a pilot, independently configure the authority signing secret
+`DIAGNOSTICS_SIGNING_SEED`, matching `DIAGNOSTICS_PUBLIC_KEY`, an independent
+`DIAGNOSTICS_EPOCH`, immutable human Access subjects in `DIAGNOSTICS_ACTORS`, the
+Access team/application audience and registered runner public keys/generations.
+Protected public policy is rendered through `scripts/diagnostics/render_config.py`.
+Signing seeds never belong in runtime variables, source, artifacts or DO backups.
+
+Protect the `/invite` operator page with Cloudflare Access. Signed client/HA
+transport endpoints authenticate their own proofs. The operator page registers
+a public client key and creates a one-use invitation for the exact HA identity,
+client and purpose. Give the invitation and authority public key to the HA admin.
+
+Rotate the independent epoch before reopening restored authority storage. A
+restored DO snapshot must not restore old access. Retain cleanup-only credentials
+until all pending private purge receipts have been reconciled.
+
+## Owner approval and client setup
+
+1. In the HA administrator's **HA diagnostics** card, create a setup identity.
+   This displays public setup information and grants no access.
+2. Create a separate client key file for each profile. Use an owner-only directory
+   and Python with the bridge's pinned `cryptography` dependency:
+
+   ```sh
+   PYTHONPATH=/opt/powersync-diagnostics-bridge.zip python -m diagnostics_access.provision create --profile codex --output /private/codex-key.json
+   ```
+
+   Register the displayed public key with the operator. Repeat for `claude`.
+3. Paste the resulting invitation and authority public key into HA. Review the
+   client, operator, processor and disclosure; then approve that exact access.
+   Diagnostic access and contribution require independent invitations.
+4. Bind the client key to the approved root/grant/public authority identity:
+
+   ```sh
+   PYTHONPATH=/opt/powersync-diagnostics-bridge.zip python -m diagnostics_access.provision bind --key-file /private/codex-key.json --output /private/codex.json --root ROOT_ID --grant GRANT_ID --authority-key PUBLIC_KEY
+   ```
+
+5. Configure Codex's MCP command as the Python executable with arguments
+   `[/opt/powersync-diagnostics-bridge.zip, --profile, codex, --config,
+   /private/codex.json]`. Use the corresponding `claude` profile/config in
+   Claude Code's stdio MCP registration. Neither bridge has a listening port or
+   a fallback bearer/HA token. Keep its configuration owner-only and unshared.
+
+Read responses are bounded, redacted and marked untrusted. Arbitrary free text
+may still contain personal information. Diagnostic queries/results exist only
+in memory; after an authority restart the client requests a fresh read.
+
+## Immutable paired runner
+
+Use the public runner sources with the exact reviewed HA repository checkout.
+Build each baseline/candidate image with the trusted builder and an immutable
+Python base digest matching the installation's Python/solver dependency profile:
+
+```sh
+python scripts/private_regression/build.py --source /reviewed/baseline --output /artifacts/baseline --base python@sha256:REVIEWED_DIGEST
+```
+
+The builder freezes source and records component/runtime/scorer/schema/image
+identities. The controller verifies the actual source bytes copied from each
+image and executes a private-profile health probe before reserving capture.
+An incompatible runtime does not receive an input bundle.
+
+Each pair manifest names baseline/candidate `root`, immutable `image` and
+`component` identities; the installation `source` runtime identity; `runtime`,
+`scorer`, `schema`, `currency`, and `required_profiles`. A complete campaign
+requires `solver_v1`, `reserve-recovery-temporal-v1` and `calibrated-plant-v1`,
+plus an explicit `terminal_price` in that currency. Keep forecasts, observed
+meters and counterfactual scores distinct.
+
+Only one local private job is admitted at a time. The host must be Linux with
+swap disabled and no piped core handler. Private processes are non-dumpable.
+Containers run as UID 65534 with no network/host/scorer mounts, a read-only root,
+bounded tmpfs, dropped capabilities, no-new-privileges, memory/process/CPU/wall
+limits and no persistent logs. Inputs and results travel over bounded pipes.
+
+Install the independent reaper timer before activating the runner service.
+Templates are in `scripts/private_regression/systemd/`. The service configuration
+names the immutable pair/campaign, private cohort key, metadata ledger, separately
+approved contribution client files and an interval of at least 900 seconds.
+Service activation and Docker access are explicit operator setup steps.
+
+## Capture and private data lifetime
+
+A healthy reserved runner/key and exact pair are required before HA attaches an
+observer. Capture occurs during a subsequent normal optimization. Private data
+uses job-bound X25519/HKDF/AES-GCM encryption and bounded memory-only relay.
+The absolute job lifetime is 30 minutes. There is no raw archive or unattended
+backlog, including encrypted bundles, normalized state or trajectories.
+
+The stateful profile observes selected real reserve-restoration calls and their
+acknowledgements. Its offline driver includes ordered events, timers and restart
+fences. Unobserved provider, EV, force and command paths remain insufficient.
+An acknowledgement does not establish a physical effect.
+
+The physical profile samples fresh cached, coherent battery/site meters and
+known units/signs. It needs independent charge/discharge observations, adequate
+SOC resolution, a separate time-blocked withheld set and known physical reserve.
+Short, single-direction, stale or out-of-range captures cannot validate a model.
+Simulation outside the calibrated range remains insufficient; forecast-based
+scores never become claims of observed savings.
+
+The trusted scorer validates candidate output, checks reconstruction and A/A
+for both arms, and computes independent scores. Crashes, timeouts, malformed
+numbers and nondeterminism are accounted for. A candidate failure alongside a
+healthy baseline is a failed comparison. Infrastructure/baseline failures create
+invalid or missing work and block campaign acceptance.
+
+Raw input, effective state, private calibration data and trajectories disappear
+with the disposable private process and its containers. The independent pidfd
+watchdog and host reaper cover controller death, deadlines and abandoned jobs.
+A summary is eligible only after a real purge confirmation. The service retains
+only bounded trusted summaries for seven days and coordination metadata.
+
+## Advisory campaigns and recovery
+
+`campaign_cli.py new-key`, `freeze` and `report` manage the private cohort key,
+immutable pair and consumed metadata ledger. Freeze consumes the holdout epoch
+before feedback is inspected. A changed candidate requires a new epoch. Reports
+recompute assignment, account for every reservation, require eligible daily
+coverage per logical installation and independent holdout/development coverage,
+and apply per-pair and site-weighted aggregate bounds. Repeated observations are
+not additional households; distinct physical households remain unknown.
+
+Plan the final admission cutoff before the observation window closes so its
+last private jobs can finish and purge. Missing/invalid work and unavailable or
+revoked grants cannot help a campaign pass. Fleet evidence is advisory alongside
+the mandatory protected-main audited full-suite release gate.
+
+Owners revoke individual grants or all installation access in HA. Access stops
+locally immediately; central authorization is fenced at the same authority
+transaction as disclosure. Retained summaries are deleted on revocation.
+Running jobs lose their lease and the private controller kills/purges them.
+HA shows cleanup pending until the runner confirms deletion. Neither a deadline
+nor metadata expiry is accepted as proof of purge.
+
+After an interrupted runner, run the host reaper and then
+`controller.py --config PRIVATE_RUNNER_CONFIG --recover-job EXACT_JOB_ID`.
+This performs metadata-only reconciliation after actual host cleanup; it never
+replays an old capture. Unconfirmed cleanup quarantines the runner and keeps the
+owner's cleanup request pending. Resume with a fresh capture after reconciliation.

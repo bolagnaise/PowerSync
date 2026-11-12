@@ -28,6 +28,7 @@ from typing import Any
 
 from homeassistant.util import dt as dt_util
 
+from ..regression.capture import capture_attempt
 from .battery_efficiency import (
     DEFAULT_ONE_WAY_EFFICIENCY,
     ResolvedOptimizerParameters,
@@ -1224,6 +1225,7 @@ class BatteryOptimizer:
         return floor
 
     @_record_optimizer_cycle
+    @capture_attempt
     def optimize(
         self,
         import_prices: list[float],

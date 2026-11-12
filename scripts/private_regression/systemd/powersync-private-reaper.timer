@@ -1,0 +1,11 @@
+[Unit]
+Description=Reap abandoned PowerSync private containers
+
+[Timer]
+OnBootSec=10
+OnUnitActiveSec=10
+AccuracySec=1
+Unit=powersync-private-reaper.service
+
+[Install]
+WantedBy=timers.target
