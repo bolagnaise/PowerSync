@@ -6827,8 +6827,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             charge_run["solar"] += solar_charge
             charge_run["grid"] += grid_charge
             charge_run["cost"] += grid_cost
-        else:
-            self._battery_provenance_charge_run = None
+        # A continuously observed zero-power pause can precede the final SOC
+        # step. Retain the measured charge so that catch-up can recover its
+        # source instead of adding unknown energy. Gaps/discharge above and
+        # reconciliation boundaries below still invalidate the episode.
         self._battery_provenance_solar_kwh += solar_charge
         self._battery_provenance_grid_kwh += grid_charge
         self._battery_provenance_grid_cost += grid_cost
