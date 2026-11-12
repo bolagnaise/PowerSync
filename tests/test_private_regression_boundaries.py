@@ -42,6 +42,20 @@ def test_length_framed_source_digest_separates_embedded_nul_collision(tmp_path):
     assert component_digest(left) != component_digest(right)
 
 
+def test_public_image_freeze_is_readable_by_unprivileged_worker_without_changing_checkout(tmp_path):
+    from private_regression.build import freeze
+    source=tmp_path/'source';component=source/'custom_components/power_sync'
+    component.mkdir(parents=True);component.chmod(0o700)
+    original=component/'manifest.json';original.write_text('{}');original.chmod(0o600)
+    destination=tmp_path/'frozen'
+    digest,_=freeze(source,destination)
+    assert digest==component_digest(component)
+    assert (destination/'custom_components/power_sync/manifest.json').stat().st_mode&0o777==0o644
+    assert (destination/'custom_components/power_sync').stat().st_mode&0o777==0o755
+    assert original.stat().st_mode&0o777==0o600
+    assert component.stat().st_mode&0o777==0o700
+
+
 def test_candidate_output_nan_unknown_shape_and_arbitrary_fields_fail_closed():
     for value in ({}, {'outcome':'pass'}, {'outcome':float('nan'), 'source':{}, 'schedule':[], 'solver':None}, {'household_text':'never release'}):
         with pytest.raises(CandidateFailure):

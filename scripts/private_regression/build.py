@@ -21,6 +21,12 @@ def freeze(source, destination):
         shutil.copyfile(ROOT/name, target)
     shutil.copytree(source/"custom_components/power_sync", destination/"custom_components/power_sync",
                     ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    # This tree contains public build inputs only. A private checkout/umask can
+    # leave source files at 0600, which COPY otherwise preserves and the
+    # unprivileged worker cannot read. Never change the original checkout.
+    destination.chmod(0o755)
+    for path in destination.rglob('*'):
+        path.chmod(0o755 if path.is_dir() else 0o644)
     component = component_digest(destination/"custom_components/power_sync")
     if component != component_digest(source/"custom_components/power_sync"):
         raise ValueError("source_changed_during_freeze")
