@@ -64,7 +64,7 @@ Merge these substitutions with your existing ones:
 
 ```yaml
 substitutions:
-  tesla_ble_component: github://bolagnaise/PowerSync@v2.12.1673
+  tesla_ble_component: github://bolagnaise/PowerSync@v2.12.1681
   BLE_library: https://github.com/PedroKTFC/tesla-ble.git#969f05f9dfdd5bfb9f3da5ad6b9f5c2265be133b
 
 packages:
@@ -78,7 +78,7 @@ packages:
       - packages/client.yml
   powersync_stop_recovery:
     url: https://github.com/bolagnaise/PowerSync/
-    ref: v2.12.1673
+    ref: v2.12.1681
     files:
       - esphome/stop-recovery.yaml
 ```

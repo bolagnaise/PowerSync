@@ -31,13 +31,13 @@ packages pinned to PedroKTFC commit
 packages:
   powersync_charging_freshness:
     url: https://github.com/bolagnaise/PowerSync/
-    ref: v2.12.1652
+    ref: v2.12.1681
     files:
       - esphome/charging-freshness-pedro.yaml
 ```
 
 This family uses component keys `charge_state`, `charge_power` and
-`charging_state`. It adds Charge level, Charge power and Charging state
+`charging_state`. It also publishes a paired Current limit sample directly from the native current-setting field, even when the value is unchanged. It adds Charge level, Charge power and Charging state
 `received` and `sample` entities. Keep their default entity names aligned with
 the corresponding measurement names.
 
@@ -64,7 +64,7 @@ and `client.yml`:
 packages:
   powersync_charging_freshness:
     url: https://github.com/bolagnaise/PowerSync/
-    ref: v2.12.1652
+    ref: v2.12.1681
     files:
       - esphome/charging-freshness-yoziru.yaml
 ```
@@ -94,6 +94,12 @@ A Stop, expired request or changed identity ends the wait. Start still needs
 fresh Charging state plus actual current or native power; a switch echo alone
 cannot confirm it. A timeout remains an uncertain outcome and preserves the
 journal and safety hold.
+
+### Unchanged current settings on Pedro bridges
+
+The v2.12.1681 Pedro freshness/stop-recovery package supplies `sensor.<prefix>_current_limit_sample`. PowerSync can use its paired value and timestamp to confirm a current setting even when HA suppresses an identical update to the Charging amps number. The sample and Current limit sensor must retain their default entity IDs and belong to the same ESPHome device as Charging amps. Missing, stale, mismatched or rebound samples cannot confirm a command. This does not use actual charging power to infer a requested current setting.
+
+Update PowerSync through HACS and rebuild the existing Pedro bridge YAML using the v2.12.1681 package references. Preserve its identity, keys and pairing; do not install a build fixture. Updating HA alone does not add the sample. An existing retained command still needs the supported whole-inventory recovery action and its normal prerequisites; publication or a matching setting does not release it automatically. This addition does not apply to yoziru firmware.
 
 ## Inspect a hold without commands
 

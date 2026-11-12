@@ -17873,3 +17873,45 @@ def test_ble_start_keeps_one_confirmation_deadline_and_never_repeats_write(monke
     assert [c for c in hass.services.calls if c[0] == "switch"] == [
         ("switch", "turn_on", {"entity_id": "switch.car_charger"})]
     assert clock[0] <= 35
+
+
+@pytest.mark.parametrize("proof", ["fresh", "stale", "mismatch", "other_device", "missing", "future", "rebind"])
+def test_ble_same_rate_confirms_only_native_current_limit_sample(monkeypatch, proof):
+    """Equal template-number reports may be suppressed after a native read."""
+    old = datetime.now(timezone.utc) - timedelta(minutes=5)
+    hass = _Hass([_State("number.car_charging_amps", "15", {"min": 1, "max": 32}, last_updated=old),
+                  _State("button.car_force_data_update", "unknown")])
+    _add_ble_session_snapshot(hass, charging_state="Stopped", current="0")
+    native = "sensor.car_current_limit"
+    packet = native + "_sample"
+    for entity in (native, packet):
+        hass.entity_registry.entities[entity] = SimpleNamespace(
+            entity_id=entity, platform="esphome", config_entry_id="ble-test-entry",
+            device_id="ble-test-device", unique_id=entity, disabled_by=None)
+    hass.states._states[native] = _State(native, "15", last_updated=old)
+    hass.states._states[packet] = _State(packet, json.dumps({"v": 1, "x": 15, "t": old.isoformat()}))
+    if proof == "other_device":
+        hass.entity_registry.entities[native].device_id = "another-car"
+    clock = [0.0]
+    original = hass.services.async_call
+    async def call(domain, service, data, **kwargs):
+        await original(domain, service, data, **kwargs)
+        if domain == "button" and proof != "missing":
+            stamp = old if proof == "stale" else datetime.now(timezone.utc)
+            if proof == "future":
+                stamp += timedelta(minutes=1)
+            if proof == "rebind":
+                hass.entity_registry.entities[packet].unique_id = "replacement"
+            hass.states._states[packet] = _State(packet, json.dumps({
+                "v": 1, "x": 14 if proof == "mismatch" else 15, "t": stamp.isoformat()}))
+    async def sleep(seconds):
+        clock[0] += seconds
+    hass.services.async_call = call
+    monkeypatch.setattr(actions, "asyncio", SimpleNamespace(
+        get_running_loop=lambda: SimpleNamespace(time=lambda: clock[0]), sleep=sleep, timeout=asyncio.timeout))
+    result = asyncio.run(actions._set_ev_charging_amps_ble(hass, "car", 15))
+    assert result is (True if proof == "fresh" else False if proof == "other_device" else None)
+    writes = [c for c in hass.services.calls if c[0] == "number"]
+    assert len(writes) == (0 if proof == "other_device" else 1)
+    assert hass.states.get("number.car_charging_amps").last_updated == old
+    assert clock[0] <= 35

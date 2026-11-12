@@ -2907,6 +2907,13 @@ def _tesla_ble_charge_data_entity_ids(
             _TESLA_BLE_SENSOR_RANGE.format(prefix=ble_prefix),
         ),
         target_entity,
+        # Pedro's writable number is a template of this vehicle-reported
+        # setting. Equal template values may never reach HA again.
+        *(
+            (f"sensor.{ble_prefix}_current_limit",)
+            if target_entity == TESLA_BLE_NUMBER_CHARGING_AMPS.format(prefix=ble_prefix)
+            else ()
+        ),
     )
     entity_ids: list[str] = []
     for entity_id in base_ids:
@@ -3422,6 +3429,31 @@ async def _wait_for_ble_command_readback(
                         return True
                 except (TypeError, ValueError):
                     continue
+        # The companion emits this paired packet only from a native
+        # optional_charging_amps response. A general last_update, requested
+        # number, current draw or power sample cannot replace that proof.
+        if (charge_binding_prefix and charge_binding is not _TESLA_BLE_BINDING_UNSET
+                and charge_binding is not None
+                and charge_binding_target == TESLA_BLE_NUMBER_CHARGING_AMPS.format(
+                    prefix=charge_binding_prefix)
+                and isinstance(expected, (int, float))):
+            from ..tesla_ble import get_tesla_ble_companion_state
+
+            native_id = f"sensor.{charge_binding_prefix}_current_limit"
+            native = hass.states.get(native_id)
+            packet = get_tesla_ble_companion_state(hass, native_id, "_sample")
+            # Pin the exact packet in the same producer binding captured
+            # before submission. Never adopt a newly appearing/rebound source.
+            pinned_ids = {item[0] for item in charge_binding}
+            if (native is not None and packet is not None
+                    and native_id in pinned_ids and packet.entity_id in pinned_ids
+                    and _ble_state_observed_after(native, command_started_at, hass=hass)):
+                try:
+                    if (math.isfinite(float(native.state))
+                            and abs(float(native.state) - expected) < 0.1):
+                        return True
+                except (TypeError, ValueError):
+                    pass
         remaining = deadline - loop.time()
         if remaining <= 0:
             _LOGGER.warning("Tesla BLE command not confirmed by fresh vehicle readback from %s", entity_ids)

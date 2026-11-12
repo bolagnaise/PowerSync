@@ -4,6 +4,18 @@
 # Include after client.yml and common.yml. Raw callbacks also run for equal values
 # and run before user filters. Never refresh these timestamps on a timer.
 tesla_ble_vehicle:
+  max_amps:
+    on_raw_value:
+      - text_sensor.template.publish:
+          id: current_limit_sample
+          state: !lambda |-
+            auto received = id(homeassistant_time).utcnow();
+            if (!received.is_valid() || !std::isfinite(x) || x < 0 || x > 100) return std::string("unavailable");
+            return json::build_json([&](JsonObject root) {
+              root["v"] = 1;
+              root["t"] = received.strftime("%Y-%m-%dT%H:%M:%SZ");
+              root["x"] = x;
+            });
   charge_state:
     on_raw_value:
       - text_sensor.template.publish:
@@ -69,6 +81,11 @@ tesla_ble_vehicle:
             });
 
 text_sensor:
+  - platform: template
+    id: current_limit_sample
+    name: "Current limit sample"
+    entity_category: diagnostic
+    update_interval: never
   - platform: template
     id: charge_level_received
     name: "Charge level received"
