@@ -17875,15 +17875,16 @@ def test_ble_start_keeps_one_confirmation_deadline_and_never_repeats_write(monke
     assert clock[0] <= 35
 
 
-@pytest.mark.parametrize("proof", ["fresh", "stale", "mismatch", "other_device", "missing", "future", "rebind"])
-def test_ble_same_rate_confirms_only_native_current_limit_sample(monkeypatch, proof):
+@pytest.mark.parametrize("proof", ["fresh", "stale", "mismatch", "other_device", "missing", "future", "rebind", "replace_alias"])
+@pytest.mark.parametrize("renamed", [False, True])
+def test_ble_same_rate_confirms_only_native_current_limit_sample(monkeypatch, proof, renamed):
     """Equal template-number reports may be suppressed after a native read."""
     old = datetime.now(timezone.utc) - timedelta(minutes=5)
     hass = _Hass([_State("number.car_charging_amps", "15", {"min": 1, "max": 32}, last_updated=old),
                   _State("button.car_force_data_update", "unknown")])
     _add_ble_session_snapshot(hass, charging_state="Stopped", current="0")
     native = "sensor.car_current_limit"
-    packet = native + "_sample"
+    packet = ("sensor.garage_car_current_limit_sample" if renamed else native + "_sample")
     for entity in (native, packet):
         hass.entity_registry.entities[entity] = SimpleNamespace(
             entity_id=entity, platform="esphome", config_entry_id="ble-test-entry",
@@ -17897,6 +17898,14 @@ def test_ble_same_rate_confirms_only_native_current_limit_sample(monkeypatch, pr
     async def call(domain, service, data, **kwargs):
         await original(domain, service, data, **kwargs)
         if domain == "button" and proof != "missing":
+            nonlocal packet
+            if proof == "replace_alias" and packet in hass.entity_registry.entities:
+                replacement = "sensor.replacement_car_current_limit_sample"
+                entry = hass.entity_registry.entities.pop(packet)
+                hass.states._states.pop(packet, None)
+                entry.entity_id = replacement
+                hass.entity_registry.entities[replacement] = entry
+                packet = replacement
             stamp = old if proof == "stale" else datetime.now(timezone.utc)
             if proof == "future":
                 stamp += timedelta(minutes=1)

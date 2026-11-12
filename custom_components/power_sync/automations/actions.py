@@ -2921,12 +2921,14 @@ def _tesla_ble_charge_data_entity_ids(
         if state is None or not _tesla_ble_charge_state_is_present(state):
             continue
         entity_ids.append(entity_id)
+        from ..tesla_ble import get_tesla_ble_companion_state
+
         for suffix in ("received", "sample"):
-            receipt_id = f"{entity_id}_{suffix}"
-            if hass.states.get(receipt_id) is not None:
-                # Pin both timestamp and paired-value companions, including
-                # invalid values. A different producer cannot renew freshness.
-                entity_ids.append(receipt_id)
+            companion = get_tesla_ble_companion_state(hass, entity_id, f"_{suffix}")
+            if companion is not None:
+                # Pin the same registry-resolved companion used by readback,
+                # including invalid values and renamed same-device entities.
+                entity_ids.append(companion.entity_id)
     return tuple(entity_ids)
 
 
