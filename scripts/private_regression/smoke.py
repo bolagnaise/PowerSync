@@ -30,7 +30,7 @@ def main(artifact):
     bundle["digest"] = contract.digest({key:value for key,value in bundle.items() if key != "digest"})
     pair = {"baseline": {"root": str(root), "image": metadata["image"], "component": metadata["component"]},
             "candidate": {"root": str(root), "image": metadata["image"], "component": metadata["component"]},
-            "source": bundle["source"], "runtime": metadata["runtime"],"scorer":metadata['scorer'],"schema":metadata['schema']}
+            "source": bundle["source"], "runtime": metadata["runtime"],"scorer":metadata['scorer'],"schema":metadata['schema'],'currency':'AUD'}
     digest = hashlib.sha256(wire.json_bytes(pair)).hexdigest()
     context = {"root": "a"*64, "grant": "b"*32, "job": secrets.token_hex(32), "pair": digest}
     private = X25519PrivateKey.generate()

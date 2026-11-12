@@ -735,3 +735,28 @@ async def test_real_coordinator_closure_records_override_and_restores_on_error(a
     attempts = rec.export()["cycles"][0]["attempts"]
     assert [item["state"]["backup_reserve"] for item in attempts] == [0.35, 0.4]
     assert attempts[1]["outcome"] == "exception"
+
+
+def test_closing_observation_erases_pending_copies_without_waiting_for_solver_lock(api):
+    from threading import Event, Thread
+    module, capture, _ = api
+    optimizer = module.BatteryOptimizer(interval_minutes=60, horizon_hours=8)
+    recorder = capture.CaptureRecorder(source_binding(COMPONENT, module), currency='AUD')
+    recorder.start_cycle()
+    bound = inspect.signature(optimizer.optimize).bind(**inputs())
+    bound.apply_defaults()
+    ticket = recorder.begin(optimizer, dict(bound.arguments), provided_inputs=list(inputs()), decision_time=NOW)
+    assert ticket and recorder.pending
+    held, release = Event(), Event()
+    def hold():
+        with recorder._lock:
+            held.set();release.wait(5)
+    thread = Thread(target=hold)
+    thread.start();assert held.wait(2)
+    try:
+        recorder.close()
+        assert ticket == {} and not recorder.pending and not recorder.cycles and recorder.active is None
+        assert recorder.closed
+    finally:
+        release.set();thread.join(2)
+    assert not thread.is_alive()

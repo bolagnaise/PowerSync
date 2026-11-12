@@ -1,8 +1,9 @@
 # Local optimizer replay
 
-The first fleet-regression milestone records complete resolved solver attempts
-locally and replays them offline. It does not enrol installations, upload data,
-enable a remote MCP grant or change an installed Home Assistant system.
+The local CLI records complete resolved solver attempts and replays them offline.
+It remains useful for explicit developer exports. The separately consented ongoing
+service, private OS runner, Codex/Claude bridge and deployment procedure are
+documented in [private-fleet-operations.md](private-fleet-operations.md).
 
 ## Capture a synthetic case
 
@@ -90,8 +91,8 @@ precedence over missing coverage; failed fidelity or repeatability is invalid.
 Recording is absent by default. A developer/test harness can explicitly attach
 `CaptureRecorder` using `record_cycle(optimizer, recorder)`, with a source
 binding and declared currency. An isolated coordinator harness can attach it
-as `_regression_recorder`. There is deliberately no new HA setting or remote
-activation path in this milestone.
+as `_regression_recorder`. The ongoing service attaches this observer only after a separate owner-approved
+contribution grant and a ready, exact-pair private runner reservation.
 
 Each `optimize` invocation records arguments and all reviewed optimizer state
 before normalization. That includes temporary reserve overrides, independently
@@ -130,8 +131,9 @@ unchecked bytecode file cannot replace the fingerprinted Python source. Source
 symlinks, standalone bytecode and native component extensions are refused. Coverage is computed before the
 workers run, with source hashes checked around coverage and after all workers.
 Private customer cases must not be supplied to unreviewed code or public PR
-jobs. The later fleet service still needs its separately reviewed private
-runner, consent, retention/deletion and activation workflow.
+jobs. The ongoing service uses the separate OS sandbox and consent/cleanup authority
+described in [private-fleet-operations.md](private-fleet-operations.md); this local
+CLI must not substitute for that boundary.
 
 Economic equivalence cannot validate changed action, power, grid-import target
 or missing-SOC command fields. Such changes report unsupported unless a stronger
@@ -154,16 +156,17 @@ Use the repository's audited full regression runner for full verification.
 Local replay evidence does not replace trusted matching protected-main test
 success or authorize publication, installation or hardware operations.
 
-HA-wide diagnostic access, ongoing enrolment, broader scoring, coordinator
-sequence replay, private fleet evaluation and validated physical simulation
-remain subsequent implementation milestones. They must preserve their own
-scope, coverage and evidence boundaries.
+The ongoing service includes broader HA diagnostics, independent client grants,
+reserve-restoration replay, measured plant calibration and cohort evaluation.
+Coverage remains explicit: missing observations, unsupported source changes or
+insufficient calibration cannot receive a passing fleet result. Real pilot
+calibration and seven-day observation gates require actual enrolled systems.
 
 ## Pilot retention policy
 
-The selected future automatic contribution policy is replay, then delete, with
+The automatic contribution policy is replay, then delete, with
 summary-only results for Codex and Claude. It does not enable a raw case archive
 or raw-bundle MCP retrieval. Explicit local developer/owner exports created by
 this CLI are separate local artifacts; no automatic upload or retention policy
-is activated by exporting one. The private service must implement purge on
-success, failure, cancellation and expiry before contribution is enabled.
+is activated by exporting one. The private service requires confirmed purge on success, failure, cancellation
+and expiry; uncertain cleanup quarantines the grant instead of admitting new work.

@@ -55,7 +55,7 @@ class Plant:
 
     def step(self, *, action_kw, load_kw, solar_kw, hours, import_price, export_price, available=True, strict=True):
         finite(action_kw, load_kw, solar_kw, hours, import_price, export_price)
-        if min(load_kw, solar_kw) < 0 or not 0 < hours <= 1 or type(available) is not bool:
+        if min(load_kw, solar_kw) < 0 or max(load_kw,solar_kw,abs(action_kw))>100000 or max(abs(import_price),abs(export_price))>100000 or not 0 < hours <= 1 or type(available) is not bool:
             raise PlantError("invalid_exogenous_inputs")
         p = self.parameters
         self.pending.append(action_kw)

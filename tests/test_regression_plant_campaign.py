@@ -66,6 +66,8 @@ def test_seven_day_gate_counts_only_eligible_complete_installations(tmp_path):
     invalid = [{**row,'status':'invalid'} if row['cohort']=='holdout' else row for row in rows]
     assert seven_day(c, invalid, **kwargs)['status'] == 'pending'
     assert seven_day(c, rows, start=100, now=100+7*86400)['status'] == 'pending'
+    uncertain=[{**row,'cost_delta':-.008 if row['cohort']=='holdout' else -.004} for row in rows]
+    assert seven_day(c,uncertain,**kwargs)['status']!='pass'
     failed = [{**row,'status':'fail'} if index == 0 else {**row,'status':'invalid'} for index,row in enumerate(rows)]
     assert seven_day(c, failed, **kwargs)['status'] == 'fail'
     for changed in ({'schedule':[]}, {'purge':'unconfirmed'}, {'cohort':'wrong'}):

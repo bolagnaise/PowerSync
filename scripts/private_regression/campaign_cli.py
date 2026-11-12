@@ -24,7 +24,7 @@ def freeze(pair,key,*,minimum=5,tolerance=.01):
         raise ValueError('complete_campaign_profiles_required')
     digest=hashlib.sha256(wire.json_bytes(pair)).hexdigest()
     cohort=hashlib.sha256(key).hexdigest()
-    return Campaign(pair['baseline']['component'],pair['candidate']['component'],pair['runtime'],pair['scorer'],pair['schema'],cohort,tolerance,minimum,pair=digest)
+    return Campaign(pair['baseline']['component'],pair['candidate']['component'],pair['runtime'],pair['scorer'],pair['schema'],cohort,tolerance,minimum,pair=digest,currency=pair['currency'])
 
 
 def collect(config,campaign,secret):

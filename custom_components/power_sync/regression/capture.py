@@ -29,6 +29,8 @@ def expendable(function):
     """
     @wraps(function)
     def guarded(self, *args, **kwargs):
+        if getattr(self,'closed',False):
+            return None
         if not self._lock.acquire(blocking=False):
             self.errors += 1
             self._drop(detach=True)
@@ -75,6 +77,18 @@ class CaptureRecorder:
         self.dropped = 0
         self.capture_seconds = 0.0
         self._retained_bytes = 0
+        self.closed = False
+        self.pending = {}
+
+    def close(self):
+        """Erase retained observation copies without waiting for a solver thread."""
+        self.closed=True
+        self._drop(detach=True)
+        for ticket in tuple(self.pending.values()):
+            ticket.clear()
+        self.pending.clear()
+        self.cycles.clear()
+        self._retained_bytes=0
 
     @expendable
     def start_cycle(self):
@@ -123,9 +137,15 @@ class CaptureRecorder:
                 self._drop()
                 return None
             cycle["outstanding"] += 1
-            return {"generation": cycle["generation"], "cycle": cycle, "codec": codec, "inputs": inputs,
+            ticket = {"generation": cycle["generation"], "cycle": cycle, "codec": codec, "inputs": inputs,
                     "state": state, **clock, "provided_inputs": provided,
                     "arguments": arguments}
+            if self.closed or cycle is not self.active or not cycle['complete']:
+                ticket.clear();return None
+            self.pending[id(ticket)]=ticket
+            if self.closed:
+                ticket.clear();self.pending.pop(id(ticket),None);return None
+            return ticket
         finally:
             self.capture_seconds += time.monotonic() - start
 
@@ -170,6 +190,8 @@ class CaptureRecorder:
             cycle["attempts"].append(body)
             cycle["bytes"] += codec.bytes
         finally:
+            if ticket is not None:
+                self.pending.pop(id(ticket),None)
             self.capture_seconds += time.monotonic() - start
 
     @expendable

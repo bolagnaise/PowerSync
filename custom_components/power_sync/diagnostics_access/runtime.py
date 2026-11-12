@@ -71,7 +71,7 @@ class AccessRuntime:
             return result
 
     async def command(self, grant, command, purpose="installation"):
-        cleanup = command["type"] in ("revoke", "owner_status", "close_boot")
+        cleanup = command["type"] in ("revoke", "cancel_invitation", "owner_status", "close_boot")
         if not cleanup and (self.closed or self.root_pending or grant.get("revoking") or self.grants.get(grant["id"]) is not grant):
             raise wire.WireError("locally_blocked")
         identity = self.identity
@@ -124,7 +124,7 @@ class AccessRuntime:
         if "approval" not in grant:
             return
         try:
-            await self.command(grant, {"type": "approve", **grant["approval"],
+            approved = await self.command(grant, {"type": "approve", **grant["approval"],
                 "ceiling_digest": grant["ceiling"]["policy_digest"], "installation_key": self.identity["public"],
                 "continuation_hash": wire.secret_hash(grant["continuation"]), "revoke_hash": wire.secret_hash(grant["revoke"]),
                 "revision": grant["revision"], "owner_attestation_digest": grant["attestation"]})
@@ -132,7 +132,9 @@ class AccessRuntime:
             status = await self.command(grant, {"type": "owner_status"})
             if status.get("status") != "active" or status.get("revision") != grant["revision"] or status.get("owner_attestation_digest") != grant["attestation"]:
                 raise wire.WireError("approval_unconfirmed") from None
-        del grant["approval"]
+            approved=status
+        grant['epoch']=approved['epoch']
+        grant.pop('approval',None)
         await self.save()
 
     async def boot(self, grant):
@@ -185,6 +187,7 @@ class AccessRuntime:
             return (not self.closed and not self.root_pending and not grant.get("revoking") and grant.get("active") is True
                 and time.time() < min(grant["lease"], page["expires_at"])
                 and binding["grant_id"] == grant["id"] and binding["revision"] == grant["revision"]
+                and binding['epoch']==grant.get('epoch',1) and binding['proof_key']==grant['registration']['public_key']
                 and all(binding[key] == grant["ceiling"][key] for key in ("actor", "client", "processor", "audience")))
         context = ReadContext(self.identity["root"], binding["actor"], binding["client"], binding["epoch"],
             min(grant["lease"], page["expires_at"]), frozenset(grant["ceiling"]["operations"]), allowed,
@@ -195,8 +198,9 @@ class AccessRuntime:
         except ReadError as error:
             result = {'schema_version': 1, 'untrusted_content': True, 'error': {'code': str(error)}}
         context.check(page["operation"], time.time())
+        text=wire.json_bytes(result).decode()
         await self.boot_command(grant, {"type": "stage", "id": page["id"], "permit": page["permit"],
-            "result": result, "result_digest": wire.secret_hash(wire.json_bytes(result).decode())})
+            "result": text, "result_digest": wire.secret_hash(text)})
 
     async def revoke(self, grant_id=None):
         self.reviews.clear()
@@ -213,6 +217,7 @@ class AccessRuntime:
             if grant_id is None or key == grant_id:
                 grant["active"] = False
                 grant["revoking"] = True
+                grant['invitation_pending']='approval' in grant
                 for secret in ("continuation", "boot", "boot_pending", "approval"):
                     grant.pop(secret, None)
         await self.save()
@@ -237,7 +242,16 @@ class AccessRuntime:
             return
         for key,grant in list(self.grants.items()):
             if grant.get('revoking'):
-                value=await self.command(grant,{'type':'revoke','revoke_hash':wire.secret_hash(grant['revoke'])})
+                value=None
+                if grant.get('invitation_pending'):
+                    try:
+                        value=await self.command(grant,{'type':'cancel_invitation','installation_key':self.identity['public']})
+                    except wire.WireError:
+                        # Approval may have committed before its response was
+                        # lost. The independently persisted revoke proof closes it.
+                        pass
+                if value is None:
+                    value=await self.command(grant,{'type':'revoke','revoke_hash':wire.secret_hash(grant['revoke'])})
                 if value.get('cleanup')!='confirmed':
                     self.last_error='access_revoked_private_cleanup_pending'
                     continue

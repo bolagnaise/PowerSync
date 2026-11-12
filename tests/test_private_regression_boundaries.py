@@ -10,8 +10,20 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT/'scripts'))
 sys.path.insert(0, str(ROOT/'custom_components/power_sync'))
 from private_regression.job import aggregate, output
-from private_regression.sandbox import CandidateFailure
+from private_regression.sandbox import CandidateFailure,parse_output
 from regression_runner.runtime import component_digest
+
+
+def test_daemon_start_failure_is_infrastructure_and_real_candidate_exit_is_attributable(monkeypatch):
+    from private_regression import sandbox
+    for state in ({'StartedAt':'0001-01-01T00:00:00Z','Error':''},
+                  {'StartedAt':'2026-11-13T00:00:00Z','Error':'synthetic daemon failure'}):
+        monkeypatch.setattr(sandbox,'docker',lambda *args:json.dumps([{'State':state}]).encode())
+        with pytest.raises(sandbox.SandboxError) as raised:
+            sandbox.candidate_started('synthetic')
+        assert not isinstance(raised.value,CandidateFailure)
+    monkeypatch.setattr(sandbox,'docker',lambda *args:json.dumps([{'State':{'StartedAt':'2026-11-13T00:00:00Z','Error':'','ExitCode':23}}]).encode())
+    assert sandbox.candidate_started('synthetic')['ExitCode']==23
 
 
 def test_failure_wins_invalid_and_unknown_status_never_passes():
@@ -34,6 +46,12 @@ def test_candidate_output_nan_unknown_shape_and_arbitrary_fields_fail_closed():
     for value in ({}, {'outcome':'pass'}, {'outcome':float('nan'), 'source':{}, 'schedule':[], 'solver':None}, {'household_text':'never release'}):
         with pytest.raises(CandidateFailure):
             output({'source':{}}, value, 'a'*64)
+
+
+@pytest.mark.parametrize('raw',[b'{"number":1e999}',b'{"number":NaN}',b'['*4000+b'0'+b']'*4000],ids=['overflow_exponent','nan','excessive_depth'])
+def test_nonfinite_exponent_and_excessive_nesting_are_candidate_failures(raw):
+    with pytest.raises(CandidateFailure):
+        parse_output(raw)
 
 
 def test_reference_redaction_keeps_the_real_replay_identical():

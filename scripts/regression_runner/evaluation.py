@@ -14,7 +14,7 @@ def measured_calibration(report,bundle):
         state['charge_efficiency'],state['discharge_efficiency'],state['hardware_reserve'],uncertainty_kwh=state['capacity_kwh']*.02)
     rows=report['rows'];intervals=[]
     for index,row in enumerate(rows):
-        if type(row) is not dict or set(row)!={'at','soc','power','load','solar','grid','available'} or type(row['at']) is not int or type(row['available']) is not bool:
+        if type(row) is not dict or set(row)!={'at','soc','power','load','solar','grid','grid_connected'} or type(row['at']) is not int or type(row['grid_connected']) is not bool:
             raise PlantError('invalid_measured_row')
         if any(type(row[key]) not in (int,float) or not math.isfinite(row[key]) for key in ('soc','power','load','solar','grid')) or not 0<=row['soc']<=1 or min(row['load'],row['solar'])<0:
             raise PlantError('invalid_measured_row')
@@ -24,7 +24,7 @@ def measured_calibration(report,bundle):
             before=rows[index-1];seconds=row['at']-before['at']
             if not 1<=seconds<=60:
                 raise PlantError('measured_time_gap')
-            if row['available'] and before['available']:
+            if row['grid_connected'] and before['grid_connected']:
                 intervals.append({'at':row['at'],'before':before['soc']*parameters.capacity_kwh,
                     'after':row['soc']*parameters.capacity_kwh,'power':(row['power']+before['power'])/2,'hours':seconds/3600})
     resolution=report['soc_resolution']

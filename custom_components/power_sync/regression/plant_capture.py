@@ -41,7 +41,7 @@ class PlantCapture:
                     value=state.state.strip().lower()
                     if value not in ('active','systemgridconnected','inactive','islanded','off-grid','systemislandedactive'):
                         raise ValueError
-                    row['available']=value in ('active','systemgridconnected')
+                    row['grid_connected']=value in ('active','systemgridconnected')
                     continue
                 number=float(state.state)
                 if not math.isfinite(number):

@@ -80,7 +80,7 @@ def execute(config, pair, transport=None, *, client=None):
             raise ValueError("unverified_runner_artifact")
         if artifact['image'] not in verified:
             verify_image(artifact['image'],artifact['component'])
-            probe=Sandbox(secrets.token_hex(32),time.time()+30)
+            probe=Sandbox(secrets.token_hex(32),time.time()+120)
             try:
                 health=probe.run(artifact['image'],artifact['component'],None,mode='health')
                 if health!={'source':{**pair['source'],'component_sha256':artifact['component']}}:

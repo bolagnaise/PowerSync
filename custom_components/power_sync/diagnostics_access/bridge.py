@@ -110,9 +110,10 @@ class Bridge:
         while time.monotonic() < until:
             result = self.command({"type": "release", "family": self.family, "binding": self.binding, "id": page})
             if result["status"] == "released":
-                if wire.secret_hash(wire.json_bytes(result["result"]).decode()) != result["result_digest"]:
+                text=result['result']
+                if type(text) is not str or wire.secret_hash(text) != result["result_digest"]:
                     raise wire.WireError("result_changed")
-                return result["result"]
+                return wire.loads(text.encode())
             time.sleep(0.5)
         raise wire.WireError("read_timeout")
 

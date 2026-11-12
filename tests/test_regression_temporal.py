@@ -5,8 +5,10 @@ import sys
 import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'scripts'))
 from regression_runner.temporal import replay, TemporalError
+from regression_runner.compare import temporal_surface,temporal_changed_methods
+import ast
 ROOT = Path(__file__).resolve().parents[1]/'custom_components/power_sync'
-INITIAL = dict(reserve=20, held_reserve=60, last_action='self_consumption', ev_preserve=False, monitoring=False, configured_reserve=.2)
+INITIAL = dict(reserve=20, held_reserve=60, last_action='self_consumption', ev_preserve=False, scheduled_ev_state=False, monitoring=False, configured_reserve=.2)
 
 
 def test_actual_coordinator_retries_failure_then_restores_at_timer_boundary():
@@ -43,3 +45,25 @@ def test_changed_real_method_is_observed_and_unknown_boundaries_fail(tmp_path):
     assert baseline['commands']
     with pytest.raises(TemporalError):
         asyncio.run(replay(ROOT, INITIAL, [dict(at=0, type='call', method='service_call')]))
+    assert temporal_surface(ROOT/'optimization/coordinator.py')==temporal_surface(tmp_path/'optimization/coordinator.py')
+    assert temporal_changed_methods(ROOT/'optimization/coordinator.py',tmp_path/'optimization/coordinator.py')=={'_should_restore_pre_idle_backup_reserve_from_polling'}
+    assert not temporal_changed_methods(ROOT/'optimization/coordinator.py',tmp_path/'optimization/coordinator.py')<={'_restore_pre_idle_backup_reserve'}
+
+
+def test_restore_post_state_includes_action_ev_configuration_and_rejects_unknown_writes(tmp_path):
+    (tmp_path/'optimization').mkdir()
+    shutil.copytree(ROOT/'licensing',tmp_path/'licensing',ignore=shutil.ignore_patterns('__pycache__'))
+    source=ast.parse((ROOT/'optimization/coordinator.py').read_text())
+    cls=next(node for node in source.body if isinstance(node,ast.ClassDef) and node.name=='OptimizationCoordinator')
+    method=next(node for node in cls.body if isinstance(node,ast.AsyncFunctionDef) and node.name=='_restore_pre_idle_backup_reserve')
+    block=next(node for node in method.body if isinstance(node,ast.Try))
+    block.body[-1:-1]=ast.parse('self._last_executed_action = None').body
+    (tmp_path/'optimization/coordinator.py').write_text(ast.unparse(ast.fix_missing_locations(source)))
+    events=[dict(at=0,type='response',value=True),dict(at=0,type='call',method='restore')]
+    result=asyncio.run(replay(tmp_path,INITIAL,events))
+    assert result['state']['last_action'] is None
+    assert asyncio.run(replay(ROOT,INITIAL,events))['state']['last_action']=='self_consumption'
+    block.body[-1:-1]=ast.parse('self.unobserved_flag = True').body
+    (tmp_path/'optimization/coordinator.py').write_text(ast.unparse(ast.fix_missing_locations(source)))
+    with pytest.raises(TemporalError,match='unsupported_temporal_mutation'):
+        asyncio.run(replay(tmp_path,INITIAL,events))

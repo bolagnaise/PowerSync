@@ -18,7 +18,7 @@ from types import SimpleNamespace
 
 METHODS = frozenset({'_reserve_ratio', '_force_discharge_reserve_floor', '_scheduled_ev_preserve_active',
                      '_should_restore_pre_idle_backup_reserve_from_polling', '_restore_pre_idle_backup_reserve'})
-STATE = frozenset({'reserve', 'held_reserve', 'last_action', 'ev_preserve', 'monitoring', 'configured_reserve'})
+STATE = frozenset({'reserve', 'held_reserve', 'last_action', 'ev_preserve', 'scheduled_ev_state', 'monitoring', 'configured_reserve'})
 
 
 class TemporalError(ValueError):
@@ -52,7 +52,7 @@ def coordinator(root):
             body.append(copy.deepcopy(data_key))
         else:
             body.append(node)
-    namespace = {'_LOGGER': logging.getLogger('private_temporal_replay'), '_temporal_monitoring':lambda *_:None, '_temporal_boundary':lambda *_:None, '_temporal_exception':lambda *_:None}
+    namespace = {'_LOGGER': logging.getLogger('private_temporal_replay'), '_temporal_monitoring':lambda *_:None, '_temporal_boundary':lambda *_:None, '_temporal_exception':lambda *_:None, '_temporal_argument':lambda *_:None}
     exec(compile(ast.fix_missing_locations(ast.Module(body=body, type_ignores=[])), '<reviewed-restoration-guard>', 'exec'), namespace)
     exec(compile(ast.fix_missing_locations(extracted), '<reviewed-coordinator-methods>', 'exec'), namespace)
     return namespace['ObservedCoordinator'], hashlib.sha256((ast.dump(extracted, include_attributes=False)+ast.dump(guard, include_attributes=False)+ast.dump(data_key, include_attributes=False)).encode()).hexdigest()
@@ -66,7 +66,7 @@ async def replay(root, initial, events):
             number = value[key]
             if number is not None and (type(number) not in (int, float) or not math.isfinite(number) or not 0 <= number <= 100):
                 raise TemporalError('invalid_temporal_state')
-        if any(type(value[key]) is not bool for key in ('ev_preserve', 'monitoring')) or value['last_action'] not in ('idle', 'self_consumption', 'charge', 'export', None):
+        if any(type(value[key]) is not bool for key in ('ev_preserve', 'scheduled_ev_state', 'monitoring')) or value['last_action'] not in ('idle', 'self_consumption', 'charge', 'export', None):
             raise TemporalError('invalid_temporal_state')
     validate_state(initial)
     missing = [False]
@@ -77,6 +77,7 @@ async def replay(root, initial, events):
     generation = 0
     clock = 0
     queue = []
+    callbacks={}
     state = copy.deepcopy(initial)
     def install():
         observed._pre_idle_backup_reserve = state['reserve']
@@ -85,9 +86,27 @@ async def replay(root, initial, events):
         observed._scheduled_ev_no_discharge_active = state['ev_preserve']
         observed._config = SimpleNamespace(backup_reserve=state['configured_reserve'])
         observed.entry_id = 'logical-installation'
-        observed.hass = SimpleNamespace(data={'power_sync': {'logical-installation': {'scheduled_ev_preserve_state': {'active': state['ev_preserve']}}}})
+        observed.hass = SimpleNamespace(data={'power_sync': {'logical-installation': {'scheduled_ev_preserve_state': {'active': state['scheduled_ev_state']}}}})
         observed._monitoring_mode_active = lambda: state['monitoring']
+        callbacks['monitoring']=observed._monitoring_mode_active
     install()
+    allowed_fields=set(vars(observed))
+    class_fields=dict(vars(cls))
+    def after_state():
+        if set(vars(observed))!=allowed_fields or dict(vars(cls))!=class_fields or observed._monitoring_mode_active is not callbacks['monitoring'] or type(observed._config) is not SimpleNamespace or set(vars(observed._config))!={"backup_reserve"} or observed.entry_id!="logical-installation" or type(observed.hass) is not SimpleNamespace or set(vars(observed.hass))!={"data"}:
+            raise TemporalError("unsupported_temporal_mutation")
+        data=observed.hass.data
+        try:
+            if set(data)!={"power_sync"} or set(data["power_sync"])!={observed.entry_id} or set(data["power_sync"][observed.entry_id])!={"scheduled_ev_preserve_state"} or set(data["power_sync"][observed.entry_id]["scheduled_ev_preserve_state"])!={"active"}:
+                raise ValueError
+            active=data["power_sync"][observed.entry_id]["scheduled_ev_preserve_state"]["active"]
+        except (KeyError,TypeError,ValueError):
+            raise TemporalError("unsupported_temporal_mutation") from None
+        result={"reserve":observed._pre_idle_backup_reserve,"held_reserve":observed._idle_hold_reserve,
+            "last_action":observed._last_executed_action,"ev_preserve":observed._scheduled_ev_no_discharge_active,
+            "scheduled_ev_state":active,"monitoring":state["monitoring"],"configured_reserve":observed._config.backup_reserve}
+        validate_state(result)
+        return result
     class Battery:
         async def set_backup_reserve(self, reserve):
             commands.append({'at': clock, 'generation': generation, 'operation': 'set_backup_reserve', 'reserve': reserve})
@@ -114,7 +133,7 @@ async def replay(root, initial, events):
         if missing[0]:
             raise TemporalError('boundary_response_missing')
         returns.append({'at': clock, 'generation': generation, 'value': value})
-        state['reserve'], state['held_reserve'] = observed._pre_idle_backup_reserve, observed._idle_hold_reserve
+        state.update(after_state())
     for index, event in enumerate(events):
         if type(event) is not dict or type(event.get('at')) is not int or not clock <= event['at'] <= 7*86400:
             raise TemporalError('invalid_virtual_clock')

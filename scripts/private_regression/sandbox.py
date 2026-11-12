@@ -2,6 +2,7 @@
 from __future__ import annotations
 import argparse
 import ctypes
+import math
 import json
 import os
 from pathlib import Path
@@ -28,12 +29,44 @@ class CandidateFailure(SandboxError):
     pass
 
 
+def parse_output(raw):
+    def number(text):
+        value=float(text)
+        if not math.isfinite(value):
+            raise ValueError
+        return value
+    try:
+        value=json.loads(raw,parse_float=number,parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
+        pending=[(value,0)];count=0
+        while pending:
+            item,depth=pending.pop();count+=1
+            if depth>24 or count>100000:
+                raise ValueError
+            if type(item) in (int,float) and (not math.isfinite(item) or abs(item)>2**53-1):
+                raise ValueError
+            if type(item) is dict:
+                pending.extend((child,depth+1) for child in item.values())
+            elif type(item) is list:
+                pending.extend((child,depth+1) for child in item)
+        return value
+    except (ValueError,UnicodeError,RecursionError,OverflowError,MemoryError):
+        raise CandidateFailure('candidate_output_invalid') from None
+
+
 def docker(*arguments):
     result = subprocess.run([DOCKER, *arguments], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL, timeout=20, check=False,env=DOCKER_ENV)
     if result.returncode:
         raise SandboxError("sandbox_operation_failed")
     return result.stdout
+
+
+def candidate_started(name):
+    """Infrastructure failures cannot become evidence against a candidate."""
+    state = json.loads(docker('inspect', name))[0]['State']
+    if state.get('Error') or not state.get('StartedAt', '').startswith(('19', '20')):
+        raise SandboxError('sandbox_candidate_not_started')
+    return state
 
 
 def no_swap():
@@ -127,7 +160,8 @@ class Sandbox:
             raise SandboxError("job_expired")
         if self.watchdog.poll() is not None:
             raise SandboxError("watchdog_unavailable")
-        run_deadline = min(self.deadline-2, time.time()+10)
+        if self.deadline-time.time()<75:
+            raise SandboxError('insufficient_run_and_cleanup_budget')
         # Captured reference plans and outcomes stay outside candidate memory.
         from regression_runner.trusted_contract import validate_bundle
         from regression_runner.trusted_contract import digest, canonical
@@ -167,6 +201,9 @@ class Sandbox:
                 or "ALL" not in host["CapDrop"] or not any(value.startswith("no-new-privileges") for value in host["SecurityOpt"])
                 or info["Config"]["User"] != "65534:65534" or any(mount["Type"] != "tmpfs" or mount["Destination"] != "/tmp" for mount in info["Mounts"])):
                 raise SandboxError("sandbox_profile_not_enforced")
+            if self.deadline-time.time()<75:
+                raise SandboxError('sandbox_startup_budget_exhausted')
+            run_deadline=time.time()+10
             process = subprocess.Popen([DOCKER, "start", "-a", "-i", name], stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=DOCKER_ENV, bufsize=0)
             selector = selectors.DefaultSelector()
@@ -180,12 +217,14 @@ class Sandbox:
                     if self.watchdog.poll() is not None:
                         raise SandboxError("watchdog_unavailable")
                     if time.time() >= run_deadline:
+                        candidate_started(name)
                         raise CandidateFailure("candidate_timeout")
                     for event, _ in selector.select(timeout=.2):
                         if event.fileobj is process.stdin:
                             try:
                                 written = os.write(process.stdin.fileno(), raw[offset:offset+65536]); offset += written
                             except BrokenPipeError:
+                                candidate_started(name)
                                 raise CandidateFailure("candidate_input_refused") from None
                             if offset == len(raw):
                                 selector.unregister(process.stdin); process.stdin.close()
@@ -199,13 +238,12 @@ class Sandbox:
                 try:
                     code = process.wait(timeout=max(.1, run_deadline-time.time()))
                 except subprocess.TimeoutExpired:
+                    candidate_started(name)
                     raise CandidateFailure("candidate_timeout") from None
                 if code:
+                    candidate_started(name)
                     raise CandidateFailure("candidate_exit")
-                try:
-                    value = json.loads(output, parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
-                except (ValueError, UnicodeError):
-                    raise CandidateFailure("candidate_output_invalid") from None
+                value = parse_output(output)
                 if type(value) is not dict:
                     raise CandidateFailure("candidate_output_invalid")
                 return value

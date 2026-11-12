@@ -31,6 +31,8 @@ class Campaign:
     required_days: int = 7
     minimum_daily_pairs: int = 1
     pair: str = "0"*64
+    currency: str = 'AUD'
+    max_mean_cost_delta: float = 0.0
 
     def __post_init__(self):
         for value in (self.baseline, self.candidate, self.runtime, self.scorer, self.schema, self.cohort, self.pair):
@@ -38,6 +40,8 @@ class Campaign:
                 raise CampaignError("immutable_artifact_required")
         if any(type(value) is not int for value in (self.min_installations, self.required_days, self.minimum_daily_pairs)) or type(self.max_cost_delta) not in (int, float) or not math.isfinite(self.max_cost_delta) or not 1 <= self.min_installations <= 10000 or self.required_days != 7 or not 1 <= self.minimum_daily_pairs <= 10000:
             raise CampaignError("invalid_campaign")
+        if type(self.currency) is not str or len(self.currency)!=3 or not self.currency.isascii() or not self.currency.isupper() or not self.currency.isalpha() or type(self.max_mean_cost_delta) not in (int,float) or not math.isfinite(self.max_mean_cost_delta):
+            raise CampaignError('invalid_campaign_units')
 
     @property
     def digest(self):
@@ -146,14 +150,23 @@ def seven_day(campaign, receipts, *, start, now, reservations=None, holdout_secr
     development = covered-holdouts
     site_means = [sum(sum(row['cost_delta'] for row in items)/len(items) for items in per_site[site].values())/len(per_site[site]) for site in covered]
     mean = sum(site_means)/len(site_means) if site_means else None
-    if mean is not None and mean > campaign.max_cost_delta:
-        failed += 1
+    dispersion=(sum((value-mean)**2 for value in site_means)/(len(site_means)-1)/len(site_means))**.5 if len(site_means)>1 else 0
+    # Conservative stepwise two-sided Student-t quantiles. Logical installs
+    # are not proven independent households; this is a dispersion guard.
+    quantile=12.707
+    for degrees,value in ((2,4.303),(3,3.183),(4,2.777),(5,2.571),(9,2.263),(19,2.094),(29,2.046)):
+        if len(site_means)-1>=degrees:
+            quantile=value
+    upper=None if mean is None else mean+quantile*dispersion
+    mean_exceeded=mean is not None and mean>campaign.max_mean_cost_delta
+    dispersion_passed=upper is not None and upper<=campaign.max_mean_cost_delta
     complete = (authorised and now >= end and len(covered) >= campaign.min_installations and bool(holdouts) and bool(development)
-        and all(count >= campaign.minimum_daily_pairs for count in days) and len(expected)>0 and not missing and not invalid)
-    return {'campaign':campaign.digest, 'status':'fail' if failed else 'pass' if complete else 'pending',
+        and all(count >= campaign.minimum_daily_pairs for count in days) and len(expected)>0 and not missing and not invalid and dispersion_passed)
+    return {'campaign':campaign.digest, 'status':'fail' if failed or mean_exceeded else 'pass' if complete else 'pending',
         'logical_installations':len(covered), 'unique_households':None, 'eligible_pairs':len(eligible),
         'holdout_installations':len(holdouts), 'failed_pairs':int(failed), 'invalid_pairs':invalid, 'missing_pairs':missing,
-        'reserved_pairs':len(expected), 'daily_counts':days, 'mean_cost_delta':mean,
+        'reserved_pairs':len(expected), 'daily_counts':days, 'mean_cost_delta':mean,'dispersion_upper_bound':upper,'currency':campaign.currency,
+        'aggregate_mean_exceeded':mean_exceeded,'dispersion_guard_passed':dispersion_passed,
         'observed_from':min((row['completed_at'] for row in rows),default=None),
         'observed_until':max((row['completed_at'] for row in rows),default=None)}
 

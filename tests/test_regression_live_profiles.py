@@ -21,7 +21,7 @@ def capture_module():
 def test_actual_restore_observation_replays_negative_and_positive_ack_without_changing_controls():
     capture=capture_module();cls,_=coordinator(ROOT/'custom_components/power_sync')
     function=cls._restore_pre_idle_backup_reserve
-    function.__globals__.update(_temporal_monitoring=capture.monitoring,_temporal_boundary=capture.boundary,_temporal_exception=capture.boundary_exception)
+    function.__globals__.update(_temporal_monitoring=capture.monitoring,_temporal_boundary=capture.boundary,_temporal_exception=capture.boundary_exception,_temporal_argument=capture.command_argument)
     cls._restore_pre_idle_backup_reserve=capture.observe_reserve_restore(function)
     owner=cls();owner._pre_idle_backup_reserve=20;owner._idle_hold_reserve=60;owner._last_executed_action='self_consumption'
     owner._scheduled_ev_no_discharge_active=False;owner._config=SimpleNamespace(backup_reserve=.2)
@@ -69,7 +69,7 @@ def physical_case():
         if index:
             average=(powers[index-1]+power)/2
             energy+=average/120*(.9 if average>=0 else 1/.9)
-        rows.append(dict(at=100+index*30,soc=energy,power=power,load=.2,solar=0.,grid=.2+power,available=True))
+        rows.append(dict(at=100+index*30,soc=energy,power=power,load=.2,solar=0.,grid=.2+power,grid_connected=True))
     report=dict(profile='measured-battery-v1',rows=rows,unsupported=0,soc_resolution=.001,power_sign='positive_into_battery')
     bundle={'state':dict(capacity_kwh=1.,max_charge_kw=5.,max_discharge_kw=5.,charge_efficiency=.95,discharge_efficiency=.95,
                         hardware_reserve_known=True,hardware_reserve=.1,dt_hours=1/12),

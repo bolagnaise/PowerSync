@@ -45,7 +45,8 @@ def http(route, value):
 
 async def main():
     store = Store()
-    backend = HAReadBackend(SimpleNamespace(states=SimpleNamespace(async_all=lambda: [])))
+    states=[]
+    backend = HAReadBackend(SimpleNamespace(states=SimpleNamespace(async_all=lambda: list(states))))
     async with aiohttp.ClientSession() as raw:
         session = Session(raw)
         runtime = AccessRuntime(None, store, session, backend)
@@ -76,6 +77,12 @@ async def main():
             assert runtime.grants[grant].get("active"), runtime.last_error
             result = await asyncio.to_thread(clients[-1].dispatch, "tools/call", {"name": "ha_get_capabilities", "arguments": {}})
             assert "structuredContent" in result
+        from datetime import datetime,timezone
+        clock=datetime.now(timezone.utc)
+        states.append(SimpleNamespace(entity_id='sensor.fidelity',state='1.0',attributes={'integral_float':1.0,'tiny':1e-7,'unicode':'☀️'},last_changed=clock,last_updated=clock))
+        values=(await asyncio.to_thread(clients[0].call,'ha_get_states',{}))['result']['records'][0]['attributes']
+        assert type(values['integral_float']) is float and values['integral_float']==1.0 and values['tiny']==1e-7 and values['unicode']=='☀️'
+        states.clear()
         if os.environ.get("DIAGNOSTICS_NATIVE_CLIENTS"):
             from diagnostics_native_clients import native
             await native(clients)
@@ -150,7 +157,7 @@ async def contribution(runtime, identity):
               "runner_generation": "d"*32, "runner_private_key": os.environ["DIAGNOSTICS_RUNNER_SEED"]}
     pair = {"baseline": {"root": str(root), "image": metadata["image"], "component": metadata["component"]},
             "candidate": {"root": str(root), "image": metadata["image"], "component": metadata["component"]},
-            "source": source, "runtime": metadata["runtime"],"scorer":metadata['scorer'],"schema":metadata['schema']}
+            "source": source, "runtime": metadata["runtime"],"scorer":metadata['scorer'],"schema":metadata['schema'],'currency':'AUD'}
     controller = asyncio.create_task(asyncio.to_thread(run, config, pair, http))
     for _ in range(200):
         if getattr(coordinator, "_regression_recorder", None):

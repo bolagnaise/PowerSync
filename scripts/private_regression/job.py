@@ -6,6 +6,7 @@ from pathlib import Path
 import signal
 import re
 import math
+import hashlib
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -18,7 +19,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from regression_runner import trusted_contract as contract
 from regression_runner.runtime import component_digest
-from regression_runner.compare import classify, fidelity, source_coverage, changed_component_paths, run_status
+from regression_runner.compare import classify, fidelity, source_coverage, changed_component_paths, run_status, temporal_surface, temporal_changed_methods
 from private_regression.sandbox import Sandbox, no_swap, CandidateFailure
 from private_regression.fingerprints import scorer_digest,schema_digest
 
@@ -54,6 +55,13 @@ def aggregate(statuses):
 
 
 def temporal_output(value):
+    try:
+        return _temporal_output(value)
+    except (ValueError,TypeError,KeyError,OverflowError,MemoryError,RecursionError):
+        raise CandidateFailure('candidate_temporal_output_invalid') from None
+
+
+def _temporal_output(value):
     from regression_runner.temporal import METHODS, STATE
     if type(value) is not dict or set(value) != {'profile','source','methods','commands','returns','state','elapsed_virtual_seconds','restarts'} or value['profile'] != 'reserve-recovery-temporal-v1' or value['methods'] != sorted(METHODS) or not re.fullmatch('[a-f0-9]{64}',value['source']):
         raise CandidateFailure('candidate_temporal_output_invalid')
@@ -63,7 +71,7 @@ def temporal_output(value):
         item=value['state'][key]
         if item is not None and (type(item) not in (int,float) or not math.isfinite(item) or not 0<=item<=100):
             raise CandidateFailure('candidate_temporal_output_invalid')
-    if value['state']['last_action'] not in ('idle','self_consumption','charge','export',None) or any(type(value['state'][key]) is not bool for key in ('ev_preserve','monitoring')):
+    if value['state']['last_action'] not in ('idle','self_consumption','charge','export',None) or any(type(value['state'][key]) is not bool for key in ('ev_preserve','scheduled_ev_state','monitoring')):
         raise CandidateFailure('candidate_temporal_output_invalid')
     for field in ('commands','returns'):
         rows=value[field]
@@ -108,6 +116,11 @@ def run(request):
     pair = request["pair"]
     if pair.get('scorer')!=scorer_digest() or pair.get('schema')!=schema_digest():
         raise ValueError('trusted_scorer_or_schema_changed')
+    if hashlib.sha256(wire.json_bytes(pair)).hexdigest()!=request['context']['pair']:
+        raise ValueError('pair_context_changed')
+    required=pair.get('required_profiles',['solver_v1'])
+    if type(required) is not list or not required or not set(required)<={'solver_v1','reserve-recovery-temporal-v1','calibrated-plant-v1'}:
+        raise ValueError('unsupported_campaign_profiles')
     # Artifact verification happens before private decryption.
     for arm in ("baseline", "candidate"):
         if component_digest(Path(pair[arm]["root"])) != pair[arm]["component"]:
@@ -122,6 +135,14 @@ def run(request):
     key = HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=associated).derive(shared)
     captured = json.loads(AESGCM(key).decrypt(raw[32:44], raw[44:], associated))
     del raw, key, private, shared
+    if type(captured) is not dict:
+        raise ValueError('incomplete_capture')
+    temporal=captured.get('temporal',{})
+    coordinator_path='custom_components/power_sync/optimization/coordinator.py'
+    if coordinator_path in coverage and temporal.get('complete') is True and 'reserve-recovery-temporal-v1' in pair.get('required_profiles',[]):
+        left_path=Path(pair['baseline']['root'])/'optimization/coordinator.py';right_path=Path(pair['candidate']['root'])/'optimization/coordinator.py'
+        if temporal_changed_methods(left_path,right_path)<={'_restore_pre_idle_backup_reserve'} and temporal_surface(left_path)==temporal_surface(right_path):
+            coverage[coordinator_path]='reserve-recovery-temporal-v1'
     if type(captured) is not dict or len(captured.get("cycles", [])) != 1:
         raise ValueError("incomplete_capture")
     bundles = captured["cycles"][0]["attempts"]
@@ -129,12 +150,23 @@ def run(request):
         raise ValueError("attempt_limit")
     for bundle in bundles:
         contract.validate_bundle(bundle)
-        if bundle['source'] != pair['source'] or bundle['source']['component_sha256'] != pair['baseline']['component']:
+        if bundle['source'] != pair['source'] or bundle['source']['component_sha256'] != pair['baseline']['component'] or bundle['currency']!=pair.get('currency'):
             raise ValueError('runtime_source_changed')
     sandbox = Sandbox(context["job"], request["deadline"])
     statuses, violations, differences = [], 0, []
+    executed=None
+    def summary():
+        if any(type(value) not in (int,float) or not math.isfinite(value) for value in differences):
+            statuses.append('invalid');safe=[]
+        else:
+            safe=differences
+        status=aggregate(statuses)
+        return {'status':status,'attempts':len(bundles),'violations':min(10000,violations),
+            'coverage':'complete' if status in ('pass','fail') and all(value in ('pass','fail') for value in statuses) else 'insufficient',
+            'cost_delta':round(max(safe,default=0),4)}
     try:
         for bundle in bundles:
+            executed=None
             contract.validate_bundle(bundle)
             if bundle["source"] != pair["source"]:
                 raise ValueError("runtime_source_changed")
@@ -155,6 +187,7 @@ def run(request):
             if results['candidate'] is None:
                 statuses.append('fail');continue
             left, right = results["baseline"][0], results["candidate"][0]
+            executed=(bundle,left,right)
             expected = {"outcome": bundle["outcome"], "solver": bundle["result"]["solver"], "schedule": bundle["result"]["schedule"], "exception": bundle["result"]["exception"]}
             a_a = fidelity(bundle, *results["baseline"], exact_only=True)
             b_b = fidelity(bundle, *results["candidate"], exact_only=True)
@@ -171,9 +204,6 @@ def run(request):
                 # Retry attempts describe the same horizon; report the worst
                 # delta instead of summing the same energy several times.
                 differences.append(score_b["common_score"]-score_a["common_score"])
-        required=pair.get('required_profiles',['solver_v1'])
-        if type(required) is not list or not set(required)<={'solver_v1','reserve-recovery-temporal-v1','calibrated-plant-v1'}:
-            raise ValueError('unsupported_campaign_profiles')
         if 'reserve-recovery-temporal-v1' in required:
             statuses.extend(temporal_checks(sandbox,pair,captured.get('temporal')))
         if 'calibrated-plant-v1' in required:
@@ -181,18 +211,20 @@ def run(request):
             # solver-only inputs never become invented observations.
             from regression_runner.evaluation import evaluate_plant
             from regression_runner.plant import PlantError
-            if pair.get('terminal_price') is None:
+            committed=[row['schedule'] for row in captured['cycles'][0].get('stages',[]) if row.get('stage')=='committed']
+            if pair.get('terminal_price') is None or executed is None or not committed or executed[1]['schedule']!=committed[-1]:
                 statuses.append('insufficient')
             else:
                 try:
-                    physical=evaluate_plant(captured.get('plant'),bundle,left,right,terminal_price=pair['terminal_price'])
+                    physical=evaluate_plant(captured.get('plant'),*executed,terminal_price=pair['terminal_price'])
                     statuses.append(physical['status']);violations+=physical['violations']
                     differences.append(physical['common_score_delta'])
-                except (PlantError,KeyError,TypeError,ValueError,UnboundLocalError):
+                except Exception:
                     statuses.append('insufficient')
-        status = aggregate(statuses)
-        return {"status": status, "attempts": len(bundles), "violations": min(10000, violations),
-            "coverage": "complete" if status in ("pass", "fail") else "insufficient", "cost_delta": round(max(differences, default=0), 4)}
+        return summary()
+    except Exception:
+        statuses.append('invalid')
+        return summary()
     finally:
         if not sandbox.close():
             raise ValueError("purge_unconfirmed")

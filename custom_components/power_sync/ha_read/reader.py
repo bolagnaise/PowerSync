@@ -27,7 +27,7 @@ TOOLS = frozenset({
 })
 READERS = TOOLS - {"ha_get_capabilities", "ha_search_entities", "ha_get_states"}
 SECRET_KEY = re.compile(r"(?i)(password|passwd|secret|token|api[_-]?key|authorization|credential|private[_-]?key|cookie|client[_-]?secret|passphrase|webhook_id|(?:^|_)(?:pin|code|key)(?:$|_))")
-MAX_RESULT = 256 * 1024
+MAX_RESULT = 120 * 1024
 _TEXT = {"type": "string", "maxLength": 256}
 _IDS = {"type": "array", "items": _TEXT, "maxItems": 1000}
 _PAGE = {"limit": {"type": "integer", "minimum": 1, "maximum": 250}, "cursor": {"type": "string", "maxLength": 4096}}
@@ -230,7 +230,7 @@ class HAReadBackend:
                       "readers": statuses,
                       "complete_profile": READERS <= self.adapters.keys() and all(
                           status.get("reason") != "unsupported_ha_version" for status in statuses.values()),
-                      "all_entity_domains": True, "max_page_size": 250}
+                      "all_entity_domains": True, "max_page_size": 250, 'max_result_bytes':MAX_RESULT}
         elif operation in {"ha_search_entities", "ha_get_states"}:
             if arguments.keys() - {"entity_ids", "domain", "search", "limit", "cursor"}:
                 raise ReadError("invalid_query")

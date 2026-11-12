@@ -7,7 +7,7 @@ to produce a schedule, which the execution layer then applies.
 from __future__ import annotations
 
 from ..licensing.guard import optimizer_work, optimizer_command, fenced_call, restoration_work, background_work, OptimizerAccessLost
-from ..regression.temporal_capture import observe_reserve_restore, monitoring as _temporal_monitoring, boundary as _temporal_boundary, boundary_exception as _temporal_exception
+from ..regression.temporal_capture import observe_reserve_restore, monitoring as _temporal_monitoring, boundary as _temporal_boundary, boundary_exception as _temporal_exception, command_argument as _temporal_argument
 
 import asyncio
 import calendar
@@ -1049,7 +1049,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 restore_reserve = getattr(
                     battery, "restore_backup_reserve_for_monitoring", restore_reserve
                 )
-            result = await fenced_call(self, lambda: restore_reserve(self._pre_idle_backup_reserve), 'set_backup_reserve')
+            def restore_observed():
+                value = self._pre_idle_backup_reserve
+                _temporal_argument(self, value)
+                return restore_reserve(value)
+            result = await fenced_call(self, restore_observed, 'set_backup_reserve')
             _temporal_boundary(self, result)
             if result is False:
                 _LOGGER.warning(

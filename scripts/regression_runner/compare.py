@@ -135,3 +135,31 @@ def source_coverage(paths, baseline=None, candidate=None):
         except (OSError, SyntaxError, StopIteration, ValueError):
             pass
     return {path: "solver_v1" if path == supported and surface_matches else "not-covered" for path in paths}
+
+
+def temporal_surface(path):
+    """Only reviewed reserve-method bodies may vary for this temporal profile."""
+    from .temporal import METHODS
+    tree=ast.parse(Path(path).read_text())
+    matched=set()
+    for cls in tree.body:
+        if not isinstance(cls,ast.ClassDef):
+            continue
+        for method in cls.body:
+            if isinstance(method,(ast.FunctionDef,ast.AsyncFunctionDef)) and method.name in METHODS:
+                matched.add(method.name);method.body=[ast.Pass()]
+    if matched!=METHODS:
+        raise ValueError('unsupported_temporal_surface')
+    return ast.dump(tree,include_attributes=False)
+
+
+def temporal_changed_methods(baseline,candidate):
+    from .temporal import METHODS
+    def methods(path):
+        tree=ast.parse(Path(path).read_text())
+        return {node.name:ast.dump(node,include_attributes=False) for cls in tree.body if isinstance(cls,ast.ClassDef)
+                for node in cls.body if isinstance(node,(ast.FunctionDef,ast.AsyncFunctionDef)) and node.name in METHODS}
+    left,right=methods(baseline),methods(candidate)
+    if set(left)!=METHODS or set(right)!=METHODS:
+        raise ValueError('unsupported_temporal_surface')
+    return {name for name in METHODS if left[name]!=right[name]}

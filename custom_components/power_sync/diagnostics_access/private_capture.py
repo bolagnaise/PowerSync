@@ -101,6 +101,5 @@ class FreshCapture:
                 if getattr(coordinator, "_regression_temporal_recorder", None) is temporal:
                     coordinator._regression_temporal_recorder = None
             if recorder is not None:
-                recorder._drop(detach=True)
-                recorder.cycles.clear()
+                recorder.close()
             self.active = False

@@ -1,30 +1,41 @@
 # Optimizer fleet regression plan
 
-Status: implementation started. The local replay milestone is implemented; remote enrolment, the complete HA reader matrix and the private fleet service remain later phases. This plan covers the Home Assistant integration, full HA-wide read-only diagnostics and a separate regression data service. Implementing code does not enrol owners or activate sharing.
+Status: the software now includes the ongoing authority and administrator consent flow, the complete HA reader adapter matrix, local Codex/Claude bridges, reserved private replay, selected stateful replay, measured-calibration simulation, and frozen advisory campaigns. Publication and production activation have separate evidence gates. Actual owner consent, fleet participation, physical calibration and a seven-day observation window require real observations.
 
-## Implemented checkpoint
+## Implemented software
 
-The HA implementation starts from fetched `origin/main` at
-`215b2d4877e62f858fde25d5f7459b71f6b99fe8` (manifest `2.12.1684`).
-The separate broker foundation starts from
-`3cd8cf7ed4d3205bb4079911197fbadcdd88bc55` in the Cloud repository.
+The continuation is based on published HA `v2.12.1688` and the separate Cloud
+repository authority. Diagnostic access and optimizer contribution use independent
+grants, including independent Codex and Claude registrations. The separate
+Worker defaults to disabled; installing the HA integration does not enrol anyone.
 
+- [HA-wide diagnostics](ha-read-backend.md): cached state, five registries,
+  Recorder history/statistics/logbook, automation/script configuration, traces,
+  integration configuration, YAML, dashboards, logs and installation metadata.
+  Missing components and unsupported HA API versions remain explicit.
+- [Private fleet operations](private-fleet-operations.md): two-step HA admin
+  approval, sender-bound stdio clients, outbound signed transport, boot/restore
+  fencing, independent revocation and private cleanup receipts.
 - [Local optimizer replay](optimizer-replay.md): closed effective-state/input
-  capture at every solver attempt, explicit local export, fresh-process A/A and
-  candidate replay, trusted scoring and explicit unsupported/source-coverage gaps.
-- [HA read backend](ha-read-backend.md): all-domain cached entity discovery/read,
-  bounded pagination, pre/post authorization checks and a read-only MCP dispatcher.
-  The capability manifest reports the remaining adapters as unavailable; this is
-  not yet complete full HA access.
-- The Cloud `ha-diagnostics` library contains independent grant namespaces,
-  continuity/revocation/refresh/page-release state machines, transactional storage
-  and signed-metadata helpers. It has no route, OAuth issuer or deployed binding.
+  capture and independent scoring. The private runner adds immutable images,
+  OS isolation, bounded streaming, independent watchdog/reaping, A/A checks for
+  both arms and trusted output validation.
+- Stateful replay uses actual selected coordinator reserve-recovery methods,
+  ordered events, recorded acknowledgements, virtual timers and restart fences.
+  Changed unobserved coordinator/provider/force paths remain insufficient coverage.
+- Simulation fits efficiencies from fresh measured meter intervals, checks a
+  separate time-blocked withheld set, refuses extrapolation, and scores actions
+  against an independent plant with conservation, physical limits, terminal
+  energy and sensitivity checks. Forecast scenarios remain counterfactuals.
+- Frozen campaigns require complete reservation accounting, eligible daily
+  installation/cohort coverage, consumed holdout epochs and purge-confirmed
+  summaries. They are advisory alongside the mandatory protected-main full suite.
 
-The existing ticket service is unchanged. No live installation, customer grant,
-raw corpus, remote capture or mandatory fleet gate is enabled. Complete the
-remaining Phase 2 service/readers before proposing a customer pilot. Broader
-scoring, temporal replay, physical simulation and measured pilot budgets remain
-explicit work rather than implied coverage of the first solver replay layer.
+The HA code, client packaging, private runner and campaign/recovery commands are
+software deliverables. A deployed service is not an owner grant, a successful
+synthetic run is not physical calibration, and accelerated virtual time is not
+an elapsed seven-day pilot. Those acceptance fields remain pending until their
+corresponding real evidence exists.
 
 ## Owner-selected pilot policy
 
