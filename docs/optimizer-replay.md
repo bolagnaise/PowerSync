@@ -61,6 +61,8 @@ can be captured/reconstructed but cannot receive a passing comparison that
 requires those metrics. Do not sum successive forecast horizons as daily
 realised savings. `--terminal-price` supplies one declared common value per kWh
 for comparing terminal inventory; terminal SOC/energy is always reported.
+The reported first-action duration is the configured solver slot length, not
+an observed hardware command duration.
 
 ## Developer capture boundary
 
