@@ -11,7 +11,7 @@ Use these PowerSync actions in Home Assistant automations or Developer Tools →
 
 Select your PowerSync integration and set **Enabled** to true or false. Smart Schedule also requires the exact configured vehicle ID. These actions set a desired state rather than toggling it, so retrying an automation does not reverse the setting. They preserve the other charging options shown in the PowerSync app.
 
-New setups use actions rather than adding EV mode switches to the integration screen. Existing Solar Surplus EV Charging switches retain their entity IDs and remain callable, so current automations keep working. These legacy entities are hidden from the normal UI; Home Assistant's entity registry can show hidden entities. You can migrate switch-based automations to `power_sync.set_solar_surplus_charging` at your convenience. Saved charging settings and the app's charging controls are preserved.
+New setups use actions rather than adding EV mode switches to the integration screen. Existing Solar Surplus EV Charging switches retain their entity IDs and visibility, so current automations keep working, including device- or area-targeted switch actions. They are not automatically hidden or removed. You can migrate switch-based automations to `power_sync.set_solar_surplus_charging` at your convenience. Only hide an old entity after updating indirect automation targets too. Saved charging settings and the app's charging controls are preserved.
 
 For example, an automation can disable Scheduled Charging when the home battery reaches your chosen minimum:
 

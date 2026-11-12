@@ -151,7 +151,7 @@ def test_registered_actions_validate_entry_and_route_each_mode(actions):
 
 
 @pytest.mark.parametrize("existing,hidden_by", [(False, None), (True, None), (True, "user")])
-def test_legacy_solar_switch_keeps_entity_id_but_new_setups_use_actions(existing, hidden_by):
+def test_legacy_solar_switch_keeps_identity_and_visibility_but_new_setups_use_actions(existing, hidden_by):
     tree = ast.parse((ROOT / "switch.py").read_text())
     helper = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_legacy_solar_surplus_switch")
     entity_id = "switch.renamed_solar" if existing else None
@@ -172,10 +172,7 @@ def test_legacy_solar_switch_keeps_entity_id_but_new_setups_use_actions(existing
     if existing:
         assert result == "legacy entity"
         factory.assert_called_once_with(hass, entry)
-        if hidden_by is None:
-            registry.async_update_entity.assert_called_once_with(entity_id, hidden_by="integration")
-        else:
-            registry.async_update_entity.assert_not_called()
+        registry.async_update_entity.assert_not_called()
     else:
         assert result is None
         factory.assert_not_called()

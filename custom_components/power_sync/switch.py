@@ -222,7 +222,7 @@ async def async_setup_entry(
     )
 
     entities = []
-    # Keep old entity IDs callable for existing automations, hidden from the UI.
+    # Preserve existing entity/device/area automation targets; new installs use actions.
     if legacy_solar_switch := _legacy_solar_surplus_switch(hass, entry):
         entities.append(legacy_solar_switch)
     if native_amber := hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get("amber_smartshift_coordinator"):
@@ -454,9 +454,8 @@ def _legacy_solar_surplus_switch(hass, entry):
     )
     if entity_id is None:
         return None
-    registered = registry.async_get(entity_id)
-    if registered.hidden_by is None:
-        registry.async_update_entity(entity_id, hidden_by=er.RegistryEntryHider.INTEGRATION)
+    # Hiding the entity would break indirect device/area/label service targets.
+    # Keep registry visibility and identity untouched for compatibility.
     return SolarSurplusChargingSwitch(hass, entry)
 
 
