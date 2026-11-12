@@ -32,6 +32,19 @@ or allow the optimizer's next cycle. Other battery or EV safety checks still
 apply. Success does not establish historical command execution or actual battery
 grid charging.
 
+If a Scheduled Charging session has ended, its expired ownership lease no longer
+blocks read-only recovery for the same verified native vehicle source. Unresolved
+commands, changed identities and active owners still block recovery. This applies
+to existing retained reservations after updating; no store edit is needed.
+
+**PowerSync: Inspect Tesla EV recovery status** now includes `headroom_recovery`.
+It reports the command route and read-only settlement route separately, whether
+a sidecar hold exists, whether a matching reservation is loaded, and the exact
+native-source selection verdict and matching-source count. It does not refresh
+the vehicle or meter. `no_retained_history` describes the command journal; it does
+not mean no headroom reservation exists. A `native_source_unavailable` response
+also includes this projection under `preflight`; send that response if refused.
+
 If the action returns `success: false`, keep the reservation and use the returned
 `error` to choose the next step:
 
@@ -58,8 +71,11 @@ unanswered failure.
 The service targets one exact entry/VIN reservation, serializes with site
 admission, and binds the retained producer identity to the matching native
 vehicle source and local meter. It refuses active provider tasks, live/recovered
-owners, native control claims, blocked routes, sidecar holds and runtime changes.
+owners, native control claims, unsafe blocked routes, sidecar holds and runtime changes.
 Authorization is rechecked around awaits and revoked when the attempt ends.
+An otherwise valid native route whose only failed check is its ended ownership
+lease may supply read-only stop proof when no command or hazard remains unresolved.
+Its command route and historical journal remain unchanged.
 
 Independent reads use the qualified concrete cloud reader, including explicit
 Teslemetry refresh consent, without command-router calls, wake, or publishing

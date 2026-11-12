@@ -313,13 +313,13 @@ def _site_evidence(hass, entry, runtime, vin, profile, *, native_entity_id=None,
 
 def _managed_native_entity(hass, entry, runtime, vin, record, registration):
     """Bind read-only settlement to remembered or unique exact native evidence."""
-    from .tesla_ev_recovery import get_vehicle_route, _compatible
+    from .tesla_ev_recovery import get_headroom_recovery_route, _compatible
     from .native_rate_budget import managed_devices, provider_device
     from homeassistant.helpers import entity_registry as er
 
     if runtime.get("_tesla_ev_recovery_sidecar_hold") is not None:
         return None
-    route = get_vehicle_route(hass, entry, vin)
+    route = get_headroom_recovery_route(hass, entry, vin)
     if route is not None and route.get("kind") == "blocked":
         return None
     if getattr(registration, "platform", None) in {"tesla_fleet", "teslemetry"}:
@@ -413,9 +413,9 @@ async def refresh_managed_records(hass, budget, *, vins=None, site=None, native_
         # unknown so reconciliation retains the uncertain reservation.
         entry = runtime.get("entry")
         native = None
-        from .tesla_ev_recovery import get_vehicle_route
+        from .tesla_ev_recovery import get_headroom_recovery_route
         if (runtime.get("_tesla_ev_recovery_sidecar_hold") is not None
-                or (get_vehicle_route(hass, entry, vin) or {}).get("kind") == "blocked"):
+                or (get_headroom_recovery_route(hass, entry, vin) or {}).get("kind") == "blocked"):
             continue
         native_entity_id = _managed_native_entity(hass, entry, runtime, vin, record, registration)
         native_producer = getattr(registration, "platform", None) in {"tesla_fleet", "teslemetry"}
@@ -476,7 +476,7 @@ async def refresh_managed_records(hass, budget, *, vins=None, site=None, native_
                 and _identity(registry.async_get(record["entity_id"])) == record["identity"]
                 and (get_ev_ownership(hass, entry, vin)[1] if entry is not None else None) is owner
                 and runtime.get("_tesla_ev_recovery_sidecar_hold") is None
-                and (get_vehicle_route(hass, entry, vin) or {}).get("kind") != "blocked"
+                and (get_headroom_recovery_route(hass, entry, vin) or {}).get("kind") != "blocked"
                 and (native is None or (
                     _managed_native_entity(hass, entry, runtime, vin, record, registration) == native_entity_id
                     and native_charge_setting_current(hass, vin, native_entity_id, native)))

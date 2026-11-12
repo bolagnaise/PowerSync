@@ -42,33 +42,45 @@ def vehicle_reports(hass, vin):
 
 def _native_charge_source(hass, vin, entity_id):
     """Pin the native entry/runtime/device which owns one registered entity."""
+    return _native_charge_source_result(hass, vin, entity_id)[0]
+
+
+def native_charge_source_status(hass, vin, entity_id):
+    """Project the exact source-selection verdict without reads or runtime IDs."""
+    return _native_charge_source_result(hass, vin, entity_id)[1]
+
+
+def _native_charge_source_result(hass, vin, entity_id):
     from homeassistant.helpers import entity_registry as er
     from .tesla_ev_observation import _device_identity, _identifiers, _provider_identifiers
 
     registration = er.async_get(hass).async_get(entity_id)
+    if registration is None:
+        return None, {"available": False, "reason": "registration_missing", "matching_sources": 0}
     domain = getattr(registration, "platform", None)
     if domain not in {"tesla_fleet", "teslemetry"} or getattr(registration, "disabled_by", None) is not None:
-        return None
+        return None, {"available": False, "reason": "registration_not_enabled_native", "matching_sources": 0}
     entry_id = getattr(registration, "config_entry_id", None)
     device_id = getattr(registration, "device_id", None)
     unique_id = getattr(registration, "unique_id", None)
     if not all(isinstance(value, str) and value for value in (entry_id, device_id, unique_id)):
-        return None
+        return None, {"available": False, "reason": "registration_identity_incomplete", "matching_sources": 0}
     normalized = str(vin or "").upper()
     matching = [source for source in vehicle_sources(hass, normalized)
                 if source[0] == domain
                 and getattr(source[1], "entry_id", None) == entry_id
                 and _device_identity(hass, source[2], domain, normalized)[0] == device_id]
     if len(matching) != 1:
-        return None
+        return None, {"available": False, "reason": "native_source_missing" if not matching else
+                      "native_source_ambiguous", "matching_sources": len(matching)}
     _domain, entry, vehicle, coordinator = matching[0]
     device = getattr(vehicle, "device", None)
     if _provider_identifiers(device, domain) != frozenset({(domain, normalized)}):
-        return None
+        return None, {"available": False, "reason": "native_device_identity_mismatch", "matching_sources": 1}
     token = (domain, entry_id, device_id, unique_id,
              id(entry), id(getattr(entry, "runtime_data", None)),
              id(vehicle), id(coordinator), id(device), tuple(sorted(_identifiers(device))))
-    return token
+    return token, {"available": True, "reason": "available", "matching_sources": 1}
 
 
 def native_charge_setting(hass, vin, entity_id, *, observation=None):

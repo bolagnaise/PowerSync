@@ -78,6 +78,117 @@ async def recover(c, **kwargs):
                                              allow_provider_refresh=True, **kwargs)
 
 
+def ended_session_route(c):
+    """An exact native route survives its now-ended Scheduled Charging lease."""
+    a = c.a
+    ev = importlib.import_module(a.m.__package__ + '.tesla_ev_recovery')
+    route = dict(kind='ha', entity_id='switch.car_charge', vehicle_id=VIN,
+        entity_identity=ev._identity(a.hass, 'switch.car_charge'),
+        session_scope=dict(owner='scheduled', owner_mode='scheduled', session_id='ended',
+                           ownership_generation=1, lease_id='ended-lease'))
+    route['pairing_digest'] = ev._pairing_digest(a.entry, route, identity=route['entity_identity'])
+    a.runtime[ev.RECOVERY_KEY] = {'vehicles': {
+        VIN: {'route': route, 'attempts': {'old-start': {
+            'attempt_id': 'old-start', 'operation': 'start', 'route': deepcopy(route),
+            'outcome': 'sent_unknown', 'recovery_retired': {
+                'state': 'native_state_reconciled', 'historical_outcome': 'unknown'}}}, 'hazards': {}}}}
+    return ev, route
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('legacy', [False, True])
+async def test_ended_native_session_can_recover_headroom_without_reauthorizing_controls(recovery_case, legacy):
+    c = recovery_case
+    ev, route = ended_session_route(c)
+    key = ev.LEGACY_RECOVERY_KEY if legacy else ev.RECOVERY_KEY
+    if legacy:
+        c.a.runtime[key] = c.a.runtime.pop(ev.RECOVERY_KEY)
+    assert ev.get_vehicle_route(c.a.hass, c.a.entry, VIN)['reason'] == 'route_identity_changed'
+    before = deepcopy(c.a.runtime[key])
+    keys = set(c.a.runtime)
+    inspection = ev.ev_recovery_status(c.a.hass, c.a.entry, VIN)
+    assert inspection['reason'] == 'no_retained_history'
+    assert not inspection['recovery_required']
+    preflight = inspection['headroom_recovery']
+    assert preflight['reservation_present'] and preflight['registration_identity_matches']
+    assert preflight['control_route'] == dict(kind='blocked', reason='route_identity_changed')
+    assert preflight['settlement_route'] == dict(kind='ha', reason=None)
+    assert preflight['native_source'] == dict(available=True, reason='available', matching_sources=1)
+    assert c.reads == c.meters == []
+    assert c.a.runtime[key] == before and set(c.a.runtime) == keys
+    assert await recover(c) == dict(success=True, vin=VIN, reservation_cleared=True)
+    assert len(c.reads) == len(c.meters) == 2
+    assert VIN not in c.a.store.data['managed']
+    assert c.a.runtime[key] == before and set(c.a.runtime) == keys | {'_ev_headroom_recovery_attempts'}
+    assert ev.get_vehicle_route(c.a.hass, c.a.entry, VIN)['kind'] == 'blocked'
+
+
+@pytest.mark.asyncio
+async def test_ended_native_session_passively_settles_only_advancing_stopped_proof(recovery_case):
+    c, a = recovery_case, recovery_case.a
+    ev, _ = ended_session_route(c)
+    await a.m.refresh_managed_records(a.hass, a.budget)
+    assert VIN in a.budget.managed  # Unchanged old stream cannot prove recovery.
+    a.charge['timestamp'] = c.now[0]
+    await a.m.refresh_managed_records(a.hass, a.budget)
+    assert VIN in a.budget.managed
+    c.now[0] += 5
+    a.charge['timestamp'] = a.local.last_success_ts = c.now[0]
+    await a.m.refresh_managed_records(a.hass, a.budget)
+    assert VIN not in a.budget.managed and VIN not in a.store.data['managed']
+    assert ev.get_vehicle_route(a.hass, a.entry, VIN)['kind'] == 'blocked'
+    assert c.reads == c.meters == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('variant,reason,count', [
+    ('missing', 'native_source_missing', 0), ('ambiguous', 'native_source_ambiguous', 2),
+    ('disabled', 'registration_not_enabled_native', 0),
+    ('wrong_device', 'native_source_missing', 0)])
+async def test_recovery_failure_exposes_source_verdict_without_reads(recovery_case, variant, reason, count):
+    c, a = recovery_case, recovery_case.a
+    ev, _ = ended_session_route(c)
+    if variant == 'missing': a.provider.runtime_data.vehicles.clear()
+    if variant == 'ambiguous': a.provider.runtime_data.vehicles *= 2
+    if variant == 'disabled': c.registry.entities['switch.car_charge'].disabled_by = 'user'
+    if variant == 'wrong_device': a.provider.runtime_data.vehicles[0].device.id = 'other'
+    before = deepcopy(a.store.data)
+    response = await recover(c)
+    assert response['error'] == 'native_source_unavailable'
+    assert response['preflight']['native_source'] == dict(available=False, reason=reason, matching_sources=count)
+    assert a.store.data == before and c.reads == c.meters == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('change', ['identity', 'anchor', 'pairing', 'vehicle', 'unknown',
+                                   'malformed', 'hold', 'owner', 'hazard', 'pending'])
+async def test_ended_native_session_keeps_other_recovery_fences(recovery_case, monkeypatch, change):
+    c, a = recovery_case, recovery_case.a
+    ev, route = ended_session_route(c)
+    ledger = a.runtime[ev.RECOVERY_KEY]['vehicles'][VIN]
+    if change == 'identity': route['entity_identity']['unique_id'] = 'replaced'
+    if change == 'anchor':
+        route['session_anchor'] = {'entity_id': 'number.absent', 'entity_identity': {}}
+    if change == 'pairing': route['pairing_digest'] = 'changed'
+    if change == 'vehicle': route['vehicle_id'] = '5YJ3E1EA7KF000002'
+    if change == 'unknown':
+        ledger['attempts']['unknown'] = dict(attempt_id='unknown', route=deepcopy(route),
+            entity_id=route['entity_id'], outcome='sent_unknown', operation='start')
+    if change == 'malformed': a.runtime[ev.RECOVERY_KEY] = 'malformed'
+    if change == 'hold': a.runtime['_tesla_ev_recovery_sidecar_hold'] = 'held'
+    if change == 'owner':
+        ownership = importlib.import_module(a.m.__package__ + '.automations.ev_ownership')
+        monkeypatch.setattr(ownership, 'get_ev_ownership', lambda *_: ('new', {'owner': 'scheduled'}))
+    if change == 'hazard':
+        ledger['hazards']['ble'] = dict(kind='ble_quarantine', state='pending')
+    if change == 'pending':
+        a.runtime[ev._SIDECAR_STATE_KEY] = {'incidents': {
+            'pending': {'activation_pending': True, 'vehicle_ids': [VIN]}}}
+    assert not (await recover(c))['success']
+    assert c.reads == c.meters == []
+    assert VIN in a.budget.managed
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize('other_site', ['site', 'another-site'])
 async def test_explicit_recovery_clears_restored_start_durably_without_stream_update(recovery_case, other_site):

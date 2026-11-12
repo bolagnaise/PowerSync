@@ -125,7 +125,7 @@ def _recovery(runtime: dict[str, Any], *, create: bool) -> dict[str, Any] | None
     return recovery
 
 
-def _ledger(runtime: dict[str, Any], vid: str, *, create=False) -> dict[str, Any] | None:
+def _ledger(runtime: dict[str, Any], vid: str, *, create=False, migrate=True) -> dict[str, Any] | None:
     recovery = _recovery(runtime, create=create)
     if recovery is None:
         return None
@@ -157,7 +157,7 @@ def _ledger(runtime: dict[str, Any], vid: str, *, create=False) -> dict[str, Any
     for hazard in ledger["hazards"].values():
         if not isinstance(hazard, dict):
             return None
-    if RECOVERY_KEY not in runtime and LEGACY_RECOVERY_KEY in runtime:
+    if migrate and RECOVERY_KEY not in runtime and LEGACY_RECOVERY_KEY in runtime:
         # Migrate only after the complete selected ledger has passed schema
         # validation; malformed legacy evidence remains byte-for-byte intact.
         # Use a copy so a failed mutation can remove the migrated root without
@@ -3692,6 +3692,49 @@ def _unresolved_route_reason(routes: list[Mapping[str, Any]]) -> str:
     return "ble_recovery" if kinds == {"ble"} else "transport_recovery"
 
 
+def ev_headroom_recovery_status(hass, entry, vin):
+    """Inspect loaded exact-entry preflight evidence without refresh or mutation."""
+    from .native_rate_budget import RUNTIME_KEY, site_identity
+
+    runtime = hass.data.get("power_sync", {}).get(entry.entry_id, {})
+    route = get_vehicle_route(hass, entry, vin)
+    settlement_route = get_headroom_recovery_route(hass, entry, vin)
+
+    def verdict(value):
+        return {"kind": value.get("kind"), "reason": value.get("reason")} if value else None
+
+    status = {
+        "sidecar_hold_present": runtime.get("_tesla_ev_recovery_sidecar_hold") is not None,
+        "control_route": verdict(route), "settlement_route": verdict(settlement_route),
+    }
+    budget = hass.data.get(RUNTIME_KEY)
+    if budget is None or not getattr(budget, "loaded", False):
+        return {**status, "reason": "headroom_budget_unavailable", "reservation_present": None}
+    record = budget.managed.get(vin)
+    if record is None:
+        return {**status, "reason": "reservation_not_found", "reservation_present": False}
+    if record.get("entry_id") != entry.entry_id or record.get("site") != site_identity(entry):
+        return {**status, "reason": "reservation_scope_mismatch", "reservation_present": None}
+    from homeassistant.helpers import entity_registry as er
+    from .native_rate_admission import _identity as managed_identity, _managed_native_entity
+    from .native_rate_telemetry import native_charge_source_status
+
+    registration = er.async_get(hass).async_get(record.get("entity_id"))
+    identity_matches = managed_identity(registration) == record.get("identity")
+    native = _managed_native_entity(hass, entry, runtime, vin, record, registration) if identity_matches else None
+    # Show source validity separately from route eligibility. A blocked route
+    # must not hide a disabled/missing native producer in the same response.
+    candidate = native or (record.get("entity_id") if getattr(registration, "platform", None)
+                          in {"tesla_fleet", "teslemetry"} else None)
+    source = native_charge_source_status(hass, vin, candidate) if candidate else None
+    return {**status, "reservation_present": True, "registration_identity_matches": identity_matches,
+            "registration_state": "missing" if registration is None else
+                                  "disabled" if getattr(registration, "disabled_by", None) is not None else "enabled",
+            "native_entity_id": native, "native_source": source,
+            "reason": "reservation_identity_changed" if not identity_matches else
+                      "native_entity_unavailable" if native is None else source["reason"]}
+
+
 def ev_recovery_status(hass: Any, entry: Any, vehicle_id: Any) -> dict[str, Any]:
     """Inspect one VIN without migrating, refreshing or changing its history."""
     if not isinstance(vehicle_id, str) or not re.fullmatch(r"[A-HJ-NPR-Z0-9]{17}", vehicle_id):
@@ -3755,6 +3798,7 @@ def ev_recovery_status(hass: Any, entry: Any, vehicle_id: Any) -> dict[str, Any]
         "generation": current_vehicle_generation(hass, entry, vehicle_id),
         "journal_revision": state.get("revision") if isinstance(state, Mapping) else None,
         "retained_attempts": rows, "reason": reason,
+        "headroom_recovery": ev_headroom_recovery_status(hass, entry, vehicle_id),
         "recovery_required": malformed or bool(routes) or activation_pending if available else None,
         "native_retirement_available": False,
         "native_state_reconciliation_available": reason == "native_recovery",
@@ -3790,7 +3834,7 @@ def get_vehicle_route(hass: Any, entry: Any, vehicle_id: Any) -> dict[str, Any] 
         if (isinstance(incident, Mapping) and incident.get("activation_pending") is True
                 and _incident_covers_vehicle(incident, vid)):
             return _blocked(vid, None, "ble_recovery_commit_pending")
-    ledger = _ledger(runtime, vid) if runtime else None
+    ledger = _ledger(runtime, vid, migrate=False) if runtime else None
     if ledger is None:
         return None
     route = ledger.get("route")
@@ -3820,6 +3864,45 @@ def get_vehicle_route(hass: Any, entry: Any, vehicle_id: Any) -> dict[str, Any] 
     if not _compatible(hass, entry, runtime, vid, route):
         return _blocked(vid, route, "route_identity_changed")
     return deepcopy(dict(route))
+
+
+def get_headroom_recovery_route(hass: Any, entry: Any, vehicle_id: Any) -> dict[str, Any] | None:
+    """Resolve read-only settlement after a native session ends, never controls.
+
+    An ended lease still invalidates the command route. It must not strand
+    independent stop-proof acquisition for the unchanged native producer.
+    """
+    route = get_vehicle_route(hass, entry, vehicle_id)
+    if route is None or route.get("reason") != "route_identity_changed":
+        return route
+    runtime = _runtime(hass, entry)
+    vid = str(vehicle_id or "")
+    ledger = _ledger(runtime, vid, migrate=False) if runtime else None
+    saved = ledger.get("route") if ledger else None
+    if (not isinstance(saved, Mapping) or saved.get("kind") != "ha"
+            or saved.get("cleanup_only") is True
+            or not isinstance(saved.get("session_scope"), Mapping)
+            or _session_scope(saved["session_scope"]) is None
+            or _unresolved_routes(ledger)
+            or any(not hazard.get("recovery_retired") for hazard in _hazards(ledger))
+            or runtime.get("_tesla_ev_recovery_sidecar_hold") is not None):
+        return route
+    from .automations.ev_ownership import get_ev_ownership
+    # Do not interpret unavailable ownership as proof that a lease ended.
+    try:
+        lease_id, owner = get_ev_ownership(hass, entry, vid)
+    except Exception:
+        return route
+    if lease_id is not None or owner is not None:
+        return route
+    binding = dict(saved)
+    binding.pop("session_scope")
+    identity = _identity(hass, str(saved.get("entity_id") or ""))
+    if (not isinstance(identity, Mapping)
+            or identity.get("platform") not in {"tesla_fleet", "teslemetry"}
+            or not _compatible(hass, entry, runtime, vid, binding)):
+        return route
+    return deepcopy(binding)
 
 
 def pending_ble_attempt(hass: Any, entry: Any, vehicle_id: Any) -> RecoveryTicket | None:

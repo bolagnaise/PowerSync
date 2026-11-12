@@ -60,7 +60,8 @@ async def async_recover_ev_headroom(hass, entry, vin, *, allow_provider_refresh=
     native_entity = _managed_native_entity(hass, entry, runtime, vin, record, registration)
     source = _native_charge_source(hass, vin, native_entity) if native_entity else None
     if source is None:
-        return result("native_source_unavailable")
+        from .tesla_ev_recovery import ev_headroom_recovery_status
+        return result("native_source_unavailable", preflight=ev_headroom_recovery_status(hass, entry, vin))
     original = deepcopy(record)
     active = True
 
