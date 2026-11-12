@@ -1295,6 +1295,7 @@ async def test_full_unload_and_settings_setup_boundary_keep_released_cloud_avail
     ns["hass"].data["power_sync_settings"] = {"entry": {"store": ns["store"], "submissions": submissions}}
     ns["hass"].config_entries.async_unload_platforms = AsyncMock(return_value=True)
     ns["hass"].services = SimpleNamespace(async_remove=Mock())
+    ns["hass"].config_entries.async_entries = lambda domain: [ns["entry"]]
     real_asyncio = asyncio
     class BoundedClock:
         def __getattr__(self, name):
@@ -1304,10 +1305,12 @@ async def test_full_unload_and_settings_setup_boundary_keep_released_cloud_avail
             return await real_asyncio.wait(tasks, timeout=.01)
     ns.update(asyncio=BoundedClock(), _stop_tesla_native_rate=AsyncMock(), PLATFORMS=[],
               SERVICE_SYNC_TOU="sync_tou", SERVICE_SYNC_NOW="sync_now",
-              cleanup_dynamic_ev_entry=Mock(), STORAGE_VERSION=1, STORAGE_KEY="test")
+              cleanup_dynamic_ev_entry=Mock(), STORAGE_VERSION=1, STORAGE_KEY="test",
+              _unregister_ev_charging_services=Mock())
     unload = load_function(ROOT / "__init__.py", "async_unload_entry", ns, strip_imports=True)
     try:
         assert await asyncio.wait_for(unload(ns["hass"], ns["entry"]), .5)
+        ns["_unregister_ev_charging_services"].assert_called_once_with(ns["hass"])
         assert not receipt.done()
         # A reload must not rely on an artificially pre-created entry mapping.
         await load_settings_startup(ns)()

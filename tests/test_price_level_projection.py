@@ -341,7 +341,10 @@ def test_price_level_settings_write_only_schedules_nonblocking_replan():
     start = source.index("class PriceLevelChargingSettingsView")
     end = source.index("class PriceLevelChargingStatusView", start)
     view_source = source[start:end]
-    assert "_schedule_settings_reoptimization" in view_source
-    assert "await opt_coordinator._run_optimization" not in view_source
-    assert "_start_charging(" not in view_source
-    assert "_stop_charging(" not in view_source
+    assert "await async_update_charging_config(" in view_source
+    shared_source = (INIT_PATH.parent / "ev_charging_services.py").read_text()
+    assert "_schedule_settings_reoptimization" in shared_source
+    for path_source in (view_source, shared_source):
+        assert "await opt_coordinator._run_optimization" not in path_source
+        assert "_start_charging(" not in path_source
+        assert "_stop_charging(" not in path_source
