@@ -1363,6 +1363,8 @@ class AutomationEngine:
 
     async def _async_get_ocpp_state(self) -> Dict[str, Any]:
         """Get OCPP charger state from OCPP integration entities."""
+        from homeassistant.helpers import entity_registry as er
+
         from .ocpp_status import (
             is_hacs_ocpp_energy_entity,
             is_hacs_ocpp_status_entity,
@@ -1376,12 +1378,17 @@ class AutomationEngine:
         }
 
         all_states = self._hass.states.async_all()
+        entity_registry = er.async_get(self._hass)
 
         for state in all_states:
             entity_id = state.entity_id
             state_value = state.state
 
             if state_value in ("unavailable", "unknown"):
+                continue
+
+            registry_entry = entity_registry.async_get(entity_id)
+            if registry_entry is None or registry_entry.platform != "ocpp":
                 continue
 
             # OCPP status sensor — match both sensor.*_status and sensor.*_status_connector.

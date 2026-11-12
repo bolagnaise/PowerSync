@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import ast
+import asyncio
+import logging
 import sys
 import types
 from pathlib import Path
 from types import SimpleNamespace
+
+from conftest import load_source_node
 
 
 ROOT = Path(__file__).resolve().parent.parent / "custom_components" / "power_sync"
@@ -140,3 +145,58 @@ def test_finishing_without_power_ends_session():
     assert should_end_ocpp_session("charging", 0, has_session=True) is False
     assert should_end_ocpp_session("available", 0, has_session=True) is True
     assert should_end_ocpp_session("available", 0, has_session=False) is False
+
+
+def _collect_automation_ocpp_state(monkeypatch, rows):
+    """Exercise the real collector with exact entity-registry ownership."""
+    helpers = types.ModuleType("power_sync.automations.ocpp_status")
+    exec(compile((ROOT / "automations/ocpp_status.py").read_text(), str(ROOT), "exec"), helpers.__dict__)
+    monkeypatch.setitem(sys.modules, helpers.__name__, helpers)
+    registry = SimpleNamespace(
+        async_get=lambda entity_id: next(
+            (SimpleNamespace(platform=platform) for name, _value, platform in rows
+             if name == entity_id and platform is not None),
+            None,
+        )
+    )
+    ha_helpers = types.ModuleType("homeassistant.helpers")
+    ha_helpers.entity_registry = SimpleNamespace(async_get=lambda hass: registry)
+    monkeypatch.setitem(sys.modules, "homeassistant.helpers", ha_helpers)
+    path = ROOT / "automations/__init__.py"
+    method = load_source_node(path, "_async_get_ocpp_state", parent="AutomationEngine")
+    namespace = {
+        "__package__": "power_sync.automations",
+        "Dict": dict,
+        "Any": object,
+        "_LOGGER": logging.getLogger(__name__),
+    }
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[method], type_ignores=[])), str(path), "exec"), namespace)
+    states = [SimpleNamespace(entity_id=name, state=value) for name, value, _platform in rows]
+    engine = SimpleNamespace(_hass=SimpleNamespace(states=SimpleNamespace(async_all=lambda: states)))
+    return asyncio.run(namespace["_async_get_ocpp_state"](engine))
+
+
+def test_automation_ocpp_state_ignores_ble_and_unrelated_status_sensors(monkeypatch):
+    """A nearby Tesla or tariff sensor must not invent an OCPP connection."""
+    result = _collect_automation_ocpp_state(monkeypatch, [
+        ("sensor.pricehawk_zerohero_status", "pending", "pricehawk"),
+        ("binary_sensor.tesla_flinn_ble_status", "on", "esphome"),
+        ("binary_sensor.tesla_yf88_status", "on", "esphome"),
+        ("sensor.unregistered_status_connector", "Charging", None),
+        ("sensor.unrelated_energy_session", "42", "template"),
+    ])
+
+    assert result == {"status": "", "is_connected": False, "energy_kwh": 0}
+
+
+def test_automation_ocpp_state_keeps_real_connector_and_energy(monkeypatch):
+    result = _collect_automation_ocpp_state(monkeypatch, [
+        ("sensor.pricehawk_zerohero_status", "pending", "pricehawk"),
+        ("sensor.wallbox_status", "Available", "ocpp"),
+        ("sensor.wallbox_status_connector", "Suspended_EVSE", "ocpp"),
+        ("sensor.wallbox_energy_session", "3.5", "ocpp"),
+        ("sensor.unrelated_status_connector", "Charging", "template"),
+        ("sensor.unrelated_energy_session", "42", "template"),
+    ])
+
+    assert result == {"status": "suspendedevse", "is_connected": True, "energy_kwh": 3.5}
