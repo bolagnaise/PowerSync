@@ -889,3 +889,85 @@ set_teslemetry_charge_on_solar:
           max: 100
           step: 1
           unit_of_measurement: '%'
+
+set_solar_surplus_charging:
+  name: Set Solar Surplus EV charging
+  description: >-
+    Enable or disable Solar Surplus using its saved PowerSync settings. Does not
+    force charging or bypass ownership, monitoring, price or battery safeguards.
+    Changes take effect through the normal charging evaluation cycle.
+  fields:
+    entry_id:
+      name: PowerSync integration
+      required: true
+      selector:
+        config_entry:
+          integration: power_sync
+    enabled:
+      name: Enabled
+      required: true
+      selector:
+        boolean:
+
+set_scheduled_charging:
+  name: Set Scheduled EV charging
+  description: >-
+    Enable or disable Scheduled using its saved PowerSync settings. Does not
+    force charging or bypass ownership, monitoring, price or battery safeguards.
+    Changes take effect through the normal charging evaluation cycle.
+  fields:
+    entry_id:
+      name: PowerSync integration
+      required: true
+      selector:
+        config_entry:
+          integration: power_sync
+    enabled:
+      name: Enabled
+      required: true
+      selector:
+        boolean:
+
+set_price_level_charging:
+  name: Set Price Level EV charging
+  description: >-
+    Enable or disable Price Level using its saved PowerSync settings. Does not
+    force charging or bypass ownership, monitoring, price or battery safeguards.
+    Changes take effect through the normal charging evaluation cycle.
+  fields:
+    entry_id:
+      name: PowerSync integration
+      required: true
+      selector:
+        config_entry:
+          integration: power_sync
+    enabled:
+      name: Enabled
+      required: true
+      selector:
+        boolean:
+
+set_smart_schedule_charging:
+  name: Set Smart Schedule EV charging
+  description: >-
+    Enable or disable Smart Schedule using its saved PowerSync settings. Does not
+    force charging or bypass ownership, monitoring, price or battery safeguards.
+    Changes take effect through the normal charging evaluation cycle.
+  fields:
+    entry_id:
+      name: PowerSync integration
+      required: true
+      selector:
+        config_entry:
+          integration: power_sync
+    enabled:
+      name: Enabled
+      required: true
+      selector:
+        boolean:
+    vehicle_id:
+      name: Smart Schedule vehicle ID
+      description: Exact ID of a vehicle already configured in PowerSync Smart Schedule.
+      required: true
+      selector:
+        text:

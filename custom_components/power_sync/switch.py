@@ -75,6 +75,7 @@ from .const import (
 )
 from .monitoring import async_prepare_monitoring_handoff, finish_monitoring_handoff
 from .tesla_grid_control import tesla_grid_charging_enabled_from_site_info
+
 from .solar_surplus_config import get_stored_solar_surplus_config
 from .solar_surplus_control import (
     SIGNAL_SOLAR_SURPLUS_CONFIG_UPDATED,
@@ -221,7 +222,9 @@ async def async_setup_entry(
     )
 
     entities = []
-    entities.append(SolarSurplusChargingSwitch(hass, entry))
+    # Keep old entity IDs callable for existing automations, hidden from the UI.
+    if legacy_solar_switch := _legacy_solar_surplus_switch(hass, entry):
+        entities.append(legacy_solar_switch)
     if native_amber := hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get("amber_smartshift_coordinator"):
         from .amber_smartshift.entities import AmberSmartShiftSwitch
         entities.append(AmberSmartShiftSwitch(native_amber, entry))
@@ -441,6 +444,20 @@ async def async_setup_entry(
             _add_capability_gated_switches(),
             name=f"{DOMAIN}_capability_gated_switches",
         )
+
+
+def _legacy_solar_surplus_switch(hass, entry):
+    """Retain an existing entity ID for automations without adding new switches."""
+    registry = er.async_get(hass)
+    entity_id = registry.async_get_entity_id(
+        "switch", DOMAIN, f"{entry.entry_id}_solar_surplus_ev_charging"
+    )
+    if entity_id is None:
+        return None
+    registered = registry.async_get(entity_id)
+    if registered.hidden_by is None:
+        registry.async_update_entity(entity_id, hidden_by=er.RegistryEntryHider.INTEGRATION)
+    return SolarSurplusChargingSwitch(hass, entry)
 
 
 class SolarSurplusChargingSwitch(SwitchEntity):

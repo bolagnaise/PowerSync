@@ -23007,50 +23007,11 @@ class PriceLevelChargingSettingsView(HomeAssistantView):
                     "error": "Storage not available"
                 }, status=503)
 
-            stored_data = getattr(store, '_data', {}) or {}
-            settings = stored_data.get("price_level_charging", {
-                "enabled": False,
-                "recovery_soc": 40,
-                "recovery_price_cents": 30,
-                "opportunity_price_cents": 10,
-                "preserve_home_battery": False,
-                "no_grid_import": False,
-                "home_battery_minimum": 20,
-            })
+            from .ev_charging_services import async_update_charging_config
 
-            # Update with provided values
-            for key in [
-                "enabled",
-                "recovery_soc",
-                "recovery_price_cents",
-                "opportunity_price_cents",
-                "preserve_home_battery",
-                "no_grid_import",
-                "home_battery_minimum",
-            ]:
-                if key in data:
-                    settings[key] = data[key]
-            if settings.get("preserve_home_battery"):
-                settings["no_grid_import"] = False
-            elif settings.get("no_grid_import"):
-                settings["preserve_home_battery"] = False
-
-            stored_data["price_level_charging"] = settings
-            store._data = stored_data
-            await store.async_save()
-
-            # Refresh the advisory 24-hour projection after returning the saved
-            # settings.  The coordinator coalesces repeated updates and this
-            # does not run any EV charger command path.
-            entry_data = self._hass.data.get(DOMAIN, {}).get(
-                self._config_entry.entry_id, {}
+            settings = await async_update_charging_config(
+                self._hass, self._config_entry, store, "price_level_charging", data,
             )
-            opt_coordinator = entry_data.get("optimization_coordinator")
-            schedule_refresh = getattr(
-                opt_coordinator, "_schedule_settings_reoptimization", None
-            )
-            if schedule_refresh:
-                schedule_refresh()
 
             _LOGGER.info(
                 f"💰 Price-level charging settings updated: enabled={settings.get('enabled')}, "
@@ -23181,35 +23142,11 @@ class ScheduledChargingSettingsView(HomeAssistantView):
                     "error": "Storage not available"
                 }, status=503)
 
-            stored_data = getattr(store, '_data', {}) or {}
-            settings = stored_data.get("scheduled_charging", {
-                "enabled": False,
-                "start_time": "00:00",
-                "end_time": "06:00",
-                "max_price_cents": 30,
-                "preserve_home_battery": False,
-                "no_grid_import": False,
-            })
+            from .ev_charging_services import async_update_charging_config
 
-            # Update with provided values
-            for key in [
-                "enabled",
-                "start_time",
-                "end_time",
-                "max_price_cents",
-                "preserve_home_battery",
-                "no_grid_import",
-            ]:
-                if key in data:
-                    settings[key] = data[key]
-            if settings.get("preserve_home_battery"):
-                settings["no_grid_import"] = False
-            elif settings.get("no_grid_import"):
-                settings["preserve_home_battery"] = False
-
-            stored_data["scheduled_charging"] = settings
-            store._data = stored_data
-            await store.async_save()
+            settings = await async_update_charging_config(
+                self._hass, self._config_entry, store, "scheduled_charging", data,
+            )
 
             _LOGGER.info(f"Scheduled charging settings updated: enabled={settings.get('enabled')}")
 
@@ -47120,6 +47057,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     from .teslemetry_solar import register_services as _register_native_solar_services
     _register_native_solar_services(hass)
+    from .ev_charging_services import register_services as _register_ev_charging_services
+    _register_ev_charging_services(hass)
     from .teslemetry_solar_api import register_http_view as _register_native_solar_http
     _register_native_solar_http(hass)
     from .tesla_schedule_planning import register_http_view as _register_tesla_schedule_planning_http
@@ -53135,9 +53074,14 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.data[DOMAIN].pop(entry.entry_id)
 
     # Remove services if this is the last entry
-    if not hass.data[DOMAIN]:
+    if not any(
+        candidate.entry_id in hass.data[DOMAIN]
+        for candidate in hass.config_entries.async_entries(DOMAIN)
+    ):
         hass.services.async_remove(DOMAIN, SERVICE_SYNC_TOU)
         hass.services.async_remove(DOMAIN, SERVICE_SYNC_NOW)
+        from .ev_charging_services import unregister_services as _unregister_ev_charging_services
+        _unregister_ev_charging_services(hass)
 
     return unload_ok
 

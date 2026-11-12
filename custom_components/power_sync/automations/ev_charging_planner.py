@@ -5390,7 +5390,7 @@ class AutoScheduleExecutor:
         except Exception as e:
             _LOGGER.error(f"Failed to load auto-schedule settings: {e}")
 
-    async def save_settings(self, store) -> None:
+    async def save_settings(self, store, *, raise_errors: bool = False) -> None:
         """Save settings to storage."""
         try:
             from .. import _update_powerwall_store
@@ -5412,6 +5412,8 @@ class AutoScheduleExecutor:
             _LOGGER.debug(f"Saved auto-schedule settings for {len(self._settings)} vehicles")
         except Exception as e:
             _LOGGER.error(f"Failed to save auto-schedule settings: {e}")
+            if raise_errors:
+                raise
             if "generic_ev" in getattr(self, "_settings", {}) and getattr(self, "hass", None) is not None:
                 from .shared_generic_charger import shared_data
                 if shared_data(self.hass, getattr(self, "config_entry", None)) is not None:

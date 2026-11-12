@@ -6,6 +6,7 @@ import asyncio
 import importlib
 import sys
 import types
+from unittest.mock import AsyncMock
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -1324,3 +1325,17 @@ def test_failed_start_backoff_is_exponential_and_bounded(monkeypatch):
 
     assert delays[:4] == [30, 60, 120, 240]
     assert delays[-1] == ev_planner.AUTO_SCHEDULE_START_RETRY_MAX_SECONDS
+
+
+def test_action_smart_schedule_save_reports_storage_failure(monkeypatch):
+    import pytest
+
+    executor = object.__new__(ev_planner.AutoScheduleExecutor)
+    executor._settings = {"car": ev_planner.AutoScheduleSettings(vehicle_id="car", enabled=True)}
+    executor._cached_soc = {}
+    failed_save = AsyncMock(side_effect=OSError("disk full"))
+    monkeypatch.setattr(sys.modules["power_sync"], "_update_powerwall_store", failed_save, raising=False)
+    store = types.SimpleNamespace(async_save=AsyncMock())
+    with pytest.raises(OSError, match="disk full"):
+        asyncio.run(executor.save_settings(store, raise_errors=True))
+    failed_save.assert_awaited_once()
