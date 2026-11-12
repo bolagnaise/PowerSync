@@ -2981,7 +2981,7 @@ class PsTariffCard extends PsCardBase {
     const hm = mins => psTime(hass, new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, mins));
     const ribbon = periods.map(p => {
       const [, c, op] = label(p);
-      return `<span style="--c:var(${c});flex:${p.end - p.start};opacity:${op}"></span>`;
+      return `<span style="position:absolute;left:${(p.start / 1440 * 100).toFixed(4)}%;width:${((p.end - p.start) / 1440 * 100).toFixed(4)}%;height:100%;--c:var(${c});opacity:${op}"></span>`;
     }).join('');
     const unit = psMinorUnit(hass);
     const shown = periods.filter((p, i) => !(i === 0 && periods[periods.length - 1].wrapEnd === p.end));
