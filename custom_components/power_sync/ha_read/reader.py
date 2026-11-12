@@ -26,7 +26,7 @@ TOOLS = frozenset({
     "ha_read_configuration", "ha_get_logs", "ha_get_system", "ha_get_supervisor",
 })
 READERS = TOOLS - {"ha_get_capabilities", "ha_search_entities", "ha_get_states"}
-SECRET_KEY = re.compile(r"(?i)(password|passwd|secret|token|api[_-]?key|authorization|credential|private[_-]?key|cookie|client[_-]?secret)")
+SECRET_KEY = re.compile(r"(?i)(password|passwd|secret|token|api[_-]?key|authorization|credential|private[_-]?key|cookie|client[_-]?secret|passphrase|webhook_id|(?:^|_)(?:pin|code|key)(?:$|_))")
 MAX_RESULT = 256 * 1024
 _TEXT = {"type": "string", "maxLength": 256}
 _IDS = {"type": "array", "items": _TEXT, "maxItems": 1000}
@@ -44,7 +44,7 @@ PROPERTIES = {
     "ha_get_trace": {**_PAGE, "domain": {"type": "string", "enum": ["automation", "script"]}, "item_id": _TEXT, "run_id": _TEXT},
     "ha_get_integration_config": {**_PAGE, "entry_id": _TEXT},
     "ha_get_dashboard": {**_PAGE, "url_path": _TEXT},
-    "ha_read_configuration": {"path": _TEXT},
+    "ha_read_configuration": {**_PAGE, "path": _TEXT},
     "ha_get_logs": {**_PAGE, "source": {"type": "string", "enum": ["core", "system", "power_sync"]}},
     "ha_get_system": {},
     "ha_get_supervisor": {"section": {"type": "string", "enum": ["info", "host", "addons", "backup_metadata"]}},
@@ -70,6 +70,9 @@ class ReadContext:
     expires_at: float
     operations: frozenset[str]
     verify: Callable[["ReadContext", str], bool]
+    grant_id: str = ""
+    revision: str = ""
+    boot: str = ""
 
     def check(self, operation, now):
         try:
@@ -81,7 +84,7 @@ class ReadContext:
             raise ReadError("read_scope_denied")
 
     def binding(self):
-        return [self.installation, self.actor, self.client, self.epoch]
+        return [self.installation, self.actor, self.client, self.epoch, self.grant_id, self.revision, self.boot]
 
 
 def sanitized(value, *, key="", depth=0, budget=None):
@@ -98,11 +101,13 @@ def sanitized(value, *, key="", depth=0, budget=None):
         budget[0] -= len(str(value))
         if budget[0] < 0:
             raise ReadError("result_limit")
-        return value
+        return value if abs(value) <= 2**53 - 1 else {"integer": str(value), "encoding": "decimal"}
     if value is None or type(value) is bool:
         return value
     if type(value) is float:
-        return value if math.isfinite(value) else {"unavailable": True}
+        if not math.isfinite(value):
+            return {"unavailable": True}
+        return value if abs(value) <= 2**53 - 1 else {"number": repr(value), "encoding": "float64"}
     if isinstance(value, Enum):
         return sanitized(value.value, key=key, depth=depth + 1, budget=budget)
     if isinstance(value, datetime):
@@ -133,12 +138,36 @@ def sanitized(value, *, key="", depth=0, budget=None):
 class HAReadBackend:
     """All-domain cached-state reads with actor/epoch-bound opaque pagination."""
 
-    def __init__(self, hass, *, adapters=None, wall=time.time):
-        self.hass, self.wall = hass, wall
+    def __init__(self, hass, *, adapters=None, wall=time.time, projector=None):
+        self.hass, self.wall, self.projector = hass, wall, projector
         self.adapters = dict(adapters or {})
         if self.adapters.keys() - READERS:
             raise ReadError("unsupported_reader")
         self._cursor_key = secrets.token_bytes(32)
+
+    def page(self, context, operation, arguments, records, *, revision, metadata=None):
+        """Page a bounded, primitive snapshot; changing revisions invalidate cursors."""
+        query = {key: value for key, value in arguments.items() if key != "cursor"}
+        expected = {"binding": context.binding(),
+                    "query": hashlib.sha256(json.dumps([operation, query], sort_keys=True).encode()).hexdigest(),
+                    "inventory": revision}
+        offset = self._cursor(arguments["cursor"], expected) if "cursor" in arguments else 0
+        limit = arguments.get("limit", 100)
+        selected, size = [], 0
+        for record in records[offset:offset + limit]:
+            encoded = json.dumps(record, ensure_ascii=False, allow_nan=False).encode()
+            if size + len(encoded) > MAX_RESULT - 8192:
+                if not selected:
+                    raise ReadError("result_limit")
+                break
+            selected.append(record)
+            size += len(encoded)
+        end = offset + len(selected)
+        if offset > len(records):
+            raise ReadError("invalid_or_stale_cursor")
+        return {"records": selected, "total": len(records), "source_revision": revision,
+                "next_cursor": self._token({**expected, "offset": end, "expires_at": self.wall() + 60}) if end < len(records) else None,
+                **(metadata or {})}
 
     def _token(self, value):
         raw = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
@@ -191,11 +220,16 @@ class HAReadBackend:
         if operation == "ha_get_capabilities":
             if arguments:
                 raise ReadError("invalid_query")
-            available = {"ha_get_capabilities", "ha_search_entities", "ha_get_states"} | self.adapters.keys()
+            statuses = {name: adapter.status() if hasattr(adapter, "status") else {"implemented": True, "available": True}
+                        for name, adapter in self.adapters.items()}
+            available = {"ha_get_capabilities", "ha_search_entities", "ha_get_states"} | {
+                name for name, status in statuses.items() if status.get("available") is True}
             result = {"profile": "ha_read_v1", "schema_version": 1,
                       "supported": sorted(available & context.operations),
                       "unavailable": sorted(TOOLS - available),
-                      "complete_profile": READERS <= self.adapters.keys(),
+                      "readers": statuses,
+                      "complete_profile": READERS <= self.adapters.keys() and all(
+                          status.get("reason") != "unsupported_ha_version" for status in statuses.values()),
                       "all_entity_domains": True, "max_page_size": 250}
         elif operation in {"ha_search_entities", "ha_get_states"}:
             if arguments.keys() - {"entity_ids", "domain", "search", "limit", "cursor"}:
@@ -245,7 +279,7 @@ class HAReadBackend:
             if adapter is None:
                 raise ReadError("reader_unavailable")
             try:
-                value = adapter(dict(arguments))
+                value = adapter(context, dict(arguments))
                 if inspect.isawaitable(value):
                     value = await value
                 result = sanitized(value)
@@ -253,6 +287,8 @@ class HAReadBackend:
                 raise
             except Exception:
                 raise ReadError("reader_unavailable") from None
+        if self.projector is not None:
+            result = self.projector(result)
         # Consent can be revoked while an awaited local reader is running.
         context.check(operation, self.wall())
         payload = {"schema_version": 1, "source": "ha_cache_or_reader", "observed_at": self.wall(),

@@ -7,6 +7,7 @@ to produce a schedule, which the execution layer then applies.
 from __future__ import annotations
 
 from ..licensing.guard import optimizer_work, optimizer_command, fenced_call, restoration_work, background_work, OptimizerAccessLost
+from ..regression.temporal_capture import observe_reserve_restore, monitoring as _temporal_monitoring, boundary as _temporal_boundary, boundary_exception as _temporal_exception
 
 import asyncio
 import calendar
@@ -1020,6 +1021,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return await method(*args, automatic=True)
         return await method(*args)
 
+    @observe_reserve_restore
     @restoration_work
     async def _restore_pre_idle_backup_reserve(
         self, battery, context: str = "", bypass_monitoring: bool = False
@@ -1032,7 +1034,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._pre_idle_backup_reserve = None
             self._idle_hold_reserve = None
             return True
-        if not bypass_monitoring and self._monitoring_mode_active():
+        monitoring_active = not bypass_monitoring and self._monitoring_mode_active()
+        _temporal_monitoring(self, monitoring_active)
+        if monitoring_active:
             _LOGGER.info(
                 "[MONITORING] Optimizer would restore pre-IDLE backup reserve to %d%%%s — blocked by monitoring mode",
                 self._pre_idle_backup_reserve,
@@ -1046,6 +1050,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     battery, "restore_backup_reserve_for_monitoring", restore_reserve
                 )
             result = await fenced_call(self, lambda: restore_reserve(self._pre_idle_backup_reserve), 'set_backup_reserve')
+            _temporal_boundary(self, result)
             if result is False:
                 _LOGGER.warning(
                     "Failed to restore backup reserve to %d%%: command returned False "
@@ -1062,6 +1067,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._idle_hold_reserve = None
             return True
         except Exception as e:
+            _temporal_exception(self)
             _LOGGER.warning(
                 "Failed to restore backup reserve to %d%%: %s (will retry next cycle)",
                 self._pre_idle_backup_reserve, e,

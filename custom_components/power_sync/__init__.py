@@ -50684,6 +50684,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     except Exception:
         _LOGGER.warning("PowerSync support diagnostics unavailable; core integration remains active")
 
+    try:
+        from .diagnostics_access.ha import setup as _setup_diagnostics
+        await _setup_diagnostics(hass, entry)
+    except Exception:
+        _LOGGER.warning("Ongoing diagnostics unavailable; energy control remains active")
+
     _LOGGER.info("PowerSync integration setup complete!")
     _LOGGER.info("Domain '%s' registered successfully", DOMAIN)
     _LOGGER.info("Mobile app should now detect the integration")
@@ -53073,6 +53079,12 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     except Exception:
         _LOGGER.warning("PowerSync support diagnostics cleanup unavailable")
 
+    try:
+        from .diagnostics_access.ha import unload as _unload_diagnostics
+        await _unload_diagnostics(hass, entry)
+    except Exception:
+        _LOGGER.warning("Ongoing diagnostics cleanup unavailable")
+
     if unload_ok:
         hass.data[DOMAIN].pop(entry.entry_id)
 
@@ -53102,6 +53114,11 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
         await _remove_support(hass, entry)
     except Exception:
         _LOGGER.warning("PowerSync support removal cleanup unavailable")
+    try:
+        from .diagnostics_access.ha import remove as _remove_diagnostics
+        await _remove_diagnostics(hass, entry)
+    except Exception:
+        _LOGGER.warning("Ongoing diagnostics revocation needs central confirmation")
     warning = False
     try:
         from homeassistant.helpers.storage import Store

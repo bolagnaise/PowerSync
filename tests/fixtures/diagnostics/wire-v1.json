@@ -1,0 +1,27 @@
+{
+  "description": "Synthetic deterministic Ed25519 seed bytes 0 through 31; no real credentials",
+  "packet": {
+    "metadata": {
+      "grant_id": "11111111111111111111111111111111",
+      "issued_at": 1700000000,
+      "nonce": "AAAAAAAAAAAAAAAAAAAAAA",
+      "payload_sha256": "5nt1IHvoIhvYQ8VRIUzMPCCVl9KsdCM3CD7NV9PHiNQ",
+      "purpose": "client",
+      "root_id": "0000000000000000000000000000000000000000000000000000000000000000",
+      "version": 1
+    },
+    "payload": "eyJhcmd1bWVudHMiOnsiZW50aXR5X2lkcyI6WyJzZW5zb3IuZXhhbXBsZSJdLCJsaW1pdCI6MX0sIm5vdGUiOiLimIDvuI8iLCJvcGVyYXRpb24iOiJoYV9nZXRfc3RhdGVzIn0",
+    "signature": "CRftjlIbE_wUe1A-njWXwhDdVujhkuu_ppq3utMoW0Xapq-5i2nnnqJhMMdp-Q6QHXXlxNqIT34U9cf6Kp0GDA"
+  },
+  "payload": {
+    "arguments": {
+      "entity_ids": [
+        "sensor.example"
+      ],
+      "limit": 1
+    },
+    "note": "☀️",
+    "operation": "ha_get_states"
+  },
+  "public_key": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg"
+}

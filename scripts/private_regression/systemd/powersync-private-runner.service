@@ -1,0 +1,22 @@
+[Unit]
+Description=PowerSync private fresh-pair replay
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=powersync-regression
+Group=docker
+ExecStart=/opt/powersync-regression/venv/bin/python /opt/powersync-regression/scripts/private_regression/daemon.py --config /etc/powersync-regression/service.json
+Restart=on-failure
+RestartSec=30
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/etc/powersync-regression /tmp
+LimitCORE=0
+UMask=0077
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

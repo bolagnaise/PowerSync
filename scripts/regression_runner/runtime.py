@@ -90,6 +90,7 @@ def component_digest(component_root):
     from importlib.machinery import EXTENSION_SUFFIXES
     root = Path(component_root).resolve(strict=True)
     tree = hashlib.sha256()
+    total = count = 0
     from .trusted_contract import ContractError
     for path in sorted(root.rglob("*")):
         if "__pycache__" in path.parts:
@@ -102,7 +103,11 @@ def component_digest(component_root):
             raise ContractError("unsupported_native_component")
         if not path.is_file():
             continue
-        tree.update(path.relative_to(root).as_posix().encode() + b"\0" + path.read_bytes() + b"\0")
+        count += 1;total += path.stat().st_size
+        if count>20000 or path.stat().st_size>8*1024*1024 or total>64*1024*1024:
+            raise ContractError("source_budget_exceeded")
+        name, content = path.relative_to(root).as_posix().encode(), path.read_bytes()
+        tree.update(len(name).to_bytes(8, "big") + name + len(content).to_bytes(8, "big") + content)
     return tree.hexdigest()
 
 
@@ -147,7 +152,8 @@ def replay(bundle, component_root, *, allow_changed_source=False):
     for name, expected in contract.CLASS_FIELDS.items():
         if tuple(field.name for field in fields(getattr(module, name))) != expected:
             raise contract.ContractError("unsupported_dataclass")
-    binding = source_binding(root, module)
+    from power_sync.regression.environment import POLICY_SHA, binding as ha_binding
+    binding = ha_binding(root, module) if bundle["source"]["requirements_sha256"] == POLICY_SHA else source_binding(root, module)
     if not allow_changed_source and binding != bundle["source"]:
         raise contract.ContractError("source_environment_mismatch")
     if any(binding[key] != bundle["source"][key] for key in binding if key != "component_sha256"):
