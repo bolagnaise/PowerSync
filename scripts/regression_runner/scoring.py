@@ -1,8 +1,9 @@
 """Independent accounting and invariants. This code never selects a plan."""
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 import math
+from zoneinfo import ZoneInfo
 
 from .trusted_contract import ContractError
 
@@ -12,7 +13,8 @@ def primitive(value):
         return [primitive(v) for v in value]
     if type(value) is dict:
         if "$datetime" in value:
-            return datetime.fromisoformat(value["$datetime"])
+            result = datetime.fromisoformat(value["$datetime"])
+            return result.astimezone(ZoneInfo(value["zone"])) if value.get("zone") else result
         if "$tuple" in value:
             return [primitive(v) for v in value["$tuple"]]
         if "$class" in value:
@@ -63,13 +65,35 @@ def score(bundle, schedule, *, terminal_price=0.0):
         unsupported.append("cost_neutral_settlement")
     if inputs["export_bonus_prices"] is not None or inputs["import_bonus_prices"] is not None:
         unsupported.append("settlement_bonuses")
+    def active(value):
+        if type(value) in (list, tuple):
+            return any(active(item) for item in value)
+        return value is not None and bool(value)
+    if any(export_allowed) and any(active(value) for value in (
+            inputs["export_reserve_floor"], state["export_reserve_floor"], state["export_reserve_floor_slots"])):
+        unsupported.append("export_reserve_policy")
+    if state["hardware_reserve_known"] and active(state["hardware_reserve"]):
+        unsupported.append("hardware_reserve_policy")
+    if state["max_battery_export_w"] is not None and state["max_battery_export_w"] < state["max_discharge_w"] and any(export_allowed):
+        unsupported.append("battery_export_limit_policy")
+    if state["grid_charge_soc_cap"] < 1 and inputs["allow_grid_charge"]:
+        unsupported.append("grid_charge_soc_cap_policy")
+    if inputs["priority_export_enabled"] or active(inputs["priority_export_slots"]):
+        unsupported.append("priority_export_policy")
+    if inputs["disable_idle"]:
+        unsupported.append("disable_idle_policy")
+    if any(active(inputs[name]) for name in ("cost_neutral_slots", "cost_neutral_forecast_import_cost", "cost_neutral_fixed_cost_allowance")):
+        unsupported.append("cost_neutral_settlement")
+    accounting_complete = True
     for index, row in enumerate(rows):
         charge, discharge, ev = (float(row[k]) / 1000 for k in ("battery_charge_w", "battery_discharge_w", "ev_charge_w"))
         reported = float(row["soc"]) if row["soc"] is not None else None
         if any(not math.isfinite(x) for x in (charge, discharge, ev)) or min(charge, discharge, ev) < -1e-6:
             violations.append({"slot": index, "rule": "invalid_power"})
+            accounting_complete = False
             continue
-        if timestamps and row["timestamp"] != timestamps[index]:
+        expected_time = (timestamps[index] if index < len(timestamps) else timestamps[0] + timedelta(hours=dt * index)) if timestamps else None
+        if expected_time is not None and row["timestamp"] != expected_time:
             violations.append({"slot": index, "rule": "timestamp_alignment"})
         if index and (row["timestamp"] - rows[index - 1]["timestamp"]).total_seconds() != dt * 3600:
             violations.append({"slot": index, "rule": "slot_duration"})
@@ -79,7 +103,7 @@ def score(bundle, schedule, *, terminal_price=0.0):
         floor = min(opening_soc, state["backup_reserve"])
         if soc < floor - 0.0002 or soc > 1.0002:
             violations.append({"slot": index, "rule": "soc_limit"})
-        if reported is not None and abs(reported - soc) > 0.0002:
+        if reported is not None and (not math.isfinite(reported) or abs(reported - soc) > 0.0002):
             violations.append({"slot": index, "rule": "soc_energy_balance"})
         net = load[index] + ev + charge - solar[index] - discharge
         importing, exporting = max(0.0, net), max(0.0, -net)
@@ -88,23 +112,25 @@ def score(bundle, schedule, *, terminal_price=0.0):
         if caps[index] is not None and exporting * 1000 > caps[index] + 1:
             # Solar curtailment isn't represented by ScheduleAction alone.
             unsupported.append("solar_curtailment")
+            accounting_complete = False
         if row["action"] == "charge" and (not inputs["allow_grid_charge"] or not can_charge[index] or blocked[index] or not valid[index]):
             violations.append({"slot": index, "rule": "forbidden_grid_charge"})
         if row["action"] in ("export", "discharge") and (not export_allowed[index] or not valid[index]):
             violations.append({"slot": index, "rule": "forbidden_battery_export"})
-        if not unsupported or "solar_curtailment" not in unsupported:
-            import_cost += importing * dt * prices_in[index]
-            export_revenue += exporting * dt * prices_out[index]
-            import_kwh += importing * dt
-            export_kwh += exporting * dt
+        import_cost += importing * dt * prices_in[index]
+        export_revenue += exporting * dt * prices_out[index]
+        import_kwh += importing * dt
+        export_kwh += exporting * dt
         throughput += (charge + discharge) * dt
     terminal_delta = (soc - opening_soc) * capacity
     return {"scorer_version": 1, "currency": bundle["currency"], "violations": violations,
-            "unsupported_metrics": sorted(set(unsupported)), "import_cost": import_cost,
-            "export_revenue": export_revenue, "tariff_net_cost": import_cost - export_revenue,
-            "import_kwh": import_kwh, "export_kwh": export_kwh, "throughput_kwh": throughput,
+            "unsupported_metrics": sorted(set(unsupported)), "accounting_complete": accounting_complete,
+            "import_cost": import_cost if accounting_complete else None,
+            "export_revenue": export_revenue if accounting_complete else None,
+            "tariff_net_cost": import_cost - export_revenue if accounting_complete else None,
+            "import_kwh": import_kwh if accounting_complete else None, "export_kwh": export_kwh if accounting_complete else None, "throughput_kwh": throughput,
             "terminal_soc": soc, "terminal_energy_delta_kwh": terminal_delta,
             "terminal_price": terminal_price,
-            "common_score": None if unsupported else import_cost - export_revenue - terminal_delta * terminal_price,
+            "common_score": None if unsupported or not accounting_complete else import_cost - export_revenue - terminal_delta * terminal_price,
             "first_action": {"action": rows[0]["action"], "duration_seconds": dt * 3600} if rows else None,
             "mode": "identical_input", "counterfactual_daily_savings": None}

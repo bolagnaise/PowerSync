@@ -169,8 +169,8 @@ def test_missing_field_and_nonfinite_values_fail_closed(api):
 
 def test_ev_aliases_preserve_identity_and_deadlines(api):
     module, _, contract = api
-    plans = [module.EVChargePlan(vehicle_id="VIN_CANARY_A", max_power_kw=(3.0,) * 8, energy_needed_kwh=1.0),
-             module.EVChargePlan(vehicle_id="VIN_CANARY_B", max_power_kw=(3.0,) * 8, energy_needed_kwh=2.0)]
+    plans = [module.EVChargePlan(vehicle_id="VIN_CANARY_A", max_power_kw=(3.0,) * 8, energy_needed_kwh=1.0, deadline_requirements=((4, 1.0),)),
+             module.EVChargePlan(vehicle_id="VIN_CANARY_B", max_power_kw=(3.0,) * 8, energy_needed_kwh=2.0, deadline_requirements=((3, 1.0), (7, 2.0)))]
     _, bundle, _ = capture_one(api, values={**inputs(), "ev_plan": plans})
     wire = json.dumps(bundle)
     assert "VIN_CANARY" not in wire
@@ -178,6 +178,7 @@ def test_ev_aliases_preserve_identity_and_deadlines(api):
     assert len({p.vehicle_id for p in restored}) == 2
     assert [p.energy_needed_kwh for p in restored] == [1.0, 2.0]
     assert [p.max_power_kw for p in restored] == [(3.0,) * 8] * 2
+    assert [p.deadline_requirements for p in restored] == [((4, 1.0),), ((3, 1.0), (7, 2.0))]
 
 
 def test_unknown_free_text_is_not_disclosed(api):
@@ -229,7 +230,7 @@ def test_currency_and_terminal_energy_are_explicit(api):
 
 def test_coordinator_edits_are_not_solver_coverage():
     paths = ["custom_components/power_sync/optimization/coordinator.py", "custom_components/power_sync/optimization/battery_optimizer.py"]
-    assert source_coverage(paths) == {paths[0]: "not-covered", paths[1]: "solver_v1"}
+    assert source_coverage(paths, COMPONENT, COMPONENT) == {paths[0]: "not-covered", paths[1]: "solver_v1"}
 
 
 def test_environment_change_is_not_silently_attributed_to_candidate(api):
@@ -238,6 +239,381 @@ def test_environment_change_is_not_silently_attributed_to_candidate(api):
     bundle["source"]["solver_version"] = "0.0.0"
     with pytest.raises(trusted.ContractError, match="dependency_image_mismatch"):
         replay(resign(bundle), COMPONENT, allow_changed_source=True)
+
+
+@pytest.mark.parametrize("missing", [False, True])
+def test_source_binding_refuses_an_uninstalled_or_drifted_dependency(api, monkeypatch, missing):
+    from regression_runner import runtime
+    module, _, _ = api
+    versions = runtime.installed_dependencies()
+    if missing:
+        versions.pop("numpy")
+    else:
+        versions["numpy"] = "0.0.0"
+    monkeypatch.setattr(runtime, "installed_dependencies", lambda: versions)
+    with pytest.raises(trusted.ContractError, match="dependency_image_unavailable" if missing else "dependency_image_mismatch"):
+        source_binding(COMPONENT, module)
+
+
+def test_dependency_contract_does_not_silently_skip_unpinned_or_duplicate_entries():
+    from regression_runner.runtime import verify_dependencies
+    for requirements in (b"# no actual pins\n", b"numpy>=2\n", b"numpy==2.5.0\nnumpy==2.5.0\n"):
+        with pytest.raises(trusted.ContractError, match="unsupported_dependency_contract"):
+            verify_dependencies(requirements)
+
+
+def test_capture_records_the_observed_clock_zone_and_explicit_argument_names(api, monkeypatch):
+    from zoneinfo import ZoneInfo
+    from regression_runner.runtime import install_stubs
+    module, _, _ = api
+    local = datetime(2026, 10, 4, 1, 30, tzinfo=ZoneInfo("Australia/Sydney"))
+    monkeypatch.setattr(module.dt_util, "now", lambda: local)
+    _, bundle, _ = capture_one(api)
+    assert bundle["decision_time"] == local.isoformat()
+    assert bundle["decision_timezone"] == "Australia/Sydney"
+    assert set(bundle["provided_inputs"]) == set(inputs())
+    assert "disable_idle" not in bundle["provided_inputs"]
+    assert trusted.decision_clock(bundle).tzinfo.key == "Australia/Sydney"
+    install_stubs(COMPONENT, trusted.decision_clock(bundle))
+    from homeassistant.util import dt
+    assert dt.now().tzinfo.key == "Australia/Sydney"
+    assert dt.now(timezone.utc) == local.astimezone(timezone.utc)
+
+
+def test_full_installed_image_drift_and_dataclass_schema_drift_are_rejected(api, monkeypatch):
+    from regression_runner import runtime
+    _, bundle, _ = capture_one(api)
+    versions = runtime.installed_dependencies()
+    monkeypatch.setattr(runtime, "installed_dependencies", lambda: {**versions, "unexpected-package": "1.0"})
+    with pytest.raises(trusted.ContractError, match="source_environment_mismatch"):
+        runtime.replay(bundle, COMPONENT)
+    monkeypatch.setattr(runtime, "installed_dependencies", lambda: versions)
+    monkeypatch.setitem(trusted.CLASS_FIELDS, "EVChargePlan", (*trusted.CLASS_FIELDS["EVChargePlan"], "new_required_field"))
+    with pytest.raises(trusted.ContractError, match="unsupported_dataclass"):
+        runtime.replay(bundle, COMPONENT)
+
+
+def test_candidate_constructor_defaults_and_derivations_are_not_claimed_covered(tmp_path):
+    source = (COMPONENT / "optimization/battery_optimizer.py").read_text()
+    roots = [tmp_path / "baseline", tmp_path / "candidate"]
+    for root in roots:
+        (root / "optimization").mkdir(parents=True)
+        (root / "optimization/battery_optimizer.py").write_text(source)
+    path = "custom_components/power_sync/optimization/battery_optimizer.py"
+    candidate = roots[1] / "optimization/battery_optimizer.py"
+    tree = ast.parse(source)
+    cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "BatteryOptimizer")
+    method = next(node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == "optimize")
+    found = False
+    for arguments, defaults in ((method.args.args[-len(method.args.defaults):], method.args.defaults),
+                                (method.args.kwonlyargs, method.args.kw_defaults)):
+        for index, argument in enumerate(arguments):
+            if argument.arg == "disable_idle":
+                defaults[index] = ast.Constant(True)
+                found = True
+    assert found
+    candidate.write_text(ast.unparse(tree))
+    assert source_coverage([path], *roots)[path] == "not-covered"
+    tree = ast.parse(source)
+    config = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "update_config")
+    config.body.append(ast.Assign(targets=[ast.Attribute(value=ast.Name(id="self", ctx=ast.Load()), attr="charge_efficiency", ctx=ast.Store())], value=ast.Constant(0.123)))
+    candidate.write_text(ast.unparse(ast.fix_missing_locations(tree)))
+    assert source_coverage([path], *roots)[path] == "not-covered"
+    tree = ast.parse(source)
+    method = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "optimize")
+    method.body.append(ast.Pass())
+    candidate.write_text(ast.unparse(tree))
+    assert source_coverage([path], *roots)[path] == "solver_v1"
+    for dependency in ("cost_neutral.py", "ev_load_plan.py"):
+        full = "custom_components/power_sync/optimization/" + dependency
+        assert source_coverage([full], *roots)[full] == "not-covered"
+
+
+def test_compare_refuses_deterministic_replays_that_do_not_match_capture(api, tmp_path, monkeypatch):
+    _, original, _ = capture_one(api)
+    baseline = {"outcome": original["outcome"], "solver": original["result"]["solver"],
+                "exception": original["result"]["exception"], "schedule": original["result"]["schedule"], "source": original["source"]}
+    changed = copy.deepcopy(original)
+    changed["result"]["schedule"][0]["power_w"] += 1
+    path = tmp_path / "capture.json"
+    path.write_bytes(trusted.canonical(resign(changed)))
+    spec = importlib.util.spec_from_file_location("trusted_replay_cli_fidelity_test", ROOT / "scripts/replay_optimizer.py")
+    cli = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cli)
+    requests = []
+    def worker(request):
+        requests.append(request)
+        return copy.deepcopy(baseline)
+    monkeypatch.setattr(cli, "worker", worker)
+    output = tmp_path / "report.json"
+    assert cli.main(["compare", str(path), "--candidate-root", str(COMPONENT),
+        "--expected-candidate-sha256", original["source"]["component_sha256"], "--output", str(output)]) == 1
+    report = json.loads(output.read_bytes())
+    assert report["status"] == "invalid"
+    assert report["a_a"]["outcome"] == report["candidate_a_a"]["outcome"] == "exact"
+    assert report["capture_fidelity"]["outcome"] == "changed"
+    assert len(requests) == 4
+
+
+def test_comparison_rejects_source_edits_after_workers(api, tmp_path, monkeypatch, capsys):
+    from regression_runner.runtime import component_digest
+    _, bundle, _ = capture_one(api)
+    baseline = {"outcome": bundle["outcome"], "solver": bundle["result"]["solver"],
+                "exception": None, "schedule": bundle["result"]["schedule"], "source": bundle["source"]}
+    root = tmp_path / "candidate"
+    root.mkdir()
+    path = root / "reviewed.py"
+    path.write_text("# approved\n")
+    expected = component_digest(root)
+    capture = tmp_path / "capture.json"
+    capture.write_bytes(trusted.canonical(bundle))
+    spec = importlib.util.spec_from_file_location("trusted_replay_source_race_test", ROOT / "scripts/replay_optimizer.py")
+    cli = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cli)
+    requests = []
+    def worker(request):
+        requests.append(request)
+        if len(requests) == 4:
+            path.write_text("# changed after execution\n")
+        return copy.deepcopy(baseline)
+    monkeypatch.setattr(cli, "worker", worker)
+    assert cli.main(["compare", str(capture), "--candidate-root", str(root), "--expected-candidate-sha256", expected]) == 2
+    assert json.loads(capsys.readouterr().out) == {"status": "invalid", "error": "source_changed_during_comparison"}
+
+
+def test_unscored_command_changes_cannot_pass_as_economic_equivalence(api):
+    _, bundle, _ = capture_one(api)
+    baseline = {"outcome": bundle["outcome"], "solver": bundle["result"]["solver"], "schedule": bundle["result"]["schedule"]}
+    for key, value in (("action", "self_consumption"), ("power_w", 123456), ("grid_import_target_w", 123456), ("soc", None)):
+        target = copy.deepcopy(baseline)
+        if key == "action" and target["schedule"][0][key] == value:
+            value = "charge"
+        target["schedule"][0][key] = value
+        assert classify(bundle, baseline, target)["outcome"] in ("unsupported", "violation")
+
+
+def test_callbacks_static_and_external_helper_references_are_frozen(tmp_path):
+    baseline, candidate = tmp_path / "baseline", tmp_path / "candidate"
+    path = "custom_components/power_sync/optimization/battery_optimizer.py"
+    template = '''class BatteryOptimizer:
+    def __init__(self):
+        CALLBACK
+    def optimize(self):
+        return self.helper()
+    def helper(self):
+        return VALUE
+'''
+    for root in (baseline, candidate):
+        (root / "optimization").mkdir(parents=True)
+    for callback, external in (("self.callback = self.helper", ""), ("BatteryOptimizer.helper(self)", ""),
+                               ('getattr(self, "helper")()', ""), ("pass", "result = optimizer.helper()\n"),
+                               ('getattr(self, "hel" + mode)()', ""), ("pass", 'result = getattr(optimizer, name)()\n')):
+        for root, value in ((baseline, "1"), (candidate, "2")):
+            (root / "optimization/battery_optimizer.py").write_text(template.replace("CALLBACK", callback).replace("VALUE", value))
+            (root / "coordinator.py").write_text(external)
+        assert source_coverage([path], baseline, candidate)[path] == "not-covered"
+    for alias in ("public = helper", "value = property(helper)"):
+        for root, value in ((baseline, "1"), (candidate, "2")):
+            (root / "optimization/battery_optimizer.py").write_text(template.replace("CALLBACK", "pass").replace("VALUE", value) + "    " + alias + "\n")
+            (root / "coordinator.py").write_text("result = optimizer.public()\n")
+        assert source_coverage([path], baseline, candidate)[path] == "not-covered"
+
+
+def test_source_digest_refuses_symlinks_and_sourceless_bytecode(tmp_path):
+    from regression_runner.runtime import component_digest
+    external = tmp_path / "external.py"
+    external.write_text("# outside source tree\n")
+    root = tmp_path / "source"
+    root.mkdir()
+    link = root / "module.py"
+    link.symlink_to(external)
+    with pytest.raises(trusted.ContractError, match="unsupported_source_symlink"):
+        component_digest(root)
+    link.unlink()
+    (root / "module.pyc").write_bytes(b"unreviewed code")
+    with pytest.raises(trusted.ContractError, match="unsupported_sourceless_bytecode"):
+        component_digest(root)
+    (root / "module.pyc").unlink()
+    from importlib.machinery import EXTENSION_SUFFIXES
+    (root / ("module" + EXTENSION_SUFFIXES[0])).write_bytes(b"unreviewed native code")
+    with pytest.raises(trusted.ContractError, match="unsupported_native_component"):
+        component_digest(root)
+
+
+@pytest.mark.parametrize("comparison,control,reconstruction,uncovered,candidate,expected", [
+    ("exact", "exact", "exact", False, "exact", "pass"),
+    ("violation", "exact", "exact", True, "exact", "fail"),
+    ("changed", "exact", "exact", True, "exact", "fail"),
+    ("unsupported", "exact", "exact", False, "exact", "insufficient"),
+    ("exact", "exact", "exact", True, "exact", "insufficient"),
+    ("changed", "changed", "exact", False, "exact", "invalid"),
+    ("exact", "exact", "changed", False, "exact", "invalid"),
+    ("exact", "exact", "exact", False, "changed", "invalid"),
+])
+def test_run_status_preserves_failures_and_requires_faithful_repeatable_runs(comparison, control, reconstruction, uncovered, candidate, expected):
+    from regression_runner.compare import run_status
+    assert run_status({"outcome": comparison}, {"outcome": control}, {"outcome": reconstruction},
+        {"path": "not-covered"} if uncovered else {}, {"outcome": candidate}) == expected
+
+
+def test_unscored_active_policy_cannot_receive_equivalence_or_partial_cashflows(api):
+    _, bundle, _ = capture_one(api)
+    baseline = {"outcome": "feasible", "solver": bundle["result"]["solver"], "schedule": bundle["result"]["schedule"]}
+    candidate = copy.deepcopy(baseline)
+    candidate["schedule"][0]["power_w"] += 1
+    variants = [
+        ({"export_reserve_floor": 0.9, "allow_battery_export": True}, {}, "export_reserve_policy"),
+        ({}, {"hardware_reserve_known": True, "hardware_reserve": 0.8}, "hardware_reserve_policy"),
+        ({"allow_battery_export": True}, {"max_battery_export_w": 10}, "battery_export_limit_policy"),
+        ({}, {"grid_charge_soc_cap": 0.6}, "grid_charge_soc_cap_policy"),
+        ({"priority_export_enabled": True}, {}, "priority_export_policy"),
+        ({"disable_idle": True}, {}, "disable_idle_policy"),
+    ]
+    for changed_inputs, changed_state, metric in variants:
+        case = copy.deepcopy(bundle)
+        case["inputs"].update(changed_inputs)
+        case["state"].update(changed_state)
+        result = classify(case, baseline, candidate)
+        assert result["outcome"] in ("unsupported", "violation")
+        assert metric in result["candidate_score"]["unsupported_metrics"]
+    curtailed = copy.deepcopy(bundle)
+    curtailed["inputs"]["solar_forecast"] = [100.0] * 8
+    curtailed["inputs"]["grid_export_limits_w"] = [1.0] * 8
+    value = score(curtailed, baseline["schedule"])
+    assert not value["accounting_complete"]
+    assert value["import_cost"] is value["export_revenue"] is value["tariff_net_cost"] is None
+    malformed = copy.deepcopy(candidate)
+    malformed["schedule"].pop()
+    assert classify(bundle, baseline, malformed)["outcome"] == "violation"
+
+
+def test_contract_rejects_boolean_versions_incoherent_outcomes_and_huge_numbers(api):
+    _, bundle, _ = capture_one(api)
+    for field in ("version", "outcome", "integer"):
+        value = copy.deepcopy(bundle)
+        if field == "version":
+            value["schema_version"] = True
+        elif field == "outcome":
+            value["result"]["feasible"] = False
+        else:
+            value["inputs"]["import_prices"][0] = 10 ** 400
+        with pytest.raises(trusted.ContractError):
+            trusted.validate_bundle(resign(value))
+
+
+def test_partial_cycle_is_discarded_and_snapshot_finish_cannot_contaminate_next_cycle(api, monkeypatch):
+    from threading import Event, Thread
+    module, capture, _ = api
+    _, _, first = capture_one(api)
+    retained = first.export()["estimated_bytes"]
+    recorder = capture.CaptureRecorder(first.source, currency="AUD", max_bytes=retained + 128)
+    optimizer = module.BatteryOptimizer(interval_minutes=60, horizon_hours=8)
+    with capture.record_cycle(optimizer, recorder):
+        optimizer.optimize(**inputs())
+        assert len(recorder.active["attempts"]) == 1
+        optimizer.optimize(**inputs())
+        assert not recorder.active["complete"]
+    assert recorder.export()["cycles"] == []
+    assert recorder.dropped == 1
+
+    recorder = capture.CaptureRecorder(first.source, currency="AUD")
+    recorder.start_cycle()
+    optimizer._regression_recorder = recorder
+    entered, release, restarted = Event(), Event(), Event()
+    original = capture.state_snapshot
+    count = [0]
+    errors = []
+    def snapshot(*args):
+        count[0] += 1
+        if count[0] == 2:
+            entered.set()
+            assert release.wait(5)
+        return original(*args)
+    monkeypatch.setattr(capture, "state_snapshot", snapshot)
+    def solve():
+        try:
+            optimizer.optimize(**inputs())
+        except BaseException as error:
+            errors.append(error)
+    worker = Thread(target=solve)
+    lifecycle = Thread(target=lambda: (recorder.start_cycle(), restarted.set()))
+    worker.start()
+    try:
+        assert entered.wait(5)
+        lifecycle.start()
+        assert restarted.wait(2), "lifecycle waited for an orphaned snapshot"
+        assert recorder.active is None
+    finally:
+        release.set()
+        worker.join(5)
+        if lifecycle.ident is not None:
+            lifecycle.join(5)
+    assert not errors
+    assert not worker.is_alive() and not lifecycle.is_alive()
+    assert recorder.generation == 2 and recorder.active is None
+    assert recorder.errors == 1 and recorder.dropped == 2
+
+
+def test_worker_hash_seed_and_pre_dispatch_source_approval(tmp_path, monkeypatch):
+    spec = importlib.util.spec_from_file_location("trusted_replay_cli_seed_test", ROOT / "scripts/replay_optimizer.py")
+    cli = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cli)
+    request = {"operation": "probe", "component_root": str(tmp_path)}
+    assert cli.worker(request)["hash_seed_probe"] == cli.worker(request)["hash_seed_probe"]
+    def forbidden(*args, **kwargs):
+        raise AssertionError("unapproved source received a dispatch")
+    monkeypatch.setattr(cli.subprocess, "run", forbidden)
+    with pytest.raises(trusted.ContractError, match="source_changed_before_dispatch"):
+        cli.worker({**request, "expected_component_sha256": "0" * 64})
+
+
+def test_replay_refuses_unmodeled_persistent_state_changes(api, monkeypatch):
+    from functools import wraps
+    from regression_runner import runtime
+    module, _, _ = api
+    _, bundle, _ = capture_one(api)
+    original = module.BatteryOptimizer.optimize
+    @wraps(original)
+    def mutate(self, *args, **kwargs):
+        result = original(self, *args, **kwargs)
+        self.terminal_weight = 123.456
+        return result
+    monkeypatch.setattr(module.BatteryOptimizer, "optimize", mutate)
+    monkeypatch.setattr(runtime, "load_component", lambda *args: module)
+    with pytest.raises(trusted.ContractError, match="unsupported_state_mutation"):
+        runtime.replay(bundle, COMPONENT)
+
+
+def test_actual_coordinator_stage_guard_preserves_observer_and_aborts_bad_capture(api):
+    module, capture, _ = api
+    _, _, first = capture_one(api)
+    recorder = capture.CaptureRecorder(first.source, currency="AUD")
+    recorder.start_cycle()
+    optimizer = module.BatteryOptimizer(interval_minutes=60, horizon_hours=8)
+    optimizer._regression_recorder = recorder
+    optimizer.optimize(**inputs())
+    schedule = SimpleNamespace(actions=[SimpleNamespace(timestamp=NOW, action="idle", power_w=float("nan"),
+        soc=0.5, battery_charge_w=0.0, battery_discharge_w=0.0, ev_charge_w=0.0, grid_import_target_w=None)])
+    tree = ast.parse((COMPONENT / "optimization/coordinator.py").read_text())
+    def named_if(node, name):
+        return isinstance(node, ast.If) and isinstance(node.test, ast.Compare) and isinstance(node.test.left, ast.Name) and node.test.left.id == name
+    def calls(node, method, argument=None):
+        return any(isinstance(item, ast.Call) and isinstance(item.func, ast.Attribute) and item.func.attr == method and
+            (argument is None or any(isinstance(value, ast.Constant) and value.value == argument for value in item.args))
+            for item in ast.walk(node))
+    stage = next(node for node in ast.walk(tree) if named_if(node, "regression_recorder") and calls(node, "record_stage"))
+    assignment = next(node for node in ast.walk(tree) if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == "support_observer" for target in node.targets))
+    observer = next(node for node in ast.walk(tree) if named_if(node, "support_observer"))
+    cleanup = next(node for node in ast.walk(tree) if named_if(node, "regression_recorder") and calls(node, "finish_cycle", "aborted"))
+    observed = []
+    owner = SimpleNamespace(_optimizer=optimizer, _support_plan_observer=lambda *args: observed.append(args), _config=SimpleNamespace())
+    namespace = {"regression_recorder": recorder, "result": SimpleNamespace(schedule=schedule), "self": owner,
+        **{name: [] for name in ("import_prices", "export_prices", "solar_forecast", "load_forecast")}}
+    code = compile(ast.fix_missing_locations(ast.Module(body=[stage, assignment, observer, cleanup], type_ignores=[])), str(COMPONENT / "optimization/coordinator.py"), "exec")
+    exec(code, namespace)
+    assert len(observed) == 1 and observed[0][0] is schedule
+    assert recorder.errors == 1 and recorder.export()["cycles"] == []
+    assert optimizer._regression_recorder is None
 
 
 def test_nondefault_diagnostic_solver_options_are_not_complete_capture(api):
@@ -271,12 +647,20 @@ def test_independent_cashflow_signs_with_hand_calculated_values(api, price, sola
 
 
 def test_worker_blocks_network_during_component_import(tmp_path):
+    import py_compile
     spec = importlib.util.spec_from_file_location("trusted_replay_cli_test", ROOT / "scripts/replay_optimizer.py")
     cli = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(cli)
     optimization = tmp_path / "optimization"
     optimization.mkdir()
-    (optimization / "battery_optimizer.py").write_text('import socket\nsocket.create_connection(("127.0.0.1", 9))\n')
+    source = optimization / "battery_optimizer.py"
+    poison = tmp_path / "poison.py"
+    poison.write_text('raise RuntimeError("stale unreviewed bytecode executed")\n')
+    cache = Path(importlib.util.cache_from_source(str(source)))
+    cache.parent.mkdir()
+    py_compile.compile(str(poison), cfile=str(cache), invalidation_mode=py_compile.PycInvalidationMode.UNCHECKED_HASH)
+    poison.unlink()
+    source.write_text('import socket\nsocket.create_connection(("127.0.0.1", 9))\n')
     report = cli.worker({"operation": "capture", "component_root": str(tmp_path), "case": "flat-tariff", "currency": "AUD"})
     assert report == {"worker_error": "forbidden_io"}
 

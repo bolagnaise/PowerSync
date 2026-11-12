@@ -21,6 +21,9 @@ not a public HTTP endpoint or a replacement for authentication.
 - Publish only installed and granted tools, with closed argument schemas and
   read-only annotations. Mutation/service/restart/event-fire tool names are
   rejected by the dispatcher itself.
+- Validate argument shapes, finite numeric bounds and the encoded request budget
+  before any reader runs. Oversized integers and malformed values return the
+  closed `invalid_query` error without invoking formatters or adapters.
 
 The caller must construct `ReadContext` from a verified owner-approved grant.
 Never accept that context or a verifier from request JSON, and never substitute
@@ -59,5 +62,6 @@ pseudonymous numeric replay contract.
 `tests/test_ha_read_backend.py` exercises 1,200 entities across four domains,
 opaque cursor constraints, revocation during an awaited read, mutation-name
 refusal, explicit missing capabilities, bounded text, known-secret redaction,
-closed errors and avoiding unsafe attribute formatters. These are isolated
+closed errors (including oversized numeric arguments) and avoiding unsafe
+attribute formatters. These are isolated
 backend tests, not an installation or connected-MCP receipt.

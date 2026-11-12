@@ -15,6 +15,7 @@ import re
 from zoneinfo import ZoneInfo
 
 VERSION = 1
+SOURCE_FIELDS = frozenset(("component_sha256", "requirements_sha256", "installed_dependencies_sha256", "python", "platform", "solver", "solver_version"))
 MAX_BYTES = 4 * 1024 * 1024
 MAX_ITEMS = 150_000
 MAX_SLOTS = 576
@@ -122,7 +123,11 @@ class Codec:
         if value is None or type(value) is bool:
             return value
         if isinstance(value, (int, float)) and not isinstance(value, bool):
-            if not math.isfinite(value):
+            try:
+                finite = math.isfinite(value)
+            except OverflowError:
+                finite = False
+            if not finite:
                 raise ContractError("nonfinite_value")
             return int(value) if isinstance(value, int) else float(value)
         if type(value) is str:
@@ -216,9 +221,27 @@ def schedule_snapshot(schedule, codec):
     return [{key: codec.encode(getattr(action, key), key) for key in SCHEDULE_FIELDS} for action in schedule.actions]
 
 
+def decision_clock(bundle):
+    try:
+        value = datetime.fromisoformat(bundle["decision_time"])
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError
+        zone = bundle["decision_timezone"]
+        if zone is not None:
+            if type(zone) is not str or len(zone) > 256:
+                raise ValueError
+            converted = value.astimezone(ZoneInfo(zone))
+            if converted.utcoffset() != value.utcoffset():
+                raise ValueError
+            value = converted
+        return value
+    except (TypeError, ValueError, KeyError):
+        raise ContractError("invalid_decision_time") from None
+
+
 def validate_bundle(bundle):
-    required = {"schema_version", "layer", "source", "decision_time", "currency", "inputs", "state", "outcome", "result", "coverage", "digest"}
-    if type(bundle) is not dict or set(bundle) != required or bundle["schema_version"] != VERSION or bundle["layer"] != "solver_v1":
+    required = {"schema_version", "layer", "source", "decision_time", "decision_timezone", "provided_inputs", "currency", "inputs", "state", "outcome", "result", "coverage", "digest"}
+    if type(bundle) is not dict or set(bundle) != required or type(bundle["schema_version"]) is not int or bundle["schema_version"] != VERSION or bundle["layer"] != "solver_v1":
         raise ContractError("unsupported_contract")
     if type(bundle["inputs"]) is not dict or type(bundle["state"]) is not dict:
         raise ContractError("incomplete_contract")
@@ -226,16 +249,14 @@ def validate_bundle(bundle):
         raise ContractError("incomplete_contract")
     if bundle["outcome"] not in ("feasible", "infeasible", "exception") or type(bundle["currency"]) is not str or not re.fullmatch(r"[A-Z]{3}", bundle["currency"]):
         raise ContractError("invalid_outcome")
-    try:
-        decision = datetime.fromisoformat(bundle["decision_time"])
-        if decision.tzinfo is None:
-            raise ValueError
-    except (TypeError, ValueError):
-        raise ContractError("invalid_decision_time") from None
+    decision_clock(bundle)
+    provided = bundle["provided_inputs"]
+    if type(provided) is not list or any(type(name) is not str or name not in INPUT_FIELDS for name in provided) or len(set(provided)) != len(provided):
+        raise ContractError("invalid_provided_inputs")
     source = bundle["source"]
-    if type(source) is not dict or set(source) != {"component_sha256", "requirements_sha256", "python", "platform", "solver", "solver_version"}:
+    if type(source) is not dict or set(source) != SOURCE_FIELDS:
         raise ContractError("invalid_source_binding")
-    for key in ("component_sha256", "requirements_sha256"):
+    for key in ("component_sha256", "requirements_sha256", "installed_dependencies_sha256"):
         if type(source[key]) is not str or not re.fullmatch(r"[a-f0-9]{64}", source[key]):
             raise ContractError("invalid_source_binding")
     if source["solver"] not in ("highs", "greedy") or not all(type(source[k]) is str and re.fullmatch(r"[a-zA-Z0-9_.+-]{1,64}", source[k]) for k in ("python", "platform", "solver_version")):
@@ -248,7 +269,11 @@ def validate_bundle(bundle):
         if value is None or type(value) is bool:
             return
         if type(value) in (int, float):
-            if not math.isfinite(value):
+            try:
+                finite = math.isfinite(value)
+            except OverflowError:
+                finite = False
+            if not finite:
                 raise ContractError("nonfinite_value")
             return
         if type(value) is str:
@@ -311,6 +336,11 @@ def validate_bundle(bundle):
         raise ContractError("invalid_result")
     if result["solver"] not in (None, "highs", "greedy") or result["exception"] not in (None, "ValueError", "RuntimeError", "TimeoutError", "CancelledError", "KeyboardInterrupt", "other") or result["feasible"] is not None and type(result["feasible"]) is not bool:
         raise ContractError("invalid_result")
+    if bundle["outcome"] == "exception":
+        if result["exception"] is None or result["feasible"] is not None or result["solver"] is not None or result["schedule"]:
+            raise ContractError("incoherent_result")
+    elif result["exception"] is not None or result["feasible"] is not (bundle["outcome"] == "feasible") or result["solver"] not in ("highs", "greedy"):
+        raise ContractError("incoherent_result")
     for row in result["schedule"]:
         if type(row) is not dict or set(row) != set(SCHEDULE_FIELDS):
             raise ContractError("invalid_schedule")

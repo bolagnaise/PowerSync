@@ -148,3 +148,27 @@ async def test_search_does_not_invoke_unknown_attribute_formatters():
     backend.hass.states.async_all()[0].attributes["friendly_name"] = Unsafe()
     result = await backend.read(context, "ha_search_entities", {"search": "not present"})
     assert result["result"]["records"] == []
+
+
+@pytest.mark.asyncio
+async def test_invalid_arguments_are_closed_before_formatting_or_reader_invocation():
+    called = []
+    backend, context, _, _ = harness(adapters={"ha_get_history": lambda args: called.append(args)})
+    class Opaque:
+        def __str__(self):
+            raise AssertionError("must not format invalid argument")
+    cases = [
+        ("ha_get_history", {"start": 10**400}),
+        ("ha_get_history", {"start": float("inf")}),
+        ("ha_get_history", {"start": float("nan")}),
+        ("ha_get_states", {"search": Opaque()}),
+        ("ha_get_states", {"unknown": Opaque()}),
+        ("ha_get_states", {"entity_ids": [Opaque()]}),
+        ("ha_get_states", {"entity_ids": ["sensor." + "x" * 200] * 100}),
+        ("ha_get_states", {"search": "\ud800"}),
+        ("ha_get_states", []),
+    ]
+    for operation, arguments in cases:
+        with pytest.raises(ReadError, match="invalid_query"):
+            await backend.read(context, operation, arguments)
+    assert called == []

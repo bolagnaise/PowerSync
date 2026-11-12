@@ -164,7 +164,7 @@ class HAReadBackend:
     async def read(self, context, operation, arguments=None):
         context.check(operation, self.wall())
         arguments = {} if arguments is None else arguments
-        if type(arguments) is not dict or len(json.dumps(arguments)) > 16384:
+        if type(arguments) is not dict:
             raise ReadError("invalid_query")
         if arguments.keys() - PROPERTIES[operation].keys():
             raise ReadError("invalid_query")
@@ -175,10 +175,19 @@ class HAReadBackend:
                 raise ReadError("invalid_query")
             if kind == "integer" and (type(value) is not int or not rule["minimum"] <= value <= rule["maximum"]):
                 raise ReadError("invalid_query")
-            if kind == "number" and (type(value) not in (int, float) or not math.isfinite(value)):
+            if kind == "number" and (type(value) not in (int, float) or
+                                     type(value) is int and value.bit_length() > 1023 or
+                                     not math.isfinite(value)):
                 raise ReadError("invalid_query")
             if kind == "array" and (type(value) is not list or len(value) > rule["maxItems"] or any(type(item) is not str or len(item) > 256 for item in value)):
                 raise ReadError("invalid_query")
+        # Validate the closed scalar/list shapes before formatting. This avoids
+        # invoking opaque values or overflowing on an otherwise valid JSON int.
+        try:
+            if len(json.dumps(arguments, ensure_ascii=False, allow_nan=False).encode()) > 16384:
+                raise ReadError("invalid_query")
+        except (TypeError, ValueError, OverflowError, UnicodeError, RecursionError):
+            raise ReadError("invalid_query") from None
         if operation == "ha_get_capabilities":
             if arguments:
                 raise ReadError("invalid_query")

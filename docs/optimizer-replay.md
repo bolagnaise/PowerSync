@@ -21,17 +21,29 @@ required declared ISO code; it is not inferred from household location.
 To compare a reviewed candidate component:
 
 ```bash
-python3.12 scripts/replay_optimizer.py compare /tmp/optimizer-case.json --candidate-root /path/to/candidate/custom_components/power_sync --output /tmp/comparison.json
+python3.12 scripts/replay_optimizer.py fingerprint --component-root /path/to/candidate/custom_components/power_sync
+python3.12 scripts/replay_optimizer.py compare /tmp/optimizer-case.json --candidate-root /path/to/candidate/custom_components/power_sync --expected-candidate-sha256 "$REVIEWED_COMPONENT_SHA256" --output /tmp/comparison.json
 ```
+
+Set `REVIEWED_COMPONENT_SHA256` to the fingerprint of the frozen source you have
+reviewed. Printing a fingerprint does not review or approve code. The parent
+checks this digest before dispatching an input; each worker checks before import
+and again after execution. A changed source tree invalidates the job.
 
 The baseline component defaults to this checkout. `--component-root` selects an
 explicit baseline component directory. Same-version replay requires a matching
-component, Python, platform, solver and test dependency fingerprint. A candidate may have
+component, Python, OS/architecture, solver and test dependency fingerprint. Every
+capture/replay verifies the installed versions against all explicit test-image
+pins; a matching lock-file hash alone is insufficient. A candidate may have
 different source, but its dependency image must match the approved baseline.
+The binding includes a digest of all installed distribution names/versions.
 This first tool does not build or download dependency images.
 
-Every replay uses a fresh process. Comparison includes a separate baseline A/A
-arm, and the trusted parent evaluates schedules independently of the candidate.
+Every replay uses a fresh process with a fixed hash seed. Comparison includes
+separate baseline and candidate A/A arms. Baseline replay must exactly reproduce
+the captured outcome, solver, exception and schedule before it can support a
+passing comparison. Metric equivalence does not override failed reconstruction.
+The trusted parent evaluates schedules independently of the candidate.
 The report binds the input digest, component identities, runner/scorer code and
 thresholds. Changed component files are detected automatically; additional
 paths may be supplied with `--changed-path`.
@@ -50,6 +62,10 @@ paths may be supplied with `--changed-path`.
 Solver replay feeds captured resolved inputs to the candidate optimizer.
 Changes to coordinator preprocessing, retry selection, overlays, hardware
 execution and unrelated component files remain outside this layer's coverage.
+Constructor/update-config derivations, caller defaults, dataclass definitions,
+properties and their helper graphs are frozen reconstruction surfaces. Changes
+there, including in EV/Cost Neutral planners, are reported as not covered because
+injecting baseline effective state does not execute their production construction.
 The checker reports these gaps rather than treating a solver match as proof
 that the whole proposed update is correct.
 
@@ -63,6 +79,11 @@ realised savings. `--terminal-price` supplies one declared common value per kWh
 for comparing terminal inventory; terminal SOC/energy is always reported.
 The reported first-action duration is the configured solver slot length, not
 an observed hardware command duration.
+Active export-reserve, hardware-reserve, restricted battery-export, grid-charge
+SOC cap, priority-export and disable-idle policies also remain unsupported until
+their independent checks are implemented. Incomplete curtailment accounting has
+null cashflow totals rather than partial totals. Detected violations/changes take
+precedence over missing coverage; failed fidelity or repeatability is invalid.
 
 ## Developer capture boundary
 
@@ -77,6 +98,11 @@ before normalization. That includes temporary reserve overrides, independently
 assigned capabilities, learned conversion values and retry-specific masks.
 Raw solver schedules are separate from the coordinator's final committed
 stage. Exceptions retain an allowlisted class, never the raw message.
+The attempt also records which arguments the caller supplied and the observed
+HA clock with its IANA zone. Replay refuses unknown dataclass schemas or stable
+state mutations. Capture uses nonblocking serialization: lifecycle contention
+drops observation immediately, and stale executor snapshots cannot enter a later
+cycle. A cancelled snapshot cannot make the event loop wait for its capture lock.
 
 The schema closes all input/state fields and admits only reviewed dataclasses.
 Missing required state, an unknown dependency, changed signature, unsupported
@@ -99,9 +125,20 @@ Workers have CPU, runtime and output limits (plus a 2 GiB virtual-memory cap on 
 disabled core dumps and a network/process-launch audit tripwire installed
 before component import. The parent does not include raw worker stderr in a
 report. These are local diagnostic defenses, not an OS security sandbox.
+Workers disable bytecode writes and use a fresh empty cache prefix so a stale
+unchecked bytecode file cannot replace the fingerprinted Python source. Source
+symlinks, standalone bytecode and native component extensions are refused. Coverage is computed before the
+workers run, with source hashes checked around coverage and after all workers.
 Private customer cases must not be supplied to unreviewed code or public PR
 jobs. The later fleet service still needs its separately reviewed private
 runner, consent, retention/deletion and activation workflow.
+
+Economic equivalence cannot validate changed action, power, grid-import target
+or missing-SOC command fields. Such changes report unsupported unless a stronger
+independent check rejects them first. Constructor callbacks, static references
+and component-external helper references remain outside solver-only coverage.
+Class-level aliases, implicit special methods and dynamic optimizer dispatch
+also freeze their reconstruction surfaces rather than imply constructor coverage.
 
 ## Verification and delivery boundary
 
