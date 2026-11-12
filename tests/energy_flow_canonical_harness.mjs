@@ -289,6 +289,22 @@ if (scenario === 'generated-idle' || scenario === 'generated-charging') {
   assert.equal(card._collectEvData().totalDrawPower, 10000);
   assert.equal(view.paths.find(path => path.id === 'line-wallbox-ev')?.power, 7000);
   assert.equal(view.paths.find(path => path.id === 'line-wallbox-ev2')?.power, 3000);
+} else if (scenario === 'grid-battery-with-home-ev') {
+  for (const batteryKw of [3.2, 5]) {
+    const {card, hass} = create(async () => snapshot([
+      row('vin-a', {actual_charging: true, current_power_kw: 3}),
+    ]));
+    card.setConfig({...card._config, load_includes_ev: true});
+    for (const [name, power] of [['solar_power', 1.7], ['grid_power', 3.6 + batteryKw], ['battery_power', -batteryKw], ['home_load', 5.3]]) {
+      const id = `sensor.power_sync_${name}`;
+      hass.states[id] = state(id, String(power), {unit_of_measurement: 'kW'});
+    }
+    await flush();
+    const view = render(card);
+    assert.ok(Math.abs(view.paths.find(path => path.id === 'line-grid-battery')?.power - batteryKw * 1000) < 0.001);
+    assert.equal(view.paths.find(path => path.id === 'line-grid-load')?.power, 3600);
+    assert.equal(view.paths.find(path => path.id === 'line-wallbox-ev')?.power, 3000);
+  }
 } else if (scenario === 'generated-layouts') {
   // The board loader is the only substituted dependency; run real generation
   // and _boardCards for both layout branches rather than asserting source text.

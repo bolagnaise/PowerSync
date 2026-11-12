@@ -40,7 +40,7 @@ def canonical_energy_flow_harness(tmp_path_factory):
 
 
 @pytest.mark.parametrize("scenario", [
-    "generated-idle", "generated-charging", "away", "unplugged", "empty",
+    "grid-battery-with-home-ev", "generated-idle", "generated-charging", "away", "unplugged", "empty",
     "unknown-power", "duplicates-stable", "failed-fallback", "malformed-fallback",
     "manual-no-poll", "cadence-overlap-disconnect", "config-change-in-flight",
     "enabled-config-change-in-flight", "distinct-car-power-flows",

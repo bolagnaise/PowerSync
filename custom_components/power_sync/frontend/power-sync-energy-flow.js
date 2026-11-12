@@ -2710,10 +2710,6 @@ import {
         { id: 'line-grid-battery', cls: 'flow-broken', watt: gridToBattery, min: batteryMin, reverse: false },
         { id: 'line-grid-load', cls: 'flow-broken', watt: gridLoadImport, min: gridMin, reverse: false },
       ];
-      const gridImportFlow = importCandidates.reduce(
-        (best, candidate) => (candidate.watt > best.watt ? candidate : best),
-        { id: '', cls: '', watt: 0, min: gridMin, reverse: false }
-      );
 
       const exportCandidates = [
         { id: 'line-solar-grid', cls: 'flow-solar', watt: solarExport, min: gridMin, reverse: false },
@@ -2725,8 +2721,11 @@ import {
       );
 
       this._activatePath('line-solar-load', 'flow-solar', solarToLoad, solarMin);
-      if (gridImportFlow.watt >= gridImportFlow.min) {
-        this._activatePath(gridImportFlow.id, gridImportFlow.cls, gridImportFlow.watt, gridImportFlow.min, gridImportFlow.reverse);
+      // Both destinations can draw from the grid at once. Keep each branch visible.
+      for (const flow of importCandidates) {
+        if (flow.watt >= flow.min) {
+          this._activatePath(flow.id, flow.cls, flow.watt, flow.min, flow.reverse);
+        }
       }
       if (gridExportFlow.watt >= gridExportFlow.min) {
         this._activatePath(gridExportFlow.id, gridExportFlow.cls, gridExportFlow.watt, gridExportFlow.min, gridExportFlow.reverse);
