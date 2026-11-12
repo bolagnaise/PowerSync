@@ -121,3 +121,12 @@ HA-wide diagnostic access, ongoing enrolment, broader scoring, coordinator
 sequence replay, private fleet evaluation and validated physical simulation
 remain subsequent implementation milestones. They must preserve their own
 scope, coverage and evidence boundaries.
+
+## Pilot retention policy
+
+The selected future automatic contribution policy is replay, then delete, with
+summary-only results for Codex and Claude. It does not enable a raw case archive
+or raw-bundle MCP retrieval. Explicit local developer/owner exports created by
+this CLI are separate local artifacts; no automatic upload or retention policy
+is activated by exporting one. The private service must implement purge on
+success, failure, cancellation and expiry before contribution is enabled.

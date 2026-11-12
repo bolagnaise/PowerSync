@@ -26,15 +26,28 @@ remaining Phase 2 service/readers before proposing a customer pilot. Broader
 scoring, temporal replay, physical simulation and measured pilot budgets remain
 explicit work rather than implied coverage of the first solver replay layer.
 
+## Owner-selected pilot policy
+
+The first pilot permits **Codex and Claude**, using separately registered client
+identities and disclosed processor policies. Exact client IDs and callbacks must
+be configured and shown during approval; product names alone are not credentials.
+
+Optimizer captures use **replay, then delete**. Keep inputs only for the approved
+paired replay job, purge them after completion/cancellation/expiry and retain
+bounded summary results. Do not archive raw captures, normalized/effective-state
+copies or reconstruction-capable case artifacts. Do not collect an unattended
+raw backlog. Later comparisons obtain fresh captures. Historical summaries are
+receipts of completed runs rather than replayable historical datasets.
+
 ## Goal and recommendation
 
-Let consenting owners contribute optimizer observations so a proposed PowerSync update can be tested against many real system configurations before release. Test the released and candidate revisions against the same saved inputs, identify changes, and turn confirmed defects into lasting regression tests.
+Let consenting owners contribute optimizer observations so a proposed PowerSync update can be tested against many real system configurations before release. Test the released and candidate revisions against the same transient inputs, identify changes, purge those inputs after replay, and turn confirmed defects into independently authored synthetic regression tests.
 
-Build an opt-in regression programme with ongoing enrolment, bounded data retention and revocable access. Use MCP to discover cases and inspect results. Use ordinary software jobs to capture data and execute comparisons; an AI conversation should not be required for collection or every test run.
+Build an opt-in regression programme with ongoing enrolment, transient raw processing, bounded summary retention and revocable access. Use MCP to discover cases and inspect results. Use ordinary software jobs to capture data and execute comparisons; an AI conversation should not be required for collection or every test run.
 
 The access scope includes full HA-wide diagnostic reads, beyond PowerSync entities or the existing small semantic-field allowlist. An approved investigator can discover and inspect other integrations, automations and configuration that influence the energy system. Preserve the original read-only requirement: this scope covers observation and configuration inspection, while mutation/device commands require a distinct future permission. Whole-HA access and ongoing regression contribution have independent grants and data-retention choices.
 
-The useful deliverable is a reproducible test corpus and replay runner. Longer access is one part of that system. Start by proving that captured inputs can reproduce an optimizer run before expanding remote access.
+The useful deliverable is a reproducible paired replay runner, diverse fresh observations and a durable independent synthetic regression suite. Longer access is one part of that system. Start by proving that captured inputs can reproduce an optimizer run before expanding remote access.
 
 ## Original design baseline
 
@@ -58,11 +71,11 @@ flowchart LR
     HA[Owner opts in within HA] --> C[Bounded capture of resolved inputs and events]
     C --> U[Outbound authenticated upload]
     U --> V[Validate schema consent and completeness]
-    V --> S[Private versioned case store]
+    V --> S[Private ephemeral replay staging]
     S --> R[Isolated released and candidate replay jobs]
-    R --> D[Invariant checks and behavior comparison]
+    R --> D[Checks followed by raw-input purge]
     D --> A[Review report and regression cases]
-    M[Scoped staff MCP] --> S
+    M[Scoped staff MCP] --> J[Approved job metadata]
     M --> A
 ```
 
@@ -72,7 +85,7 @@ Candidate code runs in the test environment. Participating homes continue runnin
 
 ## Owner enrolment and data lifecycle
 
-Use a separate HA administrator control for contributing optimizer regression data. Proposed wording: **Help test PowerSync updates**. Describe it as ongoing, read-only sharing until stopped, with a visible retention period; avoid describing credentials or stored data as permanent.
+Use a separate HA administrator control for contributing optimizer regression data. Proposed wording: **Help test PowerSync updates**. Describe it as ongoing, read-only sharing until stopped, with visible replay-then-delete handling and a separate summary retention period; avoid describing credentials or stored data as permanent.
 
 The owner can inspect what is shared, download a representative bundle, see the last successful upload and data volume, pause uploads, leave the programme, and request deletion. Support access, local recording and regression enrolment have independent controls. Existing support consent never enrols anyone automatically.
 
@@ -82,18 +95,26 @@ Distinguish installation lineage, active incarnation, centrally enforced enrolme
 
 Changes to the shared categories, processors or purpose require renewed approval. Entity mapping changes invalidate pending bundles and suspend sharing until the new mapping is reviewed. Credential revocation must remain effective across a restart or restore; enforce an installation generation/epoch centrally.
 
-Proposed pilot defaults, subject to measured volume and owner-facing policy:
+Pilot data handling:
 
-- A bounded local queue, with a 24-hour maximum age and a byte cap established in the local pilot. Stop collecting when the queue budget is exhausted; never delay control work.
-- Private uploaded raw bundles retained for 30 days, with automatic expiry and a separately bounded report lifetime.
-- A curated case may be retained longer only under a clearly disclosed, separate retention choice. No automatic permanent promotion of customer data into fixtures.
-- Metadata-only audit retention is documented separately. Audit records must not become an accidental copy of the payload.
+- Capture only when a reviewed replay job and private worker are ready. Bound
+  in-memory local buffering and transient processing by bytes and time; exhaustion
+  or expiry drops the complete attempt/cycle without delaying control work.
+- Delete raw and reconstructable normalized/effective-state inputs from staging
+  and worker scratch after replay, cancellation, rejection or expiry. Exclude them
+  from backups, archives, public CI artifacts and raw MCP responses.
+- A summary cannot contain full schedules, forecasts, inputs or configuration that
+  reconstruct the deleted bundle. Retain only the declared bounded result schema.
+- Keep metadata-only audit and summary lifetimes separate and explicit. Their
+  deletion policy must not create an accidental payload archive.
+- Independently authored synthetic regressions may be retained. A redacted or
+  date-shifted household trace is still customer data and is not such a fixture.
 
 Pausing stops new capture and upload. Leaving invalidates credentials, removes pending local uploads and blocks further service access. Deletion covers raw bundles, derived private cases, reports and indexes under an explicit deletion SLA, with backup expiry described honestly. Reads and upload finalization recheck active enrolment so delayed work cannot resurrect deleted data. Previously disclosed transcripts cannot be retracted; minimise their contents.
 
-Define cases as immutable while retained, but deletable by policy. Check the enrolment epoch at upload finalization, queue admission, staging, run start, result finalization and every service read. Revocation cancels queued jobs and cancels or quarantines running jobs, blocks their result publication and triggers scratch-data cleanup. Affected required runs become incomplete. Whether a completed aggregate release receipt may outlive deletion of its underlying private cases is a separate policy decision; do not retain case-level evidence by default under that exception.
+Treat each transient input as immutable for its paired replay, then delete it. A historical summary is not permission to retain or recreate its raw case. Check the enrolment epoch at upload finalization, queue admission, staging, run start, result finalization and every service read. Revocation cancels queued jobs and cancels or quarantines running jobs, blocks their result publication and triggers scratch-data cleanup. Affected required runs become incomplete. Summary receipts may describe a completed replay after raw deletion, but must disclose that its original input is no longer available for rerun. Revoking summary access and deleting installation-linked summaries remain separate operations; no receipt exception permits retaining raw case content.
 
-For the uploaded regression corpus, use random participant IDs and allowlisted fields. Omit credentials, addresses, coordinates, serials, VINs, raw entity IDs, free text and arbitrary provider payloads. Energy patterns and timestamps can still identify a household: treat the resulting corpus as private, pseudonymous data. HA-wide interactive diagnostics has the separate, broader content contract below; its entity identities and configuration text are not automatically included in regression bundles.
+For transient uploaded regression inputs, use random participant IDs and allowlisted fields. Omit credentials, addresses, coordinates, serials, VINs, raw entity IDs, free text and arbitrary provider payloads. Energy patterns and timestamps can still identify a household: treat the resulting corpus as private, pseudonymous data. HA-wide interactive diagnostics has the separate, broader content contract below; its entity identities and configuration text are not automatically included in regression bundles or retained summaries.
 
 ## Full Home Assistant read access
 
@@ -238,7 +259,7 @@ Use an independent, versioned pure schedule evaluator with hand-calculated fixtu
 
 Always show terminal SOC/energy delta and use a declared version-independent terminal-value rule when comparing horizon costs. Report first-action duration separately from the hypothetical full horizon. Capture ISO currency and price scale; aggregate cash metrics only within one currency, weighted by participant. Prefer absolute deltas near zero or negative net cost. Depleting terminal inventory alone is not an economic improvement.
 
-Freeze the evaluation corpus before each comparison and bind its result to the exact candidate content, baseline, manifest and runner version. Release evaluation reads retained approved cases; it must not depend on customers being online at release time. A corpus change requires new comparison evidence. Retention expiry or revocation can remove a case from a future manifest, but must not silently turn an incomplete required run into a pass.
+Freeze the candidate before capture and bind the transient comparison manifest/result to its exact content, baseline, consent epochs and runner version. Collection needs online consenting participants. Publication can use a completed, still-valid bounded summary receipt without recapturing data at that instant, but cannot rerun deleted raw cases. A new candidate or cohort requires fresh comparison evidence. Missing participants, expiry or revocation must never silently turn an incomplete required run into a pass.
 
 Safety/constraint violations and unexplained exceptions block acceptance. Cost, throughput, plan churn and performance changes use predeclared tolerances and require review when exceeded. Keep thresholds versioned and prohibit silently refreshing expected outputs from the candidate. Record intentional behavior changes and their supporting regression tests.
 
@@ -246,43 +267,72 @@ Keep case outcomes separate from run acceptance. Cases may be exact, equivalent,
 
 ## MCP and automation
 
-Proposed read tools: `regression_list_cohorts`, `regression_list_cases`, `regression_get_case_summary`, `regression_get_bundle`, `regression_get_run`, and `regression_compare_results`. Bind each read to the staff actor, approved programme/cohort and current retention/consent state. Summaries are the normal response; full bundles require explicit scope and bounded pagination.
+Proposed read tools: `regression_list_cohorts`, `regression_list_cases`, `regression_get_case_summary`, `regression_get_run`, and `regression_compare_results`. Cases here identify summary receipts, not retained raw bundles. Bind reads to the staff actor, approved programme/cohort and current summary-retention/consent state. Do not implement a raw-bundle retrieval tool under the selected replay-then-delete policy.
 
-Separate discovery, metadata, summaries, reports and raw-bundle scopes. Raw-bundle disclosure is default-deny, audited and purpose-bound, including any disclosure to model providers and their transcripts. Bind opaque cursors to actor, filters and consent epoch. Restrict evaluation holdouts from tuning/discovery access until the candidate is frozen. A summary-scoped token must not discover hidden cases or retrieve payloads through another tool or cursor.
+Separate discovery, metadata, summaries and reports. Raw contribution bundle disclosure to model clients remains disabled; a summary token cannot retrieve deleted/transient inputs through another tool, error or cursor. Bind cursors to actor, filters and consent epoch. Restrict held-out cohort metadata from tuning/discovery until candidate freeze.
 
 Read-only MCP provides two surfaces: HA-wide live/cached diagnostic reads under the full-HA grant, and regression case/report inspection under the fleet grant. Replay jobs are launched by a trusted local command or CI scheduler against an approved revision; the initial MCP does not execute arbitrary commands, fetch arbitrary Git URLs or change enrolment. An operational job launcher, if later needed, has a separate permission and audit contract.
 
 Use the existing approved OAuth patterns with resource-bound, short-lived access tokens and narrowly scoped authorization. Tool annotations describe behavior; enforce read-only access in server routes, credentials and data interfaces. These choices follow the [MCP authorization specification](https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization) and [tool trust guidance](https://modelcontextprotocol.io/specification/2025-11-25/server/tools).
 
+The first clients are Codex and Claude. Their official documentation describes HTTP MCP OAuth and preconfigured client IDs/callbacks: [OpenAI MCP authentication](https://developers.openai.com/plugins/build/auth), [Codex MCP](https://learn.chatgpt.com/docs/extend/mcp?surface=cli) and [Claude Code MCP](https://code.claude.com/docs/en/mcp). Native per-request proof-of-possession support was not established by those pages. Verify the exact client versions or use a reviewed compatible bridge before enabling a sender-bound authority; do not silently drop a required proof. A client/product label does not cryptographically attest the downstream processor.
+
 Collection and routine comparisons require no model calls. Give an agent compact failing-case summaries only when investigation adds value. Keep this dispatcher separate from the Discord support runner; a healthy collection heartbeat must never trigger an investigation for every solve.
 
-## Corpus selection and private execution
+## Cohort selection and private execution
 
-Select a small, diverse initial cohort across battery brands/capabilities, capacity, tariffs, objectives, climates/timezones and EV configurations. More households running the same configuration do not replace missing classes. Maintain coverage counts and a synthetic edge-case matrix for rare and unobserved conditions.
+Select a small, diverse initial cohort across battery brands/capabilities,
+capacity, tariffs, objectives, climates/timezones and EV configurations. More
+homes with the same setup do not replace missing classes. Keep summary coverage
+counts and an independently synthetic edge-case matrix for rare conditions.
 
-Collect a bounded sequence of all solve attempts during a pilot window, within agreed budgets. After measuring volume, retain representative routine samples plus anomalies and opt-in incident windows. Keep sampling/drop metadata and report selection bias. Use separate discovery and held-out evaluation windows so tuning does not simply overfit the corpus.
+Assign discovery and held-out installations/windows before collecting inputs.
+Freeze the exact reviewed candidate and dependencies before evaluation. A private
+job obtains fresh observations and runs released/candidate and A/A arms against
+the same immutable transient bundle. Purge that bundle after processing. A failing
+holdout can inform a synthetic regression, but its deleted household input cannot
+be retained as a convenient discovery case. Keep selection/drop metadata and
+report the bias of the participating cohort.
 
-Group selection by installation lineage, configuration revision and time range, with no overlapping horizons across discovery/evaluation boundaries. Use an installation-held-out track for claims about unseen systems and a separate temporal track for future behavior on known systems. Freeze candidate content before evaluation; an explicitly unsealed failing holdout becomes a discovery case and is replaced for future held-out evaluation. Cap contribution per installation/class and treat the small pilot as calibration, not fleet-representative evidence.
+No raw case archive is approved. Use public/synthetic or separately approved
+independent fixtures for ordinary PR CI. The private trusted runner stages only
+an approved live job's inputs, then executes reviewed code with no network, no
+broker/customer credentials, restricted filesystem, bounded CPU/RAM/time and
+controlled outputs. Untrusted fork/PR code must never receive customer inputs;
+sandboxing does not make that disclosure safe. Raw data must not enter logs,
+crash dumps, model transcripts, public artifacts or backups.
 
-Keep raw real-world data outside Git and public Actions artifacts. Use public/synthetic or separately approved non-identifying fixtures for normal PR CI. A private trusted runner stages a frozen corpus, then executes reviewed code with no network, no broker/customer credentials, restricted filesystem, bounded CPU/RAM/time and controlled outputs. Candidate code sees the staged data, so untrusted fork/PR code must never receive it; sandboxing alone does not make disclosure safe. Keep reports private and sanitise failures before public use.
+Even authenticated captures remain untrusted. Enforce the closed schema,
+array/decompression limits, finite values, per-participant quotas and idempotent
+ordering before processing. Flag unusual physical inputs without clipping away
+the trigger. Reported component hashes identify claimed source versions; they
+are not remote attestation.
 
-Ingestion treats even authenticated uploads as untrusted: enforce schema/array/decompression limits, finite values, per-participant quotas and idempotent ordering before staging. Flag unusual physical inputs without clipping them; triage their eligibility rather than letting one participant poison a required cohort. A reported component hash can identify a claimed source version but remains self-asserted, not remote attestation.
+Use ephemeral workers and read-only input mounts. Bound output and disable core
+dumps. Purge scratch on success, rejection, failure, timeout and consent loss.
+Require purge confirmation before publishing a completed summary; failed cleanup
+leaves the run incomplete and inaccessible. Retain the digest and declared result
+metrics rather than reconstruction-capable inputs/schedules. A later revision
+requires fresh capture; prior summary receipts cannot recreate deleted inputs.
 
-Use ephemeral workers and read-only case mounts. Bound structured output and logs, disable core dumps and purge scratch artifacts. Exercise DNS/network attempts, credential/environment reads, host-path/symlink escapes and raw-input logging in synthetic adversarial tests. Output filters cannot prove malicious code harmless: maintainer review and exact trusted revision promotion remain required.
+Exercise DNS/network attempts, credential/environment reads, path/symlink escapes
+and raw-input logging with synthetic adversarial tests. Filters cannot prove
+malicious code harmless: exact trusted revision promotion remains required.
 
-A recurring confirmed defect should produce a minimal reviewed synthetic regression in the existing suite. Preserve the temporal pattern and constraints that caused it; data minimisation must not smooth away stepped-SOC or boundary behavior.
-
-Author public fixtures from the minimal causal mechanism with independent synthetic values. Do not publish a household trace after merely deleting names or shifting dates. Canary/similarity checks can catch obvious leakage but cannot prove anonymity, and a generic tariff/date substitution must not remove the trigger the regression is meant to preserve.
+Confirmed recurring defects should become minimal independently authored
+synthetic tests. Preserve the causal temporal pattern and constraints without
+publishing household traces after merely deleting names or shifting timestamps.
+Similarity checks may detect obvious leakage but cannot prove anonymity.
 
 ## Delivery order and acceptance
 
 | Phase | Deliverable | Acceptance before continuing |
 | --- | --- | --- |
 | 1. Replay contract and local proof | First build the offline synthetic harness/checker with A/A and seeded defects; then add default-off local attempt capture/export | Synthetic and owner-local cases reproduce the captured version; missing fields fail explicitly; source-layer coverage is stated; no outbound/control access; captures do not change solve behavior. |
-| 2. Opt-in service and full-HA readers | Separate HA-wide diagnostic and regression enrolment/grants, rotating credentials, capability manifest, broad entity/registry/history readers, bounded uploads, storage/audit/deletion and regression-summary MCP | Explicit scopes, reboot/restore identity, revoke, expiry and read-only side-effect tests pass. Complete the configuration/trace/dashboard/log/installation reader matrix before exposing the full-HA profile as complete. Existing support protocol remains compatible. Raw regression-bundle access waits for its specific scope/processor policy. |
+| 2. Opt-in service and full-HA readers | Separate HA-wide diagnostic and regression enrolment/grants, rotating credentials, capability manifest, broad entity/registry/history readers, bounded transient uploads, summary/audit/purge and regression-summary MCP | Explicit scopes, reboot/restore identity, revoke, expiry and read-only side-effect tests pass. Complete the configuration/trace/dashboard/log/installation reader matrix before exposing the full-HA profile as complete. Existing support protocol remains compatible. Raw regression-bundle access waits for its specific scope/processor policy. |
 | 3. Diverse pilot | Proposed 5–10 consenting installations across available hardware/tariff classes, with independently approved diagnostic and regression scopes | Measure full-HA reader coverage/latency plus capture overhead, queue/storage volume, replayability, coverage and error rates over a proposed seven-day window. Unsupported categories stay visible. Expand only against measured capacity. |
 | 4. Stateful replay | Single-cycle retry/overlay replay first, then coordinator/event sequences and fake control boundary | Temporal cases cover provenance steps, midnight/restart, force cleanup, EV/provider overlays and command durations. Unexpected network/control calls fail the run. |
-| 5. Pre-release fleet comparison | Frozen private corpus, released/candidate report, held-out cases and review rules | Initially advisory while reproducibility is calibrated; then make supported checks required through a reviewed gate change. Missing/expired evidence is never a pass. |
+| 5. Pre-release fleet comparison | Frozen candidate, fresh private cohort, released/candidate report, held-out assignments and review rules | Initially advisory while reproducibility is calibrated; then make supported checks required through a reviewed gate change. Missing/expired evidence is never a pass. |
 | 6. Validated simulation | Battery/site model and scored counterfactual runs | Model-specific conservation/limit tests and validation against independent observations; forecast and outcome data remain distinct. |
 
 Extend nearest existing tests, then run the required adjacent and full audited checks for each implemented slice. Publishing HA code still requires the tracked release procedure and trusted matching full-suite evidence from protected main. Broker service deployment and HA installation each need their own verified rollout; replay success is not either receipt.
@@ -296,11 +346,11 @@ Before the pilot, define any intended layer-2 state category as an exact reviewe
 - HA-wide access: separate reader adapters, capability manifest and broad JSON/text diagnostic schema; separate live-read grant/storage/retention from the small support projection and the numeric replay contract. Add state/registry/history first and complete the full category matrix before claiming full coverage.
 - Replay: shared offline loading/configuration helpers with `scripts/benchmark_lp_optimizer.py`; separate replay contracts/adapters and a command such as `scripts/replay_optimizer.py` (proposed name).
 - Service: a separate regression authority/storage module and deployment configuration in `powersync-cc`, reusing reviewed primitives where appropriate. Partition ingestion by installation; avoid one global queue or Durable Object for the fleet. Choose concrete storage/queue bindings after measuring payload and query requirements.
-- Tests: schema round-trip/completeness, access/retention/restore, same-version replay, stateful regressions, blocked I/O and resource-budget tests. Put public synthetic cases in the existing fixture system; private recordings remain external.
+- Tests: schema round-trip/completeness, access/purge/restore, same-version replay, stateful regressions, blocked I/O and resource-budget tests. Put public independent synthetic cases in the existing fixture system; transient private recordings stay outside Git and are purged after processing.
 
-Before selecting pilot budgets, measure compressed bytes per full solve, attempts per day, upload retries and replay CPU cost. For illustration only, 100 KiB per capture at 288 captures/day is about 28 MiB/site/day, or 16.5 GiB for 20 sites over 30 days before duplication, indexes and reports. Retries can increase capture counts. Deduplication and sampling targets should follow those measurements.
+Before selecting pilot budgets, measure bytes per solve, transient peak memory/storage, attempts per approved job, retries and replay CPU. For illustration only, 100 KiB at 288 captures/day is about 28 MiB/site/day of transfer, or 16.5 GiB transferred across 20 sites over 30 days. This is a bandwidth illustration, not permission for 30-day raw storage. Capture only against ready approved jobs; never accumulate an unattended raw backlog.
 
-Recommended next implementation slice: define solver replay v1, capture the complete resolved call/configuration locally, and demonstrate same-version replay with networking disabled. That establishes whether the evidence is useful before adding continuing access to customer installations.
+The Phase 1 implementation defines solver replay v1, captures the resolved call/configuration locally and demonstrates matching-version replay with networking disabled. This establishes usefulness before continuing access to customer installations.
 
 ## First implementation slice after review
 
@@ -317,4 +367,4 @@ Prefer cohesive tests in the existing `tests/` layout over creating a separate f
 
 For validation, use Python 3.12 focused tests for the new contract, capture, replay and scorer, then the required audited full runner when implementing HA changes. Existing benchmark examples can be reused; its `--component-root` expects the actual `custom_components/power_sync` directory. Proposed replay commands and test paths in the raw review are design suggestions, not existing tools.
 
-Before activating a customer pilot, settle consent/processor wording, retention/deletion policy, clone takeover UX, measured resource budgets and staff raw-data roles. Keep raw-bundle model disclosure disabled until separately consented. Before making fleet checks mandatory, settle coverage/holdout requirements, numeric tolerances, evidence validity and the policy for aggregate receipts after deletion. These later decisions do not block the local slice.
+Before activating a customer pilot, finalize consent/processor wording for Codex and Claude, exact callback/client registrations, summary retention, purge guarantees, clone takeover UX and measured resource budgets. Replay-then-delete is selected; do not reopen raw archival or raw-bundle model disclosure as an implicit default. Before making fleet checks mandatory, settle coverage/holdout requirements, numeric tolerances, summary evidence validity and bounded receipt retention after raw deletion. These later decisions do not block the local slice.
