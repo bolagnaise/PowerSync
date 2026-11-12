@@ -86,3 +86,40 @@ def test_multiple_alphaess_cloud_systems_require_an_explicit_serial():
 
     assert ok is False
     assert "Enter the AlphaESS system serial number" in message
+
+
+def test_optimizer_uses_alphaess_telemetry_instead_of_tesla_default_soc():
+    """The active AlphaESS source must seed the plan with measured SOC."""
+    from types import SimpleNamespace
+
+    tree = ast.parse(INIT.read_text())
+    route = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.If)
+        and isinstance(node.test, ast.Name) and node.test.id == "is_sigenergy"
+        and node.body and isinstance(node.body[0], ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == "battery_system"
+                for t in node.body[0].targets)
+    )
+    names = {n.id for n in ast.walk(route) if isinstance(n, ast.Name)}
+    namespace = {name: False for name in names if name.startswith("is_")}
+    namespace.update({name: None for name in names if name.endswith("_coordinator")})
+    measured = SimpleNamespace(data={"battery_level": 37.6})
+    namespace.update(is_alphaess=True, alphaess_coordinator=measured,
+                     BATTERY_SYSTEM_CUSTOM="custom")
+    exec(compile(ast.Module(body=[route], type_ignores=[]), str(INIT), "exec"), namespace)
+    assert namespace["battery_system"] == "alphaess"
+    assert namespace["energy_coordinator"] is measured
+
+    path = ROOT / "custom_components/power_sync/optimization/coordinator.py"
+    method = next(n for n in ast.walk(ast.parse(path.read_text()))
+                  if isinstance(n, ast.AsyncFunctionDef) and n.name == "_get_battery_state")
+    scope = {}
+    exec(compile(ast.Module(body=[method], type_ignores=[]), str(path), "exec"), scope)
+    coordinator = SimpleNamespace(
+        _config=SimpleNamespace(battery_capacity_wh=10000),
+        _get_energy_data=lambda: namespace["energy_coordinator"].data,
+    )
+    soc, capacity = asyncio.run(scope["_get_battery_state"](coordinator))
+    assert soc == 0.376
+    assert capacity == 10000

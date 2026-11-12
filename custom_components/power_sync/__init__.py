@@ -49687,6 +49687,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             elif is_goodwe:
                 battery_system = "goodwe"
                 energy_coordinator = goodwe_coordinator
+            elif is_alphaess:
+                battery_system = "alphaess"
+                energy_coordinator = alphaess_coordinator
             elif is_esy_sunhome:
                 battery_system = "esy_sunhome"
                 energy_coordinator = esy_sunhome_coordinator
