@@ -1774,3 +1774,31 @@ def test_right_now_weather_chip_summarizes_today_and_degrades():
     assert "Available hourly forecast" in out["hourly"]
     for name in ("failed", "empty", "optOut", "yesterday"):
         assert "wx-chip" not in out[name], name
+
+
+def test_today_average_labels_net_home_energy_cost_not_battery_acquisition():
+    """Ticket456: free battery charging can coexist with supply-inclusive cost."""
+    out = _run_board(r"""
+  const card = new T.PsTodayCard();
+  const state = (value, attributes = {}) => ({ state: String(value), attributes });
+  card.config = { entities: {
+    avgCost: 'sensor.avg', mtdAvgCost: 'sensor.mtd',
+    importCost: 'sensor.cost', gridImport: 'sensor.import', netCost: 'sensor.net',
+  } };
+  card.hass = {
+    states: {
+      'sensor.avg': state(0.099, { unit_of_measurement: 'AUD/kWh' }),
+      'sensor.mtd': state(1.62, { unit_of_measurement: 'AUD/kWh' }),
+      'sensor.cost': state(0.01),
+      'sensor.import': state(2.5, { unit_of_measurement: 'kWh' }),
+      'sensor.net': state(1.35, { supply_charge: 1.34 }),
+    }, config: { currency: 'AUD' }, locale: {}, callApi: async () => null,
+  };
+  card._render();
+  console.log(JSON.stringify({ html: card.innerHTML }));
+""")
+    assert 'Average net energy cost' in out['html']
+    assert 'Net cost per kWh used at home' in out['html']
+    assert 'Average import cost' not in out['html']
+    assert '9.9' in out['html']
+    assert 'Month to date 162.0 c' in out['html']

@@ -3092,7 +3092,7 @@ class PsTodayCard extends PsCardBase {
       const avg = psNum(hass, en.avgCost);
       const avgMinor = Number.isFinite(avg) && avg < 5 ? avg * 100 : avg;
       const mtdMinor = Number.isFinite(mtd) && mtd < 5 ? mtd * 100 : mtd;
-      stats.push(stat('Average import cost', `${psFix(avgMinor)}<small>${unit}/kWh</small>`, Number.isFinite(mtdMinor) ? `Month to date ${mtdMinor.toFixed(1)} ${unit}` : ''));
+      stats.push(stat('Average net energy cost', `${psFix(avgMinor)}<small>${unit}/kWh</small>`, `Net cost per kWh used at home${Number.isFinite(mtdMinor) ? ` · Month to date ${mtdMinor.toFixed(1)} ${unit}` : ''}`));
     }
     if (en.netCost) {
       const attrs = psState(hass, en.netCost)?.attributes || {};
