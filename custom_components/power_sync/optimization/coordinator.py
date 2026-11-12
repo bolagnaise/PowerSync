@@ -7518,6 +7518,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 return False
             _LOGGER.debug("Optimization in progress — queuing forced re-optimization")
         await self._optimization_lock.acquire()
+        regression_recorder = getattr(self, "_regression_recorder", None)
         try:
             octopus_revision = (
                 (self.price_coordinator.data or {}).get("revision")
@@ -8164,6 +8165,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         for plan in ev_charge_plan
                     ),
                 )
+
+            # A local developer/test recorder is explicitly attached; ordinary
+            # installations do not allocate or export regression observations.
+            if regression_recorder is not None:
+                try:
+                    regression_recorder.start_cycle()
+                    self._optimizer._regression_recorder = regression_recorder
+                except Exception:
+                    regression_recorder = None
 
             async def _run_optimizer_once(
                 reserve_floor: float | None = None,
@@ -8825,6 +8835,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             # Optional diagnostic observation after the final solve/overlay commit.
             # Failure is expendable and must never change execution or cleanup.
+            if regression_recorder is not None:
+                try:
+                    regression_recorder.record_stage("committed", result.schedule)
+                    regression_recorder.finish_cycle("committed")
+                except Exception:
+                    regression_recorder.errors += 1
             support_observer = getattr(self, "_support_plan_observer", None)
             if support_observer is not None:
                 try:
@@ -8882,6 +8898,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             _LOGGER.error("Optimization failed: %s", e, exc_info=True)
             return False
         finally:
+            if regression_recorder is not None:
+                try:
+                    regression_recorder.finish_cycle("aborted")
+                except Exception:
+                    pass
+                if getattr(self._optimizer, "_regression_recorder", None) is regression_recorder:
+                    self._optimizer._regression_recorder = None
             self._pending_price_timestamps = None
             self._pending_amber_forecast_confidence = None
             self._optimization_lock.release()
