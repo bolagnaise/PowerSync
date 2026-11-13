@@ -4,6 +4,20 @@ The investigator is the PowerSync support agent acting for the operator. The
 reporter supplies the issue and approves ongoing access; they do not need to
 choose logs, manage test captures or decide when diagnosis should expand.
 
+## Why a system is being accessed
+
+There are two supported reasons. Testing work identifies a specific code change
+and exact baseline/candidate pair, then uses an opted-in installation's inputs
+for private offline comparison. Bug investigation requires an active support
+ticket linked to that installation and reporter. Record the applicable test/job
+or current ticket reference in the investigation receipt before reading data.
+
+Initial enrollment is arranged through a support ticket so the operator can
+verify the owner and installation. Once ongoing approval is given, participation
+in regression testing can continue after that enrollment ticket closes. A new
+bug investigation still needs an active ticket. Ongoing approval avoids repeated
+pairing; it does not authorize unrelated browsing or live hardware changes.
+
 ## Diagnose efficiently and thoroughly
 
 Start with the newest question, current source, existing receipts and a focused

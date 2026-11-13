@@ -62,10 +62,14 @@ class AccessRuntime:
 
     async def post(self, route, value):
         async with self.session.post(wire.ORIGIN + route, data=wire.json_bytes(value),
-                                     headers={"Content-Type": "application/json"},
+                                     headers={"Content-Type": "application/json", "User-Agent": "PowerSync-HA-Diagnostics/1.0"},
                                      allow_redirects=False, timeout=15) as response:
-            raw = await response.content.read(420 * 1024 + 1)
-            result = wire.loads(raw, maximum=420 * 1024)
+            raw = bytearray()
+            async for chunk in response.content.iter_chunked(16384):
+                raw.extend(chunk)
+                if len(raw) > 420 * 1024:
+                    raise wire.WireError("payload_limit")
+            result = wire.loads(bytes(raw), maximum=420 * 1024)
             if response.status != 200:
                 raise wire.WireError("remote_request_denied")
             return result

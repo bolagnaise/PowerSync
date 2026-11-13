@@ -160,3 +160,90 @@ async def test_root_revocation_during_descriptor_fetch_prevents_review():
     with pytest.raises(wire.WireError):
         await runtime.review('owner', code, public)
     assert not runtime.reviews and not runtime.grants
+
+class _FragmentedContent:
+    def __init__(self, parts, failure=None):
+        self.parts = list(parts)
+        self.failure = failure
+        self.parts_started = 0
+
+    async def read(self, maximum):
+        # aiohttp read(n) returns available data, not necessarily a whole body.
+        return self.parts.pop(0)[:maximum] if self.parts else b''
+
+    async def iter_chunked(self, maximum):
+        for part in self.parts:
+            self.parts_started += 1
+            for offset in range(0, len(part), maximum):
+                yield part[offset:offset + maximum]
+                await asyncio.sleep(0)
+        if self.failure:
+            raise self.failure
+
+
+class _StreamResponse:
+    def __init__(self, content, status=200):
+        self.content = content
+        self.status = status
+        self.closed = False
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_):
+        self.closed = True
+
+
+class _StreamSession:
+    def __init__(self, response):
+        self.response = response
+
+    def post(self, url, **kwargs):
+        assert url == wire.ORIGIN + '/descriptor'
+        assert kwargs['allow_redirects'] is False
+        assert kwargs['headers']['User-Agent'].startswith('PowerSync-HA-Diagnostics/')
+        return self.response
+
+
+def _stream_runtime(parts, status=200, failure=None):
+    response = _StreamResponse(_FragmentedContent(parts, failure), status)
+    return module.AccessRuntime(None, None, _StreamSession(response), None), response
+
+
+@pytest.mark.asyncio
+async def test_http_transport_consumes_fragmented_json_through_end_of_body():
+    raw = wire.json_bytes({'payload': 'fragmented production response', 'metadata': {'version': 1}})
+    runtime, response = _stream_runtime([raw[:5], raw[5:19], raw[19:]])
+    assert await runtime.post('/descriptor', {}) == wire.loads(raw)
+    assert response.closed
+
+
+@pytest.mark.asyncio
+async def test_http_transport_accepts_a_complete_frame_at_the_exact_size_limit():
+    runtime, response = _stream_runtime([b'{', b'}' + b' ' * (420 * 1024 - 2)])
+    assert await runtime.post('/descriptor', {}) == {}
+    assert response.closed
+
+
+@pytest.mark.asyncio
+async def test_http_transport_refuses_extra_bytes_after_an_apparently_valid_prefix():
+    runtime, response = _stream_runtime([b'{}' + b' ' * (420 * 1024 - 2), b' ', b'never consume this'])
+    with pytest.raises(wire.WireError, match='payload_limit'):
+        await runtime.post('/descriptor', {})
+    assert response.closed and response.content.parts_started == 2
+
+
+@pytest.mark.asyncio
+async def test_http_transport_preserves_remote_denial_after_fragmented_error_body():
+    runtime, response = _stream_runtime([b'{"error":', b'"denied"}'], status=403)
+    with pytest.raises(wire.WireError, match='remote_request_denied'):
+        await runtime.post('/descriptor', {})
+    assert response.closed
+
+
+@pytest.mark.asyncio
+async def test_http_transport_never_returns_a_frame_after_stream_interruption():
+    runtime, response = _stream_runtime([b'{"payload":'], failure=OSError('connection closed'))
+    with pytest.raises(OSError, match='connection closed'):
+        await runtime.post('/descriptor', {})
+    assert response.closed
