@@ -87,38 +87,79 @@ class AccessRuntime:
 
     async def review(self, user, code, authority_key):
         await self.setup_identity()
-        parts = code.split(".") if type(code) is str else []
-        if len(parts) != 4 or parts[0] != self.identity["root"] or not wire.ID.fullmatch(parts[1]):
-            raise wire.WireError("invitation_denied")
         wire.unb64(authority_key, size=32)
-        response = await self.post("/descriptor", dict(zip(("root", "grant", "invitation", "challenge"), parts)))
-        descriptor = wire.verify(response, authority_key, "authority", parts[0], parts[1])["descriptor"]
-        if descriptor["expires_at"] <= time.time() or descriptor["registration"]["root"] != parts[0]:
+        codes = [code]
+        combined = type(code) is str and code.startswith("psa1.")
+        if combined:
+            bundle = wire.loads(wire.unb64(code[5:], maximum=4096), maximum=4096)
+            if set(bundle) != {"invitations"} or type(bundle["invitations"]) is not list or len(bundle["invitations"]) != 2:
+                raise wire.WireError("invitation_denied")
+            codes = bundle["invitations"]
+        selections = []
+        root = self.identity["root"]
+        for invitation in codes:
+            parts = invitation.split(".") if type(invitation) is str else []
+            if len(parts) != 4 or parts[0] != root or not wire.ID.fullmatch(parts[1]):
+                raise wire.WireError("invitation_denied")
+            response = await self.post("/descriptor", dict(zip(("root", "grant", "invitation", "challenge"), parts)))
+            descriptor = wire.verify(response, authority_key, "authority", root, parts[1])["descriptor"]
+            registration = descriptor["registration"]
+            if (descriptor["expires_at"] <= time.time() or registration["root"] != root
+                    or registration["grant"] != parts[1] or parts[1] in self.grants
+                    or any(item["parts"][1] == parts[1] for item in selections)):
+                raise wire.WireError("invitation_denied")
+            selections.append({"parts": parts, "descriptor": descriptor})
+        if combined:
+            first, second = (item["descriptor"] for item in selections)
+            if ({first["ceiling"]["kind"], second["ceiling"]["kind"]} != {"ha_read", "optimizer_contribution"}
+                    or any(first["registration"][key] != second["registration"][key]
+                           for key in ("root", "actor", "profile", "public_key", "processor"))
+                    or any(first["ceiling"][key] != second["ceiling"][key]
+                           for key in ("actor", "client", "processor"))):
+                raise wire.WireError("invitation_denied")
+        if self.root_pending or not self.identity or self.identity["root"] != root:
             raise wire.WireError("invitation_denied")
-        if parts[1] in self.grants:
-            raise wire.WireError("grant_already_reviewed")
         challenge = secrets.token_hex(32)
-        self.reviews = {challenge: {"user": user, "expires": time.time() + 300, "parts": parts,
-                                   "descriptor": descriptor, "authority_key": authority_key}}
-        return {"challenge": challenge, "descriptor": descriptor}
+        self.reviews = {challenge: {"user": user, "expires": time.time() + 300,
+            "selections": selections, "authority_key": authority_key, "combined": combined}}
+        descriptors = [item["descriptor"] for item in selections]
+        return {"challenge": challenge, "descriptor": descriptors[0], "descriptors": descriptors, "combined": combined}
 
     async def confirm(self, user, challenge):
-        review = self.reviews.pop(challenge, None)
-        if not review or review["user"] != user or review["expires"] <= time.time() or self.root_pending:
-            raise wire.WireError("review_required")
-        root, grant_id, invitation, challenge_secret = review["parts"]
-        descriptor = review["descriptor"]
-        grant = {"id": grant_id, "authority_key": review["authority_key"], "ceiling": descriptor["ceiling"],
-                 "registration": descriptor["registration"], "revision": secrets.token_hex(32),
-                 "continuation": secrets.token_urlsafe(32), "generation": 1, "revoke": secrets.token_urlsafe(32),
-                 "attestation": wire.secret_hash(wire.json_bytes({"user": user, "descriptor": descriptor, "challenge": challenge}).decode()),
-                 "confirmed": True, "active": False,
-                 "approval": {"invitation_hash": wire.secret_hash(invitation), "challenge_hash": wire.secret_hash(challenge_secret)}}
-        self.grants[grant_id] = grant
-        # A crash after this write may finish this exact approved selection.
-        await self.save()
-        self.start()
-        return {"status": "approved_locally_connecting", "grant": grant_id}
+        async with self.lock:
+            review = self.reviews.pop(challenge, None)
+            if not review or review["user"] != user or review["expires"] <= time.time() or self.root_pending or self.closed:
+                raise wire.WireError("review_required")
+            selections = review["selections"]
+            if not self.identity or any(item["parts"][0] != self.identity["root"]
+                    or item["parts"][1] in self.grants or item["descriptor"]["expires_at"] <= time.time()
+                    for item in selections):
+                raise wire.WireError("review_required")
+            attestation = wire.secret_hash(wire.json_bytes({"user": user,
+                "descriptors": [item["descriptor"] for item in selections], "challenge": challenge}).decode())
+            additions = {}
+            for item in selections:
+                root, grant_id, invitation, challenge_secret = item["parts"]
+                descriptor = item["descriptor"]
+                grant = {"id": grant_id, "authority_key": review["authority_key"], "ceiling": descriptor["ceiling"],
+                    "registration": descriptor["registration"], "revision": secrets.token_hex(32),
+                    "continuation": secrets.token_urlsafe(32), "generation": 1, "revoke": secrets.token_urlsafe(32),
+                    "attestation": attestation, "confirmed": True, "active": False,
+                    "approval": {"invitation_hash": wire.secret_hash(invitation), "challenge_hash": wire.secret_hash(challenge_secret)}}
+                if review["combined"]:
+                    grant["approval_set"] = attestation
+                additions[grant_id] = grant
+            previous = self.grants
+            self.grants = {**previous, **additions}
+            try:
+                # One atomic local write records the complete owner-approved selection.
+                # Remote purpose-specific grants can connect independently afterward.
+                await self.save()
+            except BaseException:
+                self.grants = previous
+                raise
+            self.start()
+            return {"status": "approved_locally_connecting", "grant": next(iter(additions)), "grants": list(additions)}
 
     async def approve(self, grant):
         if "approval" not in grant:
@@ -213,8 +254,10 @@ class AccessRuntime:
             if self.grants:
                 first = next(iter(self.grants.values()))
                 self.root_pin = {key: first[key] for key in ("id", "authority_key")}
+        selected = self.grants.get(grant_id, {})
+        approval_set = selected.get("approval_set")
         for key, grant in self.grants.items():
-            if grant_id is None or key == grant_id:
+            if grant_id is None or key == grant_id or approval_set and grant.get("approval_set") == approval_set:
                 grant["active"] = False
                 grant["revoking"] = True
                 grant['invitation_pending']='approval' in grant
@@ -294,7 +337,7 @@ class AccessRuntime:
         return {"identity": {"root": self.identity["root"], "public_key": self.identity["public"]} if self.identity else None,
             "root_revocation": "pending_central_confirmation" if self.root_pending else None,
             "connection": self.last_error,
-            "grants": [{"id": key, "ceiling": value["ceiling"], "activity":value.get('activity',{}), "status": "revoking_locally_blocked" if value.get("revoking") else "connected" if value.get("active") else "connecting"} for key, value in self.grants.items()]}
+            "grants": [{"id": key, "approval_set": value.get("approval_set"), "ceiling": value["ceiling"], "activity":value.get('activity',{}), "status": "revoking_locally_blocked" if value.get("revoking") else "connected" if value.get("active") else "connecting"} for key, value in self.grants.items()]}
 
     async def stop(self):
         self.closed = True

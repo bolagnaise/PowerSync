@@ -57,7 +57,11 @@ async def main():
         for profile in ("codex", "claude"):
             private, public = wire.keypair()
             invitation = await asyncio.to_thread(http, "/invite", {"root": identity["root"], "profile": profile, "public_key": public, "kind": "ha_read"})
-            review = await runtime.review("ha-administrator", invitation["code"], os.environ["DIAGNOSTICS_AUTHORITY_PUBLIC"])
+            owner_code = invitation["code"]
+            if profile == "codex":
+                contribution_invite = await asyncio.to_thread(http, "/invite", {"root": identity["root"], "profile": profile, "public_key": public, "kind": "optimizer_contribution"})
+                owner_code = "psa1." + wire.b64(wire.json_bytes({"invitations": [owner_code, contribution_invite["code"]]}))
+            review = await runtime.review("ha-administrator", owner_code, os.environ["DIAGNOSTICS_AUTHORITY_PUBLIC"])
             assert review["descriptor"]["registration"]["profile"] == profile
             assert invitation["code"].split(".")[1] not in runtime.grants
             try:
@@ -66,7 +70,7 @@ async def main():
                 pass
             else:
                 raise AssertionError("cross-user confirmation")
-            review = await runtime.review("ha-administrator", invitation["code"], os.environ["DIAGNOSTICS_AUTHORITY_PUBLIC"])
+            review = await runtime.review("ha-administrator", owner_code, os.environ["DIAGNOSTICS_AUTHORITY_PUBLIC"])
             await runtime.confirm("ha-administrator", review["challenge"])
             grant = invitation["code"].split(".")[1]
             clients.append(Bridge({"profile": profile, "root": identity["root"], "grant": grant, "private_key": private, "authority_key": os.environ["DIAGNOSTICS_AUTHORITY_PUBLIC"]}, profile, http))
@@ -98,7 +102,7 @@ async def main():
         result = await asyncio.to_thread(clients[1].call, "ha_get_states", {})
         assert result["result"]["records"] == []
         if os.environ.get("DIAGNOSTICS_PRIVATE_ARTIFACT"):
-            await contribution(runtime, identity)
+            await contribution(runtime, identity, clients[0])
         await runtime.revoke(clients[0].config["grant"])
         for _ in range(100):
             if clients[0].config["grant"] not in runtime.grants:
@@ -110,6 +114,7 @@ async def main():
             pass
         else:
             raise AssertionError("revoked Codex read survived")
+        assert contribution_invite["code"].split(".")[1] not in runtime.grants
         await asyncio.to_thread(clients[1].call, "ha_get_states", {})
         await runtime.revoke()
         for _ in range(100):
@@ -127,7 +132,7 @@ async def main():
     print("owner journey passed")
 
 
-async def contribution(runtime, identity):
+async def contribution(runtime, identity, diagnostic_client):
     from datetime import datetime, timezone, timedelta
     from regression_runner.runtime import load_component
     from private_regression.controller import run
@@ -144,11 +149,10 @@ async def contribution(runtime, identity):
     coordinator = SimpleNamespace(_optimizer=module.BatteryOptimizer(interval_minutes=60, horizon_hours=8))
     runtime.hass = SimpleNamespace(data={"power_sync": {"entry": {"optimization_coordinator": coordinator}}},
                                    config_entries=SimpleNamespace(async_get_entry=lambda _: object()))
-    private, public = wire.keypair()
-    invitation = await asyncio.to_thread(http, "/invite", {"root": identity["root"], "profile": "codex", "public_key": public, "kind": "optimizer_contribution"})
-    review = await runtime.review("ha-administrator", invitation["code"], os.environ["DIAGNOSTICS_AUTHORITY_PUBLIC"])
-    await runtime.confirm("ha-administrator", review["challenge"])
-    grant_id = invitation["code"].split(".")[1]
+    private = diagnostic_client.config["private_key"]
+    grant_id = next(key for key, value in runtime.grants.items()
+                    if value["ceiling"]["kind"] == "optimizer_contribution"
+                    and value["registration"]["profile"] == "codex")
     for _ in range(100):
         if runtime.grants[grant_id].get("active"):
             break
