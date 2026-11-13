@@ -1,4 +1,12 @@
-# Recovering held charging commands on a BLE-only Tesla bridge
+# EV command and headroom recovery
+
+- [Recovering held charging commands on a BLE-only Tesla bridge](#tesla-ble-stop-recovery)
+- [Recover native Tesla charging after a lost response](#tesla-native-recovery)
+- [Recover retained EV charging headroom](#ev-headroom-recovery)
+
+<a id="tesla-ble-stop-recovery"></a>
+
+## Recovering held charging commands on a BLE-only Tesla bridge
 
 PowerSync can reconcile retained **Start, Stop, current and charge-limit** history without Tesla Fleet or
 Teslemetry when every affected ESPHome bridge runs the companion recovery
@@ -22,7 +30,7 @@ HA recovery files, bridge YAML and working firmware before updating.
 Another held recovery incident in the same PowerSync entry also requires
 support review before this whole-entry recovery can proceed.
 
-## Install the companion component
+### Install the companion component
 
 Keep EV automations and other writers paused while installing and recovering.
 The vehicle must be available to BLE and already report stopped, complete,
@@ -83,7 +91,7 @@ packages:
       - esphome/stop-recovery.yaml
 ```
 
-The v2.12.1652 recovery package also includes native charging receipt and paired-value entities automatically; do not add a second freshness package. See [BLE reliability](tesla-ble-reliability.md) for firmware-family compatibility, the matching yoziru recovery adapter, and the operational recovery policy.
+The v2.12.1652 recovery package also includes native charging receipt and paired-value entities automatically; do not add a second freshness package. See [BLE reliability](tesla-ble.md#tesla-ble-reliability) for firmware-family compatibility, the matching yoziru recovery adapter, and the operational recovery policy.
 
 The companion component is separately licensed under AGPL-3.0; see
 [its source and notice](../esphome/NOTICE.md). Existing upstream binaries do not
@@ -91,7 +99,7 @@ provide this protocol. The pinned packages preserve the upstream controls; the
 recovery lock temporarily rejects vehicle mutations, including pairing/key
 changes, while it collects proof.
 
-## Confirm the entire affected inventory
+### Confirm the entire affected inventory
 
 In HA **Developer tools → Actions**, run `power_sync.recover_ble_command_history`
 using YAML mode. Replace the example prefixes and VINs with your actual values.
@@ -129,7 +137,7 @@ unknown command outcomes remain unknown in history. Recovery does not replay a
 saved Start or claim that an earlier Stop succeeded. Normal automation can issue
 new commands after successful recovery; resume paused automations deliberately.
 
-## If recovery is interrupted or refused
+### If recovery is interrupted or refused
 
 Leave the records, pairing and bindings intact. The action returns
 `success: false` with a reason when required proof or scope is missing. A refusal
@@ -161,7 +169,7 @@ persistent read-only enforcement; it is not a recovery method. No customer
 firmware installation, charging command or live recovery is performed by the
 release itself.
 
-## Operational recovery policy
+### Operational recovery policy
 
 The general action uses protocol 2 to retire executable bridge work through a
 persistent read-only lock and verified reboot, then checks new source-native
@@ -176,5 +184,147 @@ read-only acquisition transaction; no pairing change or protocol upgrade is
 required. Firmware without this protocol must use its separately supported stock
 recovery route or install the compatible companion. Pedro and yoziru packages
 are different firmware families. Use the [yoziru adapter and matching library
-pins](tesla-ble-reliability.md#yoziru-recovery-adapter) for that family; do not
+pins](tesla-ble.md#tesla-ble-reliability) for that family; do not
 flash the Pedro component onto yoziru.
+
+<a id="tesla-native-recovery"></a>
+
+## Recover native Tesla charging after a lost response
+
+A Fleet, Teslemetry or Tessie timeout can occur before or after a command executes.
+PowerSync keeps the original attempt as `sent_unknown`. It now separates that
+historical uncertainty from the operational decision to resume charging control.
+
+### Automatic recovery
+
+A new charging request can reconcile old native Start, Stop, current or limit
+attempts when:
+
+- the journal is loaded and valid, and the original producer identities still match;
+- no provider submission is running and configuration, ownership and generation remain unchanged;
+- the uncertain commands have settled for at least 60 seconds (120 seconds for Teslemetry, whose command retry window can last 90 seconds);
+- two advancing vehicle charge-state reports, separated by at least three seconds, show stopped/complete/disconnected/no-power, zero current and zero power, with valid unchanged requested current and charge limit.
+
+This also works with an older current request whose numerical value was never
+saved. It does not reconstruct that value or claim the earlier command succeeded.
+Instead, it records the exact attempt IDs and current vehicle observations, saves
+the operational recovery, and advances the control generation. Normal command
+admission then checks ownership, electrical headroom and the requested settings.
+
+If the car is charging, use the normal **Stop** control before requesting Start.
+A charging or contradictory observation keeps recovery pending. A failed recovery
+attempt backs off for 60 seconds, persisted across restart; it does not create a
+permanent per-session retry latch. Intentional Stop pre-emption permits an
+immediate new recovery request. Missing historical submission timing gets one
+finite, durable settling interval without backfilling the old record. Stop remains available and interrupts an in-progress reconciliation.
+
+Recovery performs a bounded provider refresh, using the exact independent cloud
+reader when the ordinary coordinator retains a stale document. Teslemetry may
+require a paid refresh. Tessie recovery uses its source-state GET with caching
+disabled. Reconciliation never invokes a wake or charging command by itself. Offline/asleep vehicles can recover after fresh reports become available.
+
+Where an obsolete managed reservation exists, recovery also obtains fresh local
+meter samples and feeds the two observations through the existing allocator.
+Only the captured car's reservation can settle; other vehicles keep their demand.
+Unavailable electrical evidence retains the reservation and normal admission
+continues to enforce it.
+
+The original records and unknown outcomes survive restart. Recovery does not
+manufacture terminal proofs or delete history. A new uncertain command gets a new
+hold and requires new observations.
+
+This is state reconciliation under [Tesla's documented stateful-command timeout
+model](https://developer.tesla.com/docs/fleet-api/getting-started/best-practices).
+The settling period and repeated observations are operational safeguards, not a
+vendor guarantee that no delayed historical command can ever execute. Ordinary
+setting confirmation, current regulation and electrical admission remain active.
+
+### Read-only inspection
+
+In **Developer Tools → Actions → PowerSync: Inspect Tesla EV recovery status**:
+
+```yaml
+action: power_sync.get_ev_recovery_status
+data:
+  entry_id: YOUR_POWERSYNC_ENTRY_ID
+  vin: YOUR_UPPERCASE_17_CHARACTER_VIN
+```
+
+Specify the PowerSync entry when multiple entries are loaded. The response covers
+only that VIN. It distinguishes missing/malformed history, producer changes and
+native uncertainty, and identifies the fresh reports needed for reconciliation.
+The inspection action itself does not refresh, wake, send controls or change history.
+
+BLE history uses the companion firmware recovery described in
+[Tesla BLE recovery](ev-command-recovery.md#tesla-ble-stop-recovery). Reconciliation never adopts another
+provider, vehicle, disabled entity or changed pairing to escape a retained hold.
+
+<a id="ev-headroom-recovery"></a>
+
+## Recover retained EV charging headroom
+
+An uncertain Tesla charging command can leave a conservative EV reservation
+that blocks Powerwall battery grid charging. Previously, automatic recovery
+could only wait for the provider's cached charge data to advance. A fresh log
+does not make that data advance.
+
+After updating through HACS and restarting Home Assistant, use **Developer Tools
+→ Actions → PowerSync: Recover EV charging headroom** for the affected vehicle.
+Enable **Allow provider refresh** to authorize this attempt. Teslemetry refreshes
+can consume credits. For multiple PowerSync entries, specify the PowerSync
+configuration entry ID.
+
+```yaml
+action: power_sync.recover_ev_headroom
+data:
+  vin: YOUR_17_CHARACTER_VIN
+  allow_provider_refresh: true
+```
+
+The action requests up to two independent native vehicle charge reports and two
+local Powerwall meter updates, with a five-second interval so normal two-second
+meter polling can satisfy the unchanged three-second acquisition-progress check. Each round
+has an eight-second read timeout. There is a one-minute cooldown per vehicle
+after an attempted recovery. There are no automatic paid retries or background
+changes. The car must be able to provide fresh data; the action does not wake it.
+
+A successful response includes `success: true` and `reservation_cleared: true`.
+This means the targeted reservation has been removed durably after verified
+readback. It does not start battery charging: retry the intended charge action
+or allow the optimizer's next cycle. Other battery or EV safety checks still
+apply. Success does not establish historical command execution or actual battery
+grid charging.
+
+If a Scheduled Charging session has ended, its expired ownership lease no longer
+blocks read-only recovery for the same verified native vehicle source. Unresolved
+commands, changed identities and active owners still block recovery. This applies
+to existing retained reservations after updating; no store edit is needed.
+
+**PowerSync: Inspect Tesla EV recovery status** now includes `headroom_recovery`.
+It reports the command route and read-only settlement route separately, whether
+a sidecar hold exists, whether a matching reservation is loaded, and the exact
+native-source selection verdict and matching-source count. It does not refresh
+the vehicle or meter. `no_retained_history` describes the command journal; it does
+not mean no headroom reservation exists. A `native_source_unavailable` response
+also includes this projection under `preflight`; send that response if refused.
+
+If the action returns `success: false`, keep the reservation and use the returned
+`error` to choose the next step:
+
+| Error | Meaning / next step |
+|---|---|
+| `provider_refresh_confirmation_required` | Enable Allow provider refresh for this attempt. |
+| `reservation_not_found` | This VIN has no retained managed reservation; another guard may be blocking charging. |
+| `reservation_scope_mismatch` | Check the VIN and PowerSync entry ID. |
+| `native_provider_required` / `native_source_unavailable` | A uniquely identified, enabled Tesla Fleet or Teslemetry native source is required. BLE-only evidence cannot use this action. |
+| `local_meter_unavailable` | The configured local Powerwall meter cannot be refreshed. |
+| `site_busy` / `recovery_cooldown` | Let the current operation finish; wait one minute before another recovery attempt. |
+| `recovery_scope_blocked` / `recovery_scope_changed` / `reservation_identity_changed` | Ownership, an unresolved recovery hold, or source/configuration changes prevent settlement. Resolve that cause; do not reset the store. |
+| `fresh_readback_unavailable` | The provider/meter failed, timed out, or did not supply a usable fresh charge report. No wake is attempted. |
+| `vehicle_not_stopped` | The charge report does not establish a stopped vehicle with zero current and power. |
+| `settlement_not_confirmed` | The readings did not meet the existing timing/alignment and consistency checks. |
+| `recovery_failed` | Recovery could not finish, including a possible persistence failure; retain the error response for support. |
+
+No additional diagnostic log is required to try this action. If it cannot finish,
+send the response and attempt time first; request further logs only for a specific
+unanswered failure.

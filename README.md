@@ -177,7 +177,7 @@ An explicit EV session limit can reduce the site limit but cannot increase it.
 Whole-site power balancing uses site power telemetry.
 Optional per-phase current protection additionally requires fresh mains-current sensors in amps; a grid-power sensor in kW cannot be selected as a phase-current sensor.
 
-For Tesla BLE bridges, see [charging freshness and command confirmation](docs/tesla-ble-reliability.md)
+For Tesla BLE bridges, see [charging freshness and command confirmation](docs/tesla-ble.md#tesla-ble-reliability)
 for the PedroKTFC and yoziru firmware packages, recovery inspection, and held-command requirements.
 
 ### Custom tariff daily supply charge
@@ -224,6 +224,21 @@ Remote monitoring and control via iOS and Android.
 </p>
 
 ---
+
+## Documentation
+
+- [Battery settings and manual controls](docs/battery-settings.md)
+- [Electricity providers](docs/electricity-providers.md)
+- [Solar forecasts, accounting and curtailment](docs/solar.md)
+- [EV charging and shared chargers](docs/ev-charging.md)
+- [Tesla EV charging](docs/tesla-ev-charging.md), [BLE setup](docs/tesla-ble.md) and [command recovery](docs/ev-command-recovery.md)
+- [Diagnostic sharing and privacy](docs/diagnostics-privacy.md)
+- [Read-only support](docs/remote-support.md)
+
+The [wiki](https://github.com/bolagnaise/PowerSync/wiki) covers integration setup
+and supported hardware. Legal policies are published on the website:
+[Privacy](https://bolagnaise.github.io/PowerSync/privacy.html) and
+[Terms](https://bolagnaise.github.io/PowerSync/terms.html).
 
 ## Development and testing
 

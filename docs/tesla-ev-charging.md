@@ -1,10 +1,129 @@
-# Tesla EV transport recovery and native site coexistence
+# Tesla EV charging
+
+- [Native Tesla Charge on Solar](#teslemetry-native-solar)
+- [Rate management inside Tesla charge windows](#tesla-native-window-rate)
+- [Tesla Start confirmation](#tesla-start-confirmation)
+- [Tesla EV transport recovery and native site coexistence](#tesla-transport-recovery)
+
+<a id="teslemetry-native-solar"></a>
+
+## Native Tesla Charge on Solar
+
+PowerSync adds explicit Home Assistant actions for reading and managing Tesla's native Charge on Solar through PowerSync Fleet or the selected Teslemetry vehicle provider. With the matching mobile app changes, **EVs & Chargers > Vehicles > Tesla Charge on Solar** provides an explicit settings read, enabled setting, lower and upper charge limits, and a confirmed apply action. Developer Tools → Actions remains available. The actions, cost, eligibility and recovery procedure are documented in the wiki [Services Reference](https://github.com/bolagnaise/PowerSync/wiki/Services-Reference#native-tesla-charge-on-solar).
+
+The native controller is distinct from PowerSync Solar Surplus and Smart Schedule. PowerSync Fleet uses its own OAuth connection and paired virtual key through the private signing gateway; Teslemetry uses its documented custom GET/POST route. Both operate the native feature and its two limits. Existing installations make no native requests until explicitly requested. The selected Teslemetry vehicle provider takes precedence; otherwise the configured PowerSync account supplies Fleet credentials. The separate Home Assistant Tesla Fleet integration cannot sign these custom commands.
+
+The module persists a VIN control hold before each native request, serializes handover against in-flight PowerSync EV actions and dynamic updates, and retains the hold on rejected or uncertain requests. Only complete disabled readback releases it. Unresolved commands are blocked while a hold exists, including unidentified charger paths. An explicitly different identified vehicle remains separate. Reads are explicit, incur provider costs and have a 15-second minimum interval. Teslemetry may wake the car; the PowerSync Fleet extension sends no wake command. Writes are blocked in monitoring mode; active PowerSync EV sessions block reads and writes.
+
+Enabling requires confirmation of Tesla native setup, compatible Tesla/Powerwall hardware and firmware, no site/export limits, other controllers disarmed and request costs accepted. Native mode does not enforce PowerSync price, phase allocation or grid-import constraints. The local hold cannot fence another integration or product, so it must be disarmed before native activation. There is no automatic hardware activation, restoration, retry or background native polling.
+
+The mobile screen reads local provider and ownership metadata when opened; it does not contact the vehicle for native settings. **Read Tesla settings** and **Apply Tesla settings** are explicit requests. Confirmed readback is shown separately from an unconfirmed control hold. The independently developed `no_solar_installed` setting prevents new native activation, while explicit reads and disabling remain available subject to the existing monitoring/session gates. Changing solar installation settings never disables hardware or releases an uncertain native hold.
+
+### PowerSync Fleet provider
+
+Register the vehicle in PowerSync Cloud, grant Tesla vehicle-data and charging permissions, and install the PowerSync virtual key. Complete native Charge on Solar site pairing in the Tesla app first. PowerSync does not create or remove the vehicle-to-Powerwall association. An unregistered or unpaired vehicle cannot use this path.
+
+HA sends one authenticated transaction to `/v1/vehicles/{vin}/native-solar`. Cloud resolves the VIN inside the authenticated account, serializes it with Cloud vehicle controls, and keeps its own persistent ownership hold. A write includes fresh settings readback in that transaction; HA must not make a second read that would collide with the Cloud cooldown. Both products retain their holds after an uncertain response. Cloud accepts HA writes only with an authenticated actuating-mode HA session; ordinary Cloud activation remains blocked when HA is active.
+
+The private gateway independently encodes the native protocol messages and uses the official vehicle-command session, key, VIN mutex, counter and response authentication. These commands are absent from Tesla's public command API. The extension builds against checksum-pinned official vehicle-command v0.4.1; protocol fields are documented in the extended [CarServer schema](https://github.com/Teslemetry/tesla-protocol/blob/main/proto/command/car_server.proto). No Teslemetry account or token is needed. Existing service IDs retain `teslemetry` for compatibility.
+
+Deploy the extended gateway before Cloud and HA changes. Compile/protocol fixtures and mocked provider tests do not establish live firmware compatibility or physical solar charging. No vehicle command was sent during implementation verification.
+
+### Vehicle schedules in battery optimization
+
+**EVs & Chargers > Vehicles > Plan Tesla charge schedules** controls each VIN's imported Tesla home charge windows independently of Smart EV Charging. It defaults on, including when Smart EV Charging is disabled or unconfigured. An away or unplugged vehicle keeps future home windows; its current known unavailable slot is excluded. Planning uses the configured home charger rate when a live away/unplugged charger cannot be identified, while execution keeps its own availability and charger-safety gates.
+
+Turn this forecast switch off for a car you do not expect to charge at home during a longer absence. The preference is stored per VIN and PowerSync entry, survives restarts, excludes cached native schedule demand immediately on the next solve and suppresses further schedule reads for that VIN. Other cars and PowerSync's own Smart Schedule plans remain independent. Turning it on restores the bounded schedule cache/refresh path. Actual observed home EV consumption remains part of the site's measured load.
+
+The authenticated `/api/power_sync/ev/tesla_schedule_planning` endpoint returns saved inclusion preferences on GET. POST accepts `entry_id`, `vin` and strict boolean `enabled`; it persists before publishing the new preference and queues an advisory reoptimization. Both operations are local. They never change Tesla schedules, charging controls, native Charge on Solar ownership or the household Smart Optimization setting. No solar installed does not prohibit planning ordinary grid-charge windows.
+
+
+The battery optimizer imports location-specific Tesla vehicle charging schedules through loaded Home Assistant Teslemetry or Tesla Fleet integrations, even when PowerSync Smart EV charging is disabled or unconfigured. Online vehicle schedule/charge-state reads are limited to once per 15 minutes per VIN per optimizer entry. This is separate from the native-solar settings endpoint and can incur provider charges. Known sleeping vehicles are skipped and no wake command is issued. Missing/unsupported responses are unavailable evidence rather than confirmed empty schedules; successful empty responses replace the previous schedules.
+
+Home-location schedules are expanded on the Home Assistant local clock, including recurring days, overnight windows, one-time schedules and finish-by-only schedules. Forecast power uses requested charging current and available/configured charger limits; remaining energy uses SOC, charge limit and the shared capacity resolver (including its labelled 60 kWh default estimate). Cached schedules and charge state are limited to 24 hours; older-but-bounded charge state is explicitly described as last known. This is predicted demand, not measured charging or a guarantee of the vehicle's actual execution time.
+
+For the same VIN, overlapping Tesla and PowerSync windows are combined once per slot and share one remaining-energy budget. Distinct cars still add. Tesla-controlled charging is fixed load in the battery solve, so the optimizer reserves site-import headroom and includes it in costs, battery planning and published EV demand. Other managed cars retain joint optimization. An explicitly configured planned-EV-load sensor remains authoritative over automatic forecasts.
+
+When a native-solar ownership hold exists, competing PowerSync windows do not become forecast demand. Confirmed native settings restrict scheduled any-source charging to the lower solar limit; opportunistic excess-solar charging above it has no guaranteed fixed window. Tesla's newer Powerwall/Wall Connector Smart Charging plans are not imported because they have no documented public schedule-read API. Existing native ownership protections remain the physical-command authority.
+
+<a id="tesla-native-window-rate"></a>
+
+## Rate management inside Tesla charge windows
+
+Available in the Home Assistant integration from v2.12.1482.
+
+PowerSync can optionally adjust a Tesla vehicle's charging current while the car is already charging at home in a recurring Tesla schedule with explicit start and end times. Tesla continues to start and stop charging and enforce its charge limit. PowerSync does not wake the car, edit its schedule, change its charge limit, or pause a Tesla-owned session.
+
+**Plan Tesla charge schedules** remains a forecast setting, enabled by default. The separate **Adjust rate in Tesla windows** setting grants current-control permission for that vehicle and defaults off. Turning forecast inclusion on does not enable rate control.
+
+### Requirements and limits
+
+- A paired local Powerwall with fresh whole-site measurements and a known site import limit, plus an enabled PowerSync optimiser.
+- A loaded Tesla Fleet or Teslemetry vehicle integration supplies current vehicle data and the saved schedule. Existing supported Tesla BLE, Teslemetry Bluetooth or Fleet current entities supply the actual amp command.
+- A unique vehicle/provider mapping, fresh electrical metadata, and an explicit recurring home window. One-time, start-only and finish-by-only schedules remain forecast-only.
+- Grid-charging permission, gateway limits and other controller ownership still apply. PowerSync keeps the original positive current setting as its maximum; this permission does not authorize exceeding that setting.
+
+Current is calculated from the remaining vehicle energy and time before the window ends. Battery charging, home load, other EV demand and pending commands share the site budget. If the minimum positive charging current does not fit, PowerSync cannot stop a Tesla-owned session; its status reports the limitation. A target can remain unreachable because of site capacity, vehicle limits or a short window.
+
+The first implementation supports Tesla vehicle current control. Native rate management is withheld where PowerSync has configured another charger controller, or existing managed charging demand has not been reconciled. Existing controllers continue operating while the new feature is unavailable. A pending native current restoration must finish before an unsupported controller can take over.
+
+### Battery and forecast coordination
+
+Before increasing EV demand into capacity currently used by a local grid-following battery charge, PowerSync records the prospective EV demand, lowers that exact battery charging session, and waits for two fresh site readings showing sufficient headroom. It rechecks authority and measurements before sending the EV command. Manual battery charging also respects reserved EV demand; a legacy tariff charge cannot enforce this shared wattage budget.
+
+An eligible active native window uses one fixed EV forecast derived from the same current, remaining-energy and deadline calculation as rate control. Existing native scheduling forecasts remain in use elsewhere. Losing authority, recovery or a manual takeover removes the controlled forecast and requests a new household plan. Forecasts and acknowledged current settings are separate from measured charging power.
+
+Keep enforced gateway connection limits configured. Software coordination uses sampled measurements and asynchronous provider commands; it is not a replacement for electrical protection or the gateway's enforced limits.
+
+### Restoration and manual changes
+
+Disabling rate management, leaving a supported window, stopping the optimiser, or restarting Home Assistant ends active control. PowerSync restores only the original current it owns and checks available import headroom before increasing it. An offline vehicle, uncertain command or insufficient capacity can leave restoration pending; the journal survives restart and does not replay a charging target.
+
+After the original current setting is acknowledged, its prospective demand stays reserved until two fresh, aligned vehicle and site readings confirm physical settlement. Battery charging cannot consume that headroom while the car ramps up. Waiting for settlement does not resend the current command.
+
+A manual current change or another controller taking ownership supersedes PowerSync. PowerSync does not overwrite that change or reacquire the same native window. Native Charge on Solar and native-window rate management are mutually exclusive across PowerSync entries for the same vehicle.
+
+### Home Assistant API
+
+Authenticated `GET /api/power_sync/ev/tesla_schedule_planning?vin=<VIN>` returns each loaded entry's forecast setting, rate permission, availability reason and current status. `POST` accepts `entry_id`, `vin`, `enabled`, and the optional explicit boolean `rate_management`. A rate permission requires forecast inclusion. These settings requests do not themselves establish physical charging proof.
+
+The mobile control appears under **EVs & Chargers > Vehicles** with a matching app build (1.0.7 build 454 or later). **Refresh rate status** reads PowerSync's local status without waking or polling the vehicle.
+
+This document describes the Home Assistant implementation. Cloud rate control and mobile build delivery require separate implementation and validation; their publication must not be inferred from an HA source change.
+
+<a id="tesla-start-confirmation"></a>
+
+## Tesla Start confirmation
+
+PowerSync checks fresh physical charging evidence after a Tesla Start. A newer
+native reading replaces the initial command observation only when its VIN,
+provider, config entry, device and producer identity all match. Stale, future,
+pre-command and unchanged-timestamp readings cannot confirm a new Start.
+
+In Fleet API or Both mode, an old Home Assistant cache can trigger a bounded
+read-only request through the already selected Fleet connection for that exact
+vehicle. BLE-only mode does not acquire this fallback. This read does not wake
+the car or repeat the Start command, and ownership, provider binding and request
+deadline checks still apply before and after the request.
+
+Charging state and positive measured current or power remain necessary. Command
+acceptance, a UI state and a later independent physical reading are separate
+proof levels. A failed confirmation must not be described as proof that the
+vehicle never started.
+
+The corresponding user documentation is in the wiki's Tesla Vehicle Charging
+section of EV Smart Charging. No provider, automatic EV mode or monitoring
+setting changes are required for this correction.
+
+<a id="tesla-transport-recovery"></a>
+
+## Tesla EV transport recovery and native site coexistence
 
 This continues the 31 October Tesla control review in PR #139. The earlier
 control-path and two-car validation reports describe previous checkpoints;
 their installation and physical results do not validate this candidate.
 
-## Ownership and charging plans
+### Ownership and charging plans
 
 The existing per-vehicle controller owns the charging target, allocation and
 deadline. Transport recovery does not introduce a second scheduler. An
@@ -47,7 +166,7 @@ stopped evidence needs no cloud request. Malformed persisted obligation
 families remain held and retained without arming callbacks or aborting the
 otherwise healthy integration setup.
 
-## Transport selection and evidence
+### Transport selection and evidence
 
 Configured ESPHome BLE remains first. A proven pre-dispatch failure permits
 the next configured route. An uncertain dispatched command first gets an
@@ -322,7 +441,7 @@ fallback, while ambiguous mutating-command errors retain their attempt.
 The provider contract was checked against [the modern adapter source](https://github.com/Teslemetry/hass-teslemetry-bluetooth/blob/a3a672d4116dfa9b29a68c73238e5380399736c2/custom_components/teslemetry_bluetooth/vehicle.py)
 and [tesla-fleet-api 1.20.0's Bluetooth contract](https://github.com/Teslemetry/python-tesla-fleet-api/blob/v1.20.0/docs/bluetooth_vehicles.md).
 
-## Native battery charge and discharge
+### Native battery charge and discharge
 
 Tesla native Max battery charge and export can coexist with managed EV
 charging and EV rate-only control when the current site proves that capability.
@@ -350,14 +469,3 @@ manual native restore still awaiting physical settling, and nothing to restore.
 Requesting an HA service response does not request strict synchronous physical
 confirmation. Internal strict confirmation and background cleanup retain their
 existing failure, retry and ownership rules.
-
-## Verification boundaries
-
-Focused regressions cover exact two-car routing, sparse BLE charge responses,
-stale provider data, command outcomes, durable persistence and cancellation,
-isolation, fallback identity, pending plans, original deadlines and both native
-battery directions. Release also requires the audited complete suite and
-trusted protected-main evidence under the tracked regression gate.
-
-Software tests do not establish installation, fresh hardware readback or physical
-effect. Site-specific validation receipts are maintained privately.
