@@ -981,3 +981,43 @@ def test_future_stop_observation_cannot_clear_provisional_lease_or_emit_confirma
     )
     assert ev_ownership.get_ev_ownership(hass, entry, "car")[1]["stop_settling"] is True
     assert not any(c.args[1].get("physical_confirmation") for c in hass.bus.async_fire.call_args_list)
+
+@pytest.mark.parametrize('status,power,offset,external,cleared', [
+    ('b1', 0.0, 1, False, True),
+    ('b2', 0.02, 1, False, True),
+    ('b1', 0.0, -1, False, False),
+    ('b1', None, 1, False, False),
+    ('b1', float('nan'), 1, False, False),
+    ('unknown', 0.0, 1, False, False),
+    ('c2', 0.0, 1, False, False),
+    ('b1', 1.5, 1, False, False),
+    ('b1', -1.5, 1, False, False),
+    ('b1', 0.0, 1, True, False),
+])
+def test_sigenergy_stopped_read_releases_only_confirmed_provisional_stop(status, power, offset, external, cleared):
+    hass, entry = _Hass(), _Entry()
+    command = ev_ownership.record_ev_command(hass, entry, 'sigenergy_charger', command='stop', success=True)
+    command_time = datetime.fromisoformat(command['at'])
+    ev_ownership.ensure_external_ev_ownership(hass, entry, 'sigenergy_charger', observed_at=command_time + timedelta(seconds=1))
+    lease = ev_ownership.get_ev_ownership(hass, entry, 'sigenergy_charger')[1]
+    if external:
+        lease.pop('stop_settling')
+    state = SimpleNamespace(charger_type='evac', status=status, power_kw=power, is_charging=False, is_discharging=False)
+    ev_ownership.observe_sigenergy_ev_stop(hass, entry, state, observed_at=command_time + timedelta(seconds=offset))
+    assert (ev_ownership.get_ev_ownership(hass, entry, 'sigenergy_charger')[1] is None) is cleared
+
+
+def test_sigenergy_load_collection_reconciles_price_to_solar_handoff():
+    hass, entry = _Hass(), _Entry()
+    command = ev_ownership.record_ev_command(hass, entry, 'sigenergy_charger', command='stop', success=True)
+    observed_at = datetime.fromisoformat(command['at']) + timedelta(seconds=1)
+    ev_ownership.ensure_external_ev_ownership(hass, entry, 'sigenergy_charger', observed_at=observed_at)
+    state = SimpleNamespace(charger_type='evac', status='b1', power_kw=0.0, is_charging=False, is_discharging=False)
+    tree = ast.parse((ROOT / '__init__.py').read_text())
+    branch = next(n for n in ast.walk(tree) if isinstance(n, ast.If) and ast.unparse(n.test) == 'sigenergy_state is not None')
+    namespace = dict(__package__='power_sync', hass=hass, entry=entry, sigenergy_state=state,
+                     entry_data=hass.data['power_sync'][entry.entry_id], observed_at=observed_at,
+                     observations=[], EvLoadObservation=lambda **kw: kw,
+                     EvMeasurementKind=SimpleNamespace(INTEGRATED_CHARGER='integrated'))
+    exec(compile(ast.Module(body=[branch], type_ignores=[]), '<sigenergy collection>', 'exec'), namespace)
+    assert ev_ownership.get_ev_ownership(hass, entry, 'sigenergy_charger') == (None, None)

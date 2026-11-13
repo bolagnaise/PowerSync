@@ -1627,6 +1627,29 @@ def has_pending_ev_stop(hass: Any, config_entry: Any, vehicle_id: Any) -> bool:
     return False
 
 
+def observe_sigenergy_ev_stop(hass: Any, config_entry: Any, state: Any, *, observed_at: Any) -> None:
+    """Reconcile a recorded stop using a fresh, complete charger read only."""
+    import math
+
+    try:
+        power = float(state.power_kw)
+    except (AttributeError, TypeError, ValueError):
+        return
+    if not math.isfinite(power):
+        return
+    stopped_states = {
+        "evac": {"a1_a2", "b1", "b2"},
+        "evdc": {"idle", "occupied", "scheduled", "ended"},
+    }
+    if (
+        state.status in stopped_states.get(state.charger_type, set())
+        and not state.is_charging
+        and not state.is_discharging
+        and abs(power) <= 0.05
+    ):
+        confirm_powersync_ev_stop(hass, config_entry, "sigenergy_charger", observed_at=observed_at)
+
+
 def observe_recorded_ev_stop(
     hass: Any, config_entry: Any, vehicle_id: Any, *,
     observed_at: Any, charging: bool,
