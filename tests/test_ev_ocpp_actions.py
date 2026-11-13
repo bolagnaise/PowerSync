@@ -14025,6 +14025,8 @@ def test_ble_start_complete_vehicle_is_not_sent_or_quarantined(
     monkeypatch.setattr(actions, "_TESLA_BLE_COMMAND_CONFIRMATION_SECONDS", 0)
     monkeypatch.setattr(actions, "_TESLA_BLE_SESSION_PROBE_SECONDS", 0)
 
+    admission = AsyncMock(return_value=True)
+    monkeypatch.setattr(actions, "prepare_ev_submission", admission)
     result = asyncio.run(actions._run_ble_transport_command(
         hass, _Entry(), {"vehicle_vin": "5YJTEST0000000001"}, "car", "start",
         lambda: actions._start_ev_charging_ble(hass, "car"),
@@ -14032,6 +14034,7 @@ def test_ble_start_complete_vehicle_is_not_sent_or_quarantined(
 
     assert result == (False, False)
     assert outcomes == ["not_sent"]
+    admission.assert_not_awaited()
     assert not any(domain == "switch" for domain, _service, _data in hass.services.calls)
     assert hass.services.calls == (
         [("button", "press", {"entity_id": "button.car_force_data_update"})]

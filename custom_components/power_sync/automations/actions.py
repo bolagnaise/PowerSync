@@ -4590,12 +4590,6 @@ async def _start_ev_charging_ble(
             hass, charger_entity, expected_identity, authorize, stock_token
         ):
             return False
-        if not await prepare_ev_submission(hass, charger_entity, operation="start"):
-            return False
-        if not await _tesla_ble_scope_current(
-            hass, charger_entity, expected_identity, authorize, stock_token
-        ):
-            return False
         charge_binding = (
             None
             if not charge_binding_holder or charge_binding_holder[0] is None
@@ -4629,6 +4623,17 @@ async def _start_ev_charging_ble(
             ):
                 _LOGGER.info("Tesla BLE %s: vehicle charge complete; start not sent", ble_prefix)
                 return False
+        if not await prepare_ev_submission(hass, charger_entity, operation="start"):
+            return False
+        if not await _tesla_ble_scope_current(
+            hass, charger_entity, expected_identity, authorize, stock_token
+        ):
+            return False
+        charge_binding = _tesla_ble_charge_data_binding(
+            hass, ble_prefix, charger_entity, previous=charge_binding
+        )
+        if charge_binding is None:
+            return False
         command_started_at = datetime.now(dt_timezone.utc)
         confirmation_deadline = (asyncio.get_running_loop().time()
                                  + _TESLA_BLE_COMMAND_CONFIRMATION_SECONDS)
