@@ -11,6 +11,7 @@ Auth uses OAuth2 ROPC (Resource Owner Password Credentials):
 
 import asyncio
 import logging
+import math
 import time
 from typing import Any, Optional
 
@@ -53,6 +54,7 @@ class ZaptecCloudClient:
         self._own_session = False
         self._last_request_time = 0.0
         self._last_current_update_time = 0.0
+        self._last_current_update_target: tuple | None = None
 
         # Token state
         self._access_token: str | None = None
@@ -350,6 +352,22 @@ class ZaptecCloudClient:
         now = time.time()
         elapsed = now - self._last_current_update_time
         if elapsed < _MIN_CURRENT_UPDATE_INTERVAL:
+            target = (installation_id, phase1_amps, phase2_amps, phase3_amps)
+            if target == self._last_current_update_target:
+                # A prior acknowledgement alone cannot prove that another
+                # controller has not changed the allocation. Verify the exact
+                # installation before treating a redundant write as a no-op.
+                current = await self._request("GET", f"/api/installation/{installation_id}")
+                matches = isinstance(current, dict)
+                for phase, wanted in enumerate(target[1:], 1):
+                    key = f"AvailableCurrentPhase{phase}"
+                    value = current.get(key, current.get(key[0].lower() + key[1:])) if matches else None
+                    try:
+                        matches = matches and not isinstance(value, bool) and math.isfinite(float(value)) and float(value) == wanted
+                    except (TypeError, ValueError):
+                        matches = False
+                if matches:
+                    return {}
             remaining = int(_MIN_CURRENT_UPDATE_INTERVAL - elapsed)
             raise Exception(
                 f"Zaptec installation current rate limit: "
@@ -376,6 +394,7 @@ class ZaptecCloudClient:
             json_data=payload,
         )
         self._last_current_update_time = time.time()
+        self._last_current_update_target = (installation_id, phase1_amps, phase2_amps, phase3_amps)
         return result
 
     async def test_connection(self) -> tuple[bool, str]:
@@ -464,6 +483,14 @@ class ZaptecCloudClient:
             )
         except (ValueError, TypeError):
             parsed["total_charge_power_w"] = 0.0
+        raw_power = state.get(513, state.get("513"))
+        try:
+            parsed["total_charge_power_w_valid"] = (
+                not isinstance(raw_power, bool)
+                and math.isfinite(float(raw_power)) and float(raw_power) >= 0
+            )
+        except (ValueError, TypeError):
+            parsed["total_charge_power_w_valid"] = False
 
         # Session energy
         try:
@@ -479,9 +506,15 @@ class ZaptecCloudClient:
             ("phase_c_current", 509),
         ]:
             try:
-                parsed[phase] = float(state.get(sid, state.get(str(sid), 0)))
+                raw_current = state.get(sid, state.get(str(sid), 0))
+                parsed[phase] = float(raw_current)
+                parsed[f"{phase}_valid"] = (
+                    not isinstance(raw_current, bool)
+                    and math.isfinite(parsed[phase]) and parsed[phase] >= 0
+                )
             except (ValueError, TypeError):
                 parsed[phase] = 0.0
+                parsed[f"{phase}_valid"] = False
 
         # Firmware
         parsed["firmware_version"] = state.get(911, state.get("911", ""))

@@ -1,6 +1,7 @@
 # EV charging and shared chargers
 
 - [EV charging actions in Home Assistant](#ev-charging-actions)
+- [Zaptec Price Level charging](#zaptec-price-level-charging)
 - [Multiple vehicles on one generic charger](#shared-charger-vehicles)
 
 <a id="ev-charging-actions"></a>
@@ -32,6 +33,14 @@ data:
 Re-enable it with the same action and `enabled: true`. Check battery charge both when your morning window begins and when it crosses the minimum; a numeric-state crossing alone misses a battery already below the threshold. Include an appropriate check after Home Assistant restarts. Use a margin above the battery's absolute minimum because telemetry and charging evaluation are periodic.
 
 These actions change the mode's saved eligibility, not the physical charger directly. Scheduled Charging, Price Level and Smart Schedule apply changes on the normal EV evaluation cycle. Solar Surplus also uses its existing disable cleanup. Enabling a mode does not force a charging start, and disabling one mode does not disable other eligible charging modes. A successful action confirms the setting was saved, not that the charger physically stopped. Monitoring Mode and existing ownership and provider safeguards still apply.
+
+## Zaptec Price Level charging
+
+With Price Level enabled and **PowerSync controls charging** selected, PowerSync applies your price limit even when charging begins after authentication in Zaptec. **Allow hands-off external charging** leaves that session under external control until a fresh charger reading confirms it was unplugged. Manual and Boost ownership remain separate.
+
+An accepted start or stop command is not proof of charging or stopping. PowerSync waits for fresh charger readings and keeps the existing home-battery protection while its command is unresolved. Invalid power readings do not confirm a stop. A completed session releases that session's battery protection without repeatedly restarting the car at cheap prices.
+
+The same pending-command handling applies when Zaptec uses an associated Tesla vehicle for its charging decision. Ambiguous vehicle associations cannot independently start the same charger. Unchanged current allocations can be reused only after a fresh installation readback confirms them; requests for a different allocation still respect Zaptec's update interval.
 
 <a id="shared-charger-vehicles"></a>
 

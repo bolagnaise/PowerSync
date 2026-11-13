@@ -12225,6 +12225,30 @@ def test_zaptec_waiting_start_records_pending_authorization():
     assert params["_zaptec_pending_start"] is True
 
 
+def test_zaptec_resume_reuses_only_freshly_verified_unchanged_allocation(monkeypatch):
+    zaptec_api = importlib.import_module("power_sync.zaptec_api")
+    clock = [10000.0]
+    monkeypatch.setattr(zaptec_api, "time", SimpleNamespace(time=lambda: clock[0]))
+    client = zaptec_api.ZaptecCloudClient("user@example.com", "password")
+    client._request = AsyncMock(side_effect=[{}, {
+        "availableCurrentPhase1": 16, "availableCurrentPhase2": 16, "availableCurrentPhase3": 16,
+    }, {}])
+    hass, _ = _zaptec_hass({"charger_operation_mode": "charging_paused", "cable_locked": True})
+    hass.data["power_sync"]["entry-1"]["zaptec_client"] = client
+
+    async def replay():
+        await client.set_installation_current("installation-1", 16)
+        clock[0] += 30
+        assert await actions._start_zaptec_charging(hass, _zaptec_entry("installation-1"), amps=16) is True
+
+    asyncio.run(replay())
+    assert [(call.args[0], call.args[1]) for call in client._request.await_args_list] == [
+        ("POST", "/api/installation/installation-1/update"),
+        ("GET", "/api/installation/installation-1"),
+        ("POST", "/api/chargers/charger-1/SendCommand/507"),
+    ]
+
+
 def test_zaptec_waiting_pending_start_deauthorizes_exact_charger():
     hass, client = _zaptec_hass({"charger_operation_mode": "connected_waiting"})
 

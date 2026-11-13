@@ -47290,16 +47290,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 # Reconcile the shared stop guard as well as the executors'
                 # local state. Use poll start time so an in-flight old response
                 # cannot confirm a later stop. Missing/malformed power is not 0 W.
-                try:
-                    stop_power_w = float(raw_state.get(513, raw_state.get("513")))
-                except (TypeError, ValueError):
-                    stop_power_w = math.nan
-                if (
-                    parsed.get("charger_operation_mode")
-                    in ("connected_waiting", "connected_finished", "disconnected")
-                    and math.isfinite(stop_power_w)
-                    and 0 <= stop_power_w <= 50
-                ):
+                from .zaptec_state import zaptec_charge_state
+
+                charge_evidence = zaptec_charge_state(parsed)
+                if charge_evidence is False:
                     from .automations.ev_ownership import confirm_powersync_ev_stop
 
                     confirm_powersync_ev_stop(
@@ -47307,7 +47301,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     )
                 # Timestamped charging telemetry can expose an accepted stop
                 # that did not take effect, without issuing another command.
-                if parsed.get("charger_operation_mode") == "charging" and math.isfinite(stop_power_w) and stop_power_w > 50:
+                if charge_evidence is True:
                     from .automations.ev_ownership import observe_recorded_ev_stop
                     observe_recorded_ev_stop(
                         hass, entry, "zaptec_standalone",

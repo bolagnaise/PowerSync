@@ -27,3 +27,7 @@ target:
 ### Battery-powered charging near zero grid flow
 
 Scheduled charging with no grid import holds its rate while the home battery keeps measured grid flow within the configured tolerance. Small fluctuations inside that tolerance do not reduce the rate repeatedly. Inverter capacity limits and reductions for grid imports above tolerance still apply.
+
+### Zaptec and Price Level charging
+
+When Price Level is enabled, **PowerSync controls charging** applies your price limit to Zaptec-authenticated starts too. **Allow hands-off external charging** leaves those sessions alone until unplugged. Pending PowerSync commands retain battery protection until fresh, valid charger readings confirm the outcome; completed charging releases that session's protection without repeated starts. See the [EV charging guide](https://github.com/bolagnaise/PowerSync/blob/main/docs/ev-charging.md#zaptec-price-level-charging).
