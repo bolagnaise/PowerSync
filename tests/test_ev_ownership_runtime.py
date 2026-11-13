@@ -989,6 +989,7 @@ def test_future_stop_observation_cannot_clear_provisional_lease_or_emit_confirma
     ('b1', None, 1, False, False),
     ('b1', float('nan'), 1, False, False),
     ('unknown', 0.0, 1, False, False),
+    (None, 0.0, 1, False, False),
     ('c2', 0.0, 1, False, False),
     ('b1', 1.5, 1, False, False),
     ('b1', -1.5, 1, False, False),
@@ -1003,6 +1004,8 @@ def test_sigenergy_stopped_read_releases_only_confirmed_provisional_stop(status,
     if external:
         lease.pop('stop_settling')
     state = SimpleNamespace(charger_type='evac', status=status, power_kw=power, is_charging=False, is_discharging=False)
+    if status is None:
+        del state.status
     ev_ownership.observe_sigenergy_ev_stop(hass, entry, state, observed_at=command_time + timedelta(seconds=offset))
     assert (ev_ownership.get_ev_ownership(hass, entry, 'sigenergy_charger')[1] is None) is cleared
 

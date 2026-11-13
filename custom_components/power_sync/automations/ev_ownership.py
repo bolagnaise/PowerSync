@@ -1642,9 +1642,9 @@ def observe_sigenergy_ev_stop(hass: Any, config_entry: Any, state: Any, *, obser
         "evdc": {"idle", "occupied", "scheduled", "ended"},
     }
     if (
-        state.status in stopped_states.get(state.charger_type, set())
-        and not state.is_charging
-        and not state.is_discharging
+        getattr(state, "status", None) in stopped_states.get(getattr(state, "charger_type", None), set())
+        and getattr(state, "is_charging", None) is False
+        and getattr(state, "is_discharging", None) is False
         and abs(power) <= 0.05
     ):
         confirm_powersync_ev_stop(hass, config_entry, "sigenergy_charger", observed_at=observed_at)
