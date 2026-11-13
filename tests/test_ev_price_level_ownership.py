@@ -2659,6 +2659,85 @@ async def _no_vehicles(*args, **kwargs):
     return []
 
 
+@pytest.mark.parametrize("policy,action,enabled,expected_stop", [
+    ("override", None, True, True),
+    ("yield", None, True, False),
+    ("override", "leave_alone", True, False),
+    ("override", "adopt", True, True),
+    ("override", "abort", True, True),
+    ("override", None, False, False),
+])
+def test_price_level_untracked_zaptec_obeys_price_and_external_policy(
+    monkeypatch, policy, action, enabled, expected_stop
+):
+    hass = _FakeHass(price_settings={"preserve_home_battery": True})
+    entry = SimpleNamespace(entry_id="entry-1", data={}, options={
+        "zaptec_standalone_enabled": True, "zaptec_username": "synthetic",
+        "zaptec_charger_id": "charger-1",
+    })
+    store = hass.data["power_sync"]["entry-1"]["automation_store"]
+    store._data["vehicle_charging_configs"] = [{
+        "vehicle_id": "zaptec_standalone", "charger_type": "zaptec",
+        "external_control_policy": policy, "external_session_policy": action,
+    }]
+    hass.data["power_sync"]["entry-1"]["zaptec_cached_state"] = {
+        "charger_operation_mode": "charging", "total_charge_power_w": 10700,
+    }
+    monkeypatch.setattr(ev_planner, "discover_all_tesla_vehicles", _no_vehicles)
+    executor = ev_planner.PriceLevelChargingExecutor(hass, entry)
+    reason = "EV 70% >= 40%, price 31.4c > 12c" if enabled else "Price-level charging is disabled"
+    executor.get_charging_decision = AsyncMock(return_value=(False, reason, ""))
+    executor._stop_charging = AsyncMock(return_value=True)
+    executor.apply_preserve_home_battery = AsyncMock()
+
+    asyncio.run(executor.evaluate_all_vehicles(31.4))
+
+    assert executor._stop_charging.await_count == int(expected_stop)
+
+
+@pytest.mark.parametrize("owner,success", [(None, True), (None, False), ("manual", True), ("scheduled", True)])
+def test_price_level_untracked_zaptec_stop_keeps_owner_and_readback_guards(
+    monkeypatch, fake_actions, owner, success
+):
+    hass = _FakeHass(price_settings={"preserve_home_battery": True})
+    entry = SimpleNamespace(entry_id="entry-1", data={}, options={
+        "zaptec_standalone_enabled": True, "zaptec_username": "synthetic",
+        "zaptec_charger_id": "charger-1",
+    })
+    data = hass.data["power_sync"]["entry-1"]
+    data["zaptec_cached_state"] = {
+        "charger_operation_mode": "charging", "total_charge_power_w": 10700,
+    }
+    ownership = importlib.import_module("power_sync.automations.ev_ownership")
+    if owner:
+        ownership.claim_ev_ownership(hass, entry, "zaptec_standalone", owner_mode=owner)
+    monkeypatch.setattr(ev_planner, "discover_all_tesla_vehicles", _no_vehicles)
+    clock = [200.0]
+    monkeypatch.setattr(ev_planner.time, "monotonic", lambda: clock[0])
+    fake_actions._action_stop_ev_charging_dynamic = AsyncMock(return_value=success)
+    executor = ev_planner.PriceLevelChargingExecutor(hass, entry)
+    executor.get_charging_decision = AsyncMock(return_value=(False, "Price above threshold", ""))
+
+    asyncio.run(executor.evaluate_all_vehicles(31.4))
+
+    assert fake_actions._action_stop_ev_charging_dynamic.await_count == int(owner is None)
+    state = executor._get_or_create_vehicle_state("zaptec_standalone")
+    assert state.stop_pending is (owner is None and success)
+    if owner:
+        assert ownership.get_ev_ownership(hass, entry, "zaptec_standalone")[1]["owner_mode"] == owner
+    if owner is None and success:
+        assert data["scheduled_ev_preserve_state"]["active"] is True
+        data["zaptec_cached_state"] = {"charger_operation_mode": "connected_waiting", "total_charge_power_w": 0}
+        data["zaptec_state_poll"] = {"started_at": 199.0, "completed_at": 202.0}
+        asyncio.run(executor.evaluate_all_vehicles(31.4))
+        assert state.stop_pending is True
+        clock[0] = 203.0
+        data["zaptec_state_poll"] = {"started_at": 203.0, "completed_at": 204.0}
+        asyncio.run(executor.evaluate_all_vehicles(31.4))
+        assert state.stop_pending is False
+        assert data["scheduled_ev_preserve_state"]["active"] is False
+
+
 def test_price_level_keeps_zaptec_pending_and_late_charge_owned(monkeypatch):
     class ZaptecEntry(_FakeConfigEntry):
         options = {

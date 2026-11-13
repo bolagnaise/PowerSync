@@ -11672,7 +11672,20 @@ class PriceLevelChargingExecutor:
                         await self.apply_preserve_home_battery(False, reason)
                         return results
                     if external_action == "abort" or (
-                        external_action == "adopt" and not should_charge
+                        not should_charge
+                        and (
+                            external_action == "adopt"
+                            or (
+                                external_action is None
+                                and reason != "Price-level charging is disabled"
+                                and not _claim_external_charging_ownership(
+                                    self.hass,
+                                    self.config_entry,
+                                    "zaptec_standalone",
+                                    reason="Zaptec started outside PowerSync Price-Level",
+                                )
+                            )
+                        )
                     ):
                         stopped = await self._stop_charging(
                             reason,
