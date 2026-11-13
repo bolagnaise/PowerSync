@@ -38,8 +38,8 @@ other integrations. Available sources include:
 Readers use passive sources and bounded queries. Missing components, unavailable
 data and unsupported Home Assistant versions are reported explicitly.
 Configuration reads exclude secret files and do not resolve YAML includes or
-render templates. See [HA-wide diagnostics](ha-read-backend.md) for the technical
-source and transport boundaries.
+render templates. Diagnostic access does not authorize service calls, settings
+changes or hardware commands.
 
 Known credential fields and known installation credential values are redacted.
 Arbitrary free text can still contain personal information, so redaction is not
@@ -51,8 +51,8 @@ follow the separate policy below.
 Incident-specific diagnostic reads require a current active support ticket
 linked to the same owner and installation. Support should read the information
 needed to investigate the issue, expanding to related sources when necessary.
-See [Testing against approved installations](testing-approved-installations.md)
-for the investigation and verification policy.
+Approval for private offline testing is separate from incident-specific support
+access and does not authorize installing candidate code or controlling hardware.
 
 ## What private offline testing uses
 

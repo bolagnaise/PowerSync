@@ -87,20 +87,9 @@ repository protection/administrator permissions is outside this installation.
 The lookup examines the newest 100 regression runs. If older proof falls outside
 that window, it runs the suite again rather than weakening validation.
 
-## Operational copies
+## Local environments
 
-The MacBook checkout is `/Users/benboller/Developer/power-sync`, with dedicated
-test Python at `/Users/benboller/.codex/venvs/power-sync-regression/bin/python`;
-prefix Mac commands with `rtk proxy`. Use an isolated current-main worktree when
-the checkout contains unrelated work. Tower's clean operational
-checkout is `/root/codex-workspaces/power-sync-release-gate`, with pinned test
-dependencies in `/root/codex-workspaces/power-sync-test-venv`. Fetch and
-fast-forward before preparing a release. Tower's older
-`/mnt/user/developer/power-sync` is a symlink to `PowerSync` and may contain
-unrelated work; its local agent/release guidance routes release operations to
-the clean checkout rather than overwriting that work.
-
-Tracked workflows, gate scripts, dependency pins and tests are shared through
-Git. Host release skills retain their local routing and support policies while
-pointing to the same tracked procedure. Local `PROCEDURE.md` and preflight-script
-copies must match the tracked files; do not maintain competing gate policies.
+Use a dedicated Python 3.12 environment synchronized with `requirements-test.txt`
+and a clean checkout of current main. Keep machine paths, host-specific setup
+and operational runbooks outside this repository. Tracked workflows, gate
+scripts, dependency pins and tests define the shared verification procedure.

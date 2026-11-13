@@ -1,104 +1,35 @@
-# HA optimiser subscriptions
+# Home Assistant optimiser access
 
-## Commercial behaviour
+PowerSync Home Assistant optimiser access is separate from PowerSync Cloud.
+The subscription covers one active Home Assistant installation; multiple
+PowerSync battery entries on that installation share access.
 
-HA optimiser access is separate from PowerSync Cloud: A$4/month through Stripe, or a qualifying recurring GitHub sponsorship of at least US$3/month while active. Existing US$4/month and higher qualifying sponsors are included. Choose one payment option; overlapping sources are resolved as a union, and cancellation of one does not remove another valid source. Cloud subscriptions never grant HA optimiser access.
+## Subscribe and pair Home Assistant
 
-Direct signup collects a card and completes hosted Checkout before the one seven-day HA trial starts. The subscription then bills A$4/month automatically until cancelled. Abandoned Checkout, account creation, pairing, reinstalling HA, browser return URLs and an existing-user campaign cannot start or reset the trial. GitHub charges immediately and has no HA trial. Paid HA subscriptions and qualifying sponsors include priority HA support; trials and campaign access do not. There is no response-time guarantee.
+Choose either a direct A$4/month subscription or a qualifying recurring GitHub
+sponsorship of at least US$3/month. Direct signup requires a card and offers one
+seven-day trial, then bills automatically until cancelled. GitHub sponsorship
+is charged immediately and has no HA trial. See the
+[setup and subscription guide](https://powersync.cc/ha-optimiser).
 
-A fixed existing-user deadline is configured separately from individual trials. The missed announcement implementation date is not used as an invented launch date. Activation is live. The fixed production cutoff is 23 October 2026 at 00:00 UTC (11:00 am AEDT), with signed policy epoch 2. Users can enrol in Stripe during the transition; their own seven-day trial starts at completed signup.
+In the integration options, open **Optimiser access** to start or finish pairing,
+refresh access, resume optimisation when required, or reset pairing. Review the
+status shown for this Home Assistant installation. Cloud subscriptions do not
+grant HA optimiser access.
 
-One active HA installation is included per account; multiple PowerSync battery entries on that installation share the subscription and have independent recovery and Resume state. The hosted service validates access; optimisation continues on the user's own HA server. Monitoring, dashboards, manual controls and recovery remain available.
+## Expiry and recovery
 
-## Implemented boundaries
+Monitoring, dashboards, manual controls and recovery remain available without
+an optimiser subscription. Existing verified access can continue through a
+bounded offline period; the status shown in Home Assistant determines when
+access expires.
 
-- `worker/src/ha-licensing/`: isolated billing, source resolution, signing, installation pairing, GitHub and Discord account linking, support-role reconciliation, payment adjustments, account lifecycle and transient-record maintenance.
-- `worker/migrations/0075_ha_optimizer_licensing.sql` and `0076_ha_optimizer_operations.sql`: separate HA tables. Remote application is recorded under the production preparation status below.
-- `/app/ha`: account-only sign-in, direct Checkout, immutable trial status, GitHub verification, Discord linking, pairing, disconnection and billing portals. Cloud enrolment is an explicit separate action. Return URLs poll for verified access and never grant it.
-- HA `licensing/`: public-key registry, signed policy and permission verification, private atomic storage with disk readback, bounded transport, refresh, time watermarks, entry-specific admission, command fencing and owned recovery.
-- HA integration options → **Optimiser access**: Start pairing, Finish pairing, Refresh access, Resume optimisation and Reset pairing. Account passwords and bearer tokens are not stored in HA. The installation has its own random activation credential; only its hash is held by the Worker.
-- Native mobile: optional HA-authoritative status, local Refresh and entry-specific Resume. Older HA remains compatible. No new HA price, payment button or external purchase link is shown in the native app. The previously requested Amber/Hermes changes in build 442 remain bundled.
-- Public website, terms, privacy, README, HA site and wiki: pricing, activation, cancellation, scoped priority support and offline/recovery guidance.
+When access ends, new optimiser work stops and PowerSync attempts to restore
+only the temporary settings and sessions it owns. Recovery can remain pending
+when hardware is unavailable. Restoring paid access does not automatically
+restart an old schedule: complete recovery and select **Resume optimisation**
+when requested. Smart Optimization and Monitoring Mode settings still apply.
 
-The HA access dialog describes the free existing-user transition separately from the seven-day direct-subscription trial, using the fixed deadline from the signed policy. It shows this HA server's pairing status independently of account links on the website. After successful pairing, it removes the approval code and shows only the relevant next step: wait for recovery, restore access, Resume when required, or close the window when access is available and no Resume is needed. Access availability does not mean automatic control is running; Smart Optimization and Monitoring Mode settings still apply.
-
-## Trust and expiry
-
-Permissions use Ed25519 compact `PSHA1` documents, strict issuer/audience/schema, installation binding and monotonic policy/revision watermarks. HA trusts only the public keys in `licensing/keys.py`; no test key is shipped there. A separate signed `PSHP1` policy controls shadow/enforced mode and the fixed legacy deadline. The public policy endpoint stays available during rollback. A shadow policy expires after at most seven days; it cannot become a permanent offline bypass. A previously verified enforced policy retains its fixed cutoff through an outage.
-
-HA normally refreshes permission hourly. Offline permission lasts at most seven days and is capped by source expiry. Paid renewal grace has a fixed seven-day boundary after paid-through; it is never slid forward by a failed check. The resolver can issue that fixed renewal horizon in advance to avoid an unnecessary pause at every monthly renewal. A trial has no paid renewal grace. A renewing seven-day trial can continue only until its original end plus a fixed two-hour first-billing verification buffer. That horizon is issued before expiry to avoid an unnecessary pause while Stripe finalizes its invoice. Confirmed payment failure, cancellation or revocation removes eligibility. The trial receipt remains seven days, retries cannot move the buffer, and paid priority support requires verified payment. Cancellation caps access at the current paid period. Provider outages preserve existing verified evidence only until its original deadline; they cannot extend sponsorship freshness or grant new access.
-
-Signed denial closes admission before awaited persistence. Expiry, unload, manual takeover and policy changes fence queued work. Each entry has its own reload generation and command lock; long-lived polling loops capture a fresh generation for each new decision, while pending solves keep their original generation. Manual commands fence old work until completion, discard cached schedules, and then allow fresh plans. An already admitted vendor transaction may finish, and owned recovery waits for it before restoring. The software cannot retract a hardware command already sent. Permission checks are not proof of physical inverter response.
-
-The first paid optimiser mutation requires a durable recovery journal. Supported HA versions can log a storage write error without raising, so the adapter reads the actual stored file before admitting controls. Restart, an NTP rollback and re-pairing cannot replenish a cached lease. A repaired fast clock requires a newer signed revision before its saved watermark can be reset.
-
-When access ends, new optimiser work stops. PowerSync attempts to restore only its own force modes, reserves and temporary holds, and stops only EV sessions it owns. Independent EV cleanup still runs when battery restoration fails. Failed recovery remains pending and is retried after restart; paid access returning does not automatically restart old schedules. Resume requires valid access and completed recovery, and clears the old plan. A newer manual/Boost owner takes precedence. If a restart removed EV ownership proof, PowerSync does not reclaim it from a journal; the user can stop the old session manually. A removed/unavailable charger stays pending until its state can be resolved.
-
-The Home Assistant 24-Hour Optimizer Plan card reports when HA optimiser access has expired, recovery is pending, or a fresh Resume is required. It separately identifies Smart Optimization disabled in settings. While control is stopped or the status cannot be refreshed, the card hides any retained forecast rather than presenting it as an active plan.
-
-Local source is available under the repository's existing licence. Client-side enforcement is not tamper-proof; this subscription pays for the supported verification and optimiser service, not a guarantee against modification of local Python.
-
-## Billing and identities
-
-HA has a separate Stripe customer, price, Checkout and portal configuration. An existing Cloud card cannot start HA billing silently. Exact AUD 400 monthly catalogue checks, mandatory payment-method collection and explicit automatic-charge wording precede Checkout. Automatic tax and adaptive currency pricing are disabled for this fixed offer. A repeated signup resumes the same valid open Checkout; scans recover historical subscriptions after lost webhooks/responses and reject another active HA subscription.
-
-Paid coverage comes from a refetched paid invoice for the exact customer/subscription/HA price and environment. A zero-value trial invoice does not establish paid renewal or paid support. Full refunds and formal disputes block matching invoice coverage; partial goodwill refunds preserve it. A won dispute can clear only its own dispute revocation, and a delayed paid webhook cannot undo a verified refund. A different active sponsor or paid subscription remains valid.
-
-GitHub linking uses OAuth state, PKCE, a secure browser nonce and refetched stable GitHub identity. Verification requires a complete private-inclusive maintainer sponsorship snapshot; incomplete pagination, anonymous/unreadable identities and provider errors cannot cancel or extend cached sources. Webhooks verify signatures and trigger a fresh snapshot; hourly reconciliation covers missed events. Personal sponsorships are linked to the authenticated GitHub user. Organisation-funded sponsorships require a separately verified organisation entitlement design before claiming automatic membership coverage; contact support rather than sharing another person's credentials.
-
-Discord linking verifies the stable user ID through OAuth, not a supplied username. Cloud account status exposes a separate `priority_support_cloud` flag from a current paid Cloud subscription; trial/comp/bypass access does not set it. Configure the optional `HA_DISCORD_CLOUD_PRIORITY_ROLE_ID` to reconcile a distinct Cloud support role. A Cloud role never grants HA access. A durable versioned outbox manages only the configured HA priority role. The role must be unmanaged with zero permissions and below the bot. Provider failures retry without changing licence eligibility. Periodic checks handle expiry, late guild joins and missed billing events. Unlinking or deletion queues removal even after the account is gone. A test Worker cannot change live Discord roles.
-
-Unlinking identities and uninstalling HA do not cancel billing. Deletion also preserves provider trial evidence if original signup webhooks were missed, and checks its operation lease before billing mutations. Transient retention cleanup continues through a rollout rollback. Direct cancellation uses the dedicated portal; GitHub cancellation happens in Sponsors. Admin deletion revokes installations, expires open HA Checkout sessions and confirms cancellation of every HA subscription before removing account records. Provider failure keeps the account and records available for retry. Successful HA cleanup blocks new enrolment/linking while the enclosing deletion completes. Anonymous credential tombstones and deleted-customer references last at most 90 days, allowing signed denial and late-event quarantine.
-
-A minimal HMAC fingerprint of the normalised verified signup email (preferred over mutable contact email) plus consumed trial dates prevents trial reuse after deletion and recreation, including imported accounts with different user IDs. There is no plaintext email in that receipt. It is not an authentication token. The HMAC key is stable and separate from the signing key; do not casually rotate it. Merges preserve paid coverage, customer aliases/portals and the earliest consumed trial. Conflicting identities or multiple active installations must be resolved before merging. Source writes and merges use database operation leases; failures retain reviewable records rather than inventing a new owner.
-
-## Deployment configuration and order
-
-1. Use a **separate test Worker, test D1 database, test signing keys and Stripe test key**. Never point test billing at production D1 or replace the live Worker's existing Stripe secret with a test key. HA subscription rows are environment-filtered as defence in depth; customer/trial tables deliberately belong to one environment. The existing shared `STRIPE_SECRET_KEY` must match `HA_STRIPE_LIVEMODE`.
-2. Apply both migrations to that test database. Configure `HA_LICENSING_ENABLED=true`, `HA_ENFORCEMENT_MODE=shadow`, a positive `HA_LICENSE_POLICY_EPOCH`, exact `HA_STRIPE_PRICE_ID`, pinned `HA_STRIPE_API_VERSION`, and `HA_STRIPE_LIVEMODE=false`. Use a dedicated active portal configuration with end-of-period cancellation enabled and subscription plan changes disabled.
-3. Configure secret signing JWK and `HA_LICENSE_KEY_ID`; configure a separate random `HA_TRIAL_HISTORY_HMAC_KEY`. Production public material is committed to HA; private production material is held outside the repos in the owner's protected secrets directory and provisioned as Worker secrets. Future signing rotation requires overlapping public trust and a new policy epoch, with old keys retained until issued leases expire. Test keys must never be published in production HA's registry.
-4. Configure the GitHub OAuth application's callback `https://api.powersync.cc/ha-license/v1/github/callback`, client ID/secret, maintainer node ID, private Sponsors credential and signed webhook secret. Register `/ha-sponsors/webhook`. Create the actual US$3 recurring tier in GitHub; this source implementation has not changed the real tier. Test private sponsorship visibility using an authorised real account.
-5. Configure the Discord OAuth callback `https://api.powersync.cc/ha-license/v1/discord/callback`, client ID/secret, bot secret, guild and HA support role. Use the configured production callbacks only for production; isolated test hosting needs its own fixed origin build and registered callbacks. The production code intentionally never accepts a caller-supplied redirect URL.
-6. Stripe events use the existing signed `/stripe/webhook`: Checkout completion, subscription updates/deletion, paid/failed invoices, full refunds and dispute updates. Configure provider retries and the existing five-minute scheduled Worker trigger. The HA sponsor poll itself is hourly. Check scheduled role reconciliation and retention cleanup.
-7. Run read-only provider readiness, then actual browser/test-clock tests below. Deploy the signed **shadow policy before releasing HA**: new HA fails closed until it verifies policy, and cannot assume an unsigned free-access flag. Verify the public policy using the exact shipped public key and test activation from the minimum supported HA version.
-8. Publish activation guidance and the revised fixed deadline. Set explicit UTC epoch seconds for `HA_ENFORCEMENT_START` and `HA_LEGACY_ACCESS_UNTIL`; the latter must be no earlier than activation. Dates are never calculated from signup or installation. Enforce only after those values and launch readiness are verified. Rolling back uses a freshly signed shadow policy with a newer epoch, not deleting keys or disabling the public policy endpoint. Entries paused after a gap still require explicit Resume.
-
-`worker/scripts/ha-licensing/readiness.mjs` is a read-only check of signing trust, price/mode, dedicated portal, complete private sponsorship visibility, OAuth/webhook configuration and Discord role/hierarchy. It creates no payment objects or roles. Run from `worker/`:
-
-```sh
-npm run check:ha-readiness -- --config /absolute/protected/ha-provider-config.json --ha-public-keys /absolute/ha/custom_components/power_sync/licensing/keys.py
-```
-
-The optional JSON file must be mode 0600 and kept outside repos; environment variables can be used instead. Output contains check names/booleans, never credentials. A pass verifies configuration/read-only provider evidence; it does not replace real OAuth, Checkout, webhook, scheduler or physical tests. Test callbacks require an isolated build with fixed test origins; the production routes do not accept arbitrary origins.
-
-## Verification and launch gates
-
-Production activation on 2026-10-15 applied migrations 0075/0076, provisioned signing, trial-history and provider secrets, and enabled account signup with signed policy epoch 2. The fixed enforcement deadline is 2026-10-23 00:00 UTC. Live Stripe has the A$4 monthly price, isolated HA cancellation portal and extended existing webhook events. Real test-mode Checkout collected a card; trial cancellation, duplicate signup, used-trial re-enrolment, failed first payment, first-invoice conversion, paid cancellation, partial refund and full refund passed. A fresh Stripe test clock confirmed billing_pending at trial end plus 30 minutes and paid access at plus 75 minutes, with no paid support before payment. Production GitHub linking, a complete 29-sponsor snapshot (three private; 28 personal and one organisation-funded), and real webhook ping HTTP 200 are verified. The maintainer token expires on 2027-10-14. Production pairing and a signed transition permission were verified with the shipped HA Python verifier; disconnecting the temporary installation returned a signed installation_revoked denial. HACS v2.12.1404 Release, HACS validation and Pages workflows passed. Android build 442 was uploaded, validated and committed to Google Play production; the publishing console confirms it is in review. The signed iOS 1.0.7 (442) archive passed codesign verification and App Store Connect processing, and is Testing for the existing Dev and Beta Testers groups (188 external testers). Public App Store distribution remains separate from this established TestFlight channel. Verified Discord OAuth linked the owner account; a temporary support grant assigned only the HA support role, and the normal reconciliation worker withdrew it after the grant was removed. Both positive and negative role readbacks were verified. The isolated test Stripe clocks, customers and subscriptions were deleted, its webhook removed and test product archived; the temporary test Worker and D1 database were deleted after preserving credential-free evidence.
-
-Local checks exercise actual Hono routes, both D1 migrations on SQLite with foreign keys enabled, mocked provider APIs, signed webhook verification and shared Worker/Python signing fixtures. They cover independent source union, exact price/mode, card-required signup, abandoned/repeated Checkout, immutable trial receipt, paid invoice evidence, full/partial refund and dispute recovery, signed policy rollback, pairing retry/revocation, private sponsors and outages, OAuth browser/replay/conflict, support role permissions/retries/version races, merge coverage/aliases and deletion cancellation failure/success.
-
-HA regressions cover signed permissions/policies, clock changes and restart, parallel durable first-write admission, stale queued work, per-entry routing/unload, manual takeover, silent storage failure, persistent failed restoration/retry, EV ownership and solar hold lifecycle. Adjacent existing restore, price-source and control regressions must pass. A few older fixture deficiencies were reproduced unchanged on the committed baseline before correcting their fake inputs/source selector; no hardware assertions were weakened.
-
-Run Python 3.12 pytest on the licensing, restore, disable, price-source, EV ownership and solar-export suites. Worker: `test:ha-licensing`, `test:subscription-plans`, `test:auth-email-security`, `type-check`. Build both account and admin web apps. Mobile: TypeScript, `test:optimizer-access`, `test:cloud-enrollment`, optimisation/EV, Amber contract, Hermes and build-version tests.
-
-Before live enforcement, perform real Stripe test-mode Checkout/card collection, trial cancellation/conversion, failed first payment/no buffer, fixed two-hour pending-first-invoice boundary, paid renewal/grace, portal cancellation, refund/dispute, duplicate/race and deletion/merge scenarios. Exercise real private GitHub sponsorship/linking/cancellation and Discord join/link/unlink/role retry. Verify HA activation, restart with pending recovery, minimum-version storage, policy outage/expiry and two-entry routing. Representative live hardware readback/physical confirmation requires a separately authorised installation and controls. No such command was issued here.
-
-Native Hermes configuration checks can run on Linux; CocoaPods and actual iOS compilation require a Mac. Store review is a remaining publication gate. The native HA feature has no purchasing or external purchase calls to action; treating it as a companion/consumption app is an implementation choice, not store approval.
-
-The source-stage verification record below predates production preparation. It does not establish live activation, tier publication, HA release or store distribution; those require the separate launch evidence recorded above.
-
-## Primary references
-
-[GitHub OAuth state and PKCE](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps), [Sponsors GraphQL](https://docs.github.com/en/graphql/reference/sponsors), [Stripe card-required Checkout trials](https://docs.stripe.com/payments/checkout/free-trials), [invoice payments](https://docs.stripe.com/api/invoice-payment/list), [dispute status](https://docs.stripe.com/api/disputes/object), [Apple app review rules](https://developer.apple.com/app-store/review/guidelines/), [Google consumption-only payments guidance](https://support.google.com/googleplay/android-developer/answer/10281818), [ACCC consumer guarantees](https://www.accc.gov.au/consumers/buying-products-and-services/contracts).
-
-## Final local verification record
-
-- HA: 80 focused permission/runtime/EV/disable tests after the final task-lifecycle guards; 55 permission/runtime/disable tests; 135 adjacent restore/price-source/controller tests; 58 EV/solar-hold/recovery tests. These sets overlap and are not a summed unique-test count. The larger all-in-one attempt was interrupted and was replaced by the bounded passing groups.
-- Worker: expanded HA lifecycle/provider/signing checks, subscription-plan checks, auth/admin-access security checks and TypeScript pass. Account and admin production web builds pass.
-- Mobile: access parsing/actions, explicit Cloud enrolment, build-442 consistency, EV display, optimiser settings and the mobile-to-HA Amber settings/restart contract pass. TypeScript passes. Hermes reports three passes and two Mac-only skips. The existing mixed import/require optimiser test uses its CommonJS TypeScript harness; running it directly as stripped ESM is not the supported runner.
-- The actual protected production signing file matches the shipped public registry; a local sign/verify and private-file permission check passes. Private material was not printed or uploaded.
-- The read-only provider readiness script compiles and correctly reports missing provider configuration in this environment. It has not passed against real configured Stripe, GitHub or Discord accounts. No live provider validation or physical hardware outcome is claimed.
-
-The final branch also includes the published HA baseline through v2.12.1392, the Cloud Flow Power Happy Hour fix, and current wiki updates. Baseline display-flow checks pass (31 selected tests); the merged Cloud licensing/Flow Power checks, Worker type checking and account web build pass.
-
-After the final lifecycle changes, 80 focused HA tests and the adjacent control suite pass. Production loops start fresh decisions after manual commands; obsolete solves cannot publish a cached schedule, and an old entry object cannot act in its replacement. A shadow funding observation does not create a spurious Resume requirement at enforcement.
+Manage cancellation through the billing portal or GitHub, according to the
+payment method you chose. Paid subscriptions and qualifying sponsors include
+priority HA support, without a guaranteed response time.

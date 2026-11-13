@@ -25,9 +25,24 @@ jobs:
 
       - uses: actions/configure-pages@v6
 
+      - name: Stage public website files
+        shell: bash
+        run: |
+          set -euo pipefail
+          SITE_DIR="$RUNNER_TEMP/powersync-pages"
+          mkdir -p "$SITE_DIR/images"
+          cp docs/index.html docs/privacy.html docs/terms.html docs/.nojekyll "$SITE_DIR/"
+          cp docs/images/app-action-plan.png \
+             docs/images/app-ev-charging.png \
+             docs/images/app-hero.png \
+             docs/images/app-optimization.png \
+             docs/images/app-price-chart.png \
+             docs/images/app-settings.png \
+             docs/images/logo-circle.png "$SITE_DIR/images/"
+
       - uses: actions/upload-pages-artifact@v4
         with:
-          path: docs
+          path: ${{ runner.temp }}/powersync-pages
 
       - id: deployment
         uses: actions/deploy-pages@v5
