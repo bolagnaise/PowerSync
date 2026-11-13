@@ -168,7 +168,10 @@ def test_energy_flow_keeps_unavailable_home_load_unknown():
     )
     assert helper is not None
     dynamic = source[source.index("_renderDynamic()") :]
-    assert "toOptionalWatt(this._entityState(cfg.entities.load_power))" in dynamic
+    # Home load goes through homeLoadWatt, which only falls back to the measured
+    # load for an EV-withheld value; any other missing reading stays unknown.
+    assert "homeLoadWatt(this._entityState(cfg.entities.load_power))" in dynamic
+    assert "const watt = toOptionalWatt(entityState);" in source
     assert "loadPowerKnown ? this._formatKW(loadPower) : '--'" in dynamic
 
     checks = """

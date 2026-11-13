@@ -429,6 +429,18 @@ function psKw(hass, id) {
   if (unit === 'mw') return n * 1000;
   return n;
 }
+// Home load for display. When the EV-adjusted value is withheld because a
+// car's charging state is unknown (normalization_quality "incomplete"), show
+// the measured house load instead, flagged as possibly including the car.
+// The sensor itself stays unknown, so optimizer load history is unaffected.
+function psHomeLoad(hass, id) {
+  const kw = psKw(hass, id);
+  if (Number.isFinite(kw)) return { kw, mayIncludeEv: false };
+  const a = psState(hass, id)?.attributes || {};
+  const raw = typeof a.raw_home_load_kw === 'number' ? a.raw_home_load_kw : NaN;
+  return a.normalization_quality === 'incomplete' && Number.isFinite(raw) && raw >= 0
+    ? { kw: raw, mayIncludeEv: true } : { kw: NaN, mayIncludeEv: false };
+}
 // Energy in kWh, whatever unit the sensor reports.
 function psKwh(hass, id) {
   const n = psNum(hass, id);
@@ -2005,7 +2017,8 @@ class PsNowCard extends PsCardBase {
     const hass = this._hass, en = this.ents;
     const data = this._api('power_sync/optimization');
     const soc = psNum(hass, en.soc);
-    const solar = psKw(hass, en.solar), home = psKw(hass, en.home);
+    const homeLoad = psHomeLoad(hass, en.home);
+    const solar = psKw(hass, en.solar), home = homeLoad.kw;
     const battery = psKw(hass, en.battery), grid = psKw(hass, en.grid);
     const imp = psMinor(hass, en.importPrice);
     const exp = psLiveExportRate(hass, en, Date.now());
@@ -2145,7 +2158,7 @@ class PsNowCard extends PsCardBase {
       </div>
       <div class="power">
         ${en.solar ? read('Solar', '--yellow', solar, solarSub, true) : ''}
-        ${en.home ? read('Home', '--purple', home, 'Using', false) : ''}
+        ${en.home ? read('Home', '--purple', home, homeLoad.mayIncludeEv ? 'May include car charging' : 'Using', false) : ''}
         ${en.battery ? read('Battery', '--green', battery, battSub, true) : ''}
         ${en.grid ? read('Grid', grid < -0.05 ? '--red' : '--cyan', grid, gridSub, true) : ''}
         <div class="balance" aria-hidden="true">

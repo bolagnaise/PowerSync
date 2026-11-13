@@ -1094,6 +1094,17 @@ import {
     return raw;
   }
 
+  // Home load when PowerSync withholds its EV-adjusted value because a car's
+  // charging state is unknown: show the measured house load (it may include
+  // the car) rather than "--". The sensor stays unknown for the optimizer.
+  function homeLoadWatt(entityState) {
+    const watt = toOptionalWatt(entityState);
+    if (Number.isFinite(watt)) return watt;
+    const attrs = entityState?.attributes || {};
+    const raw = typeof attrs.raw_home_load_kw === 'number' ? attrs.raw_home_load_kw : NaN;
+    return attrs.normalization_quality === 'incomplete' && Number.isFinite(raw) && raw >= 0 ? raw * 1000 : null;
+  }
+
   function displayedHomeLoadPower(rawLoadPower, evDrawPower, loadIncludesEv) {
     if (!Number.isFinite(rawLoadPower)) return null;
     if (!loadIncludesEv) return rawLoadPower;
@@ -2482,7 +2493,7 @@ import {
       const roofBCurrent = safeNum(this._entityState(cfg.entities.roof_b_current)?.state, 0);
       let batteryPower = toOptionalWatt(this._entityState(cfg.entities.battery_power));
       if (Number.isFinite(batteryPower) && cfg.battery_invert) batteryPower *= -1;
-      const rawLoadPower = toOptionalWatt(this._entityState(cfg.entities.load_power));
+      const rawLoadPower = homeLoadWatt(this._entityState(cfg.entities.load_power));
       const batteryLevel = toOptionalPct(this._entityState(cfg.entities.battery_level));
       const batteryConfigured = !!(cfg.entities.battery_power || cfg.entities.battery_level);
       const coreTelemetryKnown = Number.isFinite(solarPower)
