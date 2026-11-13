@@ -25,6 +25,13 @@ vm.runInNewContext(fs.readFileSync(process.argv[1],'utf8'),context);
  card._hass={user:{is_admin:true},callApi:async(method,path,value)=>{assert.equal(path,'power_sync/diagnostics');calls.push(value);if(value?.action==='review')return {combined:true,challenge:'reviewed-both',descriptors:scopes.map(ceiling=>({ceiling,disclosure:'Signed <b>disclosure</b>'}))};return state;}};
  await card.load();
  let nodes=card.all();assert.equal(nodes.filter(node=>node.textContent==='Revoke ongoing access').length,1);
+ const identity=nodes.find(node=>node.tag==='pre');
+ assert.equal(identity.style.whiteSpace,'pre-wrap','setup identity must wrap in three-column layouts');
+ assert.equal(identity.style.userSelect,'text','identity supports normal text selection');
+ assert.equal(nodes.find(node=>node.tag==='ha-card').style.overflowWrap,'anywhere');
+ for(const control of nodes.filter(node=>['button','input'].includes(node.tag))){
+   assert.equal(control.style.maxWidth,'100%');assert.equal(control.style.boxSizing,'border-box');
+ }
  const inputs=nodes.filter(node=>node.tag==='input');inputs[0].value='bundle';inputs[1].value='authority';
  await nodes.find(node=>node.textContent==='Review invitation').onclick();
  assert.equal(calls.filter(value=>value?.action==='confirm').length,0,'review alone grants nothing');

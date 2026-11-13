@@ -3,17 +3,24 @@ class PowerSyncDiagnostics extends HTMLElement {
   set hass(value) { this._hass = value; if (!this.ready) { this.ready = true; this.load(); } }
   setConfig() {}
   getCardSize() { return 5; }
-  node(tag, text, parent = this) { const n = document.createElement(tag); n.textContent = text; parent.append(n); return n; }
+  node(tag, text, parent = this) { const n = document.createElement(tag); n.textContent = text; if (['input', 'button'].includes(tag)) { n.style.maxWidth = '100%'; n.style.boxSizing = 'border-box'; } parent.append(n); return n; }
   async request(value) { return this._hass.callApi(value ? 'POST' : 'GET', 'power_sync/diagnostics', value); }
   async load() {
     this.replaceChildren();
     if (!this._hass.user?.is_admin) return;
     const card = this.node('ha-card', ''); card.style.padding = '20px';
+    // Legacy dashboard columns can be narrower than the setup identity.
+    card.style.minWidth = '0';
+    card.style.overflowWrap = 'anywhere';
     this.node('h2', 'Ongoing HA diagnostics', card);
     this.node('p', 'Approve ongoing read-only access for support and private offline testing of optimizer updates. Approval stays enabled across restarts until you revoke it. Test captures are replayed, then deleted; bounded summaries expire after seven days. No settings or hardware controls can be changed through this access.', card);
     try {
       const state = await this.request();
-      if (state.identity) this.node('pre', JSON.stringify(state.identity, null, 2), card);
+      if (state.identity) {
+        const identity = this.node('pre', JSON.stringify(state.identity, null, 2), card);
+        identity.style.whiteSpace = 'pre-wrap';
+        identity.style.userSelect = 'text';
+      }
       this.button(card, 'Create setup identity', async () => { await this.request({action: 'identity'}); this.load(); });
       const code = this.node('input', '', card); code.placeholder = 'Invitation code'; code.autocomplete = 'off'; code.type = 'password';
       const key = this.node('input', '', card); key.placeholder = 'Operator-provided authority public key'; key.autocomplete = 'off';
