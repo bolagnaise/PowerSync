@@ -59,6 +59,13 @@ def test_public_image_freeze_is_readable_by_unprivileged_worker_without_changing
 def test_public_freeze_rejects_links_before_copy_and_late_links_before_chmod(tmp_path,monkeypatch):
     from private_regression import build
     source=tmp_path/'source';component=source/'custom_components/power_sync';component.mkdir(parents=True)
+    for name,level in (('linked-parent','parent'),('linked-root','root')):
+        linked=tmp_path/name;linked.mkdir()
+        if level=='parent':(linked/'custom_components').symlink_to(source/'custom_components',target_is_directory=True)
+        else:
+            (linked/'custom_components').mkdir();(linked/'custom_components/power_sync').symlink_to(component,target_is_directory=True)
+        with pytest.raises(ValueError,match='source_symlink'):build.freeze(linked,tmp_path/(name+'-output'))
+        assert not (tmp_path/(name+'-output')).exists()
     secret=tmp_path/'private';secret.write_text('synthetic-private-canary');secret.chmod(0o600)
     link=component/'linked';link.symlink_to(secret)
     with pytest.raises(ValueError,match='source_symlink'):build.freeze(source,tmp_path/'early')

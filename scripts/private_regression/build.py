@@ -13,6 +13,8 @@ from private_regression.fingerprints import ROOT,scorer_digest,schema_digest
 
 
 def freeze(source, destination):
+    if any(path.is_symlink() for path in (source/'custom_components',source/'custom_components/power_sync')):
+        raise ValueError('source_symlink')
     expected = component_digest(source/"custom_components/power_sync")
     destination.mkdir(parents=True, exist_ok=False)
     for name in ("requirements-test.txt", ".dockerignore", "scripts/private_regression/Dockerfile", "scripts/private_regression/worker.py",
