@@ -11556,11 +11556,23 @@ class PriceLevelChargingExecutor:
         )
         return cached_zaptec_charge_state(entry_data, now=time.monotonic(), after=boundary)
 
+    def _tracked_zaptec_vehicle_ids(self) -> list[str]:
+        """Retain physical command obligations independently of discovery rows."""
+        opts = {**self.config_entry.data, **self.config_entry.options}
+        return [
+            vin for vin, state in self._vehicle_states.items()
+            if (state.is_charging or state.start_pending or state.stop_pending or state.zaptec_owned)
+            and _build_dynamic_stop_params(
+                self.hass, self._domain, self.config_entry, opts, vehicle_vin=vin,
+            ).get("charger_type") == "zaptec"
+        ]
+
     async def _evaluate_zaptec_loadpoint(self, pseudo_vin: str, decision: tuple) -> tuple:
         """Reconcile one Zaptec lifecycle for either a profile VIN or standalone id."""
         from ..const import CONF_MONITORING_MODE
         from .ev_ownership import (
-            get_external_control_policy, release_external_ev_ownership,
+            get_external_control_policy, get_ev_ownerships, owner_family,
+            release_external_ev_ownership,
         )
 
         should_charge, reason, mode = decision
@@ -11618,6 +11630,25 @@ class PriceLevelChargingExecutor:
             vehicle_state.zaptec_owned = False
             vehicle_state.last_decision = "stopped"
             vehicle_state.last_decision_reason = reason
+
+        # Several logical VINs may resolve to the same physical charger. A
+        # manual/Boost/external owner on any alias must also protect that charger.
+        for other_id, lease in list(get_ev_ownerships(self.hass, self.config_entry).items()):
+            if other_id == pseudo_vin or owner_family(lease.get("owner_mode")) == "price_level":
+                continue
+            if _build_dynamic_stop_params(
+                self.hass, self._domain, self.config_entry, opts, vehicle_vin=other_id,
+            ).get("charger_type") != "zaptec":
+                continue
+            if _dynamic_ev_owner_suspended_control(self.hass, self.config_entry, other_id):
+                continue
+            vehicle_state.last_decision = "waiting"
+            vehicle_state.last_decision_reason = f"{reason}; another profile owns this Zaptec charger"
+            await self.apply_preserve_home_battery(
+                vehicle_state.start_pending or vehicle_state.stop_pending
+                or (vehicle_state.is_charging and zaptec_charge_state is not False), reason,
+            )
+            return decision
 
         # A yielded session remains hands-off when the vehicle pauses or fills.
         # Only a fresh disconnected observation retires that external lease.
@@ -11793,9 +11824,17 @@ class PriceLevelChargingExecutor:
             opts = {**self.config_entry.data, **self.config_entry.options}
             if opts.get(CONF_ZAPTEC_STANDALONE_ENABLED) and opts.get(CONF_ZAPTEC_USERNAME):
                 decision = await self.get_charging_decision(current_price_cents)
-                results["zaptec_standalone"] = await self._evaluate_zaptec_loadpoint(
-                    "zaptec_standalone", decision
-                )
+                tracked = self._tracked_zaptec_vehicle_ids()
+                target = tracked[0] if tracked else "zaptec_standalone"
+                if len(tracked) > 1:
+                    decision = (False, "Multiple unresolved Zaptec command profiles; cancelling before restart", "")
+                results[target] = await self._evaluate_zaptec_loadpoint(target, decision)
+                if len(tracked) > 1:
+                    await self.apply_preserve_home_battery(
+                        any(self._vehicle_states[vin].start_pending or self._vehicle_states[vin].stop_pending
+                            or (self._vehicle_states[vin].is_charging and self._zaptec_cached_charge_state() is not False)
+                            for vin in tracked), decision[1],
+                    )
                 return results
 
             # Also check OCPP
@@ -11862,15 +11901,55 @@ class PriceLevelChargingExecutor:
         ]
         # A single associated VIN may supply its SOC/location. If discovery is
         # ambiguous, reconcile an existing obligation but never pick a new car.
-        active_zaptec_vins = [
-            vin for vin in zaptec_vins
-            if (state := self._vehicle_states.get(vin)) is not None
-            and (state.is_charging or state.start_pending or state.stop_pending or state.zaptec_owned)
-        ]
+        active_zaptec_vins = self._tracked_zaptec_vehicle_ids()
+        zaptec_decisions = {}
         selected_zaptec_vin = (
-            zaptec_vins[0] if len(zaptec_vins) == 1
-            else active_zaptec_vins[0] if len(active_zaptec_vins) == 1 else None
+            active_zaptec_vins[0] if active_zaptec_vins
+            else zaptec_vins[0] if len(zaptec_vins) == 1 else None
         )
+        if selected_zaptec_vin and selected_zaptec_vin not in zaptec_vins:
+            # Discovery may temporarily lose the VIN or expose a different
+            # alias. Keep the original command namespace for cancellation and
+            # post-command readback; never create an independent new session.
+            decision = await self.get_charging_decision(current_price_cents)
+            results[selected_zaptec_vin] = await self._evaluate_zaptec_loadpoint(selected_zaptec_vin, decision)
+            zaptec_vins.append(selected_zaptec_vin)
+        elif selected_zaptec_vin is None and len(zaptec_vins) > 1:
+            from .ev_ownership import (
+                get_external_control_policy, normalize_external_control_policy,
+                normalize_external_session_policy, owner_family,
+            )
+
+            zaptec_decisions = {
+                vin: await self.get_charging_decision_for_vehicle(vin, current_price_cents)
+                for vin in zaptec_vins
+            }
+            runtime = self.hass.data.get(self._domain, {}).get(self.config_entry.entry_id, {})
+            stored = getattr(runtime.get("automation_store"), "_data", {}) or {}
+            explicit_protection = False
+            for profile in stored.get("vehicle_charging_configs", []):
+                if not isinstance(profile, Mapping) or profile.get("vehicle_id") not in zaptec_vins:
+                    continue
+                session_policy = profile.get("external_session_policy")
+                if isinstance(session_policy, Mapping):
+                    session_policy = session_policy.get("price_level")
+                if (normalize_external_control_policy(profile.get("external_control_policy")) == "yield"
+                        or normalize_external_session_policy(session_policy) == "leave_alone"):
+                    explicit_protection = True
+                    break
+            # Ambiguity forbids a positive start, but need not disable a price
+            # rejection shared by every candidate. Require all policy/ownership
+            # contracts to permit that single physical stop.
+            if not explicit_protection and all(
+                not zaptec_decisions[vin][0]
+                and self._get_or_create_vehicle_state(vin).last_decision not in AWAY_EV_DECISIONS
+                and get_external_control_policy(self.hass, self.config_entry, vin) == "override"
+                and _external_session_policy(self.hass, self.config_entry, vin, "price_level") != "leave_alone"
+                and (not (owner := _get_active_dynamic_ev_mode(self.hass, self.config_entry, vin))
+                     or owner_family(owner) == "price_level")
+                for vin in zaptec_vins
+            ):
+                selected_zaptec_vin = zaptec_vins[0]
 
         for vehicle in vehicles:
             vin = vehicle["vin"]
@@ -11906,7 +11985,9 @@ class PriceLevelChargingExecutor:
                 continue
 
             # Get charging decision for this vehicle
-            decision = await self.get_charging_decision_for_vehicle(vin, current_price_cents)
+            decision = zaptec_decisions.get(vin)
+            if decision is None:
+                decision = await self.get_charging_decision_for_vehicle(vin, current_price_cents)
 
             should_charge, reason, mode = decision
             vehicle_state = self._get_or_create_vehicle_state(vin)

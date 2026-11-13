@@ -3118,6 +3118,111 @@ def test_multiple_unassociated_tesla_vins_cannot_start_one_zaptec(monkeypatch):
     assert all(not decision[0] for decision in results.values())
 
 
+@pytest.mark.parametrize("pending", ["start", "stop"])
+def test_zaptec_pending_vin_survives_discovery_loss(monkeypatch, pending):
+    entry = SimpleNamespace(entry_id="entry-1", data={}, options={
+        "zaptec_standalone_enabled": True, "zaptec_username": "user@example.com",
+        "zaptec_charger_id": "charger-1",
+    })
+    hass = _FakeHass(price_settings={"preserve_home_battery": True})
+    runtime = hass.data["power_sync"]["entry-1"]
+    runtime["zaptec_cached_state"] = {"charger_operation_mode": "connected_waiting", "total_charge_power_w": 0}
+    runtime["zaptec_state_poll"] = {"started_at": 201, "completed_at": 202}
+    monkeypatch.setattr(ev_planner.time, "monotonic", lambda: 203)
+    monkeypatch.setattr(ev_planner, "discover_all_tesla_vehicles", _no_vehicles)
+    executor = ev_planner.PriceLevelChargingExecutor(hass, entry)
+    state = executor._get_or_create_vehicle_state(VIN)
+    state.zaptec_owned = True
+    if pending == "start":
+        state.start_pending = True
+    else:
+        state.stop_pending = True
+        state.stop_requested_at = 200
+    executor.get_charging_decision = AsyncMock(return_value=(False, "Price above threshold", ""))
+    executor._start_charging = AsyncMock()
+    executor._stop_charging = AsyncMock(return_value=True)
+
+    asyncio.run(executor.evaluate_all_vehicles(31.4))
+
+    executor._start_charging.assert_not_awaited()
+    if pending == "start":
+        executor._stop_charging.assert_awaited_once_with("Price above threshold", vehicle_vin=VIN)
+        assert runtime["scheduled_ev_preserve_state"]["active"] is True
+    else:
+        assert state.stop_pending is False
+        assert runtime["scheduled_ev_preserve_state"]["active"] is False
+
+
+@pytest.mark.parametrize("protected", [None, "manual", "yield", "leave_alone"])
+def test_ambiguous_zaptec_vins_can_only_enforce_shared_stop_policy(monkeypatch, protected):
+    other = "5YJTEST0000000002"
+    entry = SimpleNamespace(entry_id="entry-1", data={}, options={
+        "zaptec_standalone_enabled": True, "zaptec_username": "user@example.com",
+        "zaptec_charger_id": "charger-1",
+    })
+    hass = _FakeHass(price_settings={"preserve_home_battery": True})
+    runtime = hass.data["power_sync"]["entry-1"]
+    runtime["zaptec_cached_state"] = {"charger_operation_mode": "charging", "total_charge_power_w": 10000}
+    now = ev_planner.time.monotonic()
+    runtime["zaptec_state_poll"] = {"started_at": now - 1, "completed_at": now}
+    runtime["automation_store"]._data["vehicle_charging_configs"] = [
+        {"vehicle_id": vin, "charger_type": "zaptec", "external_control_policy":
+         "yield" if vin == other and protected == "yield" else "override",
+         "external_session_policy": "leave_alone" if vin == other and protected == "leave_alone" else None}
+        for vin in (VIN, other)
+    ]
+    if protected == "manual":
+        ownership = importlib.import_module("power_sync.automations.ev_ownership")
+        ownership.claim_ev_ownership(hass, entry, other, owner_mode="manual")
+    monkeypatch.setattr(ev_planner, "discover_all_tesla_vehicles", AsyncMock(return_value=[{"vin": VIN}, {"vin": other}]))
+    stop = AsyncMock(return_value=True)
+    monkeypatch.setattr(ev_planner, "_stop_coordinated_charging", stop)
+    executor = ev_planner.PriceLevelChargingExecutor(hass, entry)
+    executor.get_charging_decision_for_vehicle = AsyncMock(return_value=(False, "Price above threshold", ""))
+    executor._start_charging = AsyncMock()
+
+    asyncio.run(executor.evaluate_all_vehicles(31.4))
+
+    assert stop.await_count == int(protected is None)
+    executor._start_charging.assert_not_awaited()
+
+
+def test_lost_zaptec_vin_retains_failed_cancel_until_post_stop_poll(monkeypatch):
+    entry = SimpleNamespace(entry_id="entry-1", data={}, options={
+        "zaptec_standalone_enabled": True, "zaptec_username": "user@example.com",
+        "zaptec_charger_id": "charger-1",
+    })
+    hass = _FakeHass(price_settings={"preserve_home_battery": True})
+    runtime = hass.data["power_sync"]["entry-1"]
+    runtime["zaptec_cached_state"] = {"charger_operation_mode": "connected_waiting", "total_charge_power_w": 0}
+    runtime["zaptec_state_poll"] = {"started_at": 201, "completed_at": 202}
+    clock = [203]
+    monkeypatch.setattr(ev_planner.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(ev_planner, "discover_all_tesla_vehicles", _no_vehicles)
+    stop = AsyncMock(side_effect=[False, True])
+    monkeypatch.setattr(ev_planner, "_stop_coordinated_charging", stop)
+    executor = ev_planner.PriceLevelChargingExecutor(hass, entry)
+    state = executor._get_or_create_vehicle_state(VIN)
+    state.start_pending = state.zaptec_owned = True
+    state.charging_mode = "price_level_opportunity"
+    executor.get_charging_decision = AsyncMock(return_value=(False, "Price above threshold", ""))
+
+    asyncio.run(executor.evaluate_all_vehicles(31.4))
+    assert state.start_pending is True
+    assert runtime["scheduled_ev_preserve_state"]["active"] is True
+    clock[0] = 204
+    asyncio.run(executor.evaluate_all_vehicles(31.4))
+    assert state.stop_pending is True
+    assert runtime["scheduled_ev_preserve_state"]["active"] is True
+    clock[0] = 207
+    runtime["zaptec_state_poll"] = {"started_at": 205, "completed_at": 206}
+    asyncio.run(executor.evaluate_all_vehicles(31.4))
+    assert state.stop_pending is False
+    assert runtime["scheduled_ev_preserve_state"]["active"] is False
+    assert stop.await_count == 2
+    assert all(call.kwargs["vehicle_vin"] == VIN for call in stop.await_args_list)
+
+
 @pytest.mark.parametrize("poll_started,confirmed", [(199, False), (201, True), (float("nan"), False)])
 def test_zaptec_pending_start_requires_post_command_charging_poll(monkeypatch, poll_started, confirmed):
     entry = SimpleNamespace(entry_id="entry-1", data={}, options={
