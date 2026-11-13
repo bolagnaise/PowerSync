@@ -131,6 +131,7 @@ async def contribution(runtime, identity):
     from datetime import datetime, timezone, timedelta
     from regression_runner.runtime import load_component
     from private_regression.controller import run
+    from private_regression.sandbox import daemon_identity
     artifact = Path(os.environ["DIAGNOSTICS_PRIVATE_ARTIFACT"])
     metadata = json.loads((artifact/"artifact.json").read_bytes())
     root = artifact/"custom_components/power_sync"
@@ -154,7 +155,7 @@ async def contribution(runtime, identity):
         await asyncio.sleep(.1)
     config = {"profile": "codex", "private_key": private, "root": identity["root"], "grant": grant_id,
               "authority_key": os.environ["DIAGNOSTICS_AUTHORITY_PUBLIC"], "runner": "c"*32,
-              "runner_generation": "d"*32, "runner_private_key": os.environ["DIAGNOSTICS_RUNNER_SEED"]}
+              "runner_generation": "d"*32, "daemon_id": await asyncio.to_thread(daemon_identity), "pid_namespace": os.readlink("/proc/self/ns/pid"), "runner_private_key": os.environ["DIAGNOSTICS_RUNNER_SEED"]}
     pair = {"baseline": {"root": str(root), "image": metadata["image"], "component": metadata["component"]},
             "candidate": {"root": str(root), "image": metadata["image"], "component": metadata["component"]},
             "source": source, "runtime": metadata["runtime"],"scorer":metadata['scorer'],"schema":metadata['schema'],'currency':'AUD'}

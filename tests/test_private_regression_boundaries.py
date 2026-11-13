@@ -56,6 +56,62 @@ def test_public_image_freeze_is_readable_by_unprivileged_worker_without_changing
     assert component.stat().st_mode&0o777==0o700
 
 
+def test_public_freeze_rejects_links_before_copy_and_late_links_before_chmod(tmp_path,monkeypatch):
+    from private_regression import build
+    source=tmp_path/'source';component=source/'custom_components/power_sync';component.mkdir(parents=True)
+    secret=tmp_path/'private';secret.write_text('synthetic-private-canary');secret.chmod(0o600)
+    link=component/'linked';link.symlink_to(secret)
+    with pytest.raises(ValueError,match='source_symlink'):build.freeze(source,tmp_path/'early')
+    assert not (tmp_path/'early').exists()
+    link.unlink();(component/'manifest.json').write_text('{}')
+    original=build.shutil.copytree
+    def racing(src,dest,*args,**kwargs):
+        if Path(src)==component:link.symlink_to(secret)
+        return original(src,dest,*args,**kwargs)
+    monkeypatch.setattr(build.shutil,'copytree',racing)
+    with pytest.raises(ValueError,match='symlink_in_frozen_tree'):build.freeze(source,tmp_path/'late')
+    assert (tmp_path/'late/custom_components/power_sync/linked').is_symlink()
+    assert secret.stat().st_mode&0o777==0o600
+
+
+def test_cleanup_pins_daemon_and_group_signal_uses_held_pidfd(monkeypatch):
+    from private_regression import sandbox
+    monkeypatch.setattr(sandbox,'daemon_identity',lambda:'other-daemon')
+    monkeypatch.setattr(sandbox,'docker',lambda *args:pytest.fail('must not trust an empty listing on another daemon'))
+    with pytest.raises(sandbox.SandboxError,match='cleanup_daemon_changed'):sandbox.purge('a'*32,'expected-daemon')
+    calls=[]
+    monkeypatch.setattr(sandbox.signal,'pidfd_send_signal',lambda *args:calls.append(args))
+    sandbox.kill_group(73)
+    assert calls==[(73,sandbox.signal.SIGKILL,None,4)]
+    monkeypatch.setattr(sandbox,'no_swap',lambda:None)
+    monkeypatch.setattr(sandbox.os,'getpgrp',lambda:sandbox.os.getpid()+1)
+    with pytest.raises(sandbox.SandboxError,match='private_process_group_required'):sandbox.Sandbox('a'*32,__import__('time').time()+100)
+
+
+def test_reaper_refuses_cross_namespace_owner_liveness(monkeypatch):
+    from private_regression import sandbox
+    calls=[]
+    def docker(*args):
+        calls.append(args)
+        if args[0]=='ps':return b'public-container\n'
+        if args[0]=='inspect':return json.dumps([{'Config':{'Labels':{sandbox.LABEL+'.pid_ns':'different-namespace',sandbox.LABEL+'.deadline':'0'}}}]).encode()
+        pytest.fail('cross-namespace reaper must not remove this container')
+    monkeypatch.setattr(sandbox,'docker',docker)
+    sandbox.reap()
+    assert [call[0] for call in calls]==['ps','inspect']
+
+
+def test_cleanup_process_inventory_only_matches_our_exact_job_markers():
+    from private_regression.sandbox import private_argv
+    job='a'*64
+    assert private_argv(['/python','/opt/job.py','--private-job-id',job],job)
+    assert private_argv(['/docker','start','-a','-i','ppr-'+job+'-01234567'],job)
+    assert not private_argv(['/python','controller.py','--recover-job',job],job)
+    assert not private_argv(['/python','sandbox.py','watch',job],job)
+    assert not private_argv(['/docker','start','-a','-i','ppr-'+('b'*64)+'-01234567'],job)
+    assert not private_argv(['/python','unrelated.py','--private-job-id',job],job)
+
+
 def test_candidate_output_nan_unknown_shape_and_arbitrary_fields_fail_closed():
     for value in ({}, {'outcome':'pass'}, {'outcome':float('nan'), 'source':{}, 'schedule':[], 'solver':None}, {'household_text':'never release'}):
         with pytest.raises(CandidateFailure):

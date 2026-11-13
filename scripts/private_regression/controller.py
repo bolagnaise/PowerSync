@@ -12,6 +12,7 @@ import secrets
 import subprocess
 import sys
 import time
+import traceback
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "custom_components/power_sync"))
@@ -19,7 +20,7 @@ from diagnostics_access import wire
 from diagnostics_access.bridge import Bridge, private_file
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PrivateFormat, PublicFormat, NoEncryption
-from private_regression.sandbox import no_swap, purge, reap, docker, Sandbox, LABEL
+from private_regression.sandbox import no_swap, purge, reap, docker, daemon_identity, kill_group, LABEL
 from regression_runner.runtime import component_digest
 from private_regression.images import verify_image
 from private_regression.fingerprints import scorer_digest,schema_digest
@@ -42,6 +43,7 @@ def runner_slot():
 
 def run(config,pair,transport=None):
     with runner_slot():
+        host_identity(config)
         client=Bridge(config,config['profile'],transport)
         try:
             return execute(config,pair,transport,client=client)
@@ -53,7 +55,8 @@ def recover(config,job,transport=None):
     """Metadata-only recovery after a real host cleanup, never a replay retry."""
     with runner_slot():
         no_swap()
-        confirmed=purge(job)
+        host_identity(config)
+        confirmed=purge(job,config['daemon_id'])
         client=Bridge(config,config['profile'],transport)
         request=wire.packet(config['runner_private_key'],'runner',config['root'],config['grant'],
             {'type':'job_purged','id':job,'runner':config['runner'],'runner_generation':config['runner_generation'],'confirmed':confirmed})
@@ -64,8 +67,13 @@ def recover(config,job,transport=None):
         return {'job':job,'purge':'confirmed' if confirmed else 'unconfirmed'}
 
 
+def host_identity(config):
+    if config.get('daemon_id')!=daemon_identity() or config.get('pid_namespace')!=os.readlink('/proc/self/ns/pid'):
+        raise ValueError('runner_host_not_pinned')
+
+
 def execute(config, pair, transport=None, *, client=None):
-    no_swap(); reap()
+    no_swap(); reap(config['daemon_id'])
     if pair.get('scorer')!=scorer_digest() or pair.get('schema')!=schema_digest():
         raise ValueError('trusted_scorer_or_schema_changed')
     if docker('ps','-aq','--filter','label='+LABEL).strip():
@@ -80,14 +88,10 @@ def execute(config, pair, transport=None, *, client=None):
             raise ValueError("unverified_runner_artifact")
         if artifact['image'] not in verified:
             verify_image(artifact['image'],artifact['component'])
-            probe=Sandbox(secrets.token_hex(32),time.time()+120)
-            try:
-                health=probe.run(artifact['image'],artifact['component'],None,mode='health')
-                if health!={'source':{**pair['source'],'component_sha256':artifact['component']}}:
-                    raise ValueError('runner_runtime_incompatible')
-            finally:
-                if not probe.close():
-                    raise ValueError('probe_cleanup_unconfirmed')
+            probe=subprocess.run([sys.executable,str(Path(__file__).with_name('sandbox.py')),'probe',secrets.token_hex(32),artifact['image'],artifact['component'],config['daemon_id']],
+                stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=130,start_new_session=True)
+            if probe.returncode or len(probe.stdout)>4096 or json.loads(probe.stdout)!={'source':{**pair['source'],'component_sha256':artifact['component']}}:
+                raise ValueError('runner_runtime_incompatible')
             verified.add(artifact['image'])
     profile = config["profile"]
     client = client or Bridge(config, profile, transport)
@@ -113,6 +117,8 @@ def execute(config, pair, transport=None, *, client=None):
         return payload["value"]
     runner({"type": "job_ready", "encryption_key": wire.b64(private.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw))})
     summary, process = {"status": "invalid", "attempts": 0, "violations": 0, "coverage": "insufficient", "cost_delta": 0}, None
+    process_fd=None
+    encoded=request=pending=None
     try:
         chunks = []
         # No capture backlog: this single reservation owns one ephemeral stream.
@@ -136,10 +142,11 @@ def execute(config, pair, transport=None, *, client=None):
         if not chunks:
             raise ValueError("fresh_capture_timeout")
         request = {"encrypted": "".join(chunks), "decryption_key": wire.b64(private.private_bytes(Encoding.Raw, PrivateFormat.Raw, NoEncryption())),
-            "pair": pair, "deadline": result["deadline"]-5, "context": {"root": config["root"], "grant": config["grant"], "job": job, "pair": digest}}
-        del chunks, private
-        process = subprocess.Popen([sys.executable, str(Path(__file__).with_name("job.py"))], stdin=subprocess.PIPE,
-                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+               "pair": pair, "daemon_id":config['daemon_id'],"deadline": result["deadline"]-5, "context": {"root": config["root"], "grant": config["grant"], "job": job, "pair": digest}}
+        chunks.clear();private=None
+        process = subprocess.Popen([sys.executable, str(Path(__file__).with_name("job.py")),'--private-job-id',job], stdin=subprocess.PIPE,
+                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,start_new_session=True)
+        process_fd=os.pidfd_open(process.pid)
         encoded = json.dumps(request).encode()
         del request
         with ThreadPoolExecutor(max_workers=1) as executor:
@@ -155,16 +162,26 @@ def execute(config, pair, transport=None, *, client=None):
                     time.sleep(1)
                 output, _ = pending.result()
             finally:
-                if process.poll() is None:
-                    process.kill();process.wait()
+                kill_group(process_fd)
+                process.wait()
         if process.returncode or len(output) > 4096:
             raise ValueError("private_job_failed")
         summary = json.loads(output)
     finally:
-        if process and process.poll() is None:
-            process.kill(); process.wait()
+        if process_fd is not None:
+            kill_group(process_fd)
+            process.wait()
+            os.close(process_fd)
+        elif process and process.poll() is None:
+            process.kill();process.wait()
+        # Destroy reconstruction-capable controller references before signing
+        # the cleanup receipt, including cancellation/exception paths.
+        encoded=request=private=pending=process=None
+        chunks.clear()
+        if sys.exception() is not None:
+            traceback.clear_frames(sys.exception().__traceback__)
         try:
-            confirmed = purge(job)
+            confirmed = purge(job,config['daemon_id'])
         except Exception:
             confirmed = False
         runner({"type": "job_purged", "confirmed": confirmed, **({"summary": summary} if confirmed and summary else {})})

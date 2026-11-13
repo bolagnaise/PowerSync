@@ -94,17 +94,30 @@ requires `solver_v1`, `reserve-recovery-temporal-v1` and `calibrated-plant-v1`,
 plus an explicit `terminal_price` in that currency. Keep forecasts, observed
 meters and counterfactual scores distinct.
 
-Only one local private job is admitted at a time. The host must be Linux with
+Only one local private job is admitted at a time. The host must be Linux 6.9 or
+newer with pidfd process-group signalling, with
 swap disabled and no piped core handler. Private processes are non-dumpable.
 Containers run as UID 65534 with no network/host/scorer mounts, a read-only root,
 bounded tmpfs, dropped capabilities, no-new-privileges, memory/process/CPU/wall
 limits and no persistent logs. Inputs and results travel over bounded pipes.
+The disposable trusted process has its own process group. Cancellation and the
+watchdog kill that group through a held pidfd, including Docker CLI children
+that could otherwise retain pipe data after their parent dies. Cleanup also
+checks the exact public job markers of disposable scorer and attachment processes
+through pidfds before confirming deletion, including stopped orphaned children.
 
 Install the independent reaper timer before activating the runner service.
 Templates are in `scripts/private_regression/systemd/`. The service configuration
 names the immutable pair/campaign, private cohort key, metadata ledger, separately
 approved contribution client files and an interval of at least 900 seconds.
 Service activation and Docker access are explicit operator setup steps.
+Pin `daemon_id` in every private runner client configuration to the public value
+from `docker info --format '{{.ID}}'`. Recovery checks that identity before trusting
+an empty container listing. Pin `pid_namespace` to `readlink /proc/self/ns/pid`
+in those client files too; do not reuse them in another PID namespace. Put the same value in the reaper's owner-only
+`/etc/powersync-regression/host.env` as `POWERSYNC_DOCKER_ID=...`.
+The reaper refuses PID-owner checks across PID namespaces. Install it in the
+runner's PID namespace and verify that it removes an abandoned synthetic job.
 
 ## Capture and private data lifetime
 

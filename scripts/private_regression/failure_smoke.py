@@ -17,7 +17,7 @@ from diagnostics_access import wire
 from diagnostics_access.private_capture import encrypt,aad
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding,PrivateFormat,PublicFormat,NoEncryption
-from private_regression.sandbox import purge
+from private_regression.sandbox import purge,daemon_identity
 
 
 def mutate(root,mode):
@@ -63,8 +63,8 @@ def main(base,output):
         private=X25519PrivateKey.generate()
         encrypted=encrypt(contract.canonical({'cycles':[{'attempts':[bundle]}]}),wire.b64(private.public_key().public_bytes(Encoding.Raw,PublicFormat.Raw)),aad(**context))
         request={'encrypted':encrypted,'decryption_key':wire.b64(private.private_bytes(Encoding.Raw,PrivateFormat.Raw,NoEncryption())),
-                 'pair':pair,'context':context,'deadline':time.time()+120}
-        process=subprocess.run([sys.executable,str(Path(__file__).with_name('job.py'))],input=json.dumps(request).encode(),stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=130)
+                 'pair':pair,'context':context,'daemon_id':daemon_identity(),'deadline':time.time()+120}
+        process=subprocess.run([sys.executable,str(Path(__file__).with_name('job.py')),'--private-job-id',context['job']],input=json.dumps(request).encode(),stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=130,start_new_session=True)
         assert process.returncode==0,'fault disappeared without a receipt: '+mode
         report=json.loads(process.stdout)
         assert report['status']=='fail',(mode,report)

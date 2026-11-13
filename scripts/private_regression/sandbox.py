@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 import resource
 import selectors
+import secrets
 import signal
 import shutil
 import subprocess
@@ -16,6 +17,7 @@ import sys
 import time
 
 LABEL = "cc.powersync.private-replay"
+PIDFD_SIGNAL_PROCESS_GROUP = 4  # Linux >=6.9, uapi/linux/pidfd.h
 MAX_BYTES = 4*1024*1024
 DOCKER = shutil.which("docker") or "/usr/bin/docker"
 DOCKER_ENV = {'PATH':os.defpath, **{key:os.environ[key] for key in ('DOCKER_HOST','DOCKER_CONTEXT','DOCKER_CONFIG','DOCKER_TLS_VERIFY','DOCKER_CERT_PATH') if key in os.environ}}
@@ -69,7 +71,24 @@ def candidate_started(name):
     return state
 
 
+def daemon_identity():
+    value=docker('info','--format','{{.ID}}').decode().strip()
+    if not re.fullmatch(r'[A-Za-z0-9:_-]{16,128}',value):
+        raise SandboxError('docker_identity_unavailable')
+    return value
+
+
+def kill_group(descriptor):
+    """A held pidfd targets the original group even after its leader exits."""
+    try:
+        signal.pidfd_send_signal(descriptor,signal.SIGKILL,None,PIDFD_SIGNAL_PROCESS_GROUP)
+    except ProcessLookupError:
+        pass
+
+
 def no_swap():
+    if int(Path('/proc/self/stat').read_text().split(' ',1)[0])!=os.getpid():
+        raise SandboxError('private_proc_namespace_mismatch')
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     if ctypes.CDLL(None).prctl(4, 0, 0, 0, 0) != 0:
         raise SandboxError("private_process_dumpable")
@@ -79,26 +98,72 @@ def no_swap():
         raise SandboxError('private_host_core_handler_enabled')
 
 
-def purge(job):
+def private_argv(arguments,job):
+    """Only our disposable scorer and its named Docker attachment carry data."""
+    if len(arguments)>=3 and arguments[-2:]==['--private-job-id',job] and any(Path(value).name=='job.py' for value in arguments):
+        return True
+    return any(value.startswith('ppr-'+job+'-') for value in arguments) and any(
+        arguments[index:index+3]==['start','-a','-i'] for index in range(len(arguments)-2))
+
+
+def private_processes_gone(job):
+    # This backstop also covers a stopped/dead watchdog and an already removed
+    # container. Open pidfds and recheck argv before signalling; never kill by
+    # a reusable numeric PID. No private bytes enter this process inventory.
+    for path in Path('/proc').iterdir():
+        if not path.name.isdecimal() or int(path.name)==os.getpid():continue
+        try:
+            arguments=(path/'cmdline').read_bytes().rstrip(b'\0').decode().split('\0')
+            if not private_argv(arguments,job):continue
+            descriptor=os.pidfd_open(int(path.name))
+        except (FileNotFoundError,ProcessLookupError,PermissionError,UnicodeError):continue
+        try:
+            try:current=(path/'cmdline').read_bytes().rstrip(b'\0').decode().split('\0')
+            except (FileNotFoundError,ProcessLookupError):continue
+            if not private_argv(current,job):continue
+            try:signal.pidfd_send_signal(descriptor,signal.SIGKILL)
+            except ProcessLookupError:continue
+            monitor=selectors.DefaultSelector()
+            try:
+                monitor.register(descriptor,selectors.EVENT_READ)
+                if not monitor.select(5):return False
+            finally:monitor.close()
+        finally:os.close(descriptor)
+    return True
+
+
+def purge(job,daemon_id=None):
     if not re.fullmatch(r'[a-f0-9]{32,64}',job):
         raise SandboxError('invalid_cleanup_job')
-    names = docker("ps", "-aq", "--filter", "label=" + LABEL + "=" + job).decode().split()
-    for name in names:
-        try:
-            docker("rm", "-f", name)
-        except Exception:
-            # The independent watchdog/reaper may have removed it first.
-            if name in docker('ps','-aq','--filter','label='+LABEL+'='+job).decode().split():
-                raise
-    return not docker("ps", "-aq", "--filter", "label=" + LABEL + "=" + job).strip()
+    if daemon_id is not None and daemon_identity()!=daemon_id:
+        raise SandboxError('cleanup_daemon_changed')
+    if not private_processes_gone(job):return False
+    query=('ps','-aq','--no-trunc','--filter','label='+LABEL+'='+job)
+    for attempt in range(3):
+        names=docker(*query).decode().split()
+        if not names:return True
+        for name in names:
+            try:docker('rm','-f',name)
+            except SandboxError:
+                if name in docker(*query).decode().split():
+                    if attempt==2:raise
+        if attempt<2:time.sleep(.1)
+    return not docker(*query).strip()
 
 
-def reap():
+def reap(daemon_id=None):
+    if daemon_id is not None and daemon_identity()!=daemon_id:
+        raise SandboxError('cleanup_daemon_changed')
     ids = docker("ps", "-aq", "--filter", "label=" + LABEL).decode().split()
     for identity in ids:
-        info = json.loads(docker("inspect", identity))[0]
+        try:info = json.loads(docker("inspect", identity))[0]
+        except SandboxError:
+            if identity in docker('ps','-aq','--filter','label='+LABEL).decode().split():raise
+            continue
         deadline = info["Config"]["Labels"].get(LABEL + ".deadline", "0")
         labels=info['Config']['Labels']
+        if labels.get(LABEL+'.pid_ns')!=os.readlink('/proc/self/ns/pid'):
+            continue
         pid=labels.get(LABEL+'.owner_pid','')
         alive=False
         if pid.isdecimal():
@@ -108,10 +173,11 @@ def reap():
             except (OSError,IndexError):
                 pass
         if not alive or not deadline.isdecimal() or int(deadline) <= time.time():
-            docker("rm", "-f", identity)
+            job=labels.get(LABEL,'')
+            if re.fullmatch(r'[a-f0-9]{32,64}',job):purge(job,daemon_id)
 
 
-def watchdog(job, deadline, parent_fd):
+def watchdog(job, deadline, parent_fd,daemon_id):
     # An independent process survives controller death and uses the real clock.
     monitor = selectors.DefaultSelector()
     monitor.register(parent_fd, selectors.EVENT_READ)
@@ -123,32 +189,40 @@ def watchdog(job, deadline, parent_fd):
         if monitor.select(max(0, min(1, deadline-time.time()))):
             break
     try:
-        signal.pidfd_send_signal(parent_fd, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
+        kill_group(parent_fd)
+        if not monitor.select(5):
+            return
     finally:
         monitor.close()
-        # Process memory dies before fallible daemon cleanup; host reaping is
-        # still required if bounded retries cannot confirm container deletion.
-        for attempt in range(3):
-            try:
-                if purge(job):
-                    break
-            except Exception:
-                time.sleep(.2)
+    # Process memory dies before fallible daemon cleanup; host reaping is
+    # still required if bounded retries cannot confirm container deletion.
+    for attempt in range(3):
+        try:
+            if purge(job,daemon_id):
+                break
+        except Exception:
+            time.sleep(.2)
 
 
 class Sandbox:
-    def __init__(self, job, deadline):
+    def __init__(self, job, deadline,daemon_id=None):
         if not re.fullmatch(r"[a-f0-9]{32,64}", job) or not time.time() < deadline <= time.time()+1800:
             raise SandboxError("invalid_job_lease")
         no_swap()
-        reap()
+        if os.getpgrp()!=os.getpid():
+            raise SandboxError('private_process_group_required')
+        self.daemon_id=daemon_identity()
+        if daemon_id is not None and self.daemon_id!=daemon_id:
+            raise SandboxError('cleanup_daemon_changed')
+        reap(self.daemon_id)
         self.job, self.deadline = job, deadline
         self.cpu = min(os.sched_getaffinity(0))
         parent_fd = os.pidfd_open(os.getpid())
         try:
-            self.watchdog = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "watch", job, str(int(deadline)), str(parent_fd)],
+            # Refuse unsupported kernels before any private input reaches an
+            # image. The pidfd group flag avoids numeric process-group reuse.
+            signal.pidfd_send_signal(parent_fd,0,None,PIDFD_SIGNAL_PROCESS_GROUP)
+            self.watchdog = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "watch", job, str(int(deadline)), str(parent_fd),self.daemon_id],
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True, pass_fds=(parent_fd,))
         finally:
             os.close(parent_fd)
@@ -180,14 +254,16 @@ class Sandbox:
             raise SandboxError('unsupported_private_profile')
         if len(raw) > MAX_BYTES:
             raise SandboxError("input_limit")
-        name = docker("create", "--network=none", "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges",
+        name='ppr-'+self.job+'-'+secrets.token_hex(8)
+        process = None
+        try:
+            docker("create", '--name='+name,"--network=none", "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges",
             "--memory=512m", "--memory-swap=512m", "--cpus=1", "--cpuset-cpus="+str(self.cpu), "--pids-limit=32", "--ulimit=core=0:0",
             "--ulimit=nofile=64:64", "--log-driver=none", "--tmpfs=/tmp:rw,noexec,nosuid,nodev,size=16m",
             "--label="+LABEL+"="+self.job, "--label="+LABEL+".deadline="+str(int(self.deadline)),
             '--label='+LABEL+'.owner_pid='+str(os.getpid()),
-            '--label='+LABEL+'.owner_start='+Path('/proc/self/stat').read_text().rsplit(')',1)[1].split()[19], '-i', image).decode().strip()
-        process = None
-        try:
+            '--label='+LABEL+'.pid_ns='+os.readlink('/proc/self/ns/pid'),
+            '--label='+LABEL+'.owner_start='+Path('/proc/self/stat').read_text().rsplit(')',1)[1].split()[19], '-i', image)
             info = json.loads(docker("inspect", name))[0]
             host = info["HostConfig"]
             # Tower has no swap and no per-container swap controller. This
@@ -252,10 +328,12 @@ class Sandbox:
         finally:
             if process and process.poll() is None:
                 process.kill(); process.wait()
-            docker("rm", "-f", name)
+            try:docker("rm", "-f", name)
+            except SandboxError:
+                if name in docker('ps','-aq','--filter','name=^/'+name+'$','--format','{{.Names}}').decode().split():raise
 
     def close(self):
-        confirmed = purge(self.job)
+        confirmed = purge(self.job,self.daemon_id)
         if confirmed:
             self.watchdog.terminate()
             self.watchdog.wait(timeout=5)
@@ -263,9 +341,15 @@ class Sandbox:
 
 
 if __name__ == "__main__":
-    if sys.argv[1:] == ["reap"]:
-        reap()
-    elif len(sys.argv) == 5 and sys.argv[1] == "watch":
-        watchdog(sys.argv[2], int(sys.argv[3]), int(sys.argv[4]))
+    if len(sys.argv)==3 and sys.argv[1]=='reap':
+        reap(sys.argv[2])
+    elif len(sys.argv) == 6 and sys.argv[1] == "watch":
+        watchdog(sys.argv[2], int(sys.argv[3]), int(sys.argv[4]),sys.argv[5])
+    elif len(sys.argv)==6 and sys.argv[1]=='probe':
+        sandbox=Sandbox(sys.argv[2],time.time()+120,sys.argv[5])
+        try:result=sandbox.run(sys.argv[3],sys.argv[4],None,mode='health')
+        finally:
+            if not sandbox.close():raise SandboxError('probe_cleanup_unconfirmed')
+        print(json.dumps(result,allow_nan=False))
     else:
         raise SystemExit(2)

@@ -152,7 +152,7 @@ def run(request):
         contract.validate_bundle(bundle)
         if bundle['source'] != pair['source'] or bundle['source']['component_sha256'] != pair['baseline']['component'] or bundle['currency']!=pair.get('currency'):
             raise ValueError('runtime_source_changed')
-    sandbox = Sandbox(context["job"], request["deadline"])
+    sandbox = Sandbox(context["job"], request["deadline"],request['daemon_id'])
     statuses, violations, differences = [], 0, []
     executed=None
     def summary():
@@ -232,11 +232,15 @@ def run(request):
 
 def main():
     no_swap()
+    if os.getpgrp()!=os.getpid():
+        raise ValueError('private_process_group_required')
     parent = os.getppid()
     # No private-memory orphan if the network controller dies.
     if ctypes.CDLL(None).prctl(1, signal.SIGKILL, 0, 0, 0) != 0 or os.getppid() != parent:
         raise ValueError("parent_guard_unavailable")
     request = json.loads(sys.stdin.buffer.read(8*1024*1024+1))
+    if sys.argv[1:]!=['--private-job-id',request['context']['job']]:
+        raise ValueError('private_process_identity_required')
     print(json.dumps(run(request), allow_nan=False))
 
 
