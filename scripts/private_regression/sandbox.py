@@ -16,6 +16,8 @@ import subprocess
 import sys
 import time
 
+sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
+
 LABEL = "cc.powersync.private-replay"
 PIDFD_SIGNAL_PROCESS_GROUP = 4  # Linux >=6.9, uapi/linux/pidfd.h
 MAX_BYTES = 4*1024*1024
@@ -86,9 +88,14 @@ def kill_group(descriptor):
         pass
 
 
-def no_swap():
+def proc_namespace():
     if int(Path('/proc/self/stat').read_text().split(' ',1)[0])!=os.getpid():
         raise SandboxError('private_proc_namespace_mismatch')
+    return os.readlink('/proc/self/ns/pid')
+
+
+def no_swap():
+    proc_namespace()
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     if ctypes.CDLL(None).prctl(4, 0, 0, 0, 0) != 0:
         raise SandboxError("private_process_dumpable")
@@ -107,6 +114,7 @@ def private_argv(arguments,job):
 
 
 def private_processes_gone(job):
+    proc_namespace()
     # This backstop also covers a stopped/dead watchdog and an already removed
     # container. Open pidfds and recheck argv before signalling; never kill by
     # a reusable numeric PID. No private bytes enter this process inventory.
@@ -152,6 +160,7 @@ def purge(job,daemon_id=None):
 
 
 def reap(daemon_id=None):
+    proc_namespace()
     if daemon_id is not None and daemon_identity()!=daemon_id:
         raise SandboxError('cleanup_daemon_changed')
     ids = docker("ps", "-aq", "--filter", "label=" + LABEL).decode().split()
