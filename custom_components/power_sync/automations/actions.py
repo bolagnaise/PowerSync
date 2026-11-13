@@ -4608,6 +4608,27 @@ async def _start_ev_charging_ble(
         )
         if charge_binding is None:
             return False
+        # Pedro's optimistic Charger switch accepts turn_on but deliberately
+        # sends no vehicle command while charging is Complete. Refuse before
+        # handoff so that this known terminal state cannot create an unknown
+        # Start liability. Only use fresh telemetry from the pinned bridge;
+        # stale Complete reports must first pass the normal session refresh.
+        cutoff = datetime.now(dt_timezone.utc) - timedelta(
+            seconds=_TESLA_BLE_WAKE_FRESHNESS_SECONDS
+        )
+        for entity_id, _identity in charge_binding:
+            if entity_id not in (
+                TESLA_BLE_SENSOR_CHARGING_STATE.format(prefix=ble_prefix),
+                TESLA_BLE_SENSOR_CHARGING.format(prefix=ble_prefix),
+            ):
+                continue
+            state = hass.states.get(entity_id)
+            if (
+                str(getattr(state, "state", "")).strip().lower() == "complete"
+                and _ble_state_observed_after(state, cutoff, hass=hass)
+            ):
+                _LOGGER.info("Tesla BLE %s: vehicle charge complete; start not sent", ble_prefix)
+                return False
         command_started_at = datetime.now(dt_timezone.utc)
         confirmation_deadline = (asyncio.get_running_loop().time()
                                  + _TESLA_BLE_COMMAND_CONFIRMATION_SECONDS)

@@ -14,6 +14,12 @@ filters produce unavailable evidence rather than a fabricated fresh reading.
 Existing timestamp-only packages and older HA-timestamp installations remain
 compatible; their capability is reported separately.
 
+PowerSync refuses a BLE Start before dispatch when fresh vehicle telemetry
+reports `Complete`. This avoids an unnecessary recovery hold when the bridge
+declines to restart a vehicle already at its charge limit. Stale completion
+readings still require the normal fresh-data check. This prevention does not
+clear existing retained commands; use the supported recovery action for those.
+
 ## Choose the firmware family
 
 Preserve the existing device name, entity IDs, VIN, BLE address, board,
