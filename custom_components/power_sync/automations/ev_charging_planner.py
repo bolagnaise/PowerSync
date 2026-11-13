@@ -8602,6 +8602,7 @@ class PriceLevelChargingState:
     # but does not prove physical charging.  Keep that lifecycle separate from
     # the physical charging flag so a price rejection can cancel it exactly.
     start_pending: bool = False
+    start_requested_at: float = 0.0
     stop_pending: bool = False
     # Monotonic boundary after the accepted stop command. A cached noncharging
     # sample is not a stop readback unless its poll began after this boundary.
@@ -9838,16 +9839,20 @@ async def _start_coordinated_charging(
             params,
             context=None,
         )
-        if success and charger_type == "zaptec" and cooldown_state is not None:
-            cooldown_state.consecutive_start_failures = 0
-            cooldown_state.start_cooldown_until = 0.0
-            cooldown_state.start_retry_reason = ""
-            cooldown_state.start_pending = bool(params.get("_zaptec_pending_start"))
-            cooldown_state.stop_pending = False
-            cooldown_state.stop_requested_at = 0.0
-            cooldown_state.zaptec_owned = True
-            if hasattr(cooldown_state, "managed_by_powersync"):
-                cooldown_state.managed_by_powersync = False
+        if charger_type == "zaptec" and cooldown_state is not None:
+            if success:
+                cooldown_state.consecutive_start_failures = 0
+                cooldown_state.start_cooldown_until = 0.0
+                cooldown_state.start_retry_reason = ""
+                cooldown_state.start_pending = bool(params.get("_zaptec_pending_start"))
+                cooldown_state.start_requested_at = time.monotonic()
+                cooldown_state.stop_pending = False
+                cooldown_state.stop_requested_at = 0.0
+                cooldown_state.zaptec_owned = True
+                if hasattr(cooldown_state, "managed_by_powersync"):
+                    cooldown_state.managed_by_powersync = False
+            else:
+                _record_zaptec_command_failure(cooldown_state, "start")
         if success and confirm_tesla_start and cooldown_state is not None:
             cooldown_state.consecutive_start_failures = 0
             cooldown_state.start_cooldown_until = 0.0
@@ -9894,17 +9899,19 @@ async def _start_coordinated_charging(
             )
             cooldown_state.start_cooldown_until = time.time() + retry_delay
         if charger_type == "zaptec" and cooldown_state is not None:
-            cooldown_state.consecutive_start_failures += 1
-            if cooldown_state.consecutive_start_failures >= 3:
-                cooldown_state.start_cooldown_until = time.time() + 300
-                _LOGGER.warning(
-                    "Zaptec start failed %d times, cooling down 5min: %s",
-                    cooldown_state.consecutive_start_failures,
-                    err,
-                )
-                return False
+            _record_zaptec_command_failure(cooldown_state, "start")
         _LOGGER.error("%s: Error starting: %s", log_prefix, err)
         return False
+
+
+def _record_zaptec_command_failure(state: Any, command: str) -> None:
+    """Apply the same bounded backoff to rejected and raised action results."""
+    failures_key = f"consecutive_{command}_failures"
+    failures = getattr(state, failures_key, 0) + 1
+    setattr(state, failures_key, failures)
+    if failures >= 3:
+        setattr(state, f"{command}_cooldown_until", time.time() + 300)
+        _LOGGER.warning("Zaptec %s failed %d times, cooling down 5min", command, failures)
 
 
 async def _stop_coordinated_charging(
@@ -9958,23 +9965,18 @@ async def _stop_coordinated_charging(
 
     try:
         success = await _action_stop_ev_charging_dynamic(hass, config_entry, params)
-        if success and charger_type == "zaptec" and cooldown_state is not None:
-            cooldown_state.consecutive_stop_failures = 0
-            cooldown_state.stop_cooldown_until = 0.0
-            if hasattr(cooldown_state, "managed_by_powersync"):
-                cooldown_state.managed_by_powersync = True
+        if charger_type == "zaptec" and cooldown_state is not None:
+            if success:
+                cooldown_state.consecutive_stop_failures = 0
+                cooldown_state.stop_cooldown_until = 0.0
+                if hasattr(cooldown_state, "managed_by_powersync"):
+                    cooldown_state.managed_by_powersync = True
+            else:
+                _record_zaptec_command_failure(cooldown_state, "stop")
         return success
     except Exception as err:
         if charger_type == "zaptec" and cooldown_state is not None:
-            cooldown_state.consecutive_stop_failures += 1
-            if cooldown_state.consecutive_stop_failures >= 3:
-                cooldown_state.stop_cooldown_until = time.time() + 300
-                _LOGGER.warning(
-                    "Zaptec stop failed %d times, cooling down 5min: %s",
-                    cooldown_state.consecutive_stop_failures,
-                    err,
-                )
-                return False
+            _record_zaptec_command_failure(cooldown_state, "stop")
         _LOGGER.error("%s: Error stopping: %s", log_prefix, err)
         return False
 
@@ -10323,22 +10325,9 @@ def _has_current_non_tesla_charge(
         return bool(getattr(observed, "is_charging", False) or power_kw > 0.05)
 
     if charger_type == "zaptec":
+        from ..zaptec_state import cached_zaptec_charge_state
         entry_data = hass.data.get(DOMAIN, {}).get(config_entry.entry_id, {})
-        poll = entry_data.get("zaptec_state_poll") or {}
-        try:
-            completed_at = float(poll.get("completed_at"))
-        except (TypeError, ValueError):
-            return False
-        age = time.monotonic() - completed_at
-        if not math.isfinite(age) or age < 0 or age > 90:
-            return False
-        cached = entry_data.get("zaptec_cached_state") or {}
-        mode = str(cached.get("charger_operation_mode") or "").lower()
-        try:
-            power_w = float(cached.get("total_charge_power_w") or 0.0)
-        except (TypeError, ValueError):
-            power_w = 0.0
-        return mode == "charging" or (math.isfinite(power_w) and power_w > 50)
+        return cached_zaptec_charge_state(entry_data, now=time.monotonic()) is True
 
     if charger_type == "generic":
         return _generic_charger_charge_state(hass, params) is True
@@ -11219,14 +11208,16 @@ class PriceLevelChargingExecutor:
             vehicle_vin=vehicle_vin,
             stop_untracked=True,
             zaptec_pending_start=pending_start,
-            cooldown_state=self._get_or_create_vehicle_state("zaptec_standalone"),
+            cooldown_state=state,
             log_prefix="Price-level charging",
         )
         if not success:
             return False
 
         opts = {**self.config_entry.data, **self.config_entry.options}
-        is_zaptec = _configured_charger_type(opts) == "zaptec"
+        is_zaptec = _build_dynamic_stop_params(
+            self.hass, self._domain, self.config_entry, opts, vehicle_vin=vehicle_vin,
+        ).get("charger_type") == "zaptec"
         state.start_pending = False
         if is_zaptec:
             state.stop_pending = True
@@ -11541,22 +11532,13 @@ class PriceLevelChargingExecutor:
 
     def _zaptec_cached_charge_state(self) -> Optional[bool]:
         """Return exact cached Zaptec charging state, or None when unknown."""
+        from ..zaptec_state import cached_zaptec_charge_state
         entry_data = (
             self.hass.data.get(self._domain, {})
             .get(self.config_entry.entry_id, {})
             or {}
         )
-        cached_state = entry_data.get("zaptec_cached_state", {}) or {}
-        mode = str(cached_state.get("charger_operation_mode", "")).lower()
-        try:
-            power_w = float(cached_state.get("total_charge_power_w", 0) or 0)
-        except (TypeError, ValueError):
-            power_w = 0
-        if mode == "charging" or power_w > 50:
-            return True
-        if mode in ("connected_waiting", "disconnected", "connected_finished"):
-            return False
-        return None
+        return cached_zaptec_charge_state(entry_data, now=time.monotonic())
 
     def _zaptec_cached_is_charging(self) -> bool:
         """Return current Zaptec charging evidence from the exact configured charger."""
@@ -11564,6 +11546,7 @@ class PriceLevelChargingExecutor:
 
     def _zaptec_cached_readback_after(self, boundary: float) -> Optional[bool]:
         """Return cached state only when its poll began after ``boundary``."""
+        from ..zaptec_state import cached_zaptec_charge_state
         if not boundary:
             return None
         entry_data = (
@@ -11571,14 +11554,221 @@ class PriceLevelChargingExecutor:
             .get(self.config_entry.entry_id, {})
             or {}
         )
-        poll_meta = entry_data.get("zaptec_state_poll", {}) or {}
-        try:
-            poll_started_at = float(poll_meta.get("started_at"))
-        except (TypeError, ValueError):
-            return None
-        if not math.isfinite(poll_started_at) or poll_started_at < boundary:
-            return None
-        return self._zaptec_cached_charge_state()
+        return cached_zaptec_charge_state(entry_data, now=time.monotonic(), after=boundary)
+
+    async def _evaluate_zaptec_loadpoint(self, pseudo_vin: str, decision: tuple) -> tuple:
+        """Reconcile one Zaptec lifecycle for either a profile VIN or standalone id."""
+        from ..const import CONF_MONITORING_MODE
+        from .ev_ownership import (
+            get_external_control_policy, release_external_ev_ownership,
+        )
+
+        should_charge, reason, mode = decision
+
+        vehicle_state = self._get_or_create_vehicle_state(pseudo_vin)
+        opts = {**self.config_entry.data, **self.config_entry.options}
+        if opts.get(CONF_MONITORING_MODE, False):
+            vehicle_state.last_decision = "monitoring"
+            vehicle_state.last_decision_reason = reason
+            return decision
+        enabled = self._get_settings().get("enabled", False)
+        if not enabled:
+            should_charge, reason, mode = False, "Price-level charging is disabled", ""
+            decision = (should_charge, reason, mode)
+        zaptec_charge_state = self._zaptec_cached_charge_state()
+        zaptec_is_charging = zaptec_charge_state is True
+        _LOGGER.debug(
+            f"Zaptec standalone decision: should_charge={should_charge}, reason={reason}"
+        )
+
+        # A current-limit acknowledgement is only a pending start.
+        # Promote it to physical charging only after fresh Zaptec
+        # telemetry says the charger is drawing power.
+        start_readback = (
+            self._zaptec_cached_readback_after(vehicle_state.start_requested_at)
+            if vehicle_state.start_requested_at else zaptec_charge_state
+        )
+        if vehicle_state.start_pending and start_readback is True:
+            vehicle_state.start_pending = False
+            vehicle_state.is_charging = True
+            vehicle_state.last_decision = "charging"
+            vehicle_state.last_decision_reason = (
+                f"{reason}; fresh Zaptec charging telemetry"
+            )
+
+        # A successful deauthorize/stop command is not itself a
+        # physical readback.  Keep the policy lifecycle pending until
+        # a poll begun after the command shows that charging has ceased.
+        if vehicle_state.stop_pending:
+            stop_readback = self._zaptec_cached_readback_after(
+                vehicle_state.stop_requested_at
+            )
+            if stop_readback is not False:
+                vehicle_state.is_charging = True
+                vehicle_state.last_decision = "stopping"
+                vehicle_state.last_decision_reason = (
+                    f"{reason}; waiting for Zaptec stop readback"
+                )
+                await self.apply_preserve_home_battery(True, reason)
+                return decision
+            vehicle_state.stop_pending = False
+            vehicle_state.stop_requested_at = 0.0
+            vehicle_state.is_charging = False
+            vehicle_state.charging_mode = ""
+            vehicle_state.zaptec_owned = False
+            vehicle_state.last_decision = "stopped"
+            vehicle_state.last_decision_reason = reason
+
+        # A yielded session remains hands-off when the vehicle pauses or fills.
+        # Only a fresh disconnected observation retires that external lease.
+        active_owner = _get_active_dynamic_ev_mode(self.hass, self.config_entry, pseudo_vin)
+        if active_owner == "external":
+            runtime = self.hass.data.get(self._domain, {}).get(self.config_entry.entry_id, {})
+            disconnected = (
+                zaptec_charge_state is False
+                and (runtime.get("zaptec_cached_state") or {}).get("charger_operation_mode") == "disconnected"
+            )
+            if disconnected:
+                release_external_ev_ownership(self.hass, self.config_entry, pseudo_vin)
+                vehicle_state.last_decision = "unplugged"
+                await self.apply_preserve_home_battery(False, reason)
+                return decision
+            if get_external_control_policy(self.hass, self.config_entry, pseudo_vin) == "yield":
+                vehicle_state.last_decision = "external"
+                vehicle_state.last_decision_reason = reason
+                await self.apply_preserve_home_battery(False, reason)
+                return decision
+
+        if zaptec_charge_state is None and not (
+            vehicle_state.is_charging or vehicle_state.start_pending or vehicle_state.zaptec_owned
+        ):
+            vehicle_state.last_decision = "waiting"
+            vehicle_state.last_decision_reason = f"{reason}; waiting for current Zaptec telemetry"
+            await self.apply_preserve_home_battery(False, reason)
+            return decision
+
+        # Apply an explicit external-session policy only to a fresh
+        # charger-positive session that Price-Level did not start.
+        # Adopt falls through to the normal price decision; abort
+        # stops regardless of that decision; leave_alone has no
+        # ownership or battery-preservation side effect.
+        if (
+            enabled and reason != "Price-level charging is disabled"
+            and self._has_current_non_tesla_charge(pseudo_vin)
+            and not vehicle_state.is_charging
+            and not vehicle_state.start_pending
+        ):
+            external_action = _external_session_policy(
+                self.hass,
+                self.config_entry,
+                pseudo_vin,
+                "price_level",
+            )
+            if external_action == "leave_alone":
+                vehicle_state.last_decision = "external"
+                vehicle_state.last_decision_reason = (
+                    f"{reason}; external session policy leaves this session alone"
+                )
+                await self.apply_preserve_home_battery(False, reason)
+                return decision
+            if _claim_external_charging_ownership(
+                self.hass, self.config_entry, pseudo_vin,
+                reason="Zaptec charging started outside PowerSync Price-Level",
+            ):
+                vehicle_state.last_decision = "external"
+                vehicle_state.last_decision_reason = (
+                    f"{reason}; external charging controls this session"
+                )
+                await self.apply_preserve_home_battery(False, reason)
+                return decision
+            if external_action == "abort" or not should_charge:
+                stopped = await self._stop_charging(
+                    reason,
+                    vehicle_vin=pseudo_vin,
+                )
+                vehicle_state.last_decision = (
+                    "stopping" if vehicle_state.stop_pending
+                    else "stopped" if stopped else "waiting"
+                )
+                vehicle_state.last_decision_reason = (
+                    reason
+                    if stopped
+                    else f"{reason}; external stop unconfirmed"
+                )
+                await self.apply_preserve_home_battery(
+                    vehicle_state.is_charging
+                    or vehicle_state.stop_pending,
+                    reason,
+                )
+                return decision
+
+        # Release charger when price-level charging is disabled
+        if not should_charge and reason == "Price-level charging is disabled":
+            if vehicle_state.is_charging or vehicle_state.start_pending:
+                await self._stop_charging(
+                    reason,
+                    vehicle_vin=pseudo_vin,
+                )
+                await self.apply_preserve_home_battery(
+                    vehicle_state.is_charging
+                    or vehicle_state.start_pending
+                    or vehicle_state.stop_pending,
+                    reason,
+                )
+                return decision
+            if vehicle_state.managed_by_powersync:
+                from .actions import _action_start_ev_charging
+
+                await _action_start_ev_charging(
+                    self.hass,
+                    self.config_entry,
+                    {
+                        "charger_type": "zaptec",
+                        "vehicle_id": pseudo_vin,
+                        "vehicle_vin": pseudo_vin,
+                        "amps": 16,
+                    },
+                    context=None,
+                )
+                vehicle_state.managed_by_powersync = False
+                vehicle_state.is_charging = False
+                _LOGGER.info("Price-level disabled: released Zaptec charger control")
+            await self.apply_preserve_home_battery(False, reason)
+            return decision
+
+        if should_charge and not (
+            vehicle_state.is_charging or vehicle_state.start_pending
+        ):
+            await self._start_charging(mode, reason, vehicle_vin=pseudo_vin)
+        elif not should_charge and (
+            vehicle_state.is_charging or vehicle_state.start_pending
+        ):
+            await self._stop_charging(reason, vehicle_vin=pseudo_vin)
+        elif (
+            not should_charge
+            and zaptec_is_charging
+            and vehicle_state.zaptec_owned
+        ):
+            # The internal session may have been torn down before a
+            # delayed Zaptec authorization produced charging telemetry.
+            # Keep the original PowerSync attribution and cancel it.
+            await self._stop_charging(reason, vehicle_vin=pseudo_vin)
+        else:
+            vehicle_state.last_decision = (
+                "charging"
+                if vehicle_state.is_charging
+                else "starting"
+                if vehicle_state.start_pending
+                else "waiting"
+            )
+            vehicle_state.last_decision_reason = reason
+
+        await self.apply_preserve_home_battery(
+            vehicle_state.start_pending or vehicle_state.stop_pending
+            or (vehicle_state.is_charging and zaptec_charge_state is not False),
+            reason,
+        )
+        return decision
 
     async def evaluate_all_vehicles(
         self,
@@ -11603,175 +11793,8 @@ class PriceLevelChargingExecutor:
             opts = {**self.config_entry.data, **self.config_entry.options}
             if opts.get(CONF_ZAPTEC_STANDALONE_ENABLED) and opts.get(CONF_ZAPTEC_USERNAME):
                 decision = await self.get_charging_decision(current_price_cents)
-                should_charge, reason, mode = decision
-                pseudo_vin = "zaptec_standalone"
-                results[pseudo_vin] = decision
-
-                vehicle_state = self._get_or_create_vehicle_state(pseudo_vin)
-                zaptec_charge_state = self._zaptec_cached_charge_state()
-                zaptec_is_charging = zaptec_charge_state is True
-                _LOGGER.debug(
-                    f"Zaptec standalone decision: should_charge={should_charge}, reason={reason}"
-                )
-
-                # A current-limit acknowledgement is only a pending start.
-                # Promote it to physical charging only after fresh Zaptec
-                # telemetry says the charger is drawing power.
-                if vehicle_state.start_pending and zaptec_is_charging:
-                    vehicle_state.start_pending = False
-                    vehicle_state.is_charging = True
-                    vehicle_state.last_decision = "charging"
-                    vehicle_state.last_decision_reason = (
-                        f"{reason}; fresh Zaptec charging telemetry"
-                    )
-
-                # A successful deauthorize/stop command is not itself a
-                # physical readback.  Keep the policy lifecycle pending until
-                # a poll begun after the command shows that charging has ceased.
-                if vehicle_state.stop_pending:
-                    stop_readback = self._zaptec_cached_readback_after(
-                        vehicle_state.stop_requested_at
-                    )
-                    if stop_readback is not False:
-                        vehicle_state.is_charging = True
-                        vehicle_state.last_decision = "stopping"
-                        vehicle_state.last_decision_reason = (
-                            f"{reason}; waiting for Zaptec stop readback"
-                        )
-                        await self.apply_preserve_home_battery(True, reason)
-                        return results
-                    vehicle_state.stop_pending = False
-                    vehicle_state.stop_requested_at = 0.0
-                    vehicle_state.is_charging = False
-                    vehicle_state.charging_mode = ""
-                    vehicle_state.zaptec_owned = False
-                    vehicle_state.last_decision = "stopped"
-                    vehicle_state.last_decision_reason = reason
-
-                # Apply an explicit external-session policy only to a fresh
-                # charger-positive session that Price-Level did not start.
-                # Adopt falls through to the normal price decision; abort
-                # stops regardless of that decision; leave_alone has no
-                # ownership or battery-preservation side effect.
-                if (
-                    zaptec_is_charging
-                    and not vehicle_state.is_charging
-                    and not vehicle_state.start_pending
-                ):
-                    external_action = _external_session_policy(
-                        self.hass,
-                        self.config_entry,
-                        "zaptec_standalone",
-                        "price_level",
-                    )
-                    if external_action == "leave_alone":
-                        vehicle_state.last_decision = "external"
-                        vehicle_state.last_decision_reason = (
-                            f"{reason}; external session policy leaves this session alone"
-                        )
-                        await self.apply_preserve_home_battery(False, reason)
-                        return results
-                    if external_action == "abort" or (
-                        not should_charge
-                        and (
-                            external_action == "adopt"
-                            or (
-                                external_action is None
-                                and reason != "Price-level charging is disabled"
-                                and not _claim_external_charging_ownership(
-                                    self.hass,
-                                    self.config_entry,
-                                    "zaptec_standalone",
-                                    reason="Zaptec started outside PowerSync Price-Level",
-                                )
-                            )
-                        )
-                    ):
-                        stopped = await self._stop_charging(
-                            reason,
-                            vehicle_vin="zaptec_standalone",
-                        )
-                        vehicle_state.last_decision = (
-                            "stopped" if stopped else "waiting"
-                        )
-                        vehicle_state.last_decision_reason = (
-                            reason
-                            if stopped
-                            else f"{reason}; external stop unconfirmed"
-                        )
-                        await self.apply_preserve_home_battery(
-                            vehicle_state.is_charging
-                            or vehicle_state.stop_pending,
-                            reason,
-                        )
-                        return results
-
-                # Release charger when price-level charging is disabled
-                if not should_charge and reason == "Price-level charging is disabled":
-                    if vehicle_state.is_charging or vehicle_state.start_pending:
-                        await self._stop_charging(
-                            reason,
-                            vehicle_vin="zaptec_standalone",
-                        )
-                        await self.apply_preserve_home_battery(
-                            vehicle_state.is_charging
-                            or vehicle_state.start_pending
-                            or vehicle_state.stop_pending,
-                            reason,
-                        )
-                        return results
-                    if vehicle_state.managed_by_powersync:
-                        from .actions import _action_start_ev_charging
-
-                        await _action_start_ev_charging(
-                            self.hass,
-                            self.config_entry,
-                            {
-                                "charger_type": "zaptec",
-                                "vehicle_id": "zaptec_standalone",
-                                "vehicle_vin": "zaptec_standalone",
-                                "amps": 16,
-                            },
-                            context=None,
-                        )
-                        vehicle_state.managed_by_powersync = False
-                        vehicle_state.is_charging = False
-                        _LOGGER.info("Price-level disabled: released Zaptec charger control")
-                    await self.apply_preserve_home_battery(False, reason)
-                    return results
-
-                if should_charge and not (
-                    vehicle_state.is_charging or vehicle_state.start_pending
-                ):
-                    await self._start_charging(mode, reason, vehicle_vin="zaptec_standalone")
-                elif not should_charge and (
-                    vehicle_state.is_charging or vehicle_state.start_pending
-                ):
-                    await self._stop_charging(reason, vehicle_vin="zaptec_standalone")
-                elif (
-                    not should_charge
-                    and zaptec_is_charging
-                    and vehicle_state.zaptec_owned
-                ):
-                    # The internal session may have been torn down before a
-                    # delayed Zaptec authorization produced charging telemetry.
-                    # Keep the original PowerSync attribution and cancel it.
-                    await self._stop_charging(reason, vehicle_vin="zaptec_standalone")
-                else:
-                    vehicle_state.last_decision = (
-                        "charging"
-                        if vehicle_state.is_charging
-                        else "starting"
-                        if vehicle_state.start_pending
-                        else "waiting"
-                    )
-                    vehicle_state.last_decision_reason = reason
-
-                await self.apply_preserve_home_battery(
-                    vehicle_state.is_charging
-                    or vehicle_state.start_pending
-                    or vehicle_state.stop_pending,
-                    reason,
+                results["zaptec_standalone"] = await self._evaluate_zaptec_loadpoint(
+                    "zaptec_standalone", decision
                 )
                 return results
 
@@ -11829,6 +11852,26 @@ class PriceLevelChargingExecutor:
             else set()
         )
 
+        opts = {**self.config_entry.data, **self.config_entry.options}
+        zaptec_vins = [
+            vehicle["vin"] for vehicle in vehicles
+            if vehicle["vin"] not in paired_ble_aliases and _build_dynamic_stop_params(
+                self.hass, self._domain, self.config_entry, opts,
+                vehicle_vin=vehicle["vin"],
+            ).get("charger_type") == "zaptec"
+        ]
+        # A single associated VIN may supply its SOC/location. If discovery is
+        # ambiguous, reconcile an existing obligation but never pick a new car.
+        active_zaptec_vins = [
+            vin for vin in zaptec_vins
+            if (state := self._vehicle_states.get(vin)) is not None
+            and (state.is_charging or state.start_pending or state.stop_pending or state.zaptec_owned)
+        ]
+        selected_zaptec_vin = (
+            zaptec_vins[0] if len(zaptec_vins) == 1
+            else active_zaptec_vins[0] if len(active_zaptec_vins) == 1 else None
+        )
+
         for vehicle in vehicles:
             vin = vehicle["vin"]
             name = vehicle.get("name", vin)
@@ -11857,6 +11900,11 @@ class PriceLevelChargingExecutor:
                 )
                 continue
 
+            if vin in zaptec_vins and vin != selected_zaptec_vin:
+                reason = "Zaptec charger vehicle association is ambiguous or owned by another profile"
+                results[vin] = (False, reason, "")
+                continue
+
             # Get charging decision for this vehicle
             decision = await self.get_charging_decision_for_vehicle(vin, current_price_cents)
 
@@ -11869,6 +11917,13 @@ class PriceLevelChargingExecutor:
                 f"Multi-vehicle decision for {name} ({vin}): "
                 f"should_charge={should_charge}, reason={reason}"
             )
+
+            if vin in zaptec_vins:
+                # Preserve the vehicle-scoped decision while sharing the exact
+                # same pending-command/readback handling as standalone Zaptec.
+                if vehicle_state.last_decision != "away":
+                    results[vin] = await self._evaluate_zaptec_loadpoint(vin, decision)
+                continue
 
             # Take action per vehicle
             # An away result is a scope boundary, not a stop decision. Price-level
@@ -11948,7 +12003,12 @@ class PriceLevelChargingExecutor:
                 vehicle_state.last_decision_reason = reason
 
         any_price_level_charging = any(
-            state.is_charging for state in self._vehicle_states.values()
+            state.start_pending or state.stop_pending or (
+                state.is_charging and (
+                    vin not in zaptec_vins or self._zaptec_cached_charge_state() is not False
+                )
+            )
+            for vin, state in self._vehicle_states.items()
         )
         reason = next(
             (
@@ -11999,13 +12059,21 @@ class PriceLevelChargingExecutor:
             and session.get("transport_recovery_pending")
             and (session.get("params") or {}).get("owner_mode") == state.charging_mode
         )
+        opts = {**self.config_entry.data, **self.config_entry.options}
+        zaptec_inactive = bool(
+            _build_dynamic_stop_params(
+                self.hass, self._domain, self.config_entry, opts, vehicle_vin=vehicle_vin,
+            ).get("charger_type") == "zaptec"
+            and not state.start_pending and not state.stop_pending
+            and self._zaptec_cached_charge_state() is False
+        )
         # is_charging also retains executor ownership while recovery is armed.
         # Changing it here would make each eligible cycle replace the session
         # and issue another Stop. Only the public projection is physical status.
         return {
-            "is_charging": state.is_charging and not recovery_pending,
+            "is_charging": state.is_charging and not recovery_pending and not zaptec_inactive,
             "charging_mode": state.charging_mode,
-            "last_decision": "starting" if recovery_pending else state.last_decision,
+            "last_decision": "starting" if recovery_pending else "waiting" if zaptec_inactive else state.last_decision,
             "last_decision_reason": (
                 f"{state.last_decision_reason}; waiting for Tesla transport recovery"
                 if recovery_pending else state.last_decision_reason

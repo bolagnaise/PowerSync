@@ -7,6 +7,8 @@ import importlib.util
 from pathlib import Path
 from unittest.mock import AsyncMock
 
+import pytest
+
 
 MODULE_PATH = (
     Path(__file__).resolve().parent.parent
@@ -58,3 +60,41 @@ def test_deauthorize_and_stop_targets_the_charger_command():
         "POST",
         "/api/chargers/charger-1/SendCommand/10001",
     )
+
+
+@pytest.mark.parametrize("power", [None, "bad", "NaN", "inf", "-1", True])
+def test_invalid_power_is_not_reported_as_measured_zero(power):
+    client = zaptec_api.ZaptecCloudClient("user@example.com", "password")
+    parsed = client.parse_charger_state({710: "2", 513: power})
+    assert parsed["total_charge_power_w_valid"] is False
+
+
+@pytest.mark.parametrize("actual", [16, 10, None, "bad", float("nan"), True])
+def test_same_current_during_cooldown_needs_matching_installation_readback(monkeypatch, actual):
+    clock = [10000.0]
+    monkeypatch.setattr(zaptec_api.time, "time", lambda: clock[0])
+    client = zaptec_api.ZaptecCloudClient("user@example.com", "password")
+    client._request = AsyncMock(return_value={})
+
+    async def replay():
+        await client.set_installation_current("installation-1", 16)
+        clock[0] += 30
+        client._request.reset_mock()
+        client._request.return_value = {
+            "AvailableCurrentPhase1": actual,
+            "AvailableCurrentPhase2": 16,
+            "AvailableCurrentPhase3": 16,
+        }
+        if type(actual) is int and actual == 16:
+            await client.set_installation_current("installation-1", 16)
+        else:
+            with pytest.raises(Exception, match="rate limit"):
+                await client.set_installation_current("installation-1", 16)
+        client._request.assert_awaited_once_with("GET", "/api/installation/installation-1")
+        assert client._last_current_update_time == 10000
+        client._request.reset_mock()
+        with pytest.raises(Exception, match="rate limit"):
+            await client.set_installation_current("installation-1", 6)
+        client._request.assert_not_awaited()
+
+    asyncio.run(replay())
