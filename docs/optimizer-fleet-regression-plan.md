@@ -13,9 +13,9 @@ Worker defaults to disabled; installing the HA integration does not enrol anyone
   Recorder history/statistics/logbook, automation/script configuration, traces,
   integration configuration, YAML, dashboards, logs and installation metadata.
   Missing components and unsupported HA API versions remain explicit.
-- [Private fleet operations](private-fleet-operations.md): two-step HA admin
-  approval, sender-bound stdio clients, outbound signed transport, boot/restore
-  fencing, independent revocation and private cleanup receipts.
+- [Diagnostics and privacy](diagnostics-privacy.md): owner approval, HA-wide
+  diagnostic access, private offline testing, data lifetime and revocation.
+  Maintainer deployment and recovery procedures are kept in a private runbook.
 - [Local optimizer replay](optimizer-replay.md): closed effective-state/input
   capture and independent scoring. The private runner adds immutable images,
   OS isolation, bounded streaming, independent watchdog/reaping, A/A checks for

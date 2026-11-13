@@ -48,5 +48,8 @@ Synthetic real-HTTP/workerd tests cover the owner journey, separate client
 profiles, restart, independent/root revocation, reserved capture, encrypted
 transfer, actual isolated replay and purge. Native discovery was checked with
 Codex CLI 0.166.0 app-server and Claude Code 2.1.319. The pilot transport is local
-stdio. [Operations](private-fleet-operations.md) covers provisioning, deployment,
-recovery, packaging and the separate real-owner acceptance gates.
+stdio. [Diagnostics and privacy](diagnostics-privacy.md) covers owner consent,
+data access, retention and revocation. Maintainer provisioning, deployment and
+recovery procedures are maintained separately in the private operator runbook.
+Software verification, service activation and real-owner participation remain
+separate acceptance gates.

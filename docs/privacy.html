@@ -98,20 +98,20 @@
         <a href="https://github.com/bolagnaise/PowerSync" class="back-link">&larr; Back to PowerSync</a>
 
         <h1>Privacy Policy</h1>
-        <p class="effective-date">Effective Date: January 26, 2026</p>
+        <p class="effective-date">Effective Date: November 13, 2026</p>
 
         <div class="summary">
-            <p><strong>PowerSync is designed with privacy in mind.</strong> The system operates primarily on your local network via Home Assistant and does not collect, store, or transmit your personal energy data to our servers.</p>
+            <p><strong>PowerSync is designed with privacy in mind.</strong> The system operates primarily on your local network via Home Assistant. Optional ongoing diagnostics and private offline optimizer testing transmit approved installation data only after administrator consent; see section 3.6.</p>
         </div>
 
         <h2>1. Information We Don't Collect</h2>
         <p>PowerSync does NOT:</p>
         <ul>
-            <li>Store your energy usage data on our servers</li>
+            <li>Automatically enroll your installation in ongoing diagnostics or private testing when you install or update PowerSync</li>
             <li>Track your location</li>
             <li>Collect analytics about your app usage</li>
             <li>Share your data with third parties for advertising</li>
-            <li>Access your contacts, photos, or other personal data</li>
+            <li>Access your device's contacts or photo library</li>
         </ul>
 
         <h2>2. Information Stored Locally</h2>
@@ -149,7 +149,7 @@
         <h2>3. Third-Party Services</h2>
 
         <h3>3.1 Home Assistant</h3>
-        <p>PowerSync operates as a Home Assistant custom integration. All energy data, credentials, and configuration are stored on your Home Assistant instance. The mobile app connects to your Home Assistant server to display data and send commands.</p>
+        <p>PowerSync operates as a Home Assistant custom integration. Energy data, credentials, and configuration are stored on your Home Assistant instance. The mobile app connects to your Home Assistant server to display data and send commands. Optional approved diagnostics and private testing can transmit installation data as described in section 3.6.</p>
 
         <h3>3.2 Amber Electric</h3>
         <p>When you connect your Amber Electric account, Home Assistant communicates directly with Amber Electric's servers to retrieve your current and forecast electricity prices. We do not act as an intermediary or store this data on our servers.</p>
@@ -175,6 +175,11 @@
             <li>Expo may retain notification metadata according to their privacy policy</li>
         </ul>
         <p>Expo's privacy policy: <a href="https://expo.dev/privacy">https://expo.dev/privacy</a></p>
+
+        <h3>3.6 Optional Ongoing Diagnostics and Private Testing</h3>
+        <p>A Home Assistant administrator must review and approve the application, operator, processor and purposes before access is enabled. Diagnostic support can read approved sources across the HA installation, including configuration, entity states, history and logs. Known credentials are redacted, but arbitrary free text may still contain personal information. Diagnostic reads require an active support ticket linked to the owner and installation; approved private offline testing may continue after the enrollment ticket closes.</p>
+        <p>Private testing uses encrypted job-bound captures in isolated offline processes, followed by confirmed deletion. Bounded testing summaries are retained for seven days after confirmed purge, with coordination metadata retained separately. The operator maintains private ownership linkage records. Diagnostic query arguments and responses exist only in the authority's memory; the approved application's or processor's retention policy is separate.</p>
+        <p>Approval persists across restarts until revoked in HA. Revocation blocks access locally immediately, requests deletion of retained summaries and stops running private jobs; HA shows cleanup pending until deletion is confirmed. Read <a href="https://github.com/bolagnaise/PowerSync/blob/main/docs/diagnostics-privacy.md">Diagnostics and privacy</a> for the full scope, data handling and owner controls.</p>
 
         <h2>4. Data Security</h2>
         <ul>

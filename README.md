@@ -101,6 +101,10 @@ Solar inverters that bypass the battery can be curtailed during negative feed-in
 
 ## Quick Start
 
+Optional ongoing support and private offline testing require administrator
+approval. Read [Diagnostics and privacy](docs/diagnostics-privacy.md) for what can
+be accessed, how data is handled and how to revoke access.
+
 1. **Install** via [HACS](#installation) (custom repository)
 2. **Add Integration** — Settings > Devices & Services > Add Integration > "PowerSync"
 3. **Pick your [electricity provider](https://github.com/bolagnaise/PowerSync/wiki/Electricity-Providers)** and complete its account, plan and [tariff periods](https://github.com/bolagnaise/PowerSync/wiki/Tariffs-and-Time-Periods) where required

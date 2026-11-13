@@ -2,8 +2,9 @@
 
 The local CLI records complete resolved solver attempts and replays them offline.
 It remains useful for explicit developer exports. The separately consented ongoing
-service, private OS runner, Codex/Claude bridge and deployment procedure are
-documented in [private-fleet-operations.md](private-fleet-operations.md).
+service's consent, data handling and access boundaries are documented in
+[Diagnostics and privacy](diagnostics-privacy.md). Maintainer deployment and
+runner procedures are kept in a private operator runbook.
 
 ## Capture a synthetic case
 
@@ -132,7 +133,7 @@ symlinks, standalone bytecode and native component extensions are refused. Cover
 workers run, with source hashes checked around coverage and after all workers.
 Private customer cases must not be supplied to unreviewed code or public PR
 jobs. The ongoing service uses the separate OS sandbox and consent/cleanup authority
-described in [private-fleet-operations.md](private-fleet-operations.md); this local
+described in [Diagnostics and privacy](diagnostics-privacy.md); this local
 CLI must not substitute for that boundary.
 
 Economic equivalence cannot validate changed action, power, grid-import target

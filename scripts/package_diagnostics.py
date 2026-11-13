@@ -30,7 +30,7 @@ def build(output,*,require_clean=False):
     # Operator sources, including scorer, are separate from candidate images.
     paths = [*sorted((ROOT/'scripts/private_regression').glob('*.py')),*sorted((ROOT/'scripts/private_regression/systemd').glob('*')),
              ROOT/'scripts/private_regression/Dockerfile',*sorted((ROOT/'scripts/regression_runner').glob('*.py')),
-             ROOT/'scripts/diagnostics_enrollments.py',ROOT/'scripts/replay_optimizer.py',ROOT/'scripts/benchmark_lp_optimizer.py',ROOT/'requirements-test.txt',ROOT/'.dockerignore',ROOT/'docs/private-fleet-operations.md',ROOT/'docs/testing-approved-installations.md']
+             ROOT/'scripts/diagnostics_enrollments.py',ROOT/'scripts/replay_optimizer.py',ROOT/'scripts/benchmark_lp_optimizer.py',ROOT/'requirements-test.txt',ROOT/'.dockerignore',ROOT/'docs/diagnostics-privacy.md',ROOT/'docs/testing-approved-installations.md']
     with tarfile.open(output/'powersync-private-runner.tar', 'w') as archive:
         for path in paths:
             raw = path.read_bytes();info=tarfile.TarInfo(path.relative_to(ROOT).as_posix());info.size=len(raw);info.mode=0o644
