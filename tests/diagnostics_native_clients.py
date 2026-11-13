@@ -7,6 +7,7 @@ import tempfile
 
 
 async def codex(config, directory):
+    from private_regression.sandbox import kill_group
     fixture = Path(__file__).with_name('diagnostics_stdio_fixture.py')
     python = '/mnt/user/developer/codex-storage/workspaces/power-sync-test-venv/bin/python'
     home = directory/'codex-config'
@@ -14,7 +15,8 @@ async def codex(config, directory):
     (home/'config.toml').write_text('[mcp_servers.powersync]\ncommand = '+json.dumps(python)+'\nargs = '+json.dumps([str(fixture.resolve()), '--profile', 'codex', '--config', str(config.resolve())])+'\n[mcp_servers.powersync.env]\nDIAGNOSTICS_TEST_URL = '+json.dumps(os.environ['DIAGNOSTICS_TEST_URL'])+'\n')
     env = {**os.environ, 'CODEX_HOME': str(home)}
     process = await asyncio.create_subprocess_exec('/root/.local/bin/codex', 'app-server', '--listen', 'stdio://',
-        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL, env=env)
+        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL, env=env,start_new_session=True)
+    descriptor=os.pidfd_open(process.pid)
     async def rpc(identity, method, params):
         process.stdin.write((json.dumps({'id':identity,'method':method,'params':params})+'\n').encode());await process.stdin.drain()
         while True:
@@ -32,7 +34,9 @@ async def codex(config, directory):
         rows = status.get('data', [])
         assert len(rows) == 1 and any('ha_get_capabilities' in name for name in rows[0]['tools']), 'Codex did not discover HA tools'
     finally:
-        process.terminate();await process.wait()
+        kill_group(descriptor)
+        await process.wait()
+        os.close(descriptor)
 
 
 async def claude(config, directory):
