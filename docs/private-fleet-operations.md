@@ -1,8 +1,12 @@
 # Ongoing diagnostics and private regression operations
 
-The released software is disabled until configured and approved. HA diagnostic
-reads, optimizer contribution, Codex and Claude Code each have their own grant.
-Installing/updating PowerSync does not create those grants.
+The released software is disabled until configured and approved. One owner
+confirmation now covers ongoing diagnostic support and private offline optimizer
+testing for the registered application. The underlying read and contribution
+grants retain independent technical scopes and connect in the background;
+combined access is shown as connected only when both are connected. Installing
+or updating PowerSync does not create approval. Existing read-only approvals
+keep their original scope until the owner reviews a combined invitation.
 
 ## Delivery and acceptance
 
@@ -35,7 +39,11 @@ Signing seeds never belong in runtime variables, source, artifacts or DO backups
 Protect the `/invite` operator page with Cloudflare Access. Signed client/HA
 transport endpoints authenticate their own proofs. The operator page registers
 a public client key and creates a one-use invitation for the exact HA identity,
-client and purpose. Give the invitation and authority public key to the HA admin.
+client and purpose internally. The operator page combines the read and testing
+invitations into one owner-facing invitation. Give that invitation and the
+authority public key to the HA admin. If invitation creation fails midway, no
+access has been approved; retry setup rather than treating either invitation as
+an active grant.
 
 Rotate the independent epoch before reopening restored authority storage. A
 restored DO snapshot must not restore old access. Retain cleanup-only credentials
@@ -54,8 +62,11 @@ until all pending private purge receipts have been reconciled.
 
    Register the displayed public key with the operator. Repeat for `claude`.
 3. Paste the resulting invitation and authority public key into HA. Review the
-   client, operator, processor and disclosure; then approve that exact access.
-   Diagnostic access and contribution require independent invitations.
+   connected application, operator and disclosure for both support and private
+   testing; then choose **Enable ongoing access** once. Approval survives restarts
+   until revoked. The operator receives both technical grant IDs. Use the read
+   grant for the MCP configuration and the contribution grant for private replay.
+   A legacy single-purpose invitation retains its original explicit scope.
 4. Bind the client key to the approved root/grant/public authority identity:
 
    ```sh
@@ -71,6 +82,41 @@ until all pending private purge receipts have been reconciled.
 Read responses are bounded, redacted and marked untrusted. Arbitrary free text
 may still contain personal information. Diagnostic queries/results exist only
 in memory; after an authority restart the client requests a fresh read.
+
+## Private participant index and ticket lookup
+
+There is no automatic global Discord-to-installation directory in the authority.
+Keep the operator index on the investigation host, outside source and public
+reports. During enrollment, the human operator verifies the immutable Discord
+reporter ID and exact HA setup identity through the private ticket. Record the
+message establishing that association, then register each already-approved
+read/testing configuration using the shipped operator helper:
+
+```sh
+python scripts/diagnostics_enrollments.py enroll --reporter-id DISCORD_USER_ID --ownership-reference https://discord.com/channels/1443943629130567874/CHANNEL_ID/MESSAGE_ID --config /private/read-client.json
+python scripts/diagnostics_enrollments.py enroll --reporter-id DISCORD_USER_ID --ownership-reference https://discord.com/channels/1443943629130567874/CHANNEL_ID/MESSAGE_ID --config /private/testing-client.json
+python scripts/diagnostics_enrollments.py lookup --reporter-id DISCORD_USER_ID
+```
+
+The default index is `~/.local/share/powersync-diagnostics/enrollments.json`
+inside an owner-only directory. The directory stores verified ownership linkage,
+public grant identifiers, purposes, a local configuration-file reference and last
+checked metadata. It contains no credentials, HA settings, logs or raw captures.
+Credential files remain owner-only and outside the index. The reference records
+human verification; supplying a message URL alone does not establish ownership.
+Conflicting owner associations are rejected for operator reconciliation.
+
+Lookup rechecks each matching grant with the signed live authority. An old row
+never authorizes access; revoked or unreachable grants remain unavailable. An
+active grant does not prove HA is online: the subsequent bounded read must also
+complete. Reuse valid diagnostic approval for new tickets without asking the
+owner to pair again. Do not guess a match from a display name or ticket number.
+Missing linkage is unlinked, not proof that the owner has never approved access.
+No real participant is enrolled by installing the package or running synthetic
+acceptance tests.
+
+For the investigation and cross-configuration verification workflow, read
+[Testing against approved installations](testing-approved-installations.md).
 
 ## Immutable paired runner
 
@@ -166,7 +212,10 @@ last private jobs can finish and purge. Missing/invalid work and unavailable or
 revoked grants cannot help a campaign pass. Fleet evidence is advisory alongside
 the mandatory protected-main audited full-suite release gate.
 
-Owners revoke individual grants or all installation access in HA. Access stops
+Owners revoke the combined ongoing access or all installation access in HA.
+Revoking either member of a combined approval blocks both purposes locally and
+reconciles both revocations centrally. Legacy standalone grants retain their
+individual revoke controls. Access stops
 locally immediately; central authorization is fenced at the same authority
 transaction as disclosure. Retained summaries are deleted on revocation.
 Running jobs lose their lease and the private controller kills/purges them.
