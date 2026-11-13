@@ -46,3 +46,37 @@ def test_payload_limits_reject_cycles_opaque_objects_and_conversion_hooks():
     for value in [{"opaque": Opaque()}, recursive, {"too_big": "x" * wire.MAX_PAYLOAD}, {"unsafe_float": 1e20}]:
         with pytest.raises(wire.WireError):
             wire.json_bytes(value)
+
+
+def test_standalone_http_bridge_identifies_itself_to_the_production_edge(monkeypatch):
+    import importlib
+    monkeypatch.syspath_prepend(str(ROOT / 'custom_components/power_sync'))
+    bridge = importlib.import_module('diagnostics_access.bridge')
+    calls = []
+
+    class Response:
+        def __enter__(self):
+            return self
+        def __exit__(self, *_):
+            pass
+        def read(self, maximum):
+            assert maximum == 420 * 1024 + 1
+            return b'{"transport":"ready"}'
+
+    class Opener:
+        def open(self, request, timeout):
+            assert request.full_url == bridge.wire.ORIGIN + '/command'
+            assert request.get_header('User-agent').startswith('PowerSync-Diagnostics-Bridge/')
+            assert request.get_header('Content-type') == 'application/json'
+            assert timeout == 15
+            calls.append(request)
+            return Response()
+
+    def opener(handler):
+        assert isinstance(handler, bridge.NoRedirect)
+        return Opener()
+
+    monkeypatch.setattr(bridge.urllib.request, 'build_opener', opener)
+    client = bridge.Bridge({'profile': 'codex', 'root': 'a' * 64, 'grant': 'b' * 32}, 'codex')
+    assert client.http('/command', {'probe': True}) == {'transport': 'ready'}
+    assert len(calls) == 1

@@ -50,7 +50,7 @@ class Bridge:
 
     def http(self, route, value):
         opener = urllib.request.build_opener(NoRedirect())
-        request = urllib.request.Request(wire.ORIGIN + route, data=wire.json_bytes(value), headers={"Content-Type": "application/json"})
+        request = urllib.request.Request(wire.ORIGIN + route, data=wire.json_bytes(value), headers={"Content-Type": "application/json", "User-Agent": "PowerSync-Diagnostics-Bridge/1.0"})
         with opener.open(request, timeout=15) as response:
             return wire.loads(response.read(420 * 1024 + 1), maximum=420 * 1024)
 

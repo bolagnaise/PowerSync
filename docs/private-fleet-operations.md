@@ -51,6 +51,12 @@ until all pending private purge receipts have been reconciled.
 
 ## Owner approval and client setup
 
+Open a support ticket for initial enrollment. The operator verifies the reporter
+and HA installation before creating the ongoing-access invitation. After approval,
+private tests of identified code changes may use the contribution grant without
+an active bug ticket. Incident-specific diagnostic reads require a current active
+ticket linked to the same owner and installation.
+
 1. In the HA administrator's **HA diagnostics** card, create a setup identity.
    This displays public setup information and grants no access.
 2. Create a separate client key file for each profile. Use an owner-only directory
