@@ -116,6 +116,9 @@ async def test_native_route_notifies_scheduled_admission_failure(
     parent = ModuleType(package)
     parent.__path__ = [str(ROOT)]
     monkeypatch.setitem(sys.modules, package, parent)
+    local = ModuleType(package + '.powerwall_local')
+    local.__path__ = [str(ROOT / 'powerwall_local')]
+    monkeypatch.setitem(sys.modules, local.__name__, local)
     host = ModuleType(package + '.powerwall_host')
     host.local_battery_dispatch_configured = lambda _: True
     monkeypatch.setitem(sys.modules, host.__name__, host)

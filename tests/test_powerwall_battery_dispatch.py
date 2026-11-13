@@ -453,6 +453,8 @@ def load_routing(monitored=False, paired=True, **options):
     uploads = importlib.util.module_from_spec(upload_spec); upload_spec.loader.exec_module(uploads)
     from test_powerwall_control_method import policy
     ns = dict(NativeMaxChargeError=type("NativeMaxChargeError", (Exception,), {}),runtime_route=policy.runtime_route, control_method=policy.control_method,
+              LOCAL_EXPORT_MIN_SOC_PERCENT=policy.LOCAL_EXPORT_MIN_SOC_PERCENT,
+              optimizer_low_soc_export=policy.optimizer_low_soc_export,
               reserve_tariff_upload=uploads.reserve_tariff_upload,
               TariffUploadReservationError=uploads.TariffUploadReservationError,
               get_tesla_api_base_url=lambda provider, base: base or provider, CONF_FLEET_API_BASE_URL='fleet_api_base_url',
@@ -822,7 +824,7 @@ def test_local_target_capability_honors_lp_and_static_limits_without_changing_cl
     import ast
     tree=ast.parse((ROOT/'custom_components/power_sync/optimization/coordinator.py').read_text())
     cls=next(n for n in tree.body if isinstance(n,ast.ClassDef) and n.name=='OptimizationCoordinator')
-    names={'_powerwall_route','_powerwall_plan_uses_tariff','_supports_local_powerwall_target_power','_supports_target_export_power','_supports_target_charge_power','_export_command_power_w','_native_powerwall_safety_power_w'}
+    names={'_powerwall_route','_powerwall_service_power','_powerwall_plan_uses_tariff','_supports_local_powerwall_target_power','_supports_target_export_power','_supports_target_charge_power','_export_command_power_w','_native_powerwall_safety_power_w'}
     nodes=[n for n in cls.body if isinstance(n,ast.FunctionDef) and n.name in names]
     class StripImports(ast.NodeTransformer):
         def visit_ImportFrom(self,node): return ast.copy_location(ast.Pass(),node)
@@ -840,6 +842,18 @@ def test_local_target_capability_honors_lp_and_static_limits_without_changing_cl
     assert c._export_command_power_w(SimpleNamespace(power_w=1000))==1000
     assert c._export_command_power_w(SimpleNamespace(power_w=5000))==1500
     assert c._export_command_power_w(SimpleNamespace(power_w=0))==0
+    runtime = c.hass.data['power_sync']['entry']
+    runtime['powerwall_local'] = {'coordinator': SimpleNamespace(
+        data=snapshot(soc=19.94, backup_reserve_percent=0),
+        last_success_monotonic=__import__('time').monotonic())}
+    assert not c._supports_target_export_power()
+    assert c._supports_target_charge_power()
+    c._powerwall_plan_routes = {direction: c._powerwall_route(direction) for direction in ('charge', 'discharge')}
+    assert c._powerwall_plan_routes == {'charge': 'local', 'discharge': 'tariff'}
+    assert c._powerwall_service_power('discharge', 5000) == 0
+    assert c._powerwall_service_power('charge', 3000) == 3000
+    del c._powerwall_plan_routes
+    runtime.clear()
     c._entry.data['tesla_control_method']='tariff'
     c.energy_coordinator=SimpleNamespace(_site_info_cache={'nameplate_power':20000},_site_info_last_fetch=__import__('time').monotonic())
     assert not c._supports_target_export_power() and not c._supports_target_charge_power()

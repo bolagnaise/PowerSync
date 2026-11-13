@@ -6,7 +6,7 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 import pytest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 ROOT = Path(__file__).parents[1] / "custom_components/power_sync"
 PREFIX = "tesla_method_probe"
@@ -70,6 +70,164 @@ def test_auto_keeps_a_native_episode_stable_until_it_finishes():
     assert policy.runtime_route(runtime,config(),"discharge")=="tariff"
     runtime["force_discharge_state"]["active"]=False
     assert policy.runtime_route(runtime,config(),"discharge")=="local"
+
+
+@pytest.mark.parametrize('method', ['local', 'auto'])
+@pytest.mark.parametrize('soc,expected', [(20.01, 'local'), (20, 'tariff'), (19.94, 'tariff')])
+def test_optimizer_low_usable_soc_selects_tariff_without_changing_preference(method, soc, expected):
+    sample = snapshot()
+    sample.soc = soc
+    runtime = {'powerwall_local': {'coordinator': SimpleNamespace(
+        data=sample, last_success_monotonic=time.monotonic())}}
+    cfg = config(tesla_control_method=method)
+    assert policy.runtime_route(runtime, cfg, 'discharge', optimizer=True) == expected
+    assert policy.runtime_route(runtime, cfg, 'discharge') == 'local'
+    assert cfg['tesla_control_method'] == method
+
+
+@pytest.mark.parametrize('soc', [None, True, float('nan'), -1, 101, '19.9'])
+def test_unknown_usable_soc_does_not_authorize_optimizer_tariff_exception(soc):
+    sample = snapshot()
+    sample.soc = soc
+    runtime = {'powerwall_local': {'coordinator': SimpleNamespace(
+        data=sample, last_success_monotonic=time.monotonic())}}
+    assert policy.runtime_route(runtime, config(tesla_control_method='local'),
+                                'discharge', optimizer=True) == 'local'
+
+
+def test_optimizer_tariff_episode_stays_selected_above_threshold_until_restored():
+    sample = snapshot()
+    sample.soc = 20.1
+    runtime = {'force_discharge_state': {'active': True, 'source': 'optimizer',
+                                        'native_tariff_force': True},
+               'powerwall_local': {'coordinator': SimpleNamespace(
+                   data=sample, last_success_monotonic=time.monotonic())}}
+    cfg = config(tesla_control_method='local')
+    assert policy.runtime_route(runtime, cfg, 'discharge', optimizer=True) == 'tariff'
+    assert policy.runtime_route(runtime, cfg, 'charge', optimizer=True) == 'local'
+    assert policy.runtime_route(runtime, cfg, 'discharge') == 'local'
+    runtime['force_discharge_state']['active'] = False
+    assert policy.runtime_route(runtime, cfg, 'discharge', optimizer=True) == 'local'
+
+
+def test_optimizer_uses_latest_fresh_renewal_soc_and_rejects_expired_observations():
+    sample = snapshot()
+    sample.soc = 21
+    runtime = {'powerwall_local': {'coordinator': SimpleNamespace(
+        data=sample, last_success_monotonic=time.monotonic() - 10)},
+               'powerwall_optimizer_export_observation': {'soc': 19.94, 'at': time.monotonic()}}
+    cfg = config(tesla_control_method='local')
+    assert policy.runtime_route(runtime, cfg, 'discharge', optimizer=True) == 'tariff'
+    runtime['powerwall_local']['coordinator'].last_success_monotonic = time.monotonic()
+    assert policy.runtime_route(runtime, cfg, 'discharge', optimizer=True) == 'local'
+    runtime['powerwall_local']['coordinator'].last_success_monotonic -= 100
+    runtime['powerwall_optimizer_export_observation']['at'] -= 100
+    assert policy.runtime_route(runtime, cfg, 'discharge', optimizer=True) == 'local'
+
+
+def test_slow_poll_completion_cannot_make_older_high_soc_newer_than_renewal():
+    now = time.monotonic()
+    sample = snapshot()
+    sample.soc = 21
+    sample.observed_monotonic = now - 10
+    runtime = {'powerwall_local': {'coordinator': SimpleNamespace(
+        data=sample, last_success_monotonic=now)},
+        'powerwall_optimizer_export_observation': {'soc': 19.94, 'at': now - 5}}
+    assert policy.runtime_route(runtime, config(tesla_control_method='local'),
+                                'discharge', optimizer=True) == 'tariff'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('soc', [20, 19.94])
+async def test_low_soc_optimizer_export_reaches_tariff_session_with_local_preference(soc):
+    from test_powerwall_battery_dispatch import load_routing, call
+    ns, local, client, _ = load_routing(tesla_control_method='local', optimization_backup_reserve=0)
+    client.get_snapshot.return_value.soc = soc
+    client.get_snapshot.return_value.backup_reserve_percent = 0
+    session = SimpleNamespace(pending=False, record=None,
+        adapter=SimpleNamespace(guard=AsyncMock(return_value=True)),
+        start=AsyncMock(return_value={'expires_at': 2000}))
+    ns.update(_native_max_context={'call': None},
+        _get_tesla_site_configs=lambda *_: [('site', 'token', 'provider')],
+        _get_native_max_charge=AsyncMock(return_value=session),
+        _create_discharge_tariff=lambda _: ({'code': 'temporary'}, None))
+    result = await ns['_try_local_powerwall_force']('discharge', call(source='optimizer', power_w=0), 5, 0)
+    assert result['control_path'] == 'powerwall_native_tariff'
+    assert result['command_status'] == 'accepted' and result['physical_effect_confirmed'] is False
+    assert result['control_route_reason'] == 'low_usable_soc_export'
+    assert session.adapter.startup_kick is False
+    assert session.adapter.planning_request and session.adapter.direction == 'discharge'
+    session.start.assert_awaited_once()
+    client.dispatch_battery_power.assert_not_awaited()
+    assert not local.pending and ns['entry'].data['tesla_control_method'] == 'local'
+
+
+@pytest.mark.asyncio
+async def test_low_soc_numeric_optimizer_request_waits_for_replan_instead_of_becoming_tariff():
+    from test_powerwall_battery_dispatch import load_routing, call
+    ns, local, client, _ = load_routing(tesla_control_method='local', optimization_backup_reserve=0)
+    client.get_snapshot.return_value.soc = 19.94
+    client.get_snapshot.return_value.backup_reserve_percent = 0
+    refresh = Mock()
+    ns['_local_powerwall_runtime']['optimization_coordinator'] = SimpleNamespace(
+        _schedule_settings_reoptimization=refresh)
+    ns['_get_native_max_charge'] = AsyncMock()
+    with pytest.raises(RuntimeError, match='fresh tariff plan'):
+        await ns['_try_local_powerwall_force']('discharge', call(source='optimizer', power_w=500), 5, 500)
+    refresh.assert_called_once()
+    ns['_get_native_max_charge'].assert_not_awaited()
+    client.dispatch_battery_power.assert_not_awaited()
+    assert not local.pending
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('resume_ok', [True, False])
+async def test_crossing_threshold_during_local_renewal_releases_before_tariff_replan(monkeypatch, resume_ok):
+    from test_powerwall_battery_dispatch import load_routing, call, snapshot, module
+    ns, local, client, _ = load_routing(tesla_control_method='local', optimization_backup_reserve=0)
+    refresh = Mock()
+    runtime = ns['_local_powerwall_runtime']
+    runtime['optimization_coordinator'] = SimpleNamespace(_schedule_settings_reoptimization=refresh)
+    await ns['_try_local_powerwall_force']('discharge', call(source='optimizer', power_w=500), 5, 500)
+    await local._cancel_task()
+    client.get_snapshot.return_value = snapshot(soc=19.94, backup_reserve_percent=0)
+    client.resume_battery_operation.return_value = resume_ok
+    monkeypatch.setattr(module, 'RENEW_SECONDS', 0)
+    await local._renew()
+    assert client.dispatch_battery_power.await_count == 1
+    assert client.resume_battery_operation.await_count == (1 if resume_ok else 3)
+    assert local.pending is not resume_ok
+    assert ns['force_discharge_state']['active'] is not resume_ok
+    refresh.assert_called_once()
+    # The regular two-second poll has not published the newer renewal sample.
+    assert runtime['powerwall_local']['coordinator'].data.soc == 60
+    assert policy.runtime_route(runtime, ns['entry'].data, 'discharge', optimizer=True) == 'tariff'
+    if not resume_ok:
+        assert ns['force_discharge_state']['command_status'] == 'restore_pending'
+        session = SimpleNamespace(pending=False, record=None,
+            adapter=SimpleNamespace(guard=AsyncMock(return_value=True)), start=AsyncMock())
+        ns.update(_native_max_context={'call': None},
+            _get_tesla_site_configs=lambda *_: [('site', 'token', 'provider')],
+            _get_native_max_charge=AsyncMock(return_value=session))
+        with pytest.raises(RuntimeError, match='cleanup remains pending'):
+            await ns['_try_local_powerwall_force']('discharge', call(source='optimizer', power_w=0), 5, 0)
+        session.start.assert_not_awaited()
+        client.resume_battery_operation.return_value = True
+        await local.stop()
+
+
+@pytest.mark.asyncio
+async def test_low_soc_manual_numeric_export_preserves_local_watts():
+    from test_powerwall_battery_dispatch import load_routing, call
+    ns, local, client, _ = load_routing(tesla_control_method='local', optimization_backup_reserve=0)
+    client.get_snapshot.return_value.soc = 19.94
+    client.get_snapshot.return_value.backup_reserve_percent = 0
+    try:
+        result = await ns['_try_local_powerwall_force']('discharge', call(source='user', power_w=500), 5, 500)
+        assert result['control_path'] == 'powerwall_local_dispatch'
+        client.dispatch_battery_power.assert_awaited_once()
+    finally:
+        await local.stop()
 
 
 def admission(runtime=None, **changes):

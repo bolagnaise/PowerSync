@@ -36521,6 +36521,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 command_status=("accepted" if status.get("active") else "pending" if phase in ("prepared", "applying")
                                 else "restore_pending" if active else None),
                 startup_kick_w=status.get("startup_kick_w"), handoff_phase=status.get("handoff_phase"),
+                control_route_reason="low_usable_soc_export" if phase and _native_max_context.get("low_soc_export") else None,
                 commitment_eligible=False)
             if direction == "charge":
                 state["native_max_charge"] = bool(phase)
@@ -36711,9 +36712,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     async def _try_native_powerwall_force(direction, call, duration, deadline):
         from .powerwall_host import local_battery_dispatch_configured
+        from .powerwall_local.control_method import optimizer_low_soc_export, runtime_route
         raw_power = call.data.get("power_w", 0)
         source = _control_call_source(call)
+        low_soc_export = (source == "optimizer" and direction == "discharge"
+                          and optimizer_low_soc_export(_local_powerwall_runtime))
         native_route = _powerwall_prefers_native_tariff(direction)
+        if source == "optimizer":
+            native_route = native_route or runtime_route(
+                _local_powerwall_runtime, _local_powerwall_dispatch_config(),
+                direction, optimizer=True) == "tariff"
         large_site = native_route
         # Optimizer requests are targetless only when the pre-solve capability
         # selected tariff control. Explicit positive user targets stay local.
@@ -36760,9 +36768,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             controller = await _get_native_max_charge()
             if controller.pending:
                 await controller.stop()
-            _native_max_context.update(call=call, direction=direction, targetless=targetless)
+            _native_max_context.update(call=call, direction=direction, targetless=targetless,
+                                       low_soc_export=low_soc_export)
             controller.adapter.direction = direction
-            controller.adapter.startup_kick = large_site
+            controller.adapter.startup_kick = large_site and not low_soc_export
             controller.adapter.planning_request = targetless
             # Admission may prepare a tighter export cap under its durable
             # restore owner. The session must verify that cap before granting
@@ -36815,6 +36824,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 raise HomeAssistantError(str(error)) from error
             return {"success": True, "native_max_charge": direction == "charge",
                     "control_path": "powerwall_native_tariff", "command_status": "accepted",
+                    "control_route_reason": "low_usable_soc_export" if low_soc_export else None,
                     "expires_at": status["expires_at"], "physical_effect_confirmed": False}
 
     async def _try_local_powerwall_force(mode, call, duration, power_w):
@@ -36926,6 +36936,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 return await write(target)
             return await guard.async_guard_write(target, write, current_controlled_export_w=controlled_export, stop_on_fault=False)
 
+        def check_optimizer_export_snapshot(sample, observed_at):
+            from .powerwall_local.control_method import LOCAL_EXPORT_MIN_SOC_PERCENT
+            soc = getattr(sample, "soc", None)
+            if type(soc) not in (int, float) or not math.isfinite(soc) or not 0 <= soc <= 100:
+                raise ValueError("Optimizer local export needs valid usable SOC")
+            _local_powerwall_runtime["powerwall_optimizer_export_observation"] = {
+                "soc": soc, "at": observed_at,
+            }
+            if soc <= LOCAL_EXPORT_MIN_SOC_PERCENT:
+                optimization = _local_powerwall_runtime.get("optimization_coordinator")
+                if optimization is not None:
+                    optimization._schedule_settings_reoptimization()
+                raise ValueError("Optimizer export at or below 20% usable SOC requires a fresh tariff plan")
+
         async with _local_powerwall_route_lock:
             await _stop_native_max_charge()
             controller = await _get_local_powerwall_dispatch()
@@ -36961,7 +36985,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 result = await controller.start(mode, target, duration * 60,
                                                 allowed=allowed, guarded_write=local_export_guard if mode == "discharge" else None,
                                                 target_basis=target_basis,
-                                                prepare_grid_charging=source == "optimizer")
+                                                prepare_grid_charging=source == "optimizer",
+                                                snapshot_check=check_optimizer_export_snapshot
+                                                if source == "optimizer" and mode == "discharge" else None)
             except Exception as err:
                 from .powerwall_local.battery_dispatch import DispatchCommandFailed, GridChargingPermissionError
                 if mode == "charge" and source == "optimizer" and isinstance(err, GridChargingPermissionError):

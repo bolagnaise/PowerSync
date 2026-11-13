@@ -14,6 +14,10 @@ The Tesla-only **Preferred battery control** selector is saved per Home Assistan
 
 Explicit positive kW requests retain local wattage control regardless of this preference. They cannot become unrestricted tariff actions. Local inverter output includes home consumption as well as export, so the same grid-export target may fit the local ceiling at one load and exceed it at another.
 
+For optimiser-planned export at or below **20% usable SOC**, paired Powerwalls use tariff forcing even when **Local V1R** is selected. This changes the actuator, not your reserve floor: reserve, export permission and site-limit checks still apply. Crossing 20% during local export releases the timed command and requests a fresh tariff-compatible plan. The tariff route remains selected until that action is restored, and its original settings are recovered through the normal restart-safe cleanup. No local startup pulse is used for this low-SOC export. Manual kW targets retain their existing behaviour.
+
+Battery Mode reports `control_path: powerwall_native_tariff` and `control_route_reason: low_usable_soc_export` for this route. Tariff forcing cannot hold a precise kW target; the optimiser replans with that capability before starting it. Command acknowledgement remains separate from measured Battery Power and Grid Power.
+
 From v2.12.1563, charge and discharge controls show **Starting charge…** or **Starting discharge…** while a published request awaits acknowledgement. Local V1R publishes that pending status before waiting for the gateway. The duration appears after acknowledgement; measured Battery Power and Grid Power remain the evidence of physical behaviour.
 
 From v2.12.1563, **Restore** and the active charge/discharge button show **Restoring…** while cleanup is pending. A manual Restore request no longer shows a failure solely because Native Max settings have been restored but physical settling is still being checked. PowerSync keeps the recovery record and control ownership until those checks complete; settings or readback failures still report an error.

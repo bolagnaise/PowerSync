@@ -3402,7 +3402,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             optimization_max_grid_import_w=getattr(self._config, "max_grid_import_w", None),
             optimization_max_grid_export_w=getattr(self._config, "max_grid_export_w", None))
         runtime = getattr(getattr(self, "hass", None), "data", {}).get(DOMAIN, {}).get(getattr(self, "entry_id", None), {})
-        return runtime_route(runtime, config, direction)
+        return runtime_route(runtime, config, direction, optimizer=True)
 
     def _powerwall_service_power(self, direction, requested_w):
         from ..powerwall_host import local_battery_dispatch_configured

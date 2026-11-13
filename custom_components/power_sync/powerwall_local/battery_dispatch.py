@@ -229,6 +229,7 @@ class LocalBatteryDispatch:
         self._grid_charge_restore = None
         self._prepare_grid = False
         self._resume_confirmed = False
+        self._snapshot_check = None
 
     @property
     def grid_charge_restore(self):
@@ -342,7 +343,7 @@ class LocalBatteryDispatch:
                 return False
         return True
 
-    async def start(self, mode: str, target_w: float, duration_seconds: int, *, allowed=None, guarded_write=None, target_basis="battery", prepare_grid_charging=False) -> dict:
+    async def start(self, mode: str, target_w: float, duration_seconds: int, *, allowed=None, guarded_write=None, target_basis="battery", prepare_grid_charging=False, snapshot_check=None) -> dict:
         if type(duration_seconds) is not int or not 1 <= duration_seconds <= 86400:
             raise ValueError("Invalid local dispatch duration")
         if (target_basis not in ("battery", "grid_import", "grid_export")
@@ -361,6 +362,7 @@ class LocalBatteryDispatch:
                 raise ValueError("Local grid charging restoration must finish before a new owner")
             self._generation += 1
             self._prepare_grid = prepare_grid_charging is True
+            self._snapshot_check = snapshot_check
             if allowed is not None:
                 self.allowed = allowed
             self.guarded_write = guarded_write
@@ -606,6 +608,8 @@ class LocalBatteryDispatch:
             if remaining < 1:
                 raise ValueError("Local dispatch window expired before command")
             current_config = dict(self.config())
+            if self._snapshot_check is not None:
+                self._snapshot_check(snapshot, observed_at)
             limit_key = f"optimization_max_{self._mode}_w"
             current_config[limit_key] = min(
                 _number(current_config.get(limit_key, 5000), f"{self._mode} limit"),

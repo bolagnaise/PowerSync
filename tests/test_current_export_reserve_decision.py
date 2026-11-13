@@ -474,6 +474,22 @@ def test_capacity_change_between_solve_and_execution_requests_a_fresh_plan(opt_m
     assert replans==[True] and not battery.force_discharge_calls
 
 
+def test_crossing_usable_soc_threshold_rejects_old_local_plan_before_command(opt_module, clock):
+    coordinator, battery, actions, _ = _controller(opt_module, soc=.1994, targetless=True)
+    coordinator._entry = SimpleNamespace(data={'tesla_control_method': 'local',
+        'powerwall_local_paired': True, 'powerwall_local_ip': 'gateway.local'}, options={})
+    coordinator._powerwall_plan_routes = {'charge': 'local', 'discharge': 'local'}
+    coordinator._powerwall_plan_method = 'local'
+    runtime = coordinator.hass.data.setdefault('power_sync', {}).setdefault(coordinator.entry_id, {})
+    runtime['powerwall_local'] = {'coordinator': SimpleNamespace(
+        data=SimpleNamespace(soc=19.94), last_success_monotonic=__import__('time').monotonic())}
+    replans = []
+    coordinator._schedule_settings_reoptimization = lambda: replans.append(True)
+    _run(coordinator, actions[0])
+    assert replans == [True]
+    assert not battery.force_discharge_calls
+
+
 @pytest.mark.parametrize('direction',['charge','discharge'])
 def test_native_tariff_safety_uses_reported_rating_above_planning_rate(opt_module,clock,direction):
     coordinator,battery,actions,_=_controller(opt_module,soc=.717,targetless=True)

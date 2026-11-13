@@ -7791,6 +7791,7 @@ class BatteryModeSensor(SensorEntity):
         if local_state.get("native_tariff_force"):
             status = local_state.get("command_status", "pending")
             attributes.update(control_path="powerwall_native_tariff", command_status=status,
+                control_route_reason=local_state.get("control_route_reason"),
                 power_target_basis="native_tariff", physical_effect="unverified",
                 startup_kick_w=local_state.get("startup_kick_w"),
                 handoff_phase=local_state.get("handoff_phase"))

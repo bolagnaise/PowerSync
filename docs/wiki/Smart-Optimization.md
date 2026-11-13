@@ -255,6 +255,20 @@ the site's export allowance. The effective gateway limit does not overwrite
 your saved settings, and command acceptance still requires separate power
 readings to establish what the battery actually did.
 
+### Powerwall export at low SOC
+
+At or below **20% usable SOC**, optimiser-planned Powerwall export uses tariff
+forcing, including when **Local V1R** is selected. Your configured reserve floor,
+export permission and site export limits still apply. This is a control-route
+change, not a new 20% reserve floor.
+
+If a local export crosses 20%, PowerSync releases local control and requests a
+fresh plan that accounts for tariff forcing without a precise kW target. The
+tariff action retains its route until restored. Manual kW requests keep their
+existing behaviour. Battery Mode shows the tariff control path and
+`low_usable_soc_export` reason; Battery Power and Grid Power show the measured
+result.
+
 ### Allow grid charging
 
 When enabled, Smart Optimization may plan forced battery charging from grid

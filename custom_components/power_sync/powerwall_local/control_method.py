@@ -16,6 +16,7 @@ METHODS = ("tariff", "local", "auto")
 LABELS = {"tariff": "Tariff", "local": "Local V1R", "auto": "Automatic"}
 DEFAULT_METHOD = "tariff"
 LOCAL_MAX_W = 10000
+LOCAL_EXPORT_MIN_SOC_PERCENT = 20
 
 
 class ControlTargetKind(str, Enum):
@@ -195,12 +196,36 @@ def select_route(config, direction, snapshot=None, *, local_available=False, loc
         return "tariff"
 
 
-def runtime_route(runtime, config, direction):
-    """Use fresh per-entry telemetry; retain a running Auto tariff episode."""
+def optimizer_low_soc_export(runtime):
+    """Use the newest fresh, normalized usable SOC for the route exception."""
+    coordinator = runtime.get("powerwall_local", {}).get("coordinator")
+    at = getattr(coordinator, "last_success_monotonic", None)
+    observed = getattr(getattr(coordinator, "data", None), "observed_monotonic", None)
+    if type(at) in (int, float) and type(observed) in (int, float) and math.isfinite(observed):
+        at = min(at, observed)
+    fresh = type(at) in (int, float) and 0 <= time.monotonic() - at <= 90
+    # A renewal can observe the boundary before the regular poll publishes it.
+    observation = runtime.get("powerwall_optimizer_export_observation", {})
+    renewal_at = observation.get("at")
+    if (type(renewal_at) in (int, float) and 0 <= time.monotonic() - renewal_at <= 90
+            and (not fresh or renewal_at > at)):
+        soc = observation.get("soc")
+    else:
+        soc = getattr(getattr(coordinator, "data", None), "soc", None) if fresh else None
+    return (type(soc) in (int, float) and math.isfinite(soc)
+            and 0 <= soc <= LOCAL_EXPORT_MIN_SOC_PERCENT)
+
+
+def runtime_route(runtime, config, direction, *, optimizer=False):
+    """Select control; optimizer low-SOC export uses a stable tariff episode."""
     from ..powerwall_host import local_battery_dispatch_configured
     method = control_method(config)
     state = runtime.get(f"force_{direction}_state", {})
     if method == "auto" and state.get("active") and state.get("native_tariff_force"):
+        return "tariff"
+    if optimizer and direction == "discharge" and (
+            (state.get("active") and state.get("source") == "optimizer"
+             and state.get("native_tariff_force")) or optimizer_low_soc_export(runtime)):
         return "tariff"
     local = runtime.get("powerwall_local", {})
     coordinator = local.get("coordinator")

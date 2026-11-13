@@ -106,6 +106,21 @@ async def orphaned_charge(s, phase='restoring'):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('reserve,allowed', [(0, True), (5, True), (20, False), (25, False)])
+async def test_optimizer_low_soc_tariff_export_retains_configured_reserve_floor(setup, reserve, allowed):
+    s = setup
+    s.adapter.direction = 'discharge'
+    s.adapter.planning_request = True
+    s.settings.update(optimization_backup_reserve=reserve / 100, powerwall_native_capacity_w=10000)
+    s.state.soc = 19.94
+    s.state.config['site_info']['customer_preferred_export_rule'] = 'battery_ok'
+    assert await s.adapter.guard() is allowed
+    if not allowed:
+        assert s.adapter.guard_denial_reason == 'discharge_reserve_floor_reached'
+    assert not s.state.events
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize('phase', ['restoring', 'settling', 'restored'])
 async def test_same_site_orphaned_charge_retires_after_read_only_confirmation(setup, phase):
     s = setup
