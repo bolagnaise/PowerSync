@@ -105,6 +105,7 @@ def _strategy_script(board_missing: bool) -> str:
     const cards = top.cards || [];
     console.log(JSON.stringify({
       type: top.type,
+      legacySupport: (top.columns || [view.cards]).flat().filter(c => c.type === 'custom:ps-support-card').length,
       keys: cards.map(c => c.key),
       wide: cards.filter(c => c.size === 'wide').map(c => c.key),
       natives: [...new Set(cards.map(c => c.native).filter(Boolean))],
@@ -154,10 +155,12 @@ def test_generate_falls_back_to_classic_layout_without_board():
 
 
 def _run_strategy(
-    board_missing: bool, *, solar_entity: str | None = None, optimizer: bool = True
+    board_missing: bool, *, solar_entity: str | None = None,
+    optimizer: bool = True, admin: bool = False
 ) -> dict:
     script = _strategy_script(board_missing)
     setup = ""
+    script = script.replace("    states,", f"    user: {{ is_admin: {str(admin).lower()} }}, states,")
     if solar_entity:
         setup += f"states[{json.dumps(solar_entity)}] = s('off');"
     if not optimizer:
@@ -1831,3 +1834,14 @@ def test_today_average_labels_net_home_energy_cost_not_battery_acquisition():
     assert 'Average import cost' not in out['html']
     assert '9.9' in out['html']
     assert 'Month to date 162.0 c' in out['html']
+
+
+@pytest.mark.parametrize("board_missing", [False, True])
+@pytest.mark.parametrize("admin", [False, True])
+def test_dashboard_has_one_admin_support_card(board_missing, admin):
+    out = _run_strategy(board_missing, admin=admin)
+    assert (out["legacySupport"] if board_missing else out["keys"].count("support")) == int(admin)
+    assert "diagnostics" not in out["keys"]
+    assert "ps-diagnostics-card" not in out["natives"]
+    if not board_missing:
+        assert ("ps-support-card" in out["natives"]) == admin

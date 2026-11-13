@@ -8,8 +8,9 @@ diagnostics service or testing pilot is active.
 
 ## What you approve
 
-The **HA diagnostics** card shows the connected application, operator, processor,
-purposes and disclosure for review before approval. Codex and Claude Code have
+The **Support** card, with **Allow ongoing support** selected, shows the
+connected application, operator, processor, purposes and disclosure for review
+before approval. Codex and Claude Code have
 separate client registrations. Review the actual invitation for the application
 and processor that will receive your information.
 
@@ -100,15 +101,25 @@ access; current permission is checked with the authority.
 
 ## Enable or revoke access
 
-1. Open a support ticket to arrange enrollment and verify the owner and
-   installation.
-2. In the administrator's **HA diagnostics** card, create a setup identity.
-   Creating this identity grants no access.
-3. Enter the invitation and authority public key supplied through the verified
-   support process. Review both purposes, the application, operator and
-   disclosure, then choose **Enable ongoing access** if you agree.
+1. Open a private support ticket.
+2. In the administrator's **Support** card, select **Allow ongoing support**.
+   Under **Ongoing support setup**, create a setup identity. Creating this
+   identity and selecting the option grant no access.
+3. Send the setup identity in your private ticket. Support automatically prepares
+   an invitation; no manual support-owner verification is needed.
+4. Paste the invitation into **Support invitation** and enter the authority
+   public key supplied through the verified support process. Select **Review
+   invitation**, review the purposes, application, operator and disclosure, then
+   check the approval box and choose **Enable ongoing access** if you agree.
 
-You can revoke combined ongoing access or all installation access in HA.
+The same card provides temporary support sessions, local diagnostic downloads
+and recording. Changing the ongoing-support option changes the setup form; it
+does not change existing access. Existing approvals and their revoke controls
+remain visible in either mode. Saved HA diagnostics cards open the same Support
+interface.
+
+Combined approvals have a **Revoke ongoing access** button. Use **Revoke all
+ongoing access** to stop all ongoing approvals for the installation.
 Revoking either member of a combined approval blocks both purposes locally and
 reconciles both revocations centrally. Legacy standalone approvals retain
 individual revoke controls.

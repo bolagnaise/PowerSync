@@ -26,6 +26,7 @@ def test_support_card_requires_admin_and_reviewed_scope_before_confirmation():
     const Card=registry.get('ps-support-card'),card=new Card();card._hass={user:{is_admin:false}};card.render();
     assert.equal(card.shadowRoot.querySelectorAll().filter(x=>x.tag==='button').length,0,'non-admin has no consent controls');
     const canary='<img src=x onerror=alert(1)>',calls=[];
+    card.diagnosticsApi=async()=>({grants:[]});card._diagnostics={grants:[]};card._diagnosticsError=false;card._ongoing=false;
     card._hass={user:{is_admin:true}};card._entry='entry-one';card._entries=[{entry_id:'entry-one'}];
     card._status={state:'pending',invitation:{actor:canary,ticket:'discord:1234',phrase:'VISIBLE'},descriptor_digest:'DISPLAYED_DIGEST',policy:{disclosure:canary}};
     card.run=(...args)=>calls.push(args);card.render();

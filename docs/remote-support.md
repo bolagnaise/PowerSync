@@ -9,7 +9,14 @@ It does not permit shell access, settings changes or hardware commands.
 Open **Support** in the PowerSync HA dashboard using an administrator account.
 Use the local diagnostic download when a remote session is unnecessary.
 
-For a remote session arranged through your private support ticket:
+The same card offers temporary sessions and **Allow ongoing support**. Leave
+that option off for the temporary workflow below. Select it for ongoing
+read-only diagnostics and any private offline testing included in the reviewed
+invitation; see [Diagnostics and privacy](diagnostics-privacy.md) for setup,
+scope and retention. Selecting or clearing the option grants and revokes
+nothing. Existing temporary and ongoing access remains manageable in this card.
+
+For a temporary remote session arranged through your private support ticket:
 
 1. Paste the investigator's invitation into **Support invitation** and select
    **Get pairing code**.

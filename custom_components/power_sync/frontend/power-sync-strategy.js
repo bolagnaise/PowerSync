@@ -8450,6 +8450,8 @@ class PowerSyncStrategy {
       };
     }
 
+    if (hass.user?.is_admin) left.push({ type: 'custom:ps-support-card' });
+
     // ── Build responsive layout ──
     const columns = [left, center, right].filter(col => col.length > 0);
     let cards;
@@ -8624,8 +8626,7 @@ function _boardCards(ctx) {
 
   add({ key: 'ev', title: 'Car charging', card: _evPanel(), ownHeader: true });
 
-  if (hass.user?.is_admin) add({ key: 'support', title: 'Support', native: 'ps-support-card' });
-  if (hass.user?.is_admin) add({ key: 'diagnostics', title: 'HA diagnostics', native: 'ps-diagnostics-card' });
+  if (hass.user?.is_admin) add({ key: 'support', title: 'Support', native: 'ps-support-card', ownHeader: true });
 
   if (hasTesla) {
     const vpp = findVppSwitches().map(entity => ({ kind: 'switch', entity }));
