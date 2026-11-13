@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Add AFTER the pinned PedroKTFC packages. Install only after reviewing the
-# operator inventory and rollback instructions in docs/tesla-ble-stop-recovery.md.
+# operator inventory and rollback instructions in docs/ev-command-recovery.md#tesla-ble-stop-recovery.
 packages:
   powersync_charging_freshness: !include charging-freshness-pedro.yaml
 

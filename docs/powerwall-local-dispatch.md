@@ -157,7 +157,7 @@ Home Assistant's Spread Import distributes battery charging across eligible same
 
 The optimiser already plans PowerSync-managed EV charging alongside the battery and treats supported native Tesla charge windows as fixed forecast demand without taking vehicle control. Spread Import now reserves the managed EV's planned power when redistributing battery energy, in addition to native Tesla demand already included in the load forecast. These sources are counted separately, once each.
 
-From v2.12.1482, an optional native-window vehicle rate controller can share local battery headroom. Its default-off permission, supported windows and restoration rules are described in [Rate management inside Tesla charge windows](tesla-native-window-rate.md).
+From v2.12.1482, an optional native-window vehicle rate controller can share local battery headroom. Its default-off permission, supported windows and restoration rules are described in [Rate management inside Tesla charge windows](tesla-ev-charging.md#tesla-native-window-rate).
 
 Every local battery lease uses fresh measured home load, including current EV consumption, to limit battery charging to available import headroom. Forecasts help plan future demand; they do not guarantee an unseen vehicle schedule or unreported load. Keep gateway site connection limits configured: software targets do not replace enforced electrical limits.
 

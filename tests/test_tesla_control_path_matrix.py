@@ -2,7 +2,7 @@
 
 These checks use software fakes only.  A passing receipt or target calculation
 is not provider acknowledgement, settings readback, or physical battery proof.
-The corresponding local-HA checklist is docs/tesla-control-path-matrix.md.
+Local Home Assistant validation receipts are maintained privately.
 """
 from __future__ import annotations
 

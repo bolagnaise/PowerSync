@@ -72,3 +72,13 @@ pro-project-kickoff-guidance*.txt
 
 # Unrelated personal assets
 /roof-colour-visualisations/
+
+# Internal operational notes and investigation receipts belong outside this repo.
+/docs/*-investigation.md
+/docs/*-plan.md
+/docs/*-validation-*.md
+/docs/*-review*/
+/docs/private-*.md
+/docs/ha-read-backend.md
+/docs/testing-approved-installations.md
+/docs/tesla-control-path-matrix.md
