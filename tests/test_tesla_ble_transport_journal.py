@@ -291,14 +291,15 @@ async def test_each_esp_home_helper_marks_mutation_before_service_cancellation(
     finished = _journal_mocks(monkeypatch)
     _patch_ble_scope(monkeypatch)
 
-    async def prepare(*_args, **kwargs):
+    async def prepare(hass, prefix, target_entity, **kwargs):
         if (holder := kwargs.get("charge_binding_holder")) is not None:
-            holder[:] = [object()]
+            binding = actions._tesla_ble_charge_data_binding(hass, prefix, target_entity)
+            assert binding is not None
+            holder[:] = [binding]
         return True
 
     monkeypatch.setattr(actions, "_tesla_ble_prepare_mutation", prepare)
     monkeypatch.setattr(actions, "_tesla_ble_scope_current", lambda *_args, **_kwargs: _true_async())
-    monkeypatch.setattr(actions, "_tesla_ble_charge_data_binding", lambda *_args, **_kwargs: object())
     monkeypatch.setattr(actions, "prepare_ev_submission", lambda *_args, **_kwargs: _true_async())
     monkeypatch.setattr(actions, "_wait_for_ble_command_readback", _cancelled_readback)
 
