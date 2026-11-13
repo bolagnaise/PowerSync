@@ -13997,6 +13997,115 @@ def test_ble_start_accepts_fresh_vehicle_charging_state(monkeypatch, state_suffi
     assert asyncio.run(actions._start_ev_charging_ble(hass, "car")) is (True if draw else None)
 
 
+@pytest.mark.parametrize("state_suffix", ["charging_state", "charging"])
+@pytest.mark.parametrize("refresh", [False, True])
+def test_ble_start_complete_vehicle_is_not_sent_or_quarantined(
+    monkeypatch, state_suffix, refresh
+):
+    """Ticket #150: a completed car must not acquire an unknown Start hazard."""
+    from power_sync import tesla_ev_recovery as recovery
+
+    hass = _Hass([_State("switch.car_charger", "off")])
+    _add_ble_session_snapshot(hass, charging_state="Complete", current="0")
+    state = hass.states._states.pop("sensor.car_charging_state")
+    state.entity_id = f"sensor.car_{state_suffix}"
+    hass.states._states[state.entity_id] = state
+    if refresh:
+        state.last_updated = datetime.now(timezone.utc) - timedelta(hours=1)
+        _add_ble_force_data_update(hass)
+        _ble_refresh_call(hass, charging_state="Complete", current="0")
+    outcomes = []
+
+    async def finish(_ticket, outcome):
+        outcomes.append(outcome)
+
+    monkeypatch.setattr(recovery, "async_begin_attempt", AsyncMock(return_value=object()))
+    monkeypatch.setattr(recovery, "async_finish_attempt", finish)
+    monkeypatch.setattr(actions, "_wake_tesla_ble", AsyncMock(return_value=True))
+    monkeypatch.setattr(actions, "_TESLA_BLE_COMMAND_CONFIRMATION_SECONDS", 0)
+    monkeypatch.setattr(actions, "_TESLA_BLE_SESSION_PROBE_SECONDS", 0)
+
+    admission = AsyncMock(return_value=True)
+    monkeypatch.setattr(actions, "prepare_ev_submission", admission)
+    result = asyncio.run(actions._run_ble_transport_command(
+        hass, _Entry(), {"vehicle_vin": "5YJTEST0000000001"}, "car", "start",
+        lambda: actions._start_ev_charging_ble(hass, "car"),
+    ))
+
+    assert result == (False, False)
+    assert outcomes == ["not_sent"]
+    admission.assert_not_awaited()
+    assert not any(domain == "switch" for domain, _service, _data in hass.services.calls)
+    assert hass.services.calls == (
+        [("button", "press", {"entity_id": "button.car_force_data_update"})]
+        if refresh else []
+    )
+
+
+def test_ble_start_refreshes_stale_complete_before_deciding(monkeypatch):
+    """An old Complete report cannot suppress a newly permitted charging session."""
+    hass = _Hass([_State("switch.car_charger", "off")])
+    _add_ble_session_snapshot(hass, charging_state="Complete", current="0")
+    hass.states.get("sensor.car_charging_state").last_updated = (
+        datetime.now(timezone.utc) - timedelta(hours=1)
+    )
+    _add_ble_force_data_update(hass)
+    _ble_refresh_call(hass, charging_state="Stopped", current="0")
+    original_call = hass.services.async_call
+
+    async def call(domain, service, data, **kwargs):
+        await original_call(domain, service, data, **kwargs)
+        if domain == "switch" and service == "turn_on":
+            _add_ble_session_snapshot(hass, charging_state="Charging", current="16")
+
+    hass.services.async_call = call
+    monkeypatch.setattr(actions, "_wake_tesla_ble", AsyncMock(return_value=True))
+    monkeypatch.setattr(actions, "_TESLA_BLE_COMMAND_CONFIRMATION_SECONDS", 0)
+    monkeypatch.setattr(actions, "_TESLA_BLE_SESSION_PROBE_SECONDS", 0)
+
+    assert asyncio.run(actions._start_ev_charging_ble(hass, "car")) is True
+    assert hass.services.calls == [
+        ("button", "press", {"entity_id": "button.car_force_data_update"}),
+        ("switch", "turn_on", {"entity_id": "switch.car_charger"}),
+    ]
+
+
+def test_ble_start_complete_after_dispatch_keeps_unknown_history(monkeypatch):
+    """A later Complete response cannot prove that a submitted Start was not sent."""
+    from power_sync import tesla_ev_recovery as recovery
+
+    hass = _Hass([_State("switch.car_charger", "off")])
+    _add_ble_session_snapshot(hass, charging_state="Stopped", current="0")
+    _add_ble_session_snapshot(hass, prefix="other", charging_state="Complete", current="0")
+    original_call = hass.services.async_call
+
+    async def call(domain, service, data, **kwargs):
+        await original_call(domain, service, data, **kwargs)
+        if domain == "switch" and service == "turn_on":
+            _add_ble_session_snapshot(hass, charging_state="Complete", current="0")
+
+    hass.services.async_call = call
+    outcomes = []
+
+    async def finish(_ticket, outcome):
+        outcomes.append(outcome)
+
+    monkeypatch.setattr(recovery, "async_begin_attempt", AsyncMock(return_value=object()))
+    monkeypatch.setattr(recovery, "async_finish_attempt", finish)
+    monkeypatch.setattr(actions, "_wake_tesla_ble", AsyncMock(return_value=True))
+    monkeypatch.setattr(actions, "_TESLA_BLE_COMMAND_CONFIRMATION_SECONDS", 0)
+    monkeypatch.setattr(actions, "_TESLA_BLE_SESSION_PROBE_SECONDS", 0)
+
+    result = asyncio.run(actions._run_ble_transport_command(
+        hass, _Entry(), {"vehicle_vin": "5YJTEST0000000001"}, "car", "start",
+        lambda: actions._start_ev_charging_ble(hass, "car"),
+    ))
+
+    assert result == (None, False)
+    assert outcomes == ["sent_unknown"]
+    assert hass.services.calls == [("switch", "turn_on", {"entity_id": "switch.car_charger"})]
+
+
 @pytest.mark.parametrize("kind", ["amps", "limit"])
 def test_ble_number_commands_do_not_send_after_failed_wake(monkeypatch, kind):
     async def failed_wake(*args, **kwargs):

@@ -4590,12 +4590,6 @@ async def _start_ev_charging_ble(
             hass, charger_entity, expected_identity, authorize, stock_token
         ):
             return False
-        if not await prepare_ev_submission(hass, charger_entity, operation="start"):
-            return False
-        if not await _tesla_ble_scope_current(
-            hass, charger_entity, expected_identity, authorize, stock_token
-        ):
-            return False
         charge_binding = (
             None
             if not charge_binding_holder or charge_binding_holder[0] is None
@@ -4605,6 +4599,38 @@ async def _start_ev_charging_ble(
                 charger_entity,
                 previous=charge_binding_holder[0],
             )
+        )
+        if charge_binding is None:
+            return False
+        # Pedro's optimistic Charger switch accepts turn_on but deliberately
+        # sends no vehicle command while charging is Complete. Refuse before
+        # handoff so that this known terminal state cannot create an unknown
+        # Start liability. Only use fresh telemetry from the pinned bridge;
+        # stale Complete reports must first pass the normal session refresh.
+        cutoff = datetime.now(dt_timezone.utc) - timedelta(
+            seconds=_TESLA_BLE_WAKE_FRESHNESS_SECONDS
+        )
+        for entity_id, _identity in charge_binding:
+            if entity_id not in (
+                TESLA_BLE_SENSOR_CHARGING_STATE.format(prefix=ble_prefix),
+                TESLA_BLE_SENSOR_CHARGING.format(prefix=ble_prefix),
+            ):
+                continue
+            state = hass.states.get(entity_id)
+            if (
+                str(getattr(state, "state", "")).strip().lower() == "complete"
+                and _ble_state_observed_after(state, cutoff, hass=hass)
+            ):
+                _LOGGER.info("Tesla BLE %s: vehicle charge complete; start not sent", ble_prefix)
+                return False
+        if not await prepare_ev_submission(hass, charger_entity, operation="start"):
+            return False
+        if not await _tesla_ble_scope_current(
+            hass, charger_entity, expected_identity, authorize, stock_token
+        ):
+            return False
+        charge_binding = _tesla_ble_charge_data_binding(
+            hass, ble_prefix, charger_entity, previous=charge_binding
         )
         if charge_binding is None:
             return False
