@@ -11642,6 +11642,14 @@ class PriceLevelChargingExecutor:
                 continue
             if _dynamic_ev_owner_suspended_control(self.hass, self.config_entry, other_id):
                 continue
+            if (owner_family(lease.get("owner_mode")) == "external"
+                    and get_external_control_policy(self.hass, self.config_entry, other_id) == "override"
+                    and _external_session_policy(self.hass, self.config_entry, other_id, "price_level") != "leave_alone"):
+                if not _claim_external_charging_ownership(
+                    self.hass, self.config_entry, other_id,
+                    reason="Zaptec alias now uses PowerSync external-control policy",
+                ):
+                    continue
             vehicle_state.last_decision = "waiting"
             vehicle_state.last_decision_reason = f"{reason}; another profile owns this Zaptec charger"
             await self.apply_preserve_home_battery(

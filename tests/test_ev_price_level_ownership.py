@@ -3223,6 +3223,36 @@ def test_lost_zaptec_vin_retains_failed_cancel_until_post_stop_poll(monkeypatch)
     assert all(call.kwargs["vehicle_vin"] == VIN for call in stop.await_args_list)
 
 
+@pytest.mark.parametrize("policy,expected_stop", [("override", True), ("yield", False)])
+def test_zaptec_external_alias_lease_follows_current_policy(monkeypatch, policy, expected_stop):
+    other = "5YJTEST0000000002"
+    entry = SimpleNamespace(entry_id="entry-1", data={}, options={
+        "zaptec_standalone_enabled": True, "zaptec_username": "user@example.com",
+        "zaptec_charger_id": "charger-1",
+    })
+    hass = _FakeHass()
+    runtime = hass.data["power_sync"]["entry-1"]
+    runtime["zaptec_cached_state"] = {"charger_operation_mode": "charging", "total_charge_power_w": 10000}
+    now = ev_planner.time.monotonic()
+    runtime["zaptec_state_poll"] = {"started_at": now - 1, "completed_at": now}
+    runtime["automation_store"]._data.update({
+        "vehicle_charging_configs": [{
+            "vehicle_id": other, "charger_type": "zaptec", "external_control_policy": policy,
+        }],
+    })
+    ownership = importlib.import_module("power_sync.automations.ev_ownership")
+    ownership.claim_ev_ownership(hass, entry, other, owner="external", owner_mode="external")
+    monkeypatch.setattr(ev_planner, "discover_all_tesla_vehicles", _one_vehicle)
+    stop = AsyncMock(return_value=True)
+    monkeypatch.setattr(ev_planner, "_stop_coordinated_charging", stop)
+    executor = ev_planner.PriceLevelChargingExecutor(hass, entry)
+    executor.get_charging_decision_for_vehicle = AsyncMock(return_value=(False, "Price above threshold", ""))
+
+    asyncio.run(executor.evaluate_all_vehicles(31.4))
+
+    assert stop.await_count == int(expected_stop)
+
+
 @pytest.mark.parametrize("poll_started,confirmed", [(199, False), (201, True), (float("nan"), False)])
 def test_zaptec_pending_start_requires_post_command_charging_poll(monkeypatch, poll_started, confirmed):
     entry = SimpleNamespace(entry_id="entry-1", data={}, options={
