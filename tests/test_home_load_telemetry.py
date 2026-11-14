@@ -512,6 +512,48 @@ def test_tesla_local_powerwall_fallback_excludes_ev_power_from_load():
     assert data["ev_power"] == pytest.approx(7.1)
 
 
+def test_tesla_local_powerwall_keeps_metering_grid_while_home_load_is_withheld():
+    """Live 2026-11-14: an uncertain EV stopped all daily energy metering.
+
+    A stale Fleet "charging" claim made EV attribution incomplete from 06:01,
+    and the local Powerwall path skipped the whole accumulator update, so a
+    ~45 kWh grid charge left daily grid import at 0.51 kWh and import cost at
+    $0.00. Grid, battery and cost must keep metering; only Home Load is skipped.
+    """
+    snap = types.SimpleNamespace(
+        solar_w=0.0, grid_w=12000.0, battery_w=-10300.0, load_w=1700.0,
+        grid_status="SystemGridConnected", soc=40.0,
+        total_pack_full_wh=None, total_pack_remaining_wh=None,
+    )
+
+    class _IncompleteEvCoordinator(_FakeLocalPowerwallCoordinator):
+        def _observed_ev_power_w(self):
+            return 0.0, False
+
+    coordinator = _new_tesla_coordinator(_IncompleteEvCoordinator(snap, ev_power_w=0.0))
+    updates = []
+
+    class _RecordingAccumulator(_FakeEnergyAccumulator):
+        def update(self, *args) -> None:
+            updates.append(args)
+
+    coordinator._energy_acc = _RecordingAccumulator()
+
+    data = coordinator._local_powerwall_energy_data()
+
+    assert data is not None
+    assert len(updates) == 1, "the accumulator must still be fed"
+    solar_kw, grid_kw, battery_kw, load_kw = updates[0][:4]
+    assert (solar_kw, grid_kw, battery_kw) == pytest.approx((0.0, 12.0, -10.3))
+    assert load_kw is None, "only the uncertain Home Load is withheld"
+
+
+def test_tesla_and_sigenergy_feeds_are_not_gated_on_known_home_load():
+    """Structural guard: no coordinator may skip metering because load is unknown."""
+    source = (Path(__file__).resolve().parents[1] / "custom_components/power_sync/coordinator.py").read_text()
+    assert "if load_kw is not None or getattr(self, \"_additional_solar_enabled\"" not in source
+
+
 def test_tesla_local_powerwall_fallback_clamps_load_at_zero_and_defaults_ev_to_zero():
     """Defensive: EV power missing/absent must not crash or go negative."""
     snap = types.SimpleNamespace(
