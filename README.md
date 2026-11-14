@@ -213,12 +213,12 @@ Remote monitoring and control via iOS and Android.
 - **Demo Mode** — Try the app without a Home Assistant connection using simulated data
 
 <p align="center">
-  <img src="docs/images/app-hero.png" alt="Dashboard — live energy flow" width="200"/>
-  <img src="docs/images/app-optimization.png" alt="Smart Optimization summary" width="200"/>
-  <img src="docs/images/app-action-plan.png" alt="24-hour LP action plan" width="200"/>
+  <img src="docs/images/app-hero.png" alt="Dashboard — live energy flow, battery and today's weather" width="200"/>
+  <img src="docs/images/app-optimization.png" alt="Optimizer — status and today's forecast" width="200"/>
+  <img src="docs/images/app-action-plan.png" alt="Optimizer plan — inspecting a planned interval" width="200"/>
 </p>
 <p align="center">
-  <img src="docs/images/app-price-chart.png" alt="TOU schedule and price forecast" width="200"/>
+  <img src="docs/images/app-price-chart.png" alt="Optimizer plan — 12 hours measured, 24 hours planned" width="200"/>
   <img src="docs/images/app-ev-charging.png" alt="EV Charging" width="200"/>
   <img src="docs/images/app-settings.png" alt="Settings" width="200"/>
 </p>
