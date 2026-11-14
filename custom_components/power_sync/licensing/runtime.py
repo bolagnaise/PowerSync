@@ -28,6 +28,8 @@ class LicenseRuntime:
         self._control_locks = {}
         self._manual_command_owners = {}
         self._manual_command_depth = {}
+        self._enable_pending = set()
+        self._enable_locks = {}
         self.admission = OptimizerAdmission(enforced=True)
         self.policy = None
         self._policy_token = self._permission_token = None
@@ -98,6 +100,10 @@ class LicenseRuntime:
                 self.admission.suspend()
 
     def permits(self, entry_id=None, generation=None, entry_generation=None):
+        return self._entry_permits(entry_id, generation, entry_generation) and entry_id not in self._enable_pending
+
+    def _entry_permits(self, entry_id=None, generation=None, entry_generation=None):
+        """Check signed access independently of an uncommitted enable request."""
         self._update_enforcement()
         state = self.entries.get(entry_id, {})
         if self.admission.enforced and self.admission.permission and self.admission.permission.epoch < self.policy_epoch:

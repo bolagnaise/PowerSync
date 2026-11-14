@@ -751,27 +751,33 @@ class OptimizationEnabledSwitch(SwitchEntity):
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Enable Smart Optimization and select the built-in LP provider."""
+        from contextlib import AsyncExitStack
         from .licensing.runtime import DATA_KEY as _LICENSE_MANAGER_KEY
-        if manager := self.hass.data.get(_LICENSE_MANAGER_KEY):
-            await manager.maintain(force=True)
-            if manager.status(self._entry.entry_id)["requires_resume"]:
-                await manager.resume_entry(self._entry.entry_id)
-            if not manager.permits(self._entry.entry_id):
+        async with AsyncExitStack() as stack:
+            commit = None
+            if manager := self.hass.data.get(_LICENSE_MANAGER_KEY):
                 from homeassistant.exceptions import HomeAssistantError
-                raise HomeAssistantError("HA optimiser access is required; activate through integration options")
-        _LOGGER.info("Enabling Smart Optimization from HA switch")
-        self._attr_is_on = True
-        new_data = {**self._entry.data}
-        new_options = {**self._entry.options}
-        new_data[CONF_OPTIMIZATION_PROVIDER] = OPT_PROVIDER_POWERSYNC
-        new_options[CONF_OPTIMIZATION_PROVIDER] = OPT_PROVIDER_POWERSYNC
-        new_options[CONF_OPTIMIZATION_ENABLED] = True
-        self.hass.config_entries.async_update_entry(
-            self._entry,
-            data=new_data,
-            options=new_options,
-        )
-        self.async_write_ha_state()
+                try:
+                    commit = await stack.enter_async_context(manager.prepare_enable(self._entry.entry_id))
+                except (ValueError, TimeoutError) as err:
+                    raise HomeAssistantError(
+                        "Unable to enable Smart Optimization; check HA optimiser access and pending recovery"
+                    ) from err
+            _LOGGER.info("Enabling Smart Optimization from HA switch")
+            new_data = {**self._entry.data}
+            new_options = {**self._entry.options}
+            new_data[CONF_OPTIMIZATION_PROVIDER] = OPT_PROVIDER_POWERSYNC
+            new_options[CONF_OPTIMIZATION_PROVIDER] = OPT_PROVIDER_POWERSYNC
+            new_options[CONF_OPTIMIZATION_ENABLED] = True
+            self.hass.config_entries.async_update_entry(
+                self._entry,
+                data=new_data,
+                options=new_options,
+            )
+            if commit:
+                commit()
+            self._attr_is_on = True
+            self.async_write_ha_state()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Disable Smart Optimization while preserving saved LP settings."""

@@ -12691,12 +12691,34 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
                         err,
                     )
                     return self.async_abort(reason="monitoring_cleanup_failed")
-            if isinstance(entry_data, dict) and persisted_changed:
-                entry_data["_skip_reload"] = True
             try:
-                self.hass.config_entries.async_update_entry(
-                    self.config_entry, data=new_data, options=new_options
-                )
+                from contextlib import AsyncExitStack
+                async with AsyncExitStack() as enable_stack:
+                    commit_enable = None
+                    manager = self.hass.data.get("power_sync_license_manager")
+                    was_enabled = (
+                        self._get_option(CONF_OPTIMIZATION_PROVIDER, OPT_PROVIDER_NATIVE) == OPT_PROVIDER_POWERSYNC
+                        and self._get_option(CONF_OPTIMIZATION_ENABLED, False)
+                    )
+                    if optimization_enabled and manager and (
+                        not was_enabled or not manager.permits(self.config_entry.entry_id)
+                    ):
+                        try:
+                            commit_enable = await enable_stack.enter_async_context(
+                                manager.prepare_enable(self.config_entry.entry_id)
+                            )
+                        except (ValueError, TimeoutError):
+                            return await self._async_step_optimization(
+                                None, form_step_id=form_step_id,
+                                errors={"base": "optimizer_access_unavailable"},
+                            )
+                    if isinstance(entry_data, dict) and persisted_changed:
+                        entry_data["_skip_reload"] = True
+                    self.hass.config_entries.async_update_entry(
+                        self.config_entry, data=new_data, options=new_options
+                    )
+                    if commit_enable:
+                        commit_enable()
             finally:
                 if monitoring_handoff:
                     finish_monitoring_handoff(self.hass, self.config_entry)

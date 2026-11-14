@@ -1,5 +1,6 @@
 """Home Assistant adapter for licensing, local persistence and owned recovery."""
 import asyncio
+from contextlib import asynccontextmanager
 import inspect
 import json
 from pathlib import Path
@@ -183,6 +184,8 @@ class HALicenseManager(LicenseRuntime):
 
     async def reconcile_entries(self):
         for entry_id, coordinator in list(self.coordinators.items()):
+            if entry_id in self._enable_pending:
+                continue
             state = self.entries.setdefault(entry_id, {})
             enabled = bool(getattr(coordinator, "_enabled", False))
             entry = getattr(coordinator, "_entry", None)
@@ -221,7 +224,52 @@ class HALicenseManager(LicenseRuntime):
                 # This is startup after policy verification, never resumption after an access gap.
                 await coordinator.enable()
 
-    async def resume_entry(self, entry_id):
+    @asynccontextmanager
+    async def prepare_enable(self, entry_id):
+        """Refresh and admit an explicit enable; fence work until settings are saved."""
+        async with self._enable_locks.setdefault(entry_id, asyncio.Lock()):
+            self._enable_pending.add(entry_id)
+            committed = False
+
+            def commit():
+                nonlocal committed
+                committed = True
+
+            try:
+                # Both signed-policy and signed-permission requests share this
+                # deadline. Mobile enable requests allow 45 seconds in total.
+                async with asyncio.timeout(40):
+                    await self.maintain(force=True)
+                coordinator = self.coordinators.get(entry_id)
+                if coordinator:
+                    force = coordinator._get_active_force_state()
+                    if force and force.get("active") and force.get("source") != "optimizer":
+                        raise ValueError("optimizer_external_control_active")
+                if self.status(entry_id)["requires_resume"]:
+                    # Enabling is the user's explicit Resume intent. Do not
+                    # start hardware or replay a cached plan during admission.
+                    await self.resume_entry(entry_id, start_optimizer=False)
+                if not self._entry_permits(entry_id):
+                    raise ValueError("optimizer_access_required")
+                # Work admitted before this enable must not regain permission
+                # when the temporary pending fence opens after persistence.
+                state = self.entries.setdefault(entry_id, {})
+                state["generation"] = state.get("generation", 0) + 1
+                await self.persist()
+                self.finish_manual_command(entry_id)
+                yield commit
+            finally:
+                try:
+                    if not committed:
+                        self.entries.setdefault(entry_id, {})["resume_required"] = True
+                        try:
+                            await asyncio.shield(self.persist())
+                        except Exception:
+                            _LOGGER.warning("Unable to persist failed optimizer enable; admission remains closed")
+                finally:
+                    self._enable_pending.discard(entry_id)
+
+    async def resume_entry(self, entry_id, *, start_optimizer=True):
         coordinator = self.coordinators.get(entry_id)
         if not coordinator:
             entry = self.hass.config_entries.async_get_entry(entry_id)
@@ -235,6 +283,8 @@ class HALicenseManager(LicenseRuntime):
         await self.resume(entry_id)
         coordinator._last_optimizer_result = None
         coordinator._current_schedule = None
+        if not start_optimizer:
+            return
         if not await coordinator.enable():
             self.entries.setdefault(entry_id, {})["resume_required"] = True
             await self.persist()

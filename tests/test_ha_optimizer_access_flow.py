@@ -251,6 +251,7 @@ def test_refresh_resume_and_switch_after_reload_without_optimizer(monkeypatch, s
         manager.hass = hass
         manager.entry_loaded = lambda entry_id: rt.manager_method("entry_loaded")(manager, entry_id)
         manager.coordinators = {}
+        rt.attach_enable_manager(manager, hass)
         manager.entries["one"] = {"generation": 1}
         old_owner = SimpleNamespace(hass=hass, entry_id="one", _licensing_entry_generation=1)
         writes = []
@@ -276,7 +277,7 @@ def test_refresh_resume_and_switch_after_reload_without_optimizer(monkeypatch, s
 
         manager._request = request
         manager.reconcile_entries = lambda: rt.manager_method("reconcile_entries")(manager)
-        manager.resume_entry = lambda entry_id: rt.manager_method("resume_entry")(manager, entry_id)
+        manager.resume_entry = lambda entry_id, **kwargs: rt.manager_method("resume_entry")(manager, entry_id, **kwargs)
         flow = SimpleNamespace(hass=hass, config_entry=entry, async_show_form=lambda **kwargs: kwargs)
         step = flow_method(monkeypatch, manager)
         assert not (await step(flow, {"action": "refresh"}))["errors"]
@@ -287,8 +288,89 @@ def test_refresh_resume_and_switch_after_reload_without_optimizer(monkeypatch, s
         assert update.call_args.kwargs["options"]["optimization_enabled"] is True
         assert update.call_args.kwargs["options"]["optimization_provider"] == "powersync"
         assert manager.status("one")["can_optimize"]
-        assert manager.entries["one"]["generation"] == generation
+        assert manager.entries["one"]["generation"] > generation
         assert await stale_work(old_owner) is False
         assert writes == []
 
+    asyncio.run(run())
+
+
+def test_ha_switch_enable_uses_the_shared_refresh_and_resume(monkeypatch):
+    from unittest.mock import Mock
+    import test_ha_optimizer_runtime as rt
+
+    async def run():
+        h = rt.Harness()
+        await h.activate()
+        h.client.entries["one"] = {"resume_required": True}
+        entry = SimpleNamespace(entry_id="one", domain="power_sync", data={}, options={"optimization_enabled": False})
+        def update(target, *, data, options):
+            assert not h.client.permits("one")
+            target.data, target.options = data, options
+        hass = SimpleNamespace(data={rt.runtime.DATA_KEY: h.client}, config_entries=SimpleNamespace(
+            async_get_entry=lambda _: entry, async_update_entry=update))
+        rt.attach_enable_manager(h.client, hass)
+        switch = SimpleNamespace(hass=hass, _entry=entry, _attr_is_on=False, async_write_ha_state=Mock())
+        before = len(h.calls)
+        await switch_turn_on(monkeypatch, rt.runtime)(switch)
+        assert switch._attr_is_on
+        assert entry.options["optimization_enabled"]
+        assert h.client.permits("one")
+        assert [path for path, _ in h.calls[before:]] == ["/policy", "/refresh"]
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("target_enabled,previous_enabled,denied", [
+    (True, False, False), (True, False, True), (False, True, True), (True, True, False),
+])
+def test_ha_options_enable_checks_access_before_persisting(target_enabled, previous_enabled, denied):
+    """Exercise the real final options persistence block with normalized form inputs."""
+    from copy import deepcopy
+    from unittest.mock import Mock
+    import logging
+    import test_ha_optimizer_runtime as rt
+
+    async def run():
+        h = rt.Harness()
+        await h.activate()
+        h.denied = denied
+        h.revision = 2
+        entry = SimpleNamespace(entry_id="one", domain="power_sync", data={}, options={
+            "optimization_enabled": previous_enabled, "optimization_provider": "powersync",
+        })
+        def update(target, *, data, options):
+            if target_enabled and not previous_enabled:
+                assert not h.client.permits("one")
+            target.data, target.options = data, options
+        write = Mock(side_effect=update)
+        hass = SimpleNamespace(data={rt.runtime.DATA_KEY: h.client}, config_entries=SimpleNamespace(
+            async_get_entry=lambda _: entry, async_update_entry=write))
+        rt.attach_enable_manager(h.client, hass)
+        flow = SimpleNamespace(hass=hass, config_entry=entry,
+            _get_option=lambda key, default: entry.options.get(key, default),
+            _async_step_optimization=AsyncMock(return_value={"access_error": True}))
+        tree = ast.parse((COMPONENT / "config_flow.py").read_text())
+        method = deepcopy(next(node for node in ast.walk(tree) if isinstance(node, ast.AsyncFunctionDef) and node.name == "_async_step_optimization"))
+        save = next(node for node in ast.walk(method) if isinstance(node, ast.Try) and node.finalbody
+                    and any(isinstance(n, ast.Name) and n.id == "finish_monitoring_handoff" for n in ast.walk(node)))
+        method.body = [save, ast.Return(value=ast.Constant(True))]
+        namespace = dict(Any=object, FlowResult=object, entry_data={}, persisted_changed=True,
+            monitoring_handoff=False, optimization_enabled=target_enabled, new_data={},
+            new_options={"optimization_enabled": target_enabled, "optimization_provider": "powersync"},
+            CONF_OPTIMIZATION_PROVIDER="optimization_provider", CONF_OPTIMIZATION_ENABLED="optimization_enabled",
+            OPT_PROVIDER_NATIVE="native", OPT_PROVIDER_POWERSYNC="powersync", _LOGGER=logging.getLogger(__name__))
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[method], type_ignores=[])), "config_flow.py", "exec"), namespace)
+        before = len(h.calls)
+        result = await namespace[method.name](flow)
+        if target_enabled and denied:
+            assert result == {"access_error": True}
+            write.assert_not_called()
+            assert not entry.options["optimization_enabled"]
+            assert "_skip_reload" not in namespace["entry_data"]
+        else:
+            assert result is True
+            write.assert_called_once()
+            assert entry.options["optimization_enabled"] is target_enabled
+        expected = ["/policy", "/refresh"] if target_enabled and not previous_enabled else []
+        assert [path for path, _ in h.calls[before:]] == expected
     asyncio.run(run())

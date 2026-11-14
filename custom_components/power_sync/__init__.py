@@ -51582,8 +51582,17 @@ class OptimizationSettingsView(HomeAssistantView):
 
     async def post(self, request: web.Request) -> web.Response:
         """Handle POST request to update optimization settings."""
+        from contextlib import AsyncExitStack
+        enable_stack = AsyncExitStack()
+        commit_enable = None
         try:
             settings = await request.json()
+            if not isinstance(settings, dict) or (
+                "enabled" in settings and not isinstance(settings["enabled"], bool)
+            ):
+                return web.json_response({"success": False, "error": "enabled must be a boolean"}, status=400)
+            if settings.get("profit_max_enabled") is True and settings.get("cost_neutral_enabled") is True:
+                return web.json_response({"success": False, "error": "Profit Max and Cost Neutral cannot both be enabled"}, status=400)
             changes = []
 
             # Find the config entry and optimization coordinator
@@ -51602,21 +51611,6 @@ class OptimizationSettingsView(HomeAssistantView):
                 entry_data = self._hass.data.get(DOMAIN, {}).get(entry_id)
                 if isinstance(entry_data, dict):
                     opt_coordinator = entry_data.get("optimization_coordinator")
-
-            if settings.get("enabled") and config_entry:
-                license_manager = self._hass.data.get("power_sync_license_manager")
-                if license_manager and not license_manager.permits(entry_id):
-                    # Reject before saving or queueing a transition: a guarded
-                    # enable would otherwise fail after the client saw success.
-                    return web.json_response({
-                        "success": False,
-                        "code": "optimizer_access_required",
-                        "error": (
-                            "Open HA optimiser access in PowerSync integration "
-                            "options to check access and resume optimisation."
-                        ),
-                        "licensing": license_manager.status(entry_id),
-                    }, status=402)
 
             ai_setting_keys = {
                 "ai_summary_provider",
@@ -51716,6 +51710,31 @@ class OptimizationSettingsView(HomeAssistantView):
                     status=400,
                 )
 
+            if settings.get("enabled") and config_entry:
+                license_manager = self._hass.data.get("power_sync_license_manager")
+                if license_manager and not (
+                    opt_coordinator and opt_coordinator.enabled and license_manager.permits(entry_id)
+                ):
+                    try:
+                        commit_enable = await enable_stack.enter_async_context(
+                            license_manager.prepare_enable(entry_id)
+                        )
+                    except TimeoutError:
+                        return web.json_response({
+                            "success": False, "code": "optimizer_access_refresh_timeout",
+                            "error": "Checking HA optimiser access timed out. Please try enabling again.",
+                        }, status=503)
+                    except ValueError:
+                        return web.json_response({
+                            "success": False,
+                            "code": "optimizer_access_required",
+                            "error": (
+                                "Open HA optimiser access in PowerSync integration "
+                                "options to check access and resume optimisation."
+                            ),
+                            "licensing": license_manager.status(entry_id),
+                        }, status=402)
+
             # If coordinator exists, use it
             if opt_coordinator:
                 transition_task = (
@@ -51757,6 +51776,14 @@ class OptimizationSettingsView(HomeAssistantView):
                             "_optimization_settings_target_enabled"
                         ] = requested_enabled
 
+                    def _persist_optimizer_enabled_request() -> None:
+                        if config_entry and isinstance(entry_data, dict):
+                            new_options = dict(config_entry.options)
+                            if new_options.get(CONF_OPTIMIZATION_ENABLED, False) != requested_enabled:
+                                new_options[CONF_OPTIMIZATION_ENABLED] = requested_enabled
+                                entry_data["_skip_reload"] = True
+                                self._hass.config_entries.async_update_entry(config_entry, options=new_options)
+
                     async def _apply_optimizer_settings_transition() -> None:
                         if previous_task is not None:
                             try:
@@ -51773,23 +51800,7 @@ class OptimizationSettingsView(HomeAssistantView):
                         # Persist the requested toggle before the first slow
                         # hardware await.  The coordinator repeats this write
                         # after applying the transition, but it is then a no-op.
-                        if config_entry and isinstance(entry_data, dict):
-                            new_options = dict(config_entry.options)
-                            if (
-                                new_options.get(
-                                    CONF_OPTIMIZATION_ENABLED,
-                                    False,
-                                )
-                                != requested_enabled
-                            ):
-                                new_options[
-                                    CONF_OPTIMIZATION_ENABLED
-                                ] = requested_enabled
-                                entry_data["_skip_reload"] = True
-                                self._hass.config_entries.async_update_entry(
-                                    config_entry,
-                                    options=new_options,
-                                )
+                        _persist_optimizer_enabled_request()
 
                         try:
                             result = await opt_coordinator.set_settings(
@@ -51809,6 +51820,9 @@ class OptimizationSettingsView(HomeAssistantView):
                                 exc_info=True,
                             )
 
+                    # Save before opening admission; the serialized task repeats
+                    # this after an older transition, then starts the optimizer.
+                    _persist_optimizer_enabled_request()
                     queued_task = self._hass.async_create_task(
                         _apply_optimizer_settings_transition()
                     )
@@ -51840,10 +51854,12 @@ class OptimizationSettingsView(HomeAssistantView):
                                     None,
                                 )
 
-                        queued_task.add_done_callback(
-                            _clear_completed_transition
-                        )
+                    queued_task.add_done_callback(
+                        _clear_completed_transition
+                    )
 
+                    if commit_enable:
+                        commit_enable()
                     return web.json_response({
                         "success": True,
                         "changes": [
@@ -51855,6 +51871,8 @@ class OptimizationSettingsView(HomeAssistantView):
                     })
 
                 result = await opt_coordinator.set_settings(settings)
+                if commit_enable and result.get("success"):
+                    commit_enable()
                 return web.json_response(result)
 
             # Otherwise, update config entry directly
@@ -52285,6 +52303,8 @@ class OptimizationSettingsView(HomeAssistantView):
 
             # Update the config entry (both data and options)
             self._hass.config_entries.async_update_entry(config_entry, data=new_data, options=new_options)
+            if commit_enable:
+                commit_enable()
             _LOGGER.info(f"Optimization settings updated via API: {changes}")
 
             # Only reload if enabled/disabled state actually changed
@@ -52312,6 +52332,8 @@ class OptimizationSettingsView(HomeAssistantView):
                 "success": False,
                 "error": str(e)
             }, status=500)
+        finally:
+            await enable_stack.aclose()
 
 
 class OptimizationChatGPTView(HomeAssistantView):

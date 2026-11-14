@@ -333,9 +333,157 @@ def manager_method(name):
     tree=ast.parse(source.read_text())
     cls=next(n for n in tree.body if isinstance(n,ast.ClassDef) and n.name=='HALicenseManager')
     function=next(n for n in cls.body if isinstance(n,(ast.AsyncFunctionDef,ast.FunctionDef)) and n.name==name)
-    namespace={'asyncio':asyncio,'json':json,'Path':Path,'LicenseRuntime':runtime.LicenseRuntime,'recovery_scope':guard.recovery_scope,'_LOGGER':logging.getLogger(__name__)}
+    from contextlib import asynccontextmanager
+    namespace={'asyncio':asyncio,'asynccontextmanager':asynccontextmanager,'json':json,'Path':Path,'LicenseRuntime':runtime.LicenseRuntime,'recovery_scope':guard.recovery_scope,'_LOGGER':logging.getLogger(__name__)}
     exec(compile(ast.fix_missing_locations(ast.Module(body=[function],type_ignores=[])),str(source),'exec'),namespace)
     return namespace[name]
+
+
+def attach_enable_manager(client, hass, coordinators=None):
+    """Use the real HA admission methods on the signed-permission harness."""
+    client.hass = hass
+    client.coordinators = coordinators or {}
+    client.prepare_enable = lambda entry_id: manager_method("prepare_enable")(client, entry_id)
+    client.resume_entry = lambda entry_id, **kwargs: manager_method("resume_entry")(client, entry_id, **kwargs)
+    client.finish_manual_command = lambda entry_id: manager_method("finish_manual_command")(client, entry_id)
+    return client
+
+
+@pytest.mark.parametrize("finish", ["commit", "reject", "cancel"])
+def test_explicit_enable_refreshes_and_fences_until_settings_are_committed(finish):
+    async def run():
+        h = Harness()
+        await h.activate()
+        h.client.entries["one"] = {"resume_required": True}
+        h.revision = 2
+        coordinator = types.SimpleNamespace(
+            _enabled=False, _entry=types.SimpleNamespace(options={"optimization_enabled": True}, data={}),
+            _get_active_force_state=lambda: None, _last_optimizer_result="old", _current_schedule="old",
+        )
+        async def enable():
+            raise AssertionError("preparation must not start hardware or let reconciliation start it")
+        coordinator.enable = enable
+        manager = attach_enable_manager(h.client, types.SimpleNamespace(), {"one": coordinator})
+        calls_before = len(h.calls)
+        try:
+            async with manager.prepare_enable("one") as commit:
+                assert len(h.calls) == calls_before + 2
+                assert manager.admission.permission.revision == 2
+                assert not manager.permits("one")
+                assert manager.permits("two"), "preparation fences only the requested entry"
+                assert coordinator._current_schedule is None
+                await manager_method("reconcile_entries")(manager)
+                if finish == "cancel":
+                    raise asyncio.CancelledError()
+                if finish == "commit":
+                    commit()
+        except asyncio.CancelledError:
+            assert finish == "cancel"
+        assert not manager._enable_pending
+        assert manager.permits("one") is (finish == "commit")
+        if finish != "commit":
+            assert h.stored["entries"]["one"]["resume_required"]
+            await manager_method("reconcile_entries")(manager)
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("blocked_by", ["denied", "recovery", "external", "storage"])
+def test_enable_preparation_cannot_bypass_denial_recovery_or_external_control(blocked_by):
+    async def run():
+        h = Harness()
+        await h.activate()
+        if blocked_by == "denied":
+            h.denied = True
+            h.revision = 2
+        h.client.entries["one"] = {"resume_required": True, "recovery_pending": blocked_by == "recovery"}
+        coordinator = types.SimpleNamespace(
+            _get_active_force_state=lambda: {"active": True, "source": "manual"} if blocked_by == "external" else None,
+            _last_optimizer_result="old", _current_schedule="old",
+        )
+        if blocked_by == "storage":
+            async def fail_save(_):
+                raise OSError("storage unavailable")
+            h.client._save = fail_save
+        manager = attach_enable_manager(h.client, types.SimpleNamespace(), {"one": coordinator})
+        with pytest.raises(ValueError):
+            async with manager.prepare_enable("one"):
+                raise AssertionError("blocked admission must never reach config persistence")
+        assert not manager.permits("one")
+        assert not manager._enable_pending
+        assert coordinator._current_schedule == "old"
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("phase", ["/policy", "/refresh", "resume_save"])
+def test_cancelled_enable_verification_stays_closed_after_restart(phase):
+    async def run():
+        h = Harness()
+        await h.activate()
+        h.client.entries["one"] = {"resume_required": True}
+        entered = asyncio.Event()
+        request = h.client._request
+        save = h.client._save
+        async def blocked_request(path, body):
+            if path == phase:
+                entered.set()
+                await asyncio.Future()
+            return await request(path, body)
+        async def blocked_save(value):
+            if phase == "resume_save" and not value["entries"]["one"]["resume_required"]:
+                entered.set()
+                await asyncio.Future()
+            await save(value)
+        h.client._request = blocked_request
+        h.client._save = blocked_save
+        entry = types.SimpleNamespace(domain="power_sync")
+        manager = attach_enable_manager(h.client, types.SimpleNamespace(config_entries=types.SimpleNamespace(async_get_entry=lambda _: entry)))
+        async def enable():
+            async with manager.prepare_enable("one"):
+                raise AssertionError("cancelled request cannot commit an enable")
+        task = asyncio.create_task(enable())
+        await entered.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert not manager.permits("one")
+        assert not manager._enable_pending
+        restarted = h.new_client()
+        await restarted.initialize()
+        assert not restarted.permits("one")
+    asyncio.run(run())
+
+
+def test_enable_does_not_readmit_work_queued_before_the_request():
+    async def run():
+        h = Harness()
+        await h.activate()
+        h.client.entries["one"] = {"generation": 1}
+        started = asyncio.Event()
+        continue_work = asyncio.Event()
+        writes = []
+        owner = types.SimpleNamespace(entry_id="one", _licensing_entry_generation=1,
+            _get_active_force_state=lambda: None)
+        hass = types.SimpleNamespace(data={runtime.DATA_KEY: h.client})
+        owner.hass = hass
+        manager = attach_enable_manager(h.client, hass, {"one": owner})
+        @guard.optimizer_work
+        async def work(self):
+            started.set()
+            await continue_work.wait()
+            async def write():
+                writes.append("new write")
+            await guard.fenced_call(self, write, "set_backup_reserve")
+        old = asyncio.create_task(work(owner))
+        await started.wait()
+        async with manager.prepare_enable("one") as commit:
+            commit()
+        continue_work.set()
+        with pytest.raises(guard.OptimizerAccessLost):
+            await old
+        assert writes == []
+        await work(owner)
+        assert writes == ["new write"]
+    asyncio.run(run())
 
 
 def test_recovery_journal_survives_restart_and_failed_cleanup():

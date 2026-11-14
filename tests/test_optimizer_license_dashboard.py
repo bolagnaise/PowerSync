@@ -26,11 +26,29 @@ def settings_post():
                 if isinstance(node, ast.ClassDef) and node.name == "OptimizationSettingsView")
     method = next(node for node in view.body
                   if isinstance(node, ast.AsyncFunctionDef) and node.name == "post")
+    constants = {}
+    for node in ast.parse((COMPONENT / "const.py").read_text()).body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            try:
+                value = ast.literal_eval(node.value)
+            except (ValueError, TypeError):
+                if not isinstance(node.value, ast.Name) or node.value.id not in constants:
+                    continue
+                value = constants[node.value.id]
+            constants[node.targets[0].id] = value
+    package = ModuleType("_optimizer_settings_view_test")
+    package.__path__ = []
+    const_module = ModuleType(package.__name__ + ".const")
+    const_module.__dict__.update(constants)
+    sys.modules[package.__name__] = package
+    sys.modules[const_module.__name__] = const_module
     namespace = {
+        **constants,
+        "__package__": package.__name__,
         "asyncio": asyncio,
         "DOMAIN": "power_sync",
         "CONF_OPTIMIZATION_ENABLED": "optimization_enabled",
-        "_LOGGER": SimpleNamespace(warning=Mock(), error=Mock()),
+        "_LOGGER": SimpleNamespace(warning=Mock(), error=Mock(), info=Mock()),
         "web": SimpleNamespace(Request=object, Response=object,
                                json_response=lambda body, status=200: {**body, "_status": status}),
     }
@@ -38,7 +56,7 @@ def settings_post():
     return namespace["post"]
 
 
-@pytest.mark.parametrize("blocked_by", ["unpaired", "denied", "expired", "storage", "resume", "recovery"])
+@pytest.mark.parametrize("blocked_by", ["unpaired", "denied", "expired", "storage", "recovery"])
 @pytest.mark.parametrize("with_coordinator", [True, False])
 def test_settings_reject_unavailable_access_before_saving_or_queueing(blocked_by, with_coordinator):
     import test_ha_optimizer_runtime as rt
@@ -58,12 +76,12 @@ def test_settings_reject_unavailable_access_before_saving_or_queueing(blocked_by
             h.mono = 8 * 86400
         elif blocked_by == "storage":
             h.client.storage_ok = False
+            h.client._save = AsyncMock(side_effect=OSError("storage unavailable"))
         elif blocked_by in {"resume", "recovery"}:
             h.client.entries["one"] = {"resume_required": True,
                                        "recovery_pending": blocked_by == "recovery"}
         assert not h.client.permits("one")
-        status = h.client.status("one")
-        entry = SimpleNamespace(entry_id="one", data={}, options={"optimization_enabled": False})
+        entry = SimpleNamespace(entry_id="one", domain="power_sync", data={}, options={"optimization_enabled": False})
         update = Mock()
         queue = Mock(side_effect=asyncio.create_task)
         coordinator = SimpleNamespace(enabled=False, set_settings=AsyncMock(
@@ -71,9 +89,10 @@ def test_settings_reject_unavailable_access_before_saving_or_queueing(blocked_by
         entry_data = {"optimization_coordinator": coordinator} if with_coordinator else {}
         hass = SimpleNamespace(
             data={"power_sync": {"one": entry_data}, rt.runtime.DATA_KEY: h.client},
-            config_entries=SimpleNamespace(async_entries=lambda _: [entry], async_update_entry=update),
+            config_entries=SimpleNamespace(async_entries=lambda _: [entry], async_get_entry=lambda _: entry, async_update_entry=update),
             async_create_task=queue,
         )
+        rt.attach_enable_manager(h.client, hass)
         request = SimpleNamespace(json=AsyncMock(return_value={"enabled": True}))
         response = await settings_post()(SimpleNamespace(_hass=hass), request)
         # Drain any incorrectly accepted background work so the old behavior is
@@ -84,7 +103,7 @@ def test_settings_reject_unavailable_access_before_saving_or_queueing(blocked_by
         assert response["success"] is False
         assert response["code"] == "optimizer_access_required"
         assert "HA optimiser access" in response["error"]
-        assert response["licensing"] == status
+        assert response["licensing"] == h.client.status("one")
         assert not entry.options["optimization_enabled"]
         update.assert_not_called()
         queue.assert_not_called()
@@ -123,6 +142,7 @@ def test_settings_preserve_allowed_enable_disable_and_ordinary_writes(access, se
         hass = SimpleNamespace(data=data, async_create_task=asyncio.create_task,
                                config_entries=SimpleNamespace(async_entries=lambda _: [entry],
                                                               async_update_entry=update))
+        rt.attach_enable_manager(h.client, hass)
         calls_before = list(h.calls)
         response = await settings_post()(SimpleNamespace(_hass=hass),
                                         SimpleNamespace(json=AsyncMock(return_value=settings)))
@@ -133,8 +153,89 @@ def test_settings_preserve_allowed_enable_disable_and_ordinary_writes(access, se
             await entry_data["_optimization_settings_transition_task"]
             assert entry.options["optimization_enabled"] is settings["enabled"]
         coordinator.set_settings.assert_awaited_once_with(settings)
-        assert h.calls == calls_before, "settings preflight must not refresh or contact hardware"
+        if access == "available" and settings.get("enabled"):
+            assert [path for path, _ in h.calls[len(calls_before):]] == ["/policy", "/refresh"]
+        else:
+            assert h.calls == calls_before, "disabling and ordinary writes must not refresh access"
 
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("paused", [False, True])
+@pytest.mark.parametrize("with_coordinator", [False, True])
+def test_mobile_settings_enable_refreshes_signed_access_and_resumes_explicitly(paused, with_coordinator):
+    import test_ha_optimizer_runtime as rt
+
+    async def run():
+        h = rt.Harness()
+        await h.activate()
+        if paused:
+            h.client.entries["one"] = {"resume_required": True}
+        else:
+            h.client.admission.permission = None
+        entry = SimpleNamespace(entry_id="one", domain="power_sync", data={}, options={"optimization_enabled": False})
+        coordinator = SimpleNamespace(enabled=False, set_settings=AsyncMock(return_value={"success": True}))
+        entry_data = {"optimization_coordinator": coordinator} if with_coordinator else {}
+        def update(target, *, options, data=None):
+            assert not h.client.permits("one"), "admission stays fenced until the request is committed"
+            target.options = dict(options)
+            if data is not None:
+                target.data = dict(data)
+        tasks = []
+        def queue(coro):
+            task = asyncio.create_task(coro)
+            tasks.append(task)
+            return task
+        hass = SimpleNamespace(
+            data={"power_sync": {"one": entry_data}, rt.runtime.DATA_KEY: h.client},
+            config_entries=SimpleNamespace(async_entries=lambda _: [entry], async_get_entry=lambda _: entry,
+                                           async_update_entry=update, async_reload=AsyncMock()),
+            async_create_task=queue,
+        )
+        rt.attach_enable_manager(h.client, hass)
+        before = len(h.calls)
+        response = await settings_post()(SimpleNamespace(_hass=hass), SimpleNamespace(json=AsyncMock(return_value={"enabled": True})))
+        assert response["_status"] == 200
+        assert response["success"]
+        await asyncio.gather(*tasks)
+        assert entry.options["optimization_enabled"]
+        assert coordinator.set_settings.await_count == int(with_coordinator)
+        assert h.client.permits("one")
+        assert [path for path, _ in h.calls[before:]] == ["/policy", "/refresh"]
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("settings", [None, {"enabled": "true"}, {"enabled": 1},
+    {"enabled": True, "profit_max_enabled": True, "cost_neutral_enabled": True}])
+def test_invalid_enable_request_never_refreshes_or_starts_work(settings):
+    manager = SimpleNamespace(prepare_enable=Mock(side_effect=AssertionError("invalid request must not prepare access")))
+    hass = SimpleNamespace(data={"power_sync_license_manager": manager})
+    response = asyncio.run(settings_post()(SimpleNamespace(_hass=hass), SimpleNamespace(json=AsyncMock(return_value=settings))))
+    assert response["_status"] == 400
+    manager.prepare_enable.assert_not_called()
+
+
+def test_enable_access_timeout_leaves_the_toggle_off_and_admission_closed():
+    import test_ha_optimizer_runtime as rt
+
+    async def run():
+        h = rt.Harness()
+        await h.activate()
+        h.client.maintain = AsyncMock(side_effect=TimeoutError())
+        entry = SimpleNamespace(entry_id="one", data={}, options={"optimization_enabled": False})
+        update = Mock()
+        queue = Mock()
+        hass = SimpleNamespace(data={rt.runtime.DATA_KEY: h.client},
+            config_entries=SimpleNamespace(async_entries=lambda _: [entry], async_update_entry=update), async_create_task=queue)
+        rt.attach_enable_manager(h.client, hass)
+        response = await settings_post()(SimpleNamespace(_hass=hass), SimpleNamespace(json=AsyncMock(return_value={"enabled": True})))
+        assert response["_status"] == 503
+        assert response["code"] == "optimizer_access_refresh_timeout"
+        assert not h.client.permits("one")
+        assert not h.client._enable_pending
+        assert not entry.options["optimization_enabled"]
+        update.assert_not_called()
+        queue.assert_not_called()
     asyncio.run(run())
 
 
