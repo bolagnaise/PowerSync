@@ -4,7 +4,7 @@ PowerSync withholds the EV-adjusted Home Load (state ``unknown``,
 ``normalization_quality: incomplete``) when a car may still be charging but
 has stopped reporting, e.g. a stalled Tesla Fleet integration. The sensor and
 the optimizer's load history stay unknown; the boards show the measured house
-load instead of "--", flagged as possibly including the car.
+load instead of "--".
 """
 import json
 import subprocess
@@ -40,12 +40,10 @@ def test_now_card_shows_measured_load_when_ev_adjustment_is_withheld():
       ],
     }));
     """)
-    assert "1.7" in out["incomplete"] and "May include car charging" in out["incomplete"]
+    assert "1.7" in out["incomplete"] and "Using" in out["incomplete"]
     assert "1.2" in out["complete"] and "Using" in out["complete"]
-    assert "May include" not in out["complete"]
     for key in ("unknownNoRaw", "unavailable"):
         assert "—" in out[key], key
-        assert "May include" not in out[key], key
     assert out["helper"][0] == {"kw": 1.731, "mayIncludeEv": True}
     # Only the withheld-for-EV case falls back; never a negative or other unknown.
     assert out["helper"][1]["mayIncludeEv"] is False

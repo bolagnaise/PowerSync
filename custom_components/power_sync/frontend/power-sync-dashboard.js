@@ -431,7 +431,7 @@ function psKw(hass, id) {
 }
 // Home load for display. When the EV-adjusted value is withheld because a
 // car's charging state is unknown (normalization_quality "incomplete"), show
-// the measured house load instead, flagged as possibly including the car.
+// the measured house load instead (it may include the car).
 // The sensor itself stays unknown, so optimizer load history is unaffected.
 function psHomeLoad(hass, id) {
   const kw = psKw(hass, id);
@@ -2158,7 +2158,7 @@ class PsNowCard extends PsCardBase {
       </div>
       <div class="power">
         ${en.solar ? read('Solar', '--yellow', solar, solarSub, true) : ''}
-        ${en.home ? read('Home', '--purple', home, homeLoad.mayIncludeEv ? 'May include car charging' : 'Using', false) : ''}
+        ${en.home ? read('Home', '--purple', home, 'Using', false) : ''}
         ${en.battery ? read('Battery', '--green', battery, battSub, true) : ''}
         ${en.grid ? read('Grid', grid < -0.05 ? '--red' : '--cyan', grid, gridSub, true) : ''}
         <div class="balance" aria-hidden="true">
