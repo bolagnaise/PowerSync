@@ -7,6 +7,12 @@ forecast, household load forecast, battery limits, and configured reserve floors
 Solar forecasting via Solcast or Open-Meteo Solar Forecast should be configured
 for accurate schedules.
 
+## Enabling Smart Optimization
+
+Turning on Smart Optimization from the mobile app, Home Assistant switch or integration options checks HA optimiser access before saving the enabled setting. With valid access, explicitly enabling it can also resume optimisation after an interruption. Pending recovery or an active manual control owner must be resolved first. Failed or cancelled checks leave optimisation paused.
+
+**Refresh access** checks permission without enabling Smart Optimization or resuming an interrupted schedule. Monitoring Mode still determines whether the optimiser can send hardware commands.
+
 ## Planned power ranges
 
 The dashboard groups consecutive slots with the same action into one window.

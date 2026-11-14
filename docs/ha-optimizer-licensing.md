@@ -17,6 +17,8 @@ refresh access, resume optimisation when required, or reset pairing. Review the
 status shown for this Home Assistant installation. Cloud subscriptions do not
 grant HA optimiser access.
 
+Enabling Smart Optimization through the app, HA switch or integration options checks access before saving the enabled setting. An explicit enable can also resume optimisation when access is valid and owned recovery is complete. A failed or cancelled check leaves optimisation paused. Refreshing access alone does not enable or resume optimisation.
+
 ## Expiry and recovery
 
 Monitoring, dashboards, manual controls and recovery remain available without
