@@ -280,6 +280,125 @@ def test_import_period_price_is_preserved_across_evening_split(agl_module):
     } == {(15, 17), (21, 22)}
 
 
+@pytest.mark.parametrize("month", [1, 4, 7, 11])
+def test_ausgrid_reward_overlay_preserves_import_with_all_day_fallback(agl_module, month):
+    agl = agl_module
+    definitions, rows = agl.build_ausgrid_seasonal_import_periods(
+        summer_offpeak_rate=0.2163, summer_peak_rate=0.5418,
+        winter_offpeak_rate=0.19, winter_peak_rate=0.47,
+    )
+    raw = _tariff({}, {})
+    raw["seasons"] = {}
+    raw["energy_charges"] = {}
+    raw["sell_tariff"]["energy_charges"] = {}
+    for definition in definitions:
+        name = definition["name"]
+        selected = [row for row in rows if row["season"] == name]
+        raw["seasons"][name] = {
+            "fromMonth": definition["from_month"], "toMonth": definition["to_month"],
+            "tou_periods": {row["name"]: [{"fromDayOfWeek": 0, "toDayOfWeek": 6,
+                "fromHour": row["start"], "toHour": row["end"]}] for row in selected},
+        }
+        raw["energy_charges"][name] = {row["name"]: row["import_rate"] for row in selected}
+        raw["sell_tariff"]["energy_charges"][name] = {row["name"]: 0 for row in selected}
+    before = deepcopy(raw)
+    overlaid = agl.apply_battery_rewards_export_rates(raw, peak_export_rate=0.28, offpeak_export_rate=0.03)
+    time_module = importlib.import_module("power_sync.tariff_time")
+    season = time_module.find_season_for_month(raw["seasons"], month)
+    periods = overlaid["seasons"][season]["tou_periods"]
+    buys = overlaid["energy_charges"][season]
+    sells = overlaid["sell_tariff"]["energy_charges"][season]
+    for day in range(1, 8):
+        for minute in range(0, 1440, 15):
+            when = datetime(2026, month, day, minute // 60, minute % 60)
+            original = time_module.find_matching_tou_period(
+                raw["seasons"][season]["tou_periods"], when,
+                buy_rates=raw["energy_charges"][season],
+            )
+            matched = time_module.find_matching_tou_period(periods, when, buy_rates=buys, sell_rates=sells)
+            assert buys[matched] == raw["energy_charges"][season][original], when
+            assert sells[matched] == (0.28 if 17 <= when.hour < 21 else 0.03), when
+    assert raw == before
+    assert agl.apply_battery_rewards_export_rates(overlaid, peak_export_rate=0.28, offpeak_export_rate=0.03) == overlaid
+
+
+def _previous_reward_overlay(agl, base):
+    return agl._apply_battery_rewards_export_rates(
+        base, peak_export_rate=0.28, offpeak_export_rate=0.03,
+        start_hour=17, end_hour=21, resolve_import_overlaps=False,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("initial", [False, True])
+async def test_startup_repairs_existing_reward_overlap_without_resetting_user_tariff(agl_module, initial):
+    agl = agl_module
+    base = _tariff({
+        "PEAK": [{"fromDayOfWeek": 0, "toDayOfWeek": 6, "fromHour": 15, "toHour": 21}],
+        "OFF_PEAK": [{"fromDayOfWeek": 0, "toDayOfWeek": 6, "fromHour": 0, "toHour": 24}],
+    }, {"PEAK": 0.5418, "OFF_PEAK": 0.2163})
+    original = _previous_reward_overlay(agl, base)
+    original["description"] = "user metadata"
+    original["agl_battery_rewards"]["future_metadata"] = "preserve"
+    before = deepcopy(original)
+    from unittest.mock import AsyncMock
+    class Store:
+        def __init__(self):
+            self.tariff = original
+            self.async_save = AsyncMock()
+        def get_custom_tariff(self): return self.tariff
+        def set_custom_tariff(self, tariff): self.tariff = tariff
+    store = Store()
+    entry = SimpleNamespace(options={"agl_import_schedule": "manual"},
+        data={"initial_custom_tariff": original} if initial else {})
+    await agl.async_prepare_agl_startup_tariff(entry, store)
+    fixed = store.tariff
+    time_module = importlib.import_module("power_sync.tariff_time")
+    matched = time_module.find_matching_tou_period(
+        fixed["seasons"]["All Year"]["tou_periods"], datetime(2026, 11, 14, 17, 24),
+        buy_rates=fixed["energy_charges"]["All Year"],
+        sell_rates=fixed["sell_tariff"]["energy_charges"]["All Year"],
+    )
+    assert matched == "PEAK_AGL_REWARD"
+    assert fixed["energy_charges"]["All Year"][matched] == 0.5418
+    assert fixed["sell_tariff"]["energy_charges"]["All Year"][matched] == 0.28
+    assert fixed["agl_base_tariff"] == base
+    assert fixed["agl_battery_rewards"] == original["agl_battery_rewards"]
+    assert fixed["description"] == "user metadata"
+    assert agl.repair_battery_rewards_import_overlap(fixed) is fixed
+    assert original == before
+    store.async_save.assert_awaited_once()
+    edited = deepcopy(original)
+    edited["energy_charges"]["All Year"]["PEAK_AGL_REWARD"] = 0.60
+    assert agl.repair_battery_rewards_import_overlap(edited) is edited
+    edited = deepcopy(original)
+    edited["power_sync_explicit_periods"] = [{"name": "user edited period", "import_rate": 0.60}]
+    assert agl.repair_battery_rewards_import_overlap(edited) is edited
+
+
+def test_historical_two_season_reward_overlay_still_receives_calendar_repair(agl_module):
+    agl = agl_module
+    previous = _previous_reward_overlay(agl, _legacy_ausgrid_tariff(agl))
+    repaired = agl.repair_legacy_ausgrid_seasonal_import_tariff(previous)
+    assert repaired is not previous
+    assert set(repaired["seasons"]) == {"Summer", "Autumn", "Winter", "Spring"}
+    matched = importlib.import_module("power_sync.tariff_time").find_matching_tou_period(
+        repaired["seasons"]["Summer"]["tou_periods"], datetime(2026, 11, 14, 18),
+        buy_rates=repaired["energy_charges"]["Summer"],
+        sell_rates=repaired["sell_tariff"]["energy_charges"]["Summer"],
+    )
+    assert repaired["energy_charges"]["Summer"][matched] == 0.51
+
+
+@pytest.mark.asyncio
+async def test_startup_overlap_repair_preserves_unavailable_store_fallback(agl_module):
+    class Store:
+        def get_custom_tariff(self):
+            raise OSError("synthetic unavailable store")
+    entry = SimpleNamespace(options={"agl_import_schedule": "ausgrid_seasonal"}, data={})
+    assert not await agl_module.async_prepare_agl_startup_tariff(entry, Store())
+
+
 def test_overnight_period_keeps_next_day_import_coverage(agl_module):
     agl = agl_module
     original = _tariff(

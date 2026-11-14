@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from copy import deepcopy
+from datetime import datetime
 import math
 from typing import Any
 
@@ -403,17 +404,23 @@ def repair_legacy_ausgrid_seasonal_import_tariff(
     ) != legacy_rows:
         return tariff
     try:
-        expected_overlay = apply_battery_rewards_export_rates(
+        expected_overlay = _apply_battery_rewards_export_rates(
             base,
             peak_export_rate=overlay[0],
             offpeak_export_rate=overlay[1],
             start_hour=overlay[2],
             end_hour=overlay[3],
+            resolve_import_overlaps=False,
         )
     except (TypeError, ValueError, KeyError):
         return tariff
-    for section in ("seasons", "energy_charges", "sell_tariff"):
-        if tariff.get(section) != expected_overlay.get(section):
+    sections = ("seasons", "energy_charges", "sell_tariff")
+    if any(tariff.get(section) != expected_overlay.get(section) for section in sections):
+        expected_overlay = apply_battery_rewards_export_rates(
+            base, peak_export_rate=overlay[0], offpeak_export_rate=overlay[1],
+            start_hour=overlay[2], end_hour=overlay[3],
+        )
+        if any(tariff.get(section) != expected_overlay.get(section) for section in sections):
             return tariff
 
     try:
@@ -503,10 +510,54 @@ async def async_prepare_agl_startup_tariff(entry: Any, store: Any) -> bool:
             and repair_legacy_ausgrid_seasonal_import_tariff(initial) is not initial
         )
         if not legacy_snapshot:
-            store.set_custom_tariff(deepcopy(initial))
+            repaired_initial = repair_battery_rewards_import_overlap(deepcopy(initial))
+            store.set_custom_tariff(repaired_initial)
             await store.async_save()
             return False
-    return await async_migrate_ausgrid_seasonal_import_tariff(entry, store)
+    migrated = await async_migrate_ausgrid_seasonal_import_tariff(entry, store)
+    if store is not None:
+        try:
+            source = store.get_custom_tariff()
+        except Exception:
+            return migrated
+        repaired = repair_battery_rewards_import_overlap(source)
+        if repaired is not source:
+            store.set_custom_tariff(repaired)
+            await store.async_save()
+            return True
+    return migrated
+
+
+def repair_battery_rewards_import_overlap(tariff: Any) -> Any:
+    """Rebuild an unchanged generated reward overlay, preserving user edits."""
+    if not isinstance(tariff, dict) or not isinstance(tariff.get(_BASE_TARIFF_KEY), dict):
+        return tariff
+    overlay = _overlay_values(tariff.get(_METADATA_KEY))
+    if overlay is None:
+        return tariff
+    base = tariff[_BASE_TARIFF_KEY]
+    if tariff.get("power_sync_explicit_periods") != base.get("power_sync_explicit_periods"):
+        return tariff
+    kwargs = {
+        "peak_export_rate": overlay[0],
+        "offpeak_export_rate": overlay[1],
+        "start_hour": overlay[2],
+        "end_hour": overlay[3],
+    }
+    try:
+        previous = _apply_battery_rewards_export_rates(base, **kwargs, resolve_import_overlaps=False)
+        sections = ("seasons", "energy_charges", "sell_tariff")
+        if any(tariff.get(section) != previous.get(section) for section in sections):
+            return tariff
+        corrected = apply_battery_rewards_export_rates(base, **kwargs)
+    except (TypeError, ValueError, KeyError):
+        return tariff
+    if all(tariff.get(section) == corrected.get(section) for section in sections):
+        return tariff
+    result = deepcopy(tariff)
+    for section in sections:
+        result[section] = corrected[section]
+    return result
 
 
 def _days_in_range(start: int, end: int) -> list[int]:
@@ -610,6 +661,62 @@ def apply_battery_rewards_export_rates(
     start_hour: int = AGL_BATTERY_REWARDS_START_HOUR,
     end_hour: int = AGL_BATTERY_REWARDS_END_HOUR,
 ) -> dict[str, Any]:
+    """Overlay daily export rewards without changing effective import prices."""
+    return _apply_battery_rewards_export_rates(
+        tariff,
+        peak_export_rate=peak_export_rate,
+        offpeak_export_rate=offpeak_export_rate,
+        start_hour=start_hour,
+        end_hour=end_hour,
+        resolve_import_overlaps=True,
+    )
+
+
+def _resolved_import_ranges(
+    periods: dict[str, Any],
+    buy_rates: dict[str, float],
+    sell_rates: dict[str, float],
+) -> dict[str, list[dict[str, int]]]:
+    """Resolve fallback overlaps before splitting away their original duration."""
+    from .tariff_time import find_matching_tou_period
+
+    expanded = [
+        entry
+        for ranges in periods.values() if isinstance(ranges, list)
+        for raw in ranges if isinstance(raw, dict)
+        for entry in _non_wrapping_ranges(raw)
+    ]
+    resolved: dict[str, list[dict[str, int]]] = {}
+    for day in range(7):
+        boundaries = sorted({
+            entry[key]
+            for entry in expanded if entry["fromDayOfWeek"] == day
+            for key in ("fromHour", "toHour")
+        })
+        for start, end in zip(boundaries, boundaries[1:]):
+            # 4 January 2026 is Sunday (Tesla day zero). Only the weekday and
+            # local time are relevant; the caller already selected the season.
+            name = find_matching_tou_period(
+                periods, datetime(2026, 1, 4 + day, start), default="",
+                buy_rates=buy_rates, sell_rates=sell_rates,
+            )
+            if name:
+                resolved.setdefault(name, []).append({
+                    "fromDayOfWeek": day, "toDayOfWeek": day,
+                    "fromHour": start, "toHour": end,
+                })
+    return resolved
+
+
+def _apply_battery_rewards_export_rates(
+    tariff: dict[str, Any],
+    *,
+    peak_export_rate: float,
+    offpeak_export_rate: float,
+    start_hour: int,
+    end_hour: int,
+    resolve_import_overlaps: bool,
+) -> dict[str, Any]:
     """Overlay AGL's daily evening feed-in rates on an import tariff.
 
     Rates are dollars per kWh. The helper preserves the original tariff so
@@ -651,6 +758,11 @@ def apply_battery_rewards_export_rates(
         overlaid_periods: dict[str, list[dict[str, int]]] = {}
         overlaid_buy_rates: dict[str, float] = {}
         overlaid_sell_rates: dict[str, float] = {}
+
+        if resolve_import_overlaps:
+            tou_periods = _resolved_import_ranges(
+                tou_periods, season_buy_rates, sell_charges.get(season_name, {}),
+            )
 
         for original_name, ranges in tou_periods.items():
             if not isinstance(ranges, list):

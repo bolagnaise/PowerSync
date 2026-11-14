@@ -2,7 +2,21 @@
 
 - [Amber Smart Shift](#amber-smartshift)
 - [Flow Power Happy Hour Plus](#flow-power-happy-hour-plus)
+- [AGL Battery Rewards](#agl-battery-rewards)
 - [Octopus Energy and BottlecapDave](#octopus-energy)
+
+<a id="agl-battery-rewards"></a>
+
+## AGL Battery Rewards
+
+The evening export reward changes the feed-in rate while retaining your configured
+import prices. A peak import period continues through the reward window even when
+the tariff also has an all-day off-peak fallback.
+
+After updating through HACS, restart Home Assistant. PowerSync repairs unchanged
+generated reward schedules using their saved import tariff and reward settings.
+Hand-edited schedules are preserved; review and save those through the tariff
+editor if their reward periods overlap incorrectly.
 
 <a id="amber-smartshift"></a>
 
