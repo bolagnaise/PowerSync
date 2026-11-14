@@ -550,7 +550,7 @@ def repair_battery_rewards_import_overlap(tariff: Any) -> Any:
         if any(tariff.get(section) != previous.get(section) for section in sections):
             return tariff
         corrected = apply_battery_rewards_export_rates(base, **kwargs)
-    except (TypeError, ValueError, KeyError):
+    except (AttributeError, TypeError, ValueError, KeyError):
         return tariff
     if all(tariff.get(section) == corrected.get(section) for section in sections):
         return tariff

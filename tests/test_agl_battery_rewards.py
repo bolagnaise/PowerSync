@@ -399,6 +399,19 @@ async def test_startup_overlap_repair_preserves_unavailable_store_fallback(agl_m
     assert not await agl_module.async_prepare_agl_startup_tariff(entry, Store())
 
 
+@pytest.mark.parametrize("invalid_base", [
+    {"sell_tariff": None},
+    {"sell_tariff": {"energy_charges": None}, "seasons": {}, "energy_charges": {}},
+])
+def test_overlap_repair_preserves_malformed_saved_base(agl_module, invalid_base):
+    original = {
+        "agl_base_tariff": invalid_base,
+        "agl_battery_rewards": {"peak_export_rate": 0.28, "offpeak_export_rate": 0.03,
+                                "start_hour": 17, "end_hour": 21},
+    }
+    assert agl_module.repair_battery_rewards_import_overlap(original) is original
+
+
 def test_overnight_period_keeps_next_day_import_coverage(agl_module):
     agl = agl_module
     original = _tariff(
