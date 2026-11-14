@@ -8632,6 +8632,195 @@ def test_price_level_generic_soc_uses_fallback_sensor():
     assert asyncio.run(executor._get_ev_soc()) == 68
 
 
+@pytest.mark.parametrize("primary,expected", [("36", 36), ("unknown", 68), ("nan", 68), ("120", 68), ("0", 0)])
+def test_ocpp_uses_shared_ev_soc_without_generic_control(primary, expected):
+    entry = SimpleNamespace(entry_id="entry-1", data={}, options={
+        "ocpp_enabled": True,
+        "generic_charger_enabled": False,
+        "generic_charger_soc_entity": "sensor.car_soc",
+        "generic_charger_soc_entity_2": "sensor.backup_soc",
+    })
+    hass = _FakeHass(states={"sensor.car_soc": primary, "sensor.backup_soc": "68"}, entries=[entry])
+    hass.entity_registry.entities = {"status": SimpleNamespace(
+        platform="ocpp", entity_id="sensor.beny_status_connector",
+    )}
+    price = ev_planner.PriceLevelChargingExecutor(hass, entry)
+    auto = ev_planner.AutoScheduleExecutor(hass, entry, planner=SimpleNamespace())
+    assert asyncio.run(price._get_ev_soc("ocpp_beny")) == expected
+    assert asyncio.run(auto._get_vehicle_soc("ocpp_beny")) == expected
+    assert asyncio.run(ev_planner.get_ev_battery_level(hass, entry, "ocpp_beny")) == expected
+
+
+@pytest.mark.parametrize("vehicle_id", ["ocpp_beny", "ocpp_charger", "_default", None])
+def test_ocpp_soc_native_precedes_configured_and_never_reads_tesla(vehicle_id):
+    from power_sync.automations.generic_charger_soc import resolve_ocpp_charger_soc
+    entry = SimpleNamespace(entry_id="entry-1", data={}, options={
+        "ocpp_enabled": True, "generic_charger_soc_entity": "sensor.car_soc",
+    })
+    hass = _FakeHass(states={
+        "sensor.car_soc": "41", "sensor.beny_soc": "92.5",
+        "sensor.tesla_charge_level": "99",
+    }, entries=[entry])
+    hass.entity_registry.entities = {
+        key: SimpleNamespace(platform="ocpp", entity_id=key)
+        for key in ("sensor.beny_status_connector", "sensor.beny_soc")
+    }
+    assert resolve_ocpp_charger_soc(hass, entry, vehicle_id) == 92.5
+    for executor, method in (
+        (ev_planner.PriceLevelChargingExecutor(hass, entry), "_get_ev_soc"),
+        (ev_planner.AutoScheduleExecutor(hass, entry, planner=SimpleNamespace()), "_get_vehicle_soc"),
+    ):
+        assert asyncio.run(getattr(executor, method)(vehicle_id)) == 92.5
+    hass.states._states["sensor.beny_soc"].state = "unavailable"
+    assert resolve_ocpp_charger_soc(hass, entry, vehicle_id) == 41
+    hass.states._states["sensor.car_soc"].state = "unavailable"
+    assert asyncio.run(ev_planner.get_ev_battery_level(hass, entry, vehicle_id)) is None
+
+
+@pytest.mark.parametrize("variant", ["second_charger", "generic_enabled", "wrong_charger", "disabled", "wrong_unit"])
+def test_ocpp_shared_soc_rejects_ambiguous_or_unusable_source(variant):
+    from power_sync.automations.generic_charger_soc import resolve_ocpp_charger_soc
+    entry = SimpleNamespace(entry_id="entry-1", data={}, options={
+        "ocpp_enabled": True, "generic_charger_soc_entity": "sensor.car_soc",
+    })
+    hass = _FakeHass(states={"sensor.car_soc": "71", "sensor.tesla_charge_level": "99"}, entries=[entry])
+    hass.entity_registry.entities = {"one": SimpleNamespace(platform="ocpp", entity_id="sensor.beny_status_connector")}
+    requested = "ocpp_beny"
+    if variant == "second_charger":
+        hass.entity_registry.entities["two"] = SimpleNamespace(platform="ocpp", entity_id="sensor.offline_charger_status")
+    elif variant == "generic_enabled":
+        entry.options["generic_charger_enabled"] = True
+    elif variant == "wrong_charger":
+        requested = "ocpp_other"
+    elif variant == "disabled":
+        entry.options["ocpp_enabled"] = False
+    elif variant == "wrong_unit":
+        hass.states._states["sensor.car_soc"].attributes["unit_of_measurement"] = "kWh"
+    assert resolve_ocpp_charger_soc(hass, entry, requested) is None
+    auto = ev_planner.AutoScheduleExecutor(hass, entry, planner=SimpleNamespace())
+    assert asyncio.run(auto._get_vehicle_soc(requested)) is None
+    assert auto._cached_soc == {}
+    price = ev_planner.PriceLevelChargingExecutor(hass, entry)
+    assert asyncio.run(price._get_ev_soc(requested)) is None
+    assert asyncio.run(ev_planner.get_ev_battery_level(hass, entry, requested)) is None
+
+
+def test_two_ocpp_chargers_keep_their_native_soc_and_ignore_global_fallback():
+    from power_sync.automations.generic_charger_soc import resolve_ocpp_charger_soc
+    entry = SimpleNamespace(entry_id="entry-1", data={}, options={
+        "ocpp_enabled": True, "generic_charger_soc_entity": "sensor.car_soc",
+    })
+    hass = _FakeHass(states={"sensor.car_soc": "71", "sensor.one_soc": "20", "sensor.two_soc": "80"}, entries=[entry])
+    hass.entity_registry.entities = {
+        key: SimpleNamespace(platform="ocpp", entity_id=key)
+        for key in ("sensor.one_soc", "sensor.two_soc")
+    }
+    assert resolve_ocpp_charger_soc(hass, entry, "ocpp_one") == 20
+    assert resolve_ocpp_charger_soc(hass, entry, "ocpp_two") == 80
+    assert resolve_ocpp_charger_soc(hass, entry, "ocpp_charger") is None
+    hass.states._states["sensor.two_soc"].state = "unknown"
+    assert resolve_ocpp_charger_soc(hass, entry, "ocpp_two") is None
+
+
+def test_ocpp_builtin_server_uses_existing_sensor_without_generic_control():
+    from power_sync.automations.generic_charger_soc import resolve_ocpp_charger_soc
+    entry = SimpleNamespace(entry_id="entry-1", data={}, options={
+        "ocpp_enabled": True, "generic_charger_soc_entity": "sensor.car_soc",
+    })
+    hass = _FakeHass(states={"sensor.car_soc": "71"}, entries=[entry])
+    hass.data["power_sync"]["entry-1"]["ocpp_server"] = SimpleNamespace(charge_points={"beny": SimpleNamespace()})
+    assert resolve_ocpp_charger_soc(hass, entry, "ocpp_beny") == 71
+
+
+@pytest.mark.parametrize("already_charging", [False, True])
+def test_ocpp_smart_schedule_clears_plan_without_soc(monkeypatch, already_charging):
+    entry = SimpleNamespace(entry_id="entry-1", data={}, options={"ocpp_enabled": True})
+    hass = _FakeHass(entries=[entry])
+    hass.entity_registry.entities = {"status": SimpleNamespace(platform="ocpp", entity_id="sensor.beny_status")}
+    executor = ev_planner.AutoScheduleExecutor(hass, entry, planner=SimpleNamespace())
+    executor._resolve_effective_charger_capability = AsyncMock(return_value=None)
+    executor._start_charging = AsyncMock()
+    executor._stop_charging = AsyncMock(return_value=False)
+    settings = ev_planner.AutoScheduleSettings(enabled=True, vehicle_id="ocpp_beny", charger_type="ocpp")
+    state = executor.get_state("ocpp_beny")
+    state.current_plan = SimpleNamespace(windows=[SimpleNamespace()])
+    state.is_charging = already_charging
+    asyncio.run(executor._evaluate_vehicle("ocpp_beny", settings, {}, 5))
+    assert state.current_plan is None
+    assert state.last_decision == "soc_unavailable"
+    executor._start_charging.assert_not_awaited()
+    assert executor._stop_charging.await_count == int(already_charging)
+
+
+def test_explicit_tesla_does_not_use_ocpp_or_generic_car_sensor():
+    entry = SimpleNamespace(entry_id="entry-1", data={}, options={
+        "ocpp_enabled": True, "generic_charger_enabled": True,
+        "generic_charger_soc_entity": "sensor.other_car_soc",
+    })
+    hass = _FakeHass(states={"sensor.other_car_soc": "99"}, entries=[entry])
+    assert asyncio.run(ev_planner.get_ev_battery_level(hass, entry, "5YJTEST0000000001")) is None
+
+
+@pytest.mark.parametrize("backend", ["hacs", "builtin"])
+def test_ocpp_soc_reaches_canonical_loadpoint_projection(backend):
+    import ast
+    from power_sync import const
+    from power_sync.automations.loadpoint_status import build_loadpoint_status
+    path = ROOT / "__init__.py"
+    tree = ast.parse(path.read_text())
+    method = next(
+        item for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "EVLoadpointStatusView"
+        for item in node.body if isinstance(item, ast.AsyncFunctionDef) and item.name == "_async_build_response"
+    )
+    body = method.body[1].body
+    start = next(i for i, node in enumerate(body) if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "ocpp_server" for t in node.targets))
+    stop = next(i for i, node in enumerate(body) if isinstance(node, ast.If) and isinstance(node.test, ast.Compare) and isinstance(node.test.left, ast.Name) and node.test.left.id == "observed_vehicle_sink")
+    entry = SimpleNamespace(entry_id="entry-1", data={}, options={
+        "ocpp_enabled": True, "generic_charger_soc_entity": "sensor.car_soc",
+    })
+    hass = _FakeHass(states={"sensor.car_soc": "64", "sensor.beny_status_connector": "Charging", "sensor.beny_current_power": "2300"}, entries=[entry])
+    runtime = hass.data["power_sync"]["entry-1"]
+    if backend == "builtin":
+        runtime["ocpp_server"] = SimpleNamespace(charge_points={"beny": SimpleNamespace(meter_power_w=2300, active_transaction=True)})
+    else:
+        hass.entity_registry.entities = {key: SimpleNamespace(platform="ocpp", entity_id=key) for key in ("sensor.beny_status_connector", "sensor.beny_current_power")}
+    from power_sync.automations.generic_charger_soc import resolve_ocpp_charger_soc
+    observed = []
+    namespace = {
+        **vars(const), "__package__": "power_sync", "_LOGGER": ev_planner._LOGGER,
+        "self": SimpleNamespace(_hass=hass, _config_entry=entry), "entry_data": runtime,
+        "opts": entry.options, "observed_vehicles": observed,
+        "resolve_ocpp_charger_soc": resolve_ocpp_charger_soc,
+    }
+    exec(compile(ast.Module(body=body[start:stop], type_ignores=[]), str(path), "exec"), namespace)
+    rows = build_loadpoint_status({}, observed)
+    assert len(rows) == 1
+    assert rows[0]["soc"] == 64
+    assert rows[0]["current_power_kw"] == 2.3
+
+
+def test_ocpp_schedule_preview_without_executor_uses_shared_source(monkeypatch):
+    import ast
+    path = ROOT / "__init__.py"
+    tree = ast.parse(path.read_text())
+    method = next(
+        item for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "ChargingScheduleView"
+        for item in node.body if isinstance(item, ast.AsyncFunctionDef) and item.name == "_get_vehicle_soc"
+    )
+    namespace = {"__package__": "power_sync", "DOMAIN": "power_sync"}
+    exec(compile(ast.Module(body=[method], type_ignores=[]), str(path), "exec"), namespace)
+    entry = SimpleNamespace(entry_id="entry-1", data={}, options={
+        "ocpp_enabled": True, "generic_charger_soc_entity": "sensor.car_soc",
+    })
+    hass = _FakeHass(states={"sensor.car_soc": "64"}, entries=[entry])
+    hass.entity_registry.entities = {"status": SimpleNamespace(platform="ocpp", entity_id="sensor.beny_status")}
+    monkeypatch.setattr(ev_planner, "_auto_schedule_executor", None)
+    view = SimpleNamespace(_hass=hass)
+    assert asyncio.run(namespace["_get_vehicle_soc"](view, "ocpp_beny")) == 64
+    hass.states._states["sensor.car_soc"].state = "unavailable"
+    assert asyncio.run(namespace["_get_vehicle_soc"](view, "ocpp_beny")) is None
+
+
 def test_price_level_ble_soc_uses_vehicle_specific_charge_level_sensor():
     ble_vin = "ble_garage_garage_ble_gateway"
     entry = SimpleNamespace(

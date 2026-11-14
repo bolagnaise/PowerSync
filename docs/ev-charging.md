@@ -2,6 +2,7 @@
 
 - [EV charging actions in Home Assistant](#ev-charging-actions)
 - [Zaptec Price Level charging](#zaptec-price-level-charging)
+- [EV SoC sensors with OCPP](#ev-soc-sensors-with-ocpp)
 - [Multiple vehicles on one generic charger](#shared-charger-vehicles)
 
 <a id="ev-charging-actions"></a>
@@ -33,6 +34,14 @@ data:
 Re-enable it with the same action and `enabled: true`. Check battery charge both when your morning window begins and when it crosses the minimum; a numeric-state crossing alone misses a battery already below the threshold. Include an appropriate check after Home Assistant restarts. Use a margin above the battery's absolute minimum because telemetry and charging evaluation are periodic.
 
 These actions change the mode's saved eligibility, not the physical charger directly. Scheduled Charging, Price Level and Smart Schedule apply changes on the normal EV evaluation cycle. Solar Surplus also uses its existing disable cleanup. Enabling a mode does not force a charging start, and disabling one mode does not disable other eligible charging modes. A successful action confirms the setting was saved, not that the charger physically stopped. Monitoring Mode and existing ownership and provider safeguards still apply.
+
+## EV SoC sensors with OCPP
+
+In the integration's **EV Charging** options, set **EV battery SoC sensor** and, optionally, **Fallback EV battery SoC sensor** to percentage sensors for the same car. These existing fields also work with a single OCPP charger; leave **Generic charger enabled** off when OCPP controls it. Previously saved sensor choices are reused.
+
+PowerSync prefers a valid SoC reported by that OCPP connector, then tries your primary sensor and finally the fallback. The resolved value feeds the EV display, Smart Schedule and target-SoC checks. Invalid or unavailable readings remain unknown; Smart Schedule waits for a usable SoC and requests a stop if its charging session loses that reading.
+
+The global sensor pair is not assigned automatically when multiple OCPP chargers or a separate generic charger are configured. Native per-connector SoC still works. For multiple cars sharing a generic charger, use the selected vehicle profiles below. See [EV SoC sources](ev-soc-sources.md) for source precedence and limitations.
 
 ## Zaptec Price Level charging
 

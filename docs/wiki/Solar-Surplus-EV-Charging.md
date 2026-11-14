@@ -31,3 +31,7 @@ Scheduled charging with no grid import holds its rate while the home battery kee
 ### Zaptec and Price Level charging
 
 When Price Level is enabled, **PowerSync controls charging** applies your price limit to Zaptec-authenticated starts too. **Allow hands-off external charging** leaves those sessions alone until unplugged. Pending PowerSync commands retain battery protection until fresh, valid charger readings confirm the outcome; completed charging releases that session's protection without repeated starts. See the [EV charging guide](https://github.com/bolagnaise/PowerSync/blob/main/docs/ev-charging.md#zaptec-price-level-charging).
+
+### EV SoC sensors with OCPP
+
+A single OCPP charger can reuse **EV battery SoC sensor** and **Fallback EV battery SoC sensor** from EV Charging options with **Generic charger enabled** off. Both sensors must describe the same car. Native OCPP SoC takes priority; unavailable or invalid readings fall back to those sensors. The EV display, Smart Schedule and target-SoC checks share the resolved value. Multiple OCPP chargers are not assigned the global sensor pair automatically. See [EV SoC setup and limitations](https://github.com/bolagnaise/PowerSync/blob/main/docs/ev-charging.md#ev-soc-sensors-with-ocpp).

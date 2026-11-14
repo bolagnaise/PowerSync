@@ -233,6 +233,23 @@ class _Hass:
         )
 
 
+def test_ocpp_status_endpoint_exposes_shared_soc_without_generic_charger():
+    import json
+    power_sync = _power_sync_module()
+    entry = SimpleNamespace(entry_id="entry-1", data={}, options={
+        "ocpp_enabled": True, "generic_charger_soc_entity": "sensor.car_soc",
+    })
+    hass = _Hass([
+        _State("sensor.beny_status_connector", "Preparing"),
+        _State("sensor.car_soc", "64", {"unit_of_measurement": "%"}),
+    ], registry_entities={"status": SimpleNamespace(platform="ocpp", entity_id="sensor.beny_status_connector")}, config_entries=[entry])
+    response = asyncio.run(power_sync.OCPPChargersView(hass, entry).get(SimpleNamespace()))
+    chargers = json.loads(response.body)["chargers"]
+    assert len(chargers) == 1
+    assert chargers[0]["current_soc"] == 64
+    assert chargers[0]["is_vehicle_connected"] is True
+
+
 def _fake_site_snapshot(hass) -> dict:
     """Mirror ``EVLoadpointStatusView._site_snapshot`` for the stub views.
 

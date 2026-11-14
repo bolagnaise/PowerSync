@@ -1569,8 +1569,17 @@ async def get_ev_battery_level(
     from .generic_charger_soc import resolve_generic_charger_soc
     from homeassistant.helpers import entity_registry as er, device_registry as dr
 
-    # Generic charger — check configured SoC sensor
     if config_entry:
+        opts = {**config_entry.data, **config_entry.options}
+        if str(vehicle_vin or "").startswith("ocpp_") or (
+            vehicle_vin in (None, "_default", "ev")
+            and _configured_charger_type(opts) == "ocpp"
+        ):
+            from .generic_charger_soc import resolve_ocpp_charger_soc
+            return resolve_ocpp_charger_soc(hass, config_entry, vehicle_vin)
+
+    # Generic charger — check configured SoC sensor
+    if config_entry and vehicle_vin in (None, "_default", "generic_ev", "ev"):
         opts = {**config_entry.data, **config_entry.options}
         if opts.get(CONF_GENERIC_CHARGER_ENABLED):
             level = resolve_generic_charger_soc(hass, opts)
@@ -5644,7 +5653,7 @@ class AutoScheduleExecutor:
 
         await self._force_save_cached_soc()
 
-    async def _get_vehicle_soc(self, vehicle_id: str) -> int:
+    async def _get_vehicle_soc(self, vehicle_id: str) -> Optional[float]:
         """Get current SoC for a vehicle from Home Assistant entities.
 
         Uses the same approach as EVVehiclesView to find Tesla vehicles.
@@ -5665,6 +5674,15 @@ class AutoScheduleExecutor:
         )
         from .generic_charger_soc import resolve_generic_charger_soc
         from homeassistant.helpers import entity_registry as er, device_registry as dr
+
+        entry = getattr(self, "config_entry", None)
+        opts = {**entry.data, **entry.options} if entry else {}
+        if str(vehicle_id).startswith("ocpp_") or (
+            vehicle_id in (None, "_default", "ev")
+            and _configured_charger_type(opts) == "ocpp"
+        ):
+            from .generic_charger_soc import resolve_ocpp_charger_soc
+            return resolve_ocpp_charger_soc(self.hass, entry, vehicle_id) if entry else None
 
         live_soc = None
         entries = self.hass.config_entries.async_entries(DOMAIN)
@@ -6363,6 +6381,14 @@ class AutoScheduleExecutor:
 
         # Keep the plan fresh before checking availability.
         ev_soc = await self._get_vehicle_soc(vehicle_id)
+        if ev_soc is None:
+            state.current_plan = None
+            state.current_window = None
+            if state.is_charging:
+                await self._stop_charging(vehicle_id, settings, state, reason="EV SOC unavailable")
+            state.last_decision = "soc_unavailable"
+            state.last_decision_reason = "EV SOC sensor unavailable or charger association ambiguous"
+            return
         if ev_soc >= settings.target_soc:
             # A previously generated plan is no longer needed. Clear it before
             # any availability gate returns, otherwise the optimiser may keep
@@ -7299,6 +7325,12 @@ class AutoScheduleExecutor:
                 vehicle_vin = self._resolve_vehicle_vin(vehicle_id)
 
                 ev_soc = await self._get_vehicle_soc(vehicle_id)
+                if ev_soc is None:
+                    state.current_plan = None
+                    state.current_window = None
+                    state.last_decision = "soc_unavailable"
+                    state.last_decision_reason = "EV SOC sensor unavailable or charger association ambiguous"
+                    continue
                 if ev_soc >= settings.target_soc:
                     state.current_plan = None
                     state.current_window = None
@@ -10464,7 +10496,7 @@ class PriceLevelChargingExecutor:
 
         return None
 
-    async def _get_ev_soc(self, vehicle_vin: Optional[str] = None) -> Optional[int]:
+    async def _get_ev_soc(self, vehicle_vin: Optional[str] = None) -> Optional[float]:
         """Get EV's current state of charge from HA entities.
 
         Searches for battery level sensors from various Tesla integrations:
@@ -10481,6 +10513,15 @@ class PriceLevelChargingExecutor:
         )
         from .generic_charger_soc import resolve_generic_charger_soc
         from homeassistant.helpers import entity_registry as er, device_registry as dr
+
+        entry = getattr(self, "config_entry", None)
+        opts = {**entry.data, **entry.options} if entry else {}
+        if str(vehicle_vin or "").startswith("ocpp_") or (
+            vehicle_vin in (None, "_default", "ev")
+            and _configured_charger_type(opts) == "ocpp"
+        ):
+            from .generic_charger_soc import resolve_ocpp_charger_soc
+            return resolve_ocpp_charger_soc(self.hass, entry, vehicle_vin) if entry else None
 
         config_entries = getattr(self.hass, "config_entries", None)
         if vehicle_vin in (None, "_default", "generic_ev", "ev") and config_entries:

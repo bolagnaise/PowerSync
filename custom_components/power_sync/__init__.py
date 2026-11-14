@@ -20226,7 +20226,7 @@ class ChargingScheduleView(HomeAssistantView):
             # partially initialized loadpoints without an executor profile.
             return None
 
-    async def _get_vehicle_soc(self, vehicle_id: str) -> int:
+    async def _get_vehicle_soc(self, vehicle_id: str) -> float | None:
         """Get current SoC for a vehicle from Home Assistant entities.
 
         Uses the same approach as EVVehiclesView to find Tesla vehicles.
@@ -20252,9 +20252,19 @@ class ChargingScheduleView(HomeAssistantView):
         from .const import CONF_GENERIC_CHARGER_ENABLED
         from .automations.generic_charger_soc import resolve_generic_charger_soc
         entries = self._hass.config_entries.async_entries(DOMAIN)
+        from .automations.ev_charging_planner import _configured_charger_type
+        from .automations.generic_charger_soc import resolve_ocpp_charger_soc
+        opts = {**entries[0].data, **entries[0].options} if len(entries) == 1 else {}
+        if str(vehicle_id).startswith("ocpp_") or (
+            vehicle_id in ("_default", "ev")
+            and _configured_charger_type(opts) == "ocpp"
+        ):
+            if len(entries) != 1:
+                return None
+            return resolve_ocpp_charger_soc(self._hass, entries[0], vehicle_id)
         for entry in entries:
             opts = {**entry.data, **entry.options}
-            if opts.get(CONF_GENERIC_CHARGER_ENABLED):
+            if vehicle_id in ("_default", "generic_ev", "ev") and opts.get(CONF_GENERIC_CHARGER_ENABLED):
                 level = resolve_generic_charger_soc(self._hass, opts)
                 if level is not None:
                     _LOGGER.debug("ChargingScheduleView: Found generic charger SoC: %.1f%%", level)
@@ -20398,6 +20408,11 @@ class ChargingScheduleView(HomeAssistantView):
             else:
                 # Try to get actual SoC from Home Assistant sensors
                 current_soc = await self._get_vehicle_soc(vehicle_id)
+                if current_soc is None:
+                    return web.json_response(
+                        {"success": False, "error": "EV SOC sensor unavailable or charger association ambiguous"},
+                        status=400,
+                    )
 
             # Parse target time
             target_time = None
@@ -21450,6 +21465,7 @@ class OCPPChargersView(HomeAssistantView):
             is_ocpp_vehicle_present,
             normalize_ocpp_status,
         )
+        from .automations.generic_charger_soc import resolve_ocpp_charger_soc
 
         entity_reg = er.async_get(self._hass)
 
@@ -21563,6 +21579,7 @@ class OCPPChargersView(HomeAssistantView):
                 "normalized_status": normalized_status,
                 "current_power_kw": round(power_kw, 2),
                 "energy_kwh": round(energy_kwh, 2),
+                "current_soc": resolve_ocpp_charger_soc(self._hass, self._entry, f"ocpp_{cid}"),
             })
 
         # If no chargers detected from entities but OCPP is enabled, show a placeholder
@@ -22007,6 +22024,7 @@ class EVLoadpointStatusView(HomeAssistantView):
         """Get normalized EV loadpoint status."""
         try:
             from .automations.actions import _dynamic_ev_state, _calculate_solar_surplus
+            from .automations.generic_charger_soc import resolve_ocpp_charger_soc
             from .automations.loadpoint_status import (
                 build_loadpoint_status,
                 resolve_loadpoint_surplus_power_kw,
@@ -22183,6 +22201,7 @@ class EVLoadpointStatusView(HomeAssistantView):
                             "charger_id": f"ocpp_{cp_id}",
                             "vehicle_name": f"OCPP {cp_id[:8]}",
                             "charger_type": "ocpp",
+                            "ev_soc": resolve_ocpp_charger_soc(self._hass, self._config_entry, f"ocpp_{cp_id}"),
                             "ev_power_kw": power_w / 1000,
                             "is_connected": active_transaction or power_w > 50,
                             "is_charging": power_w > 50,
@@ -22259,6 +22278,7 @@ class EVLoadpointStatusView(HomeAssistantView):
                         "charger_id": f"ocpp_{prefix}",
                         "vehicle_name": f"OCPP {prefix[:12]}",
                         "charger_type": "ocpp",
+                        "ev_soc": resolve_ocpp_charger_soc(self._hass, self._config_entry, f"ocpp_{prefix}"),
                         "ev_power_kw": charger["power_kw"],
                         "is_connected": charger["connected"],
                         "is_charging": charger["charging"],
