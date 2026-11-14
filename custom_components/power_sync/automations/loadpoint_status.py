@@ -391,6 +391,11 @@ def _merge_observation_status(target: dict[str, Any], source: Mapping[str, Any])
         # Availability belongs to the selected measurement, not to the row
         # that happened to provide the older identity/status fields.
         target["power_available"] = source.get("power_available", True)
+        # So does "activity unknown": a newer usable measurement (e.g. a BLE
+        # bridge reporting the car asleep at 0 kW) resolves an older row's
+        # stale charging claim instead of inheriting it.
+        if source.get("power_available", True) is not False:
+            target["_power_activity_unknown"] = bool(source.get("_power_activity_unknown"))
         target.pop("auxiliary_power_kw", None)
         if source.get("auxiliary_power_kw") is not None:
             target["auxiliary_power_kw"] = source.get("auxiliary_power_kw")

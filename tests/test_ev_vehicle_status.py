@@ -731,6 +731,68 @@ def test_mapped_ble_state_and_soc_have_independent_freshness(fleet_soc_newer, bl
         assert row["telemetry_state"] == ("live" if fleet_soc_newer else "stale")
 
 
+@pytest.mark.parametrize("asleep,ble_link,home_load_known", [
+    # Live capture 2026-11-14: Fleet froze at 03:01 with W3RT1E "charging 2 kW";
+    # the BLE bridge reported Stopped/0 kW at 06:00 and the car asleep at 06:00:53.
+    ("on", "on", True),
+    # Awake (or unknown sleep state): stale Fleet charging stays unknown.
+    ("off", "on", False),
+    # Bridge lost the car: its asleep value is no longer current evidence.
+    ("on", "off", False),
+])
+def test_ble_asleep_resolves_stale_fleet_charging_claim(monkeypatch, asleep, ble_link, home_load_known):
+    """A car the BLE bridge reports asleep is not charging; Home Load stays known."""
+    power_sync = _power_sync_module()
+    ev_load = importlib.import_module("power_sync.ev_load")
+    now = datetime.now(timezone.utc)
+    fleet_at = now - timedelta(hours=5)
+    ble_at = now - timedelta(hours=2)
+    native_states = [
+        _State("binary_sensor.primary_ev_status", "on", {"device_class": "connectivity"}, last_updated=fleet_at),
+        _State("binary_sensor.primary_ev_charge_cable", "on", last_updated=fleet_at),
+        _State("sensor.primary_ev_charging", "charging", last_updated=fleet_at),
+        _State("sensor.primary_ev_charger_power", "2", {"unit_of_measurement": "kW"}, last_updated=fleet_at),
+        _State("device_tracker.primary_ev_location", "home", last_updated=fleet_at),
+    ]
+    ble_states = [
+        _State("binary_sensor.home_ble_status", "on", last_updated=now - timedelta(hours=5)),
+        _State("binary_sensor.home_ble_ble_status", ble_link, last_updated=now - timedelta(hours=5)),
+        _State("binary_sensor.home_ble_asleep", asleep, last_updated=ble_at),
+        _State("sensor.home_ble_charging_state", "Stopped", last_updated=ble_at),
+        _State("sensor.home_ble_charge_power", "0", {"unit_of_measurement": "kW"}, last_updated=ble_at),
+        _State("sensor.home_ble_charge_level", "73", last_updated=ble_at),
+    ]
+    hass = _tesla_hass(native_states + ble_states)
+    hass.entity_registry.entities = {
+        key: value for key, value in hass.entity_registry.entities.items()
+        if "primary_ev" in key
+    }
+    entry = SimpleNamespace(entry_id="entry-1", data={}, options={
+        "ev_provider": "both", "tesla_ble_entity_prefix": "home_ble",
+        "tesla_ble_vehicle_mapping": "5YJTEST0000000001=home_ble",
+    })
+
+    async def no_sigenergy_charger(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(power_sync, "_read_sigenergy_charger_state_for_entry", no_sigenergy_charger)
+    vehicles = power_sync._get_ev_vehicles_status(hass, entry)
+    observations = asyncio.run(power_sync._get_ev_load_observations(hass, entry, vehicles))
+    at = datetime.now(timezone.utc)  # observations are stamped while building them
+    snapshot = ev_load.aggregate_ev_load(observations, at=at)
+    home = ev_load.normalize_home_load(1.731, ev_load.HomeLoadBasis.INCLUDES_EV, snapshot, at=at)
+
+    if home_load_known:
+        assert snapshot.quality == ev_load.EvLoadQuality.COMPLETE
+        assert snapshot.power_kw == 0.0
+        assert home.non_ev_home_load_kw == pytest.approx(1.731)
+        assert not any(v.get("is_charging") for v in vehicles)
+        assert not any(v.get("_power_activity_unknown") for v in vehicles)
+    else:
+        assert snapshot.quality == ev_load.EvLoadQuality.INCOMPLETE
+        assert home.non_ev_home_load_kw is None
+
+
 def test_ble_battery_receipt_dates_soc_without_renewing_old_watts():
     power_sync = _power_sync_module()
     from power_sync.automations.loadpoint_status import build_loadpoint_status

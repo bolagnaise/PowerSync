@@ -3087,6 +3087,28 @@ def _get_ev_vehicles_status(hass, entry, *, include_control_evidence=False) -> l
                 or ble_power_observed_at
             ),
         }
+        # A car the bridge reports asleep cannot be charging (the same rule as
+        # the Fleet status sensor). While the bridge holds its BLE link to the
+        # car, "asleep" is a current state even though HA's timestamps stop at
+        # the transition and equal 0 kW samples are suppressed, so it is fresh
+        # measured-0 load evidence. It supersedes a stale Fleet "charging"
+        # claim for the same car, which otherwise keeps EV load (and Home Load)
+        # unknown for as long as the car sleeps. Command evidence is unchanged.
+        asleep_state = hass.states.get(TESLA_BLE_BINARY_ASLEEP.format(prefix=prefix))
+        if (
+            asleep_state is not None
+            and asleep_state.state == "on"
+            and ble_status.state == "on"
+        ):
+            ble_observation.update({
+                "ev_power_kw": 0.0,
+                "power_available": True,
+                "is_charging": False,
+                "_power_activity_unknown": False,
+                "telemetry_state": "asleep",
+                "_observed_at": telemetry_now,
+                "_charging_observed_at": telemetry_now,
+            })
         if include_control_evidence and charge_state is not None:
             state_key = str(charge_state.state).strip().lower()
             ble_observation["_boost_charging_state_evidence"] = {
