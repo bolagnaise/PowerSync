@@ -40,6 +40,7 @@ OCPP_ENERGY_SUFFIXES = (
     "_energy_session",
 )
 OCPP_CURRENT_LIMIT_SUFFIXES = (
+    "_session_current_limit",
     "_maximum_current",
     "_max_current",
     "_current_limit",

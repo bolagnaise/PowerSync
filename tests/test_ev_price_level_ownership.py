@@ -8651,6 +8651,27 @@ def test_ocpp_uses_shared_ev_soc_without_generic_control(primary, expected):
     assert asyncio.run(ev_planner.get_ev_battery_level(hass, entry, "ocpp_beny")) == expected
 
 
+def test_ocpp_session_limit_does_not_create_a_second_charger():
+    entry = SimpleNamespace(entry_id="entry-1", data={}, options={
+        "ocpp_enabled": True, "generic_charger_enabled": False,
+        "generic_charger_soc_entity": "sensor.car_soc",
+    })
+    hass = _FakeHass(states={
+        "sensor.car_soc": "52.6", "sensor.charger_soc": "unknown",
+        "sensor.charger_status_connector": "Charging",
+        "number.charger_session_current_limit": "24",
+    }, entries=[entry])
+    hass.entity_registry.entities = {
+        key: SimpleNamespace(platform="ocpp", entity_id=key)
+        for key in ("sensor.charger_status_connector", "sensor.charger_soc",
+                    "number.charger_session_current_limit")
+    }
+    assert ev_planner._resolve_ocpp_charger_id(hass) == "charger"
+    price = ev_planner.PriceLevelChargingExecutor(hass, entry)
+    assert asyncio.run(price._get_ev_soc("ocpp_charger")) == 52.6
+    assert asyncio.run(ev_planner.get_ev_battery_level(hass, entry, "ocpp_charger")) == 52.6
+
+
 @pytest.mark.parametrize("vehicle_id", ["ocpp_beny", "ocpp_charger", "_default", None])
 def test_ocpp_soc_native_precedes_configured_and_never_reads_tesla(vehicle_id):
     from power_sync.automations.generic_charger_soc import resolve_ocpp_charger_soc

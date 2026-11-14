@@ -51,6 +51,12 @@ def test_extracts_upstream_hacs_ocpp_measurand_prefixes():
     )
 
 
+def test_session_current_limit_keeps_the_physical_charger_prefix():
+    assert extract_hacs_ocpp_prefix("number.charger_session_current_limit") == "charger"
+    assert extract_hacs_ocpp_prefix("number.charger_connector_2_session_current_limit") == "charger_connector_2"
+    assert extract_hacs_ocpp_prefix("number.charger_current_limit") == "charger"
+
+
 def test_generic_entity_claim_suppresses_only_its_hacs_ocpp_prefix():
     entries = [
         SimpleNamespace(
