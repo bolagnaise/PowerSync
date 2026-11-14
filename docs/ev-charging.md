@@ -37,7 +37,7 @@ These actions change the mode's saved eligibility, not the physical charger dire
 
 ## EV SoC sensors with OCPP
 
-In the integration's **EV Charging** options, set **EV battery SoC sensor** and, optionally, **Fallback EV battery SoC sensor** to percentage sensors for the same car. These existing fields also work with a single OCPP charger; leave **Generic charger enabled** off when OCPP controls it. Previously saved sensor choices are reused.
+In the integration's **EV Charging** options, set **EV battery SoC sensor** and, optionally, **Fallback EV battery SoC sensor** to percentage sensors for the same car. These existing fields also work with a single OCPP charger; leave **Enable generic charger** off when OCPP controls it. Previously saved sensor choices are reused.
 
 PowerSync prefers a valid SoC reported by that OCPP connector, then tries your primary sensor and finally the fallback. The resolved value feeds the EV display, Smart Schedule and target-SoC checks. Invalid or unavailable readings remain unknown; Smart Schedule waits for a usable SoC and requests a stop if its charging session loses that reading.
 
