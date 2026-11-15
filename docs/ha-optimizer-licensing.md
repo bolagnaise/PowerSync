@@ -12,7 +12,7 @@ seven-day trial, then bills automatically until cancelled. GitHub sponsorship
 is charged immediately and has no HA trial. See the
 [setup and subscription guide](https://powersync.cc/ha-optimiser).
 
-In the integration options, open **Optimiser access** to start or finish pairing,
+In the integration options, open **HA optimiser access** to start or finish pairing,
 refresh access, resume optimisation when required, or reset pairing. Review the
 status shown for this Home Assistant installation. Cloud subscriptions do not
 grant HA optimiser access.
@@ -36,7 +36,7 @@ priority HA support, without a guaranteed response time.
 
 ## Refer friends
 
-Open **Optimiser access** in the integration options to see your account's
+Open **HA optimiser access** in the integration options to see your account's
 referral code and link. Administrators can also use the **Refer friends** card
 on the PowerSync dashboard. The same code is available in **Referrals** on your
 PowerSync account, including from Cloud settings.
