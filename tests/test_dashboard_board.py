@@ -195,7 +195,7 @@ def _board_script(body: str) -> str:
         + r"""
   vm.createContext(context);
   const src = fs.readFileSync(process.argv[1], 'utf8').replace(/^export \{[^}]*\};?\s*$/m, '');
-  vm.runInContext(src + '\n;globalThis.__t = { PowerSyncBoard, PsSettingsDialog, PS_SETTING_EDITORS, PsSettingsCard, PsTodayCard, PsNowCard, PsTariffCard, psExportOffer, PsPlanCard, PsControlsCard, PsInverterControlsCard, psUntilPreview, psSchedule, psWindows, psActionKey, PS_LAYOUT_KEY, PS_DEFAULT_LAYOUT, psChartValue, psChart, psBars, PsPricesCard, PsEnergyCard, PsLoadForecastCard, PsSolarLoadCard, PsBatteryPlanCard, psApiCache, psPlannedRunEnd };', context);
+  vm.runInContext(src + '\n;globalThis.__t = { PowerSyncBoard, PsSettingsDialog, PS_SETTING_EDITORS, PsSettingsCard, PsTodayCard, PsNowCard, PsTariffCard, psExportOffer, PsPlanCard, PsControlsCard, PsInverterControlsCard, psUntilPreview, psSchedule, psWindows, psActionKey, PS_LAYOUT_KEY, PS_DEFAULT_LAYOUT, psChartValue, psChart, psBars, PsPricesCard, PsEnergyCard, PsLoadForecastCard, PsSolarLoadCard, PsBatteryPlanCard, psApiCache, psPlannedRunEnd, psBatteryControl };', context);
   const T = context.__t;
 """
         + body
@@ -1926,3 +1926,12 @@ def test_advanced_stop_and_backup_recovery_survive_lost_acquisition_support():
     assert out['posts'][0]['body']['operation_id'] == 'owned'
     assert out['posts'][0]['path'].endswith('battery_dispatch/stop')
     assert out['posts'][1]['body']['operation'] == 'reconcile'
+
+
+def test_zero_idle_status_does_not_claim_charging_or_change_legacy_max():
+    out = _run_board(r"""console.log(JSON.stringify({
+      idle: T.psBatteryControl({state:'force_charge',attributes:{control_source:'optimizer',battery_control_mode:'idle'}}),
+      max: T.psBatteryControl({state:'force_charge',attributes:{control_source:'user'}})
+    }));""")
+    assert out['idle']['message'] == 'Idle requested by the optimiser.'
+    assert out['max']['message'] == 'Charge requested manually.'

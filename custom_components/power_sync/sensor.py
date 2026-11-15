@@ -7726,6 +7726,12 @@ class BatteryModeSensor(SensorEntity):
                 target["remaining_minutes"] = max(0, int(remaining))
                 target["force_remaining_minutes"] = target["remaining_minutes"]
 
+        # Keep the legacy actuator mode stable while exposing the requested
+        # battery mode. Legacy Force zero still means Max, never idle.
+        zero_idle = active_state.get("power_target_basis") == "battery_output" and active_state.get("power_w") == 0
+        if zero_idle:
+            attributes["battery_control_mode"] = "idle"
+
         # Add mode-specific attributes
         if mode == BATTERY_MODE_STATE_FORCE_CHARGE:
             attributes["description"] = "Battery is being force charged"
@@ -7763,6 +7769,8 @@ class BatteryModeSensor(SensorEntity):
                 )
         else:
             attributes["description"] = "Battery operating in normal self-consumption mode"
+        if zero_idle:
+            attributes["description"] = "Battery zero-power idle requested"
 
         local_state = force_charge_state if mode == BATTERY_MODE_STATE_FORCE_CHARGE else force_discharge_state if mode == BATTERY_MODE_STATE_FORCE_DISCHARGE else {}
         if local_state.get("powerwall_local_dispatch"):
