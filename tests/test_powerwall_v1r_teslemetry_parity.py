@@ -1018,7 +1018,15 @@ def test_grid_charging_service_is_local_first_with_cloud_fallback_and_refresh():
 
 def test_max_backup_service_stages_cleanup_before_native_or_cloud_actuation():
     source = _function_source("handle_schedule_max_backup")
-    assert "await local_client.schedule_max_backup(duration_minutes * 60, end_ts=end_ts)" in source
+    tree = ast.parse(textwrap.dedent(source))
+    native_call = next(node for node in ast.walk(tree) if isinstance(node, ast.Call)
+                       and isinstance(node.func, ast.Attribute) and node.func.attr == "schedule_max_backup"
+                       and isinstance(node.func.value, ast.Name) and node.func.value.id == "local_client")
+    assert ast.dump(native_call.args[0]) == ast.dump(ast.parse("duration_minutes * 60", mode="eval").body)
+    assert any(kw.arg == "end_ts" and isinstance(kw.value, ast.Name) and kw.value.id == "end_ts"
+               for kw in native_call.keywords)
+    assert any(kw.arg is None and isinstance(kw.value, ast.Name) and kw.value.id == "strict_window"
+               for kw in native_call.keywords), "advanced starts must forward their non-replacing native window"
     assert "_cloud_tariff_control_requested(call)" in source
     assert source.index("persisted = await _persist_max_backup_schedule(") < source.index("await local_client.schedule_max_backup(")
     assert '"apply_pending": True' in source and '"site_id": site_id' in source
