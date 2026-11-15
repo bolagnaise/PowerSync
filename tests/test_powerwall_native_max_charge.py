@@ -494,6 +494,7 @@ def test_restore_service_reports_manual_settling_without_releasing_owner(source,
         adapter.restore_ok = restore_ok
         stop = AsyncMock(side_effect=session.stop)
         ns = dict(ServiceCall=object, _control_call_source=lambda call: source,
+                  hold_soc_state={"active": False},
                   _command_generation=[0], _stop_local_powerwall_dispatch=stop,
                   NativeMaxRestorePending=m.NativeMaxRestorePending,
                   _LOGGER=logging.getLogger(__name__))
