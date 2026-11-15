@@ -56,6 +56,20 @@ _TAG_END = 0xFF
 _SIGNATURE_TTL_SECONDS = 12
 
 
+def manual_backup_matches_window(snapshot, end_ts, fingerprint=None):
+    """Only a valid native window ending at our immutable deadline is ours."""
+    if not isinstance(snapshot, dict) or not isinstance(snapshot.get("manual_backup"), dict):
+        return None
+    event = snapshot["manual_backup"]
+    start, seconds = event.get("start_time"), event.get("duration_seconds")
+    if type(start) is not int or type(seconds) is not int or seconds <= 0:
+        return None
+    if fingerprint is not None and any(event.get(key) != fingerprint.get(key) for key in ("start_time", "duration_seconds", "priority")):
+        return False
+    priority = event.get("priority")
+    return start + seconds == math.floor(end_ts) and (priority is None or priority == (1 << 64) - 1)
+
+
 def manual_backup_is_absent(snapshot: Any) -> bool:
     """Accept only an explicit absence from a typed native backup-events read.
 
@@ -862,10 +876,9 @@ class TEDAPIv1rTransport:
     async def schedule_manual_backup(self, din: str, duration_s: int, *, end_ts: float | None = None) -> bool:
         """Trigger Tesla's "Storm Watch Manual Backup" — holds SOC, stops export.
 
-        This is the closest TEDAPI-native equivalent to "go off-grid" currently
-        in the reverse-engineered protobuf. It does not physically open the
-        grid contactor on all firmwares, but it stops grid import/export and
-        reserves the battery for backup use.
+        This prepares and retains battery energy for a bounded backup window.
+        It does not disconnect the house from the grid. Grid connection and
+        manual backup events have separate commands and lifecycles.
         """
         if duration_s < 60:
             raise ValueError("duration_s must be at least 60")

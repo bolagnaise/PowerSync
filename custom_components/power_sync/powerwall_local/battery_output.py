@@ -9,6 +9,7 @@ import asyncio
 from copy import deepcopy
 import hashlib
 import json
+import math
 import re
 import time
 from uuid import uuid4
@@ -28,14 +29,14 @@ def request_identity(value):
 
 def validate_output_request(data):
     if not isinstance(data, dict) or set(data) - {
-        "power_w", "duration_seconds", "request_id", "expected_control_revision", "takeover", "entry_id",
+        "power_w", "duration_seconds", "request_id", "expected_control_revision", "takeover", "entry_id", "target_soc",
     }:
         raise BatteryOutputError("invalid_battery_output_request")
     power, seconds = data.get("power_w"), data.get("duration_seconds")
     if type(power) is not int or not -10000 <= power <= 10000:
         raise BatteryOutputError("invalid_power_w")
-    if power == 0:
-        raise BatteryOutputError("zero_hold_unverified")
+    if "target_soc" in data:
+        validate_target_soc(power, data["target_soc"])
     if type(seconds) is not int or not 1 <= seconds <= 86400:
         raise BatteryOutputError("invalid_duration_seconds")
     request_identity(data.get("request_id"))
@@ -45,8 +46,24 @@ def validate_output_request(data):
     if "takeover" in data and type(data["takeover"]) is not bool:
         raise BatteryOutputError("invalid_takeover")
     return {key: data[key] for key in (
-        "power_w", "duration_seconds", "request_id", "expected_control_revision", "takeover",
+        "power_w", "duration_seconds", "request_id", "expected_control_revision", "takeover", "target_soc",
     ) if key in data}
+
+
+def validate_target_soc(power, target):
+    if type(target) is not int or not 1 <= target <= 100 or power == 0:
+        raise BatteryOutputError("invalid_target_soc")
+
+
+def check_target_soc(power, target, soc):
+    """A supervisory SOC target never changes the signed watt command."""
+    if target is None:
+        return
+    validate_target_soc(power, target)
+    if type(soc) not in (int, float) or not math.isfinite(soc) or not 0 <= soc <= 100:
+        raise BatteryOutputError("battery_soc_unavailable")
+    if (power < 0 and soc >= target) or (power > 0 and soc <= target):
+        raise BatteryOutputError("battery_target_reached")
 
 
 def digest(value):
@@ -67,8 +84,8 @@ class BatteryOutputControl:
         state = await self.load() or {}
         current = self.status()
         return {"schema_version": 1, "control_revision": self.revision(),
-                "capabilities": {"battery_output": {"version": 1,
-                    "supported": self.allowed(), "zero_hold_supported": False,
+                "capabilities": {"battery_output": {"version": 2,
+                    "supported": self.allowed(), "zero_hold_supported": self.allowed(), "target_soc_supported": self.allowed(),
                     "max_power_w": 10000}},
                 "operation": self._operation(state.get("operation"), current)}
 
@@ -82,6 +99,8 @@ class BatteryOutputControl:
         result["command_status"] = current.get("command_status") if matching else None
         result["tracking"] = "unknown"  # Acknowledgement is not measured power.
         result["observed"] = current.get("observed")
+        if matching:
+            result["completion_reason"] = current.get("completion_reason") or result.get("completion_reason")
         if matching and current.get("release_pending"):
             result["phase"] = "recovery_required"
         elif result["active"]:
@@ -171,7 +190,7 @@ class BatteryOutputControl:
             current = self.status()
             if current.get("operation_id") != operation["operation_id"]:
                 raise BatteryOutputError("operation_ownership_changed")
-            operation.update(phase="stopping", stop_request_id=data["request_id"])
+            operation.update(phase="stopping", completion_reason="stopped", stop_request_id=data["request_id"])
             state.setdefault("requests", {})[operation["request_id"]] = operation
             await self.save(deepcopy(state))
             try:

@@ -21,15 +21,17 @@ def validate_actions(actions):
     if not isinstance(params, dict) or params.get("schema_version") != 1:
         return "Unsupported battery action version"
     if action["action_type"] == "battery_output":
-        if (set(params) - {"schema_version", "power_w", "duration_seconds"}
-                or type(params.get("power_w")) is not int or not 0 < abs(params["power_w"]) <= 10000
+        if (set(params) - {"schema_version", "power_w", "duration_seconds", "target_soc"}
+                or type(params.get("power_w")) is not int or not 0 <= abs(params["power_w"]) <= 10000
                 or type(params.get("duration_seconds")) is not int or not 1 <= params["duration_seconds"] <= 86400):
             return "Invalid fixed battery output action"
+        if "target_soc" in params and (type(params["target_soc"]) is not int or not 1 <= params["target_soc"] <= 100 or params["power_w"] == 0):
+            return "Invalid battery target percentage"
     else:
         revision = params.get("approval_revision")
         values = [params[key] for key in ("import_limit_w", "export_limit_w") if key in params]
         if (set(params) - {"schema_version", "approval_revision", "import_limit_w", "export_limit_w"}
-                or not isinstance(revision, str) or len(revision) != 64 or any(c not in "0123456789abcdef" for c in revision)
+                or revision is not None and (not isinstance(revision, str) or len(revision) != 64 or any(c not in "0123456789abcdef" for c in revision))
                 or not values or any(type(value) is not int or not 0 <= value <= 1000000 for value in values)):
             return "Invalid native site limits action"
     return None
@@ -56,12 +58,13 @@ async def execute(hass, entry, action_type, params, context):
             if seconds < 1:
                 return False
             payload = {"request_id": request_id, "expected_control_revision": status["control_revision"],
-                       "power_w": params["power_w"], "duration_seconds": seconds}
+                       "power_w": params["power_w"], "duration_seconds": seconds,
+                       **({"target_soc": params["target_soc"]} if "target_soc" in params else {})}
         else:
-            if status["approval_revision"] != params["approval_revision"]:
+            if "approval_revision" in params and status["approval_revision"] != params["approval_revision"]:
                 return False
             payload = {"request_id": request_id, "expected_config_revision": status["configuration_revision"],
-                       "expected_approval_revision": params["approval_revision"],
+                       "expected_approval_revision": status["approval_revision"],
                        **{key: params[key] for key in ("import_limit_w", "export_limit_w") if key in params}}
         journal[request_id] = deepcopy(payload)
         await context["save_battery_request_journal"]()

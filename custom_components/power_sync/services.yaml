@@ -184,7 +184,7 @@ apply_history_relink:
 
 set_native_site_limits:
   name: Set native site limits
-  description: "Paired Tesla gateway import/export limits, in watts. Limits persist until changed. Raising or restoring a limit needs separately approved site maxima. This does not change export or grid-charging permissions."
+  description: "Paired Tesla gateway import/export limits, in watts. Limits persist until changed. This does not change export or grid-charging permissions."
   fields:
     entry_id:
       selector:
@@ -196,7 +196,6 @@ set_native_site_limits:
           options:
             - set
             - restore
-            - approve
             - reconcile
             - rebaseline
     import_limit_w:
@@ -222,32 +221,21 @@ set_native_site_limits:
       selector:
         text:
     expected_approval_revision:
-      required: true
+      description: Legacy policy revision. Optional for setting limits.
       selector:
         text:
     snapshot_id:
       description: Saved snapshot to restore, from native site limit status.
       selector:
         text:
-    confirm_installation_limits:
-      description: Administrator confirmation that approved maxima account for installation and network restrictions. Saves software authorisation only.
-      selector:
-        boolean:
     confirm_pairing_change:
-      description: Administrator confirmation to archive the old pairing baseline and approval, then record fresh limits without applying a gateway setting.
+      description: Administrator confirmation to archive the old pairing baseline, then record fresh limits without applying a gateway setting.
       selector:
         boolean:
-    document_reference:
-      selector:
-        text:
-    approval_date:
-      description: Date of the installation or network approval, YYYY-MM-DD.
-      selector:
-        text:
 
 dispatch_battery_power:
   name: Set fixed battery output
-  description: "Request exact battery watts on a paired Tesla gateway. Positive discharges and negative charges. This is separate from grid export. An infeasible target is refused or stopped; zero hold is unavailable."
+  description: "Request exact battery watts on a paired Tesla gateway. Positive discharges and negative charges. This is separate from grid export. An infeasible target is refused or stopped; zero holds the battery idle. An optional target percentage ends charging or discharging early."
   fields:
     entry_id:
       description: PowerSync entry ID. Required when more than one entry is configured.
@@ -255,7 +243,7 @@ dispatch_battery_power:
         text:
     power_w:
       required: true
-      description: Signed battery watts, from -10000 to 10000. Zero is currently unsupported.
+      description: Signed battery watts, from -10000 to 10000. Zero holds idle; negative charges and positive discharges.
       selector:
         number:
           min: -10000
@@ -275,6 +263,14 @@ dispatch_battery_power:
       description: Unique request ID. Reusing the same ID never starts a new power command.
       selector:
         text:
+    target_soc:
+      description: Optional target battery level. Charging stops at or above this percentage; discharging stops at or below it. Requires nonzero watts. The duration remains the maximum runtime.
+      selector:
+        number:
+          min: 1
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
     expected_control_revision:
       required: true
       description: Control revision from the battery dispatch status API.

@@ -877,3 +877,30 @@ def test_handle_set_backup_reserve_failed_tesla_write_is_not_persisted():
     assert entry.data["hardware_backup_reserve"] == 0.2
     assert entry.options["hardware_backup_reserve"] == 0.2
     assert "_skip_reload" not in hass.data["power_sync"]["entry-1"]
+
+
+@pytest.mark.parametrize("accepted", [True, False])
+def test_paired_tesla_true_idle_uses_zero_hold_without_reserve_write(opt_module, accepted):
+    from unittest.mock import AsyncMock
+    battery = _FakeBatteryNoTrust(55)
+    coordinator = _idle_hold_coordinator(opt_module, battery)
+    zero_hold = AsyncMock(return_value=accepted)
+    coordinator._entry.entry_id = "entry"
+    coordinator.hass = SimpleNamespace(data={"power_sync": {"entry": {"async_zero_power_optimizer_idle": zero_hold}}})
+    coordinator._supports_local_powerwall_target_power = lambda direction: True
+    assert asyncio.run(coordinator._set_idle_hold_mode(battery)) is accepted
+    zero_hold.assert_awaited_once_with()
+    assert coordinator._pre_idle_backup_reserve is None
+
+
+def test_paired_tesla_preserve_charge_keeps_solar_charging_path(opt_module):
+    from unittest.mock import AsyncMock
+    battery = _FakeBatteryNoTrust(55)
+    coordinator = _idle_hold_coordinator(opt_module, battery)
+    zero_hold = AsyncMock(return_value=True)
+    coordinator._entry.entry_id = "entry"
+    coordinator.hass = SimpleNamespace(data={"power_sync": {"entry": {"async_zero_power_optimizer_idle": zero_hold}}})
+    coordinator._supports_local_powerwall_target_power = lambda direction: True
+    asyncio.run(coordinator._set_idle_hold_mode(battery, preserve_charge=True))
+    zero_hold.assert_not_awaited()
+    assert coordinator._pre_idle_backup_reserve == 55

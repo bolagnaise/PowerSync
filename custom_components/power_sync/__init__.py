@@ -14566,7 +14566,12 @@ def _automation_battery_action_validation_error(data, previous=None):
     previous_actions = (previous or {}).get("actions", [])
     advanced = lambda rows: isinstance(rows, list) and any(isinstance(item, dict) and item.get("action_type") in ADVANCED_ACTIONS for item in rows)
     if advanced(actions) or "actions" in data and advanced(previous_actions):
-        if data.get("battery_action_contract_version") != 1:
+        extended = lambda rows: any(isinstance(item, dict) and item.get("action_type") == "battery_output" and
+            (item.get("parameters", {}).get("power_w") == 0 or "target_soc" in item.get("parameters", {})) for item in rows)
+        unbound_limits = lambda rows: any(isinstance(item, dict) and item.get("action_type") == "native_site_limits" and
+            "approval_revision" not in item.get("parameters", {}) for item in rows)
+        minimum = 2 if extended(actions) or extended(previous_actions) or unbound_limits(actions) or unbound_limits(previous_actions) else 1
+        if data.get("battery_action_contract_version") not in (1, 2) or data["battery_action_contract_version"] < minimum:
             return "Update this client before editing versioned battery actions"
         return validate_actions(actions)
     return None
@@ -14606,7 +14611,7 @@ class AutomationsView(HomeAssistantView):
             return web.json_response({
                 "success": True,
                 "automations": automations,
-                "battery_action_contract_version": 1,
+                "battery_action_contract_version": 2,
                 "available_vehicles": available_vehicles,
                 "automation_trigger_capabilities": {
                     "grid_import_energy": True,
@@ -37016,10 +37021,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 raise HomeAssistantError("Local dispatch cleanup required before changing control paths")
             return None
         source = _control_call_source(call)
-        if source == "optimizer" and power_w <= 0 and grid_target is None:
+        if source == "optimizer" and power_w <= 0 and grid_target is None and fixed_output is None:
             raise HomeAssistantError("Optimizer local dispatch requires positive power")
         config = {**entry.data, **entry.options}
-        target = grid_target if grid_target is not None else power_w or config.get("optimization_max_grid_export_w" if mode == "discharge" else "optimization_max_charge_w", 5000)
+        target = abs(fixed_output["power_w"]) if fixed_output is not None else grid_target if grid_target is not None else power_w or config.get("optimization_max_grid_export_w" if mode == "discharge" else "optimization_max_charge_w", 5000)
         target_basis = ("battery_output" if fixed_output is not None else
                         "grid_import" if grid_target is not None else "grid_export" if mode == "discharge" else "battery")
 
@@ -37031,7 +37036,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             state = force_charge_state if direction == "charge" else force_discharge_state
             if not state.get("active") or not state.get("powerwall_local_dispatch"):
                 return False
-            if direction == "charge" and _demand_grid_charging_protection_active():
+            if direction == "charge" and target != 0 and _demand_grid_charging_protection_active():
                 return False
             if grid_target is not None and not {**entry.data, **entry.options}.get("optimization_spread_import_enabled", False):
                 return False
@@ -37040,6 +37045,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 if not service_allowed(hass, call.data, f"handle_force_{direction}"):
                     return False
             return True
+
+        def check_fixed_output_snapshot(sample, observed_at):
+            from .powerwall_local.battery_dispatch import check_battery_soc_target
+            check_battery_soc_target(fixed_output["power_w"], fixed_output.get("target_soc"), sample, _local_powerwall_dispatch_config())
+            if source == "optimizer" and mode == "discharge":
+                check_optimizer_export_snapshot(sample, observed_at)
 
         async def local_export_guard(write, controlled_export=0.0, *, requested_export_w=None):
             guard = hass.data[DOMAIN][entry.entry_id].get("network_export_guard")
@@ -37106,9 +37117,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 result = await controller.start(mode, target, remaining_seconds if fixed_output is not None else duration * 60,
                                                 allowed=allowed, guarded_write=local_export_guard if mode == "discharge" else None,
                                                 target_basis=target_basis,
-                                                prepare_grid_charging=source == "optimizer",
-                                                snapshot_check=check_optimizer_export_snapshot
-                                                if source == "optimizer" and mode == "discharge" else None,
+                                                prepare_grid_charging=source == "optimizer" and target != 0,
+                                                snapshot_check=check_fixed_output_snapshot if fixed_output is not None else
+                                                check_optimizer_export_snapshot if source == "optimizer" and mode == "discharge" else None,
                                                 **({"deadline_monotonic": time.monotonic() + max(0, fixed_output["expires_at"] - time.time())}
                                                    if fixed_output is not None else {}))
             except Exception as err:
@@ -37268,7 +37279,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     not selected.get("active") or selected.get("command_status") == "restore_pending" or getattr(controller, "releasing", False)))
                     or any(_local_powerwall_runtime.get(key) for key in ("powerwall_local_recovery_pending", "native_max_recovery_unavailable")),
                 "command_status": selected.get("command_status"),
-                "commanded_w": getattr(controller, "_last_watts", None)}
+                "commanded_w": getattr(controller, "_last_watts", None),
+                "completion_reason": getattr(controller, "completion_reason", None)}
 
     async def _load_battery_output_requests():
         saved = await store.async_load() or {}
@@ -37298,6 +37310,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if client is None or not client.local_access_enabled:
                 raise BatteryOutputError("battery_output_unavailable")
             sample = await client.get_snapshot()
+            from .powerwall_local.battery_dispatch import check_battery_soc_target
+            check_battery_soc_target(operation["power_w"], operation.get("target_soc"), sample, _local_powerwall_dispatch_config())
             fixed_battery_watts("discharge" if operation["power_w"] > 0 else "charge", abs(operation["power_w"]), sample, _local_powerwall_dispatch_config())
             if operation["expected_control_revision"] != _battery_output_revision() or not _battery_output_allowed():
                 raise BatteryOutputError("battery_output_authority_changed")
@@ -37335,6 +37349,30 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         revision=_battery_output_revision, status=_battery_output_status, start=_start_battery_output,
         stop=_end_battery_output, allowed=_battery_output_allowed)
     _local_powerwall_runtime["battery_output_control"] = _output_control
+
+    async def _zero_power_optimizer_idle(duration_seconds=600):
+        """Acquire a bounded idle lease through the same physical owner."""
+        from .powerwall_host import local_battery_dispatch_configured
+        if not local_battery_dispatch_configured(entry.data):
+            return None  # Unpaired sites retain their existing hold mechanism.
+        if not _battery_output_allowed():
+            return False
+        states = (force_charge_state, force_discharge_state, hold_soc_state, self_consumption_state)
+        if any(s.get("active") and s.get("source") != "optimizer" for s in states):
+            return False
+        operation = {"power_w": 0, "operation_id": _output_uuid4().hex,
+                     "expires_at": time.time() + max(60, min(int(duration_seconds), 86400)),
+                     "expected_control_revision": _battery_output_revision()}
+        async with _local_powerwall_route_lock:
+            if not _battery_output_allowed():
+                return False
+            call = ServiceCall(hass, DOMAIN, "dispatch_battery_power",
+                               {"source": "optimizer", "entry_id": entry.entry_id, "power_w": 0})
+            result = await _try_local_powerwall_force_locked("charge", call, duration_seconds / 60, 0,
+                                                            fixed_output=operation)
+            return bool(result and result.get("success"))
+
+    _local_powerwall_runtime["async_zero_power_optimizer_idle"] = _zero_power_optimizer_idle
 
     async def handle_dispatch_battery_power(call):
         return await _output_control.dispatch(dict(call.data), call.context)
@@ -46062,9 +46100,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     observed = await reader() if reader is not None else None
                     if not current():
                         return
+                    from .powerwall_local.transport import manual_backup_matches_window
+                    owned_window = manual_backup_matches_window(observed, end_ts, (data.get("max_backup_schedule") or {}).get("native_window"))
                     if observed is not None and manual_backup_is_absent(observed):
                         _LOGGER.info("Max Backup native event absent in fresh readback after acceptance drain")
+                    elif owned_window is False:
+                        _LOGGER.info("Max Backup native window changed externally; leaving its replacement untouched")
                     else:
+                        if owned_window is not True:
+                            raise HomeAssistantError("Native Max Backup ownership readback is unavailable")
                         if not await _persist_max_backup_schedule({
                                 **(data.get("max_backup_schedule") or {}),
                                 "end_ts": end_ts, "saved_reserve": target,
@@ -46074,7 +46118,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         data["max_backup_apply_pending"] = True
                         if await client.cancel_max_backup() is not True:
                             raise HomeAssistantError("Native Max Backup cancellation was not acknowledged")
-                        _LOGGER.info("Max Backup native cancellation acknowledged")
+                        checked = await reader() if reader is not None else None
+                        if not manual_backup_is_absent(checked):
+                            raise HomeAssistantError("Native Max Backup cancellation readback is unconfirmed")
+                        _LOGGER.info("Max Backup native cancellation acknowledged and read back")
                 else:
                     if target is None:
                         raise HomeAssistantError("Max Backup saved reserve is unavailable")
@@ -46183,18 +46230,30 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if site_id is None:
             raise HomeAssistantError("Max Backup physical site identity is unavailable")
         end_ts = entry_data.get("battery_route_requested_at", _time.time()) + duration_minutes * 60
+        advanced_started = call.data.get("_advanced_backup_started_at")
+        if type(advanced_started) in (int, float) and math.isfinite(advanced_started):
+            end_ts = min(end_ts, advanced_started + duration_minutes * 60)
         if _time.time() >= end_ts:
             raise HomeAssistantError("Max Backup request expired before preparation")
         local_runtime = entry_data.get("powerwall_local") or {}
         local_client = local_runtime.get("client")
         if _cloud_tariff_control_requested(call):
             local_client = None
+        if advanced_started is not None and local_client is None:
+            raise HomeAssistantError("Advanced backup preparation requires a paired local gateway; no reserve fallback is used")
         coord = entry_data.get("tesla_coordinator")
         if coord is None and local_client is None:
             coord = _get_tesla_coordinator_for_service("schedule_max_backup")
         if coord is None and local_client is None:
             _LOGGER.error("schedule_max_backup: no Tesla cloud or local coordinator")
             return
+        if advanced_started is not None:
+            if local_client is None:
+                raise HomeAssistantError("Advanced backup preparation requires a paired local gateway; no reserve fallback is used")
+            from .powerwall_local.backup_preparation import validate_backup_preparation
+            validate_backup_preparation(_local_powerwall_dispatch_config(), await local_client.get_snapshot())
+            if not _backup_preparation_allowed():
+                raise HomeAssistantError("Backup authority changed during preparation")
         opt_coord = hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get("optimization_coordinator")
         if opt_coord is not None and hasattr(opt_coord, "resolve_restore_target"):
             saved_reserve = await opt_coord.resolve_restore_target()
@@ -46250,12 +46309,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     else:
                         entry_data.pop(key, None)
 
+        advanced_operation_id = _output_uuid4().hex if advanced_started is not None else None
         # The cleanup route and original baseline must survive any loss of
         # the subsequent actuator reply. A failed save authorizes no write.
         try:
             persisted = await _persist_max_backup_schedule({
                 "end_ts": end_ts, "saved_reserve": saved_reserve,
                 "local_event": local_event, "apply_pending": True, "site_id": site_id,
+                **({"operation_id": advanced_operation_id} if advanced_operation_id else {}),
             }, is_current=current)
         except BaseException:
             restore_previous_runtime()
@@ -46286,6 +46347,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if local_event:
                 if await local_client.schedule_max_backup(duration_minutes * 60, end_ts=end_ts) is not True:
                     raise HomeAssistantError("Max Backup native event was not acknowledged; cleanup remains owned")
+                if call.data.get("_advanced_backup_started_at") is not None:
+                    from .powerwall_local.transport import manual_backup_matches_window
+                    observed = await local_client.get_backup_events()
+                    if manual_backup_matches_window(observed, end_ts) is not True:
+                        raise HomeAssistantError("Native backup preparation readback is unconfirmed")
+                    native_window = {key: observed["manual_backup"][key] for key in ("start_time", "duration_seconds", "priority")}
+                else:
+                    native_window = None
                 _LOGGER.info("🛡️ Max backup acknowledged via local V1R event")
             else:
                 result = await handle_set_backup_reserve(make_service_call(
@@ -46298,6 +46367,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if not await _persist_max_backup_schedule({
                     "end_ts": end_ts, "saved_reserve": saved_reserve,
                     "local_event": local_event, "apply_pending": False, "site_id": site_id,
+                    **({"operation_id": advanced_operation_id} if advanced_operation_id else {}),
+                    **({"native_window": native_window} if local_event and native_window is not None else {}),
             }, is_current=current):
                 raise HomeAssistantError("Max Backup acknowledgement could not be persisted; cleanup remains owned")
             if current():
@@ -46860,6 +46931,99 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.services.async_register(DOMAIN, "set_storm_watch", routed_handler(hass, entry.entry_id, "set_storm_watch", handle_set_storm_watch))
     hass.services.async_register(DOMAIN, "set_off_grid_ev_reserve", routed_handler(hass, entry.entry_id, "set_off_grid_ev_reserve", handle_set_off_grid_ev_reserve))
     hass.services.async_register(DOMAIN, "set_vpp_enrollment", routed_handler(hass, entry.entry_id, "set_vpp_enrollment", handle_set_vpp_enrollment))
+    from .powerwall_local.backup_preparation import BackupPreparationControl
+
+    async def _load_backup_preparation_requests():
+        return (await store.async_load() or {}).get("backup_preparation_requests", {})
+
+    async def _save_backup_preparation_requests(value):
+        if not await _update_powerwall_store(store, {"backup_preparation_requests": value}, verify=True,
+                                             is_current=_local_powerwall_generation_current):
+            raise HomeAssistantError("Backup request could not be saved")
+
+    async def _backup_preparation_status():
+        from .powerwall_local.views import ensure_client
+        from .powerwall_local.transport import manual_backup_matches_window, manual_backup_is_absent
+        client = await ensure_client(hass, entry)
+        try:
+            events = await client.get_backup_events() if client is not None else None
+        except Exception:
+            events = None
+        record = _local_powerwall_runtime.get("max_backup_schedule")
+        operation = None
+        if record:
+            matches = manual_backup_matches_window(events, record["end_ts"], record.get("native_window"))
+            phase = "active" if matches is True and not record.get("apply_pending") else "recovery_required"
+            operation = {"operation_id": record.get("operation_id") or _control_digest({"entry": entry.entry_id, "site": record.get("site_id"), "end": record["end_ts"], "local_event": record.get("local_event")}),
+                         "phase": phase, "active": True, "ends_at": record["end_ts"],
+                         "can_cancel": events is not None and (matches is not None or manual_backup_is_absent(events))}
+        return {"operation": operation, "events": events, "readable": events is not None,
+                "can_start": events is not None and manual_backup_is_absent(events)}
+
+    def _backup_preparation_allowed():
+        return _battery_output_allowed() and not any(s.get("active") for s in (
+            force_charge_state, force_discharge_state, hold_soc_state, self_consumption_state))
+
+    async def _prepare_backup_preparation(minutes, context):
+        from .powerwall_local.views import ensure_client
+        from .powerwall_local.backup_preparation import validate_backup_preparation
+        client = await ensure_client(hass, entry)
+        if client is None or not client.local_access_enabled:
+            raise HomeAssistantError("Backup preparation requires the paired local gateway")
+        validate_backup_preparation(_local_powerwall_dispatch_config(), await client.get_snapshot())
+
+    async def _reconcile_backup_preparation(context):
+        from .powerwall_local.views import ensure_client
+        from .powerwall_local.transport import manual_backup_matches_window, manual_backup_is_absent
+        async with _local_powerwall_route_lock:
+            record = _local_powerwall_runtime.get("max_backup_schedule")
+            if not record:
+                return
+            if not record.get("local_event"):
+                raise HomeAssistantError("Use End this backup window to restore the saved reserve")
+            generation = _local_powerwall_runtime.get("max_backup_generation", 0)
+            client = await ensure_client(hass, entry)
+            first = await client.get_backup_events() if client else None
+            checked = await client.get_backup_events() if client else None
+            if first is None or checked is None or first.get("manual_backup") != checked.get("manual_backup"):
+                raise HomeAssistantError("Backup readback is unavailable or changed")
+            if _local_powerwall_runtime.get("max_backup_generation", 0) != generation:
+                raise HomeAssistantError("Backup operation changed")
+            matches = manual_backup_matches_window(checked, record["end_ts"], record.get("native_window"))
+            if matches is True:
+                confirmed = {**record, "apply_pending": False,
+                    "native_window": {key: checked["manual_backup"][key] for key in ("start_time", "duration_seconds", "priority")}}
+                if not await _persist_max_backup_schedule(confirmed, is_current=lambda: _local_powerwall_runtime.get("max_backup_generation", 0) == generation):
+                    raise HomeAssistantError("Backup readback could not be saved")
+                _local_powerwall_runtime["max_backup_apply_pending"] = False
+                _local_powerwall_runtime["max_backup_restore_attempts"] = 0
+                return
+            if matches is False or manual_backup_is_absent(checked):
+                if _local_powerwall_runtime.get("max_backup_cleanup_not_before", 0) > time.monotonic():
+                    raise HomeAssistantError("Backup command acceptance is still pending")
+                # The existing cleanup rereads and never cancels a replacement.
+                await _max_backup_restore(None, generation=generation, owner=_local_powerwall_runtime)
+                return
+            raise HomeAssistantError("Backup ownership readback is unavailable")
+
+    async def _start_backup_preparation(minutes, context, requested_at):
+        await handle_schedule_max_backup(ServiceCall(hass, DOMAIN, "schedule_max_backup",
+            {"duration_minutes": minutes, "source": "user", "entry_id": entry.entry_id,
+             "_advanced_backup_started_at": requested_at}, context=context))
+
+    async def _stop_backup_preparation(operation_id, context):
+        status = await _backup_preparation_status()
+        operation = status.get("operation")
+        if not operation or operation["operation_id"] != operation_id:
+            raise HomeAssistantError("Backup operation changed")
+        if not operation["can_cancel"]:
+            raise HomeAssistantError("Backup ownership readback is unavailable or changed")
+        await _max_backup_restore(None, generation=_local_powerwall_runtime.get("max_backup_generation", 0), owner=_local_powerwall_runtime)
+
+    _local_powerwall_runtime["backup_preparation_control"] = BackupPreparationControl(
+        load=_load_backup_preparation_requests, save=_save_backup_preparation_requests,
+        status=_backup_preparation_status, start=_start_backup_preparation, stop=_stop_backup_preparation,
+        allowed=_backup_preparation_allowed, prepare=_prepare_backup_preparation, reconcile=_reconcile_backup_preparation)
     hass.services.async_register(DOMAIN, "schedule_max_backup", routed_handler(hass, entry.entry_id, "schedule_max_backup", handle_schedule_max_backup))
     hass.services.async_register(DOMAIN, "refresh_calibration", handle_refresh_calibration)
 

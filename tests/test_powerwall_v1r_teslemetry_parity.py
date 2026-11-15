@@ -1146,6 +1146,10 @@ async def test_timed_battery_dispatch_and_resume_use_distinct_typed_requests():
     assert not command.HasField("resume_device_mode")
     assert command.real_power.power_watts == -500
     assert command.real_power.duration_seconds == 30
+    assert await transport.dispatch_battery_power("gateway", 0, 30)
+    idle = requests[-1].teg.dispatch_battery_power_request
+    assert idle.HasField("real_power") and not idle.HasField("resume_device_mode")
+    assert idle.real_power.power_watts == 0 and idle.real_power.duration_seconds == 30
     assert await transport.resume_battery_operation("gateway")
     command = requests[-1].teg.dispatch_battery_power_request
     assert command.HasField("resume_device_mode")

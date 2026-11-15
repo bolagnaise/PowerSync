@@ -228,3 +228,5 @@ from different attempts. Each returned sample carries its own acquisition start;
 Automatic refreshes DCQ after slow config work and rechecks admission at the final
 submission boundary. Missing or stale SOC still blocks control; the five-second
 freshness limit and configured site limits remain in force.
+
+For literal zero-power idle, charge/discharge to a percentage, persistent site limits and native backup windows, see [Advanced Powerwall controls](powerwall-advanced-controls.md).

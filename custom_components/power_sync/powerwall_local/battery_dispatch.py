@@ -139,13 +139,12 @@ def fixed_battery_watts(mode: str, target_w: float, snapshot: Any, config: dict)
     """
     if type(target_w) not in (int, float) or not math.isfinite(target_w) or target_w < 0:
         raise ValueError("Fixed battery output requires finite non-negative watts")
-    if target_w == 0:
-        raise ValueError("Zero battery hold is not verified on this gateway")
     policy = dict(config)
     # Zero export prohibits grid export, not supplying the home. Keep legacy
     # force-discharge admission unchanged in validate_dispatch_config().
     policy.pop("optimization_max_grid_export_w", None)
-    validate_dispatch_config(mode, policy)
+    if target_w != 0:
+        validate_dispatch_config(mode, policy)
     maximum = min(TIMED_DISPATCH_MAX_W,
                   _number(config.get(f"optimization_max_{mode}_w", 5000), f"{mode} limit"))
     if target_w > maximum:
@@ -179,7 +178,9 @@ def fixed_battery_watts(mode: str, target_w: float, snapshot: Any, config: dict)
     reserve = _percent(config.get("hardware_backup_reserve", 0), "backup reserve")
     if snapshot.backup_reserve_percent is not None:
         reserve = max(reserve, _number(snapshot.backup_reserve_percent, "gateway reserve"))
-    if mode == "discharge":
+    if target_w == 0:
+        watts = 0.0  # Explicit battery-output hold; legacy zero still means Max.
+    elif mode == "discharge":
         reserve = max(reserve, _percent(config.get("optimization_backup_reserve", .2), "reserve floor"))
         if soc <= reserve:
             raise ValueError("Battery is at its discharge reserve floor")
@@ -199,6 +200,25 @@ def fixed_battery_watts(mode: str, target_w: float, snapshot: Any, config: dict)
     if grid < -exported - 1e-6:
         raise ValueError("Fixed battery output would exceed the site export limit or permission")
     return watts
+
+
+def check_battery_soc_target(power, target, snapshot, config):
+    """Explicit target percentages stay percentages, including the value 1."""
+    if target is None:
+        return
+    from .battery_output import BatteryOutputError, check_target_soc
+    if power < 0:
+        ceiling = _percent(config.get("optimization_grid_charge_soc_cap", 1), "charge ceiling")
+        if target > ceiling:
+            raise BatteryOutputError("battery_target_above_charge_ceiling")
+    else:
+        floor = max(_number(config.get("hardware_backup_reserve", 0), "backup reserve"),
+                    _percent(config.get("optimization_backup_reserve", .2), "reserve floor"))
+        if snapshot.backup_reserve_percent is not None:
+            floor = max(floor, _number(snapshot.backup_reserve_percent, "gateway reserve"))
+        if target < floor:
+            raise BatteryOutputError("battery_target_below_reserve")
+    check_target_soc(power, target, snapshot.soc)
 
 
 def battery_watts(mode: str, target_w: float, snapshot: Any, config: dict, *, target_basis: str = "battery") -> float:
@@ -316,6 +336,7 @@ class LocalBatteryDispatch:
         self._prepare_grid = False
         self._resume_confirmed = False
         self._snapshot_check = None
+        self.completion_reason = None
 
     @property
     def grid_charge_restore(self):
@@ -454,6 +475,7 @@ class LocalBatteryDispatch:
             self.guarded_write = guarded_write
             self._mode, self._target = mode, target_w
             self._target_basis = target_basis
+            self.completion_reason = None
             self._deadline = time.monotonic() + duration_seconds
             if deadline_monotonic is not None:
                 if (target_basis != "battery_output" or type(deadline_monotonic) not in (int, float)
@@ -682,7 +704,8 @@ class LocalBatteryDispatch:
             if type(actual) in (int, float) and observed_at <= actual <= time.monotonic():
                 observed_at = actual
             self._check_site_limits(snapshot)
-            if self._mode != "charge" or not await self._prepare_grid_charging(snapshot):
+            if (self._mode != "charge" or self._target_basis == "battery_output" and self._target == 0
+                    or not await self._prepare_grid_charging(snapshot)):
                 break
         else:
             raise ValueError("Local grid charging preparation did not settle")
@@ -772,13 +795,18 @@ class LocalBatteryDispatch:
                 await asyncio.sleep(min(RENEW_SECONDS, max(0, self._deadline - time.monotonic())))
                 async with self._lock:
                     if time.monotonic() >= self._deadline:
+                        self.completion_reason = "timeout"
                         await self._release()
                         return
                     await self._write_with_limit_retry()
         except asyncio.CancelledError:
             raise
-        except Exception:
-            _LOGGER.exception("Powerwall local dispatch renewal stopped; releasing lease")
+        except Exception as err:
+            self.completion_reason = "target_reached" if getattr(err, "code", None) == "battery_target_reached" else "safety_refused"
+            if self.completion_reason == "target_reached":
+                _LOGGER.info("Powerwall battery target reached; releasing lease")
+            else:
+                _LOGGER.exception("Powerwall local dispatch renewal stopped; releasing lease")
             # Retry release only; never renew power after a failed cycle.
             for attempt in range(3):
                 try:

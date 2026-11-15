@@ -104,21 +104,22 @@ async def test_tightening_is_persistent_and_does_not_change_permissions_or_other
 
 
 @pytest.mark.asyncio
-async def test_mixed_tightening_and_unapproved_relaxation_never_partially_writes():
+async def test_authenticated_mixed_tightening_and_relaxation_writes_one_document_without_paperwork():
     control, request, gateway, writes, *_ = fixture()
-    with pytest.raises(ValueError, match="approved maximum"):
-        await control.execute(await request(import_limit_w=10000, export_limit_w=6000))
-    assert not writes
-    assert gateway["site_info"]["max_site_meter_power_ac"] == 12
+    result = await control.execute(await request(import_limit_w=10000, export_limit_w=6000))
+    assert result["success"]
+    assert writes == [{"site_info.max_site_meter_power_ac": 10, "site_info.min_site_meter_power_ac": -6}]
+    assert gateway["site_info"]["max_site_meter_power_ac"] == 10
+    assert gateway["site_info"]["min_site_meter_power_ac"] == -6
 
 
 @pytest.mark.asyncio
-async def test_saved_baseline_is_not_approval_to_restore_a_higher_limit():
+async def test_owner_can_restore_a_known_owned_baseline_without_paperwork():
     control, request, gateway, writes, *_ = fixture()
     result = await control.execute(await request(export_limit_w=2000))
-    with pytest.raises(ValueError, match="approved maximum"):
-        await control.execute(await request(operation="restore", snapshot_id=result["snapshots"][0]["snapshot_id"]))
-    assert len(writes) == 1
+    restored = await control.execute(await request(operation="restore", snapshot_id=result["snapshots"][0]["snapshot_id"]))
+    assert restored["success"]
+    assert len(writes) == 2 and gateway["site_info"]["min_site_meter_power_ac"] == -5
 
 
 @pytest.mark.asyncio
@@ -191,8 +192,10 @@ def test_site_limit_values_have_one_strict_watts_contract(value):
 def test_unknown_native_value_does_not_become_unlimited_permission():
     config = {"site_info": {"max_site_meter_power_ac": 1e9}}
     assert m.native_fields(config)["import_limit_w"]["value_w"] is None
-    with pytest.raises(ValueError, match="approved maximum"):
-        m.plan_changes(config, {"export_limit_w": 5000}, {}, {})
+    updates, baseline = m.plan_changes(config, {"export_limit_w": 5000}, {}, {})
+    assert updates == {"site_info.min_site_meter_power_ac": -5}
+    assert baseline["export_limit_w"]["present"] is False
+    assert "site_info.max_site_meter_power_ac" not in updates
 
 
 @pytest.mark.asyncio

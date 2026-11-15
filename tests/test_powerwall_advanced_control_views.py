@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def harness():
     source = ast.parse((ROOT / 'custom_components/power_sync/powerwall_local/views.py').read_text())
-    names = {'_advanced_control_entry', 'PowerwallBatteryOutputView', 'PowerwallBatteryOutputStopView', 'PowerwallNativeSiteLimitsView'}
+    names = {'_advanced_control_entry', 'PowerwallBatteryOutputView', 'PowerwallBatteryOutputStopView', 'PowerwallNativeSiteLimitsView', 'PowerwallBackupPreparationView'}
     tree = ast.Module(body=[n for n in source.body if getattr(n, 'name', None) in names], type_ignores=[])
     context = lambda **kw: SimpleNamespace(**kw)
     namespace = {'web': web, 'HomeAssistantView': object, 'HomeAssistantError': RuntimeError, 'DOMAIN': 'power_sync', 'Context': context}
@@ -21,7 +21,7 @@ def harness():
     entries = [SimpleNamespace(entry_id=key, domain='power_sync') for key in ('a', 'b')]
     controls = {key: SimpleNamespace(read=AsyncMock(return_value={'site': key}), execute=AsyncMock(return_value={'success': True}), end=AsyncMock(return_value={'success': True})) for key in ('a', 'b')}
     hass = SimpleNamespace(config_entries=SimpleNamespace(async_entries=lambda _: entries, async_get_entry=lambda key: next((e for e in entries if e.entry_id == key), None)),
-                           data={'power_sync': {key: {'native_site_limits_control': controls[key], 'battery_output_control': controls[key]} for key in controls}})
+                           data={'power_sync': {key: {'native_site_limits_control': controls[key], 'battery_output_control': controls[key], 'backup_preparation_control': controls[key]} for key in controls}})
     return namespace, hass, controls
 
 
@@ -37,7 +37,7 @@ class Request(dict):
 @pytest.mark.asyncio
 async def test_reads_refuse_ambiguous_entries_and_select_exact_site():
     n, hass, controls = harness()
-    for name in ('PowerwallBatteryOutputView', 'PowerwallNativeSiteLimitsView'):
+    for name in ('PowerwallBatteryOutputView', 'PowerwallNativeSiteLimitsView', 'PowerwallBackupPreparationView'):
         view = n[name](hass)
         assert view.requires_auth is True
         assert (await view.get(Request())).status == 409
@@ -88,3 +88,16 @@ async def test_service_cannot_bypass_administrator_approval():
     call.context.user_id = 'admin'
     assert await namespace['handle_set_native_site_limits'](call) == {'success': True}
     control.execute.assert_awaited_once_with({'operation': 'approve'}, actor='admin')
+
+
+@pytest.mark.asyncio
+async def test_backup_writes_select_exact_entry_and_preserve_authenticated_context():
+    n, hass, controls = harness()
+    view = n['PowerwallBackupPreparationView'](hass)
+    user = SimpleNamespace(id='owner')
+    assert (await view.post(Request({'request_id':'start','duration_minutes':60}, user))).status == 409
+    body = {'entry_id':'b','request_id':'start','duration_minutes':60}
+    assert (await view.post(Request(body, user))).status == 200
+    args = controls['b'].execute.await_args.args
+    assert args[0] == body and args[1].user_id == 'owner'
+    controls['a'].execute.assert_not_awaited()

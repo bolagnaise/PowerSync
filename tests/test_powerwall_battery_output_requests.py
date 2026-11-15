@@ -173,7 +173,7 @@ async def test_policy_revision_change_does_not_prevent_an_owned_stop():
 
 
 @pytest.mark.parametrize("field,value", [
-    ("power_w", True), ("power_w", "1800"), ("power_w", 1.8), ("power_w", 0),
+    ("power_w", True), ("power_w", "1800"), ("power_w", 1.8),
     ("power_w", -10001), ("duration_seconds", False), ("duration_seconds", 1.5),
     ("duration_seconds", 86401), ("takeover", "yes"), ("request_id", ""),
 ])

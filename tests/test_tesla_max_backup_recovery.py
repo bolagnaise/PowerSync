@@ -288,9 +288,10 @@ async def test_native_cleanup_uses_fresh_absence_only_after_signed_acceptance_dr
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("observed", [None, {}, {"manual_backup": None},
-    {"manual_backup": {"active": False, "start_time": 9999999999}, "backup_events": []}])
-async def test_unknown_or_present_native_read_cannot_retire_without_cancel_ack(recovery, monkeypatch, observed):
+@pytest.mark.parametrize("observed, expected_cancels", [(None, 0), ({}, 0), ({"manual_backup": None}, 0),
+    ({"manual_backup": {"active": False, "start_time": 9999999999}, "backup_events": []}, 0),
+    ({"manual_backup": {"start_time": 40, "duration_seconds": 60, "priority": (1 << 64) - 1}, "backup_events": []}, 1)])
+async def test_unknown_window_is_not_cancelled_and_owned_lost_ack_requires_absence(recovery, monkeypatch, observed, expected_cancels):
     p = recovery
     bind_absence_helper(p)
     p.durable.value["local_event"] = True
@@ -301,14 +302,15 @@ async def test_unknown_or_present_native_read_cannot_retire_without_cancel_ack(r
     elapse(monkeypatch)
     await p.ns["async_call_later"].call_args.args[2](None)
     assert p.durable.value == original
-    p.client.cancel_max_backup.assert_awaited_once()
+    assert p.client.cancel_max_backup.await_count == expected_cancels
     # A later absence cannot settle that lost cancel while its signature is valid.
     p.client.get_backup_events.return_value = {"manual_backup": None, "backup_events": []}
     await p.ns["async_call_later"].call_args.args[2](None)
-    assert p.client.get_backup_events.await_count == 1 and p.durable.value == original
+    if expected_cancels:
+        assert p.client.get_backup_events.await_count == 1 and p.durable.value == original
     elapse(monkeypatch)
     await p.ns["async_call_later"].call_args.args[2](None)
-    assert p.durable.value is None and p.client.cancel_max_backup.await_count == 1
+    assert p.durable.value is None and p.client.cancel_max_backup.await_count == expected_cancels
 
 
 @pytest.mark.asyncio

@@ -1878,3 +1878,51 @@ def test_advanced_battery_context_switch_discards_stale_drafts_reads_and_mutatio
 })().catch(e=>{console.error(e);process.exitCode=1});
 ''')
     assert result == {'freshDraft': True, 'staleReadIgnored': True, 'newRequestStillBusy': True, 'entries': ['a', 'b']}
+
+
+def test_advanced_controls_send_zero_and_soc_without_legacy_force_or_paperwork():
+    out = _run_board(r"""
+      (async () => {
+        const c = new (context.customElements.get('power-sync-advanced-controls'))();
+        c.entryId = 'entry-one';
+        const output = {schema_version:1, control_revision:'rev', capabilities:{battery_output:{supported:true,zero_hold_supported:true,target_soc_supported:true}}};
+        const limits = {schema_version:1, capabilities:{writable:true}, limits:{import_limit_w:{value_w:10000},export_limit_w:{value_w:5000}}, configuration_revision:'cfg', snapshots:[]};
+        const posts = [];
+        c.hass = {callApi: async (method,path,body) => { if(method === 'POST') {posts.push({path,body}); return {};} return path.includes('native_site_limits') ? limits : path.includes('backup_preparation') ? {schema_version:1,capabilities:{writable:true}} : output; }};
+        await c._act('refresh'); const html = c.innerHTML;
+        c._draft.mode='idle'; await c._act('target'); await c._act('target');
+        c._draft.mode='charge'; c._draft.target_soc='80'; await c._act('target'); await c._act('target');
+        c._draft.mode='discharge'; c._draft.target_soc='40'; await c._act('target'); await c._act('target');
+        c._draft.import_limit_w='12000'; await c._act('set'); await c._act('set');
+        console.log(JSON.stringify({posts,html}));
+      })().catch(e=>{console.error(e);process.exitCode=1});
+    """)
+    posts = out['posts']
+    assert [p['body']['power_w'] for p in posts[:3]] == [0, -1800, 1800]
+    assert 'target_soc' not in posts[0]['body']
+    assert [p['body']['target_soc'] for p in posts[1:3]] == [80, 40]
+    assert all(p['body']['entry_id'] == 'entry-one' for p in posts)
+    assert posts[3]['body']['import_limit_w'] == 12000
+    assert all('force' not in p['path'] for p in posts)
+    assert 'Advanced options' in out['html'] and 'Site limits' in out['html']
+    assert 'Approval document' not in out['html'] and 'Approved installation' not in out['html']
+
+
+def test_advanced_stop_and_backup_recovery_survive_lost_acquisition_support():
+    out = _run_board(r"""
+      (async () => {
+        const c = new (context.customElements.get('power-sync-advanced-controls'))();
+        c.entryId = 'entry'; const posts=[];
+        const o={schema_version:1,control_revision:'changed',capabilities:{battery_output:{supported:false}},operation:{active:true,operation_id:'owned',phase:'recovery_required',power_w:0}};
+        c.hass={callApi:async(method,path,body)=>{if(method==='POST'){posts.push({path,body});return{};}return path.includes('backup_preparation')?{schema_version:1,capabilities:{writable:false},recovery_required:true,operation:{phase:'prepared',active:true,ends_at:1800000000,can_cancel:false}}:path.includes('native_site_limits')?null:o;}};
+        await c._act('refresh'); const html=c.innerHTML;
+        await c._act('stop'); await c._act('stop');
+        await c._act('backup_reconcile'); await c._act('backup_reconcile');
+        console.log(JSON.stringify({html,posts}));
+      })().catch(e=>{console.error(e);process.exitCode=1});
+    """)
+    assert 'Stop this battery target' in out['html']
+    assert 'Check backup status' in out['html']
+    assert out['posts'][0]['body']['operation_id'] == 'owned'
+    assert out['posts'][0]['path'].endswith('battery_dispatch/stop')
+    assert out['posts'][1]['body']['operation'] == 'reconcile'
