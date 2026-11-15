@@ -808,3 +808,59 @@ async def test_advanced_reconcile_matching_window_keeps_backup_active(overlap, p
     assert p.runtime["max_backup_end_ts"] == record["end_ts"]
     p.client.cancel_max_backup.assert_not_awaited()
     assert not p.reserves and p.mutations == [("backup", 3600)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('ack', [False, True])
+async def test_advanced_backup_records_exact_window_before_native_submission(overlap, ack):
+    from conftest import load_power_sync_submodule
+    from test_powerwall_fixed_output import fixed_config, fixed_snapshot
+    import time, uuid
+    p = overlap
+    m = load_power_sync_submodule('powerwall_local.backup_preparation', 'exact_backup_intent')
+    transport = importlib.import_module(f'{overlap.core.__package__}.powerwall_local.transport')
+    p.ns.update(validate_backup_preparation=m.validate_backup_preparation,
+        backup_window_available=transport.backup_window_available, _backup_preparation_allowed=lambda: True,
+        _local_powerwall_dispatch_config=fixed_config, _output_uuid4=uuid.uuid4)
+    p.client.get_snapshot.return_value = fixed_snapshot()
+    applied = []
+    async def events():
+        return {'manual_backup': deepcopy(p.durable.value['native_window']) if applied else None, 'backup_events': []}
+    async def submit(seconds, *, end_ts, replace_existing, start_ts):
+        assert replace_existing is False and p.durable.value['apply_pending']
+        w = p.durable.value['native_window']
+        assert w['start_time'] == start_ts and w['start_time'] + w['duration_seconds'] == int(end_ts)
+        applied.append(w)
+        return ack
+    p.client.get_backup_events = AsyncMock(side_effect=events)
+    p.client.schedule_max_backup = AsyncMock(side_effect=submit)
+    request = call(source='user', duration_minutes=1, _advanced_backup_started_at=time.time())
+    if ack:
+        await p.ns['handle_schedule_max_backup'](request)
+        assert p.durable.value['apply_pending'] is False
+    else:
+        with pytest.raises(RuntimeError, match='not acknowledged'):
+            await p.ns['handle_schedule_max_backup'](request)
+        assert p.durable.value['apply_pending'] is True
+    assert p.durable.value['native_window'] == applied[0]
+    p.client.cancel_max_backup.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_advanced_backup_refuses_existing_native_window_before_intent(overlap):
+    from conftest import load_power_sync_submodule
+    from test_powerwall_fixed_output import fixed_config, fixed_snapshot
+    import time
+    p = overlap
+    m = load_power_sync_submodule('powerwall_local.backup_preparation', 'occupied_backup_intent')
+    transport = importlib.import_module(f'{overlap.core.__package__}.powerwall_local.transport')
+    p.ns.update(validate_backup_preparation=m.validate_backup_preparation,
+        backup_window_available=transport.backup_window_available, _backup_preparation_allowed=lambda: True,
+        _local_powerwall_dispatch_config=fixed_config)
+    p.client.get_snapshot.return_value = fixed_snapshot()
+    p.client.get_backup_events = AsyncMock(return_value={'manual_backup': {'start_time': int(time.time()), 'duration_seconds': 3600}, 'backup_events': []})
+    with pytest.raises(RuntimeError, match='occupied or unavailable'):
+        await p.ns['handle_schedule_max_backup'](call(source='user', duration_minutes=1, _advanced_backup_started_at=time.time()))
+    assert p.durable.value is None and not p.runtime.get('max_backup_end_ts')
+    p.client.schedule_max_backup.assert_not_awaited()
+    p.client.cancel_max_backup.assert_not_awaited()

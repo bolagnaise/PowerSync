@@ -81,6 +81,28 @@ def manual_backup_is_absent(snapshot: Any) -> bool:
             and type(snapshot.get("backup_events")) is list)
 
 
+def backup_window_available(snapshot, start, end):
+    """Refuse unknown or active manual windows and overlapping scheduled events."""
+    if not isinstance(snapshot, dict) or "manual_backup" not in snapshot or not isinstance(snapshot.get("backup_events"), list):
+        return False
+    manual = snapshot["manual_backup"]
+    if manual is not None:
+        if not isinstance(manual, dict):
+            return False
+        begins, duration = manual.get("start_time"), manual.get("duration_seconds")
+        if type(begins) is not int or begins <= 0 or type(duration) is not int or duration <= 0 or begins + duration > start:
+            return False
+    for event in snapshot["backup_events"]:
+        if not isinstance(event, dict):
+            return False
+        begins, duration = event.get("start_time"), event.get("duration_seconds")
+        if type(begins) is not int or type(duration) is not int or duration <= 0:
+            return False
+        if begins < end and begins + duration > start:
+            return False
+    return True
+
+
 def _mutation_label(envelope_bytes: bytes) -> str | None:
     """Exempt proven read envelopes; unknown wire messages are mutations.
 
@@ -873,7 +895,7 @@ class TEDAPIv1rTransport:
             _LOGGER.warning("Battery dispatch %s malformed reply: watts=%s seconds=%s", operation, watts, seconds)
             return False
 
-    async def schedule_manual_backup(self, din: str, duration_s: int, *, end_ts: float | None = None) -> bool:
+    async def schedule_manual_backup(self, din: str, duration_s: int, *, end_ts: float | None = None, replace_existing: bool = True, start_ts: int | None = None) -> bool:
         """Trigger Tesla's "Storm Watch Manual Backup" — holds SOC, stops export.
 
         This prepares and retains battery energy for a bounded backup window.
@@ -901,11 +923,16 @@ class TEDAPIv1rTransport:
         # A lost cancellation can arrive after a replacement start. Keep the
         # caller's staged cleanup ownership until cancellation is acknowledged.
         # A fresh explicit absence avoids issuing that cancellation at all.
-        if not manual_backup_is_absent(snapshot) and await self.cancel_manual_backup(din) is not True:
+        if not replace_existing:
+            if not backup_window_available(snapshot, time.time(), end_ts):
+                raise PowerwallLocalError("Native backup window is occupied or unavailable")
+        elif not manual_backup_is_absent(snapshot) and await self.cancel_manual_backup(din) is not True:
             return False
 
         before_send()
-        start_ts = int(time.time())
+        start_ts = int(time.time()) if start_ts is None else start_ts
+        if type(start_ts) is not int or start_ts <= 0:
+            raise ValueError("Invalid native backup start")
         seconds = min(duration_s, 86400)
         seconds = min(seconds, int(end_ts) - start_ts)
         if seconds < 1:

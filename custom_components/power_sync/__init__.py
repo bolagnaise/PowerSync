@@ -46252,6 +46252,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 raise HomeAssistantError("Advanced backup preparation requires a paired local gateway; no reserve fallback is used")
             from .powerwall_local.backup_preparation import validate_backup_preparation
             validate_backup_preparation(_local_powerwall_dispatch_config(), await local_client.get_snapshot())
+            from .powerwall_local.transport import backup_window_available
+            if not backup_window_available(await local_client.get_backup_events(), _time.time(), end_ts):
+                raise HomeAssistantError("Native backup window is occupied or unavailable")
             if not _backup_preparation_allowed():
                 raise HomeAssistantError("Backup authority changed during preparation")
         opt_coord = hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get("optimization_coordinator")
@@ -46268,6 +46271,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         if _time.time() >= end_ts:
             raise HomeAssistantError("Max Backup request expired while reading its restore target")
+        native_window = None
+        if advanced_started is not None:
+            native_start = int(_time.time())
+            native_seconds = min(duration_minutes * 60, int(end_ts) - native_start)
+            if native_seconds < 1:
+                raise HomeAssistantError("Backup preparation expired before intent")
+            native_window = {"start_time": native_start, "duration_seconds": native_seconds, "priority": (1 << 64) - 1}
         prior_cancel = entry_data.get("max_backup_cancel")
         if entry_data.get("max_backup_end_ts") is not None:
             if not _max_backup_site_current(entry_data):
@@ -46316,7 +46326,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             persisted = await _persist_max_backup_schedule({
                 "end_ts": end_ts, "saved_reserve": saved_reserve,
                 "local_event": local_event, "apply_pending": True, "site_id": site_id,
-                **({"operation_id": advanced_operation_id} if advanced_operation_id else {}),
+                **({"operation_id": advanced_operation_id, "native_window": native_window} if advanced_operation_id else {}),
             }, is_current=current)
         except BaseException:
             restore_previous_runtime()
@@ -46345,16 +46355,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if _time.time() >= end_ts:
                 raise HomeAssistantError("Max Backup request expired before actuation")
             if local_event:
-                if await local_client.schedule_max_backup(duration_minutes * 60, end_ts=end_ts) is not True:
+                strict_window = ({"replace_existing": False, "start_ts": native_window["start_time"]} if advanced_started is not None else {})
+                if await local_client.schedule_max_backup(duration_minutes * 60, end_ts=end_ts, **strict_window) is not True:
                     raise HomeAssistantError("Max Backup native event was not acknowledged; cleanup remains owned")
                 if call.data.get("_advanced_backup_started_at") is not None:
                     from .powerwall_local.transport import manual_backup_matches_window
                     observed = await local_client.get_backup_events()
-                    if manual_backup_matches_window(observed, end_ts) is not True:
+                    if manual_backup_matches_window(observed, end_ts, native_window) is not True:
                         raise HomeAssistantError("Native backup preparation readback is unconfirmed")
-                    native_window = {key: observed["manual_backup"][key] for key in ("start_time", "duration_seconds", "priority")}
-                else:
-                    native_window = None
                 _LOGGER.info("🛡️ Max backup acknowledged via local V1R event")
             else:
                 result = await handle_set_backup_reserve(make_service_call(
@@ -46943,7 +46951,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     async def _backup_preparation_status():
         from .powerwall_local.views import ensure_client
-        from .powerwall_local.transport import manual_backup_matches_window, manual_backup_is_absent
+        from .powerwall_local.transport import manual_backup_matches_window, manual_backup_is_absent, backup_window_available
         client = await ensure_client(hass, entry)
         try:
             events = await client.get_backup_events() if client is not None else None
@@ -46958,7 +46966,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                          "phase": phase, "active": True, "ends_at": record["end_ts"],
                          "can_cancel": events is not None and (matches is not None or manual_backup_is_absent(events))}
         return {"operation": operation, "events": events, "readable": events is not None,
-                "can_start": events is not None and manual_backup_is_absent(events)}
+                "can_start": backup_window_available(events, time.time(), time.time())}
 
     def _backup_preparation_allowed():
         return _battery_output_allowed() and not any(s.get("active") for s in (
@@ -46971,6 +46979,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if client is None or not client.local_access_enabled:
             raise HomeAssistantError("Backup preparation requires the paired local gateway")
         validate_backup_preparation(_local_powerwall_dispatch_config(), await client.get_snapshot())
+        from .powerwall_local.transport import backup_window_available
+        start = time.time()
+        if not backup_window_available(await client.get_backup_events(), start, start + minutes * 60):
+            raise HomeAssistantError("Native backup window is occupied or unavailable")
 
     async def _reconcile_backup_preparation(context):
         from .powerwall_local.views import ensure_client
