@@ -1206,7 +1206,14 @@ class AutomationEngine:
                     "charger_power",
                     "charge_current",
                     "charger_current",
-                ) and not targetable_rank:
+                ) and not (
+                    "ble" in candidate_prefix.lower()
+                    or self._hass.states.get(
+                        f"binary_sensor.{candidate_prefix}_ble_status"
+                    ) is not None
+                ):
+                    # A generic power monitor can have a matching charger
+                    # switch too. That pair alone does not identify Tesla BLE.
                     continue
 
                 activity_rank = 0

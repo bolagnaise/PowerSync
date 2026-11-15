@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import logging
+import importlib.util
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,6 +21,15 @@ TRIGGERS_PATH = ROOT / "custom_components" / "power_sync" / "automations" / "tri
 
 
 def _load_engine_method(name: str, namespace: dict[str, Any]):
+    recovery_path = ROOT / "custom_components/power_sync/tesla_ev_recovery.py"
+    spec = importlib.util.spec_from_file_location("_automation_state_recovery", recovery_path)
+    recovery = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = recovery
+    try:
+        spec.loader.exec_module(recovery)
+    finally:
+        sys.modules.pop(spec.name, None)
+    namespace["ble_quarantined"] = recovery.ble_quarantined
     namespace.setdefault("DOMAIN", "power_sync")
     namespace.setdefault("CONF_ZAPTEC_STANDALONE_ENABLED", "zaptec_standalone_enabled")
     namespace.setdefault("CONF_ZAPTEC_USERNAME", "zaptec_username")
@@ -40,6 +50,9 @@ def _load_engine_method(name: str, namespace: dict[str, Any]):
         for node in engine.body
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name
     )
+    method.body = [node for node in method.body if not (
+        isinstance(node, ast.ImportFrom) and node.module == "tesla_ev_recovery"
+    )]
     extracted = ast.ClassDef(
         name="_ExtractedEngine",
         bases=[],
@@ -802,6 +815,32 @@ def test_automation_ev_state_prefers_fresh_current_only_second_ble_vehicle():
 
     assert result.triggered is True
     assert store.updated == [(36, 7.0)]
+
+
+def test_automation_ev_state_ignores_unrelated_power_monitor_with_switch():
+    prefix = "garage_power_monitor_1pm_ev"
+    entities = {
+        f"sensor.{prefix}_charger_power": SimpleNamespace(
+            entity_id=f"sensor.{prefix}_charger_power", state="4.9",
+            attributes={"unit_of_measurement": "kW"},
+        ),
+        f"switch.{prefix}_charger": SimpleNamespace(
+            entity_id=f"switch.{prefix}_charger", state="on",
+        ),
+    }
+    engine_class = _load_engine_method("_async_get_ev_state", {
+        "Any": Any, "Dict": Dict, "_LOGGER": logging.getLogger(__name__),
+        "__package__": "power_sync.automations",
+    })
+    engine = object.__new__(engine_class)
+    engine._hass = SimpleNamespace(
+        states=SimpleNamespace(async_all=lambda: list(entities.values()), get=entities.get),
+        config_entries=SimpleNamespace(async_entries=lambda _domain: []), data={},
+    )
+    state = asyncio.run(engine._async_get_ev_state())
+    assert state["vehicle_id"] is None
+    assert state["location"] == "unknown"
+    assert state["is_charging"] is False
 
 
 def test_automation_ev_state_prefers_targetable_ble_when_activity_ties():

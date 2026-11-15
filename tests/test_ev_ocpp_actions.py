@@ -5201,6 +5201,39 @@ def test_scheduled_battery_supply_holds_rate_inside_grid_tolerance(monkeypatch, 
         assert calls == []
 
 
+@pytest.mark.parametrize("amps_entity,expected", [(None, 0), ("number.ev_current", 5)])
+def test_dynamic_switch_only_charger_cannot_claim_reduced_current(monkeypatch, amps_entity, expected):
+    calls = []
+
+    async def not_unplugged(*args, **kwargs):
+        return False
+
+    async def live_status(*args, **kwargs):
+        return {"battery_power": -8200, "grid_power": 15900,
+                "solar_power": 3000, "load_power": 3600,
+                "ev_power": 7100, "battery_soc": 88.0}
+
+    async def set_amps(hass, entry, vehicle, amps, params):
+        calls.append(amps)
+        return True
+
+    monkeypatch.setattr(actions, "_clear_ble_dynamic_session_if_unplugged", not_unplugged)
+    monkeypatch.setattr(actions, "_get_tesla_live_status", live_status)
+    monkeypatch.setattr(actions, "_set_vehicle_amps", set_amps)
+    state = {"active": True, "current_amps": 32, "target_amps": 32,
+             "params": {"dynamic_mode": "battery_target", "charger_type": "generic",
+                        "charger_switch_entity": "switch.ev",
+                        "charger_amps_entity": amps_entity,
+                        "target_battery_charge_kw": 14.7, "max_grid_import_kw": 16.0,
+                        "no_grid_import": True, "min_charge_amps": 5,
+                        "max_charge_amps": 32, "voltage": 240, "phases": 1}}
+    actions._dynamic_ev_state.clear()
+    actions._dynamic_ev_state["entry-1"] = {"generic_ev": state}
+    asyncio.run(actions._dynamic_ev_update(_Hass([]), _Entry(), "entry-1", "generic_ev"))
+    assert calls == [expected]
+    assert state["current_amps"] == expected
+
+
 def test_dynamic_battery_target_uses_solar_and_home_load_to_preserve_grid_charge(monkeypatch):
     set_amps_calls: list[int] = []
 
@@ -9534,6 +9567,7 @@ def test_scheduled_dynamic_update_uses_solax_kilowatt_snapshot(monkeypatch):
                 "dynamic_mode": "battery_target",
                 "owner_mode": "scheduled",
                 "charger_type": "generic",
+                "charger_amps_entity": "number.ev_current",
                 "min_charge_amps": 5,
                 "max_charge_amps": 32,
                 "target_battery_charge_kw": 0,

@@ -17841,6 +17841,11 @@ async def _dynamic_ev_update(
     if optimizer_ceiling_amps is not None:
         new_amps = min(new_amps, optimizer_ceiling_amps)
 
+    if params.get("charger_type") == "generic" and not params.get("charger_amps_entity"):
+        # A switch cannot enforce a reduced positive current. Pause when the
+        # available budget cannot accommodate the configured full charge rate.
+        new_amps = max_amps if new_amps >= max_amps else 0
+
     # In no_grid_import mode, respond immediately to grid imports (don't wait for 1A threshold)
     # Use ev_relevant_grid_kw (excludes battery charging) to avoid throttling due to
     # intentional home battery grid-charging by the LP optimizer
