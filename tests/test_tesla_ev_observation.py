@@ -2004,3 +2004,38 @@ async def test_preparation_observer_failure_cannot_change_admission(monkeypatch)
         raise RuntimeError('observer failed')
     assert await observation.async_prepare_tesla_fleet_command(
         hass, VIN_A, entity, diagnostic_observer=broken) is True
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("result,expected", [("fresh", True), ("unchanged", False), ("wrong_vin", False), ("failed", False)])
+async def test_fleet_preparation_waits_for_queued_refresh_completion(result, expected):
+    coordinator = _Coordinator(_fleet_data('ONLINE', math.floor(time.time()) - 2))
+    hass, entity = _fleet_command_hass(coordinator)
+    listeners = []
+    queued = None
+
+    def add_listener(callback, context=None):
+        listeners.append(callback)
+        return lambda: listeners.remove(callback)
+
+    async def completed_refresh():
+        await asyncio.sleep(0.01)
+        if result != 'unchanged':
+            coordinator.data = _fleet_data('ONLINE', time.time())
+        if result == 'wrong_vin':
+            coordinator.data['vin'] = VIN_B
+        coordinator.last_update_success = result != 'failed'
+        for callback in tuple(listeners):
+            callback()
+
+    async def request_refresh():
+        nonlocal queued
+        queued = asyncio.create_task(completed_refresh())
+
+    coordinator.async_add_listener = add_listener
+    coordinator.async_request_refresh = request_refresh
+    try:
+        assert await observation.async_prepare_tesla_fleet_command(hass, VIN_A, entity, timeout=1) is expected
+        assert not listeners
+    finally:
+        if queued is not None:
+            await queued
