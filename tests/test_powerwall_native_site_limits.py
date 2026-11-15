@@ -295,3 +295,18 @@ async def test_repair_requires_admin_readback_and_discards_old_approval_without_
     assert m.recorded_limits_w(state, control.identity()) == (12000, 2000)
     assert (await control.execute(data, actor="admin"))["replayed"]
     assert len(writes) == 1
+
+
+@pytest.mark.asyncio
+async def test_offline_status_exposes_authority_for_revocation_without_fabricated_readback():
+    control, request, gateway, writes, behaviour, load, changes = fixture()
+    await control.execute(await request(operation="approve", import_limit_w=10000,
+        confirm_installation_limits=True, document_reference="Synthetic agreement", approval_date="2026-11-15"), actor="owner")
+    behaviour["online"] = False
+    status = await control.read()
+    assert status["source"] == "stored_authority" and status["configuration_revision"] == ""
+    assert status["capabilities"]["readable"] is False and status["capabilities"]["writable"] is False
+    assert status["limits"]["import_limit_w"]["value_w"] is None
+    await control.execute({"operation": "approve", "request_id": "offline-revoke", "expected_approval_revision": status["approval_revision"],
+        "import_limit_w": None, "confirm_installation_limits": True, "document_reference": "Revoked", "approval_date": "2026-11-15"}, actor="owner")
+    assert (await load())["approval"]["import_limit_w"]["active"] is False and not writes

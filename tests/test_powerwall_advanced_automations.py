@@ -81,3 +81,53 @@ async def test_approval_revision_change_prevents_scheduled_limits():
     assert await m.execute(hass, entry, "native_site_limits", CAP["parameters"], context) is False
     control.execute.assert_not_awaited()
     context["save_battery_request_journal"].assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", [OUTPUT, CAP])
+@pytest.mark.parametrize("unresolved", [False, True])
+async def test_real_scheduler_retries_a_refused_run_but_retains_unknown_request(action, unresolved):
+    import ast
+    import logging
+    from pathlib import Path
+    from typing import Dict, Any
+    tree = ast.parse((Path(__file__).parents[1] / "custom_components/power_sync/automations/__init__.py").read_text())
+    node = next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef) and n.name == "_async_execute_automation")
+    class Imports(ast.NodeTransformer):
+        def visit_ImportFrom(self, n):
+            return None if n.module == "powerwall_local.automation_controls" else n
+    node = Imports().visit(node)
+    receipts, calls = {}, []
+    revision = ["a" * 64]
+    async def submit(data):
+        calls.append(deepcopy(data))
+        if len(calls) == 1:
+            if unresolved:
+                receipts[data["request_id"]] = {"phase": "recovery_required"}
+            raise ValueError("refused or unknown")
+        receipts[data["request_id"]] = {"phase": "active" if action is OUTPUT else "readback_confirmed"}
+        return {"success": True}
+    async def read():
+        return {"control_revision": revision[0], "configuration_revision": revision[0], "approval_revision": "b" * 64}
+    control = SimpleNamespace(load=AsyncMock(side_effect=lambda: {"requests": deepcopy(receipts)}), read=read, dispatch=submit, execute=submit)
+    hass = SimpleNamespace(data={"power_sync": {"entry": {"battery_output_control": control, "native_site_limits_control": control}}})
+    entry = SimpleNamespace(entry_id="entry")
+    async def execute_actions(h, e, actions, context):
+        try:
+            return await m.execute(h, e, actions[0]["action_type"], actions[0]["parameters"], context)
+        except ValueError:
+            return False
+    ns = {"Dict": Dict, "Any": Any, "_LOGGER": logging.getLogger(__name__), "execute_actions": execute_actions,
+          "validate_actions": m.validate_actions, "run_has_unresolved_request": m.run_has_unresolved_request}
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[node], type_ignores=[])), "<scheduler>", "exec"), ns)
+    scheduler = SimpleNamespace(_hass=hass, _config_entry=entry, _store=SimpleNamespace(async_save=AsyncMock()))
+    rule = {"name": "Synthetic", "actions": [deepcopy(action)]}
+    assert await ns["_async_execute_automation"](scheduler, rule, set(), {}) is False
+    assert ("_advanced_battery_run" in rule) is unresolved
+    revision[0] = "c" * 64  # Another control or a restart changed the revision.
+    assert await ns["_async_execute_automation"](scheduler, rule, set(), {}) is (not unresolved)
+    assert len(calls) == (1 if unresolved else 2)
+    if not unresolved:
+        assert calls[0]["request_id"] != calls[1]["request_id"]
+        key = "expected_control_revision" if action is OUTPUT else "expected_config_revision"
+        assert calls[1][key] == revision[0]

@@ -67,3 +67,22 @@ async def execute(hass, entry, action_type, params, context):
         await context["save_battery_request_journal"]()
     result = await (control.dispatch(deepcopy(payload)) if action_type == "battery_output" else control.execute(deepcopy(payload)))
     return result.get("success") is True
+
+
+async def run_has_unresolved_request(hass, entry, run):
+    """Keep failed runs only while an accepted request may still control hardware."""
+    runtime = hass.data.get("power_sync", {}).get(entry.entry_id, {})
+    try:
+        journals = {}
+        for request_id, payload in run.get("requests", {}).items():
+            key = "battery_output_control" if "power_w" in payload else "native_site_limits_control"
+            control = runtime.get(key)
+            if control is None:
+                return True
+            if key not in journals:
+                journals[key] = (await control.load() or {}).get("requests", {})
+            if journals[key].get(request_id, {}).get("phase") in ("prepared", "submitted", "active", "recovery_required"):
+                return True
+    except Exception:
+        return True  # Unreadable journal is not proof that a request was refused.
+    return False

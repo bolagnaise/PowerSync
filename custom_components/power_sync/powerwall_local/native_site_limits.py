@@ -187,14 +187,17 @@ class NativeSiteLimits:
 
     async def read(self):
         state = await self.load() or {}
-        document = await self.read_document()
-        fields = native_fields(document["config"])
+        try:
+            document = await self.read_document()
+        except Exception:
+            document = None
+        fields = native_fields(document["config"] if document else {"site_info": {}})
         same_identity = not state or state.get("identity", self.identity()) == self.identity()
-        return {"schema_version": 1, "configuration_revision": configuration_revision(document, self.identity()),
-                "approval_revision": approval_revision(state), "read_at": self.clock(), "source": "local",
+        return {"schema_version": 1, "configuration_revision": configuration_revision(document, self.identity()) if document else "",
+                "approval_revision": approval_revision(state), "read_at": self.clock(), "source": "local" if document else "stored_authority",
                 "limits": fields, "approval": state.get("approval", {}),
                 "transaction": state.get("transaction"), "snapshots": state.get("snapshots", []),
-                "capabilities": {"readable": True, "writable": same_identity and self.guard(False),
+                "capabilities": {"readable": document is not None, "writable": document is not None and same_identity and self.guard(False),
                     "zero_is_a_limit": True, "unlimited_supported": False,
                     "absent_field_restore_supported": False, "physical_enforcement_verified": False,
                     "identity_rebaseline_required": not same_identity}}

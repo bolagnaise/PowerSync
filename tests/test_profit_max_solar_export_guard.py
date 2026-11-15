@@ -44,7 +44,7 @@ _STUBS = (
 
 _METHODS = (
     "_profit_max_solar_export_slots", "_revise_solar_export_holds",
-    "_check_solar_export_counterfactual",
+    "_check_solar_export_counterfactual", "_effective_charge_and_import_limits",
 )
 
 INTERVAL_MINUTES = 5
@@ -148,6 +148,14 @@ def _fake_coordinator(export_limit_kw: float = 15.0):
         "export_limit_kw": export_limit_kw,
     }
     coordinator._sync_solar_export_capability_notice = lambda *_args: None
+    # Bind the shipped effective-cap resolver, as a real coordinator does.
+    tree = ast.parse((COMPONENT_ROOT / "optimization/coordinator.py").read_text())
+    node = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "_effective_charge_and_import_limits")
+    namespace = {"math": math}
+    exec(compile(ast.Module(body=[node], type_ignores=[]), "<effective-caps>", "exec"), namespace)
+    coordinator._local_powerwall_plan_limits = lambda: {}
+    coordinator._normalize_optional_power_w = lambda value: value
+    coordinator._effective_charge_and_import_limits = types.MethodType(namespace["_effective_charge_and_import_limits"], coordinator)
     return coordinator
 
 
@@ -620,3 +628,11 @@ def test_pre_deadline_hold_remains_allowed_when_target_is_unreachable(
         [True, True],
     )
     assert held_mask == [True, False]
+
+
+def test_native_zero_import_cannot_fund_a_profitable_solar_hold(coordinator_methods):
+    coordinator = _fake_coordinator()
+    args = ([0.20, 0.0], [0.50, 0.0], [5.0, 0.0], [1.0, 1.0], 0.33, [False, False], [True, True])
+    assert coordinator_methods['_profit_max_solar_export_slots'](coordinator, *args)[0] is True
+    coordinator._local_powerwall_plan_limits = lambda: {'max_grid_import_w': 0}
+    assert coordinator_methods['_profit_max_solar_export_slots'](coordinator, *args) == [False, False]

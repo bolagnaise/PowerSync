@@ -1062,13 +1062,22 @@ class AutomationEngine:
             context.update(battery_run_id=run["id"], battery_run_started=run["started"],
                 battery_request_journal=run["requests"], save_battery_request_journal=self._store.async_save)
 
-        result = await execute_actions(
-            self._hass,
-            self._config_entry,
-            actions_to_execute,
-            context
-        )
-        return result
+        result = False
+        try:
+            result = await execute_actions(
+                self._hass,
+                self._config_entry,
+                actions_to_execute,
+                context
+            )
+            return result
+        finally:
+            run = automation.get("_advanced_battery_run")
+            if run and not result:
+                from ..powerwall_local.automation_controls import run_has_unresolved_request
+                if not await run_has_unresolved_request(self._hass, self._config_entry, run):
+                    automation.pop("_advanced_battery_run", None)
+                    await self._store.async_save()
 
     async def _async_send_notification(self, message: str) -> None:
         """Send notification via persistent notification and Expo Push."""

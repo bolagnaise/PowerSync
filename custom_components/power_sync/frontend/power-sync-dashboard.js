@@ -2344,7 +2344,7 @@ class PsAdvancedBatteryControls extends HTMLElement {
       ${field('reference', 'Approval document reference')}${field('date', 'Approval date (YYYY-MM-DD)')}
       <label><input type="checkbox" data-advanced-field="attested" ${d.attested ? 'checked' : ''} ${disabled}> I confirm these maxima are permitted for this installation.</label>
       ${btn('approve', 'Save approved maxima')}${btn('revoke', 'Revoke saved approval')}</details>` : ''}
-      ${btn('refresh', 'Read control state')}${this._message ? `<p class="hint" role="status">${psEsc(this._message)}</p>` : ''}</details>`;
+      ${o?.operation?.active && !o?.capabilities?.battery_output?.supported ? btn('stop', 'Stop this battery target') : ''}${btn('refresh', 'Read control state')}${this._message ? `<p class="hint" role="status">${psEsc(this._message)}</p>` : ''}</details>`;
   }
 }
 if (!customElements.get('power-sync-advanced-controls')) customElements.define('power-sync-advanced-controls', PsAdvancedBatteryControls);
@@ -2434,7 +2434,7 @@ class PsControlsCard extends PsCardBase {
       <p class="hint">Tap a button twice to confirm. Hold charge and Power the home use the Run for preset.</p><div data-advanced-controls></div>`;
     this._advancedBatteryNode ||= document.createElement('power-sync-advanced-controls');
     this._advancedBatteryNode.entryId = this._config.entry_id;
-    this.querySelector('[data-advanced-controls]').append(this._advancedBatteryNode);
+    this.querySelector('[data-advanced-controls]')?.append(this._advancedBatteryNode);
     this._advancedBatteryNode.hass = hass;
     if (focus) {
       const input = this.querySelector(`[data-timing-input="${focus.key}"]`);
