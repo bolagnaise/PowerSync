@@ -36761,6 +36761,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _local_powerwall_runtime.pop("tesla_control_method_changing", None)
         optimization = _local_powerwall_runtime.get("optimization_coordinator")
         if optimization is not None:
+            # Cleanup above confirmed that the previous force session ended.
+            # Retiring its private lease prevents stale Export status and stops
+            # the next plan from extending a command that no longer exists.
+            optimization._clear_optimizer_force_state()
+            optimization._last_executed_action = "self_consumption"
+            optimization._last_executed_planned_action = None
+            optimization._boundary_execution = None
             optimization._schedule_settings_reoptimization()
         async_dispatcher_send(hass, f"{DOMAIN}_tesla_control_method_{entry.entry_id}")
 

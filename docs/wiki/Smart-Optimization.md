@@ -11,6 +11,8 @@ for accurate schedules.
 
 The dashboard keeps the last completed plan while a new calculation is running. Reserve adjustments and other planning stages finish before the replacement plan appears, so a temporary first-pass export is not shown as the final schedule. A planned export still depends on execution safety checks; it is not proof of an accepted command or measured grid export.
 
+For Tesla Powerwall, changing the control method first restores the previous session. Once cleanup succeeds, its optimizer commitment and current-control status are cleared before replanning. If restoration cannot be confirmed, PowerSync retains the pending session and refuses the method change.
+
 ## Planned power ranges
 
 The dashboard groups consecutive slots with the same action into one window.

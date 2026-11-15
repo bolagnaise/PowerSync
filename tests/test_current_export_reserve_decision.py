@@ -507,3 +507,54 @@ def test_native_tariff_safety_uses_reported_rating_above_planning_rate(opt_modul
     else:
         duration,_=coordinator._targetless_charge_safe_duration(action,.8,.9,30)
         assert duration==12  # Planned energy is the tighter bound than SOC headroom.
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("restored", [True, False])
+async def test_control_method_change_retires_only_confirmed_optimizer_force(opt_module, clock, restored):
+    """A cancelled local export must not remain an active software commitment."""
+    from unittest.mock import Mock
+    from test_powerwall_battery_dispatch import load_routing
+
+    coordinator, _, _, _ = _controller(opt_module, active=True, targetless=True)
+    _prepare_api(opt_module, coordinator)
+    coordinator._last_executed_planned_action = "export"
+    coordinator._is_in_demand_window_at = lambda timestamp: False
+    coordinator._boundary_execution = {"action": "export", "slot_start": NOW}
+    refresh = Mock()
+    coordinator._schedule_settings_reoptimization = refresh
+    assert coordinator.get_api_data()["current_action"] == "discharge"
+
+    namespace, local, client, _ = load_routing()
+    entry = namespace["entry"]
+    namespace["hass"].config_entries = SimpleNamespace(
+        async_get_entry=lambda key: entry,
+        async_update_entry=lambda current, **values: setattr(current, "options", values["options"]),
+    )
+    namespace["async_dispatcher_send"] = Mock()
+    namespace["_local_powerwall_runtime"]["optimization_coordinator"] = coordinator
+    await local.start("discharge", 2000, 120)
+    client.resume_battery_operation.return_value = restored
+    try:
+        if restored:
+            await namespace["_set_tesla_control_method"]("tariff")
+            assert coordinator._get_active_force_state()["active"] is False
+            assert coordinator._last_executed_action == "self_consumption"
+            assert coordinator._last_executed_planned_action is None
+            assert coordinator._boundary_execution is None
+            data = coordinator.get_api_data()
+            assert data["current_action"] == "self_consumption"
+            assert data["planned_current_action"] == "export"
+            refresh.assert_called_once()
+        else:
+            with pytest.raises(Exception, match="resume unconfirmed"):
+                await namespace["_set_tesla_control_method"]("tariff")
+            assert coordinator._get_active_force_state()["active"] is True
+            assert coordinator.get_api_data()["current_action"] == "discharge"
+            assert coordinator._boundary_execution["action"] == "export"
+            refresh.assert_not_called()
+        # Changing preference cleans up; it never replays a hardware command.
+        assert client.dispatch_battery_power.await_count == 1
+    finally:
+        client.resume_battery_operation.return_value = True
+        await local.stop()
