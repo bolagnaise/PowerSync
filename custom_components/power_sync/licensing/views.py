@@ -83,3 +83,23 @@ class LicensingStatusView(HomeAssistantView):
             return web.json_response({"error": str(error)}, status=409)
         except Exception:
             return web.json_response({"error": "licensing_temporarily_unavailable"}, status=503)
+
+
+class ReferralStatusView(HomeAssistantView):
+    """Administrator-only display endpoint; credentials stay on the HA server."""
+    url = "/api/power_sync/referrals"
+    name = "api:power_sync:referrals"
+    requires_auth = True
+
+    def __init__(self, hass):
+        self._hass = hass
+
+    async def get(self, request: web.Request) -> web.Response:
+        user = request.get("hass_user")
+        if not user or not user.is_admin:
+            return web.json_response({"error": "admin_required"}, status=403)
+        from .manager import async_get_manager
+        manager = await async_get_manager(self._hass)
+        response = web.json_response(await manager.async_referrals(force=request.query.get("refresh") == "1"))
+        response.headers["Cache-Control"] = "no-store"
+        return response

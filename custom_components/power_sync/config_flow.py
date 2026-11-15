@@ -12099,6 +12099,8 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
             except Exception:
                 errors["base"] = "optimizer_access_unavailable"
         status = manager.status(self.config_entry.entry_id)
+        if hasattr(manager, "async_referrals"):
+            status["referrals"] = await manager.async_referrals()
         return self.async_show_form(
             step_id="optimizer_access",
             data_schema=vol.Schema({vol.Required("action", default="refresh"): SelectSelector(SelectSelectorConfig(

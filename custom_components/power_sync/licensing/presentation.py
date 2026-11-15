@@ -68,7 +68,25 @@ def optimizer_access_description(status: dict, pairing_code: str | None = None) 
             f"Check HA optimiser access at {account_url}, then choose **Refresh access** below."
         )
 
+    referral = status.get("referrals") or {}
+    if not paired:
+        referral_summary = "Pair your PowerSync account to see your referral code."
+    elif referral.get("code"):
+        referral_summary = (
+            f"Your referral code: **{referral['code']}**\n\n"
+            f"Share: {referral['share_url']}\n\n"
+            f"{referral['earned_this_year']} of {referral['annual_limit']} rewards earned in {referral['year']}. "
+            f"Banked rewards: {referral['banked_rewards']}. "
+            "Your friend must make their first payment before you earn a free month. "
+            "Manage rewards at https://powersync.cc/app/referrals."
+        )
+        if referral.get("stale"):
+            referral_summary += " Showing the last fetched summary; refresh on the website for current status."
+    else:
+        referral_summary = "Referral information is temporarily unavailable. See https://powersync.cc/app/referrals."
+
     return {
+        "referral_summary": referral_summary,
         "access_summary": summary,
         "pairing_status": "Paired with your PowerSync account." if paired else "Not paired with a PowerSync account.",
         "next_step": next_step,

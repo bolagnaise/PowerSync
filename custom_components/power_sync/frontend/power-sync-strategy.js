@@ -1,3 +1,4 @@
+if (typeof document !== 'undefined') import('./power-sync-referrals.js').catch(() => {});
 // Optional consent UI loads independently of the energy dashboard.
 if (typeof document !== 'undefined') import('./power-sync-support.js').catch(() => {});
 if (typeof document !== 'undefined') import('./power-sync-diagnostics.js').catch(() => {});
@@ -8541,6 +8542,7 @@ function _boardCards(ctx) {
   };
   const cards = [];
   const add = entry => { if (entry) cards.push(entry); };
+  if(hass?.user?.is_admin)add({key:'referrals',title:'Refer friends',card:{type:'custom:power-sync-referrals'}});
 
   const hasOptimizer = hasE('optimization_status');
   const hasBattery = hasE('battery_level') || hasE('battery_power');

@@ -4,6 +4,7 @@ import inspect
 import json
 from pathlib import Path
 import logging
+import time
 
 from aiohttp import ClientTimeout
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -78,6 +79,42 @@ class HALicenseManager(LicenseRuntime):
             if not isinstance(value, dict):
                 raise ValueError("invalid_licensing_response")
             return value
+
+    async def async_referrals(self, *, force=False):
+        """Fetch display-only account information without changing licensing state."""
+        if not self.paired:
+            self._referral_cache = None
+            return {"paired": False, "unavailable": False}
+        identity = (self.installation_id, self.credential)
+        cached = getattr(self, "_referral_cache", None)
+        now = int(time.time())
+        if cached and cached[0] == identity and not force and now - cached[1]["fetched_at"] < 300:
+            return dict(cached[1])
+        try:
+            raw = await self._transport("/referrals", {
+                "installation_id": self.installation_id, "credential": self.credential,
+            })
+            # Never render arbitrary remote URLs or markup in the local HA UI.
+            import re
+            code = raw.get("code")
+            if not isinstance(code, str) or not re.fullmatch(r"PS[A-HJ-NP-Z2-9]{10}", code):
+                raise ValueError("invalid_referral_summary")
+            value = {
+                "paired": True, "unavailable": False, "stale": False,
+                "code": code, "share_url": "https://powersync.cc/app/refer/" + code,
+                "account_url": "https://powersync.cc/app/referrals", "fetched_at": now,
+            }
+            for key in ("earned_this_year", "annual_limit", "year", "banked_rewards"):
+                count = raw.get(key)
+                if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+                    raise ValueError("invalid_referral_summary")
+                value[key] = count
+            self._referral_cache = (identity, value)
+            return dict(value)
+        except Exception:
+            if cached and cached[0] == identity:
+                return {**cached[1], "stale": True, "unavailable": True}
+            return {"paired": True, "unavailable": True}
 
     def attach(self, coordinator):
         entry_id = coordinator.entry_id

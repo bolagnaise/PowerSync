@@ -51220,10 +51220,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
 
     # Register HTTP endpoints for Smart Optimization
-    from .licensing.views import LicensingStatusView, licensing_status
+    from .licensing.views import LicensingStatusView, ReferralStatusView, licensing_status
     from .licensing.manager import async_get_manager
     license_manager = await async_get_manager(hass)
     hass.http.register_view(LicensingStatusView(hass))
+    hass.http.register_view(ReferralStatusView(hass))
     hass.http.register_view(OptimizationView(hass))
     hass.http.register_view(OptimizationSettingsView(hass))
     hass.http.register_view(OptimizationAISummaryView(hass))

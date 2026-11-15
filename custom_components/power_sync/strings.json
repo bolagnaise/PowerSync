@@ -1362,7 +1362,7 @@
     "step": {
       "optimizer_access": {
         "title": "HA optimiser access",
-        "description": "**Access:** {access_summary}\n\n**This HA server:** {pairing_status}\n\n{next_step}\n\nMonitoring, dashboards, manual controls and recovery remain available.\n\nUse Reset pairing only to disconnect this server locally. Revoke the old installation in your account before pairing a replacement.",
+        "description": "**Access:** {access_summary}\n\n**This HA server:** {pairing_status}\n\n{next_step}\n\nMonitoring, dashboards, manual controls and recovery remain available.\n\nUse Reset pairing only to disconnect this server locally. Revoke the old installation in your account before pairing a replacement.\n\n{referral_summary}",
         "data": {
           "action": "Action"
         },
