@@ -114,6 +114,7 @@ def _strategy_script(board_missing: bool) -> str:
       evSettings: cards.find(c => c.key === 'evset') || null,
       pwRows: (cards.find(c => c.key === 'pwset')?.config.rows || []).map(r => r.entity),
       controls: cards.find(c => c.key === 'controls')?.config.entities || null,
+      controlsAdvanced: cards.find(c => c.key === 'controls')?.config.advanced || false,
       nowEntities: cards.find(c => c.key === 'now')?.config.entities || null,
       planEntities: cards.find(c => c.key === 'plan')?.config.entities || null,
       tariffEntities: cards.find(c => c.key === 'tariff')?.config.entities || null,
@@ -1984,3 +1985,11 @@ def test_advanced_controls_start_independent_reads_once_per_entry_on_connection(
 })().catch(e=>{console.error(e);process.exitCode=1});
 ''')
     assert out == {"initial": 3, "total": 6, "selected": True}
+
+
+def test_advanced_dashboard_controls_require_a_tesla_local_capability_entity():
+    assert _run_strategy(board_missing=False)["controlsAdvanced"] is False
+    script = _strategy_script(False).replace("  const hass = {", "  states['binary_sensor.power_sync_powerwall_local_paired'] = s('off');\n  const hass = {")
+    result = subprocess.run(["node", "-e", script, str(STRATEGY_PATH)], check=True, capture_output=True, text=True)
+    out = json.loads(result.stdout.strip().splitlines()[-1])
+    assert out["controlsAdvanced"] is True, "Unpaired Tesla still gets setup feedback, other brands do not get Tesla-only controls"
