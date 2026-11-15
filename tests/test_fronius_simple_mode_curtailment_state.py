@@ -408,6 +408,41 @@ def test_low_soc_alone_does_not_override_negative_export_ownership(
     assert asyncio.run(namespace["should_curtail_ac_coupled"](import_c, export_c)) is expected
 
 
+@pytest.mark.parametrize("brand,following,soc,battery,grid,import_c,expected", [
+    ("fronius", False, 28, 440, 0, 6.7, False),
+    ("fronius", False, 28, 440, 30, 6.7, False),
+    ("fronius", False, 28, 0, 0, 6.7, True),
+    ("fronius", False, 98, 440, 0, 6.7, True),
+    ("fronius", False, None, 440, 0, 6.7, True),
+    ("fronius", False, 28, 440, None, 6.7, True),
+    ("fronius", False, 28, 440, -101, 6.7, True),
+    ("fronius", False, 28, 440, 0, -1, True),
+    ("fronius", False, 28, 440, 0, None, True),
+    ("fronius", True, 28, 440, 0, 6.7, True),
+    ("sungrow", False, 28, 440, 0, 6.7, True),
+])
+def test_simple_mode_releases_low_soc_battery_starvation(
+    brand, following, soc, battery, grid, import_c, expected,
+):
+    runtime = {"inverter_last_state": "curtailed"}
+    async def live():
+        return {"battery_soc": soc, "battery_power": battery,
+                "grid_power": grid, "solar_power": 10, "load_power": 450}
+    namespace = {
+        "_aemo_dispatch_entry_data": lambda: runtime,
+        "get_live_status": live, "_LOGGER": _Logger(),
+        "entry": SimpleNamespace(options={"inverter_restore_soc": 98,
+            "inverter_brand": brand, "fronius_load_following": following}, data={}),
+        "CONF_INVERTER_RESTORE_SOC": "inverter_restore_soc",
+        "CONF_INVERTER_BRAND": "inverter_brand",
+        "CONF_FRONIUS_LOAD_FOLLOWING": "fronius_load_following",
+        "DEFAULT_INVERTER_RESTORE_SOC": 98,
+        "export_earnings_are_uneconomic": lambda value, *_args: value < 0,
+    }
+    exec(_function_source("should_curtail_ac_coupled"), namespace)
+    assert asyncio.run(namespace["should_curtail_ac_coupled"](import_c, -2)) is expected
+
+
 def _function_source(name: str) -> str:
     source = INIT_PATH.read_text()
     module = ast.parse(source)
@@ -452,6 +487,7 @@ def _run_fronius_curtailment(
     native_result: bool | None = None,
     controller_override=None,
     expected_result=True,
+    cycles=1,
 ) -> dict:
     """Drive the real apply_inverter_curtailment() fronius success branch."""
     entry_id = "entry-id"
@@ -574,7 +610,8 @@ def _run_fronius_curtailment(
     exec(_top_level_function_source("_load_following_site_load_w"), namespace)
     exec(_function_source("_aemo_dispatch_entry_data"), namespace)
     exec(_function_source("apply_inverter_curtailment"), namespace)
-    result = asyncio.run(namespace["apply_inverter_curtailment"](True, 10.67, 0.14))
+    for _ in range(cycles):
+        result = asyncio.run(namespace["apply_inverter_curtailment"](True, 10.67, 0.14))
 
     assert result is (expected_result and native_result is not False)
     assert recorded["constructed"] == 1
@@ -649,3 +686,12 @@ def test_native_failure_does_not_escalate_to_offgrid_fallback():
     recorded = _run_fronius_curtailment(load_following=True, native_result=False, expect_state=False)
     assert recorded["fallback_calls"] == []
     assert recorded["state"] is None
+
+
+def test_successful_restore_is_not_repeated_on_next_cycle():
+    recorded = _run_fronius_curtailment(
+        load_following=False, should_curtail_result=False,
+        inverter_last_state="curtailed", cycles=2, expect_state=False,
+    )
+    assert recorded["restore_calls"] == 1
+    assert recorded["state"]["control_mode"] == "normal"

@@ -27842,6 +27842,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     f"- allowing inverter to run"
                 )
                 return False
+            # A Fronius simple-mode zero-export controller can lose the solar
+            # race to a discharging Powerwall. Waiting for charging then latches
+            # the limit that prevents charging. Restore only on affirmative
+            # starvation evidence; retain export and negative-import priority.
+            if (
+                entry.options.get("inverter_brand", entry.data.get("inverter_brand")) == "fronius"
+                and not entry.options.get(
+                    "fronius_load_following", entry.data.get("fronius_load_following", False)
+                )
+                and import_price is not None and import_price >= 0
+                and grid_power is not None and grid_power >= 0
+                and battery_soc is not None and battery_soc < restore_soc
+                and battery_power > 50
+            ):
+                _LOGGER.info(
+                    "AC-COUPLED: Restoring Fronius simple mode: battery is "
+                    "discharging below restore SOC while export is stopped"
+                )
+                return False
             _LOGGER.info(
                 f"🔌 AC-COUPLED: Existing curtailment is preventing export at "
                 f"uneconomic price ({export_earnings:.2f}c/kWh) - holding limit "

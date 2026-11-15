@@ -324,3 +324,12 @@ Fresh battery charging with headroom remains an exception. Negative import price
 retain priority. To investigate a different outcome, capture the same-time prices,
 battery power and SOC, grid power, inverter status attributes, and untruncated
 PowerSync debug records around the transition.
+
+### Fronius simple mode and battery charging
+
+When a curtailed Fronius in simple mode leaves the battery discharging below
+its configured restore SOC, PowerSync allows solar production again if fresh
+telemetry shows no export and import prices are nonnegative. This prevents the
+two zero-export controllers from keeping solar suppressed while the battery
+supplies the house. Negative import prices and actual uneconomic export retain
+priority; missing telemetry does not authorize restoration.
