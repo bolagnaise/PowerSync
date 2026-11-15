@@ -44,7 +44,7 @@ def overlap(admission, request):
     functions = [deepcopy(next(node for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
                      and node.name == name)) for name in
                  ("_max_backup_site_current", "_max_backup_restore", "_restore_max_backup_window", "handle_schedule_max_backup",
-                  "_resume_max_backup_if_persisted")]
+                  "_resume_max_backup_if_persisted", "_reconcile_backup_preparation")]
     class StripImports(ast.NodeTransformer):
         def visit_ImportFrom(self, node):
             return ast.copy_location(ast.Pass(), node)
@@ -59,7 +59,27 @@ def overlap(admission, request):
         queued.set()
         return await site.run_write("test native backup boundary", submit, entry_id=entry.entry_id)
     client.schedule_max_backup = AsyncMock(side_effect=native_event)
-    client.cancel_max_backup = AsyncMock(return_value=True)
+    # Model the native readback independently of ACK, including worst-case
+    # delivery after a lost start reply. A successful cancel removes the event.
+    native = NS(absent=False, end=None)
+    class NativeCancelMock(AsyncMock):
+        async def _execute_mock_call(self, *args, **kwargs):
+            result = await super()._execute_mock_call(*args, **kwargs)
+            if result is True:
+                native.absent = True
+            return result
+    client.cancel_max_backup = NativeCancelMock(return_value=True)
+    async def read_native_events():
+        end = runtime.get("max_backup_end_ts")
+        if end != native.end:
+            native.end, native.absent = end, False
+        manual = None if native.absent or end is None else {
+            "start_time": int(end) - 60, "duration_seconds": 60, "priority": (1 << 64) - 1,
+            "end_time": int(end), "active": True,
+        }
+        return {"manual_backup": manual, "backup_events": []}
+    client.get_backup_events = AsyncMock(side_effect=read_native_events)
+    transport = importlib.import_module(f"{admission.m.__package__}.powerwall_local.transport")
     async def local_power(watts, duration):
         async def submit():
             mutations.append(("power", watts))
@@ -88,6 +108,8 @@ def overlap(admission, request):
         _notify_max_backup_recovery=lambda _runtime: None,
         foreign_site_owner=core.foreign_site_owner,
         max_backup_recovery_status=core.max_backup_recovery_status,
+        manual_backup_matches_window=transport.manual_backup_matches_window,
+        manual_backup_is_absent=transport.manual_backup_is_absent,
         SERVICE_SET_BACKUP_RESERVE="set_backup_reserve",
         handle_set_backup_reserve=admission.m.guard_battery_transition(hass, entry, reserve_handler),
     )
@@ -748,3 +770,41 @@ async def test_unknown_late_native_apply_cannot_release_owner_before_acceptance_
     elapse(monkeypatch)
     await p.ns["async_call_later"].call_args.args[2](None)
     assert not active[0] and p.durable.value is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing_client", [False, True])
+async def test_advanced_backup_refusal_leaves_no_intent_or_reserve_fallback(overlap, missing_client):
+    from test_powerwall_fixed_output import fixed_config
+    from conftest import load_power_sync_submodule
+    p = overlap
+    module = load_power_sync_submodule("powerwall_local.backup_preparation", "advanced_backup_policy")
+    p.ns["validate_backup_preparation"] = module.validate_backup_preparation
+    p.ns["_backup_preparation_allowed"] = lambda: True
+    p.ns["_local_powerwall_dispatch_config"] = lambda: fixed_config(optimization_allow_grid_charge=False)
+    if missing_client:
+        p.runtime["powerwall_local"]["client"] = None
+    with pytest.raises(RuntimeError if missing_client else ValueError, match="paired local|permitted"):
+        await p.ns["handle_schedule_max_backup"](call(source="user", duration_minutes=60, _advanced_backup_started_at=__import__("time").time()))
+    assert p.durable.value is None
+    assert not p.runtime.get("max_backup_end_ts")
+    assert not p.mutations and not p.reserves
+    p.ns["_persist_max_backup_schedule"].assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pending", [False, True])
+async def test_advanced_reconcile_matching_window_keeps_backup_active(overlap, pending):
+    p = overlap
+    await p.ns["handle_schedule_max_backup"](call(source="user", duration_minutes=60))
+    record = deepcopy(p.durable.value)
+    record["apply_pending"] = pending
+    p.runtime["max_backup_schedule"] = record
+    p.runtime["max_backup_apply_pending"] = pending
+    p.ns["ensure_client"] = AsyncMock(return_value=p.client)
+    await p.ns["_reconcile_backup_preparation"](None)
+    assert p.durable.value["apply_pending"] is False
+    assert p.runtime["max_backup_apply_pending"] is False
+    assert p.runtime["max_backup_end_ts"] == record["end_ts"]
+    p.client.cancel_max_backup.assert_not_awaited()
+    assert not p.reserves and p.mutations == [("backup", 3600)]

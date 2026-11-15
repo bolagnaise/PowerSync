@@ -78,10 +78,11 @@ def test_fixed_output_rejects_ambiguous_or_invalid_values(power):
                              target_basis="battery_output")
 
 
-def test_zero_hold_is_not_max_and_remains_explicitly_unverified():
-    with pytest.raises(ValueError, match="zero.*hold|Zero.*hold"):
-        module.battery_watts("discharge", 0, fixed_snapshot(), fixed_config(),
-                             target_basis="battery_output")
+def test_explicit_zero_output_is_idle_while_legacy_zero_stays_invalid_here():
+    assert module.battery_watts("charge", 0, fixed_snapshot(soc=100, grid_charging_enabled=False),
+        fixed_config(optimization_allow_grid_charge=False), target_basis="battery_output") == 0
+    with pytest.raises(ValueError, match="positive"):
+        module.battery_watts("discharge", 0, fixed_snapshot(), fixed_config(), target_basis="grid_export")
 
 
 @pytest.mark.asyncio

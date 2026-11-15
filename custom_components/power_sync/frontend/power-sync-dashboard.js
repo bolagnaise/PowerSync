@@ -2267,7 +2267,7 @@ class PsAdvancedBatteryControls extends HTMLElement {
     this._busy = false;
     this.addEventListener('input', e => {
       const key = e.target.dataset?.advancedField;
-      if (key) { e.stopPropagation(); this._confirm = null; this._draft[key] = e.target.type === 'checkbox' ? e.target.checked : e.target.value; }
+      if (key) { e.stopPropagation(); this._confirm = null; this._draft[key] = e.target.type === 'checkbox' ? e.target.checked : e.target.value; if (key === 'mode') { this._draft.power_w = String(Math.abs(Number(this._draft.power_w)) || 1800); this._draft.target_soc = this._draft.mode === 'charge' ? '80' : this._draft.mode === 'discharge' ? '40' : ''; this._render(); } }
     });
     this.addEventListener('click', e => {
       const action = e.target.closest('[data-advanced-action]')?.dataset.advancedAction;
@@ -2275,20 +2275,21 @@ class PsAdvancedBatteryControls extends HTMLElement {
     });
   }
   set hass(hass) { this._hass = hass; if (!this.innerHTML) this._render(); }
-  _newDraft() { return { power_w: '1800', minutes: '30', import_limit_w: '', export_limit_w: '', reference: '', date: '', takeover: false, attested: false }; }
+  _newDraft() { return { power_w: '1800', minutes: '30', import_limit_w: '', export_limit_w: '', mode: 'power', target_soc: '', backup_minutes: '120', takeover: false }; }
   set entryId(value) {
     if (value === this._entryId) return;
     this._entryId = value; ++this._contextGeneration;
-    this._draft = this._newDraft(); this._output = null; this._limits = null;
+    this._draft = this._newDraft(); this._output = null; this._limits = null; this._backup = null;
     this._confirm = null; this._busy = false; this._message = ''; this._render();
   }
   _path(resource, entryId = this._entryId) { return `power_sync/powerwall/${resource}${entryId ? `?entry_id=${encodeURIComponent(entryId)}` : ''}`; }
   async _refresh(generation = this._contextGeneration) {
     const entryId = this._entryId;
-    const values = await Promise.allSettled(['battery_dispatch', 'native_site_limits'].map(p => this._hass.callApi('GET', this._path(p, entryId))));
+    const values = await Promise.allSettled(['battery_dispatch', 'native_site_limits', 'backup_preparation'].map(p => this._hass.callApi('GET', this._path(p, entryId))));
     if (generation !== this._contextGeneration) return;
-    this._output = values[0].status === 'fulfilled' && values[0].value.schema_version === 1 ? values[0].value : null;
-    this._limits = values[1].status === 'fulfilled' && values[1].value.schema_version === 1 ? values[1].value : null;
+    this._backup = values[2].status === 'fulfilled' && values[2].value?.schema_version === 1 ? values[2].value : null;
+    this._output = values[0].status === 'fulfilled' && values[0].value?.schema_version === 1 ? values[0].value : null;
+    this._limits = values[1].status === 'fulfilled' && values[1].value?.schema_version === 1 ? values[1].value : null;
   }
   async _act(action) {
     if (this._busy) return;
@@ -2303,9 +2304,25 @@ class PsAdvancedBatteryControls extends HTMLElement {
     const integer = (s, signed = false) => (signed ? /^-?[0-9]+$/ : /^[0-9]+$/).test(s) ? Number(s) : NaN;
     try {
       if (action === 'target') {
-        const power = integer(d.power_w, true), seconds = integer(d.minutes) * 60;
-        if (!output?.capabilities?.battery_output?.supported || !Number.isInteger(power) || power === 0 || Math.abs(power) > 10000 || !Number.isInteger(seconds) || seconds < 60 || seconds > 86400) throw Error('Enter nonzero battery watts within ±10000 W and 1–1440 whole minutes.');
+        const magnitude = integer(d.power_w, d.mode === 'power'), power = d.mode === 'idle' ? 0 : d.mode === 'charge' ? -magnitude : magnitude, seconds = integer(d.minutes) * 60;
+        if (!output?.capabilities?.battery_output?.supported || !Number.isInteger(power) || (power === 0 && !output.capabilities.battery_output.zero_hold_supported) || Math.abs(power) > 10000 || !Number.isInteger(seconds) || seconds < 60 || seconds > 86400) throw Error('Enter battery watts within ±10000 W and 1–1440 whole minutes.');
         resource = 'battery_dispatch'; body = { power_w: power, duration_seconds: seconds, expected_control_revision: output.control_revision, takeover: d.takeover };
+        if ((d.mode === 'charge' || d.mode === 'discharge') && d.target_soc === '') throw Error('Enter the target battery level.');
+        if (d.target_soc !== '') {
+          const target = integer(d.target_soc);
+          if (!output.capabilities.battery_output.target_soc_supported || power === 0 || !Number.isInteger(target) || target < 1 || target > 100) throw Error('Use a target from 1 to 100% with nonzero battery watts.');
+          body.target_soc = target;
+        }
+      } else if (action.startsWith('backup_')) {
+        resource = 'backup_preparation'; body = {};
+        if (action === 'backup_start') {
+          const minutes = integer(d.backup_minutes);
+          if (!this._backup?.capabilities.writable || !Number.isInteger(minutes) || minutes < 1 || minutes > 1440) throw Error('Use a backup duration from 1 to 1440 whole minutes.');
+          body.duration_minutes = minutes;
+        } else if (action === 'backup_cancel') {
+          if (!this._backup?.operation?.can_cancel) throw Error('Refresh the owned backup window first.');
+          Object.assign(body, { operation: 'cancel', operation_id: this._backup.operation.operation_id });
+        } else body.operation = 'reconcile';
       } else if (action === 'stop') {
         if (!output?.operation?.active) throw Error('Refresh the active battery target first.');
         resource = 'battery_dispatch/stop'; body = { operation_id: output.operation.operation_id, expected_control_revision: output.control_revision };
@@ -2321,11 +2338,7 @@ class PsAdvancedBatteryControls extends HTMLElement {
             if (!Number.isInteger(watts) || watts < 0 || watts > 1000000) throw Error('Limits must be whole watts from 0 to 1000000.');
             body[key] = watts;
           }
-          if (action === 'approve' || action === 'revoke') {
-            if (!d.attested || !d.reference.trim() || !d.date) throw Error('Confirm the permitted maxima and supply an approval document reference and date.');
-            Object.assign(body, { operation: 'approve', confirm_installation_limits: true, document_reference: d.reference, approval_date: d.date });
-            if (action === 'revoke') Object.assign(body, { import_limit_w: null, export_limit_w: null });
-          }
+
         }
       }
       if (this._confirm !== action) { this._confirm = action; this._message = 'Tap the same button again to confirm.'; this._render(); return; }
@@ -2333,7 +2346,7 @@ class PsAdvancedBatteryControls extends HTMLElement {
       body.request_id = globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
       if (this._entryId) body.entry_id = this._entryId;
       await this._hass.callApi('POST', `power_sync/powerwall/${resource}`, body);
-      if (isCurrent()) this._message = 'Request completed. Review the refreshed state; measured tracking is unverified.';
+      if (isCurrent()) this._message = 'Control updated.';
     } catch (error) { if (isCurrent()) this._message = `${error.message || 'Request unconfirmed'}. Refresh state before another request.`; }
     finally {
       if (isCurrent() && this._busy) await this._refresh(generation);
@@ -2344,20 +2357,22 @@ class PsAdvancedBatteryControls extends HTMLElement {
     const d = this._draft, o = this._output, n = this._limits, disabled = this._busy ? 'disabled' : '';
     const field = (key, label) => `<label class="field"><span class="lab">${label}</span><input type="text" data-advanced-field="${key}" value="${psEsc(d[key])}" ${disabled}></label>`;
     const btn = (key, label, blocked = false) => `<button type="button" class="btn quiet" data-advanced-action="${key}" ${disabled || (blocked ? 'disabled' : '')}>${this._confirm === key ? 'Confirm: ' : ''}${label}</button>`;
-    this.innerHTML = `<details><summary>Battery output and site limits</summary>
-      ${o?.capabilities?.battery_output?.supported ? `<p class="hint">Positive battery watts supply power; negative watts charge. Household load determines grid flow. Infeasible targets are refused or stopped. Zero hold is unavailable.</p>
-      ${field('power_w', 'Battery power (W)')}${field('minutes', 'Duration (minutes)')}
-      <label><input type="checkbox" data-advanced-field="takeover" ${d.takeover ? 'checked' : ''} ${disabled}> Replace an active battery target</label>${btn('target', 'Apply battery target')}
-      ${o.operation ? `<p class="hint">Requested ${psEsc(o.operation.power_w)} W · commanded ${psEsc(o.operation.commanded_w ?? 'unknown')} W · ${psEsc(o.operation.command_status || o.operation.phase)}. Tracking: ${psEsc(o.operation.tracking)}.</p>${o.operation.active ? btn('stop', 'Stop this battery target') : ''}` : ''}` : ''}
-      ${n ? `<p class="hint">Persistent native import ${psEsc(n.limits.import_limit_w.value_w ?? 'unknown')} W · export ${psEsc(n.limits.export_limit_w.value_w ?? 'unknown')} W. Zero is a hard limit. Blank fields stay unchanged. These limits persist after timed controls stop.</p>
-      ${n.capabilities.identity_rebaseline_required ? `<p class="hint">Pairing changed. Controls are blocked. Confirm a fresh gateway baseline to archive previous approvals and record current native limits without sending a command.</p>${btn('rebaseline', 'Confirm new pairing and re-baseline')}` : ''}${field('import_limit_w', 'Import limit (W)')}${field('export_limit_w', 'Export limit (W)')}${btn('set', 'Apply persistent limits', !n.capabilities.writable)}
-      ${(n.snapshots || []).map(s => btn(`restore:${s.snapshot_id}`, `Restore saved limits ${psEsc(s.snapshot_id.slice(0, 8))}`, !n.capabilities.writable)).join('')}
-      ${n.transaction ? `<p class="hint">Transaction: ${psEsc(n.transaction.phase)}. Configuration readback does not prove physical enforcement.</p>${['prepared', 'submitted', 'recovery_required'].includes(n.transaction.phase) ? btn('reconcile', 'Check unresolved write') : ''}` : ''}
-      <details><summary>Approved installation maxima</summary><p class="hint">Enter permitted maxima above and identify the installation or network approval. Saving approval sends no gateway command. A Home Assistant administrator must confirm it.</p>
-      ${field('reference', 'Approval document reference')}${field('date', 'Approval date (YYYY-MM-DD)')}
-      <label><input type="checkbox" data-advanced-field="attested" ${d.attested ? 'checked' : ''} ${disabled}> I confirm these maxima are permitted for this installation.</label>
-      ${btn('approve', 'Save approved maxima')}${btn('revoke', 'Revoke saved approval')}</details>` : ''}
-      ${o?.operation?.active && !o?.capabilities?.battery_output?.supported ? btn('stop', 'Stop this battery target') : ''}${btn('refresh', 'Read control state')}${this._message ? `<p class="hint" role="status">${psEsc(this._message)}</p>` : ''}</details>`;
+    this.innerHTML = `<details><summary>Advanced options</summary>
+      ${o?.capabilities?.battery_output?.supported || o?.operation?.active ? `<details><summary>Battery control</summary><p class="hint">Positive battery watts discharge; negative watts charge; zero holds idle. Household load determines grid flow. Reserve and charging limits still apply.</p>
+      <label class="field"><span class="lab">Battery control</span><select data-advanced-field="mode" ${disabled}>${[['power','Fixed power'], ...(o.capabilities.battery_output.zero_hold_supported ? [['idle','Idle']] : []), ...(o.capabilities.battery_output.target_soc_supported ? [['charge','Charge to %'],['discharge','Discharge to %']] : [])].map(([value,label]) => `<option value="${value}" ${d.mode === value ? 'selected' : ''}>${label}</option>`).join('')}</select></label>
+      ${d.mode === 'idle' ? '' : field('power_w', 'Battery power (W)')}${field('minutes', 'Maximum duration (minutes)')}${d.mode !== 'idle' && o.capabilities.battery_output.target_soc_supported ? field('target_soc', 'Target battery level (%) — optional') : ''}
+      <label><input type="checkbox" data-advanced-field="takeover" ${d.takeover ? 'checked' : ''} ${disabled}> Replace an active battery target</label>${btn('target', 'Apply battery target', !o.capabilities.battery_output.supported)}
+      ${o.operation ? `<p class="hint">Battery target: ${psEsc(o.operation.power_w)} W${o.operation.target_soc === undefined ? '' : ` · ${psEsc(o.operation.target_soc)}%`} · ${psEsc(o.operation.phase.replace(/_/g, ' '))}</p>${o.operation.active ? btn('stop', 'Stop this battery target') : ''}` : ''}</details>` : ''}
+      ${n ? `<details><summary>Site limits</summary><p class="hint">Current import ${psEsc(n.limits.import_limit_w.value_w ?? 'unknown')} W · export ${psEsc(n.limits.export_limit_w.value_w ?? 'unknown')} W. Zero is a hard limit. Blank fields stay unchanged. These limits persist after timed controls stop.</p>
+      ${n.capabilities.identity_rebaseline_required ? `<p class="hint">Pairing changed. Controls are blocked. Confirm the new gateway to use these controls.</p>${btn('rebaseline', 'Confirm new gateway')}` : ''}${field('import_limit_w', 'Import limit (W)')}${field('export_limit_w', 'Export limit (W)')}${btn('set', 'Apply persistent limits', !n.capabilities.writable)}
+      ${(n.snapshots || []).slice(-1).map(s => btn(`restore:${s.snapshot_id}`, 'Restore previous site limits', !n.capabilities.writable)).join('')}
+      ${n.transaction ? `<p class="hint">${['prepared','submitted','recovery_required'].includes(n.transaction.phase) ? 'Check the previous change before applying another limit.' : 'Site limits updated.'}</p>${['prepared', 'submitted', 'recovery_required'].includes(n.transaction.phase) ? btn('reconcile', 'Check unresolved write') : ''}` : ''}
+      </details>` : ''}
+      ${this._backup ? `<details><summary>Backup preparation</summary><p class="hint">Charge to full and keep energy ready for a backup window. The house stays connected to the grid.</p>
+      ${field('backup_minutes', 'Backup duration (minutes)')}${btn('backup_start', 'Prepare backup', !this._backup.capabilities.writable)}
+      ${this._backup.operation ? `<p class="hint">Backup ${psEsc(this._backup.operation.phase)} · ends ${psEsc(new Date(this._backup.operation.ends_at * 1000).toLocaleString())}</p>${this._backup.operation.active ? btn('backup_cancel', 'End this backup window', !this._backup.operation.can_cancel) : ''}` : ''}
+      ${this._backup.recovery_required || this._backup.operation?.phase === 'recovery_required' ? btn('backup_reconcile', 'Check backup status') : ''}</details>` : ''}
+      ${btn('refresh', 'Read control state')}${this._message ? `<p class="hint" role="status">${psEsc(this._message)}</p>` : ''}</details>`;
   }
 }
 if (!customElements.get('power-sync-advanced-controls')) customElements.define('power-sync-advanced-controls', PsAdvancedBatteryControls);

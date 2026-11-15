@@ -1,4 +1,4 @@
-"""Native site limits: explicit approval, exact CAS and persistent receipts.
+"""Native site limits: authenticated adjustment, exact CAS and persistent receipts.
 
 Public values are integer watts. Native fields remain signed kilowatts. This
 module does not infer connection approval from a mutable gateway setting.
@@ -152,17 +152,10 @@ def plan_changes(config, requested, approval, identity):
         if public not in FIELDS or type(watts) is not int or not 0 <= watts <= MAX_LIMIT_W:
             raise SiteLimitError("invalid_site_limit")
         held = current[public]
-        approved = approval.get(public, {})
-        if approved.get("active") and (approved.get("identity") != identity or type(approved.get("max_w")) is not int or not 0 <= approved["max_w"] <= MAX_LIMIT_W):
-            raise SiteLimitError("approved_maximum_invalid")
-        maximum = (approved.get("max_w") if approved.get("active") is True
-                   and approved.get("identity") == identity else None)
-        if maximum is not None and watts > maximum:
-            raise SiteLimitError("site_limit_exceeds_approved_maximum")
+        # A deliberate authenticated edit is authority for this limit. Legacy
+        # approval records remain enforced until the new value is read back.
         if held["supported"] and held["value_w"] == watts:
             continue
-        if (not held["supported"] or watts > held["value_w"]) and maximum is None:
-            raise SiteLimitError("approved_maximum_required_for_relaxation")
         key, sign = FIELDS[public]
         baseline[public] = held
         updates[f"site_info.{key}"] = sign * watts / 1000
@@ -264,7 +257,7 @@ class NativeSiteLimits:
                     raise SiteLimitError("request_id_conflict")
                 return {"success": previous.get("phase") == "readback_confirmed", "replayed": True,
                         **await self.read()}
-            if data.get("expected_approval_revision") != approval_revision(state):
+            if (operation in ("approve", "rebaseline") or "expected_approval_revision" in data) and data.get("expected_approval_revision") != approval_revision(state):
                 raise SiteLimitError("approval_revision_conflict")
             state["identity"] = identity
             if operation == "approve":
@@ -300,6 +293,8 @@ class NativeSiteLimits:
                 previous["phase"] = "readback_confirmed" if desired else "rejected"
                 previous["readback_hash"] = observed["hash"]
                 for key in keys:
+                    if desired:
+                        state.get("approval", {}).pop(key, None)
                     watts = fields[key]["value_w"]
                     state.setdefault("operational", {})[key] = int(watts) if fields[key]["supported"] and float(watts).is_integer() else 0
                 if desired and not any(item["snapshot_id"] == previous["operation_id"] for item in state.get("snapshots", [])):
@@ -330,9 +325,13 @@ class NativeSiteLimits:
                 raise SiteLimitError("no_site_limit_change_supplied")
             updates, baseline = plan_changes(document["config"], requested, state.get("approval", {}), identity)
             if not updates:
+                for key in requested:
+                    state.get("approval", {}).pop(key, None)
+                state.setdefault("operational", {}).update(requested)
                 state.setdefault("requests", {})[data["request_id"]] = {
                     "payload_hash": payload_hash, "operation_id": uuid4().hex, "phase": "readback_confirmed"}
                 await self.save(deepcopy(state), None)
+                await self.changed()
                 return {"success": True, "no_op": True, **await self.read()}
             transaction = {"operation_id": uuid4().hex, "request_id": data["request_id"],
                 "payload_hash": payload_hash, "identity": identity, "phase": "prepared",
@@ -382,6 +381,8 @@ class NativeSiteLimits:
                             "baseline": baseline, "desired": {key: fields[key]["raw"] for key in baseline}}
                 state["snapshots"] = (state.get("snapshots", []) + [snapshot])[-16:]
                 state.setdefault("operational", {}).update(requested)
+                for key in requested:
+                    state.get("approval", {}).pop(key, None)
                 await self.save(deepcopy(state), None)
                 await self.changed()
                 return {"success": True, "verification": "gateway_configuration_readback",

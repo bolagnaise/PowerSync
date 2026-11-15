@@ -238,7 +238,7 @@ def _local_access_status(
         "local_access_configured": configured,
         "local_available": local_available,
         "power_control_supported": local_battery_dispatch_configured(entry.data),
-        "battery_action_contract_version": 1 if local_battery_dispatch_configured(entry.data) else None,
+        "battery_action_contract_version": 2 if local_battery_dispatch_configured(entry.data) else None,
         "dispatch_max_discharge_w": getattr(getattr(coordinator, "client", None), "dispatch_discharge_limit_w", None),
         "dispatch_max_charge_w": getattr(getattr(coordinator, "client", None), "dispatch_charge_limit_w", None),
         "local_reachable": local_reachable,
@@ -1631,11 +1631,35 @@ class PowerwallNativeSiteLimitsView(PowerwallBatteryOutputView):
                                       "message": str(error)}, status=409)
 
 
+class PowerwallBackupPreparationView(PowerwallBatteryOutputView):
+    url = "/api/power_sync/powerwall/backup_preparation"
+    name = "api:power_sync:powerwall:backup_preparation"
+
+    def _control(self, entry_id):
+        entry = _advanced_control_entry(self._hass, entry_id)
+        control = self._hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get("backup_preparation_control")
+        if control is None:
+            raise ValueError("Backup preparation is unavailable")
+        return control
+
+    async def post(self, request):
+        try:
+            body = await request.json()
+            if not isinstance(body, dict):
+                raise ValueError("Invalid backup request")
+            user = request.get("hass_user")
+            result = await self._control(body.get("entry_id")).execute(body, Context(user_id=user.id if user else None))
+            return web.json_response(result)
+        except (ValueError, HomeAssistantError) as error:
+            return web.json_response({"success": False, "error": str(error)}, status=409)
+
+
 def register_views(hass: HomeAssistant) -> None:
     """Wire up every Powerwall-local view onto the HA http app."""
     hass.http.register_view(PowerwallBatteryOutputView(hass))
     hass.http.register_view(PowerwallBatteryOutputStopView(hass))
     hass.http.register_view(PowerwallNativeSiteLimitsView(hass))
+    hass.http.register_view(PowerwallBackupPreparationView(hass))
     hass.http.register_view(PowerwallPairStartView(hass))
     hass.http.register_view(PowerwallPairStatusView(hass))
     hass.http.register_view(PowerwallPairCancelView(hass))

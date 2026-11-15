@@ -1266,6 +1266,16 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if self.battery_system == "amber_smartshift":
             return await battery.preserve()
 
+        if self.battery_system == "tesla" and not preserve_charge:
+            runtime = getattr(getattr(self, "hass", None), "data", {}).get(DOMAIN, {}).get(getattr(getattr(self, "_entry", None), "entry_id", None), {})
+            zero_hold = runtime.get("async_zero_power_optimizer_idle")
+            if zero_hold is not None and self._supports_local_powerwall_target_power("charge"):
+                result = await zero_hold()
+                if result is not None:
+                    if result:
+                        self._idle_hold_reserve = None
+                    return result is True
+
         soc, _ = await self._get_battery_state()
         soc_pct = int(soc * 100)
         configured_idle_floor = int(self._config.backup_reserve * 100)
