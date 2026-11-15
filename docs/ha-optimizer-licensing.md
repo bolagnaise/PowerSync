@@ -61,3 +61,9 @@ A refunded or disputed referral payment can reverse unused rewards. New trials
 require card verification and are limited per account and detected payment
 identity for each product. Referral information being unavailable does not
 change your existing optimiser access.
+
+Minimal hashed account and payment-identity receipts are retained after account
+deletion to enforce trial limits and first-payment eligibility. Full card details
+stay with Stripe. Recovering earned rewards after deletion requires verification
+of your PowerSync sign-in email. If separate legacy accounts share an identity,
+contact PowerSync support to link them before claiming rewards.
