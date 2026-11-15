@@ -5,7 +5,7 @@ These separate controls require a paired Tesla gateway and compatible signed-con
 | Service | Purpose | Required inputs |
 |---|---|---|
 | `power_sync.dispatch_battery_power` | Request a fixed battery output for a timed window | `power_w`, `duration_seconds`, `request_id`, `expected_control_revision` |
-| `power_sync.stop_battery_dispatch` | Stop the specific operation returned by the start request | `operation_id` |
+| `power_sync.stop_battery_dispatch` | Stop the specific operation returned by the start request | `operation_id`, `request_id` |
 | `power_sync.set_native_site_limits` | Set persistent limits or manage their approval/recovery state | Operation-specific inputs below |
 
 Battery output uses integer watts: positive discharges, negative charges. Zero hold is unavailable. Duration is an upper bound; infeasible requests are refused and infeasible renewals stop. Very short windows can be refused because a signed request must expire safely inside its window. `takeover: true` replaces another battery target only; stop legacy Force controls separately first. A successful command receipt does not verify physical tracking.
