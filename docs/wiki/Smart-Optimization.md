@@ -7,6 +7,10 @@ forecast, household load forecast, battery limits, and configured reserve floors
 Solar forecasting via Solcast or Open-Meteo Solar Forecast should be configured
 for accurate schedules.
 
+## Plan updates
+
+The dashboard keeps the last completed plan while a new calculation is running. Reserve adjustments and other planning stages finish before the replacement plan appears, so a temporary first-pass export is not shown as the final schedule. A planned export still depends on execution safety checks; it is not proof of an accepted command or measured grid export.
+
 ## Planned power ranges
 
 The dashboard groups consecutive slots with the same action into one window.

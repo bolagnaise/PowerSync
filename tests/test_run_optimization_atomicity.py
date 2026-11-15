@@ -1,26 +1,22 @@
-"""Regression test for HD-2: _run_optimization's post-solve override chain
-(spread-import, spread-export, bridge, disable-idle, off-grid overlay) must
-build the overlaid schedule into a local variable and commit it to
-self._current_schedule / result.schedule exactly once, after the whole chain
-completes successfully. Reassigning self._current_schedule after every
-overlay step (the pre-fix behaviour) means a mid-chain exception leaves
-self._current_schedule half-overlaid — visible to any concurrent reader
-(_get_current_action, sensors, to_api_response) for up to one cycle.
+"""Publish only the final reconciled plan, including reserve and resource reruns.
 
-_run_optimization is a ~700-line async method with deep executor/forecast/EV
-dependencies, so this uses the AST source-extraction pattern from
-tests/test_sungrow_curtailment_runtime.py to verify the atomicity invariant
-structurally on the real source rather than fully stubbing the method for
-execution: within each override-chain block, self._current_schedule (and
-result.schedule) must be assigned exactly once, and that single assignment
-must come after every overlay call in the block.
+Structural checks protect both overlay chains. Behavioral checks suspend the
+actual orchestration at its await points and verify concurrent readers retain
+the preceding committed plan, including when the rerun fails or is cancelled.
 """
 
 from __future__ import annotations
 
 import ast
+import asyncio
+import copy
 import re
+import textwrap
+from datetime import datetime, timezone
+from types import SimpleNamespace
 from pathlib import Path
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -57,8 +53,8 @@ def _run_optimization_source() -> str:
 def _chain_blocks(method_source: str) -> list[str]:
     """Split the method source into the two override-chain blocks.
 
-    Each chain starts from the solve-local ``schedule = result.schedule`` and
-    ends immediately before the atomic ``_last_optimizer_result`` commit.
+    Each chain starts from the solve-local ``schedule = result.schedule``.
+    Both remain local until the final external-energy stage has completed.
     There are two structurally identical chains: the initial solve and the
     optional Auto-Apply reserve rerun.
     """
@@ -75,12 +71,8 @@ def _chain_blocks(method_source: str) -> list[str]:
         f"rerun), found {len(starts)} — _run_optimization's structure changed, "
         f"update this test's chain boundaries"
     )
-    return [
-        method_source[
-            start:method_source.index("self._last_optimizer_result = result", start)
-        ]
-        for start in starts
-    ]
+    final_stage = method_source.index("result = await self._apply_external_energy_plan(")
+    return [method_source[starts[0]:starts[1]], method_source[starts[1]:final_stage]]
 
 
 def test_override_chain_blocks_are_present_and_ordered():
@@ -98,31 +90,19 @@ def test_override_chain_blocks_are_present_and_ordered():
         )
 
 
-def test_current_schedule_committed_exactly_once_per_chain():
-    """HD-2: self._current_schedule must be written exactly once per override
-    chain — not after every individual overlay call — so a mid-chain
-    exception can never leave it holding a partially-overlaid schedule.
-    """
+def test_current_schedule_committed_once_after_every_planning_stage():
     method_source = _run_optimization_source()
     chains = _chain_blocks(method_source)
+    for chain in chains:
+        assert re.search(r"self\._current_schedule\s*=", chain) is None
+        assert re.search(r"self\._last_optimizer_result\s*=", chain) is None
 
-    for i, chain in enumerate(chains, start=1):
-        assignments = [
-            m.start() for m in re.finditer(r"self\._current_schedule\s*=", chain)
-        ]
-        assert len(assignments) == 1, (
-            f"chain {i}: expected exactly one self._current_schedule assignment "
-            f"(committed once after the whole override chain completes), found "
-            f"{len(assignments)} — a mid-chain exception would leave "
-            f"self._current_schedule partially overlaid"
-        )
-
-        reconcile = chain.index("self._optimizer.reconcile_result_with_schedule(")
-        last_overlay_call = max(chain.index(marker) for marker in _OVERLAY_CALL_MARKERS)
-        assert reconcile > last_overlay_call
-        assert assignments[0] > reconcile, (
-            f"chain {i}: self._current_schedule is assigned before the override "
-            f"chain is reconciled"
+    for field in ("_current_schedule", "_last_optimizer_result", "_last_update_time",
+                  "_octopus_schedule_revision"):
+        assignments = list(re.finditer(rf"self\.{field}\s*=", method_source))
+        assert len(assignments) == 1
+        assert assignments[0].start() > method_source.index(
+            "result = await self._apply_external_energy_plan("
         )
 
 
@@ -201,3 +181,120 @@ def test_spread_export_uses_effective_bonus_prices_in_both_solve_chains():
     assert derivation < method_source.index("schedule = result.schedule")
     for chain in chains:
         assert chain.count("export_prices=spread_export_prices") == 1
+
+
+def _publication_pipeline(*, rerun=True):
+    """Execute the real post-solve orchestration, with only its inputs faked."""
+    method = ast.parse(textwrap.dedent(_run_optimization_source())).body[0]
+    body = next(node.body for node in method.body if isinstance(node, ast.Try))
+    start = next(i for i, node in enumerate(body)
+                 if isinstance(node, ast.Assign)
+                 and any(isinstance(target, ast.Name) and target.id == "used_reference_override"
+                         for target in node.targets))
+    end = next(i for i, node in enumerate(body[start:], start)
+               if isinstance(node, ast.If)
+               and isinstance(node.test, ast.Call)
+               and isinstance(node.test.func, ast.Attribute)
+               and node.test.func.attr == "isEnabledFor")
+    function = ast.parse("async def pipeline(self, result, _run_optimizer_once): pass").body[0]
+    function.body = copy.deepcopy(body[start:end])
+    namespace = dict.fromkeys((
+        "import_prices", "export_prices", "spread_import_blocked", "solar_forecast",
+        "load_forecast", "battery_export_allowed", "spread_export_prices",
+        "cost_neutral_export_prices", "schedule_timestamps", "native_home_load_w",
+        "cost_neutral_import_prices", "battery_charge_blocked", "cost_neutral_slots",
+        "priority_export_slots",
+    ), [])
+    namespace.update(solve_reserve_override=0.0 if rerun else None, soc=0.8, reference_reserve_floor=0.0,
+                     manual_control_projection=None, octopus_revision=None,
+                     cost_neutral_cap=None, cost_neutral_forecast_import_cost=None,
+                     cost_neutral_fixed_cost_allowance=None, cost_neutral_plan=None,
+                     solve_timestamp=None,
+                     dt_util=SimpleNamespace(now=lambda: datetime(2026, 1, 1, tzinfo=timezone.utc)))
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[])),
+                 str(COORDINATOR_PATH), "exec"), namespace)
+    return namespace["pipeline"]
+
+
+@pytest.mark.parametrize(("rerun", "failure_stage"), [
+    (True, None), (True, "reserve"), (True, "external"), (True, "cancel"),
+    (False, None), (False, "external"),
+])
+def test_slow_reserve_rerun_never_exposes_an_uncommitted_export(rerun, failure_stage):
+    """A refresh during either await must keep the previously committed plan."""
+    async def run():
+        old_schedule = SimpleNamespace(actions=["self_consumption"])
+        old_result = SimpleNamespace(schedule=old_schedule)
+        reference = SimpleNamespace(schedule=SimpleNamespace(actions=["export"]),
+                                    future_export_protection_floor_slots=[], lp_stats={},
+                                    reserve_recommendation={})
+        final = SimpleNamespace(schedule=SimpleNamespace(actions=["self_consumption", "export"]),
+                                future_export_protection_floor_slots=[], lp_stats={},
+                                reserve_recommendation={})
+        old_time = datetime(2025, 12, 31, tzinfo=timezone.utc)
+        adopted = []
+        committed_prices = []
+        subject = SimpleNamespace(
+            _current_schedule=old_schedule, _last_optimizer_result=old_result,
+            _last_update_time=old_time, _octopus_schedule_revision="old",
+            _config=SimpleNamespace(backup_reserve=0.2), auto_apply_reserve_enabled=True,
+            _optimizer=SimpleNamespace(reconcile_result_with_schedule=lambda result, schedule, **kw: result),
+            _should_spread_import_schedule=lambda: False,
+            _should_spread_export_schedule=lambda: False,
+            _reference_export_bridge_windows=lambda *args: [],
+            _merge_export_protection_floors=lambda *args: [],
+            _bridge_short_export_gaps=lambda schedule, *args, **kw: schedule,
+            _should_apply_offgrid_overlay=lambda: False,
+            _annotate_manual_control_schedule=lambda schedule, *args: schedule,
+            _restore_bridged_export_gap_provenance=lambda *args: None,
+            _set_forecast_bridge_reserve_recommendation=lambda *args: None,
+            _adopt_solved_ev_series=adopted.append,
+            _commit_price_forecast_cache=lambda *args: committed_prices.append(args),
+            _apply_auto_reserve_recommendation=lambda result: rerun,
+            _reserve_ratio=lambda value, default: value,
+            _last_zerohero_bonus_prices=[], _last_zerohero_bonus_cap_kwh=None,
+            _last_zerocharge_bonus_prices=[], _last_zerocharge_bonus_cap_kwh=None,
+        )
+
+        def assert_previous_plan():
+            assert subject._current_schedule is old_schedule
+            assert subject._last_optimizer_result is old_result
+            assert subject._last_update_time is old_time
+            assert subject._octopus_schedule_revision == "old"
+            assert adopted == []
+            assert committed_prices == []
+
+        async def solve_again():
+            assert rerun
+            await asyncio.sleep(0)
+            assert_previous_plan()
+            if failure_stage == "reserve":
+                raise RuntimeError("reserve solve failed")
+            if failure_stage == "cancel":
+                raise asyncio.CancelledError()
+            return final
+
+        async def external(result, **kwargs):
+            await asyncio.sleep(0)
+            assert_previous_plan()
+            if failure_stage == "external":
+                raise RuntimeError("external plan failed")
+            return result
+
+        subject._apply_external_energy_plan = external
+        if failure_stage:
+            error = asyncio.CancelledError if failure_stage == "cancel" else RuntimeError
+            with pytest.raises(error):
+                await _publication_pipeline(rerun=rerun)(subject, reference, solve_again)
+            assert_previous_plan()
+        else:
+            await _publication_pipeline(rerun=rerun)(subject, reference, solve_again)
+            expected = final if rerun else reference
+            assert subject._current_schedule is expected.schedule
+            assert subject._last_optimizer_result is expected
+            assert subject._last_update_time != old_time
+            assert subject._octopus_schedule_revision is None
+            assert adopted == [expected]
+            assert len(committed_prices) == 1
+
+    asyncio.run(run())
