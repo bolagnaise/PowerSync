@@ -2262,7 +2262,8 @@ function psUntilPreview(value, timeZone, now = Date.now()) {
 class PsAdvancedBatteryControls extends HTMLElement {
   constructor() {
     super();
-    this._draft = { power_w: '1800', minutes: '30', import_limit_w: '', export_limit_w: '', reference: '', date: '', takeover: false, attested: false };
+    this._contextGeneration = 0;
+    this._draft = this._newDraft();
     this._busy = false;
     this.addEventListener('input', e => {
       const key = e.target.dataset?.advancedField;
@@ -2274,18 +2275,27 @@ class PsAdvancedBatteryControls extends HTMLElement {
     });
   }
   set hass(hass) { this._hass = hass; if (!this.innerHTML) this._render(); }
-  set entryId(value) { this._entryId = value; }
-  _path(resource) { return `power_sync/powerwall/${resource}${this._entryId ? `?entry_id=${encodeURIComponent(this._entryId)}` : ''}`; }
-  async _refresh() {
-    const values = await Promise.allSettled(['battery_dispatch', 'native_site_limits'].map(p => this._hass.callApi('GET', this._path(p))));
+  _newDraft() { return { power_w: '1800', minutes: '30', import_limit_w: '', export_limit_w: '', reference: '', date: '', takeover: false, attested: false }; }
+  set entryId(value) {
+    if (value === this._entryId) return;
+    this._entryId = value; ++this._contextGeneration;
+    this._draft = this._newDraft(); this._output = null; this._limits = null;
+    this._confirm = null; this._busy = false; this._message = ''; this._render();
+  }
+  _path(resource, entryId = this._entryId) { return `power_sync/powerwall/${resource}${entryId ? `?entry_id=${encodeURIComponent(entryId)}` : ''}`; }
+  async _refresh(generation = this._contextGeneration) {
+    const entryId = this._entryId;
+    const values = await Promise.allSettled(['battery_dispatch', 'native_site_limits'].map(p => this._hass.callApi('GET', this._path(p, entryId))));
+    if (generation !== this._contextGeneration) return;
     this._output = values[0].status === 'fulfilled' && values[0].value.schema_version === 1 ? values[0].value : null;
     this._limits = values[1].status === 'fulfilled' && values[1].value.schema_version === 1 ? values[1].value : null;
   }
   async _act(action) {
     if (this._busy) return;
+    const generation = this._contextGeneration, isCurrent = () => generation === this._contextGeneration;
     if (action === 'refresh') {
       this._busy = true; this._render();
-      try { await this._refresh(); } finally { this._busy = false; this._render(); }
+      try { await this._refresh(generation); } finally { if (isCurrent()) { this._busy = false; this._render(); } }
       return;
     }
     const d = this._draft, output = this._output, limits = this._limits;
@@ -2320,12 +2330,15 @@ class PsAdvancedBatteryControls extends HTMLElement {
       }
       if (this._confirm !== action) { this._confirm = action; this._message = 'Tap the same button again to confirm.'; this._render(); return; }
       this._confirm = null; this._busy = true; this._message = ''; this._render();
-      body.request_id = crypto.randomUUID();
+      body.request_id = globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
       if (this._entryId) body.entry_id = this._entryId;
       await this._hass.callApi('POST', `power_sync/powerwall/${resource}`, body);
-      this._message = 'Request completed. Review the refreshed state; measured tracking is unverified.';
-    } catch (error) { this._message = `${error.message || 'Request unconfirmed'}. Refresh state before another request.`; }
-    finally { if (this._busy) await this._refresh(); this._busy = false; this._render(); }
+      if (isCurrent()) this._message = 'Request completed. Review the refreshed state; measured tracking is unverified.';
+    } catch (error) { if (isCurrent()) this._message = `${error.message || 'Request unconfirmed'}. Refresh state before another request.`; }
+    finally {
+      if (isCurrent() && this._busy) await this._refresh(generation);
+      if (isCurrent()) { this._busy = false; this._render(); }
+    }
   }
   _render() {
     const d = this._draft, o = this._output, n = this._limits, disabled = this._busy ? 'disabled' : '';
