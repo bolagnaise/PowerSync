@@ -526,3 +526,50 @@ def test_unset_pcc_entity_returns_unavailable_without_lookup(pcc_entity) -> None
 
     assert manager.pcc_export_w() == (None, None)
     assert states.calls == []
+
+
+def test_pending_listener_is_background_and_cancelled_when_manager_stops():
+    async def exercise():
+        entered = asyncio.Event()
+        blocked = asyncio.Event()
+        foreground = set()
+        background = set()
+
+        class Hass:
+            def async_create_task(self, coro):
+                task = asyncio.create_task(coro)
+                foreground.add(task)
+                return task
+
+            def async_create_background_task(self, coro, name):
+                task = asyncio.create_task(coro, name=name)
+                background.add(task)
+                return task
+
+        manager = network.HANetworkEnvelopeManager(
+            Hass(), SimpleNamespace(data={}, options={}), lambda: None
+        )
+
+        async def snapshot():
+            return network.NetworkExportEnvelope()
+
+        async def listener(old, new):
+            entered.set()
+            await blocked.wait()
+
+        manager._build_snapshot = snapshot
+        manager.add_listener(listener)
+        await manager.async_refresh()
+        await entered.wait()
+        try:
+            assert not foreground, "listener LP work must not join bootstrap"
+            assert len(background) == 1
+            await manager.async_stop()
+            assert all(task.cancelled() for task in background)
+            assert not manager._listener_tasks
+        finally:
+            for task in foreground | background:
+                task.cancel()
+            await asyncio.gather(*(foreground | background), return_exceptions=True)
+
+    asyncio.run(exercise())

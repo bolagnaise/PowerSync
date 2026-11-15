@@ -50297,8 +50297,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 if pending is not None and not pending.done():
                     return
                 entry_data["network_envelope_reoptimization_task"] = (
-                    hass.async_create_task(
-                        _retry_deferred_network_envelope_reoptimization()
+                    hass.async_create_background_task(
+                        _retry_deferred_network_envelope_reoptimization(),
+                        "powersync_network_envelope_retry",
                     )
                 )
 
@@ -50387,10 +50388,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             # state can never arm Active. Once the listener exists, reconcile
             # the current deny-only snapshot and grant any upward authority
             # only after this first successful solve.
-            hass.async_create_task(
-                _network_envelope_changed(
-                    NetworkExportEnvelope(),
-                    network_envelope_manager.snapshot,
+            # A slow LP solve must not join HA's bootstrap wait. Retain the
+            # reconciliation so unloading cannot leave it authorizing exports.
+            hass.data[DOMAIN][entry.entry_id]["network_envelope_initial_task"] = (
+                hass.async_create_background_task(
+                    _network_envelope_changed(
+                        NetworkExportEnvelope(),
+                        network_envelope_manager.snapshot,
+                    ),
+                    "powersync_network_envelope_initial",
                 )
             )
 
@@ -52763,6 +52769,11 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if network_listener_unsub := entry_data.get("network_envelope_listener_unsub"):
         network_listener_unsub()
         entry_data["network_envelope_listener_unsub"] = None
+    if network_initial_task := entry_data.get("network_envelope_initial_task"):
+        if not network_initial_task.done():
+            network_initial_task.cancel()
+        await asyncio.gather(network_initial_task, return_exceptions=True)
+        entry_data["network_envelope_initial_task"] = None
     if network_retry_task := entry_data.get("network_envelope_reoptimization_task"):
         if not network_retry_task.done():
             network_retry_task.cancel()

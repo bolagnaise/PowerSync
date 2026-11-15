@@ -142,3 +142,126 @@ def test_network_export_strings_and_translation_remain_in_sync() -> None:
 
     assert strings["options"]["step"]["network_export"] == english["options"]["step"]["network_export"]
     assert strings["entity"]["sensor"]["network_export_limit"] == english["entity"]["sensor"]["network_export_limit"]
+
+
+def test_slow_initial_network_solve_does_not_join_bootstrap_and_is_unload_owned():
+    """A pending LP reconciliation must not keep HA's startup task set busy."""
+    import asyncio
+    from types import SimpleNamespace
+
+    source = _source("__init__.py")
+    tree = ast.parse(source)
+    launch = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, (ast.Expr, ast.Assign))
+        and isinstance(node.value, ast.Call)
+        and any(
+            isinstance(arg, ast.Call)
+            and isinstance(arg.func, ast.Name)
+            and arg.func.id == "_network_envelope_changed"
+            for arg in node.value.args
+        )
+    )
+
+    async def exercise():
+        tasks, background = set(), set()
+        entry_data = {}
+
+        class Hass:
+            data = {"power_sync": {"entry": entry_data}}
+
+            def async_create_task(self, coro):
+                task = asyncio.create_task(coro)
+                tasks.add(task)
+                return task
+
+            def async_create_background_task(self, coro, name):
+                task = asyncio.create_task(coro, name=name)
+                background.add(task)
+                return task
+
+        entered = asyncio.Event()
+        released = asyncio.Event()
+
+        async def reconcile(old, new):
+            entered.set()
+            await released.wait()  # stand-in for a still-running LP executor
+
+        namespace = {
+            "hass": Hass(), "DOMAIN": "power_sync",
+            "entry": SimpleNamespace(entry_id="entry"),
+            "NetworkExportEnvelope": lambda: None,
+            "network_envelope_manager": SimpleNamespace(snapshot=object()),
+            "_network_envelope_changed": reconcile,
+            "entry_data": entry_data, "asyncio": asyncio,
+        }
+        exec(compile(ast.Module(body=[launch], type_ignores=[]), "launch", "exec"), namespace)
+        try:
+            await entered.wait()
+            assert not tasks, "slow network solve is blocking HA bootstrap"
+            task = entry_data["network_envelope_initial_task"]
+            assert task in background and not task.done()
+            cleanup = next(
+                node for node in ast.walk(tree)
+                if isinstance(node, ast.If)
+                and isinstance(node.test, ast.NamedExpr)
+                and isinstance(node.test.target, ast.Name)
+                and node.test.target.id == "network_initial_task"
+            )
+            wrapper = ast.AsyncFunctionDef(
+                name="cleanup", args=ast.arguments(posonlyargs=[], args=[],
+                kwonlyargs=[], kw_defaults=[], defaults=[]),
+                body=[cleanup], decorator_list=[],
+            )
+            module = ast.fix_missing_locations(ast.Module(body=[wrapper], type_ignores=[]))
+            exec(compile(module, "cleanup", "exec"), namespace)
+            await namespace["cleanup"]()
+            assert task.cancelled()
+            assert entry_data["network_envelope_initial_task"] is None
+        finally:
+            for task in tasks | background:
+                task.cancel()
+            await asyncio.gather(*(tasks | background), return_exceptions=True)
+
+    asyncio.run(exercise())
+
+
+def test_telemetry_retry_is_background_and_deduplicated():
+    from types import SimpleNamespace
+    import asyncio
+
+    tree = ast.parse(_source("__init__.py"))
+    scheduler = next(node for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_schedule_deferred_network_envelope_reoptimization")
+
+    async def exercise():
+        created = []
+        entry_data = {}
+
+        class Hass:
+            data = {"power_sync": {"entry": entry_data}}
+
+            def async_create_background_task(self, coro, name):
+                task = asyncio.create_task(coro, name=name)
+                created.append(task)
+                return task
+
+        async def retry():
+            await asyncio.Event().wait()
+
+        namespace = {"hass": Hass(), "DOMAIN": "power_sync",
+                     "entry": SimpleNamespace(entry_id="entry"),
+                     "_retry_deferred_network_envelope_reoptimization": retry}
+        exec(compile(ast.Module(body=[scheduler], type_ignores=[]), "retry", "exec"), namespace)
+        try:
+            namespace[scheduler.name]()
+            namespace[scheduler.name]()
+            assert len(created) == 1
+            assert entry_data["network_envelope_reoptimization_task"] is created[0]
+        finally:
+            for task in created:
+                task.cancel()
+            await asyncio.gather(*created, return_exceptions=True)
+
+    asyncio.run(exercise())
