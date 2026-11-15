@@ -506,7 +506,7 @@ class TEDAPIv1rTransport:
 
         return self.build_signed_bytes(env.SerializeToString(), din)
 
-    async def read_config(self, din: str) -> dict[str, Any] | None:
+    async def read_config(self, din: str, *, with_hash=False, strict_json=False) -> dict[str, Any] | None:
         """Read ``config.json`` from the gateway via FileStore readFileRequest."""
         envelope = transport_pb2.MessageEnvelope()
         envelope.delivery_channel = transport_pb2.DELIVERY_CHANNEL_HERMES_COMMAND
@@ -524,7 +524,13 @@ class TEDAPIv1rTransport:
             env.ParseFromString(resp.inner_bytes)
             if env.HasField("filestore") and env.filestore.WhichOneof("message") == "read_file_response":
                 blob = env.filestore.read_file_response.file.blob
-                config = json.loads(blob.decode("utf-8"))
+                if strict_json:
+                    from .native_site_limits import parse_config_json
+                    config = parse_config_json(blob.decode("utf-8"))
+                else:
+                    config = json.loads(blob.decode("utf-8"))
+                if with_hash and isinstance(config, dict):
+                    return {"config": config, "hash": env.filestore.read_file_response.hash.hex()}
                 return config if isinstance(config, dict) else None
         except Exception as err:
             _LOGGER.debug("read_config parse error: %s", err)
@@ -532,11 +538,14 @@ class TEDAPIv1rTransport:
 
     async def write_config(self, din: str, updates: dict[str, Any], *, before_write: Callable[[], None] | None = None,
                            validate_config: Callable[[dict[str, Any]], bool] | None = None,
-                           before_submit: Callable[[int], Awaitable[None]] | None = None) -> bool:
+                           before_submit: Callable[[int], Awaitable[None]] | None = None,
+                           validate_document=None, strict_json=False) -> bool:
         """Serialize the full config read/merge/write across one physical site."""
         async def transaction():
             return await self._write_config(din, updates, before_write=before_write,
-                                           validate_config=validate_config, before_submit=before_submit)
+                                           validate_config=validate_config, before_submit=before_submit,
+                                           **({"validate_document": validate_document} if validate_document is not None else {}),
+                                           **({"strict_json": True} if strict_json else {}))
         site = getattr(self, "_site_control", None)
         if site is not None:
             return await site.run_write("local_config_transaction", transaction,
@@ -547,7 +556,8 @@ class TEDAPIv1rTransport:
 
     async def _write_config(self, din: str, updates: dict[str, Any], *, before_write: Callable[[], None] | None = None,
                             validate_config: Callable[[dict[str, Any]], bool] | None = None,
-                            before_submit: Callable[[int], Awaitable[None]] | None = None) -> bool:
+                            before_submit: Callable[[int], Awaitable[None]] | None = None,
+                            validate_document=None, strict_json=False) -> bool:
         """Read-modify-write ``config.json`` via FileStore updateFileRequest.
 
         ``updates`` keys use dotted paths, eg ``site_info.default_real_mode``.
@@ -572,7 +582,11 @@ class TEDAPIv1rTransport:
                 return False
             blob = env.filestore.read_file_response.file.blob
             config_hash = env.filestore.read_file_response.hash
-            config = json.loads(blob.decode("utf-8"))
+            if strict_json:
+                from .native_site_limits import parse_config_json
+                config = parse_config_json(blob.decode("utf-8"))
+            else:
+                config = json.loads(blob.decode("utf-8"))
         except Exception as err:
             _LOGGER.error("write_config read-phase parse error: %s", err)
             return False
@@ -580,6 +594,8 @@ class TEDAPIv1rTransport:
         if not isinstance(config, dict) or not isinstance(config.get("site_info", {}), dict):
             return False
         if validate_config is not None and validate_config(config) is not True:
+            return False
+        if validate_document is not None and validate_document(config, config_hash) is not True:
             return False
 
         for dotted, value in updates.items():

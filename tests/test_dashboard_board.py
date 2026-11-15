@@ -1845,3 +1845,36 @@ def test_dashboard_has_one_admin_support_card(board_missing, admin):
     assert "ps-diagnostics-card" not in out["natives"]
     if not board_missing:
         assert ("ps-support-card" in out["natives"]) == admin
+
+
+def test_advanced_battery_context_switch_discards_stale_drafts_reads_and_mutations():
+    result = _run_board(r'''
+(async () => {
+  const Control = registry.get('power-sync-advanced-controls');
+  context.crypto = {}; // HTTP Home Assistant has no crypto.randomUUID.
+  const card = new Control();
+  let reads = [];
+  card.hass = {callApi: (method, path) => new Promise(resolve => reads.push({path, resolve}))};
+  card.entryId = 'a'; card._draft.power_w = '9000';
+  const oldRead = card._refresh();
+  card.entryId = 'b';
+  const freshDraft = card._draft.power_w === '1800';
+  reads.forEach(r => r.resolve({schema_version:1, from:'a'}));
+  await oldRead;
+  const staleReadIgnored = !card._output && !card._limits;
+  const posts = [];
+  const status = {schema_version:1, control_revision:'revision', capabilities:{battery_output:{supported:true}}, operation:null};
+  card.hass = {callApi: (method,path,body) => method === 'POST' ? new Promise(resolve => posts.push({body,resolve})) : Promise.resolve(path.includes('native_site_limits') ? {schema_version:0} : status)};
+  card.entryId = 'a'; card._output = status;
+  await card._act('target'); const oldWrite = card._act('target');
+  card.entryId = 'b'; card._output = status;
+  await card._act('target'); const newWrite = card._act('target');
+  if (posts.length !== 2) throw Error('New site could not start its independently confirmed request');
+  if (!posts.every(p => /^[A-Za-z0-9._:-]{1,80}$/.test(p.body.request_id)) || posts[0].body.request_id === posts[1].body.request_id) throw Error('Invalid or duplicate HTTP-compatible request IDs');
+  posts[0].resolve({success:true}); await oldWrite;
+  const newRequestStillBusy = card._busy;
+  posts[1].resolve({success:true}); await newWrite;
+  console.log(JSON.stringify({freshDraft,staleReadIgnored,newRequestStillBusy,entries:posts.map(p=>p.body.entry_id)}));
+})().catch(e=>{console.error(e);process.exitCode=1});
+''')
+    assert result == {'freshDraft': True, 'staleReadIgnored': True, 'newRequestStillBusy': True, 'entries': ['a', 'b']}

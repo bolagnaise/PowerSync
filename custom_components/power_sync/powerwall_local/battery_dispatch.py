@@ -33,6 +33,8 @@ _LOGGER = logging.getLogger(__name__)
 LEASE_SECONDS = 30
 RENEW_SECONDS = 10
 TIMED_DISPATCH_MAX_W = 10_000
+# LAN signatures accept for 12 s; include the rounded expiry and a guard second.
+FIXED_SIGNATURE_BUDGET_SECONDS = 14
 
 
 def _number(value: Any, label: str) -> float:
@@ -69,7 +71,7 @@ def validate_dispatch_config(mode: str, config: dict) -> None:
             raise ValueError("Grid export limit blocks battery dispatch")
 
 
-def site_grid_limits_w(snapshot: Any) -> tuple[float | None, float | None]:
+def site_grid_limits_w(snapshot: Any, limits_config: dict | None = None) -> tuple[float | None, float | None]:
     """Read signed Tesla site-meter limits in kW from this fresh snapshot.
 
     Missing fields and Tesla's 1e9 sentinel mean unset. A failed config read
@@ -92,13 +94,21 @@ def site_grid_limits_w(snapshot: Any) -> tuple[float | None, float | None]:
             raise ValueError("Invalid gateway site limit sign")
         return None if abs(watts) >= 1e9 else abs(watts) * 1000
 
-    return bound("max_site_meter_power_ac", 1), bound("min_site_meter_power_ac", -1)
+    limits = [bound("max_site_meter_power_ac", 1), bound("min_site_meter_power_ac", -1)]
+    for index, key in enumerate(("native_site_import_cap_w", "native_site_export_cap_w")):
+        value = (limits_config or {}).get(key)
+        if value is not None:
+            value = _number(value, "recorded site limit")
+            if value < 0:
+                raise ValueError("Invalid recorded site limit")
+            limits[index] = value if limits[index] is None else min(limits[index], value)
+    return tuple(limits)
 
 
 
 def manual_power_limits_kw(snapshot: Any, config: dict, learned_discharge_w: float | None = None, learned_charge_w: float | None = None) -> dict[str, float]:
     """UI bounds include both the site limit and available battery output."""
-    site_import, site_export = site_grid_limits_w(snapshot)
+    site_import, site_export = site_grid_limits_w(snapshot, config)
     load, solar = _number(snapshot.load_w, "home power"), _number(snapshot.solar_w, "solar power")
     charge = min(TIMED_DISPATCH_MAX_W, _number(config.get("optimization_max_charge_w", 5000), "charge limit"))
     if learned_charge_w is not None:
@@ -120,6 +130,77 @@ def manual_power_limits_kw(snapshot: Any, config: dict, learned_discharge_w: flo
             "grid_export_max_kw": math.floor(max(0, export) + 1e-6) / 1000}
 
 
+def fixed_battery_watts(mode: str, target_w: float, snapshot: Any, config: dict) -> float:
+    """Admit exact battery watts; never reinterpret them as a grid target.
+
+    An infeasible fixed target is refused, including on renewal. Native limits
+    and preferences may not be enforced by a real-power dispatch, so admission
+    checks the resulting whole-site flow independently of the gateway ACK.
+    """
+    if type(target_w) not in (int, float) or not math.isfinite(target_w) or target_w < 0:
+        raise ValueError("Fixed battery output requires finite non-negative watts")
+    if target_w == 0:
+        raise ValueError("Zero battery hold is not verified on this gateway")
+    policy = dict(config)
+    # Zero export prohibits grid export, not supplying the home. Keep legacy
+    # force-discharge admission unchanged in validate_dispatch_config().
+    policy.pop("optimization_max_grid_export_w", None)
+    validate_dispatch_config(mode, policy)
+    maximum = min(TIMED_DISPATCH_MAX_W,
+                  _number(config.get(f"optimization_max_{mode}_w", 5000), f"{mode} limit"))
+    if target_w > maximum:
+        raise ValueError(f"Fixed battery output exceeds the {mode} limit")
+    if snapshot.grid_status != "SystemGridConnected":
+        raise ValueError("Fixed battery output requires confirmed grid connection")
+    soc = _number(snapshot.soc, "battery SOC")
+    if not 0 <= soc <= 100:
+        raise ValueError("Battery SOC is out of range")
+    load, solar = _number(snapshot.load_w, "home power"), _number(snapshot.solar_w, "solar power")
+    if load < 0 or solar < 0:
+        raise ValueError("Fixed battery output requires coherent load and solar")
+    imported, exported = site_grid_limits_w(snapshot, config)
+    software_import = config.get("optimization_max_grid_import_w")
+    if software_import not in (None, 0):
+        value = _number(software_import, "site import limit")
+        imported = value if imported is None else min(imported, value)
+    if imported is None or imported < 0:
+        raise ValueError("Fixed battery output requires a known site import limit")
+    software_export = config.get("optimization_max_grid_export_w")
+    if software_export is not None:
+        value = _number(software_export, "site export limit")
+        if value < 0:
+            raise ValueError("Invalid site export limit")
+        exported = value if exported is None else min(exported, value)
+    # An unrecognised/unset native bound never grants permission to export.
+    exported = 0 if exported is None else exported
+    info = (getattr(snapshot, "raw", {}) or {}).get("config", {}).get("site_info", {})
+    if info.get("customer_preferred_export_rule") != "battery_ok" or config.get("optimization_allow_battery_export") is False:
+        exported = 0
+    reserve = _percent(config.get("hardware_backup_reserve", 0), "backup reserve")
+    if snapshot.backup_reserve_percent is not None:
+        reserve = max(reserve, _number(snapshot.backup_reserve_percent, "gateway reserve"))
+    if mode == "discharge":
+        reserve = max(reserve, _percent(config.get("optimization_backup_reserve", .2), "reserve floor"))
+        if soc <= reserve:
+            raise ValueError("Battery is at its discharge reserve floor")
+        watts = target_w
+    else:
+        if soc >= _percent(config.get("optimization_grid_charge_soc_cap", 1), "charge ceiling"):
+            raise ValueError("Battery is at its charge ceiling")
+        if getattr(snapshot, "grid_charging_enabled", None) is not True:
+            raise ValueError("Grid charging permission is unavailable or disabled")
+        watts = -target_w
+    reservation = _number(config.get("native_ev_unobserved_w", 0), "native EV reservation")
+    if reservation < 0:
+        raise ValueError("Invalid native EV reservation")
+    grid = load - solar - watts
+    if grid + (reservation if mode == "charge" else 0) > imported + 1e-6:
+        raise ValueError("Fixed battery output would exceed the site import limit")
+    if grid < -exported - 1e-6:
+        raise ValueError("Fixed battery output would exceed the site export limit or permission")
+    return watts
+
+
 def battery_watts(mode: str, target_w: float, snapshot: Any, config: dict, *, target_basis: str = "battery") -> float:
     """Convert a grid-export target or charging rate into safe battery watts.
 
@@ -127,6 +208,8 @@ def battery_watts(mode: str, target_w: float, snapshot: Any, config: dict, *, ta
     the caller. Positive discharge includes home load less solar generation.
     The export envelope clamps target_w before this function is called.
     """
+    if target_basis == "battery_output":
+        return fixed_battery_watts(mode, target_w, snapshot, config)
     validate_dispatch_config(mode, config)
     if (target_basis not in ("battery", "grid_import", "grid_export")
             or (target_basis == "grid_import" and mode != "charge")
@@ -142,7 +225,7 @@ def battery_watts(mode: str, target_w: float, snapshot: Any, config: dict, *, ta
         raise ValueError("Local dispatch requires a positive power target")
     load = _number(snapshot.load_w, "home power")
     solar = _number(snapshot.solar_w, "solar power")
-    site_import, site_export = site_grid_limits_w(snapshot)
+    site_import, site_export = site_grid_limits_w(snapshot, config)
     reserve = _percent(config.get("hardware_backup_reserve", 0), "backup reserve")
     if snapshot.backup_reserve_percent is not None:
         reserve = max(reserve, _number(snapshot.backup_reserve_percent, "gateway reserve"))
@@ -221,6 +304,9 @@ class LocalBatteryDispatch:
         self._target_basis = "battery"
         self.grid_import_estimate_w = None
         self.pending = False
+        self.releasing = False
+        self.power_acceptance_until = 0.0
+        self.resume_acceptance_until = 0.0
         self._command_may_have_reached = False
         self._site_limits = None
         self._generation = 0
@@ -343,10 +429,10 @@ class LocalBatteryDispatch:
                 return False
         return True
 
-    async def start(self, mode: str, target_w: float, duration_seconds: int, *, allowed=None, guarded_write=None, target_basis="battery", prepare_grid_charging=False, snapshot_check=None) -> dict:
+    async def start(self, mode: str, target_w: float, duration_seconds: int, *, allowed=None, guarded_write=None, target_basis="battery", prepare_grid_charging=False, snapshot_check=None, deadline_monotonic=None) -> dict:
         if type(duration_seconds) is not int or not 1 <= duration_seconds <= 86400:
             raise ValueError("Invalid local dispatch duration")
-        if (target_basis not in ("battery", "grid_import", "grid_export")
+        if (target_basis not in ("battery", "grid_import", "grid_export", "battery_output")
                 or (target_basis == "grid_import" and mode != "charge")
                 or (target_basis == "grid_export" and mode != "discharge")):
             raise ValueError("Invalid dispatch target basis")
@@ -369,6 +455,12 @@ class LocalBatteryDispatch:
             self._mode, self._target = mode, target_w
             self._target_basis = target_basis
             self._deadline = time.monotonic() + duration_seconds
+            if deadline_monotonic is not None:
+                if (target_basis != "battery_output" or type(deadline_monotonic) not in (int, float)
+                        or not math.isfinite(deadline_monotonic) or deadline_monotonic <= time.monotonic()
+                        or deadline_monotonic > self._deadline):
+                    raise ValueError("Invalid fixed output deadline")
+                self._deadline = deadline_monotonic
             self.pending = True
             try:
                 await self.persist()
@@ -388,6 +480,8 @@ class LocalBatteryDispatch:
         try:
             return await self._write()
         except DispatchCommandFailed:
+            if self._target_basis == "battery_output":
+                raise  # A fixed request must not become a lower-power retry.
             current_limit = self._device_limit(self._mode)
             if not 0 < current_limit < previous_limit:
                 raise
@@ -572,7 +666,8 @@ class LocalBatteryDispatch:
                     raise ValueError("Gateway site limits unavailable")
         self._site_limits = limits
     async def _write(self) -> float:
-        validate_dispatch_config(self._mode, self.config())
+        if self._target_basis != "battery_output":
+            validate_dispatch_config(self._mode, self.config())
         if not self.allowed(self._mode):
             raise ValueError("Local dispatch blocked by control ownership or safety policy")
         # Preparation can age telemetry. At most one successful enable is
@@ -594,7 +689,7 @@ class LocalBatteryDispatch:
         config = self.config()
         if not self.allowed(self._mode):
             raise ValueError("Local dispatch blocked by control ownership or safety policy")
-        remaining = min(LEASE_SECONDS, math.ceil(self._deadline - time.monotonic()))
+        remaining = min(LEASE_SECONDS, (math.floor if self._target_basis == "battery_output" else math.ceil)(self._deadline - time.monotonic()) - (FIXED_SIGNATURE_BUDGET_SECONDS if self._target_basis == "battery_output" else 0))
         if remaining < 1:
             raise ValueError("Local dispatch window expired")
 
@@ -604,7 +699,7 @@ class LocalBatteryDispatch:
                 raise ValueError("Local dispatch safety policy changed")
             if time.monotonic() - observed_at > 5:
                 raise ValueError("Local dispatch telemetry aged out before command")
-            remaining = min(LEASE_SECONDS, math.ceil(self._deadline - time.monotonic()))
+            remaining = min(LEASE_SECONDS, (math.floor if self._target_basis == "battery_output" else math.ceil)(self._deadline - time.monotonic()) - (FIXED_SIGNATURE_BUDGET_SECONDS if self._target_basis == "battery_output" else 0))
             if remaining < 1:
                 raise ValueError("Local dispatch window expired before command")
             current_config = dict(self.config())
@@ -620,7 +715,21 @@ class LocalBatteryDispatch:
             self._resume_confirmed = False
             self._pending_watts = watts
             try:
-                accepted = await self.client.dispatch_battery_power(watts, remaining)
+                if self._target_basis == "battery_output":
+                    async def stage(expires_at):
+                        if expires_at + 1 + remaining > time.time() + self._deadline - time.monotonic():
+                            raise ValueError("Fixed output signature would exceed its deadline")
+                        self.power_acceptance_until = expires_at + 1
+                        await self.persist()
+
+                    def final_guard():
+                        if (not self.allowed(self._mode) or time.monotonic() - observed_at > 5
+                                or time.monotonic() >= self._deadline):
+                            raise ValueError("Fixed output authority or telemetry changed before submission")
+
+                    accepted = await self.client.dispatch_battery_power(watts, remaining, before_submit=stage, before_write=final_guard)
+                else:
+                    accepted = await self.client.dispatch_battery_power(watts, remaining)
             except Exception as err:
                 raise DispatchCommandFailed("Local battery dispatch transport failed") from err
             if not accepted:
@@ -637,7 +746,21 @@ class LocalBatteryDispatch:
             battery = _number(snapshot.battery_w, "battery power")
             grid = _number(snapshot.grid_w, "grid power")
             controlled_export = max(0.0, min(battery, -grid))
-            if not await self.guarded_write(write, controlled_export):
+            if self._target_basis == "battery_output":
+                desired = battery_watts(self._mode, self._target, snapshot, config,
+                                       target_basis=self._target_basis)
+                requested_export = max(0.0, desired + snapshot.solar_w - snapshot.load_w)
+
+                async def fixed_write(approved_export):
+                    if approved_export + 1e-6 < requested_export:
+                        raise ValueError("Fixed battery output blocked by network export limit")
+                    return await write(self._target)
+
+                accepted = await self.guarded_write(fixed_write, controlled_export,
+                                                   requested_export_w=requested_export)
+            else:
+                accepted = await self.guarded_write(write, controlled_export)
+            if not accepted:
                 raise ValueError("Local dispatch blocked by network export envelope")
         else:
             await write(self._target)
@@ -699,6 +822,8 @@ class LocalBatteryDispatch:
     async def _release(self, *, retain_intent=False, restore_grid_charging=None):
         if not self.pending:
             return
+        if self._target_basis == "battery_output":
+            self.releasing = True
         try:
             if self._grid_charge_restore and not self._cleanup_allowed():
                 raise ValueError("Local grid charging cleanup owner changed")
@@ -707,9 +832,24 @@ class LocalBatteryDispatch:
                 await self.persist()
             if ((self._command_may_have_reached or self._grid_charge_restore)
                     and not self._resume_confirmed):
-                if not await self.client.resume_battery_operation():
+                if self._target_basis == "battery_output":
+                    while time.time() < self.power_acceptance_until:
+                        await asyncio.sleep(min(1, self.power_acceptance_until - time.time()))
+                    async def resume_stage(expires_at):
+                        self.resume_acceptance_until = expires_at + 1
+                        await self.persist()
+                    def resume_guard():
+                        if not self._cleanup_allowed():
+                            raise ValueError("Fixed output cleanup owner changed")
+                    accepted = await self.client.resume_battery_operation(before_submit=resume_stage, before_write=resume_guard)
+                else:
+                    accepted = await self.client.resume_battery_operation()
+                if not accepted:
                     raise ValueError("Gateway did not acknowledge resume; local cleanup remains pending")
                 self._resume_confirmed = True
+            if self._target_basis == "battery_output":
+                while time.time() < self.resume_acceptance_until:
+                    await asyncio.sleep(min(1, self.resume_acceptance_until - time.time()))
             self._command_may_have_reached = False
             self._pending_watts = None
             self._last_watts = 0.0
@@ -724,10 +864,12 @@ class LocalBatteryDispatch:
                 self._schedule_grid_cleanup()
             raise
         self.pending = False
+        self.releasing = False
         try:
             await self.stopped()
         except BaseException:
             self.pending = True
+            self.releasing = True
             raise
 
     async def stop(self, *, restore_grid_charging=None):

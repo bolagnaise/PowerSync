@@ -154,6 +154,7 @@ class AutomationStore:
                 if "actions" in automation_data:
                     _LOGGER.debug(f"Updating automation {automation_id} with {len(automation_data['actions'])} action(s): {automation_data['actions']}")
                     auto["actions"] = automation_data["actions"]
+                    auto.pop("_advanced_battery_run", None)
                 if "conditions" in automation_data:
                     _LOGGER.debug(f"Updating automation {automation_id} with {len(automation_data.get('conditions', []))} condition(s)")
                     auto["conditions"] = automation_data["conditions"]
@@ -512,6 +513,7 @@ class AutomationEngine:
 
                     if actions_executed:
                         triggered_count += 1
+                        automation.pop("_advanced_battery_run", None)
                         self._store.mark_triggered(automation.get("id"))
                         await self._store.async_save()
 
@@ -1047,13 +1049,35 @@ class AutomationEngine:
             "ev_vehicle_id": current_state.get("ev_state", {}).get("vehicle_id"),
         }
 
-        result = await execute_actions(
-            self._hass,
-            self._config_entry,
-            actions_to_execute,
-            context
-        )
-        return result
+        if any(item.get("action_type") in ("battery_output", "native_site_limits") for item in actions_to_execute):
+            from ..powerwall_local.automation_controls import validate_actions
+            if validate_actions(actions_to_execute):
+                return False
+            from uuid import uuid4
+            import time
+            run = automation.setdefault("_advanced_battery_run", {"id": uuid4().hex, "started": time.time(), "requests": {}})
+            # A request admitted by this run retains its exact revision and
+            # deadline even when a response is lost or HA restarts.
+            await self._store.async_save()
+            context.update(battery_run_id=run["id"], battery_run_started=run["started"],
+                battery_request_journal=run["requests"], save_battery_request_journal=self._store.async_save)
+
+        result = False
+        try:
+            result = await execute_actions(
+                self._hass,
+                self._config_entry,
+                actions_to_execute,
+                context
+            )
+            return result
+        finally:
+            run = automation.get("_advanced_battery_run")
+            if run and not result:
+                from ..powerwall_local.automation_controls import run_has_unresolved_request
+                if not await run_has_unresolved_request(self._hass, self._config_entry, run):
+                    automation.pop("_advanced_battery_run", None)
+                    await self._store.async_save()
 
     async def _async_send_notification(self, message: str) -> None:
         """Send notification via persistent notification and Expo Push."""

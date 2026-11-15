@@ -14560,6 +14560,18 @@ def _automation_trigger_validation_error(trigger: Any) -> str | None:
     return None
 
 
+def _automation_battery_action_validation_error(data, previous=None):
+    from .powerwall_local.automation_controls import ADVANCED_ACTIONS, validate_actions
+    actions = data.get("actions", [])
+    previous_actions = (previous or {}).get("actions", [])
+    advanced = lambda rows: isinstance(rows, list) and any(isinstance(item, dict) and item.get("action_type") in ADVANCED_ACTIONS for item in rows)
+    if advanced(actions) or "actions" in data and advanced(previous_actions):
+        if data.get("battery_action_contract_version") != 1:
+            return "Update this client before editing versioned battery actions"
+        return validate_actions(actions)
+    return None
+
+
 class AutomationsView(HomeAssistantView):
     """HTTP view to manage automations for mobile app."""
 
@@ -14594,6 +14606,7 @@ class AutomationsView(HomeAssistantView):
             return web.json_response({
                 "success": True,
                 "automations": automations,
+                "battery_action_contract_version": 1,
                 "available_vehicles": available_vehicles,
                 "automation_trigger_capabilities": {
                     "grid_import_energy": True,
@@ -14621,6 +14634,8 @@ class AutomationsView(HomeAssistantView):
         try:
             data = await request.json()
             _LOGGER.debug(f"📱 Creating automation with data: name={data.get('name')}, actions={data.get('actions')}")
+            if error := _automation_battery_action_validation_error(data):
+                return web.json_response({"success": False, "error": error}, status=409)
             validation_error = _automation_trigger_validation_error(
                 data.get("trigger")
             )
@@ -14708,6 +14723,8 @@ class AutomationDetailView(HomeAssistantView):
         try:
             data = await request.json()
             trigger = data.get('trigger', {})
+            if error := _automation_battery_action_validation_error(data, store.get(int(automation_id))):
+                return web.json_response({"success": False, "error": error}, status=409)
             _LOGGER.debug(f"📱 Updating automation {automation_id} with data: name={data.get('name')}, trigger={trigger}, actions={data.get('actions')}, conditions={data.get('conditions')}")
             if "trigger" in data:
                 validation_error = _automation_trigger_validation_error(trigger)
@@ -26599,6 +26616,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     async with vars(store).setdefault("_power_sync_update_lock", asyncio.Lock()):
         stored_data = await store.async_load() or {}
         settings_runtime["powerwall_settings_pending"] = pending_settings = stored_data.get("tesla_settings_pending")
+        settings_runtime["native_site_limits_state"] = stored_data.get("native_site_limits", {})
         if pending_settings and pending_settings.get("resume_cloud") is True:
             settings_runtime["powerwall_settings_lock"] = asyncio.Lock()
             settings_runtime["powerwall_settings_cloud_handoff"] = pending_settings["id"]
@@ -34127,6 +34145,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 state_to_save["command_status"] = state.get("command_status")
                 state_to_save["grid_import_target_w"] = state.get("grid_import_target_w")
                 state_to_save["power_target_basis"] = state.get("power_target_basis", "battery")
+                if state.get("power_target_basis") == "battery_output":
+                    state_to_save["battery_output_operation_id"] = state.get("battery_output_operation_id")
+                    state_to_save["local_power_acceptance_until"] = getattr(controller, "power_acceptance_until", 0)
+                    state_to_save["local_resume_acceptance_until"] = getattr(controller, "resume_acceptance_until", 0)
                 for direction in ("charge", "discharge"):
                     state_to_save[f"gateway_{direction}_limit_w"] = state.get(f"gateway_{direction}_limit_w")
 
@@ -34176,6 +34198,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             state = force_charge_state if persisted_force_state.get("mode") == "charge" else force_discharge_state
             state.update(active=True, powerwall_local_dispatch=True,
                          source=persisted_force_state.get("source", "user"),
+                         power_target_basis=persisted_force_state.get("power_target_basis"),
+                         battery_output_operation_id=persisted_force_state.get("battery_output_operation_id"),
+                         local_power_acceptance_until=persisted_force_state.get("local_power_acceptance_until"),
+                         local_resume_acceptance_until=persisted_force_state.get("local_resume_acceptance_until"),
                          local_grid_charge_restore=persisted_force_state.get("local_grid_charge_restore"))
             await _stop_local_powerwall_dispatch()
             hass.data[DOMAIN][entry.entry_id]["optimizer_force_restart_restore_pending"] = False
@@ -36253,6 +36279,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             from .native_rate_budget import site_identity
             config["native_ev_unobserved_w"] = budget.unobserved_w(site_identity(entry))
             config["native_ev_rate_armed"] = budget.site_armed(site_identity(entry))
+        if limits_state := _local_powerwall_runtime.get("native_site_limits_state"):
+            from .powerwall_local.native_site_limits import recorded_limits_w, identity_for_entry
+            imported, exported = recorded_limits_w(limits_state, identity_for_entry(entry))
+            config["native_site_import_cap_w"] = imported
+            config["native_site_export_cap_w"] = exported
         return config
 
     async def _local_powerwall_dispatch_acknowledged(watts, seconds):
@@ -36390,6 +36421,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if not pending and not (controller and controller.pending):
             return native_max_stopped
         controller = controller or await _get_local_powerwall_dispatch()
+        fixed = next((state for state in (force_charge_state, force_discharge_state)
+                      if state.get("powerwall_local_dispatch") and state.get("power_target_basis") == "battery_output"), None)
+        if fixed and not controller.pending:
+            controller._target_basis = "battery_output"
+            controller.power_acceptance_until = fixed.get("local_power_acceptance_until") or time.time() + 13
+            controller.resume_acceptance_until = fixed.get("local_resume_acceptance_until") or 0
         recovery = next((state.get("local_grid_charge_restore")
                          for state in (force_charge_state, force_discharge_state)
                          if state.get("local_grid_charge_restore") is not None), None)
@@ -36905,7 +36942,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         async with _local_powerwall_route_lock:
             return await _try_local_powerwall_force_locked(mode, call, duration, power_w)
 
-    async def _try_local_powerwall_force_locked(mode, call, duration, power_w):
+    async def _try_local_powerwall_force_locked(mode, call, duration, power_w, *, fixed_output=None):
         from .powerwall_host import local_battery_dispatch_configured
         grid_target = call.data.get("grid_import_target_w")
         if grid_target is not None and (mode != "charge" or _control_call_source(call) != "optimizer"
@@ -36915,15 +36952,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if active_battery_system != BATTERY_SYSTEM_TESLA:
             if grid_target is not None:
                 raise HomeAssistantError("Grid-import targeting requires paired local Powerwall control")
+            if fixed_output is not None:
+                raise HomeAssistantError("Fixed battery output requires a paired Tesla gateway")
             return None
-        if await _prepare_cloud_tariff_control(mode, call):
+        if fixed_output is None and await _prepare_cloud_tariff_control(mode, call):
             return None
         from .powerwall_local.control_method import control_method
         if (control_method({**entry.data, **entry.options}) == "local"
                 and not local_battery_dispatch_configured(entry.data)):
             raise HomeAssistantError("Local V1R requires a paired Powerwall gateway")
         requested_at = _local_powerwall_runtime.get("battery_route_requested_at") or dt_util.utcnow().timestamp()
-        native = await _try_native_powerwall_force(mode, call, duration, requested_at + duration * 60)
+        native = (await _try_native_powerwall_force(mode, call, duration, requested_at + duration * 60)
+                  if fixed_output is None else None)
         if native is not None:
             return native
         await _stop_native_max_charge()
@@ -36970,6 +37010,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             return None
         local_configured = local_battery_dispatch_configured(entry.data)
         if not local_configured:
+            if fixed_output is not None:
+                raise HomeAssistantError("Fixed battery output has no tariff or other-brand fallback")
             if pending:
                 raise HomeAssistantError("Local dispatch cleanup required before changing control paths")
             return None
@@ -36978,7 +37020,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             raise HomeAssistantError("Optimizer local dispatch requires positive power")
         config = {**entry.data, **entry.options}
         target = grid_target if grid_target is not None else power_w or config.get("optimization_max_grid_export_w" if mode == "discharge" else "optimization_max_charge_w", 5000)
-        target_basis = "grid_import" if grid_target is not None else "grid_export" if mode == "discharge" else "battery"
+        target_basis = ("battery_output" if fixed_output is not None else
+                        "grid_import" if grid_target is not None else "grid_export" if mode == "discharge" else "battery")
 
         def allowed(direction):
             if (not _local_powerwall_generation_current() or _monitoring_mode_should_block_control(call)
@@ -36998,11 +37041,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     return False
             return True
 
-        async def local_export_guard(write, controlled_export=0.0):
+        async def local_export_guard(write, controlled_export=0.0, *, requested_export_w=None):
             guard = hass.data[DOMAIN][entry.entry_id].get("network_export_guard")
+            requested = target if requested_export_w is None else requested_export_w
             if guard is None:
-                return await write(target)
-            return await guard.async_guard_write(target, write, current_controlled_export_w=controlled_export, stop_on_fault=False)
+                return await write(requested)
+            return await guard.async_guard_write(requested, write, current_controlled_export_w=controlled_export, stop_on_fault=False)
 
         def check_optimizer_export_snapshot(sample, observed_at):
             from .powerwall_local.control_method import LOCAL_EXPORT_MIN_SOC_PERCENT
@@ -37035,7 +37079,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _local_powerwall_runtime["powerwall_dispatch_fallback_pending"] = False
             other.update(active=False, expires_at=None, hardware_expires_at=None)
             other.pop("powerwall_local_dispatch", None)
-            expiry = dt_util.utcnow() + timedelta(minutes=duration)
+            other.pop("battery_output_operation_id", None)
+            expiry = (datetime.fromtimestamp(fixed_output["expires_at"], tz=timezone.utc)
+                      if fixed_output is not None else dt_util.utcnow() + timedelta(minutes=duration))
+            remaining_seconds = math.ceil((expiry - dt_util.utcnow()).total_seconds()) if fixed_output is not None else 0
+            if fixed_output is not None and remaining_seconds <= 0:
+                raise HomeAssistantError("Fixed battery output expired while waiting for control")
             state.update(active=True, source=source, duration=duration, power_w=power_w,
                          expires_at=expiry, hardware_expires_at=None,
                          powerwall_local_dispatch=True, command_status="pending",
@@ -37043,6 +37092,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                          started_at=dt_util.utcnow(), commitment_eligible=False,
                          grid_import_target_w=grid_target,
                          power_target_basis=target_basis)
+            if fixed_output is not None:
+                state["battery_output_operation_id"] = fixed_output["operation_id"]
+            else:
+                state.pop("battery_output_operation_id", None)
             # Publish the request before waiting for LAN acknowledgement so
             # the dashboard can distinguish starting from an accepted action.
             async_dispatcher_send(hass, f"{DOMAIN}_force_{mode}_state", {
@@ -37050,14 +37103,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "duration": duration, "command_status": "pending",
             })
             try:
-                result = await controller.start(mode, target, duration * 60,
+                result = await controller.start(mode, target, remaining_seconds if fixed_output is not None else duration * 60,
                                                 allowed=allowed, guarded_write=local_export_guard if mode == "discharge" else None,
                                                 target_basis=target_basis,
                                                 prepare_grid_charging=source == "optimizer",
                                                 snapshot_check=check_optimizer_export_snapshot
-                                                if source == "optimizer" and mode == "discharge" else None)
+                                                if source == "optimizer" and mode == "discharge" else None,
+                                                **({"deadline_monotonic": time.monotonic() + max(0, fixed_output["expires_at"] - time.time())}
+                                                   if fixed_output is not None else {}))
             except Exception as err:
                 from .powerwall_local.battery_dispatch import DispatchCommandFailed, GridChargingPermissionError
+                if fixed_output is not None:
+                    raise HomeAssistantError(f"Fixed battery output stopped: {err}") from err
                 if mode == "charge" and source == "optimizer" and isinstance(err, GridChargingPermissionError):
                     from .powerwall_local.native_max_notifications import update_native_charge_alert
                     update_native_charge_alert(hass, entry.entry_id, err.reason)
@@ -37161,6 +37218,239 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 if not nested:
                     tasks.discard(task)
         return tracked
+
+    from .powerwall_local.battery_output import BatteryOutputControl, BatteryOutputError, digest as _control_digest
+
+    from uuid import uuid4 as _output_uuid4
+    _battery_output_boot_id = _output_uuid4().hex
+
+    def _battery_output_revision():
+        return _control_digest({
+            "runtime": _battery_output_boot_id,
+            "entry": entry.entry_id, "site": _control_site_id,
+            "din": entry.data.get("powerwall_local_din"),
+            "key": entry.data.get("powerwall_local_public_key_der"),
+            "generation": _command_generation[0],
+            "pending": (_local_powerwall_runtime.get("powerwall_settings_pending") or {}).get("id"),
+            "stopping": bool(_local_powerwall_runtime.get("powerwall_local_dispatch_stopping")),
+        })
+
+    def _battery_output_allowed():
+        from .powerwall_host import local_battery_dispatch_configured
+        from .battery_backend.profiles import resolve_connection_profile
+        configuration = {**entry.data, **entry.options}
+        return (active_battery_system == BATTERY_SYSTEM_TESLA
+                and local_battery_dispatch_configured(entry.data)
+                and _local_powerwall_generation_current()
+                and not getattr(_local_powerwall_runtime.get("powerwall_native_max_charge"), "pending", False)
+                and not _local_powerwall_runtime.get("native_max_recovery_unavailable")
+                and not configuration.get(CONF_MONITORING_MODE, False)
+                and not resolve_connection_profile(entry.data, entry.options).monitoring_only
+                and not any(_local_powerwall_runtime.get(key) for key in (
+                    "powerwall_local_dispatch_stopping", "powerwall_settings_pending",
+                    "powerwall_settings_recovering", "tesla_control_method_changing",
+                    "native_max_startup_pending", "powerwall_local_recovery_pending",
+                    "max_backup_end_ts", "max_backup_recovery_unavailable")))
+
+    def _battery_output_status():
+        states = (force_charge_state, force_discharge_state, hold_soc_state, self_consumption_state)
+        selected = next((state for state in (force_charge_state, force_discharge_state)
+                         if state.get("active") and state.get("power_target_basis") == "battery_output"), None)
+        any_active = any(state.get("active") for state in states)
+        if selected is None:
+            selected = ({} if any_active else next((state for state in (force_charge_state, force_discharge_state)
+                        if state.get("battery_output_operation_id")), {}))
+        controller = _local_powerwall_runtime.get("powerwall_battery_dispatch")
+        return {"operation_id": selected.get("battery_output_operation_id"),
+                "active": bool(selected.get("active") and selected.get("power_target_basis") == "battery_output"),
+                "any_active": any_active,
+                "release_pending": bool(controller and controller.pending and (
+                    not selected.get("active") or selected.get("command_status") == "restore_pending" or getattr(controller, "releasing", False)))
+                    or any(_local_powerwall_runtime.get(key) for key in ("powerwall_local_recovery_pending", "native_max_recovery_unavailable")),
+                "command_status": selected.get("command_status"),
+                "commanded_w": getattr(controller, "_last_watts", None)}
+
+    async def _load_battery_output_requests():
+        saved = await store.async_load() or {}
+        return saved.get("battery_output_requests", {})
+
+    async def _save_battery_output_requests(value):
+        if not _local_powerwall_generation_current():
+            raise HomeAssistantError("Battery output setup was replaced")
+        if not await _update_powerwall_store(store, lambda data: {"battery_output_requests": value}, verify=True):
+            raise HomeAssistantError("Battery output request could not be saved")
+
+    async def _start_battery_output(operation, context):
+        from .powerwall_control import BatteryPowerTarget
+        async with _local_powerwall_route_lock:
+            if operation["expected_control_revision"] != _battery_output_revision():
+                raise BatteryOutputError("control_revision_conflict")
+            if not _battery_output_allowed() or _site_control is None:
+                raise BatteryOutputError("battery_output_unavailable")
+            active_states = [state for state in (force_charge_state, force_discharge_state, hold_soc_state, self_consumption_state) if state.get("active")]
+            if operation["expires_at"] - time.time() < (45 if active_states else 15):
+                raise BatteryOutputError("battery_output_window_too_short_for_signed_control")
+            if any(state.get("power_target_basis") != "battery_output" for state in active_states):
+                raise BatteryOutputError("stop_active_control_before_battery_target")
+            from .powerwall_local.views import ensure_client
+            from .powerwall_local.battery_dispatch import fixed_battery_watts
+            client = await ensure_client(hass, entry)
+            if client is None or not client.local_access_enabled:
+                raise BatteryOutputError("battery_output_unavailable")
+            sample = await client.get_snapshot()
+            fixed_battery_watts("discharge" if operation["power_w"] > 0 else "charge", abs(operation["power_w"]), sample, _local_powerwall_dispatch_config())
+            if operation["expected_control_revision"] != _battery_output_revision() or not _battery_output_allowed():
+                raise BatteryOutputError("battery_output_authority_changed")
+            manager = hass.data.get("power_sync_license_manager")
+            if manager is not None:
+                await manager.relinquish(entry.entry_id)
+            if not _battery_output_allowed():
+                raise BatteryOutputError("battery_output_authority_changed")
+            power = operation["power_w"]
+            call = ServiceCall(hass, DOMAIN, "dispatch_battery_power", {
+                "source": "user" if getattr(context, "user_id", None) else "automation",
+                "power_w": abs(power), "entry_id": entry.entry_id,
+            }, context=context)
+            remaining = operation["expires_at"] - time.time()
+            if remaining <= 0:
+                raise BatteryOutputError("battery_output_expired")
+            try:
+                async with _site_control.operation(label="battery_output", target=BatteryPowerTarget(power),
+                        deadline=time.monotonic() + remaining, is_current=_local_powerwall_generation_current,
+                        apply_guard=_battery_output_allowed, entry_id=entry.entry_id):
+                    return await _try_local_powerwall_force_locked(
+                        "discharge" if power > 0 else "charge", call, remaining / 60, abs(power), fixed_output=operation)
+            finally:
+                finish = getattr(manager, "finish_manual_command", None)
+                if finish:
+                    finish(entry.entry_id)
+
+    async def _end_battery_output(operation, context):
+        async with _local_powerwall_route_lock:
+            if _battery_output_status().get("operation_id") != operation["operation_id"]:
+                raise BatteryOutputError("operation_ownership_changed")
+            await _stop_local_powerwall_dispatch_locked()
+
+    _output_control = BatteryOutputControl(load=_load_battery_output_requests, save=_save_battery_output_requests,
+        revision=_battery_output_revision, status=_battery_output_status, start=_start_battery_output,
+        stop=_end_battery_output, allowed=_battery_output_allowed)
+    _local_powerwall_runtime["battery_output_control"] = _output_control
+
+    async def handle_dispatch_battery_power(call):
+        return await _output_control.dispatch(dict(call.data), call.context)
+
+    async def handle_stop_battery_dispatch(call):
+        return await _output_control.end(dict(call.data), call.context)
+
+    from .powerwall_local.native_site_limits import NativeSiteLimits, SiteLimitError
+
+    def _native_limits_identity():
+        from .powerwall_local.native_site_limits import identity_for_entry
+        return identity_for_entry(entry)
+
+    def _native_limits_allowed(allow_own_pending):
+        from .powerwall_host import local_battery_dispatch_configured
+        from .battery_backend.profiles import resolve_connection_profile
+        from .powerwall_control import foreign_site_owner
+        pending = _local_powerwall_runtime.get("powerwall_settings_pending")
+        pending_blocked = bool(pending and not (allow_own_pending and isinstance(pending, dict)
+                                               and pending.get("kind") == "native_site_limits"))
+        return (active_battery_system == BATTERY_SYSTEM_TESLA
+                and _control_site_id is not None and local_battery_dispatch_configured(entry.data)
+                and _local_powerwall_generation_current()
+                and not {**entry.data, **entry.options}.get(CONF_MONITORING_MODE, False)
+                and not resolve_connection_profile(entry.data, entry.options).monitoring_only
+                and not pending_blocked
+                and foreign_site_owner(hass, entry.entry_id, _control_site_id) is None
+                and not any(state.get("active") for state in (
+                    force_charge_state, force_discharge_state, hold_soc_state, self_consumption_state))
+                and not any(_local_powerwall_runtime.get(key) for key in (
+                    "powerwall_local_dispatch_stopping", "powerwall_settings_recovering",
+                    "tesla_control_method_changing", "native_max_startup_pending",
+                    "powerwall_local_recovery_pending", "optimizer_force_restart_restore_pending",
+                    "max_backup_end_ts", "max_backup_recovery_unavailable"))
+                and not getattr(_local_powerwall_runtime.get("powerwall_battery_dispatch"), "pending", False)
+                and not getattr(_local_powerwall_runtime.get("powerwall_native_max_charge"), "pending", False))
+
+    async def _load_native_limits():
+        saved = await store.async_load() or {}
+        return saved.get("native_site_limits", {})
+
+    async def _save_native_limits(value, pending):
+        def transition(data):
+            if not _local_powerwall_generation_current():
+                held = data.get("tesla_settings_pending") or {}
+                native = data.get("native_site_limits") or {}
+                if (not held or held.get("kind") != "native_site_limits"
+                        or held.get("id") != (value.get("transaction") or {}).get("operation_id")
+                        or native.get("identity") != value.get("identity")
+                        or native.get("approval", {}) != value.get("approval", {})):
+                    return None
+            if pending == "preserve":
+                return {"native_site_limits": value}
+            current = data.get("tesla_settings_pending")
+            if current and current.get("kind") != "native_site_limits":
+                return None
+            if current and pending is None and current.get("id") != ((value.get("transaction") or {}).get("operation_id") or value.get("rebaseline_previous_operation_id")):
+                return None
+            return {"native_site_limits": value, "tesla_settings_pending": pending}
+        if not await _update_powerwall_store(store, transition, verify=True):
+            raise HomeAssistantError("Native site limit journal owner changed")
+        if not _local_powerwall_generation_current():
+            return  # A late receipt belongs in storage, not a replacement runtime.
+        _local_powerwall_runtime["native_site_limits_state"] = value
+        if pending != "preserve":
+            _local_powerwall_runtime["powerwall_settings_pending"] = pending
+            _sync_powerwall_settings_issue(hass, entry.entry_id, pending)
+
+    async def _read_native_limits_document():
+        from .powerwall_local.views import ensure_client
+        client = await ensure_client(hass, entry)
+        if client is None or not client.local_access_enabled:
+            raise SiteLimitError("native_site_limits_unavailable")
+        document = await client._transport.read_config(client._din, with_hash=True, strict_json=True)
+        if document is None:
+            raise SiteLimitError("native_configuration_unavailable")
+        return document
+
+    async def _write_native_limits_document(updates, validate, stage, before_write):
+        from .powerwall_local.views import ensure_client
+        client = await ensure_client(hass, entry)
+        if client is None or not client.local_access_enabled:
+            raise SiteLimitError("native_site_limits_unavailable")
+        return await client._transport.write_config(client._din, updates,
+            validate_document=validate, strict_json=True, before_submit=stage, before_write=before_write)
+
+    async def _native_limits_changed():
+        _command_generation[0] += 1
+        _local_powerwall_runtime["native_site_limits_revision"] = _local_powerwall_runtime.get("native_site_limits_revision", 0) + 1
+        optimization = _local_powerwall_runtime.get("optimization_coordinator")
+        if optimization is not None:
+            optimization._schedule_settings_reoptimization()
+        local = (_local_powerwall_runtime.get("powerwall_local") or {}).get("coordinator")
+        if local is not None:
+            hass.async_create_task(local.async_request_refresh())
+
+    def _native_limits_approval_allowed():
+        from .powerwall_host import local_battery_dispatch_configured
+        return (active_battery_system == BATTERY_SYSTEM_TESLA and _control_site_id is not None
+                and _local_powerwall_generation_current() and local_battery_dispatch_configured(entry.data))
+
+    _limits_control = NativeSiteLimits(identity=_native_limits_identity, load=_load_native_limits,
+        save=_save_native_limits, read=_read_native_limits_document, write=_write_native_limits_document,
+        guard=_native_limits_allowed, lock=_local_powerwall_route_lock, changed=_native_limits_changed,
+        approval_guard=_native_limits_approval_allowed)
+    _local_powerwall_runtime["native_site_limits_control"] = _limits_control
+
+    async def handle_set_native_site_limits(call):
+        actor = None
+        if call.data.get("operation") in ("approve", "rebaseline"):
+            user_id = getattr(call.context, "user_id", None)
+            user = await hass.auth.async_get_user(user_id) if user_id else None
+            if user is None or not user.is_admin:
+                raise HomeAssistantError("A Home Assistant administrator must confirm approved site maxima")
+            actor = user.id
+        return await _limits_control.execute(dict(call.data), actor=actor)
 
     @_track_tesla_settings_control
     async def handle_force_discharge(call: ServiceCall) -> dict[str, Any] | None:
@@ -46148,6 +46438,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     async def handle_resume_powerwall_settings(call: ServiceCall) -> dict:
         """Release this incident to cloud control under explicit supervision."""
         runtime = hass.data[DOMAIN][entry.entry_id]
+        if (runtime.get("powerwall_settings_pending") or {}).get("kind") == "native_site_limits":
+            raise HomeAssistantError("The native site limit write requires its original terminal receipt; cloud control cannot retire it")
         # Legacy entries without a saved brand use Tesla throughout setup.
         if (active_battery_system not in (None, BATTERY_SYSTEM_TESLA)
                 or not _local_powerwall_generation_current()
@@ -46437,6 +46729,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         **(native_handlers if amber_smartshift_coordinator else {}),
         'force_charge': handle_force_charge,
         'force_discharge': handle_force_discharge,
+        'dispatch_battery_power': handle_dispatch_battery_power,
+        'stop_battery_dispatch': handle_stop_battery_dispatch,
+        'set_native_site_limits': handle_set_native_site_limits,
         'restore_normal': handle_restore_normal,
         'set_self_consumption': handle_set_self_consumption,
         'set_autonomous': handle_set_autonomous,
@@ -46459,6 +46754,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         'set_off_grid_ev_reserve': handle_set_off_grid_ev_reserve,
         'set_vpp_enrollment': handle_set_vpp_enrollment,
     })
+    for service, handler in (("dispatch_battery_power", handle_dispatch_battery_power),
+                             ("stop_battery_dispatch", handle_stop_battery_dispatch),
+                             ("set_native_site_limits", handle_set_native_site_limits)):
+        hass.services.async_register(DOMAIN, service,
+            routed_handler(hass, entry.entry_id, service, handler),
+            supports_response=SupportsResponse.OPTIONAL)
     hass.services.async_register(
         DOMAIN, "resume_powerwall_settings",
         routed_handler(hass, entry.entry_id, "resume_powerwall_settings", handle_resume_powerwall_settings),

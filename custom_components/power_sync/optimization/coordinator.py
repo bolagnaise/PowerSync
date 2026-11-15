@@ -3450,6 +3450,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         local = runtime.get("powerwall_local", {})
         client = local.get("client") or getattr(runtime.get("powerwall_battery_dispatch"), "client", None)
         limits = {}
+        if recorded := runtime.get("native_site_limits_state"):
+            from ..powerwall_local.native_site_limits import recorded_limits_w, identity_for_entry
+            imported, exported = recorded_limits_w(recorded, identity_for_entry(getattr(self, "_entry", None)))
+            if imported is not None:
+                limits["max_grid_import_w"] = imported
+            if exported is not None:
+                limits["max_grid_export_w"] = exported
         from ..powerwall_host import local_battery_dispatch_configured
         local_ready = client is not None or local_battery_dispatch_configured(
             getattr(getattr(self, "_entry", None), "data", {}))
@@ -3467,9 +3474,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 from ..powerwall_local.battery_dispatch import site_grid_limits_w
                 imported, exported = site_grid_limits_w(coordinator.data)
                 if imported is not None:
-                    limits["max_grid_import_w"] = imported
+                    limits["max_grid_import_w"] = min(imported, limits.get("max_grid_import_w", math.inf))
                 if exported is not None:
-                    limits["max_grid_export_w"] = exported
+                    limits["max_grid_export_w"] = min(exported, limits.get("max_grid_export_w", math.inf))
             except (ValueError, TypeError, AttributeError):
                 pass
         return limits
@@ -11244,9 +11251,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def _live_site_import_charge_limit_w(self) -> float | None:
         """Return live battery charge headroom under the site import cap."""
-        max_grid_import_w = self._normalize_optional_power_w(
-            self._config.max_grid_import_w
-        )
+        _, max_grid_import_w = self._effective_charge_and_import_limits()
         if max_grid_import_w is None or self.energy_coordinator is None:
             return None
 
@@ -14742,7 +14747,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return selected
 
         interval_hours = max(1, int(self._config.interval_minutes or 5)) / 60.0
-        max_charge_kw = max(0.0, float(self._config.max_charge_w or 0.0) / 1000.0)
+        effective_charge_w, effective_import_w = self._effective_charge_and_import_limits()
+        max_charge_kw = max(0.0, float(effective_charge_w or 0.0) / 1000.0)
         capacity_kwh = max(
             0.0, float(self._config.battery_capacity_wh or 0.0) / 1000.0
         )
@@ -14792,7 +14798,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
             ):
                 grid_headroom_kw = max_charge_kw
-                max_grid_import_w = self._config.max_grid_import_w
+                max_grid_import_w = effective_import_w
                 if max_grid_import_w is not None:
                     net_load_kw = max(0.0, load[idx] - solar[idx])
                     grid_headroom_kw = min(

@@ -79,6 +79,35 @@ def admission(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('limit', [0, 4000])
+async def test_recorded_native_limit_applies_without_gateway_field(admission, limit):
+    a = admission
+    native = importlib.import_module(a.m.__package__ + '.powerwall_local.native_site_limits')
+    a.snapshot.raw['config']['site_info'].pop('max_site_meter_power_ac')
+    a.runtime['native_site_limits_state'] = {'identity': native.identity_for_entry(a.entry),
+        'operational': {'import_limit_w': limit}}
+    evidence = a.m._site_evidence(a.hass, a.entry, a.runtime, VIN, {})
+    assert evidence['cap_w'] == limit
+    with pytest.raises(a.m.SiteImportAdmissionDenied):
+        await a.m.prepare_ev_submission(a.hass, a.state.entity_id, operation='rate', amps=20)
+    assert not a.budget.managed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('amps,increase', [(20, True), (5, False)])
+async def test_cap_revision_fences_increases_but_keeps_reductions(admission, amps, increase):
+    a = admission
+    a.runtime['native_site_limits_revision'] = 1
+    a.store.hook = lambda: a.runtime.update(native_site_limits_revision=2)
+    if increase:
+        with pytest.raises(a.m.SiteImportAdmissionDenied):
+            await a.m.prepare_ev_submission(a.hass, a.state.entity_id, operation='rate', amps=amps)
+        assert not a.budget.managed
+    else:
+        assert await a.m.prepare_ev_submission(a.hass, a.state.entity_id, operation='rate', amps=amps)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize('platform', ['tesla_fleet', 'teslemetry'])
 async def test_native_start_uses_charge_acquisition_time_not_equal_ha_number(admission, platform):
     a = admission

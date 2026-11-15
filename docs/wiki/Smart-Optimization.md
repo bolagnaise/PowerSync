@@ -29,6 +29,27 @@ Export is off. Temporary limits are restored when export control ends. Native
 iHomeManager uses its own dispatch route; manual force-discharge power remains a
 battery-output setting.
 
+### Tesla battery output and native site limits
+
+Paired Tesla gateways offer two separate advanced controls in **Controls → Battery output and site limits**. In the Home Assistant dashboard, select **Read control state** to load them. Availability depends on pairing, gateway responses and current control ownership.
+
+| Control | Meaning | Lifetime |
+| --- | --- | --- |
+| Fixed battery power | Signed whole watts: positive discharges; negative charges | A timed window using short renewable commands |
+| Native site limits | Non-negative whole watts for maximum grid import and export | Persistent until explicitly changed |
+
+With 5,000 W household load and 1,000 W solar, a fixed 1,800 W battery output leaves 2,200 W grid import. The existing Force Discharge export target of 1,800 W instead requests enough battery output to supply the home and export 1,800 W. Choose the quantity you intend to control.
+
+A fixed target is refused if it cannot fit current permissions, reserve, telemetry, battery or site limits. If a renewal becomes infeasible, PowerSync stops the target and resumes normal battery operation. It does not silently reduce the target or substitute tariff control. Zero-watt hold is unavailable. Signed-command and cleanup windows can shorten the usable time; very short requests may be refused. Restart recovery releases a previous command instead of replaying it. Replacing an active fixed target requires explicit confirmation; stop legacy Force controls separately first.
+
+For persistent limits, **zero is a hard limit**. Blank fields stay unchanged. These settings are separate from export permission and permission to charge from the grid. Stopping a timed action does not restore persistent limits. Before increasing a limit, a Home Assistant administrator must record the permitted installation/network maximum, its document reference and approval date. This records an owner-attested software bound; applying a native limit is a separate action. A saved previous value does not establish permission to increase a limit.
+
+PowerSync checks the latest gateway configuration before writing, preserves unrelated settings and reads the configuration back independently. An uncertain write stays blocked until **Check unresolved write** obtains matching readback after the command acceptance window. Restoring a saved limit requires that it is still PowerSync's value and that any increase remains approved. Missing or unrecognised previous values cannot be restored as an assumed unlimited setting. After re-pairing, administrator confirmation of a fresh baseline archives the old approval without applying a gateway setting.
+
+The optimiser, managed EV admission and runtime controls consume the most restrictive applicable recorded bounds, including zero. Existing manual EV charging commands retain their own control policy. A gateway acknowledgement or configuration readback does not prove measured tracking or physical enforcement; the advanced controls report that distinction. Other independently configured controllers can still interfere.
+
+For Home Assistant scripts, use `power_sync.dispatch_battery_power`, `power_sync.stop_battery_dispatch` and `power_sync.set_native_site_limits`. New starts require a unique request ID and the latest control revision; native writes also require the current configuration and approval revisions. Their authenticated status endpoints are `/api/power_sync/powerwall/battery_dispatch` and `/api/power_sync/powerwall/native_site_limits`. Specify `entry_id` when several PowerSync entries exist. Reusing a request ID cannot start another command. Automation editors expose versioned **Fixed battery power** and **Persistent native site limits** actions; these can be combined with notifications. Approval changes require a native-limit rule to be reviewed before it runs again.
+
 ### Tesla force-discharge prices
 
 From v2.12.1642, configure **Force-discharge buy price ($/kWh)** and **Force-discharge sell price ($/kWh)** under **Settings > Devices & Services > PowerSync > Configure > Smart Optimization > Dispatch behaviour**. These fields appear only for Tesla Powerwall sites and have moved out of Tesla API connection. Existing saved values are retained.

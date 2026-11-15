@@ -7767,9 +7767,15 @@ async def execute_actions(
     Returns:
         True if at least one action executed successfully
     """
+    if any(item.get("action_type") in ("battery_output", "native_site_limits") for item in actions):
+        from ..powerwall_local.automation_controls import validate_actions
+        if error := validate_actions(actions):
+            _LOGGER.warning("Automation action refused: %s", error)
+            return False
     success_count = 0
+    advanced_success = None
 
-    for action in actions:
+    for action_index, action in enumerate(actions):
         try:
             action_type = action.get("action_type")
             params = action.get("parameters", {})
@@ -7777,7 +7783,9 @@ async def execute_actions(
                 import json
                 params = json.loads(params) if params else {}
 
-            result = await _execute_single_action(hass, config_entry, action_type, params, context)
+            result = await _execute_single_action(hass, config_entry, action_type, params, {**(context or {}), "action_index": action_index})
+            if action_type in ("battery_output", "native_site_limits"):
+                advanced_success = result is True
             if result:
                 success_count += 1
                 _LOGGER.info(f"Executed action '{action_type}'")
@@ -7790,13 +7798,15 @@ async def execute_actions(
                 except Exception:
                     pass
         except Exception as e:
+            if action.get("action_type") in ("battery_output", "native_site_limits"):
+                advanced_success = False
             _LOGGER.error(f"Error executing action '{action.get('action_type')}': {e}")
             try:
                 await _send_expo_push(hass, "⚠️ Automation Error", f"Action '{action.get('action_type')}' failed: {e}")
             except Exception:
                 pass
 
-    return success_count > 0
+    return advanced_success if advanced_success is not None else success_count > 0
 
 
 def _ev_action_loadpoint_id(params: Dict[str, Any]) -> str:
@@ -8352,7 +8362,10 @@ async def _execute_single_action(
     Returns:
         True if action executed successfully
     """
-    if action_type == "set_backup_reserve":
+    if action_type in ("battery_output", "native_site_limits"):
+        from ..powerwall_local.automation_controls import execute
+        return await execute(hass, config_entry, action_type, params, context)
+    elif action_type == "set_backup_reserve":
         return await _action_set_backup_reserve(hass, config_entry, params)
     elif action_type == "preserve_charge":
         return await _action_preserve_charge(hass, config_entry)
@@ -14301,9 +14314,8 @@ async def _update_smart_schedule_battery_target_group(
     max_grid_limits = []
     for _vehicle_id, state in sessions:
         params = state.get("params") or {}
-        max_grid_limits.append(
-            await _resolve_max_grid_import_kw(hass, config_entry, params) or 12.5
-        )
+        resolved_import_kw = await _resolve_max_grid_import_kw(hass, config_entry, params)
+        max_grid_limits.append(12.5 if resolved_import_kw is None else resolved_import_kw)
         if not _plan_is_current():
             return
     max_grid_import_kw = min(max_grid_limits)
@@ -16594,6 +16606,12 @@ async def _resolve_max_grid_import_kw(
         limit for limit in (explicit, optimizer_limit, tesla_limit, home_power_limit)
         if limit is not None
     ]
+    runtime = getattr(hass, "data", {}).get("power_sync", {}).get(getattr(config_entry, "entry_id", None), {})
+    if recorded := runtime.get("native_site_limits_state"):
+        from ..powerwall_local.native_site_limits import recorded_limits_w, identity_for_entry
+        imported, _ = recorded_limits_w(recorded, identity_for_entry(config_entry))
+        if imported is not None:
+            limits.append(imported / 1000)
     return min(limits) if limits else None
 
 
@@ -17528,10 +17546,9 @@ async def _dynamic_ev_update(
         planned_charge_kw=_optimizer_planned_battery_charge_kw(hass, config_entry),
         max_battery_charge_rate_kw=params.get("max_battery_charge_rate_kw"),
     )
-    max_grid_import_kw = (
-        await _resolve_max_grid_import_kw(hass, config_entry, params)
-        or 12.5
-    )
+    max_grid_import_kw = await _resolve_max_grid_import_kw(hass, config_entry, params)
+    if max_grid_import_kw is None:
+        max_grid_import_kw = 12.5
 
     # No grid import mode: prevent ALL grid imports by dynamically adjusting EV charge rate
     no_grid_import = params.get("no_grid_import", False)
@@ -18739,13 +18756,11 @@ async def _action_start_ev_charging_dynamic_locked(
             params.get("max_battery_discharge_kw", 5.0)  # Fallback for old param name
         )
         no_grid_import = params.get("no_grid_import", False)
+        resolved_import_kw = await _resolve_max_grid_import_kw(hass, config_entry, params)
         mode_params = {
             "target_battery_charge_kw": target_battery_charge_kw,
             "reserve_battery_charge": params.get("reserve_battery_charge", True),
-            "max_grid_import_kw": (
-                await _resolve_max_grid_import_kw(hass, config_entry, params)
-                or 12.5
-            ),
+            "max_grid_import_kw": 12.5 if resolved_import_kw is None else resolved_import_kw,
             "no_grid_import": no_grid_import,
             "grid_import_tolerance_kw": params.get("grid_import_tolerance_kw", 0.1),
             "max_inverter_kw": params.get("max_inverter_kw", 10.0),

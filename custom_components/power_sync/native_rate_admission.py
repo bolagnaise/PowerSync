@@ -287,6 +287,11 @@ def _site_evidence(hass, entry, runtime, vin, profile, *, native_entity_id=None,
             configured = {**entry.data, **entry.options}.get("optimization_max_grid_import_w")
             if configured not in (None, 0):
                 cap = min(cap if cap is not None else math.inf, _number(configured))
+    if recorded := runtime.get("native_site_limits_state"):
+        from .powerwall_local.native_site_limits import recorded_limits_w, identity_for_entry
+        imported, _ = recorded_limits_w(recorded, identity_for_entry(entry))
+        if imported is not None:
+            cap = imported if cap is None else min(cap, imported)
     controller = runtime.get("powerwall_battery_dispatch")
     battery_w = _number(getattr(snapshot, "battery_w", None))
     actual_battery = max(0.0, -battery_w) if math.isfinite(battery_w) else math.nan
@@ -814,6 +819,7 @@ async def _prepare_ev_submission(hass, entity_id, *, operation, amps, committed)
         return False
     profile = context.get("params") or {}
     rate_reduction = operation == "rate" and known_setting and requested <= current
+    site_limit_revision = runtime.get("native_site_limits_revision", 0)
     evidence = _site_evidence(hass, entry, runtime, vin, profile,
                               native_entity_id=native_entity_id, native_setting=native)
     evidence["rate_reduction"] = rate_reduction
@@ -884,7 +890,8 @@ async def _prepare_ev_submission(hass, entity_id, *, operation, amps, committed)
         return latest.get("native_battery_proof") == native_proof
 
     def valid():
-        return (hass.data.get("power_sync", {}).get(entry.entry_id) is runtime
+        return ((rate_reduction or runtime.get("native_site_limits_revision", 0) == site_limit_revision)
+                and hass.data.get("power_sync", {}).get(entry.entry_id) is runtime
                 and ev_owner_snapshot(hass, entry, vin) == owners and policy_current()
                 and not runtime.get("powerwall_local_dispatch_stopping")
                 and pairing() == original_pairing and native_current()
