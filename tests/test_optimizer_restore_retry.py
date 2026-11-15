@@ -890,3 +890,46 @@ def test_monitoring_action_events_distinguish_plan_from_runtime_target(opt_modul
     assert all(c.args[1]["physical_confirmation"] is False for c in calls)
     assert calls[-1].args[1]["effective_action"] == "self_consumption"
     battery.set_self_consumption_mode.assert_not_called()
+
+
+@pytest.mark.parametrize("failed_reapply", [False, True])
+def test_goodwe_ev_preserve_reapplies_after_charge_mode(opt_module, failed_reapply):
+    """A charge action replaces conserve; the next preserve action must reapply it."""
+    async def run():
+        calls = []
+        mode = {"value": "auto"}
+
+        async def hold():
+            calls.append("conserve")
+            if failed_reapply and len(calls) == 2:
+                return False
+            mode["value"] = "conserve"
+            return True
+
+        coordinator, intent, _ = _ev_preserve_refresh_coordinator(opt_module)
+        coordinator.battery_system = "goodwe"
+        coordinator.energy_coordinator = SimpleNamespace(set_backup_mode=hold)
+        async def battery_state():
+            return 0.98, 49.0
+        coordinator._get_battery_state = battery_state
+        intent["active"] = True
+        await coordinator._execute_optimizer_action(_self_consumption_action())
+        assert calls == ["conserve"]
+        assert coordinator._last_executed_action == "no_discharge"
+        # An accepted GoodWe charge command replaces conserve with charge_pv.
+        mode["value"] = "charge_pv"
+        coordinator._last_executed_action = "charge"
+        coordinator._last_executed_planned_action = "charge"
+        await coordinator._execute_optimizer_action(_self_consumption_action())
+        if failed_reapply:
+            assert mode["value"] == "charge_pv"
+            assert coordinator._last_executed_action == "charge"
+            await coordinator._execute_optimizer_action(_self_consumption_action())
+        assert mode["value"] == "conserve"
+        assert coordinator._last_executed_action == "no_discharge"
+        assert len(calls) == (3 if failed_reapply else 2)
+        # Stable preservation still avoids duplicate commands.
+        await coordinator._execute_optimizer_action(_self_consumption_action())
+        assert len(calls) == (3 if failed_reapply else 2)
+
+    asyncio.run(run())

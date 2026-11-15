@@ -1166,7 +1166,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     @optimizer_command
     async def _set_scheduled_ev_no_discharge_mode(self, battery, reason: str) -> bool:
         """Prevent home-battery discharge while still allowing battery charging."""
-        if self._scheduled_ev_no_discharge_active:
+        # Another optimizer mode can replace the physical hold while EV
+        # preservation intent remains active (for example GoodWe charge_pv).
+        if (
+            self._scheduled_ev_no_discharge_active
+            and getattr(self, "_last_executed_action", None) == "no_discharge"
+        ):
             return True
 
         try:
