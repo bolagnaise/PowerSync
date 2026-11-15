@@ -82,6 +82,153 @@ def _timestamps(n: int) -> list[datetime]:
     return [start + timedelta(hours=idx) for idx in range(n)]
 
 
+@pytest.mark.parametrize("solar_kw", [0.0, 3.0])
+@pytest.mark.parametrize("use_highs", [True, False])
+def test_cost_neutral_replans_tiny_exports_as_native_operation(
+    optimizer_module, monkeypatch, solar_kw, use_highs,
+):
+    """Small export-mode witnesses must not become repeated force commands."""
+    module = optimizer_module
+    monkeypatch.setattr(module, "HIGHS_AVAILABLE", use_highs)
+    optimizer = module.BatteryOptimizer(
+        capacity_wh=80_000, max_charge_w=27_000, max_discharge_w=27_000,
+        efficiency=0.95, backup_reserve=0.1, hardware_reserve=0.05,
+        interval_minutes=60, horizon_hours=24, terminal_weight=0.5,
+    )
+    solar = [solar_kw if idx >= 18 else 0.0 for idx in range(24)]
+    load = [0.8] * 24
+    imports = [0.21 if idx < 2 else 0.54 if idx < 6 else 0.31 for idx in range(24)]
+    exports = [0.28 if 2 <= idx < 6 else 0.03 for idx in range(24)]
+    result = optimizer.optimize(
+        import_prices=imports, export_prices=exports,
+        solar_forecast=solar, load_forecast=load, current_soc=0.9,
+        allow_battery_export=True, schedule_timestamps=_timestamps(24),
+        cost_neutral_earnings_cap=1.5, cost_neutral_slots=[True] * 24,
+        acquisition_cost_kwh=0.21,
+    )
+    assert result.feasible
+    assert result.solver_used == ("highs" if use_highs else "greedy")
+    assert any(action.action == "export" for action in result.schedule.actions)
+    assert all(
+        power == 0.0 or power >= 500.0
+        for power in result.schedule.battery_export_w
+    )
+    if solar_kw and use_highs:
+        assert all(
+            action.action == "self_consumption"
+            and action.battery_charge_w == pytest.approx(2_200.0)
+            for action in result.schedule.actions[18:]
+        )
+    soc = 0.9
+    for idx, action in enumerate(result.schedule.actions):
+        soc += (action.battery_charge_w * 0.95 - action.battery_discharge_w / 0.95) / 80_000
+        assert action.soc == pytest.approx(soc, abs=0.0002)
+        net_grid_w = load[idx] * 1000 - solar[idx] * 1000 + action.battery_charge_w - action.battery_discharge_w
+        assert result.grid_import_w[idx] == pytest.approx(max(0, net_grid_w), abs=0.2)
+        assert result.grid_export_w[idx] == pytest.approx(max(0, -net_grid_w), abs=0.2)
+
+
+@pytest.mark.parametrize("use_highs", [True, False])
+def test_cost_neutral_small_settlement_remainder_does_not_force_export(
+    optimizer_module, monkeypatch, use_highs,
+):
+    module = optimizer_module
+    monkeypatch.setattr(module, "HIGHS_AVAILABLE", use_highs)
+    result = _optimizer(module).optimize(
+        import_prices=[0.2], export_prices=[1.0],
+        solar_forecast=[0.0], load_forecast=[0.0], current_soc=0.8,
+        allow_grid_charge=False, allow_battery_export=True,
+        schedule_timestamps=_timestamps(1), cost_neutral_earnings_cap=0.3,
+        cost_neutral_slots=[True],
+    )
+    assert result.schedule.battery_export_w == [0.0]
+    assert result.grid_export_w == [0.0]
+    assert result.schedule.actions[0].soc == pytest.approx(0.8)
+    assert result.lp_stats["cost_neutral_planned_earnings"] == 0.0
+
+
+@pytest.mark.parametrize("cost_neutral", [True, False])
+def test_micro_export_policy_preserves_manual_control_and_other_modes(
+    optimizer_module, cost_neutral,
+):
+    result = _optimizer(optimizer_module).optimize(
+        import_prices=[0.2], export_prices=[1.0],
+        solar_forecast=[0.0], load_forecast=[0.0], current_soc=0.8,
+        allow_grid_charge=False, allow_battery_export=True,
+        schedule_timestamps=_timestamps(1),
+        cost_neutral_earnings_cap=0.3 if cost_neutral else None,
+        cost_neutral_slots=[cost_neutral],
+        manual_control={
+            "mode_slots": ["export"], "required_discharge_kw": [0.1001],
+        },
+    )
+    action = result.schedule.actions[0]
+    assert action.control_source == "manual"
+    assert action.action == "export"
+    assert action.battery_discharge_w == pytest.approx(100.1)
+
+
+@pytest.mark.parametrize("charge_blocked", [False, True])
+def test_final_overlay_removal_restores_native_solar_with_ev_and_capacity_limit(
+    optimizer_module, charge_blocked,
+):
+    module = optimizer_module
+    optimizer = _optimizer(module)
+    start = _timestamps(1)[0]
+    schedule = module.OptimizationSchedule(
+        actions=[module.ScheduleAction(
+            timestamp=start, action="export", power_w=1_000,
+            battery_discharge_w=1_000, ev_charge_w=2_000, soc=0.89,
+        )],
+        predicted_cost=0.0, predicted_savings=0.0, last_updated=start,
+    )
+    result = module.OptimizerResult(
+        schedule=schedule,
+        ev_charge_by_vehicle_w={"car": [2_000.0]},
+        ev_source_by_vehicle_w={"car": {
+            "grid": [0.0], "solar": [2_000.0], "battery": [0.0],
+        }},
+    )
+    result = optimizer.reconcile_result_with_schedule(
+        result, schedule, import_prices=[0.2], export_prices=[0.03],
+        solar=[6.0], load=[1.0], initial_soc=0.99,
+        cost_neutral_earnings_cap=0.003, cost_neutral_slots=[True],
+        block_battery_charge=[charge_blocked],
+    )
+    action = result.schedule.actions[0]
+    assert action.action == "self_consumption"
+    assert action.battery_discharge_w == 0.0
+    assert action.battery_charge_w == pytest.approx(0.0 if charge_blocked else 100.0)
+    assert action.soc == pytest.approx(0.99 if charge_blocked else 1.0)
+    assert action.ev_charge_w == 2_000.0
+    assert result.grid_import_w == [0.0]
+    assert result.grid_export_w == pytest.approx([3_000.0 if charge_blocked else 2_900.0])
+    assert result.battery_to_grid_w == [0.0]
+    assert result.lp_stats["cost_neutral_planned_earnings"] == 0.0
+    assert result.ev_source_by_vehicle_w["car"]["solar"] == [2_000.0]
+
+
+@pytest.mark.parametrize("cost_neutral", [False, True])
+def test_small_export_policy_keeps_other_goals_and_useful_priority_export(
+    optimizer_module, cost_neutral,
+):
+    module = optimizer_module
+    optimizer = _optimizer(module)
+    optimizer.update_config(max_discharge_w=500 if cost_neutral else 100.1)
+    result = optimizer.optimize(
+        import_prices=[0.2], export_prices=[1.0],
+        solar_forecast=[0.0], load_forecast=[0.0], current_soc=0.8,
+        allow_grid_charge=False, allow_battery_export=True,
+        priority_export_enabled=True, priority_export_slots=[True],
+        schedule_timestamps=_timestamps(1),
+        cost_neutral_earnings_cap=0.5 if cost_neutral else None,
+        cost_neutral_slots=[cost_neutral],
+    )
+    assert result.schedule.battery_export_w == pytest.approx([
+        500.0 if cost_neutral else 100.1,
+    ])
+
+
 def test_cost_neutral_ev_uses_distinct_surplus_and_selector_columns(
     optimizer_module, monkeypatch,
 ):
@@ -440,6 +587,10 @@ def test_cost_neutral_waits_for_free_window_without_paid_topups(
         action.soc >= 0.38 - 0.0001
         for action in result.schedule.actions
         if action.action == "export"
+    )
+    assert all(
+        power == 0.0 or power >= 500.0
+        for power in result.schedule.battery_export_w
     )
 
 
@@ -923,13 +1074,13 @@ def test_cost_neutral_ev_sources_match_settled_battery_export(
         solar_forecast=[5.0, 0.0], load_forecast=[1.0, 0.0], current_soc=1.0,
         allow_battery_export=[True, True], allow_grid_charge=False,
         schedule_timestamps=_timestamps(2), ev_plan=ev,
-        cost_neutral_earnings_cap=0.2, cost_neutral_slots=[True, True],
+        cost_neutral_earnings_cap=0.6, cost_neutral_slots=[True, True],
     )
 
     action = result.schedule.actions[0]
     sources = result.ev_source_by_vehicle_w["car"]
-    assert action.battery_discharge_w == pytest.approx(1_200.0)
-    assert result.grid_export_w[0] == pytest.approx(200.0)
+    assert action.battery_discharge_w == pytest.approx(1_600.0)
+    assert result.grid_export_w[0] == pytest.approx(600.0)
     assert sources["grid"][0] == pytest.approx(0.0)
     assert sources["solar"][0] == pytest.approx(4_000.0)
     assert sources["battery"][0] == pytest.approx(1_000.0)
@@ -1131,8 +1282,8 @@ def test_zero_cap_reoptimizes_from_required_plan_import_with_static_cap(
                 module.ScheduleAction(
                     timestamp=start,
                     action="charge",
-                    power_w=2_000,
-                    battery_charge_w=2_000,
+                    power_w=4_000,
+                    battery_charge_w=4_000,
                 ),
                 module.ScheduleAction(
                     timestamp=start + timedelta(hours=1),
@@ -1148,7 +1299,7 @@ def test_zero_cap_reoptimizes_from_required_plan_import_with_static_cap(
         return module.OptimizerResult(
             schedule=schedule,
             solver_used="highs",
-            grid_import_w=[2_000.0, 0.0],
+            grid_import_w=[4_000.0, 0.0],
             grid_export_w=[0.0, export_w],
             battery_to_grid_w=[0.0, export_w],
             lp_stats={
@@ -1165,8 +1316,8 @@ def test_zero_cap_reoptimizes_from_required_plan_import_with_static_cap(
         ]
         calls.append((cap, static))
         return _result(
-            export_w=0.0 if len(calls) == 1 else 200.0,
-            effective_cap=0.20,
+            export_w=0.0 if len(calls) == 1 else 600.0,
+            effective_cap=0.60,
         )
 
     monkeypatch.setattr(optimizer, "_solve_lp", fake_solve)
@@ -1183,8 +1334,8 @@ def test_zero_cap_reoptimizes_from_required_plan_import_with_static_cap(
         cost_neutral_fixed_cost_allowance=-0.20,
     )
 
-    assert calls == [(0.0, True), (0.20, True)]
-    assert result.schedule.battery_export_w == pytest.approx([0.0, 200.0])
+    assert calls == [(0.0, True), (0.60, True)]
+    assert result.schedule.battery_export_w == pytest.approx([0.0, 600.0])
     assert result.lp_stats["cost_neutral_baseline_earnings_cap"] == 0.0
     assert result.lp_stats["cost_neutral_reconciliation_iterations"] == 1
 
@@ -1200,8 +1351,8 @@ def test_final_plan_import_reopens_only_uncovered_prior_credit_balance(
             module.ScheduleAction(
                 timestamp=start,
                 action="charge",
-                power_w=2_000,
-                battery_charge_w=2_000,
+                power_w=4_000,
+                battery_charge_w=4_000,
             ),
             module.ScheduleAction(
                 timestamp=start + timedelta(hours=1),
@@ -1228,11 +1379,11 @@ def test_final_plan_import_reopens_only_uncovered_prior_credit_balance(
         cost_neutral_fixed_cost_allowance=-0.20,
     )
 
-    assert reconciled.grid_import_w == pytest.approx([2_000.0, 0.0])
-    assert reconciled.schedule.battery_export_w == pytest.approx([0.0, 200.0])
-    assert reconciled.lp_stats["cost_neutral_earnings_cap"] == pytest.approx(0.20)
+    assert reconciled.grid_import_w == pytest.approx([4_000.0, 0.0])
+    assert reconciled.schedule.battery_export_w == pytest.approx([0.0, 600.0])
+    assert reconciled.lp_stats["cost_neutral_earnings_cap"] == pytest.approx(0.60)
     assert reconciled.lp_stats["cost_neutral_planned_earnings"] == pytest.approx(
-        0.20
+        0.60
     )
 
 
@@ -2125,7 +2276,7 @@ def test_amber_confidence_changes_decision_value_but_cost_neutral_uses_raw_earni
     assert plan.settlement_export_prices == raw
 
 
-@pytest.mark.parametrize("interval_minutes,n,allowance", [(60, 4, 0.10), (5, 12, 0.025)])
+@pytest.mark.parametrize("interval_minutes,n,allowance", [(60, 4, 0.15), (5, 12, 0.03)])
 @pytest.mark.parametrize("disable_idle", [False, True])
 @pytest.mark.parametrize("initial_soc", [0.5, 0.99])
 def test_cost_neutral_counts_final_solar_credit_before_battery_export(
@@ -2154,7 +2305,7 @@ def test_cost_neutral_counts_final_solar_credit_before_battery_export(
     result = optimizer.optimize(
         import_prices=[0.10] * n,
         export_prices=[0.08] * n,
-        solar_forecast=[2.0] * n,
+        solar_forecast=[1.5] * n,
         load_forecast=[1.0] * n,
         current_soc=initial_soc,
         allow_battery_export=[True] * n,
@@ -2181,7 +2332,7 @@ def test_cost_neutral_counts_final_solar_credit_before_battery_export(
         assert any(action.battery_charge_w > 100 for action in result.schedule.actions)
         if interval_minutes == 60:
             assert sum(action.action == "export" for action in result.schedule.actions) == 1
-            assert result.schedule.actions[-1].soc == pytest.approx(0.775, abs=1e-4)
+            assert result.schedule.actions[-1].soc == pytest.approx(0.5125, abs=1e-4)
     assert result.lp_stats["cost_neutral_planned_earnings_by_day"][day] == pytest.approx(
         battery_credit, abs=1e-5,
     )

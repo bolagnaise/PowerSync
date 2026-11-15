@@ -837,6 +837,10 @@ def _solve_lp_highs(
 
 # Action detection threshold (W) — below this, treat as idle to avoid rapid switching
 ACTION_THRESHOLD_W = 100.0
+# Automatic Cost Neutral exports below half a kilowatt are not worth a forced
+# mode change. Keep this separate from flow detection and user-owned controls.
+COST_NEUTRAL_MIN_BATTERY_EXPORT_W = 500.0
+COST_NEUTRAL_EXPORT_REMOVED_REASON = "cost_neutral_export_removed"
 
 # Default fallback prices when no price data is available ($/kWh)
 DEFAULT_IMPORT_PRICE = 0.30
@@ -1530,6 +1534,37 @@ class BatteryOptimizer:
         )
 
         fallback_details = {"fallback_reason": "highs_unavailable"}
+        suppressed_export_slots: set[int] = set()
+
+        def _micro_export_slots(result: OptimizerResult) -> list[int]:
+            if cost_neutral_plan is None:
+                return []
+            return self._cost_neutral_micro_export_slots(
+                result.schedule, solar_forecast, load_forecast,
+                cost_neutral_plan.day_ids,
+            )
+
+        def _finish_micro_exports(
+            result: OptimizerResult,
+            plan: CostNeutralPlan | None,
+        ) -> OptimizerResult:
+            result = self._finalize_cost_neutral_micro_exports(
+                result, plan=plan, import_prices=import_prices,
+                export_prices=export_prices, solar=solar_forecast,
+                load=load_forecast, initial_soc=current_soc,
+                block_battery_charge=block_battery_charge,
+                export_bonus_prices=export_bonus_prices,
+                export_bonus_cap_kwh=export_bonus_cap_kwh,
+                import_bonus_prices=import_bonus_prices,
+                import_bonus_cap_kwh=import_bonus_cap_kwh,
+            )
+            if suppressed_export_slots:
+                result.lp_stats["cost_neutral_micro_export_suppressed_slots"] = max(
+                    len(suppressed_export_slots),
+                    result.lp_stats.get("cost_neutral_micro_export_suppressed_slots", 0),
+                )
+            return result
+
         try:
             if HIGHS_AVAILABLE:
                 try:
@@ -1545,39 +1580,50 @@ class BatteryOptimizer:
                             legacy_cap = plan.earnings_caps_by_day[
                                 plan.current_day
                             ]
-                        return self._solve_lp(
-                            n_steps,
-                            import_prices,
-                            export_prices,
-                            solar_forecast,
-                            load_forecast,
-                            current_soc,
-                            cost_function,
-                            acquisition_cost_kwh,
-                            allow_battery_export,
-                            block_battery_charge,
-                            allow_grid_charge,
-                            grid_charge_allowed,
-                            export_bonus_prices,
-                            export_bonus_cap_kwh,
-                            import_bonus_prices,
-                            import_bonus_cap_kwh,
-                            schedule_timestamps,
-                            priority_export_slots,
-                            disable_idle,
-                            legacy_cap,
-                            cost_neutral_slots,
-                            cost_neutral_forecast_import_cost,
-                            cost_neutral_fixed_cost_allowance,
-                            account_for_planned_imports,
-                            plan,
-                            profit_max_solar_export_slots,
-                            manual_mode_slots,
-                            manual_required_charge_kw,
-                            manual_required_discharge_kw,
-                            ev_plan,
-                            price_valid_slots,
-                        )
+                        # Reject tiny export slots rather than raising their
+                        # power. Re-solve under the existing physical and daily
+                        # settlement constraints, with bounded extra work.
+                        for micro_pass in range(4):
+                            result = self._solve_lp(
+                                n_steps,
+                                import_prices,
+                                export_prices,
+                                solar_forecast,
+                                load_forecast,
+                                current_soc,
+                                cost_function,
+                                acquisition_cost_kwh,
+                                allow_battery_export,
+                                block_battery_charge,
+                                allow_grid_charge,
+                                grid_charge_allowed,
+                                export_bonus_prices,
+                                export_bonus_cap_kwh,
+                                import_bonus_prices,
+                                import_bonus_cap_kwh,
+                                schedule_timestamps,
+                                priority_export_slots,
+                                disable_idle,
+                                legacy_cap,
+                                cost_neutral_slots,
+                                cost_neutral_forecast_import_cost,
+                                cost_neutral_fixed_cost_allowance,
+                                account_for_planned_imports,
+                                plan,
+                                profit_max_solar_export_slots,
+                                manual_mode_slots,
+                                manual_required_charge_kw,
+                                manual_required_discharge_kw,
+                                ev_plan,
+                                price_valid_slots,
+                            )
+                            small_slots = _micro_export_slots(result)
+                            if not small_slots or micro_pass == 3:
+                                break
+                            suppressed_export_slots.update(small_slots)
+                            for idx in small_slots:
+                                allow_battery_export[idx] = False
+                        return _finish_micro_exports(result, plan)
 
                     seeded_plan = cost_neutral_plan
                     account_for_planned_imports: bool | dict[str, bool]
@@ -1768,6 +1814,7 @@ class BatteryOptimizer:
                 ev_plan,
             )
             result.lp_stats.update(fallback_details)
+            result = _finish_micro_exports(result, cost_neutral_plan)
             result.solve_time_s = time.monotonic() - start_time
             result.modeled_backup_reserve = modeled_backup_reserve
             result.modeled_export_reserve_floor = modeled_export_reserve_floor
@@ -6248,14 +6295,27 @@ class BatteryOptimizer:
         primary_solver_stats = dict(getattr(result, "stats", {}))
         charging_tiebreak_stats = None
         charging_tiebreak_used = False
-        if cost_neutral_free_charge_tiebreak and result.success:
+        export_tiebreak_active = (
+            cost_neutral_active
+            and not cost_neutral_free_charge_tiebreak
+        )
+        export_tiebreak_stats = None
+        export_tiebreak_used = False
+        if export_tiebreak_active:
+            # Equal-credit plans should use a few useful exports, not scatter
+            # the same budget across threshold-sized mode witnesses. Preserve
+            # the primary economics below, then minimize active export slots.
+            charging_tiebreak_objective = [0.0] * num_vars
+            for t in cost_neutral_mode_periods:
+                if not p_manual_control[t]:
+                    charging_tiebreak_objective[cost_neutral_export_mode_var(t)] = 1.0
+        if (cost_neutral_free_charge_tiebreak or export_tiebreak_active) and result.success:
             remaining_time = LP_SOLVER_TIME_LIMIT_SECONDS - (
                 time.monotonic() - solver_start
             )
             if remaining_time > 0.0:
-                # Keep the economic optimum as a hard bound in the second
-                # solve. An epsilon preference can fill a free window without
-                # trading away import/export money to do so.
+                # Keep the economic optimum as a hard bound in the preference
+                # solve, for either free charging or fewer export modes.
                 economic_limit = float(result.fun) + 1e-6
                 tiebreak_constraints = A_ub.with_row(c)
                 preferred = None
@@ -6277,7 +6337,7 @@ class BatteryOptimizer:
                     # The optional preference must not discard the valid
                     # primary economic result when its solver operation fails.
                     charging_tiebreak_stats = {"error": type(error).__name__}
-                    _LOGGER.warning("Free-charge preference failed; using the primary plan: %s", error)
+                    _LOGGER.warning("Optimizer preference failed; using the primary plan: %s", error)
                 if preferred is not None and preferred.success and _solver_point_is_feasible(
                     preferred.x, tiebreak_constraints, [*b_ub, economic_limit],
                     A_eq, b_eq, bounds, integer_indices,
@@ -6291,6 +6351,11 @@ class BatteryOptimizer:
                         preferred.fun = preferred_economic_cost
                         result = preferred
                         charging_tiebreak_used = True
+            if export_tiebreak_active:
+                export_tiebreak_stats = charging_tiebreak_stats
+                export_tiebreak_used = charging_tiebreak_used
+                charging_tiebreak_stats = None
+                charging_tiebreak_used = False
         solver_time_s = time.monotonic() - solver_start
         lp_stats = {
             "backend": "highspy",
@@ -6307,6 +6372,8 @@ class BatteryOptimizer:
             "cost_neutral_charging_tiebreak_used": charging_tiebreak_used,
             "primary_solver": primary_solver_stats,
             "charging_tiebreak_solver": charging_tiebreak_stats,
+            "cost_neutral_export_tiebreak_used": export_tiebreak_used,
+            "export_tiebreak_solver": export_tiebreak_stats,
             "battery_export_constraints": battery_export_constraints,
         }
         if pre_window_effective_target is not None:
@@ -9984,6 +10051,108 @@ class BatteryOptimizer:
             for day in normalized.earnings_caps_by_day
         }
 
+    @staticmethod
+    def _cost_neutral_micro_export_slots(
+        schedule: OptimizationSchedule,
+        solar: list[float],
+        load: list[float],
+        day_ids: list[str | None],
+    ) -> list[int]:
+        """Find small automatic battery exports, excluding direct solar flow."""
+        small = []
+        for idx, action in enumerate(schedule.actions):
+            if (
+                idx >= min(len(solar), len(load), len(day_ids))
+                or day_ids[idx] is None
+                or action.control_source == "manual"
+                or (
+                    action.action not in ("export", "discharge")
+                    and action.reason != COST_NEUTRAL_EXPORT_REMOVED_REASON
+                )
+            ):
+                continue
+            net_home_w = max(
+                0.0, (load[idx] - solar[idx]) * 1000.0
+                + max(0.0, action.ev_charge_w),
+            )
+            battery_export_w = round(max(
+                0.0, action.battery_discharge_w - net_home_w,
+            ), 1)
+            if battery_export_w < COST_NEUTRAL_MIN_BATTERY_EXPORT_W:
+                small.append(idx)
+        return small
+
+    def _finalize_cost_neutral_micro_exports(
+        self,
+        result: OptimizerResult,
+        *,
+        plan: CostNeutralPlan | None,
+        import_prices: list[float],
+        export_prices: list[float],
+        solar: list[float],
+        load: list[float],
+        initial_soc: float | None,
+        block_battery_charge: list[bool] | None = None,
+        export_bonus_prices: list[float] | None = None,
+        export_bonus_cap_kwh: float | None = None,
+        import_bonus_prices: list[float] | None = None,
+        import_bonus_cap_kwh: float | None = None,
+        optimizer_reserve: float | None = None,
+    ) -> OptimizerResult:
+        """Project small Cost Neutral commands back to native physical operation."""
+        if plan is None:
+            return result
+        suppressed: set[int] = set()
+        # Every pass removes at least one export mode. Reconciliation may clip
+        # another cap remainder, but cannot introduce an export mode, so this
+        # settles in at most one pass per schedule slot.
+        for _ in range(len(result.schedule.actions) + 1):
+            small_slots = self._cost_neutral_micro_export_slots(
+                result.schedule, solar, load, plan.day_ids,
+            )
+            if not small_slots:
+                break
+            suppressed.update(small_slots)
+            actions = list(result.schedule.actions)
+            for idx in small_slots:
+                action = actions[idx]
+                net_load_w = (load[idx] - solar[idx]) * 1000.0 + max(0.0, action.ev_charge_w)
+                charge_blocked = bool(
+                    block_battery_charge and idx < len(block_battery_charge)
+                    and block_battery_charge[idx]
+                )
+                charge_w = (
+                    0.0 if charge_blocked
+                    else min(self.max_charge_w, max(0.0, -net_load_w))
+                )
+                discharge_w = min(self.max_discharge_w, max(0.0, net_load_w))
+                actions[idx] = replace(
+                    action, action="self_consumption",
+                    power_w=max(charge_w, discharge_w),
+                    battery_charge_w=charge_w, battery_discharge_w=discharge_w,
+                    reason=None,
+                )
+            result = self.reconcile_result_with_schedule(
+                result, replace(result.schedule, actions=actions),
+                import_prices=import_prices, export_prices=export_prices,
+                solar=solar, load=load, initial_soc=initial_soc,
+                optimizer_reserve=optimizer_reserve, cost_neutral_plan=plan,
+                block_battery_charge=block_battery_charge,
+                export_bonus_prices=export_bonus_prices,
+                export_bonus_cap_kwh=export_bonus_cap_kwh,
+                import_bonus_prices=import_bonus_prices,
+                import_bonus_cap_kwh=import_bonus_cap_kwh,
+                _suppress_micro_exports=False,
+            )
+        else:
+            raise ValueError("Cost Neutral export projection did not settle")
+        if suppressed:
+            result.lp_stats["cost_neutral_micro_export_suppressed_slots"] = max(
+                len(suppressed),
+                result.lp_stats.get("cost_neutral_micro_export_suppressed_slots", 0),
+            )
+        return result
+
     def enforce_cost_neutral_schedule(
         self,
         schedule: OptimizationSchedule,
@@ -10192,9 +10361,12 @@ class BatteryOptimizer:
                 )
             new_discharge_w = min(discharge_w, net_home_w) + allowed_export_w
             emitted_action = action.action
+            emitted_reason = action.reason
             power_w = float(action.power_w or 0.0)
             if emitted_export_w <= ACTION_THRESHOLD_W:
                 emitted_action = "self_consumption"
+                if action.action in ("export", "discharge"):
+                    emitted_reason = COST_NEUTRAL_EXPORT_REMOVED_REASON
                 power_w = min(new_discharge_w, net_home_w)
             else:
                 power_w = allowed_export_w
@@ -10204,6 +10376,7 @@ class BatteryOptimizer:
             trimmed[idx] = replace(
                 action,
                 action=emitted_action,
+                reason=emitted_reason,
                 power_w=round(power_w, 1),
                 battery_discharge_w=round(new_discharge_w, 1),
             )
@@ -10235,6 +10408,8 @@ class BatteryOptimizer:
         cost_neutral_forecast_import_cost: float = 0.0,
         cost_neutral_fixed_cost_allowance: float | None = None,
         cost_neutral_plan: CostNeutralPlan | None = None,
+        block_battery_charge: list[bool] | None = None,
+        _suppress_micro_exports: bool = True,
     ) -> OptimizerResult:
         """Make result flows and economics describe the final emitted schedule."""
         if cost_neutral_plan is None:
@@ -10758,6 +10933,18 @@ class BatteryOptimizer:
                 schedule,
                 solar,
                 load,
+            )
+        if _suppress_micro_exports:
+            result = self._finalize_cost_neutral_micro_exports(
+                result, plan=cost_neutral_plan,
+                import_prices=import_prices, export_prices=export_prices,
+                solar=solar, load=load, initial_soc=initial_soc,
+                optimizer_reserve=optimizer_reserve,
+                block_battery_charge=block_battery_charge,
+                export_bonus_prices=export_bonus_prices,
+                export_bonus_cap_kwh=export_bonus_cap_kwh,
+                import_bonus_prices=import_bonus_prices,
+                import_bonus_cap_kwh=import_bonus_cap_kwh,
             )
         return result
 

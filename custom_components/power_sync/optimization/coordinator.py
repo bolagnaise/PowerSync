@@ -8493,6 +8493,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 import_bonus_cap_kwh=self._last_zerocharge_bonus_cap_kwh,
                 initial_soc=soc,
                 cost_neutral_earnings_cap=cost_neutral_cap,
+                block_battery_charge=battery_charge_blocked,
                 cost_neutral_slots=cost_neutral_slots,
                 cost_neutral_forecast_import_cost=(
                     cost_neutral_forecast_import_cost
@@ -8603,6 +8604,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     import_bonus_cap_kwh=self._last_zerocharge_bonus_cap_kwh,
                     initial_soc=soc,
                     cost_neutral_earnings_cap=cost_neutral_cap,
+                    block_battery_charge=battery_charge_blocked,
                     cost_neutral_slots=cost_neutral_slots,
                     cost_neutral_forecast_import_cost=(
                         cost_neutral_forecast_import_cost
