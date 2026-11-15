@@ -197,6 +197,8 @@ set_native_site_limits:
             - set
             - restore
             - approve
+            - reconcile
+            - rebaseline
     import_limit_w:
       selector:
         number:
@@ -216,7 +218,7 @@ set_native_site_limits:
       selector:
         text:
     expected_config_revision:
-      required: true
+      description: Latest native configuration revision. Required for setting, restoring or re-baselining limits.
       selector:
         text:
     expected_approval_revision:
@@ -229,6 +231,10 @@ set_native_site_limits:
         text:
     confirm_installation_limits:
       description: Administrator confirmation that approved maxima account for installation and network restrictions. Saves software authorisation only.
+      selector:
+        boolean:
+    confirm_pairing_change:
+      description: Administrator confirmation to archive the old pairing baseline and approval, then record fresh limits without applying a gateway setting.
       selector:
         boolean:
     document_reference:
@@ -276,7 +282,7 @@ dispatch_battery_power:
         text:
     takeover:
       default: false
-      description: Explicitly stop and restore an existing battery action before starting.
+      description: Explicitly replace another fixed battery target. Stop legacy Force controls separately first.
       selector:
         boolean:
 
@@ -296,7 +302,7 @@ stop_battery_dispatch:
       selector:
         text:
     expected_control_revision:
-      required: true
+      description: Optional status revision. Stopping is bound to operation_id and remains available after a policy revision changes.
       selector:
         text:
 

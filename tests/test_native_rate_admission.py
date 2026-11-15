@@ -88,7 +88,8 @@ async def test_recorded_native_limit_applies_without_gateway_field(admission, li
         'operational': {'import_limit_w': limit}}
     evidence = a.m._site_evidence(a.hass, a.entry, a.runtime, VIN, {})
     assert evidence['cap_w'] == limit
-    assert await a.m.prepare_ev_submission(a.hass, a.state.entity_id, operation='rate', amps=20) is False
+    with pytest.raises(a.m.SiteImportAdmissionDenied):
+        await a.m.prepare_ev_submission(a.hass, a.state.entity_id, operation='rate', amps=20)
     assert not a.budget.managed
 
 
