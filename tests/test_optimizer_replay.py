@@ -170,7 +170,7 @@ def test_missing_field_and_nonfinite_values_fail_closed(api):
 def test_ev_aliases_preserve_identity_and_deadlines(api):
     module, _, contract = api
     plans = [module.EVChargePlan(vehicle_id="VIN_CANARY_A", max_power_kw=(3.0,) * 8, energy_needed_kwh=1.0, deadline_requirements=((4, 1.0),)),
-             module.EVChargePlan(vehicle_id="VIN_CANARY_B", max_power_kw=(3.0,) * 8, energy_needed_kwh=2.0, deadline_requirements=((3, 1.0), (7, 2.0)))]
+             module.EVChargePlan(vehicle_id="VIN_CANARY_B", max_power_kw=(3.0,) * 8, energy_needed_kwh=2.0, forecast_only=True, deadline_requirements=((3, 1.0), (7, 2.0)))]
     _, bundle, _ = capture_one(api, values={**inputs(), "ev_plan": plans})
     wire = json.dumps(bundle)
     assert "VIN_CANARY" not in wire
@@ -179,6 +179,7 @@ def test_ev_aliases_preserve_identity_and_deadlines(api):
     assert [p.energy_needed_kwh for p in restored] == [1.0, 2.0]
     assert [p.max_power_kw for p in restored] == [(3.0,) * 8] * 2
     assert [p.deadline_requirements for p in restored] == [((4, 1.0),), ((3, 1.0), (7, 2.0))]
+    assert [p.forecast_only for p in restored] == [False, True]
 
 
 def test_unknown_free_text_is_not_disclosed(api):

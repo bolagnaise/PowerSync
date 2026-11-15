@@ -145,6 +145,7 @@ def forecast_vehicle(
     native_solar_settings: Mapping[str, Any] | None = None,
     one_time_reference: datetime | None = None,
     nominal_voltage: float | None = None, nominal_phases: int | None = None,
+    available_from: datetime | None = None,
 ) -> TeslaScheduleForecast | None:
     """Expand local recurring windows, union overlaps and cap energy once."""
     if not timestamps:
@@ -230,6 +231,10 @@ def forecast_vehicle(
     intervals.sort()
     merged: list[tuple[datetime, datetime]] = []
     for start, end in intervals:
+        if available_from is not None:
+            start = max(start, available_from.astimezone(timezone.utc))
+        if end <= start:
+            continue
         if merged and start <= merged[-1][1]:
             merged[-1] = (merged[-1][0], max(end, merged[-1][1]))
         else:
@@ -371,6 +376,7 @@ class TeslaScheduleReader:
         native_solar_settings: Mapping[str, Mapping[str, Any]] | None = None,
         excluded_vins: frozenset[str] = frozenset(),
         charging_parameters: Mapping[str, Mapping[str, Any]] | None = None,
+        arrival_forecasts: Mapping[str, Any] | None = None,
     ) -> dict[str, TeslaScheduleForecast]:
         forecasts = {}
         for vin, (read_at, data) in self.cache.items():
@@ -385,6 +391,10 @@ class TeslaScheduleReader:
                 continue
             if now.timestamp() - timestamp > 900:
                 self.diagnostics[vin] = "Forecast estimated from last known charge state; vehicle not woken"
+            arrival = (arrival_forecasts or {}).get(vin)
+            if arrival is not None:
+                # Forecast a copy; cached provider telemetry remains observed.
+                data = {**data, "charge_state": {**charge, "battery_level": arrival.soc}}
             forecast = forecast_vehicle(
                 vehicle_id=vin, data=data, timestamps=timestamps,
                 interval_minutes=interval_minutes,
@@ -394,6 +404,7 @@ class TeslaScheduleReader:
                 one_time_reference=read_at,
                 nominal_voltage=(charging_parameters or {}).get(vin, {}).get("voltage"),
                 nominal_phases=(charging_parameters or {}).get(vin, {}).get("phases"),
+                available_from=arrival.arrival if arrival is not None else None,
             )
             if forecast is not None:
                 forecasts[vin] = forecast

@@ -13685,6 +13685,10 @@ def _optimizer_planned_ev_charge_kw(
             return None
 
         by_vehicle = getattr(coordinator, "_last_ev_charge_by_vehicle_w", None)
+        if str(vehicle_id) in (getattr(coordinator, "_historical_ev_plans", {}) or {}):
+            # A speculative visit can shape battery planning but never an EV
+            # ceiling, even if an older directive is still cached.
+            return None
         if by_vehicle is None or str(vehicle_id) not in by_vehicle:
             return None
         series = by_vehicle[str(vehicle_id)]
