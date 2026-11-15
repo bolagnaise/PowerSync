@@ -559,8 +559,22 @@ async def _refresh_source(
         return None
     before = _source_charge_timestamp(getattr(source.coordinator, "data", None))
     started = time.time()
+    completed = asyncio.Event()
+    subscribe = getattr(source.coordinator, "async_add_listener", None)
+    unsubscribe = subscribe(completed.set) if callable(subscribe) else None
+
+    async def acquire() -> None:
+        await refresh()
+        # HA may queue a debounced request and return before its fetch runs.
+        # Observe that existing request; never bypass the provider cooldown.
+        data = getattr(source.coordinator, "data", None)
+        if (unsubscribe is not None and not completed.is_set()
+                and _fleet_state(data) == "ONLINE"
+                and _source_charge_timestamp(data) == before):
+            await completed.wait()
+
     try:
-        await asyncio.wait_for(refresh(), timeout=max(0.001, timeout))
+        await asyncio.wait_for(acquire(), timeout=max(0.001, timeout))
     except asyncio.CancelledError:
         raise
     except Exception:
@@ -569,6 +583,9 @@ async def _refresh_source(
         if _is_tesla_provider_error(error):
             return None
         raise
+    finally:
+        if unsubscribe is not None:
+            unsubscribe()
     return _SourceRefresh(
         started_at=started,
         before_timestamp=before,
@@ -582,7 +599,7 @@ async def async_prepare_tesla_fleet_command(
     vin: str,
     command_entity: str,
     *,
-    timeout: float = 10,
+    timeout: float = 30,
     diagnostic_observer: Callable[[dict], None] | None = None,
 ) -> bool:
     """Refresh the exact Fleet vehicle before a mutating command.
