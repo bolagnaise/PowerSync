@@ -1731,7 +1731,7 @@ class PsMissingCards extends PsCardBase {
 // recorded command source can identify who requested it; an enabled plan
 // does not establish ownership of an active battery command.
 function psBatteryControl(modeState) {
-  const request = {
+  const request = modeState?.attributes?.battery_control_mode === 'idle' ? 'Idle' : {
     force_charge: 'Charge', force_discharge: 'Discharge',
     hold_soc: 'Battery hold', self_consumption: 'Self-consumption',
   }[modeState?.state];

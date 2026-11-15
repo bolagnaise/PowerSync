@@ -172,3 +172,12 @@ def test_native_tariff_metadata_remains_unchanged_with_source(command_status: st
     assert attrs["control_path"] == "powerwall_native_tariff"
     assert attrs["command_status"] == command_status
     assert attrs["physical_effect"] == "unverified"
+
+
+@pytest.mark.parametrize("basis, power, expected", [("battery_output", 0, "idle"), ("battery", 0, None), ("battery_output", 1800, None)])
+def test_zero_power_idle_is_explicit_and_legacy_max_is_not_idle(basis, power, expected):
+    attrs = _attributes({"force_charge_state": {"active": True, "source": "optimizer", "power_target_basis": basis, "power_w": power}})
+    assert attrs.get("battery_control_mode") == expected
+    assert attrs["mode"] == "force_charge", "legacy actuator-state consumers retain their contract"
+    if expected:
+        assert attrs["description"] == "Battery zero-power idle requested"
