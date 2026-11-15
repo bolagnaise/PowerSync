@@ -339,6 +339,7 @@ def build_price_level_projection(
     demand_blocked: Sequence[bool] | None = None,
     valid_price_slots: Sequence[bool] | None = None,
     interval_minutes: int = 5,
+    historical_arrivals: dict | None = None,
 ) -> PriceLevelProjection:
     """Project Price-Level intent without performing or authorising any action."""
 
@@ -353,6 +354,15 @@ def build_price_level_projection(
     warnings: list[str] = []
 
     for vehicle in vehicles:
+        arrival = (historical_arrivals or {}).get(vehicle.loadpoint_id)
+        if arrival is not None and vehicle.location not in {"home", "unknown", "unavailable"}:
+            # This copy is used only by the advisory projection. The live
+            # executor still receives the original presence and SOC facts.
+            vehicle = replace(vehicle, ev_soc_percent=arrival.soc,
+                              location="home", plugged_in=True,
+                              assumptions=(*vehicle.assumptions, "Weekday trip history; live data takes over on return"))
+        else:
+            arrival = None
         if not vehicle.loadpoint_id:
             warnings.append(f"Skipped Price-Level projection for {vehicle.vehicle_id}: no loadpoint identity")
             continue
@@ -385,6 +395,8 @@ def build_price_level_projection(
         )
         for index, start in enumerate(timestamps):
             end = _slot_end(timestamps, index, interval_minutes)
+            if arrival is not None and start < arrival.arrival:
+                continue
             if end is None:
                 if active:
                     finished_windows.append(active.freeze())

@@ -197,7 +197,10 @@ def _publication_pipeline(*, rerun=True):
                and isinstance(node.test.func, ast.Attribute)
                and node.test.func.attr == "isEnabledFor")
     function = ast.parse("async def pipeline(self, result, _run_optimizer_once): pass").body[0]
-    function.body = copy.deepcopy(body[start:end])
+    generation_capture = next(node for node in body if isinstance(node, ast.Assign)
+                              and any(isinstance(target, ast.Name) and target.id == 'historical_ev_generation'
+                                      for target in node.targets))
+    function.body = copy.deepcopy([generation_capture, *body[start:end]])
     namespace = dict.fromkeys((
         "import_prices", "export_prices", "spread_import_blocked", "solar_forecast",
         "load_forecast", "battery_export_allowed", "spread_export_prices",

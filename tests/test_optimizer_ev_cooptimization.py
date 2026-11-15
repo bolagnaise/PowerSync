@@ -1617,3 +1617,74 @@ def test_disabling_ev_integration_excludes_cached_smart_schedule_demand(
     coordinator._ev_integration_enabled = True
     assert len(method(coordinator, timestamps)) == 1
     assert warnings == []
+
+
+@pytest.mark.parametrize('later_cheap,preserve', [(False, False), (True, False), (False, True)])
+def test_historical_commute_reaches_real_handoff_and_economic_solver(
+    optimizer_module, build_ev_charge_plan, later_cheap, preserve,
+):
+    import importlib.util
+    path = COMPONENT_ROOT / 'optimization/ev_history.py'
+    spec = importlib.util.spec_from_file_location('commute_history_probe', path)
+    history = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = history
+    spec.loader.exec_module(history)
+    now = _NOW.replace(hour=10, minute=0)
+    observations = []
+    for week in (1, 2, 3):
+        day = now - timedelta(weeks=week)
+        observations.extend([
+            history.EVHistoryPoint(day.replace(hour=8), 75, False),
+            history.EVHistoryPoint(day.replace(hour=16), 60, True),
+        ])
+    forecast = history.forecast_arrival(observations, now=now, current_soc=75, home=False)
+    assert forecast.soc == 60
+    method, holder, warnings = build_ev_charge_plan
+    executor = _ev_executor(now.replace(hour=23, minute=59).isoformat())
+    holder['executor'] = executor
+    executor._state['veh-1'].last_decision = 'away'
+    executor._settings['veh-1'].preserve_home_battery = preserve
+    start = forecast.arrival
+    deadline = now.replace(hour=23, minute=59)
+    ac_kwh = (80 - forecast.soc) / 100 * 45 / .9
+    projected = types.SimpleNamespace(
+        target_time=deadline.isoformat(), energy_needed_kwh=ac_kwh,
+        windows=[types.SimpleNamespace(start_time=start.isoformat(), end_time=deadline.isoformat(),
+            source='grid_offpeak', estimated_power_kw=7.2, price_cents_kwh=45)],
+    )
+    coordinator = types.SimpleNamespace(config_entry=_ENTRY, _ev_integration_enabled=True,
+        _use_historical_ev_data=True, _historical_ev_plans={'veh-1': projected})
+    times = [now + timedelta(minutes=30*i) for i in range(28)]
+    plans = method(coordinator, times)
+    assert warnings == []
+    assert len(plans) == 1 and plans[0].forecast_only
+    assert plans[0].energy_needed_kwh == pytest.approx(10)
+    assert plans[0].max_power_kw[:12] == (0,) * 12
+    assert executor._state['veh-1'].current_plan.energy_needed_kwh == 13.75
+    optimizer = optimizer_module.BatteryOptimizer(capacity_wh=15000,
+        max_charge_w=5000, max_discharge_w=5000, max_grid_import_w=12000,
+        backup_reserve=.05, interval_minutes=30, horizon_hours=14)
+    prices = [.08 if stamp.hour < 14 else .05 if later_cheap and stamp.hour >= 22 else .45
+              for stamp in times]
+    result = optimizer.optimize(import_prices=prices, export_prices=[0]*28,
+        solar_forecast=[0]*28, load_forecast=[0]*28, current_soc=.05,
+        schedule_timestamps=times, ev_plan=plans)
+    assert result.feasible
+    ev = result.ev_charge_by_vehicle_w['veh-1']
+    assert sum(ev[:12]) == pytest.approx(0, abs=.001)
+    assert sum(ev) * .5 / 1000 == pytest.approx(10, abs=.01)
+    early_charge = sum(a.battery_charge_w for a in result.schedule.actions[:8]) * .5 / 1000
+    if not later_cheap and not preserve:
+        assert early_charge > 9
+    elif later_cheap:
+        assert early_charge < .01
+    else:
+        # Terminal inventory valuation may still buy energy for later house
+        # use; Preserve Home Battery must prevent its use by the EV.
+        assert sum(result.ev_source_by_vehicle_w["veh-1"]["battery"]) < .01
+    # A return retires the estimate. Rebuilding from the unchanged live state
+    # must immediately recover the actual demand and executable provenance.
+    coordinator._historical_ev_plans = {}
+    live = method(coordinator, times)
+    assert not live[0].forecast_only
+    assert live[0].energy_needed_kwh == 13.75

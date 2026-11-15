@@ -348,3 +348,17 @@ def test_price_level_settings_write_only_schedules_nonblocking_replan():
         assert "await opt_coordinator._run_optimization" not in path_source
         assert "_start_charging(" not in path_source
         assert "_stop_charging(" not in path_source
+
+
+@pytest.mark.parametrize('preserve', [False, True])
+def test_history_improves_away_recovery_after_arrival_without_mutating_live_facts(projection_module, preserve):
+    from types import SimpleNamespace
+    module = projection_module
+    timestamps = _timestamps(12)
+    vehicle = _vehicle(module, location='work', plugged_in=False, ev_soc_percent=60)
+    arrival = SimpleNamespace(arrival=timestamps[3], soc=20)
+    projection = _build(module, prices=[20] * 12, vehicles=[vehicle],
+        timestamps=timestamps, historical_arrivals={'VIN_ONE': arrival}, preserve_home_battery=preserve)
+    assert projection.expected_w[:3] == (0, 0, 0)
+    assert any(projection.expected_w[3:]) is (not preserve)
+    assert vehicle.location == 'work' and vehicle.ev_soc_percent == 60 and not vehicle.plugged_in

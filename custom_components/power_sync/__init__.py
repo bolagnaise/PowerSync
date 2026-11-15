@@ -1088,6 +1088,7 @@ from .const import (
     CONF_OPTIMIZATION_PROVIDER,
     CONF_OPTIMIZATION_ENABLED,
     CONF_OPTIMIZATION_EV_INTEGRATION,
+    CONF_OPTIMIZATION_USE_HISTORICAL_EV_DATA,
     CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY,
     OPT_PROVIDER_NATIVE,
     OPT_PROVIDER_POWERSYNC,
@@ -51753,6 +51754,7 @@ class OptimizationSettingsView(HomeAssistantView):
                         config_entry.data.get(CONF_OPTIMIZATION_EV_INTEGRATION, False),
                     )
                 ),
+                "use_historical_ev_data": bool(config_entry and config_entry.options.get(CONF_OPTIMIZATION_USE_HISTORICAL_EV_DATA, config_entry.data.get(CONF_OPTIMIZATION_USE_HISTORICAL_EV_DATA, False))),
                 "planned_ev_load_entity": (
                     config_entry.options.get(
                         CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY,
@@ -51999,6 +52001,8 @@ class OptimizationSettingsView(HomeAssistantView):
             "enabled": opt_coordinator.enabled,
             "optimiser_available": opt_coordinator.optimiser_available,
             "cost_function": opt_coordinator._cost_function.value,
+            "use_historical_ev_data": getattr(opt_coordinator, "_use_historical_ev_data", False),
+            "historical_ev_data": getattr(opt_coordinator, "_historical_ev_status", {"source": "disabled"}),
             "ev_integration": opt_coordinator._ev_integration_enabled,
             "planned_ev_load_entity": opt_coordinator._planned_ev_load_entity_id,
             "amber_forecast_confidence_enabled": opt_coordinator.amber_forecast_confidence_enabled,
@@ -52219,6 +52223,9 @@ class OptimizationSettingsView(HomeAssistantView):
                         }
                     )
 
+            if "use_historical_ev_data" in settings and not isinstance(settings["use_historical_ev_data"], bool):
+                return web.json_response({"success": False, "error": "use_historical_ev_data must be a boolean"}, status=400)
+
             if "amber_forecast_confidence_enabled" in settings and not isinstance(settings["amber_forecast_confidence_enabled"], bool):
                 return web.json_response({"success": False, "error": "amber_forecast_confidence_enabled must be a boolean"}, status=400)
             if (
@@ -52400,6 +52407,10 @@ class OptimizationSettingsView(HomeAssistantView):
                         new_data[CONF_OPTIMIZATION_PROVIDER] = OPT_PROVIDER_NATIVE
                         new_options[CONF_OPTIMIZATION_ENABLED] = False
                         changes.append("Disabled Smart Optimization")
+
+            if "use_historical_ev_data" in settings:
+                new_options[CONF_OPTIMIZATION_USE_HISTORICAL_EV_DATA] = settings["use_historical_ev_data"]
+                changes.append(f"Set historical EV data to {settings['use_historical_ev_data']}")
 
             if "ev_integration" in settings:
                 from .const import CONF_OPTIMIZATION_EV_INTEGRATION
