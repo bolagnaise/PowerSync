@@ -319,6 +319,7 @@ class HANetworkEnvelopeManager:
         self._snapshot = NetworkExportEnvelope()
         self._version = 0
         self._listener_tasks: set[asyncio.Task] = set()
+        self._stopping = False
         self._fresh_post_subscription = False
         self._last_received_at: datetime | None = None
         self._last_source_updated_at: datetime | None = None
@@ -362,6 +363,7 @@ class HANetworkEnvelopeManager:
         await self.async_refresh(fresh_event=False)
 
     async def async_stop(self) -> None:
+        self._stopping = True
         while self._unsubs:
             self._unsubs.pop()()
         tasks = tuple(self._listener_tasks)
@@ -410,6 +412,8 @@ class HANetworkEnvelopeManager:
                     reason=self._fault,
                 )
             self._snapshot = new
+        if self._stopping:
+            return new
         for callback in tuple(self._listeners):
             result = callback(old, new)
             if inspect.isawaitable(result):

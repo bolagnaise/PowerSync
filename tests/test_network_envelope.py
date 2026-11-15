@@ -573,3 +573,29 @@ def test_pending_listener_is_background_and_cancelled_when_manager_stops():
             await asyncio.gather(*(foreground | background), return_exceptions=True)
 
     asyncio.run(exercise())
+
+
+def test_refresh_finishing_after_stop_does_not_launch_a_listener():
+    async def exercise():
+        entered, release = asyncio.Event(), asyncio.Event()
+        manager = network.HANetworkEnvelopeManager(
+            SimpleNamespace(), SimpleNamespace(data={}, options={}), lambda: None
+        )
+        called = []
+
+        async def snapshot():
+            entered.set()
+            await release.wait()
+            return network.NetworkExportEnvelope()
+
+        manager._build_snapshot = snapshot
+        manager.add_listener(lambda old, new: called.append(new))
+        task = asyncio.create_task(manager.async_refresh())
+        await entered.wait()
+        await manager.async_stop()
+        release.set()
+        await task
+        assert called == []
+        assert not manager._listener_tasks
+
+    asyncio.run(exercise())
