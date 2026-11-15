@@ -10739,6 +10739,12 @@ class PriceLevelChargingExecutor:
             self.config_entry,
             stored.get("vehicle_charging_configs", []),
         )
+        if _configured_charger_type(opts) == "ocpp" and not opts.get("generic_charger_enabled"):
+            # A saved generic profile may outlive switching to OCPP. It is not
+            # an active loadpoint and must not suppress OCPP discovery or read
+            # another vehicle's SoC. Keep the stored settings intact.
+            raw_configs = [config for config in raw_configs
+                           if config.get("vehicle_id") != "generic_ev"]
 
         try:
             discovered = await discover_all_tesla_vehicles(

@@ -5493,7 +5493,9 @@ def test_ocpp_start_still_resets_when_switch_on_but_connector_finishing():
     ]
 
 
-def test_ocpp_current_limit_rejection_is_cached_for_session(monkeypatch):
+def test_ocpp_current_limit_rejection_has_bounded_retry_backoff(monkeypatch):
+    now = [1000.0]
+    monkeypatch.setattr(actions.time, "time", lambda: now[0])
     calls = []
 
     async def reject_current_limit(hass, charger_id, amps):
@@ -5506,11 +5508,56 @@ def test_ocpp_current_limit_rejection_is_cached_for_session(monkeypatch):
     params = {"charger_type": "ocpp", "ocpp_charger_id": "evse_1"}
 
     assert asyncio.run(actions._set_vehicle_amps(hass, _Entry(), "ocpp_evse_1", 7, params)) is False
-    assert params["_ocpp_current_limit_unsupported"] is True
-    assert asyncio.run(actions._set_vehicle_amps(hass, _Entry(), "ocpp_evse_1", 5, params)) is False
+    assert hass.data["power_sync"]["entry-1"]["_ocpp_current_limit_retry_after"]["evse_1"] == 1060
+    assert asyncio.run(actions._set_vehicle_amps(hass, _Entry(), "ocpp_evse_1", 5, dict(params))) is False
 
     assert calls == [("evse_1", 7)]
     assert hass.services.calls == []
+    now[0] += 61
+    assert asyncio.run(actions._set_vehicle_amps(hass, _Entry(), "ocpp_evse_1", 7, params)) is False
+    assert calls == [("evse_1", 7), ("evse_1", 7)]
+    assert hass.services.calls == []
+
+
+def test_ocpp_current_limit_recovers_after_transaction_becomes_available(monkeypatch):
+    now = [1000.0]
+    monkeypatch.setattr(actions.time, "time", lambda: now[0])
+    central = _OcppSessionCentralSystem(available=False)
+    hass = _Hass([])
+    hass.data["ocpp"] = {"entry": central}
+    start = AsyncMock(return_value=True)
+    monkeypatch.setattr(actions, "_start_ocpp_charging", start)
+    params = {"charger_type": "ocpp", "ocpp_charger_id": "evse_1",
+              "_ocpp_current_limit_unsupported": True}
+    assert asyncio.run(actions._set_vehicle_amps(hass, _Entry(), "ocpp_evse_1", 24, params)) is False
+    start.assert_not_awaited()
+    assert central.session_calls == []
+    central.session_available = True
+    now[0] += 61
+    assert asyncio.run(actions._set_vehicle_amps(hass, _Entry(), "ocpp_evse_1", 24, params)) is True
+    assert central.session_calls == [("evse_1", 1, 24.0)]
+    start.assert_awaited_once()
+    assert central.calls == []
+    assert hass.data["power_sync"]["entry-1"]["_ocpp_current_limit_retry_after"] == {}
+
+
+def test_ocpp_retry_backoff_is_scoped_and_does_not_block_stop(monkeypatch):
+    set_limit = AsyncMock(return_value=False)
+    stop = AsyncMock(return_value=True)
+    monkeypatch.setattr(actions, "_set_ocpp_charging_amps", set_limit)
+    monkeypatch.setattr(actions, "_stop_ocpp_charging", stop)
+    hass = _Hass([])
+    for charger in ("station_connector_1", "station_connector_2"):
+        params = {"charger_type": "ocpp", "ocpp_charger_id": charger}
+        assert asyncio.run(actions._set_vehicle_amps(hass, _Entry(), f"ocpp_{charger}", 24, params)) is False
+    assert set_limit.await_count == 2
+    params = {"charger_type": "ocpp", "ocpp_charger_id": "station_connector_1"}
+    assert asyncio.run(actions._set_vehicle_amps(hass, _Entry(), "ocpp_station_connector_1", 0, params)) is True
+    stop.assert_awaited_once_with(hass, "station_connector_1")
+    other_entry = _Entry()
+    other_entry.entry_id = "entry-2"
+    assert asyncio.run(actions._set_vehicle_amps(hass, other_entry, "ocpp_station_connector_1", 24, params)) is False
+    assert set_limit.await_count == 3
 
 
 def test_ocpp_loadpoint_id_does_not_double_prefix():

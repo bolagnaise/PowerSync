@@ -12807,25 +12807,31 @@ async def _set_vehicle_amps_unchecked(
             return False
         if amps == 0:
             return await _stop_ocpp_charging(hass, ocpp_charger_id)
-        # Set amps then ensure charger is on (idempotent)
-        amps_ok = True
-        if params.get("_ocpp_current_limit_unsupported"):
+        # Transaction availability can change after a failed attempt.  Retry
+        # with backoff, always requiring accepted current control before start.
+        params.pop("_ocpp_current_limit_unsupported", None)
+        entry_data = hass.data.setdefault(DOMAIN, {}).setdefault(
+            getattr(config_entry, "entry_id", "_default"), {}
+        )
+        retries = entry_data.setdefault("_ocpp_current_limit_retry_after", {})
+        retry_key = str(ocpp_charger_id)
+        if time.time() < retries.get(retry_key, 0):
             _LOGGER.debug(
-                "OCPP charger %s: blocking managed start to %sA after previous current-limit rejection",
+                "OCPP charger %s: deferring managed start to %sA during current-limit retry backoff",
                 ocpp_charger_id,
                 amps,
             )
             return False
-        else:
-            amps_ok = await _set_ocpp_charging_amps(hass, ocpp_charger_id, amps)
-            if not amps_ok:
-                params["_ocpp_current_limit_unsupported"] = True
-                _LOGGER.warning(
-                    "OCPP charger %s: current limit update to %sA failed; refusing managed start",
-                    ocpp_charger_id,
-                    amps,
-                )
-                return False
+        amps_ok = await _set_ocpp_charging_amps(hass, ocpp_charger_id, amps)
+        if not amps_ok:
+            retries[retry_key] = time.time() + 60
+            _LOGGER.warning(
+                "OCPP charger %s: current limit update to %sA failed; refusing managed start",
+                ocpp_charger_id,
+                amps,
+            )
+            return False
+        retries.pop(retry_key, None)
         if _has_pre_charge_wake(params):
             ready, block_reason = _ocpp_charger_ready_for_wake(hass, str(ocpp_charger_id))
             if not ready:

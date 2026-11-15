@@ -8672,6 +8672,28 @@ def test_ocpp_session_limit_does_not_create_a_second_charger():
     assert asyncio.run(ev_planner.get_ev_battery_level(hass, entry, "ocpp_charger")) == 52.6
 
 
+def test_ocpp_projection_ignores_disabled_generic_profile(monkeypatch):
+    entry = SimpleNamespace(entry_id="entry-1", data={}, options={
+        "ocpp_enabled": True, "generic_charger_enabled": False,
+        "generic_charger_soc_entity": "sensor.car_soc",
+    })
+    hass = _FakeHass(states={"sensor.car_soc": "52.6"}, entries=[entry])
+    hass.entity_registry.entities = {"status": SimpleNamespace(
+        platform="ocpp", entity_id="sensor.charger_status_connector",
+    )}
+    old = {"vehicle_id": "generic_ev", "charger_type": "generic"}
+    store = hass.data["power_sync"]["entry-1"]["automation_store"]
+    store._data["vehicle_charging_configs"] = [old]
+    executor = ev_planner.PriceLevelChargingExecutor(hass, entry)
+    soc = AsyncMock(return_value=52.6)
+    monkeypatch.setattr(executor, "_get_ev_soc", soc)
+    snapshots = asyncio.run(executor.collect_projection_snapshots())
+    assert [row.vehicle_id for row in snapshots] == ["ocpp_charger"]
+    soc.assert_awaited_once_with("ocpp_charger")
+    assert store._data["vehicle_charging_configs"] == [old]
+    hass.services.async_call.assert_not_awaited()
+
+
 @pytest.mark.parametrize("vehicle_id", ["ocpp_beny", "ocpp_charger", "_default", None])
 def test_ocpp_soc_native_precedes_configured_and_never_reads_tesla(vehicle_id):
     from power_sync.automations.generic_charger_soc import resolve_ocpp_charger_soc
