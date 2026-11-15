@@ -1904,7 +1904,7 @@ def test_advanced_controls_send_zero_and_soc_without_legacy_force_or_paperwork()
     assert all(p['body']['entry_id'] == 'entry-one' for p in posts)
     assert posts[3]['body']['import_limit_w'] == 12000
     assert all('force' not in p['path'] for p in posts)
-    assert 'Advanced options' in out['html'] and 'Site limits' in out['html']
+    assert 'Battery power and targets' in out['html'] and 'More controls' in out['html'] and 'Site limits' in out['html']
     assert 'Approval document' not in out['html'] and 'Approved installation' not in out['html']
 
 
@@ -1935,3 +1935,52 @@ def test_zero_idle_status_does_not_claim_charging_or_change_legacy_max():
     }));""")
     assert out['idle']['message'] == 'Idle requested by the optimiser.'
     assert out['max']['message'] == 'Charge requested manually.'
+
+
+def test_advanced_sections_and_confirmation_survive_independent_refreshes():
+    out = _run_board(r'''
+(async () => {
+  const c = new (registry.get('power-sync-advanced-controls'))();
+  let markup = '', sections = [], waiting = null, rejectLimits = false;
+  Object.defineProperty(c, 'innerHTML', {get:()=>markup, set:value=>{markup=value; sections=[...value.matchAll(/data-advanced-section="([^"]+)"/g)].map(m=>({dataset:{advancedSection:m[1]},open:false}));}});
+  c.querySelectorAll=()=>sections;
+  c.querySelector=selector=>sections.find(n=>selector.includes('"'+n.dataset.advancedSection+'"'));
+  c.entryId='entry';
+  const output={schema_version:1,control_revision:'rev',capabilities:{battery_output:{supported:true,zero_hold_supported:true,target_soc_supported:true,max_power_w:10000}}};
+  const limits={schema_version:1,configuration_revision:'cfg',capabilities:{readable:true,writable:true},limits:{import_limit_w:{value_w:12000},export_limit_w:{value_w:5000}},snapshots:[]};
+  c.hass={callApi:async(method,path,body)=>{
+    if(method==='POST')return {success:false,error:'unconfirmed_gateway_write'};
+    if(path.includes('battery_dispatch'))return output;
+    if(path.includes('native_site_limits')){if(rejectLimits)throw Error('gateway_offline');return limits;}
+    if(waiting)return await waiting;
+    return {schema_version:1,capabilities:{writable:true}};
+  }};
+  await c._act('refresh'); sections.forEach(n=>n.open=true); c._draft.export_limit_w='2000';
+  await c._act('set'); const confirmed=c._confirm==='set'&&sections.every(n=>n.open);
+  let release; waiting=new Promise(resolve=>release=resolve);
+  const read=c._refresh(); for(let i=0;i<15;i++)await Promise.resolve();
+  const independent=c._output===output&&c._loading.size===1&&markup.includes('Battery power and targets');
+  const stable=c._confirm==='set'&&sections.every(n=>n.open)&&c._draft.export_limit_w==='2000';
+  release({schema_version:1,capabilities:{writable:true}});await read;waiting=null;
+  await c._act('set');const unconfirmed=c._message.includes('unconfirmed_gateway_write')&&!c._message.includes('Control updated');
+  rejectLimits=true;await c._refresh();const retained=c._limits===limits&&markup.includes('gateway_offline')&&c._draft.export_limit_w==='2000';
+  console.log(JSON.stringify({confirmed,independent,stable,unconfirmed,retained,mainBeforeMore:markup.indexOf('Battery power and targets')<markup.indexOf('More controls')}));
+})().catch(e=>{console.error(e);process.exitCode=1});
+''')
+    assert all(out.values()), out
+
+
+def test_advanced_controls_start_independent_reads_once_per_entry_on_connection():
+    out = _run_board(r'''
+(async () => {
+  const c=new (registry.get('power-sync-advanced-controls'))();const reads=[];
+  c.entryId='a';c.isConnected=true;
+  const hass={callApi:async(method,path)=>{reads.push(path);return path.includes('native_site_limits')?{schema_version:1,capabilities:{writable:true},limits:{import_limit_w:{value_w:12000},export_limit_w:{value_w:5000}},snapshots:[]}:path.includes('battery_dispatch')?{schema_version:1,capabilities:{battery_output:{supported:true}}}:{schema_version:1,capabilities:{writable:true}};}};
+  c.hass=hass;c.hass=hass;c.connectedCallback();
+  for(let i=0;i<15;i++)await Promise.resolve();
+  const initial=reads.length;c.entryId='b';
+  for(let i=0;i<15;i++)await Promise.resolve();
+  console.log(JSON.stringify({initial,total:reads.length,selected:reads.slice(3).every(p=>p.includes('entry_id=b'))}));
+})().catch(e=>{console.error(e);process.exitCode=1});
+''')
+    assert out == {"initial": 3, "total": 6, "selected": True}

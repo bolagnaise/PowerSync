@@ -68,7 +68,7 @@ async def execute(hass, entry, action_type, params, context):
                        **{key: params[key] for key in ("import_limit_w", "export_limit_w") if key in params}}
         journal[request_id] = deepcopy(payload)
         await context["save_battery_request_journal"]()
-    result = await (control.dispatch(deepcopy(payload)) if action_type == "battery_output" else control.execute(deepcopy(payload)))
+    result = await (control.dispatch(deepcopy(payload)) if action_type == "battery_output" else control.execute(deepcopy(payload), automatic=True))
     return result.get("success") is True
 
 

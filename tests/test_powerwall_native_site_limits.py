@@ -313,3 +313,26 @@ async def test_offline_status_exposes_authority_for_revocation_without_fabricate
     await control.execute({"operation": "approve", "request_id": "offline-revoke", "expected_approval_revision": status["approval_revision"],
         "import_limit_w": None, "confirm_installation_limits": True, "document_reference": "Revoked", "approval_date": "2026-11-15"}, actor="owner")
     assert (await load())["approval"]["import_limit_w"]["active"] is False and not writes
+
+
+@pytest.mark.asyncio
+async def test_manual_limits_work_in_monitoring_but_automatic_writes_remain_blocked():
+    control, request, gateway, writes, behaviour, *_ = fixture()
+    control.automatic_guard = lambda: False
+    assert (await control.read())["capabilities"]["writable"] is True
+    await control.execute(await request(export_limit_w=2000), actor="owner")
+    assert len(writes) == 1
+    with pytest.raises(m.SiteLimitError, match="control owned or unavailable"):
+        await control.execute(await request(import_limit_w=5000), automatic=True)
+    assert len(writes) == 1
+
+
+@pytest.mark.asyncio
+async def test_automatic_limits_recheck_monitoring_before_write():
+    control, request, gateway, writes, behaviour, *_ = fixture()
+    monitoring = [False]
+    control.automatic_guard = lambda: not monitoring[0]
+    behaviour["before_validate"] = lambda: monitoring.__setitem__(0, True)
+    with pytest.raises(Exception):
+        await control.execute(await request(export_limit_w=2000), automatic=True)
+    assert not writes

@@ -29,7 +29,9 @@ async def test_exact_request_is_durable_before_submission_and_not_replayed(actio
     async def save():
         persisted.append(deepcopy(journal))
 
-    async def submit(data):
+    async def submit(data, **kwargs):
+        if action is CAP:
+            assert kwargs == {"automatic": True}
         assert persisted[-1][data["request_id"]] == data
         calls.append(deepcopy(data))
         receipts[data["request_id"]] = {"phase": "active" if action is OUTPUT else "readback_confirmed"}
@@ -99,7 +101,9 @@ async def test_real_scheduler_retries_a_refused_run_but_retains_unknown_request(
     node = Imports().visit(node)
     receipts, calls = {}, []
     revision = ["a" * 64]
-    async def submit(data):
+    async def submit(data, **kwargs):
+        if action is CAP:
+            assert kwargs == {"automatic": True}
         calls.append(deepcopy(data))
         if len(calls) == 1:
             if unresolved:

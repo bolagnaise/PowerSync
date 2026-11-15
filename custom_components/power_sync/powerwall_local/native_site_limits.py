@@ -165,8 +165,9 @@ def plan_changes(config, requested, approval, identity):
 class NativeSiteLimits:
     """One persistent limits journal behind the existing site route lock."""
 
-    def __init__(self, *, identity, load, save, read, write, guard, lock, changed, clock=time.time, approval_guard=lambda: True):
+    def __init__(self, *, identity, load, save, read, write, guard, lock, changed, clock=time.time, approval_guard=lambda: True, automatic_guard=lambda: True):
         self.approval_guard = approval_guard
+        self.automatic_guard = automatic_guard
         self.identity, self.load, self._save = identity, load, save
         self.read_document, self.write_document = read, write
         self.guard, self.lock, self.changed, self.clock = guard, lock, changed, clock
@@ -195,7 +196,9 @@ class NativeSiteLimits:
                     "absent_field_restore_supported": False, "physical_enforcement_verified": False,
                     "identity_rebaseline_required": not same_identity}}
 
-    async def execute(self, data, *, actor=None):
+    async def execute(self, data, *, actor=None, automatic=False):
+        # Recheck at every write boundary, including after asynchronous reads.
+        guard = lambda own: self.guard(own) and (not automatic or self.automatic_guard())
         if not isinstance(data, dict) or set(data) - {
             "operation", "request_id", "expected_config_revision", "expected_approval_revision",
             "import_limit_w", "export_limit_w", "snapshot_id", "confirm_installation_limits",
@@ -216,7 +219,7 @@ class NativeSiteLimits:
                 return {"success": seen["phase"] == "readback_confirmed", "replayed": True,
                         "operation_id": seen["operation_id"]}
             if operation == "rebaseline":
-                if actor is None or data.get("confirm_pairing_change") is not True or not self.approval_guard() or not self.guard(True):
+                if actor is None or data.get("confirm_pairing_change") is not True or not self.approval_guard() or not guard(True):
                     raise SiteLimitError("administrator_pairing_confirmation_required")
                 prior = state.get("transaction") or {}
                 if prior.get("phase") in ("submitted", "outcome_unknown", "recovery_required") and (
@@ -272,7 +275,7 @@ class NativeSiteLimits:
                 await self.changed()
                 return {"success": True, "hardware_command_sent": False,
                         "approval": state["approval"], "approval_revision": approval_revision(state)}
-            if not self.guard(True):
+            if not guard(True):
                 raise SiteLimitError("site_limit_control_owned_or_unavailable")
             if operation == "reconcile":
                 if not previous or previous.get("phase") not in ("prepared", "submitted", "outcome_unknown", "recovery_required"):
@@ -344,7 +347,7 @@ class NativeSiteLimits:
             submitted = False
 
             def validate(config, native_hash):
-                if not self.guard(True) or self.identity() != identity:
+                if not guard(True) or self.identity() != identity:
                     raise SiteLimitError("site_limit_authority_changed")
                 if native_hash.hex() != document["hash"] or configuration_revision(
                         {"hash": native_hash.hex()}, identity) != data["expected_config_revision"]:
@@ -362,7 +365,7 @@ class NativeSiteLimits:
 
             def before_write():
                 nonlocal submitted
-                if not self.guard(True) or self.identity() != identity:
+                if not guard(True) or self.identity() != identity:
                     raise SiteLimitError("site_limit_authority_changed")
                 submitted = True
 
