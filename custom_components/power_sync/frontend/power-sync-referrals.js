@@ -29,11 +29,12 @@ class PowerSyncReferralsCard extends HTMLElement {
     const card=this.node('ha-card',undefined,this.shadowRoot);this.node('h2','Refer friends',card);
     const summary=this._summary;
     if(summary?.code) {
+      if(summary.enabled===false)this.node('p','New referral rewards are currently unavailable. Existing rewards remain on your account.',card);
       this.node('p',`Your referral code: ${summary.code}`,card);
       this.node('p',summary.share_url,card);
       this.node('p',`${summary.earned_this_year} of ${summary.annual_limit} rewards earned in ${summary.year}. Banked rewards: ${summary.banked_rewards}.`,card);
       for(const [label,value] of [['Copy code',summary.code],['Copy link',summary.share_url]]) {
-        const button=this.node('button',label,card);button.onclick=()=>this.copy(value);
+        const button=this.node('button',label,card);button.onclick=()=>this.copy(value);button.disabled=summary.enabled===false;
       }
       if(summary.stale)this.node('p',`Showing cached information from ${new Date(summary.fetched_at*1000).toLocaleString()}.`,card);
     } else this.node('p',summary?.paired===false?'Pair your PowerSync account through HA optimiser access to see your code.':'Referral information is temporarily unavailable.',card);

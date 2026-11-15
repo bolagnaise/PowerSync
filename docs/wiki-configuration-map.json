@@ -24,7 +24,7 @@
       "binary_sensor.py": "cad335bcce4d56edb1121bc08a6bbe34d55cad991ce31a34547d150ec4898704",
       "button.py": "69368d0dc0f8a1a9e336fed0da117103676670003db81d3360fc24bc0e6123b0",
       "automations/actions.py": "baa1205bf1384617752fe57a8ee78d85a5c914ef3eeaea5f67938883cd28a9f2",
-      "licensing/presentation.py": "b2d82d00cb1c6c450b01010dbe3e0bc92ad6e96e9eed38b80ad47800e7434303",
+      "licensing/presentation.py": "1573955ea9bb520e3cdbc5428522cef705c05b9c928a19e42d14ff6cbbb77546",
       "amber_smartshift/__init__.py": "979f85cb66d8ca1e88394cb74ecc275645f2c7598aac3e65f43e4180293ee032",
       "amber_smartshift/client.py": "c713ecb9e1f3ea26ddea2d0b058dc69e779192cdd3a747ee8cf30277358620ec",
       "amber_smartshift/runtime.py": "c4f6b44d704591e23f525f31b9f84a16f102150f1cffd259e21be06e1492d5bf",

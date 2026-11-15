@@ -19,7 +19,7 @@ def referral_method():
 
 
 def summary(**changes):
-    return {"code": "PSABCDEFGHJK", "share_url": "https://untrusted.invalid/ignored", "earned_this_year": 2,
+    return {"enabled": True, "code": "PSABCDEFGHJK", "share_url": "https://untrusted.invalid/ignored", "earned_this_year": 2,
             "annual_limit": 12, "year": 2027, "banked_rewards": 1, **changes}
 
 
@@ -82,3 +82,14 @@ def test_referral_copy_preserves_access_and_resume_guidance():
     assert "PSABCDEFGHJK" in result["referral_summary"]
     status.update(can_optimize=False, requires_resume=True, would_allow=True)
     assert "Resume optimisation" in presentation.optimizer_access_description(status)["next_step"]
+
+
+def test_paused_program_is_visible_without_affecting_existing_access():
+    async def run():
+        client = manager()
+        client._transport.return_value = summary(enabled=False)
+        result = await referral_method()(client)
+        assert result["enabled"] is False
+        assert result["code"] == "PSABCDEFGHJK"
+        assert client.entries == {} and client.admission is not None
+    asyncio.run(run())

@@ -100,7 +100,7 @@ class HALicenseManager(LicenseRuntime):
             if not isinstance(code, str) or not re.fullmatch(r"PS[A-HJ-NP-Z2-9]{10}", code):
                 raise ValueError("invalid_referral_summary")
             value = {
-                "paired": True, "unavailable": False, "stale": False,
+                "paired": True, "unavailable": False, "stale": False, "enabled": raw.get("enabled") is True,
                 "code": code, "share_url": "https://powersync.cc/app/refer/" + code,
                 "account_url": "https://powersync.cc/app/referrals", "fetched_at": now,
             }

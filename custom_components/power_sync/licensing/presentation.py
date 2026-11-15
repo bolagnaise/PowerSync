@@ -80,6 +80,8 @@ def optimizer_access_description(status: dict, pairing_code: str | None = None) 
             "Your friend must make their first payment before you earn a free month. "
             "Manage rewards at https://powersync.cc/app/referrals."
         )
+        if referral.get("enabled") is False:
+            referral_summary = "New referral rewards are currently unavailable. Existing rewards remain on your account.\n\n" + referral_summary
         if referral.get("stale"):
             referral_summary += " Showing the last fetched summary; refresh on the website for current status."
     else:
