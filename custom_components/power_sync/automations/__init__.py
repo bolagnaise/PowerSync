@@ -154,6 +154,7 @@ class AutomationStore:
                 if "actions" in automation_data:
                     _LOGGER.debug(f"Updating automation {automation_id} with {len(automation_data['actions'])} action(s): {automation_data['actions']}")
                     auto["actions"] = automation_data["actions"]
+                    auto.pop("_advanced_battery_run", None)
                 if "conditions" in automation_data:
                     _LOGGER.debug(f"Updating automation {automation_id} with {len(automation_data.get('conditions', []))} condition(s)")
                     auto["conditions"] = automation_data["conditions"]
@@ -512,6 +513,7 @@ class AutomationEngine:
 
                     if actions_executed:
                         triggered_count += 1
+                        automation.pop("_advanced_battery_run", None)
                         self._store.mark_triggered(automation.get("id"))
                         await self._store.async_save()
 
@@ -1046,6 +1048,19 @@ class AutomationEngine:
             "timezone": current_state.get("user_timezone", "UTC"),
             "ev_vehicle_id": current_state.get("ev_state", {}).get("vehicle_id"),
         }
+
+        if any(item.get("action_type") in ("battery_output", "native_site_limits") for item in actions_to_execute):
+            from ..powerwall_local.automation_controls import validate_actions
+            if validate_actions(actions_to_execute):
+                return False
+            from uuid import uuid4
+            import time
+            run = automation.setdefault("_advanced_battery_run", {"id": uuid4().hex, "started": time.time(), "requests": {}})
+            # A request admitted by this run retains its exact revision and
+            # deadline even when a response is lost or HA restarts.
+            await self._store.async_save()
+            context.update(battery_run_id=run["id"], battery_run_started=run["started"],
+                battery_request_journal=run["requests"], save_battery_request_journal=self._store.async_save)
 
         result = await execute_actions(
             self._hass,

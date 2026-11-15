@@ -238,6 +238,7 @@ def _local_access_status(
         "local_access_configured": configured,
         "local_available": local_available,
         "power_control_supported": local_battery_dispatch_configured(entry.data),
+        "battery_action_contract_version": 1 if local_battery_dispatch_configured(entry.data) else None,
         "dispatch_max_discharge_w": getattr(getattr(coordinator, "client", None), "dispatch_discharge_limit_w", None),
         "dispatch_max_charge_w": getattr(getattr(coordinator, "client", None), "dispatch_charge_limit_w", None),
         "local_reachable": local_reachable,
@@ -1535,8 +1536,106 @@ class PowerwallCurtailmentFallbackView(HomeAssistantView):
         return await self.get(request)
 
 
+def _advanced_control_entry(hass, entry_id):
+    entries = hass.config_entries.async_entries(DOMAIN)
+    if entry_id is None and len(entries) == 1:
+        return entries[0]
+    if not isinstance(entry_id, str):
+        raise ValueError("Specify entry_id for this PowerSync control")
+    entry = hass.config_entries.async_get_entry(entry_id)
+    if entry is None or entry.domain != DOMAIN:
+        raise ValueError("PowerSync entry is unavailable")
+    return entry
+
+
+class PowerwallBatteryOutputView(HomeAssistantView):
+    """Explicit versioned API; never falls back to legacy force discharge."""
+    url = "/api/power_sync/powerwall/battery_dispatch"
+    name = "api:power_sync:powerwall:battery_dispatch"
+    requires_auth = True
+
+    def __init__(self, hass):
+        self._hass = hass
+
+    def _control(self, entry_id):
+        entry = _advanced_control_entry(self._hass, entry_id)
+        control = self._hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get("battery_output_control")
+        if control is None:
+            raise ValueError("Battery output control is unavailable")
+        return control
+
+    async def get(self, request):
+        try:
+            result = await self._control(request.query.get("entry_id")).read()
+            return web.json_response({"success": True, **result})
+        except (ValueError, HomeAssistantError) as error:
+            return web.json_response({"success": False, "error": str(error)}, status=409)
+
+    async def post(self, request):
+        from .battery_output import BatteryOutputError
+        try:
+            data = await request.json()
+            if not isinstance(data, dict):
+                raise ValueError("Invalid battery output request")
+            control = self._control(data.get("entry_id"))
+            user = request.get("hass_user")
+            context = Context(user_id=user.id if user else None)
+            result = await control.dispatch(data, context)
+            return web.json_response(result)
+        except (ValueError, HomeAssistantError) as error:
+            code = getattr(error, "code", "battery_output_failed")
+            status = 409 if "conflict" in code or "takeover" in code else 400
+            return web.json_response({"success": False, "error": code, "message": str(error)}, status=status)
+
+
+class PowerwallBatteryOutputStopView(PowerwallBatteryOutputView):
+    url = "/api/power_sync/powerwall/battery_dispatch/stop"
+    name = "api:power_sync:powerwall:battery_dispatch:stop"
+
+    async def post(self, request):
+        try:
+            data = await request.json()
+            if not isinstance(data, dict):
+                raise ValueError("Invalid battery stop request")
+            control = self._control(data.get("entry_id"))
+            user = request.get("hass_user")
+            return web.json_response(await control.end(data, Context(user_id=user.id if user else None)))
+        except (ValueError, HomeAssistantError) as error:
+            return web.json_response({"success": False, "error": getattr(error, "code", "battery_output_stop_failed"),
+                                      "message": str(error)}, status=409)
+
+
+class PowerwallNativeSiteLimitsView(PowerwallBatteryOutputView):
+    url = "/api/power_sync/powerwall/native_site_limits"
+    name = "api:power_sync:powerwall:native_site_limits"
+
+    def _control(self, entry_id):
+        entry = _advanced_control_entry(self._hass, entry_id)
+        control = self._hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get("native_site_limits_control")
+        if control is None:
+            raise ValueError("Native site limits are unavailable")
+        return control
+
+    async def post(self, request):
+        try:
+            data = await request.json()
+            if not isinstance(data, dict):
+                raise ValueError("Invalid native site limit request")
+            user = request.get("hass_user")
+            if data.get("operation") in ("approve", "rebaseline") and (user is None or not user.is_admin):
+                return web.json_response({"success": False, "error": "administrator_approval_required"}, status=403)
+            result = await self._control(data.get("entry_id")).execute(data, actor=user.id if user else None)
+            return web.json_response(result)
+        except (ValueError, HomeAssistantError) as error:
+            return web.json_response({"success": False, "error": getattr(error, "code", "native_site_limits_failed"),
+                                      "message": str(error)}, status=409)
+
+
 def register_views(hass: HomeAssistant) -> None:
     """Wire up every Powerwall-local view onto the HA http app."""
+    hass.http.register_view(PowerwallBatteryOutputView(hass))
+    hass.http.register_view(PowerwallBatteryOutputStopView(hass))
+    hass.http.register_view(PowerwallNativeSiteLimitsView(hass))
     hass.http.register_view(PowerwallPairStartView(hass))
     hass.http.register_view(PowerwallPairStatusView(hass))
     hass.http.register_view(PowerwallPairCancelView(hass))

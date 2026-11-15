@@ -424,12 +424,17 @@ class NativeRatePorts:
         if self.budget is not None:
             self.budget.observe(vin, watts=actual_ev_w, at=ev_at, meter_at=meter_at)
         site_limit, _ = site_grid_limits_w(snapshot) if snapshot else (None, None)
+        if recorded := self.runtime.get("native_site_limits_state"):
+            from .powerwall_local.native_site_limits import recorded_limits_w, identity_for_entry
+            approved_import, _ = recorded_limits_w(recorded, identity_for_entry(self.entry))
+            if approved_import is not None:
+                site_limit = min(site_limit if site_limit is not None else math.inf, approved_import)
         info = (getattr(snapshot, "raw", {}) or {}).get("config", {}).get("site_info", {}) if snapshot else {}
         known_limit = isinstance(info, dict) and info.get("max_site_meter_power_ac") is not None
         user_limit = config.get("optimization_max_grid_import_w")
         if user_limit not in (None, 0) and known_limit:
             site_limit = min(site_limit if site_limit is not None else math.inf, _finite(user_limit))
-        if self.coexistence_reason() is not None:
+        if self.coexistence_reason() is not None or self.runtime.get("powerwall_settings_pending"):
             # Cleanup can reduce current but cannot increase it into unknown
             # pre-existing or unsupported managed demand.
             site_limit = None
@@ -500,6 +505,7 @@ class NativeRatePorts:
         session = self.controller.sessions.get(observation.vin, {})
         restore = session.get("recovering") is True or self.controller.stopping
         revision = self.budget.revision if self.budget is not None else None
+        limits_revision = self.runtime.get("native_site_limits_revision", 0)
         battery = self.runtime.get("powerwall_battery_dispatch")
         generation = battery.charge_generation if battery is not None else None
         acknowledged_at = None
@@ -521,6 +527,8 @@ class NativeRatePorts:
                     self.hass, self.entry, self.runtime, self.site, self.budget)
                     == native_proof)
             return (authorize() and current_native
+                    and (not increases or (self.runtime.get("native_site_limits_revision", 0) == limits_revision
+                                           and not self.runtime.get("powerwall_settings_pending")))
                     and (self.budget is None or self.budget.revision == revision)
                     and (generation is None or (self.runtime.get("powerwall_battery_dispatch") is battery
                          and battery.charge_generation == generation)))

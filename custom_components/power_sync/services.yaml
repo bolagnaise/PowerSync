@@ -182,6 +182,124 @@ apply_history_relink:
       selector:
         boolean:
 
+set_native_site_limits:
+  name: Set native site limits
+  description: "Paired Tesla gateway import/export limits, in watts. Limits persist until changed. Raising or restoring a limit needs separately approved site maxima. This does not change export or grid-charging permissions."
+  fields:
+    entry_id:
+      selector:
+        text:
+    operation:
+      default: set
+      selector:
+        select:
+          options:
+            - set
+            - restore
+            - approve
+    import_limit_w:
+      selector:
+        number:
+          min: 0
+          max: 1000000
+          step: 1
+          unit_of_measurement: W
+    export_limit_w:
+      selector:
+        number:
+          min: 0
+          max: 1000000
+          step: 1
+          unit_of_measurement: W
+    request_id:
+      required: true
+      selector:
+        text:
+    expected_config_revision:
+      required: true
+      selector:
+        text:
+    expected_approval_revision:
+      required: true
+      selector:
+        text:
+    snapshot_id:
+      description: Saved snapshot to restore, from native site limit status.
+      selector:
+        text:
+    confirm_installation_limits:
+      description: Administrator confirmation that approved maxima account for installation and network restrictions. Saves software authorisation only.
+      selector:
+        boolean:
+    document_reference:
+      selector:
+        text:
+    approval_date:
+      description: Date of the installation or network approval, YYYY-MM-DD.
+      selector:
+        text:
+
+dispatch_battery_power:
+  name: Set fixed battery output
+  description: "Request exact battery watts on a paired Tesla gateway. Positive discharges and negative charges. This is separate from grid export. An infeasible target is refused or stopped; zero hold is unavailable."
+  fields:
+    entry_id:
+      description: PowerSync entry ID. Required when more than one entry is configured.
+      selector:
+        text:
+    power_w:
+      required: true
+      description: Signed battery watts, from -10000 to 10000. Zero is currently unsupported.
+      selector:
+        number:
+          min: -10000
+          max: 10000
+          step: 1
+          unit_of_measurement: W
+    duration_seconds:
+      required: true
+      selector:
+        number:
+          min: 1
+          max: 86400
+          step: 1
+          unit_of_measurement: s
+    request_id:
+      required: true
+      description: Unique request ID. Reusing the same ID never starts a new power command.
+      selector:
+        text:
+    expected_control_revision:
+      required: true
+      description: Control revision from the battery dispatch status API.
+      selector:
+        text:
+    takeover:
+      default: false
+      description: Explicitly stop and restore an existing battery action before starting.
+      selector:
+        boolean:
+
+stop_battery_dispatch:
+  name: Stop fixed battery output
+  description: Stop only the identified fixed-output operation and resume normal battery operation.
+  fields:
+    entry_id:
+      selector:
+        text:
+    operation_id:
+      required: true
+      selector:
+        text:
+    request_id:
+      required: true
+      selector:
+        text:
+    expected_control_revision:
+      required: true
+      selector:
+        text:
+
 force_discharge:
   name: Force Discharge
   description: Force battery discharge for a timed window. Paired Powerwalls use local power control first, with existing Tesla controls as a fallback.

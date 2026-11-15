@@ -2258,6 +2258,97 @@ function psUntilPreview(value, timeZone, now = Date.now()) {
   return { error: 'No upcoming finish time is available.' };
 }
 
+/** Advanced controls have independent drafts and never send legacy Force. */
+class PsAdvancedBatteryControls extends HTMLElement {
+  constructor() {
+    super();
+    this._draft = { power_w: '1800', minutes: '30', import_limit_w: '', export_limit_w: '', reference: '', date: '', takeover: false, attested: false };
+    this._busy = false;
+    this.addEventListener('input', e => {
+      const key = e.target.dataset?.advancedField;
+      if (key) { e.stopPropagation(); this._confirm = null; this._draft[key] = e.target.type === 'checkbox' ? e.target.checked : e.target.value; }
+    });
+    this.addEventListener('click', e => {
+      const action = e.target.closest('[data-advanced-action]')?.dataset.advancedAction;
+      if (action) { e.stopPropagation(); void this._act(action); }
+    });
+  }
+  set hass(hass) { this._hass = hass; if (!this.innerHTML) this._render(); }
+  set entryId(value) { this._entryId = value; }
+  _path(resource) { return `power_sync/powerwall/${resource}${this._entryId ? `?entry_id=${encodeURIComponent(this._entryId)}` : ''}`; }
+  async _refresh() {
+    const values = await Promise.allSettled(['battery_dispatch', 'native_site_limits'].map(p => this._hass.callApi('GET', this._path(p))));
+    this._output = values[0].status === 'fulfilled' && values[0].value.schema_version === 1 ? values[0].value : null;
+    this._limits = values[1].status === 'fulfilled' && values[1].value.schema_version === 1 ? values[1].value : null;
+  }
+  async _act(action) {
+    if (this._busy) return;
+    if (action === 'refresh') {
+      this._busy = true; this._render();
+      try { await this._refresh(); } finally { this._busy = false; this._render(); }
+      return;
+    }
+    const d = this._draft, output = this._output, limits = this._limits;
+    let resource, body;
+    const integer = (s, signed = false) => (signed ? /^-?[0-9]+$/ : /^[0-9]+$/).test(s) ? Number(s) : NaN;
+    try {
+      if (action === 'target') {
+        const power = integer(d.power_w, true), seconds = integer(d.minutes) * 60;
+        if (!output?.capabilities?.battery_output?.supported || !Number.isInteger(power) || power === 0 || Math.abs(power) > 10000 || !Number.isInteger(seconds) || seconds < 60 || seconds > 86400) throw Error('Enter nonzero battery watts within ±10000 W and 1–1440 whole minutes.');
+        resource = 'battery_dispatch'; body = { power_w: power, duration_seconds: seconds, expected_control_revision: output.control_revision, takeover: d.takeover };
+      } else if (action === 'stop') {
+        if (!output?.operation?.active) throw Error('Refresh the active battery target first.');
+        resource = 'battery_dispatch/stop'; body = { operation_id: output.operation.operation_id, expected_control_revision: output.control_revision };
+      } else {
+        if (!limits) throw Error('Read current native limits first.');
+        resource = 'native_site_limits'; body = { expected_config_revision: limits.configuration_revision, expected_approval_revision: limits.approval_revision };
+        if (action === 'rebaseline') Object.assign(body, { operation: 'rebaseline', confirm_pairing_change: true });
+        else if (action === 'reconcile') body.operation = 'reconcile';
+        else if (action.startsWith('restore:')) { body.operation = 'restore'; body.snapshot_id = action.slice(8); }
+        else {
+          for (const key of ['import_limit_w', 'export_limit_w']) if (d[key] !== '') {
+            const watts = integer(d[key]);
+            if (!Number.isInteger(watts) || watts < 0 || watts > 1000000) throw Error('Limits must be whole watts from 0 to 1000000.');
+            body[key] = watts;
+          }
+          if (action === 'approve' || action === 'revoke') {
+            if (!d.attested || !d.reference.trim() || !d.date) throw Error('Confirm the permitted maxima and supply an approval document reference and date.');
+            Object.assign(body, { operation: 'approve', confirm_installation_limits: true, document_reference: d.reference, approval_date: d.date });
+            if (action === 'revoke') Object.assign(body, { import_limit_w: null, export_limit_w: null });
+          }
+        }
+      }
+      if (this._confirm !== action) { this._confirm = action; this._message = 'Tap the same button again to confirm.'; this._render(); return; }
+      this._confirm = null; this._busy = true; this._message = ''; this._render();
+      body.request_id = crypto.randomUUID();
+      if (this._entryId) body.entry_id = this._entryId;
+      await this._hass.callApi('POST', `power_sync/powerwall/${resource}`, body);
+      this._message = 'Request completed. Review the refreshed state; measured tracking is unverified.';
+    } catch (error) { this._message = `${error.message || 'Request unconfirmed'}. Refresh state before another request.`; }
+    finally { if (this._busy) await this._refresh(); this._busy = false; this._render(); }
+  }
+  _render() {
+    const d = this._draft, o = this._output, n = this._limits, disabled = this._busy ? 'disabled' : '';
+    const field = (key, label) => `<label class="field"><span class="lab">${label}</span><input type="text" data-advanced-field="${key}" value="${psEsc(d[key])}" ${disabled}></label>`;
+    const btn = (key, label, blocked = false) => `<button type="button" class="btn quiet" data-advanced-action="${key}" ${disabled || (blocked ? 'disabled' : '')}>${this._confirm === key ? 'Confirm: ' : ''}${label}</button>`;
+    this.innerHTML = `<details><summary>Battery output and site limits</summary>
+      ${o?.capabilities?.battery_output?.supported ? `<p class="hint">Positive battery watts supply power; negative watts charge. Household load determines grid flow. Infeasible targets are refused or stopped. Zero hold is unavailable.</p>
+      ${field('power_w', 'Battery power (W)')}${field('minutes', 'Duration (minutes)')}
+      <label><input type="checkbox" data-advanced-field="takeover" ${d.takeover ? 'checked' : ''} ${disabled}> Replace an active battery target</label>${btn('target', 'Apply battery target')}
+      ${o.operation ? `<p class="hint">Requested ${psEsc(o.operation.power_w)} W · commanded ${psEsc(o.operation.commanded_w ?? 'unknown')} W · ${psEsc(o.operation.command_status || o.operation.phase)}. Tracking: ${psEsc(o.operation.tracking)}.</p>${o.operation.active ? btn('stop', 'Stop this battery target') : ''}` : ''}` : ''}
+      ${n ? `<p class="hint">Persistent native import ${psEsc(n.limits.import_limit_w.value_w ?? 'unknown')} W · export ${psEsc(n.limits.export_limit_w.value_w ?? 'unknown')} W. Zero is a hard limit. Blank fields stay unchanged. These limits persist after timed controls stop.</p>
+      ${n.capabilities.identity_rebaseline_required ? `<p class="hint">Pairing changed. Controls are blocked. Confirm a fresh gateway baseline to archive previous approvals and record current native limits without sending a command.</p>${btn('rebaseline', 'Confirm new pairing and re-baseline')}` : ''}${field('import_limit_w', 'Import limit (W)')}${field('export_limit_w', 'Export limit (W)')}${btn('set', 'Apply persistent limits', !n.capabilities.writable)}
+      ${(n.snapshots || []).map(s => btn(`restore:${s.snapshot_id}`, `Restore saved limits ${psEsc(s.snapshot_id.slice(0, 8))}`, !n.capabilities.writable)).join('')}
+      ${n.transaction ? `<p class="hint">Transaction: ${psEsc(n.transaction.phase)}. Configuration readback does not prove physical enforcement.</p>${['prepared', 'submitted', 'recovery_required'].includes(n.transaction.phase) ? btn('reconcile', 'Check unresolved write') : ''}` : ''}
+      <details><summary>Approved installation maxima</summary><p class="hint">Enter permitted maxima above and identify the installation or network approval. Saving approval sends no gateway command. A Home Assistant administrator must confirm it.</p>
+      ${field('reference', 'Approval document reference')}${field('date', 'Approval date (YYYY-MM-DD)')}
+      <label><input type="checkbox" data-advanced-field="attested" ${d.attested ? 'checked' : ''} ${disabled}> I confirm these maxima are permitted for this installation.</label>
+      ${btn('approve', 'Save approved maxima')}${btn('revoke', 'Revoke saved approval')}</details>` : ''}
+      ${btn('refresh', 'Read control state')}${this._message ? `<p class="hint" role="status">${psEsc(this._message)}</p>` : ''}</details>`;
+  }
+}
+if (!customElements.get('power-sync-advanced-controls')) customElements.define('power-sync-advanced-controls', PsAdvancedBatteryControls);
+
 class PsControlsCard extends PsCardBase {
   constructor() {
     super();
@@ -2340,7 +2431,11 @@ class PsControlsCard extends PsCardBase {
         ${active ? `<button type="button" class="btn danger full${this._confirm === 'restore' ? ' confirming' : ''}" data-kind="restore">${restoring ? 'Restoring…' : this._confirm === 'restore' ? 'Confirm restore normal' : 'Restore normal'}</button>` : ''}
       </div>
       ${power ? `<label class="power-limit"><span class="row2"><span class="lab">Power limit<small>0 = Max · fastest rate allowed</small></span><output class="num" data-power-readout>${powerLabel}</output></span><input type="range" data-power-limit min="${Number(power.attributes?.min ?? 0)}" max="${Number(power.attributes?.max ?? 100)}" step="${Number(power.attributes?.step) || 1}" value="${Number.isFinite(powerKw) ? powerKw : 0}" aria-label="Power limit" aria-valuetext="${powerLabel}" ${Number.isFinite(powerKw) ? '' : 'disabled'}></label>` : ''}
-      <p class="hint">Tap a button twice to confirm. Hold charge and Power the home use the Run for preset.</p>`;
+      <p class="hint">Tap a button twice to confirm. Hold charge and Power the home use the Run for preset.</p><div data-advanced-controls></div>`;
+    this._advancedBatteryNode ||= document.createElement('power-sync-advanced-controls');
+    this._advancedBatteryNode.entryId = this._config.entry_id;
+    this.querySelector('[data-advanced-controls]').append(this._advancedBatteryNode);
+    this._advancedBatteryNode.hass = hass;
     if (focus) {
       const input = this.querySelector(`[data-timing-input="${focus.key}"]`);
       input?.focus({ preventScroll: true });

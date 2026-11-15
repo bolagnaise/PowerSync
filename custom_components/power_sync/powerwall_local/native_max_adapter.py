@@ -338,6 +338,12 @@ class NativeMaxChargeAdapter:
                                   native_import_limit_kw=limits.get("max_site_meter_power_ac"),
                                   native_export_limit_kw=limits.get("min_site_meter_power_ac"))
             permission = self._grid_value(raw)
+            _, native_exported = site_grid_limits_w(type("NativeBounds", (), {"raw": {"config": raw}})())
+            for setting, native_value in (("native_site_import_cap_w", imported),
+                                           ("native_site_export_cap_w", native_exported)):
+                required = config.get(setting)
+                if required is not None and (native_value is None or native_value > required):
+                    return self._deny("native_site_limit_not_enforced")
             coexistence_limit = imported
             if self.direction == "discharge":
                 try:

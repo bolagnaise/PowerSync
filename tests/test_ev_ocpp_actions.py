@@ -9114,6 +9114,24 @@ def test_optimizer_import_limit_yields_to_lower_home_power_cap():
     ) == 12.0
 
 
+@pytest.mark.parametrize('kind,expected', [('zero', 0.0), ('pending', 3.0), ('identity', 0.0)])
+def test_dynamic_ev_import_resolver_keeps_recorded_hard_bounds(monkeypatch, kind, expected):
+    native = importlib.import_module('power_sync.powerwall_local.native_site_limits')
+    hass, entry = _Hass([]), _Entry()
+    entry.data['tesla_energy_site_id'] = 'synthetic-site'
+    identity = native.identity_for_entry(entry)
+    record = {'identity': identity, 'operational': {'import_limit_w': 0 if kind == 'zero' else 7000}}
+    if kind == 'pending':
+        record['transaction'] = {'phase': 'recovery_required',
+            'baseline': {'import_limit_w': {'supported': True, 'value_w': 7000}},
+            'updates': {'site_info.max_site_meter_power_ac': 3}}
+    if kind == 'identity':
+        record['identity'] = {**identity, 'gateway': 'other-gateway'}
+    hass.data['power_sync']['entry-1']['native_site_limits_state'] = record
+    monkeypatch.setattr(actions, '_get_tesla_max_site_meter_power_kw', AsyncMock(return_value=None))
+    assert asyncio.run(actions._resolve_max_grid_import_kw(hass, entry, {'optimizer_max_grid_import_kw': 14.9})) == expected
+
+
 @pytest.mark.parametrize("force_max_rate", [False, True])
 def test_smart_schedule_start_preserves_optimizer_import_limit(monkeypatch, force_max_rate):
     """Exercise the planner-to-action limit handoff, not just the resolver."""
