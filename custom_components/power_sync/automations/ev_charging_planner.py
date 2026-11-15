@@ -9892,7 +9892,7 @@ async def _start_coordinated_charging(
         elif not success and confirm_tesla_start and cooldown_state is not None:
             cooldown_state.consecutive_start_failures += 1
             cooldown_state.start_retry_reason = (
-                "Tesla physical start was not confirmed"
+                "Tesla charging control was not established"
             )
             retry_delay = min(
                 PRICE_LEVEL_START_RETRY_BASE_SECONDS
@@ -9907,7 +9907,7 @@ async def _start_coordinated_charging(
             )
             cooldown_state.start_cooldown_until = time.time() + retry_delay
             _LOGGER.warning(
-                "%s: Tesla physical start was not confirmed; retrying in %ds",
+                "%s: Tesla charging control was not established; retrying in %ds",
                 log_prefix,
                 retry_delay,
             )
@@ -9916,7 +9916,7 @@ async def _start_coordinated_charging(
         if confirm_tesla_start and cooldown_state is not None:
             cooldown_state.consecutive_start_failures += 1
             cooldown_state.start_retry_reason = (
-                "Tesla physical start was not confirmed"
+                "Tesla charging control was not established"
             )
             retry_delay = min(
                 PRICE_LEVEL_START_RETRY_BASE_SECONDS

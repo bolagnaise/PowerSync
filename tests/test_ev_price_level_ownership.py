@@ -3946,7 +3946,7 @@ def test_price_level_unconfirmed_tesla_start_stays_idle_and_uses_backoff(
     assert state.charging_mode == ""
     assert state.consecutive_start_failures == 1
     assert state.start_cooldown_until == clock[0] + 30
-    assert "physical start was not confirmed" in state.last_decision_reason.lower()
+    assert "charging control was not established" in state.last_decision_reason.lower()
 
     caplog.clear()
     assert asyncio.run(
