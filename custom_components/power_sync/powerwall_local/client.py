@@ -559,10 +559,12 @@ class PowerwallLocalClient:
             **({"before_write": before_write} if before_write is not None else {}),
             **({"before_submit": before_submit} if before_submit is not None else {}))
 
-    async def schedule_max_backup(self, duration_seconds: int = 7200, *, end_ts: float | None = None) -> bool:
+    async def schedule_max_backup(self, duration_seconds: int = 7200, *, end_ts: float | None = None, replace_existing: bool = True, start_ts: int | None = None) -> bool:
         """Schedule a local manual max-backup event."""
         return await self._transport.schedule_manual_backup(
-            self._din, duration_seconds, **({"end_ts": end_ts} if end_ts is not None else {})
+            self._din, duration_seconds, **({"end_ts": end_ts} if end_ts is not None else {}),
+            **({"replace_existing": False} if not replace_existing else {}),
+            **({"start_ts": start_ts} if start_ts is not None else {})
         )
 
     async def cancel_max_backup(self) -> bool:

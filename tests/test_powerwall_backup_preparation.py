@@ -98,3 +98,60 @@ def test_manual_backup_fingerprint_distinguishes_replacement_with_the_same_end()
     replacement = {**first, "start_time": 1100, "duration_seconds": 500}
     assert transport.manual_backup_matches_window({"manual_backup": replacement}, 1600, first) is False
     assert transport.manual_backup_matches_window(None, 1600, first) is None
+
+
+@pytest.mark.parametrize('events, allowed', [
+    (None, False), ({'manual_backup': None}, False),
+    ({'manual_backup': {'start_time': 10, 'duration_seconds': 20}, 'backup_events': []}, True),
+    ({'manual_backup': {'start_time': 100, 'duration_seconds': 60}, 'backup_events': []}, False),
+    ({'manual_backup': None, 'backup_events': []}, True),
+    ({'manual_backup': None, 'backup_events': [{'start_time': 90, 'duration_seconds': 20}]}, False),
+    ({'manual_backup': None, 'backup_events': [{'start_time': 160, 'duration_seconds': 20}]}, True),
+    ({'manual_backup': None, 'backup_events': [{'start_time': 10, 'duration_seconds': 20}]}, True),
+    ({'manual_backup': None, 'backup_events': [{}]}, False),
+])
+def test_new_native_window_requires_absence_and_no_scheduled_overlap(events, allowed):
+    assert transport.backup_window_available(events, 100, 160) is allowed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('events', [None, {'manual_backup': {'start_time': 10000, 'duration_seconds': 60}, 'backup_events': []},
+    {'manual_backup': None, 'backup_events': [{'start_time': 10000, 'duration_seconds': 60}]}])
+async def test_strict_native_transport_never_cancels_an_existing_or_unknown_window(monkeypatch, events):
+    client = object.__new__(transport.TEDAPIv1rTransport)
+    client.get_backup_events = AsyncMock(return_value=events)
+    client.cancel_manual_backup = AsyncMock(return_value=True)
+    client.post_v1r = AsyncMock()
+    monkeypatch.setattr(transport.time, 'time', lambda: 10000)
+    with pytest.raises(Exception, match='occupied or unavailable'):
+        await client.schedule_manual_backup('DIN', 60, end_ts=10060, replace_existing=False, start_ts=10000)
+    client.cancel_manual_backup.assert_not_awaited()
+    client.post_v1r.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_strict_native_transport_submits_the_prejournaled_fingerprint(monkeypatch):
+    client = object.__new__(transport.TEDAPIv1rTransport)
+    client.get_backup_events = AsyncMock(return_value={'manual_backup': None, 'backup_events': []})
+    client.cancel_manual_backup = AsyncMock()
+    reply = transport.transport_pb2.MessageEnvelope()
+    reply.teg.schedule_manual_backup_event_response.SetInParent()
+    client.post_v1r = AsyncMock(return_value=transport.TEDAPIResponse(True, reply.SerializeToString()))
+    monkeypatch.setattr(transport.time, 'time', lambda: 10020)
+    assert await client.schedule_manual_backup('DIN', 60, end_ts=10060, replace_existing=False, start_ts=10000)
+    packet = transport.transport_pb2.MessageEnvelope()
+    packet.ParseFromString(client.post_v1r.await_args.args[0])
+    info = packet.teg.schedule_manual_backup_event_request.scheduling_info
+    assert info.start_time.seconds == 10000 and info.duration_seconds == 60 and info.priority == (1 << 64) - 1
+    client.cancel_manual_backup.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_client_preserves_strict_window_parameters_at_transport_boundary():
+    from pathlib import Path
+    from types import SimpleNamespace as NS
+    from conftest import load_power_sync_function
+    forward = load_power_sync_function('schedule_max_backup', {}, path=Path(__file__).resolve().parents[1] / 'custom_components/power_sync/powerwall_local/client.py')
+    client = NS(_din='DIN', _transport=NS(schedule_manual_backup=AsyncMock(return_value=True)))
+    assert await forward(client, 60, end_ts=10060, replace_existing=False, start_ts=10000)
+    client._transport.schedule_manual_backup.assert_awaited_once_with('DIN', 60, end_ts=10060, replace_existing=False, start_ts=10000)
