@@ -41269,6 +41269,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         def _restore_not_completed(reason: str) -> dict[str, Any] | None:
             return {"success": False, "error": reason} if confirm_restore or response_requested else None
 
+        if source == "optimizer" and hold_soc_state.get("active"):
+            _LOGGER.info("Optimizer restore skipped while manual Hold SoC owns battery control")
+            return _restore_not_completed("manual Hold SoC is active")
+
         expected_tesla_restore_generation = call.data.get(
             "_tesla_restore_generation"
         )

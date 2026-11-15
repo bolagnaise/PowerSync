@@ -35,6 +35,30 @@ ROOT = Path(__file__).resolve().parent.parent
 INIT_PATH = ROOT / "custom_components" / "power_sync" / "__init__.py"
 
 
+def test_optimizer_restore_preserves_manual_hold_before_transport_or_timer_cleanup():
+    source = textwrap.dedent(_function_source("handle_restore_normal"))
+    source = source.replace("from .powerwall_local.native_max_charge import NativeMaxRestorePending", "pass")
+    async def transport_probe():
+        pytest.fail("optimizer cleanup must not reach hardware dispatch during manual hold")
+    timer = lambda: pytest.fail("manual hold timer must remain armed")
+    hold = {"active": True, "cancel_expiry_timer": timer}
+    namespace = {
+        "ServiceCall": object, "Any": object,
+        "_control_call_source": lambda call: call.data["source"],
+        "hold_soc_state": hold,
+        "_stop_local_powerwall_dispatch": transport_probe,
+        "NativeMaxRestorePending": RuntimeError,
+        "_LOGGER": SimpleNamespace(info=lambda *args: None),
+    }
+    exec(source, namespace)
+    call = SimpleNamespace(data={"source": "optimizer", "_confirm_restore": True},
+                           context=None)
+    result = asyncio.run(namespace["handle_restore_normal"](call))
+    assert result == {"success": False, "error": "manual Hold SoC is active"}
+    assert hold["active"] is True
+    assert hold["cancel_expiry_timer"] is timer
+
+
 def _find_function(tree: ast.AST, function_name: str) -> ast.FunctionDef | ast.AsyncFunctionDef:
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == function_name:
