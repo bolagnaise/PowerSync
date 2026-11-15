@@ -79,15 +79,21 @@ async def test_service_cannot_bypass_administrator_approval():
     node = next(n for n in ast.walk(source) if isinstance(n, ast.AsyncFunctionDef) and n.name == 'handle_set_native_site_limits')
     auth = AsyncMock(return_value=SimpleNamespace(id='admin', is_admin=True))
     control = SimpleNamespace(execute=AsyncMock(return_value={'success': True}))
-    namespace = {'hass': SimpleNamespace(auth=SimpleNamespace(async_get_user=auth)), '_limits_control': control, 'HomeAssistantError': RuntimeError}
-    exec(compile(ast.Module(body=[node], type_ignores=[]), '<native-limit-service>', 'exec'), namespace)
+    namespace = {'hass': SimpleNamespace(auth=SimpleNamespace(async_get_user=auth)), '_limits_control': control, 'HomeAssistantError': RuntimeError, 'ServiceCall': object}
+    source_helper = next(n for n in ast.walk(source) if isinstance(n, ast.FunctionDef) and n.name == '_control_call_source')
+    exec(compile(ast.Module(body=[source_helper, node], type_ignores=[]), '<native-limit-service>', 'exec'), namespace)
     call = SimpleNamespace(data={'operation': 'approve'}, context=SimpleNamespace(user_id=None))
     with pytest.raises(RuntimeError, match='administrator'):
         await namespace['handle_set_native_site_limits'](call)
     control.execute.assert_not_awaited()
     call.context.user_id = 'admin'
     assert await namespace['handle_set_native_site_limits'](call) == {'success': True}
-    control.execute.assert_awaited_once_with({'operation': 'approve'}, actor='admin')
+    control.execute.assert_awaited_once_with({'operation': 'approve'}, actor='admin', automatic=False)
+    control.execute.reset_mock()
+    call.data = {'export_limit_w': 0}
+    call.context.user_id = None
+    assert await namespace['handle_set_native_site_limits'](call) == {'success': True}
+    control.execute.assert_awaited_once_with({'export_limit_w': 0}, actor=None, automatic=True)
 
 
 @pytest.mark.asyncio

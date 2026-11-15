@@ -8578,7 +8578,7 @@ function _boardCards(ctx) {
   } else if (hasBattery) {
     add({
       key: 'controls', title: 'Battery controls', native: 'ps-controls-card',
-      config: { entities: {
+      config: { advanced: !!reg('binary_sensor', 'powerwall_local_paired'), entities: {
         mode: se('battery_mode'), chargeDuration: ex('select.power_sync_force_charge_duration'),
         forcePower: ex(forcePowerEntityId) || ex('number.power_sync_force_power_kw'),
         customDischarge: ex('number.power_sync_force_discharge_custom_duration'),

@@ -2382,7 +2382,7 @@ class PsAdvancedBatteryControls extends HTMLElement {
   }
   _render() {
     const expanded = [...this.querySelectorAll('[data-advanced-section]')].filter(node => node.open).map(node => node.dataset.advancedSection);
-    const focused = this.ownerDocument?.activeElement;
+    const focused = this.getRootNode?.()?.activeElement || this.ownerDocument?.activeElement;
     const focus = focused?.dataset?.advancedField ? { key: focused.dataset.advancedField, start: focused.selectionStart, end: focused.selectionEnd } : null;
     const d = this._draft, o = this._output, n = this._limits, disabled = this._busy ? 'disabled' : '';
     const field = (key, label) => `<label class="field"><span class="lab">${label}</span><input type="text" data-advanced-field="${key}" value="${psEsc(d[key])}" ${disabled}></label>`;
@@ -2483,6 +2483,8 @@ class PsControlsCard extends PsCardBase {
     this.innerHTML = `
       ${monitoring ? '<div class="callout cyan"><b>Monitoring mode is on.</b><span>The optimizer won\'t act on its plan, but these controls still change the battery.</span></div>' : ''}
       ${active ? `<div class="callout amber"><b>${psEsc(active[0])}</b><span>${psEsc(active[1])}${Number.isFinite(remaining) ? ` ${psDuration(remaining)} left.` : ''}</span></div>` : ''}
+      ${this._config.advanced || this._advancedBatteryNode ? '<div data-advanced-controls></div>' : ''}
+      <h4>Timed battery / Max controls</h4>
       <div class="field"><span class="lab" id="dur-l">Run for</span>
         <div class="chipsel" role="group" aria-labelledby="dur-l">${this._durations().map(m => `<button type="button" data-min="${m}" aria-pressed="${m === this._duration}">${m < 60 ? `${m}m` : `${m / 60}h`}</button>`).join('')}</div>
       </div>
@@ -2495,12 +2497,14 @@ class PsControlsCard extends PsCardBase {
         ${active ? `<button type="button" class="btn danger full${this._confirm === 'restore' ? ' confirming' : ''}" data-kind="restore">${restoring ? 'Restoring…' : this._confirm === 'restore' ? 'Confirm restore normal' : 'Restore normal'}</button>` : ''}
       </div>
       ${power ? `<label class="power-limit"><span class="row2"><span class="lab">Power limit<small>0 = Max · fastest rate allowed</small></span><output class="num" data-power-readout>${powerLabel}</output></span><input type="range" data-power-limit min="${Number(power.attributes?.min ?? 0)}" max="${Number(power.attributes?.max ?? 100)}" step="${Number(power.attributes?.step) || 1}" value="${Number.isFinite(powerKw) ? powerKw : 0}" aria-label="Power limit" aria-valuetext="${powerLabel}" ${Number.isFinite(powerKw) ? '' : 'disabled'}></label>` : ''}
-      <p class="hint">Tap a button twice to confirm. Hold charge and Power the home use the Run for preset.</p><div data-advanced-controls></div>`;
+      <p class="hint">Tap a button twice to confirm. Hold charge and Power the home use the Run for preset. Use Battery power and targets for exact battery watts or Idle.</p>`;
+    if (this._config.advanced || this._advancedBatteryNode) {
     this._advancedBatteryNode ||= document.createElement('power-sync-advanced-controls');
     this._advancedBatteryNode.entryId = this._config.entry_id;
     this.querySelector('[data-advanced-controls]')?.append(this._advancedBatteryNode);
     this._advancedBatteryNode.hass = hass;
     this._advancedBatteryNode.controlMode = mode;
+    }
     if (focus) {
       const input = this.querySelector(`[data-timing-input="${focus.key}"]`);
       input?.focus({ preventScroll: true });
