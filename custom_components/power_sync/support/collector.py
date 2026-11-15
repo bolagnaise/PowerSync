@@ -84,6 +84,20 @@ def action_event(raw, kind, timestamp):
                 result[field] = raw[field]
         result["status"] = "observation" if raw.get("record_type") == "observation" else "command_result"
         result["evidence_level"] = "physical_observation" if raw.get("physical_confirmation") is True else "command_result"
+    elif kind == "ev_preparation":
+        for key in ("reason", "vehicle_state", "binding_result"):
+            value = raw.get(key)
+            if type(value) is not str or value not in CONTRACT["string_fields"][key]:
+                raise SupportError("unsupported_event")
+            result[key] = value
+        if type(raw.get("success")) is not bool:
+            raise SupportError("unsupported_event")
+        for key in ("before_source_time", "after_source_time", "refresh_started_at"):
+            result[key] = number(raw.get(key))
+        revision = raw.get("input_revision")
+        if type(revision) is str:
+            result["input_revision"] = revision
+        result.update(success=raw["success"], evidence_level="decision", physical_confirmation=False)
     else:
         raise SupportError("unsupported_event")
     validate_evidence({"records": [result]})

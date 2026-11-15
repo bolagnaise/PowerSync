@@ -2376,6 +2376,7 @@ async def _wake_tesla_ev_for_command(
     hass: HomeAssistant,
     vehicle_vin: Optional[str],
     command_entity: str,
+    support_entry_id: str | None = None,
 ) -> bool:
     """Prepare an EV for a command, preserving provider-specific wake ownership.
 
@@ -2391,10 +2392,13 @@ async def _wake_tesla_ev_for_command(
     if getattr(entity, "platform", None) == "tesla_fleet":
         from ..tesla_ev_observation import async_prepare_tesla_fleet_command
 
+        support = hass.data.get("power_sync_support", {}).get(support_entry_id)
+        observer = getattr(support, "observe_preparation", None)
         return await async_prepare_tesla_fleet_command(
             hass,
             str(vehicle_vin or ""),
             command_entity,
+            diagnostic_observer=observer,
         )
     return await _wake_tesla_ev(hass, vehicle_vin)
 
@@ -10230,7 +10234,7 @@ async def _action_start_ev_charging(
                 return False
 
             wake_success = await _wake_tesla_ev_for_command(
-                hass, vehicle_vin, charge_switch_entity
+                hass, vehicle_vin, charge_switch_entity, config_entry.entry_id
             )
             if not wake_success:
                 _LOGGER.warning("Wake failed (possibly due to API credits), skipping charge command")
@@ -10644,7 +10648,7 @@ async def _action_stop_ev_charging(
                 command_registration = er.async_get(hass).entities.get(charge_switch_entity)
                 if getattr(command_registration, "platform", None) != "tesla_fleet":
                     wake_success = await _wake_tesla_ev_for_command(
-                        hass, vehicle_vin, charge_switch_entity
+                        hass, vehicle_vin, charge_switch_entity, config_entry.entry_id
                     )
                     if not wake_success:
                         _LOGGER.warning("Wake failed (possibly due to API credits), skipping stop charge command")
@@ -10784,7 +10788,7 @@ async def _action_set_ev_charge_limit(
 
         try:
             wake_success = await _wake_tesla_ev_for_command(
-                hass, vehicle_vin, charge_limit_entity
+                hass, vehicle_vin, charge_limit_entity, config_entry.entry_id
             )
             if not wake_success:
                 _LOGGER.debug("Wake failed (possibly due to API credits), skipping set charge limit command")
@@ -11065,7 +11069,7 @@ async def _action_set_ev_charging_amps(
                     )
 
             wake_success = await _wake_tesla_ev_for_command(
-                hass, vehicle_vin, charging_amps_entity
+                hass, vehicle_vin, charging_amps_entity, config_entry.entry_id
             )
             if not wake_success:
                 _LOGGER.debug("Wake failed (possibly due to API credits), skipping set amps command")

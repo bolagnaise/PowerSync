@@ -81,7 +81,10 @@
     "max_grid_import_w",
     "max_grid_export_w",
     "battery_capacity_wh",
-    "grid_charge_soc_cap"
+    "grid_charge_soc_cap",
+    "before_source_time",
+    "after_source_time",
+    "refresh_started_at"
   ],
   "boolean_fields": [
     "monitoring_mode",
@@ -177,11 +180,28 @@
       "retention_evicted",
       "profit_max_solar_export",
       "rte_economic_hold",
-      "other"
+      "other",
+      "invalid_vin",
+      "invalid_timeout",
+      "command_binding_missing",
+      "source_unavailable",
+      "refresh_failed",
+      "command_binding_changed",
+      "source_changed",
+      "payload_vin_mismatch",
+      "vehicle_state_unknown",
+      "charge_timestamp_missing",
+      "charge_timestamp_future",
+      "charge_timestamp_stale",
+      "charge_timestamp_before_refresh",
+      "charge_timestamp_not_advanced",
+      "provider_wake",
+      "ready"
     ],
     "event": [
       "optimizer_action",
-      "ev_command"
+      "ev_command",
+      "ev_preparation"
     ],
     "status": [
       "evaluating",
@@ -210,6 +230,17 @@
     "input_provenance": [
       "cached_after_solve",
       "solve_commit"
+    ],
+    "vehicle_state": [
+      "online",
+      "asleep",
+      "offline",
+      "unknown"
+    ],
+    "binding_result": [
+      "unverified",
+      "verified",
+      "changed"
     ]
   }
 }

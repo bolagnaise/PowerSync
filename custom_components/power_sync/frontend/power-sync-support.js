@@ -215,9 +215,9 @@ class PowerSyncSupportCard extends HTMLElement {
       const invitation = field('Support invitation', 'input', step); invitation.type = 'text'; invitation.value = ''; invitation.placeholder = 'Paste invitation from your private ticket'; invitation.maxLength = this._ongoing ? 6000 : 128; invitation.autocomplete = 'off'; invitation.spellcheck = false;
       if (this._ongoing) this.renderOngoingSetup(step, invitation, { button, field, details, checkbox });
       else {
-        const summary = this.node('p', 'Sharing: versions, safe settings and energy readings · 1 hour · no past history.', step); summary.className = 'muted';
-        const options = details('Choose what to share', step), cats = {};
-        for (const [category, label] of Object.entries(labels)) cats[category] = checkbox(label, ['system','entities'].includes(category), options);
+        const summary = this.node('p', 'All six diagnostic feeds selected · 1 hour · no past history.', step); summary.className = 'muted';
+        const options = details('Choose what to share', step), cats = {}; options.open = true;
+        for (const [category, label] of Object.entries(labels)) cats[category] = checkbox(label, true, options);
         const duration = field('Support access duration', 'select', options);
         for (const [value,label] of [[3600,'1 hour'],[7200,'2 hours'],[28800,'8 hours']]) { const o = this.node('option', label, duration); o.value = String(value); }
         const history = field('Historical sharing window', 'select', options);
@@ -226,7 +226,7 @@ class PowerSyncSupportCard extends HTMLElement {
         const prepare = button('Get pairing code', () => this.run('start', { invitation_token: invitation.value.trim(), categories: Object.keys(cats).filter(k => cats[k].checked), duration: Number(duration.value), history_seconds: Number(history.value), ha_recorder: haRecorder.checked }), step, 'primary');
         const update = () => {
           const selected = Object.keys(cats).filter(k => cats[k].checked);
-          summary.textContent = `Sharing: ${selected.map(k => labels[k].toLowerCase()).join(', ') || 'nothing selected'} · ${Number(duration.value) / 3600} hour(s) · ${Number(history.value) ? 'selected past history' : 'no past history'}${haRecorder.checked ? ' · HA Recorder included' : ''}.`;
+          summary.textContent = `${selected.length === 6 ? 'All six diagnostic feeds: ' : 'Sharing: '}${selected.map(k => labels[k].toLowerCase()).join(', ') || 'nothing selected'} · ${Number(duration.value) / 3600} hour(s) · ${Number(history.value) ? 'selected past history' : 'no past history'}${haRecorder.checked ? ' · HA Recorder included' : ''}.`;
           prepare.disabled = this._busy || !this._entry || !invitation.value.trim() || !selected.length;
         };
         prepare.disabled = true; invitation.oninput = update;

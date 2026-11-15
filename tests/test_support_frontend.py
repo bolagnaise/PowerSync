@@ -52,6 +52,15 @@ def test_support_card_requires_admin_and_reviewed_scope_before_confirmation():
     const start=nodes.find(x=>x.textContent==='Get pairing code');assert.equal(start.disabled,true,'empty invitation cannot start');
     invitation.value='INVITATION';invitation.oninput();assert.equal(start.disabled,false);
     const categories=nodes.filter(x=>x.tag==='details'&&x.children.some(c=>c.textContent==='Choose what to share'))[0].querySelectorAll().filter(x=>x.type==='checkbox').slice(0,6);
+    assert.equal(categories.length,6);
+    assert.ok(categories.every(c=>c.checked),'all six diagnostic feeds are included by default');
+    assert.ok(nodes.some(x=>x.textContent?.includes('All six diagnostic feeds')),'default scope is visible before pairing');
+    const recorder=nodes.find(x=>x.tag==='label'&&x.children.some(c=>c.textContent==='Also share approved historical readings from HA Recorder')).children[0];
+    assert.equal(recorder.checked,false,'HA Recorder remains a separate choice');
+    start.onclick();
+    assert.equal(calls.at(-1)[0],'start');
+    assert.equal(calls.at(-1)[1].categories.length,6,'all defaults reach the actual request');
+    assert.equal(calls.at(-1)[1].ha_recorder,false);
     categories.forEach(c=>{c.checked=false;c.onchange();});assert.equal(start.disabled,true,'empty sharing scope cannot start');
     categories[0].checked=true;categories[0].onchange();assert.equal(start.disabled,false);
     card._status={state:'pending',code:'PAIRING'};card.render();nodes=card.shadowRoot.querySelectorAll();

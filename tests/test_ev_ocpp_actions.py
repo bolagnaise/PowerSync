@@ -2526,6 +2526,12 @@ def test_tesla_fleet_charge_switch_starts_without_separate_wake_button(monkeypat
             ),
         },
     )
+    observed = []
+    other_observed = []
+    hass.data['power_sync_support'] = {
+        'entry-1': SimpleNamespace(observe_preparation=observed.append),
+        'entry-other': SimpleNamespace(observe_preparation=other_observed.append),
+    }
     coordinator = SimpleNamespace(
         data={
             "state": "ONLINE",
@@ -2593,6 +2599,12 @@ def test_tesla_fleet_charge_switch_starts_without_separate_wake_button(monkeypat
     assert hass.services.calls == [
         ("switch", "turn_on", {"entity_id": charge_switch})
     ]
+
+    assert len(observed) == 1
+    assert observed[0]['reason'] == 'provider_wake'
+    assert observed[0]['binding_result'] == 'verified'
+    assert observed[0]['evidence_level'] == 'decision'
+    assert other_observed == [], 'a different PowerSync entry must not receive the observation'
 
 
 def test_non_fleet_command_keeps_existing_separate_wake_requirement(monkeypatch):

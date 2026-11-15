@@ -230,6 +230,23 @@ class SupportRuntime:
         except Exception:
             self.recorder.dropped += 1
 
+    def observe_preparation(self, raw):
+        """Observe only this entry's existing preparation; never refresh a device."""
+        permitted = self.session.state == "active" and bool(
+            {"control_trace", "logs"} & set(self.session.scope.get("categories", [])))
+        if self.closed or not (self.recording or permitted):
+            return
+        try:
+            timestamp = number(raw.get("timestamp"))
+            if timestamp is None or abs(time.time() - timestamp) > 300:
+                return
+            projected = action_event(raw, "ev_preparation", timestamp)
+            self.recorder.append({"schema_version": 1, "captured_at": time.time(),
+                "source": "support_recorder", "entities": [],
+                "control_trace": [projected], "logs": [projected]})
+        except Exception:
+            self.recorder.dropped += 1
+
     async def request(self, path, body=None, *, token=None):
         headers = {"Authorization": f"Bearer {token}"} if token else {}
         async with async_get_clientsession(self.hass).request("GET" if body is None else "POST", BROKER + path,

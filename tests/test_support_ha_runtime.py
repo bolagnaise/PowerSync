@@ -517,3 +517,43 @@ def test_diagnostic_cleanup_does_not_delay_existing_hardware_unload():
     platform=next(n for n in awaits if 'async_unload_platforms' in ast.unparse(n.value))
     diagnostic=next(n for n in awaits if ast.unparse(n.value).startswith('_unload_support('))
     assert diagnostic.lineno>platform.lineno
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('categories,recording,recorded', [
+    (['system', 'entities'], False, False),
+    (['control_trace'], False, True),
+    (['logs'], False, True),
+    (['history'], False, False),
+    ([], True, True),
+])
+async def test_tesla_preparation_is_projected_and_scoped_without_device_reads(runtime, categories, recording, recorded):
+    rt, _, _, _, _ = runtime
+    now = time.time()
+    rt.recording = recording
+    rt.session.state = 'active'
+    rt.session.scope = {'categories': categories, 'ha_recorder': False}
+    raw = {'event': 'ev_preparation', 'timestamp': now, 'success': False,
+        'reason': 'charge_timestamp_not_advanced', 'binding_result': 'verified',
+        'vehicle_state': 'online', 'before_source_time': now - 1,
+        'after_source_time': now - 1, 'refresh_started_at': now,
+        'input_revision': 'a' * 64, 'vin': 'PRIVATE_VIN', 'exception': 'PRIVATE_ERROR'}
+    rt.observe_preparation(raw)
+    result = await rt.collect({'category': 'control_trace', 'start': now - 2, 'end': now + 2})
+    assert bool(result['records']) is recorded
+    if recorded:
+        row = result['records'][0]['records'][0]
+        assert row['reason'] == 'charge_timestamp_not_advanced'
+        assert row['before_source_time'] == now - 1
+        assert row['after_source_time'] == now - 1
+        assert row['evidence_level'] == 'decision'
+        assert row['physical_confirmation'] is False
+        assert 'PRIVATE' not in json.dumps(result)
+        c.validate_evidence(result)
+        assert (await rt.collect({'category': 'logs', 'start': now - 2, 'end': now + 2}))['records']
+    rt.hass.services.async_call.assert_not_called()
+    rt.session.state = 'closed'
+    rt.recording = False
+    count = len(rt.recorder.dump())
+    rt.observe_preparation(raw)
+    assert len(rt.recorder.dump()) == count

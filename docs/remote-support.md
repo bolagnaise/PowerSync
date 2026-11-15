@@ -21,8 +21,9 @@ For a temporary remote session arranged through your private support ticket:
 1. Paste the investigator's invitation into **Support invitation** and select
    **Get pairing code**.
 2. Use **Choose what to share** to review categories, history and duration.
-   The default shares versions, safe settings and energy readings for one hour,
-   without past history.
+   All six diagnostic feeds are selected by default for one hour, without past
+   history. You can deselect feeds before pairing. HA Recorder history remains
+   a separate choice.
 3. Select **Copy pairing code** and send it through the same private ticket.
    A pairing code alone does not approve diagnostic reads.
 4. When **Review and approve** appears, check the investigator, reporter,
@@ -54,3 +55,11 @@ an investigator or an approved processor.
 
 Ongoing diagnostic access and private offline optimizer testing have their own
 approval and retention policy in [Diagnostics and privacy](diagnostics-privacy.md).
+
+Tesla Fleet command preparation is included in **Recorded control observations**
+and **Structured diagnostic events** while local recording or an approved session
+with either feed is active. It records the refusal reason, source-binding result,
+vehicle state and charge-data timestamps before and after the existing refresh.
+These observations do not wake the vehicle or send commands. A successful
+preparation check is a decision, not proof that a command was sent or charging
+started. No VIN, entity name, credentials or provider error text is shared.

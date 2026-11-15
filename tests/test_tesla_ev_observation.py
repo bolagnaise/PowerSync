@@ -1935,3 +1935,72 @@ async def test_tessie_coordinator_refresh_uses_advancing_charge_timestamp(indepe
     result = await observation.async_read_tesla_vehicle(hass, VIN_A)
     assert result is not None and result.domain == "tessie"
     assert await observation.async_read_tesla_vehicle(hass, VIN_A) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('variant,reason', [
+    ('unchanged', 'charge_timestamp_before_refresh'),
+    ('not_advanced', 'charge_timestamp_not_advanced'),
+    ('missing', 'charge_timestamp_missing'),
+    ('stale', 'charge_timestamp_stale'),
+    ('future', 'charge_timestamp_future'),
+    ('error', 'refresh_failed'),
+    ('rate_limited', 'refresh_failed'),
+    ('rebound', 'command_binding_changed'),
+    ('wrong_vin', 'payload_vin_mismatch'),
+    ('unknown', 'vehicle_state_unknown'),
+    ('ready', 'ready'),
+    ('asleep', 'provider_wake'),
+])
+async def test_preparation_reports_exact_refusal_and_source_timestamps(variant, reason, monkeypatch):
+    now = 1_800_000_000.0
+    monkeypatch.setattr(observation.time, 'time', lambda: now)
+    old = now if variant == 'not_advanced' else now - 1
+    coordinator = _Coordinator(_fleet_data('ONLINE', old))
+    hass, entity = _fleet_command_hass(coordinator)
+    observed = []
+
+    async def refresh(coord):
+        if variant == 'error':
+            raise RuntimeError('PRIVATE_PROVIDER_ERROR')
+        if variant == 'rate_limited':
+            coord.last_update_success = False
+        after = {'unchanged': old, 'not_advanced': old, 'missing': None,
+                 'stale': now - 100, 'future': now + 10}.get(variant, now)
+        coord.data = _fleet_data('ASLEEP' if variant == 'asleep' else 'UNKNOWN' if variant == 'unknown' else 'ONLINE', after)
+        if variant == 'rebound':
+            hass.entity_registry.async_get(entity).unique_id = 'rebound'
+        if variant == 'wrong_vin':
+            coord.data['vin'] = VIN_B
+
+    coordinator.refresh = refresh
+    result = await observation.async_prepare_tesla_fleet_command(
+        hass, VIN_A, entity, diagnostic_observer=observed.append)
+    assert result is (variant in {'ready', 'asleep'})
+    assert coordinator.refreshes == 1
+    assert len(observed) == 1
+    row = observed[0]
+    assert row['reason'] == reason
+    assert row['success'] is result
+    assert row['before_source_time'] == old
+    assert row['refresh_started_at'] == now
+    if variant not in {'error', 'missing'}:
+        assert row['after_source_time'] == coordinator.data.get('charge_state_timestamp')
+    assert row['evidence_level'] == 'decision'
+    assert row['physical_confirmation'] is False
+    assert VIN_A not in repr(row) and VIN_B not in repr(row)
+    assert entity not in repr(row) and 'PRIVATE_PROVIDER_ERROR' not in repr(row)
+
+
+@pytest.mark.asyncio
+async def test_preparation_observer_failure_cannot_change_admission(monkeypatch):
+    monkeypatch.setattr(observation.time, 'time', lambda: 1_800_000_000.0)
+    coordinator = _Coordinator(_fleet_data('ONLINE', 1_799_999_999.0))
+    hass, entity = _fleet_command_hass(coordinator)
+    async def refresh(coord):
+        coord.data = _fleet_data('ONLINE', 1_800_000_000.0)
+    coordinator.refresh = refresh
+    def broken(_):
+        raise RuntimeError('observer failed')
+    assert await observation.async_prepare_tesla_fleet_command(
+        hass, VIN_A, entity, diagnostic_observer=broken) is True

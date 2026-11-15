@@ -6,6 +6,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from importlib import import_module
 import inspect
+import hashlib
 import math
 import re
 import time
@@ -582,6 +583,7 @@ async def async_prepare_tesla_fleet_command(
     command_entity: str,
     *,
     timeout: float = 10,
+    diagnostic_observer: Callable[[dict], None] | None = None,
 ) -> bool:
     """Refresh the exact Fleet vehicle before a mutating command.
 
@@ -593,59 +595,92 @@ async def async_prepare_tesla_fleet_command(
     report must also carry a newer, fresh charge timestamp; cached or
     rate-limited data cannot authorize a write.
     """
+    diagnostic = {"event": "ev_preparation", "timestamp": time.time(),
+        "evidence_level": "decision", "physical_confirmation": False,
+        "before_source_time": None, "after_source_time": None,
+        "refresh_started_at": None, "vehicle_state": "unknown",
+        "binding_result": "unverified"}
+
+    def finish(success: bool, reason: str) -> bool:
+        # A primitive observation cannot authorize a write or interfere with it.
+        if diagnostic_observer is not None:
+            try:
+                diagnostic_observer({**diagnostic, "success": success, "reason": reason})
+            except Exception:
+                pass
+        return success
+
     canonical = _canonical_vin(vin)
     if canonical is None:
-        return False
+        return finish(False, "invalid_vin")
     try:
         timeout_value = float(timeout)
     except (TypeError, ValueError, OverflowError):
-        return False
+        return finish(False, "invalid_timeout")
     if not math.isfinite(timeout_value) or timeout_value <= 0:
-        return False
+        return finish(False, "invalid_timeout")
     timeout_value = min(timeout_value, MAX_TIMEOUT_SECONDS)
     try:
         binding = _fleet_command_binding(hass, command_entity)
         if binding is None:
-            return False
+            return finish(False, "command_binding_missing")
         source = _fleet_command_source(hass, canonical, command_entity, binding)
     except Exception:
-        return False
+        return finish(False, "source_unavailable")
     if source is None:
-        return False
+        return finish(False, "source_unavailable")
+    diagnostic["binding_result"] = "verified"
+    diagnostic["input_revision"] = hashlib.sha256(
+        repr((canonical, command_entity, binding)).encode()).hexdigest()
+    diagnostic["before_source_time"] = _source_charge_timestamp(getattr(source.coordinator, "data", None))
+    diagnostic["refresh_started_at"] = time.time()
     try:
         refreshed = await _refresh_shared(hass, source, timeout=timeout_value)
     except asyncio.CancelledError:
         raise
     except Exception:
-        return False
+        return finish(False, "refresh_failed")
     except BaseException as error:
         if _is_tesla_provider_error(error):
-            return False
+            return finish(False, "refresh_failed")
         raise
+    if refreshed is not None:
+        diagnostic.update(before_source_time=refreshed.before_timestamp,
+            after_source_time=_source_charge_timestamp(refreshed.data),
+            refresh_started_at=refreshed.started_at)
     if refreshed is None or not refreshed.successful:
-        return False
+        return finish(False, "refresh_failed")
     try:
         if _fleet_command_binding(hass, command_entity) != binding:
-            return False
+            diagnostic["binding_result"] = "changed"
+            return finish(False, "command_binding_changed")
         current_source = _fleet_command_source(hass, canonical, command_entity, binding)
     except Exception:
-        return False
+        return finish(False, "source_changed")
     if current_source is None or current_source.key() != source.key():
-        return False
+        diagnostic["binding_result"] = "changed"
+        return finish(False, "source_changed")
     if not _payload_vin_matches_source(refreshed.data, source.vin):
-        return False
+        return finish(False, "payload_vin_mismatch")
     state_value = _fleet_state(refreshed.data)
+    diagnostic["vehicle_state"] = state_value.lower() if state_value in {"ONLINE", "ASLEEP", "OFFLINE"} else "unknown"
     if state_value in {"ASLEEP", "OFFLINE"}:
-        return True
+        return finish(True, "provider_wake")
     if state_value != "ONLINE":
-        return False
+        return finish(False, "vehicle_state_unknown")
     timestamp = _source_charge_timestamp(refreshed.data)
     now = time.time()
-    if timestamp is None or timestamp > now + 5 or now - timestamp > MAX_SOURCE_AGE_SECONDS:
-        return False
+    if timestamp is None:
+        return finish(False, "charge_timestamp_missing")
+    if timestamp > now + 5:
+        return finish(False, "charge_timestamp_future")
+    if now - timestamp > MAX_SOURCE_AGE_SECONDS:
+        return finish(False, "charge_timestamp_stale")
     if timestamp < math.floor(refreshed.started_at):
-        return False
-    return refreshed.before_timestamp is None or timestamp > refreshed.before_timestamp
+        return finish(False, "charge_timestamp_before_refresh")
+    if refreshed.before_timestamp is not None and timestamp <= refreshed.before_timestamp:
+        return finish(False, "charge_timestamp_not_advanced")
+    return finish(True, "ready")
 
 
 async def async_read_tesla_vehicle(
