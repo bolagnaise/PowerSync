@@ -9,6 +9,7 @@ import inspect
 import logging
 import math
 import sys
+import textwrap
 import types
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -2545,68 +2546,82 @@ def test_failed_dynamic_replan_keeps_last_accepted_price_timestamp_pair(
     assert coordinator._pending_price_timestamps is None
 
 
-def test_optional_second_pass_failure_keeps_first_published_schedule_price_pair(
+def test_optional_second_pass_failure_keeps_previous_completed_schedule_price_pair(
     opt_module,
 ):
-    method_source = inspect.getsource(
+    """Run the actual publication/second-solve boundaries in source order.
+
+    The first pass is provisional. A failed reserve solve must retain both the
+    previous completed schedule and its matching price timestamps and values.
+    """
+    method = ast.parse(textwrap.dedent(inspect.getsource(
         opt_module.OptimizationCoordinator._run_optimization
-    )
-    first_schedule_publish = method_source.index(
-        "self._current_schedule = result.schedule"
-    )
-    first_result_publish = method_source.index(
-        "self._last_optimizer_result = result",
-        first_schedule_publish,
-    )
-    price_cache_commit = method_source.index(
-        "self._commit_price_forecast_cache(import_prices, export_prices)",
-        first_result_publish,
-    )
-    optional_second_pass = method_source.index(
-        "reserve_changed = self._apply_auto_reserve_recommendation(result)",
-        price_cache_commit,
-    )
-    assert (
-        first_schedule_publish
-        < first_result_publish
-        < price_cache_commit
-        < optional_second_pass
-    )
+    ))).body[0]
+    planning = next(node.body for node in method.body if isinstance(node, ast.Try))
+    boundaries = []
+    for node in planning:
+        if isinstance(node, ast.If) and ast.unparse(node.test) == (
+            "reserve_changed or used_reference_override"
+        ):
+            # Keep the real awaited solve; it fails before its overlays run.
+            boundaries.append(node.body[0])
+        elif isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Attribute) and target.attr in {
+                "_current_schedule", "_last_optimizer_result"
+            } for target in node.targets
+        ):
+            boundaries.append(node)
+        elif isinstance(node, ast.Expr) and isinstance(node.value, ast.Call) and (
+            isinstance(node.value.func, ast.Attribute)
+            and node.value.func.attr == "_commit_price_forecast_cache"
+        ):
+            boundaries.append(node)
+    assert sum(isinstance(node, ast.Assign) and isinstance(node.value, ast.Await)
+               for node in boundaries) == 1
+    function = ast.parse(
+        "async def publish(self, result, _run_optimizer_once, import_prices, export_prices): pass"
+    ).body[0]
+    function.body = boundaries
+    namespace = {}
+    exec(compile(ast.fix_missing_locations(ast.Module(
+        body=[function], type_ignores=[]
+    )), "<optimizer publication boundaries>", "exec"), namespace)
 
     coordinator = object.__new__(opt_module.OptimizationCoordinator)
     old_origin = datetime(2026, 5, 3, 17, 20, tzinfo=timezone.utc)
     new_origin = old_origin + timedelta(minutes=5)
-    old_schedule = SimpleNamespace(name="old")
-    first_schedule = SimpleNamespace(name="first-pass")
-    old_import_prices = [0.30, 0.31]
-    old_export_prices = [0.0, 0.45]
-    new_import_prices = [0.32, 0.33]
-    new_export_prices = [0.45, 0.45]
-    new_timestamps = [new_origin, new_origin + timedelta(minutes=5)]
+    old_schedule = SimpleNamespace(name="previous-completed")
+    old_result = SimpleNamespace(schedule=old_schedule)
+    first_result = SimpleNamespace(schedule=SimpleNamespace(name="provisional"))
     coordinator._current_schedule = old_schedule
-    coordinator._last_import_prices = old_import_prices
-    coordinator._last_export_prices = old_export_prices
-    coordinator._last_price_timestamps = [
-        old_origin,
-        old_origin + timedelta(minutes=5),
+    coordinator._last_optimizer_result = old_result
+    coordinator._last_import_prices = [0.30, 0.31]
+    coordinator._last_export_prices = [0.0, 0.45]
+    old_timestamps = [old_origin, old_origin + timedelta(minutes=5)]
+    coordinator._last_price_timestamps = old_timestamps
+    coordinator._pending_price_timestamps = [
+        new_origin, new_origin + timedelta(minutes=5)
     ]
-    coordinator._pending_price_timestamps = new_timestamps
 
-    try:
-        coordinator._current_schedule = first_schedule
-        coordinator._commit_price_forecast_cache(
-            new_import_prices,
-            new_export_prices,
-        )
+    async def fail_second_solve():
+        await asyncio.sleep(0)
+        assert coordinator._current_schedule is old_schedule
+        assert coordinator._last_optimizer_result is old_result
+        assert coordinator._last_price_timestamps == old_timestamps
+        assert coordinator._last_import_prices == [0.30, 0.31]
+        assert coordinator._last_export_prices == [0.0, 0.45]
         raise RuntimeError("optional auto-reserve re-solve failed")
-    except RuntimeError:
-        pass
 
-    assert coordinator._current_schedule is first_schedule
-    assert coordinator._last_import_prices == new_import_prices
-    assert coordinator._last_export_prices == new_export_prices
-    assert coordinator._last_price_timestamps == new_timestamps
-    assert coordinator._pending_price_timestamps is None
+    with pytest.raises(RuntimeError, match="auto-reserve re-solve failed"):
+        asyncio.run(namespace["publish"](
+            coordinator, first_result, fail_second_solve,
+            [0.32, 0.33], [0.45, 0.45],
+        ))
+    assert coordinator._current_schedule is old_schedule
+    assert coordinator._last_optimizer_result is old_result
+    assert coordinator._last_price_timestamps == old_timestamps
+    assert coordinator._last_import_prices == [0.30, 0.31]
+    assert coordinator._last_export_prices == [0.0, 0.45]
 
 
 def test_dynamic_to_static_failed_replan_keeps_dynamic_price_timestamp_pair(
