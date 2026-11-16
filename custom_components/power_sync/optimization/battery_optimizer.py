@@ -9113,6 +9113,22 @@ class BatteryOptimizer:
         )
         grid_charge_cap_active = allow_grid_charge and grid_charge_soc_cap < 0.999
 
+        # A zero-discharge LP slot can be saving energy for expensive home
+        # imports, even when export prices never justify a hold. Preserve that
+        # intent across the full horizon, including peaks more than six hours
+        # away. Use planned home discharge, not a higher price alone.
+        future_home_use_price = [float("-inf")] * n
+        best_home_use_price = float("-inf")
+        if import_prices is not None:
+            for idx in range(n - 1, -1, -1):
+                future_home_use_price[idx] = best_home_use_price
+                if (
+                    battery_discharge[idx] > 0.1
+                    and load[idx] - solar[idx] > 0.1
+                    and grid_export[idx] <= 0.1
+                ):
+                    best_home_use_price = max(best_home_use_price, import_prices[idx])
+
         # When native PV makes an earlier deadline hold unnecessary, carry
         # that extra recharge into the emitted schedule as well as the check.
         deadline_native_charge_slots: set[int] = set()
@@ -9487,6 +9503,12 @@ class BatteryOptimizer:
                     action = "idle"
                 elif disable_idle:
                     action = "self_consumption"
+                elif (
+                    economic_hold
+                    and import_prices is not None
+                    and future_home_use_price[t] > import_prices[t] + 0.001
+                ):
+                    action = "idle"
                 elif (
                     economic_hold
                     and import_prices is not None

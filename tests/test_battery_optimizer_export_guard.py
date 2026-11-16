@@ -5713,3 +5713,49 @@ def test_primary_limit_without_incumbent_returns_labeled_greedy_plan(
     assert result.lp_stats["fallback_reason"] == "solver_failed"
     assert result.lp_stats["status"] == status
     assert result.lp_stats["message"] == message
+
+
+@pytest.mark.parametrize("starting_soc", [0.24, 0.37])
+@pytest.mark.parametrize("disable_idle", [False, True])
+def test_hold_cheap_charge_for_later_home_import_peak(
+    battery_optimizer_module, starting_soc, disable_idle,
+):
+    """An LP hold must preserve energy for home use even without export value."""
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=27000, max_charge_w=10000, max_discharge_w=10000,
+        backup_reserve=0.2, hardware_reserve=0.2, interval_minutes=60,
+        horizon_hours=13, efficiency=0.92,
+    )
+    n = 13
+    schedule = optimizer._build_schedule(
+        n, grid_import=[1.0] * 12 + [0.0], grid_export=[0.0] * n,
+        battery_charge=[0.0] * n, battery_discharge=[0.0] * 12 + [1.0],
+        solar=[0.0] * n, load=[1.0] * n, soc_0=starting_soc,
+        import_prices=[0.114] + [0.1285] * 11 + [0.1776],
+        export_prices=[0.096] * n, disable_idle=disable_idle,
+    )
+    if disable_idle:
+        assert schedule.actions[0].action == "self_consumption"
+    else:
+        assert all(a.action == "idle" for a in schedule.actions[:12])
+        assert schedule.actions[11].soc == pytest.approx(starting_soc, abs=1e-4)
+        assert schedule.actions[12].battery_discharge_w > 900
+
+
+@pytest.mark.parametrize("later_discharge", [0.0, 1.0])
+@pytest.mark.parametrize("later_price", [0.1, 0.1776])
+def test_home_import_hold_requires_planned_higher_value_discharge(
+    battery_optimizer_module, later_discharge, later_price,
+):
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=27000, backup_reserve=0.2, hardware_reserve=0.2,
+        interval_minutes=60, horizon_hours=2,
+    )
+    schedule = optimizer._build_schedule(
+        2, grid_import=[1.0, 1.0 - later_discharge], grid_export=[0.0, 0.0],
+        battery_charge=[0.0, 0.0], battery_discharge=[0.0, later_discharge],
+        solar=[0.0, 0.0], load=[1.0, 1.0], soc_0=0.5,
+        import_prices=[0.1285, later_price], export_prices=[0.096, 0.096],
+    )
+    expected = "idle" if later_discharge and later_price > 0.1285 else "self_consumption"
+    assert schedule.actions[0].action == expected
