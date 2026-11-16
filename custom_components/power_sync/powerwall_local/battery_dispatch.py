@@ -155,7 +155,9 @@ def fixed_battery_watts(mode: str, target_w: float, snapshot: Any, config: dict)
     if not 0 <= soc <= 100:
         raise ValueError("Battery SOC is out of range")
     load, solar = _number(snapshot.load_w, "home power"), _number(snapshot.solar_w, "solar power")
-    if load < 0 or solar < 0:
+    # Signed PV meters include standby consumption. Preserve that draw in
+    # the site-flow calculation rather than rejecting it or clamping it away.
+    if load < 0:
         raise ValueError("Fixed battery output requires coherent load and solar")
     imported, exported = site_grid_limits_w(snapshot, config)
     software_import = config.get("optimization_max_grid_import_w")

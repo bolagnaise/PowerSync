@@ -31,6 +31,8 @@ Enter **5000** for **5 kW**, without commas or a unit suffix. Import and export 
 
 A power value within the input range can still be infeasible. The gateway's actual dispatch maximum can be below the combined inverter rating; it rejects an excessive request rather than silently reducing it. PowerSync also checks current solar, household load, reserve, permissions and connection limits. It does not guess an inverter rating from the number of batteries.
 
+In Home Assistant, a negative solar meter reading can represent standby consumption. Fixed battery control includes that consumption when checking site import and export limits, including when renewing an active command.
+
 For example, with 3000 W household load and 1000 W solar, a +5000 W battery target would export 3000 W. A 2000 W export ceiling makes that exact target infeasible. Conversely, with 6000 W load, no solar and a 4000 W import ceiling, 1000 W discharge is too little: import would still be 5000 W. Even idle can be infeasible when house load or solar alone crosses a site ceiling. Setting a higher site ceiling does not increase inverter output capability, and lowering a ceiling cannot guarantee enforcement against loads or generation the battery cannot balance.
 
 These values follow PowerSync's own API validation. Other integrations can expose different input ranges; those are not evidence that the same values work on this installation. See [Teslemetry's signed-dispatch reference](https://github.com/Teslemetry/tesla-fleet-api/blob/main/docs/fleet_api_energy_sites.md#energy-site-device-commands) and [aiopowerwall's dispatch and site-limit documentation](https://github.com/Teslemetry/aiopowerwall#api-surface). Acknowledgement, configuration readback and measured power remain distinct.

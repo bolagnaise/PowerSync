@@ -71,6 +71,42 @@ def test_fixed_charge_uses_battery_input_and_respects_solar():
                                 fixed_config(), target_basis="battery_output") == -2000
 
 
+@pytest.mark.parametrize("mode", ["charge", "discharge"])
+def test_fixed_output_accepts_signed_solar_standby_consumption(mode):
+    assert module.battery_watts(mode, 1800, fixed_snapshot(solar=-3),
+        fixed_config(), target_basis="battery_output") == (-1800 if mode == "charge" else 1800)
+
+
+def test_signed_solar_standby_is_preserved_in_site_limit_checks():
+    # Three watts of PV standby draw consumes three watts of import headroom.
+    with pytest.raises(ValueError, match="import"):
+        module.battery_watts("charge", 2000, fixed_snapshot(load=3000, solar=-3, imported=5),
+            fixed_config(), target_basis="battery_output")
+    assert module.battery_watts("discharge", 5000,
+        fixed_snapshot(load=3000, solar=-3, exported=1.998), fixed_config(),
+        target_basis="battery_output") == 5000
+
+
+@pytest.mark.asyncio
+async def test_fixed_output_renewal_survives_solar_entering_standby():
+    client = SimpleNamespace(get_snapshot=AsyncMock(return_value=fixed_snapshot()),
+        dispatch_battery_power=AsyncMock(return_value=True),
+        resume_battery_operation=AsyncMock(return_value=True))
+    controller = module.LocalBatteryDispatch(client, fixed_config, lambda mode: True,
+        AsyncMock(), AsyncMock())
+    try:
+        await controller.start("discharge", 1800, 600, target_basis="battery_output")
+        client.get_snapshot.return_value = fixed_snapshot(solar=-3)
+        assert await controller._write() == 1800
+        assert client.dispatch_battery_power.await_count == 2
+        client.get_snapshot.return_value = fixed_snapshot(load=-3)
+        with pytest.raises(ValueError, match="coherent"):
+            await controller._write()
+        assert client.dispatch_battery_power.await_count == 2
+    finally:
+        await controller.stop()
+
+
 @pytest.mark.parametrize("power", [True, False, None, "1800", float("nan"), float("inf"), -1])
 def test_fixed_output_rejects_ambiguous_or_invalid_values(power):
     with pytest.raises((ValueError, TypeError)):
