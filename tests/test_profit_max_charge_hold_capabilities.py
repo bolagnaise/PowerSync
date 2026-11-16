@@ -10,6 +10,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 from conftest import load_power_sync_submodule
 
 _PATH = (
@@ -472,3 +474,59 @@ def test_verified_hold_survives_consecutive_solves_without_oscillating():
     assert reasons == ["supported", "supported", "supported"]
     assert site.writes == ["Block Charging"]
     assert site.mode == "Block Charging"
+
+
+class _FoxLimitSite:
+    """Expose fresh entity/register readback and the separately polled cache."""
+
+    def __init__(self):
+        self.value = 50.0
+        self.data = {"max_charge_current_a": self.value}
+        self.writes = []
+        self._controller = SimpleNamespace(
+            get_status=lambda: {"max_charge_current_a": self.value}
+        )
+
+    async def set_charge_rate_limit(self, value):
+        self.value = float(value)
+        self.writes.append(self.value)
+        return True
+
+    async def async_request_refresh(self):
+        self.data["max_charge_current_a"] = self.value
+
+
+@pytest.mark.parametrize(
+    "coordinator_type", ["FoxESSEnergyCoordinator", "FoxESSEntityEnergyCoordinator"]
+)
+def test_foxess_owned_zero_limit_survives_polled_consecutive_solves(coordinator_type):
+    site = type(coordinator_type, (_FoxLimitSite,), {})()
+    adapter = resolve_solar_export_adapter("foxess", site)
+    hold = _MODULE.SolarExportHoldController(_Store(), adapter)
+
+    for cycle in range(3):
+        assert hold.capability()["supported"]
+        assert asyncio.run(hold.apply("entry-1", f"generation-{cycle}"))
+        # The regular provider poll observes the zero written by our own hold.
+        asyncio.run(site.async_request_refresh())
+        assert site.data["max_charge_current_a"] == 0.0
+
+    assert site.writes == [0.0]
+    assert hold.status["plan"]["targets"] == [{"id": "battery", "value": 50.0}]
+    # Another controller must not adopt a zero limit with no restore baseline.
+    assert not adapter.capability().supported
+    assert asyncio.run(hold.clear("transition_to_self_consumption"))
+    assert site.value == 50.0
+    assert not hold.active
+
+
+@pytest.mark.parametrize("value", [None, -1.0, math.nan, math.inf, "unavailable"])
+def test_foxess_owned_hold_still_rejects_invalid_limit_readback(value):
+    site = type("FoxESSEntityEnergyCoordinator", (_FoxLimitSite,), {})()
+    hold = _MODULE.SolarExportHoldController(
+        _Store(), resolve_solar_export_adapter("foxess", site)
+    )
+    assert asyncio.run(hold.apply("entry-1", "generation-1"))
+    site.data["max_charge_current_a"] = value
+
+    assert hold.capability()["reason"] == "charge_limit_readback_unavailable"

@@ -157,7 +157,7 @@ class SolarExportChargeHoldAdapter:
             )
 
         if self.system in {"sigenergy", "sungrow", "foxess", "solax"}:
-            if not self._has_observable_limit():
+            if not self._has_observable_limit(held=held):
                 return SolarExportCapability(
                     False,
                     "charge_limit_readback_unavailable",
@@ -265,7 +265,7 @@ class SolarExportChargeHoldAdapter:
         limit_w = _finite_positive(data.get("export_limit_w"))
         return limit_w / 1000.0 if limit_w is not None else None
 
-    def _has_observable_limit(self) -> bool:
+    def _has_observable_limit(self, *, held: bool = False) -> bool:
         def _sungrow_limit_is_safe(data: dict[str, Any]) -> bool:
             return (
                 data.get("charge_rate_limit_source") == "configured_power"
@@ -289,7 +289,14 @@ class SolarExportChargeHoldAdapter:
                 return callable(
                     getattr(getattr(self.coordinator, "_client", None), "get_device_setting", None)
                 )
-            return _finite_positive(data.get("max_charge_current_a")) is not None
+            try:
+                limit = float(data.get("max_charge_current_a"))
+            except (TypeError, ValueError):
+                return False
+            # A verified hold owns the zero limit and has already saved its
+            # positive restore baseline. A provider poll observing that zero
+            # must not make the next solve tear down our own working hold.
+            return math.isfinite(limit) and (limit > 0 or (held and limit == 0))
         if self.system == "solax":
             controller = getattr(self.coordinator, "_controller", None)
             if controller is None:
