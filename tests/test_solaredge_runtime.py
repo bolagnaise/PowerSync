@@ -1241,3 +1241,73 @@ def test_solaredge_owned_limit_is_refreshed_by_existing_fast_timer():
         assert handler.await_count == 3
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("curtail, initial", [(False, "curtailed"), (True, "curtailed"), (False, "normal")])
+@pytest.mark.parametrize("readback", [0, None])
+def test_ac_solaredge_restore_retains_owned_state_until_confirmed(monkeypatch, curtail, initial, readback):
+    """Run the real AC entry point and controller across failure then recovery."""
+    from power_sync.inverters.solaredge import SolarEdgeController
+
+    controller = SolarEdgeController(host="inverter")
+    controller._set_active_power_limit = AsyncMock(return_value=True)
+    controller.read_active_power_limit = AsyncMock(return_value=readback)
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+    entry_data = {"inverter_controller": controller, "inverter_last_state": initial,
+                  "inverter_control_mode": initial, "inverter_curtailment_device_limit_confirmed": True}
+    entry = SimpleNamespace(entry_id="entry", data={}, options={
+        "ac_inverter_curtailment_enabled": True, "inverter_brand": "solaredge", "inverter_host": "inverter"})
+    namespace = {
+        "entry": entry, "_aemo_dispatch_entry_data": lambda: entry_data,
+        "ac_inverter_is_same_hybrid": lambda: False, "_LOGGER": logging.getLogger(__name__),
+        "should_curtail_ac_coupled": AsyncMock(return_value=False),
+        "_powerwall_curtailment_fallback": AsyncMock(return_value=False),
+        "INVERTER_CONTROL_MODE_NORMAL": "normal", "INVERTER_CONTROL_MODE_CURTAILED": "curtailed",
+        "INVERTER_CONTROL_MODES": {"normal", "curtailed"},
+        "DEFAULT_INVERTER_PORT": 502, "DEFAULT_INVERTER_SLAVE_ID": 1,
+    }
+    node = _setup_node("apply_inverter_curtailment")
+    for name in {n.id for n in ast.walk(node) if isinstance(n, ast.Name) and n.id.startswith("CONF_")}:
+        namespace[name] = name.removeprefix("CONF_").lower()
+    _load_node(_setup_node("_set_inverter_control_state"), namespace)
+    call = _load_node(node, namespace)
+
+    assert not asyncio.run(call(curtail, 54, 3))
+    assert entry_data["inverter_last_state"] == initial
+    assert entry_data["inverter_control_mode"] == initial
+    assert entry_data["inverter_controller"] is controller
+    controller._set_active_power_limit.assert_awaited_once_with(100)
+    assert controller.read_active_power_limit.await_count == 3
+    # Existing owned curtailment remains retryable; normal never acquires ownership.
+    controller.read_active_power_limit.return_value = 100
+    assert asyncio.run(call(curtail, 54, 3))
+    assert entry_data["inverter_last_state"] == "normal"
+    assert entry_data["inverter_control_mode"] == "normal"
+    assert "inverter_curtailment_device_limit_confirmed" not in entry_data
+    assert controller._set_active_power_limit.await_count == 2
+
+
+@pytest.mark.parametrize("path", ["price", "dispatch"])
+def test_dc_solaredge_unconfirmed_restore_keeps_persisted_obligation(monkeypatch, path):
+    from power_sync.inverters.solaredge import SolarEdgeController
+
+    runtime = _solaredge_curtailment_recovery_runtime()
+    actual = SolarEdgeController(host="inverter")
+    actual._set_active_power_limit = AsyncMock(return_value=True)
+    actual.read_active_power_limit = AsyncMock(return_value=0)
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+    runtime.direct.restore = actual.restore
+    runtime.entry_data["solaredge_curtailment_state"] = "curtailed"
+    if path == "dispatch":
+        handler = _load_node(_setup_node("_restore_solaredge_curtailment_for_dispatch"), runtime.namespace)
+        args = (runtime.entry_data, "force discharge")
+        kwargs = {}
+    else:
+        handler, args, kwargs = runtime.handler, (), {"feedin_price": -10, "import_price": 54}
+    asyncio.run(handler(*args, **kwargs))
+    assert runtime.entry_data["solaredge_curtailment_state"] == "curtailed"
+    runtime.persist.assert_not_awaited()
+    actual.read_active_power_limit.return_value = 100
+    asyncio.run(handler(*args, **kwargs))
+    assert runtime.entry_data["solaredge_curtailment_state"] == "normal"
+    runtime.persist.assert_awaited_once_with(runtime.entry_data, False)

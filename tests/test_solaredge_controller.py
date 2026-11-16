@@ -85,9 +85,61 @@ def test_solaredge_zero_curtail_and_restore_write_percent_limits():
 
     controller._set_active_power_limit = fake_set
 
+    controller.read_active_power_limit = AsyncMock(return_value=100)
     assert asyncio.run(controller.curtail())
     assert asyncio.run(controller.restore())
     assert writes == [0, 100]
+    controller.read_active_power_limit.assert_awaited_once()
+
+
+@pytest.mark.parametrize("readback", [0, 50, None, "error"])
+def test_solaredge_restore_ack_without_confirmed_limit_is_not_success(monkeypatch, readback):
+    controller = SolarEdgeController(host="inverter")
+    controller._set_active_power_limit = AsyncMock(return_value=True)
+    reader = AsyncMock(side_effect=TimeoutError("unavailable")) if readback == "error" else AsyncMock(return_value=readback)
+    controller.read_active_power_limit = reader
+    sleep = AsyncMock()
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+
+    assert not asyncio.run(controller.restore())
+    controller._set_active_power_limit.assert_awaited_once_with(100)
+    assert reader.await_count == 3
+    assert sleep.await_count == 2
+
+
+def test_solaredge_restore_allows_delayed_limit_then_confirms(monkeypatch):
+    controller = SolarEdgeController(host="inverter")
+    controller._set_active_power_limit = AsyncMock(return_value=True)
+    controller.read_active_power_limit = AsyncMock(side_effect=[0, None, 100])
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+
+    assert asyncio.run(controller.restore())
+    controller._set_active_power_limit.assert_awaited_once_with(100)
+    assert controller.read_active_power_limit.await_count == 3
+
+
+def test_solaredge_restore_rejected_write_does_not_read_or_retry():
+    controller = SolarEdgeController(host="inverter")
+    controller._set_active_power_limit = AsyncMock(return_value=False)
+    controller.read_active_power_limit = AsyncMock(return_value=100)
+    assert not asyncio.run(controller.restore())
+    controller._set_active_power_limit.assert_awaited_once_with(100)
+    controller.read_active_power_limit.assert_not_awaited()
+
+
+@pytest.mark.parametrize("fresh", [True, False])
+def test_solaredge_restore_entity_cache_requires_fresh_confirmation(monkeypatch, fresh):
+    state = types.SimpleNamespace(state="100", last_reported=datetime.now(timezone.utc) - timedelta(minutes=10))
+    async def service(domain, name, data, *, blocking):
+        if domain == "homeassistant" and fresh:
+            state.last_reported = datetime.now(timezone.utc)
+    hass = types.SimpleNamespace(states=types.SimpleNamespace(get=lambda _: state), services=types.SimpleNamespace(async_call=service))
+    controller = SolarEdgeController(host="", hass=hass)
+    controller._connected = True
+    controller._use_entity_mode = True
+    controller._active_power_limit_entity = "number.solaredge_active_power_limit"
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+    assert asyncio.run(controller.restore()) is fresh
 
 
 @pytest.mark.parametrize("raw, expected", [(0, 0), (100, 100), (1, 1), (65535, None), (-1, None), (None, None)])
