@@ -23844,6 +23844,18 @@ def _sync_covau_withdrawn_plan_issue(
     )
 
 
+def _support_setup_failure_details(error: Exception) -> str:
+    """Identify a failed setup without exposing exception messages or locals."""
+    frames = []
+    trace = error.__traceback__
+    while trace is not None:
+        code = trace.tb_frame.f_code
+        filename = code.co_filename.rsplit("/", 1)[-1]
+        frames.append(f"{filename}:{trace.tb_lineno}:{code.co_name}")
+        trace = trace.tb_next
+    return f"{type(error).__name__} at {' > '.join(frames[-8:])}"
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up PowerSync from a config entry."""
     # Retained HTTP/service callbacks can address this entry during provider
@@ -51269,8 +51281,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     try:
         from .support.ha import setup as _setup_support
         await _setup_support(hass, entry)
-    except Exception:
-        _LOGGER.warning("PowerSync support diagnostics unavailable; core integration remains active")
+    except Exception as err:
+        _LOGGER.warning(
+            "PowerSync support diagnostics unavailable; core integration remains active (%s)",
+            _support_setup_failure_details(err),
+        )
 
     try:
         from .diagnostics_access.ha import setup as _setup_diagnostics
