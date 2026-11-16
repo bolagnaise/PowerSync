@@ -565,6 +565,7 @@ from .const import (
     CONF_OPTIMIZATION_AUTO_APPLY_RESERVE,
     CONF_OPTIMIZATION_MANUAL_RESERVE,
     CONF_OPTIMIZATION_EV_INTEGRATION,
+    CONF_OPTIMIZATION_USE_HISTORICAL_EV_DATA,
     CONF_OPTIMIZATION_LOAD_ENTITY,
     CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY,
     CONF_OPTIMIZATION_COST_FUNCTION,
@@ -3699,6 +3700,7 @@ class PowerSyncConfigFlow(AmberSetupMixin, config_entries.ConfigFlow, domain=DOM
                     CONF_OPTIMIZATION_PROVIDER: OPT_PROVIDER_POWERSYNC,
                     CONF_OPTIMIZATION_ENABLED: True,
                     CONF_MONITORING_MODE: True,
+                    CONF_OPTIMIZATION_USE_HISTORICAL_EV_DATA: False,
                     CONF_OPTIMIZATION_EV_INTEGRATION: False,
                     CONF_OPTIMIZATION_COST_FUNCTION: COST_FUNCTION_COST,
                     CONF_OPTIMIZATION_BACKUP_RESERVE: backup_reserve,
@@ -3945,6 +3947,7 @@ class PowerSyncConfigFlow(AmberSetupMixin, config_entries.ConfigFlow, domain=DOM
                     CONF_OPTIMIZATION_EV_INTEGRATION: bool(
                         user_input.get(CONF_OPTIMIZATION_EV_INTEGRATION, False)
                     ),
+                    CONF_OPTIMIZATION_USE_HISTORICAL_EV_DATA: bool(user_input.get(CONF_OPTIMIZATION_USE_HISTORICAL_EV_DATA, False)),
                     CONF_OPTIMIZATION_LOAD_ENTITY: (
                         _normalize_optional_entity(
                             user_input.get(CONF_OPTIMIZATION_LOAD_ENTITY)
@@ -4092,6 +4095,7 @@ class PowerSyncConfigFlow(AmberSetupMixin, config_entries.ConfigFlow, domain=DOM
                 CONF_OPTIMIZATION_EV_INTEGRATION,
                 default=False,
             ): BooleanSelector(),
+            vol.Required(CONF_OPTIMIZATION_USE_HISTORICAL_EV_DATA, default=False): BooleanSelector(),
             vol.Optional(
                 CONF_OPTIMIZATION_LOAD_ENTITY,
             ): EntitySelector(EntitySelectorConfig(domain="sensor")),
@@ -12536,6 +12540,9 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
                 )
                 new_data[CONF_OPTIMIZATION_LOAD_ENTITY] = load_entity
                 new_options[CONF_OPTIMIZATION_LOAD_ENTITY] = load_entity
+                historical_ev_enabled = bool(user_input.get(CONF_OPTIMIZATION_USE_HISTORICAL_EV_DATA, False))
+                new_data[CONF_OPTIMIZATION_USE_HISTORICAL_EV_DATA] = historical_ev_enabled
+                new_options[CONF_OPTIMIZATION_USE_HISTORICAL_EV_DATA] = historical_ev_enabled
                 new_data[CONF_OPTIMIZATION_EV_INTEGRATION] = ev_integration_enabled
                 new_options[CONF_OPTIMIZATION_EV_INTEGRATION] = ev_integration_enabled
                 new_data[CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY] = planned_ev_load_entity
@@ -12742,6 +12749,7 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
                     "battery_efficiency_learning_enabled": (
                         battery_efficiency_learning_enabled
                     ),
+                    "use_historical_ev_data": historical_ev_enabled,
                     "ev_integration": ev_integration_enabled,
                     "load_entity": load_entity,
                     "planned_ev_load_entity": planned_ev_load_entity,
@@ -12798,6 +12806,7 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
                         "battery_efficiency_learning_enabled": (
                             CONF_OPTIMIZATION_BATTERY_EFFICIENCY_LEARNING
                         ),
+                        "use_historical_ev_data": CONF_OPTIMIZATION_USE_HISTORICAL_EV_DATA,
                         "ev_integration": CONF_OPTIMIZATION_EV_INTEGRATION,
                         "load_entity": CONF_OPTIMIZATION_LOAD_ENTITY,
                         "planned_ev_load_entity": (
@@ -13122,6 +13131,7 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
         current_ai_auto_refresh = bool(self._get_option(CONF_OPTIMIZATION_AI_SUMMARY_AUTO_REFRESH, self.config_entry.data.get(CONF_OPTIMIZATION_AI_SUMMARY_AUTO_REFRESH, False)))
 
         current_form_values: dict[str, Any] = {
+            CONF_OPTIMIZATION_USE_HISTORICAL_EV_DATA: bool(self._get_option(CONF_OPTIMIZATION_USE_HISTORICAL_EV_DATA, False)),
             CONF_OPTIMIZATION_PROVIDER: current_opt_provider,
             CONF_OPTIMIZATION_ENABLED: bool(current_optimization_enabled),
             CONF_OPTIMIZATION_AUTO_APPLY_RESERVE: bool(
@@ -13231,6 +13241,7 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
                 CONF_OPTIMIZATION_EV_INTEGRATION,
                 default=bool(current_ev_integration_enabled),
             ): BooleanSelector(),
+            vol.Required(CONF_OPTIMIZATION_USE_HISTORICAL_EV_DATA, default=bool(self._get_option(CONF_OPTIMIZATION_USE_HISTORICAL_EV_DATA, False))): BooleanSelector(),
             vol.Optional(
                 CONF_OPTIMIZATION_LOAD_ENTITY,
                 description=(
@@ -13533,6 +13544,7 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
                 CONF_HARDWARE_BACKUP_RESERVE,
             },
             "battery_forecast_inputs": {
+                CONF_OPTIMIZATION_USE_HISTORICAL_EV_DATA,
                 CONF_AMBER_FORECAST_CONFIDENCE_ENABLED,
                 CONF_OPTIMIZATION_BATTERY_CAPACITY_WH,
                 CONF_OPTIMIZATION_MAX_CHARGE_W,

@@ -1478,6 +1478,7 @@ const PS_SETTING_FIELDS = {
   max_grid_export_w: { label: 'Maximum grid export', unit: 'W', min: 0, nullable: true, help: 'Leave blank to use the system limit. Zero prevents planned export.' },
   allow_grid_charge: { label: 'Allow grid charging', type: 'checkbox' },
   grid_charge_soc_cap: { label: 'Grid charge ceiling', unit: '%', min: 0, max: 100, ratio: true },
+  use_historical_ev_data: { label: 'Use Historical EV Data', type: 'checkbox', help: 'Anticipate weekday EV demand while away; actual battery data takes over on return.' },
   ev_integration: { label: 'Include PowerSync EV plans', type: 'checkbox', help: 'Include planned car demand in battery planning.' },
   battery_efficiency_learning_enabled: { label: 'Learn battery efficiency', type: 'checkbox' },
   household_buffer_kw: { label: 'Household buffer', unit: 'kW', min: 0, step: '0.1' },
@@ -1491,7 +1492,7 @@ const PS_SETTING_FIELDS = {
 };
 const PS_SETTING_EDITORS = {
   auto_update: { path: 'power_sync/auto_update/settings', entityScoped: true, fields: ['auto_update_time'] },
-  optimizer: { path: 'power_sync/optimization/settings', fields: ['backup_reserve', 'battery_capacity_wh', 'max_charge_w', 'max_discharge_w', 'max_grid_import_w', 'max_grid_export_w', 'allow_grid_charge', 'grid_charge_soc_cap', 'ev_integration', 'battery_efficiency_learning_enabled'] },
+  optimizer: { path: 'power_sync/optimization/settings', fields: ['backup_reserve', 'battery_capacity_wh', 'max_charge_w', 'max_discharge_w', 'max_grid_import_w', 'max_grid_export_w', 'allow_grid_charge', 'grid_charge_soc_cap', 'ev_integration', 'use_historical_ev_data', 'battery_efficiency_learning_enabled'] },
   reserve: { path: 'power_sync/optimization/settings', fields: ['backup_reserve'] },
   cost_neutral: { path: 'power_sync/optimization/settings', fields: ['daily_supply_charge'] },
   charge_by_time: { path: 'power_sync/optimization/settings', fields: ['charge_by_time_target_soc', 'charge_by_time_target_time'] },

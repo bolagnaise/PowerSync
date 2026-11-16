@@ -583,3 +583,19 @@ def test_fresh_schedule_cannot_make_stale_battery_data_usable():
         assert not reader.forecasts(timestamps=[NOW], interval_minutes=60,
             latitude=-27.47, longitude=153.03, capacities={}, power_limits={}, now=NOW)
     asyncio.run(run())
+
+
+def test_native_history_uses_predicted_soc_only_inside_real_schedule_after_return():
+    from copy import deepcopy
+    reader = m.TeslaScheduleReader()
+    data = vehicle([{**schedule(), "end_time": 1200}])
+    before = deepcopy(data)
+    reader.cache[VIN] = (NOW, data)
+    timestamps = [NOW + timedelta(hours=i) for i in range(10)]
+    arrival = NOW.replace(hour=16)
+    forecast = reader.forecasts(timestamps=timestamps, interval_minutes=60,
+        latitude=-27.47, longitude=153.03, capacities={VIN: 60}, power_limits={VIN: 7.2}, now=NOW,
+        arrival_forecasts={VIN: SimpleNamespace(arrival=arrival, soc=40)})[VIN]
+    assert forecast.power_w[:6] == (0,) * 6
+    assert any(forecast.power_w[6:])
+    assert data == before, 'historical estimates never rewrite provider telemetry'

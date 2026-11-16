@@ -1143,3 +1143,22 @@ def test_lp_plan_suppresses_only_its_loadpoint_overlay():
     load = _run_overlay(coordinator, [2000.0, 2000.0, 2000.0, 2000.0])
 
     assert load == [3200.0, 3200.0, 2000.0, 2000.0]
+
+
+def test_historical_jobs_are_displayed_but_never_published_as_ev_directives():
+    adopt = _extract_coordinator_method('_adopt_solved_ev_series')
+    updated = datetime(2026, 11, 16, 10, tzinfo=timezone.utc)
+    coordinator = SimpleNamespace(
+        _pending_ev_charge_plan=[SimpleNamespace(vehicle_id='away-car', forecast_only=True),
+                                 SimpleNamespace(vehicle_id='home-car', forecast_only=False)],
+    )
+    result = SimpleNamespace(
+        schedule=SimpleNamespace(last_updated=updated,
+            actions=[SimpleNamespace(ev_charge_w=1000), SimpleNamespace(ev_charge_w=7000)]),
+        ev_charge_by_vehicle_w={'away-car': [0, 7000], 'home-car': [1000, 0]},
+        ev_source_by_vehicle_w={},
+    )
+    adopt(coordinator, result)
+    assert coordinator._last_ev_charge_by_vehicle_w == {'home-car': [1000, 0]}
+    assert coordinator._last_planned_ev_load_forecast_w == [1000, 7000]
+    assert coordinator._last_ev_charge_schedule_updated is updated

@@ -163,6 +163,7 @@ def _install_power_sync_stubs() -> None:
     const_module.CONF_OPTIMIZATION_MAX_DISCHARGE_W = "optimization_max_discharge_w"
     const_module.CONF_OPTIMIZATION_BACKUP_RESERVE = "optimization_backup_reserve"
     const_module.CONF_OPTIMIZATION_EV_INTEGRATION = "optimization_ev_integration"
+    const_module.CONF_OPTIMIZATION_USE_HISTORICAL_EV_DATA = "optimization_use_historical_ev_data"
     const_module.CONF_OPTIMIZATION_LOAD_ENTITY = "optimization_load_entity"
     const_module.CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY = "optimization_planned_ev_load_entity"
     const_module.CONF_OPTIMIZATION_MANUAL_RESERVE = "optimization_manual_reserve"
@@ -4034,3 +4035,23 @@ def test_amber_confidence_settings_persist_true_false_and_replan_without_changin
     result = asyncio.run(coordinator.set_settings({"amber_forecast_confidence_enabled": "false"}))
     assert result["success"] is False
     assert entry.options == before
+
+
+@pytest.mark.parametrize('future', [True, False])
+def test_historical_mode_honours_only_a_future_explicit_external_zero(opt_module, future):
+    start = '2026-05-03T08:35:00+00:00' if future else '2026-05-03T07:00:00+00:00'
+    end = '2026-05-03T08:45:00+00:00' if future else '2026-05-03T07:30:00+00:00'
+    coordinator = _planned_ev_load_coordinator(opt_module, [_State('sensor.planned_ev_load', '1',
+        attributes={'planned_load': [{'start': start, 'end': end, 'power_kw': 0}]})])
+    coordinator._use_historical_ev_data = True
+    forecast = coordinator._get_planned_ev_load_forecast(6)
+    assert forecast == ([0.0] * 6 if future else None)
+
+
+def test_history_alone_does_not_subtract_ev_without_replacement(opt_module):
+    coordinator = opt_module.OptimizationCoordinator(
+        hass=SimpleNamespace(), entry_id="entry-1", battery_system="sungrow",
+        battery_controller=SimpleNamespace(), entry=SimpleNamespace(data={}, options={
+            "optimization_ev_integration": False, "optimization_use_historical_ev_data": True,
+            "generic_charger_power_entity": "sensor.ev_power"}))
+    assert coordinator._ev_load_subtraction_entities() == []

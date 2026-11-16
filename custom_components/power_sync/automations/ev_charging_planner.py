@@ -3005,6 +3005,7 @@ class ChargingPlanner:
         max_grid_price_cents: Optional[float] = None,
         minimum_charging_power_kw: float = MIN_CHARGING_POWER_KW,
         charging_power_step_kw: Optional[float] = None,
+        available_from: Optional[datetime] = None,
         reserved_ev_power_schedule: Optional[Dict[str, float]] = None,
     ) -> ChargingPlan:
         """
@@ -3085,6 +3086,7 @@ class ChargingPlanner:
                 reserved_ev_power_schedule=reserved_ev_power_schedule,
                 minimum_charging_power_kw=minimum_charging_power_kw,
                 charging_power_step_kw=charging_power_step_kw,
+                available_from=available_from,
             )
         elif (
             priority == ChargingPriority.SOLAR_PREFERRED
@@ -3099,6 +3101,7 @@ class ChargingPlanner:
                 reserved_ev_power_schedule=reserved_ev_power_schedule,
                 minimum_charging_power_kw=minimum_charging_power_kw,
                 charging_power_step_kw=charging_power_step_kw,
+                available_from=available_from,
             )
         elif priority in (
             ChargingPriority.COST_OPTIMIZED,
@@ -3113,6 +3116,7 @@ class ChargingPlanner:
                 reserved_ev_power_schedule=reserved_ev_power_schedule,
                 minimum_charging_power_kw=minimum_charging_power_kw,
                 charging_power_step_kw=charging_power_step_kw,
+                available_from=available_from,
             )
         else:  # TIME_CRITICAL
             plan = await self._plan_time_critical(
@@ -3123,6 +3127,7 @@ class ChargingPlanner:
                 reserved_ev_power_schedule=reserved_ev_power_schedule,
                 minimum_charging_power_kw=minimum_charging_power_kw,
                 charging_power_step_kw=charging_power_step_kw,
+                available_from=available_from,
             )
 
         plan.battery_capacity_kwh = resolved_capacity.battery_capacity_kwh
@@ -3148,6 +3153,7 @@ class ChargingPlanner:
         reserved_ev_power_schedule: Optional[Dict[str, float]] = None,
         minimum_charging_power_kw: float = MIN_CHARGING_POWER_KW,
         charging_power_step_kw: Optional[float] = None,
+        available_from: Optional[datetime] = None,
     ) -> ChargingPlan:
         """Plan charging using only solar surplus with dynamic power sharing."""
         windows = []
@@ -3155,6 +3161,8 @@ class ChargingPlanner:
         total_confidence = 0
         battery_power_schedule = battery_power_schedule or {}
         now = _ha_local_now_naive()
+        if available_from is not None:
+            now = max(now, _as_ha_local_naive(available_from))
         target_time_local = (
             _as_ha_local_naive(target_time)
             if target_time is not None and target_time.tzinfo is not None
@@ -3271,6 +3279,7 @@ class ChargingPlanner:
         reserved_ev_power_schedule: Optional[Dict[str, float]] = None,
         minimum_charging_power_kw: float = MIN_CHARGING_POWER_KW,
         charging_power_step_kw: Optional[float] = None,
+        available_from: Optional[datetime] = None,
     ) -> ChargingPlan:
         """Plan charging preferring solar, falling back to offpeak grid with dynamic power sharing."""
         windows = []
@@ -3280,6 +3289,8 @@ class ChargingPlanner:
         total_confidence = 0
         battery_power_schedule = battery_power_schedule or {}
         now = _ha_local_now_naive()
+        if available_from is not None:
+            now = max(now, _as_ha_local_naive(available_from))
         target_time_local = (
             _as_ha_local_naive(target_time)
             if target_time is not None and target_time.tzinfo is not None
@@ -3515,6 +3526,7 @@ class ChargingPlanner:
         reserved_ev_power_schedule: Optional[Dict[str, float]] = None,
         minimum_charging_power_kw: float = MIN_CHARGING_POWER_KW,
         charging_power_step_kw: Optional[float] = None,
+        available_from: Optional[datetime] = None,
     ) -> ChargingPlan:
         """
         Plan charging to minimize cost while meeting departure deadline.
@@ -3532,6 +3544,8 @@ class ChargingPlanner:
         - Battery charging at 5kW during cheap period -> EV charges at reduced rate
         """
         now = _ha_local_now_naive()
+        if available_from is not None:
+            now = max(now, _as_ha_local_naive(available_from))
         battery_power_schedule = battery_power_schedule or {}
 
         # Convert target_time to naive local time for comparison
@@ -3878,6 +3892,7 @@ class ChargingPlanner:
         reserved_ev_power_schedule: Optional[Dict[str, float]] = None,
         minimum_charging_power_kw: float = MIN_CHARGING_POWER_KW,
         charging_power_step_kw: Optional[float] = None,
+        available_from: Optional[datetime] = None,
     ) -> ChargingPlan:
         """Plan charging to meet deadline, minimizing cost as secondary goal."""
         battery_power_schedule = battery_power_schedule or {}
@@ -3892,6 +3907,7 @@ class ChargingPlanner:
                 reserved_ev_power_schedule=reserved_ev_power_schedule,
                 minimum_charging_power_kw=minimum_charging_power_kw,
                 charging_power_step_kw=charging_power_step_kw,
+                available_from=available_from,
             )
 
         # If the target can be met entirely inside guaranteed free-grid
@@ -3912,6 +3928,7 @@ class ChargingPlanner:
             reserved_ev_power_schedule=reserved_ev_power_schedule,
             minimum_charging_power_kw=minimum_charging_power_kw,
             charging_power_step_kw=charging_power_step_kw,
+            available_from=available_from,
         )
         if (
             cost_plan.can_meet_target
@@ -3925,6 +3942,8 @@ class ChargingPlanner:
         # Calculate minimum hours needed (0.85 efficiency: AC-DC losses, ramp-up, thermal)
         hours_needed = energy_needed_kwh / (charger_power_kw * 0.85)
         now = _ha_local_now_naive()
+        if available_from is not None:
+            now = max(now, _as_ha_local_naive(available_from))
 
         # Convert target_time to naive local time for comparison
         # Price forecast hours are stored as naive local time strings
@@ -7073,6 +7092,7 @@ class AutoScheduleExecutor:
         state: AutoScheduleState,
         current_soc: Optional[int] = None,
         charger_capability: Optional[dict] = None,
+        available_from: Optional[datetime] = None,
     ) -> None:
         """Regenerate the charging plan based on current forecasts."""
         # HA-local, not OS-local: on UTC-container installs with a non-UTC HA
@@ -7083,20 +7103,21 @@ class AutoScheduleExecutor:
         # and _evaluate_vehicle() must read staleness against this same
         # HA-local clock (OB-31) rather than a mismatched datetime.now().
         now = _ha_local_now_naive()
+        departure_reference = max(now, _as_ha_local_naive(available_from)) if available_from is not None else now
 
         # Determine target time from per-day departure_times
         target_time = None
         if settings.departure_times:
             # Find next applicable departure by walking forward through days
             for days_ahead in range(8):  # Check up to 7 days ahead
-                check_time = now + timedelta(days=days_ahead)
+                check_time = departure_reference + timedelta(days=days_ahead)
                 weekday = check_time.weekday()
                 if weekday in settings.departure_times:
                     dep_str = settings.departure_times[weekday]
                     try:
                         dep_hour, dep_min = map(int, dep_str.split(":"))
                         candidate = check_time.replace(hour=dep_hour, minute=dep_min, second=0, microsecond=0)
-                        if candidate > now:
+                        if candidate > departure_reference:
                             target_time = candidate
                             break
                     except ValueError:
@@ -7105,10 +7126,10 @@ class AutoScheduleExecutor:
             # Legacy fallback: single departure_time + departure_days
             try:
                 dep_hour, dep_min = map(int, settings.departure_time.split(":"))
-                target_time = now.replace(hour=dep_hour, minute=dep_min, second=0, microsecond=0)
+                target_time = departure_reference.replace(hour=dep_hour, minute=dep_min, second=0, microsecond=0)
 
                 # If departure is in the past today, use tomorrow
-                if target_time <= now:
+                if target_time <= departure_reference:
                     target_time += timedelta(days=1)
 
                 # Check if target day is in departure_days
@@ -7182,6 +7203,7 @@ class AutoScheduleExecutor:
             plan = await self.planner.plan_charging(
                 vehicle_id=vehicle_id,
                 current_soc=current_soc,
+                available_from=available_from,
                 target_soc=settings.target_soc,
                 target_time=target_time,
                 resolved_capacity=resolved_capacity,

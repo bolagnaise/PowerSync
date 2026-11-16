@@ -64,6 +64,8 @@ class EVChargePlan:
     solar_battery_reserve_kw: tuple[float, ...] = ()
     window_source: tuple[str, ...] = ()
     initially_charging: bool = False
+    # Speculative future visits affect battery planning, never EV directives.
+    forecast_only: bool = False
     # Cumulative energy that must be delivered by a given slot, as
     # ``(last_usable_slot, kwh_by_then)`` sorted by slot. Empty means the one
     # implicit stage every single-vehicle plan has: all of its energy by its
@@ -156,6 +158,7 @@ def normalize_ev_charge_plan(
 
     normalized = EVChargePlan(
         vehicle_id=str(plan.vehicle_id or "_default"),
+        forecast_only=bool(getattr(plan, "forecast_only", False)),
         max_power_kw=tuple(powers),
         energy_needed_kwh=max(0.0, _finite(plan.energy_needed_kwh)),
         charge_efficiency=efficiency,
@@ -231,6 +234,7 @@ def combine_ev_charge_plans(
 
     return EVChargePlan(
         vehicle_id="_combined",
+        forecast_only=any(plan.forecast_only for plan in normalized),
         max_power_kw=combined_power,
         energy_needed_kwh=total_energy,
         charge_efficiency=weighted_efficiency,
@@ -338,6 +342,7 @@ def ev_plan_from_demand(
     solar_battery_reserve_kw: Sequence[float] = (),
     window_source: Sequence[str] = (),
     initially_charging: bool = False,
+    forecast_only: bool = False,
 ) -> EVChargePlan | None:
     """Build one vehicle's LP demand from the EV planner's figures.
 
@@ -377,6 +382,7 @@ def ev_plan_from_demand(
     return normalize_ev_charge_plan(
         EVChargePlan(
             vehicle_id=str(vehicle_id or "_default"),
+            forecast_only=forecast_only,
             max_power_kw=tuple(powers),
             energy_needed_kwh=energy_kwh,
             charge_efficiency=_finite(charge_efficiency, 0.9),

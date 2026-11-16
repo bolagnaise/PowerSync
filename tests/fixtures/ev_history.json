@@ -1,0 +1,229 @@
+[
+  {
+    "name": "weekday",
+    "now": 1794830400000,
+    "timezone": "UTC",
+    "soc": 75,
+    "home": false,
+    "points": [
+      {
+        "at": 1794211200000,
+        "soc": 75,
+        "home": false
+      },
+      {
+        "at": 1794240000000,
+        "soc": 65,
+        "home": true
+      },
+      {
+        "at": 1793606400000,
+        "soc": 75,
+        "home": false
+      },
+      {
+        "at": 1793635200000,
+        "soc": 65,
+        "home": true
+      },
+      {
+        "at": 1793001600000,
+        "soc": 75,
+        "home": false
+      },
+      {
+        "at": 1793030400000,
+        "soc": 65,
+        "home": true
+      }
+    ],
+    "expected": {
+      "arrival": 1794844800000,
+      "soc": 65,
+      "sampleDays": 3
+    }
+  },
+  {
+    "name": "actual-return",
+    "now": 1794830400000,
+    "timezone": "UTC",
+    "soc": 75,
+    "home": true,
+    "points": [
+      {
+        "at": 1794211200000,
+        "soc": 75,
+        "home": false
+      },
+      {
+        "at": 1794240000000,
+        "soc": 65,
+        "home": true
+      },
+      {
+        "at": 1793606400000,
+        "soc": 75,
+        "home": false
+      },
+      {
+        "at": 1793635200000,
+        "soc": 65,
+        "home": true
+      },
+      {
+        "at": 1793001600000,
+        "soc": 75,
+        "home": false
+      },
+      {
+        "at": 1793030400000,
+        "soc": 65,
+        "home": true
+      }
+    ],
+    "expected": null
+  },
+  {
+    "name": "dst",
+    "now": 1793638800000,
+    "timezone": "America/New_York",
+    "soc": 75,
+    "home": false,
+    "points": [
+      {
+        "at": 1793016000000,
+        "soc": 75,
+        "home": false
+      },
+      {
+        "at": 1793044800000,
+        "soc": 65,
+        "home": true
+      },
+      {
+        "at": 1792411200000,
+        "soc": 75,
+        "home": false
+      },
+      {
+        "at": 1792440000000,
+        "soc": 65,
+        "home": true
+      },
+      {
+        "at": 1791806400000,
+        "soc": 75,
+        "home": false
+      },
+      {
+        "at": 1791835200000,
+        "soc": 65,
+        "home": true
+      }
+    ],
+    "expected": {
+      "arrival": 1793653200000,
+      "soc": 65,
+      "sampleDays": 3
+    }
+  },
+  {
+    "name": "offsite-charge",
+    "now": 1794830400000,
+    "timezone": "UTC",
+    "soc": 75,
+    "home": false,
+    "points": [
+      {
+        "at": 1794211200000,
+        "soc": 75,
+        "home": false
+      },
+      {
+        "at": 1794236400000,
+        "soc": 90,
+        "home": false
+      },
+      {
+        "at": 1794240000000,
+        "soc": 65,
+        "home": true
+      },
+      {
+        "at": 1793606400000,
+        "soc": 75,
+        "home": false
+      },
+      {
+        "at": 1793631600000,
+        "soc": 90,
+        "home": false
+      },
+      {
+        "at": 1793635200000,
+        "soc": 65,
+        "home": true
+      },
+      {
+        "at": 1793001600000,
+        "soc": 75,
+        "home": false
+      },
+      {
+        "at": 1793026800000,
+        "soc": 90,
+        "home": false
+      },
+      {
+        "at": 1793030400000,
+        "soc": 65,
+        "home": true
+      }
+    ],
+    "expected": null
+  },
+  {
+    "name": "overnight",
+    "now": 1794870000000,
+    "timezone": "UTC",
+    "soc": 75,
+    "home": false,
+    "points": [
+      {
+        "at": 1794261600000,
+        "soc": 75,
+        "home": false
+      },
+      {
+        "at": 1794290400000,
+        "soc": 65,
+        "home": true
+      },
+      {
+        "at": 1793656800000,
+        "soc": 75,
+        "home": false
+      },
+      {
+        "at": 1793685600000,
+        "soc": 65,
+        "home": true
+      },
+      {
+        "at": 1793052000000,
+        "soc": 75,
+        "home": false
+      },
+      {
+        "at": 1793080800000,
+        "soc": 65,
+        "home": true
+      }
+    ],
+    "expected": {
+      "arrival": 1794895200000,
+      "soc": 65,
+      "sampleDays": 3
+    }
+  }
+]

@@ -423,3 +423,52 @@ def test_present_second_vehicle_still_reserves_site_capacity():
         datetime(2026, 8, 19, 2, 0).isoformat(): 7.36,
         datetime(2026, 8, 19, 3, 0).isoformat(): 7.36,
     }
+
+
+def test_detached_history_planner_excludes_cheap_pre_arrival_hours(monkeypatch):
+    from unittest.mock import AsyncMock
+    now = datetime(2026, 11, 16, 10)
+    monkeypatch.setattr(ev_planner, '_ha_local_now_naive', lambda: now)
+    planner = object.__new__(ev_planner.ChargingPlanner)
+    planner.surplus_forecaster = SimpleNamespace(forecast_surplus=AsyncMock(return_value=[]))
+    planner.price_forecaster = SimpleNamespace(get_price_forecast=AsyncMock(return_value=[
+        ev_planner.PriceForecast(hour=now.replace(hour=hour).isoformat(),
+            import_cents=8 if hour < 14 else 45, export_cents=0, period='offpeak')
+        for hour in range(10, 24)
+    ]))
+    planner._get_battery_power_schedule = AsyncMock(return_value={})
+    planner._get_available_ev_power = lambda *args, **kwargs: 7.2
+    planner._is_grid_charging_blocked_at = lambda *args, **kwargs: False
+    planner._get_grid_capacity_kw = lambda: 12
+    planner._get_solar_surplus_config = AsyncMock(return_value={})
+    capacity = ev_planner.resolve_ev_battery_capacity(manual_capacity_kwh=45)
+    arrival = now.replace(hour=16, minute=30)
+    plan = asyncio.run(planner.plan_charging(vehicle_id=HOME_VIN, current_soc=60,
+        target_soc=80, target_time=now.replace(hour=23, minute=59),
+        resolved_capacity=capacity, priority=ev_planner.ChargingPriority.COST_OPTIMIZED,
+        charger_power_kw=7.2, available_from=arrival))
+    assert plan.energy_needed_kwh == pytest.approx(10)
+    assert plan.windows
+    assert all(datetime.fromisoformat(w.start_time) >= arrival for w in plan.windows)
+    assert sum(w.estimated_energy_kwh for w in plan.windows) == pytest.approx(10)
+
+
+@pytest.mark.parametrize("modern", [False, True])
+def test_historical_return_uses_next_departure_after_arrival(monkeypatch, modern):
+    now = datetime(2026, 11, 16, 6)
+    monkeypatch.setattr(ev_planner, "_ha_local_now_naive", lambda: now)
+    stored = {"enabled": True, "vehicle_id": HOME_VIN,
+              "departure_time": "07:00", "departure_days": list(range(7))}
+    if modern:
+        stored["departure_times"] = {str(day): "07:00" for day in range(7)}
+    settings = ev_planner.AutoScheduleSettings.from_dict(stored)
+    planner = _RecordingPlanner()
+    executor = ev_planner.AutoScheduleExecutor(_Hass(), _ConfigEntry(), planner=planner)
+    state = ev_planner.AutoScheduleState(vehicle_id=HOME_VIN)
+    asyncio.run(executor._regenerate_plan(HOME_VIN, settings, state, current_soc=40,
+        charger_capability=_live_capability(20), available_from=now.replace(hour=8)))
+    assert planner.calls[-1]["target_time"] == datetime(2026, 11, 17, 7)
+    assert state.last_plan_update == now
+    asyncio.run(executor._regenerate_plan(HOME_VIN, settings, state, current_soc=40,
+        charger_capability=_live_capability(20)))
+    assert planner.calls[-1]["target_time"] == now.replace(hour=7)
