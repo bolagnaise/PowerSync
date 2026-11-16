@@ -1311,3 +1311,40 @@ def test_dc_solaredge_unconfirmed_restore_keeps_persisted_obligation(monkeypatch
     asyncio.run(handler(*args, **kwargs))
     assert runtime.entry_data["solaredge_curtailment_state"] == "normal"
     runtime.persist.assert_awaited_once_with(runtime.entry_data, False)
+
+
+@pytest.mark.parametrize("limit", [0, None, 100])
+def test_manual_solaredge_restore_reports_unconfirmed_limit_as_service_error(monkeypatch, limit):
+    from power_sync.inverters.solaredge import SolarEdgeController
+
+    controller = SolarEdgeController(host="inverter")
+    controller._set_active_power_limit = AsyncMock(return_value=True)
+    controller.read_active_power_limit = AsyncMock(return_value=limit)
+    controller.disconnect = AsyncMock()
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+    entry_data = {"inverter_controller": controller, "inverter_last_state": "curtailed"}
+    namespace = {
+        "entry": SimpleNamespace(entry_id="entry", data={}, options={
+            "ac_inverter_curtailment_enabled": True, "inverter_brand": "solaredge", "inverter_host": "inverter"}),
+        "hass": SimpleNamespace(data={"power_sync": {"entry": entry_data}}), "DOMAIN": "power_sync",
+        "_aemo_dispatch_entry_data": lambda: entry_data,
+        "ac_inverter_is_same_hybrid": lambda: False, "_LOGGER": logging.getLogger(__name__),
+        "INVERTER_CONTROL_MODE_NORMAL": "normal", "INVERTER_CONTROL_MODE_CURTAILED": "curtailed",
+        "INVERTER_CONTROL_MODES": {"normal", "curtailed"},
+        "DEFAULT_INVERTER_PORT": 502, "DEFAULT_INVERTER_SLAVE_ID": 1,
+        "HomeAssistantError": RuntimeError, "asyncio": asyncio,
+    }
+    node = _setup_node("handle_restore_inverter")
+    for name in {n.id for n in ast.walk(node) if isinstance(n, ast.Name) and n.id.startswith("CONF_")}:
+        namespace[name] = name.removeprefix("CONF_").lower()
+    _load_node(_setup_node("_set_inverter_control_state"), namespace)
+    call = _load_node(node, namespace)
+    if limit == 100:
+        asyncio.run(call(SimpleNamespace(data={})))
+        assert entry_data["inverter_last_state"] == "normal"
+    else:
+        with pytest.raises(RuntimeError, match="restoration was not confirmed"):
+            asyncio.run(call(SimpleNamespace(data={})))
+        assert entry_data["inverter_last_state"] == "curtailed"
+    controller.disconnect.assert_awaited_once()
+    assert not entry_data["inverter_control_lock"].locked()

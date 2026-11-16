@@ -47447,6 +47447,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     entry_data.pop("inverter_controller", None)
             inverter_control_lock.release()
 
+        if inverter_brand == "solaredge" and not success:
+            raise HomeAssistantError(
+                "SolarEdge active power restoration was not confirmed; check inverter status"
+            )
+
     hass.services.async_register(DOMAIN, SERVICE_CURTAIL_INVERTER, handle_curtail_inverter)
     hass.services.async_register(DOMAIN, SERVICE_RESTORE_INVERTER, handle_restore_inverter)
 
