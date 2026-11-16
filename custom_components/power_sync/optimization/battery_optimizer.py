@@ -9506,12 +9506,6 @@ class BatteryOptimizer:
                 elif (
                     economic_hold
                     and import_prices is not None
-                    and future_home_use_price[t] > import_prices[t] + 0.001
-                ):
-                    action = "idle"
-                elif (
-                    economic_hold
-                    and import_prices is not None
                     and export_prices is not None
                     and abs(export_prices[t] - import_prices[t]) <= 0.001
                     and _future_grid_charge_planned(
@@ -9552,6 +9546,12 @@ class BatteryOptimizer:
                     # the existing natural-use behavior.
                     action = "idle"
                     action_reason = RTE_ECONOMIC_HOLD_REASON
+                elif (
+                    economic_hold
+                    and import_prices is not None
+                    and future_home_use_price[t] > import_prices[t] + 0.001
+                ):
+                    action = "idle"
                 elif meaningful_hold and export_prices is not None and import_prices is not None:
                     # Check if upcoming export prices justify holding battery
                     # over letting it serve load (avoiding import cost).

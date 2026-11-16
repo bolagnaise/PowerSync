@@ -976,6 +976,7 @@ def test_flat_price_charge_timing_is_stable_across_reserve_margin(
     _select_backend(module, monkeypatch, "highs")
     n = 576
     first_actions = []
+    first_discharge_w = []
     first_charge_slots = []
     total_charge_kwh = []
     predicted_costs = []
@@ -1010,6 +1011,7 @@ def test_flat_price_charge_timing_is_stable_across_reserve_margin(
         )
         actions = result.schedule.actions
         first_actions.append(actions[0].action)
+        first_discharge_w.append(actions[0].battery_discharge_w)
         first_charge_slots.append(
             next(idx for idx, action in enumerate(actions) if action.action == "charge")
         )
@@ -1020,7 +1022,11 @@ def test_flat_price_charge_timing_is_stable_across_reserve_margin(
         assert all(0.0 <= action.soc <= 1.0 for action in actions)
         assert all(action.battery_charge_w <= 10_000.1 for action in actions)
 
-    assert first_actions[:3] == ["self_consumption"] * 3
+    # A later household peak now retains the LP's intentional hold, including
+    # either side of the reserve margin. The flat-price timing must still be
+    # stable; spending the held energy would force an avoidable recharge.
+    assert first_actions[:3] == ["idle"] * 3
+    assert first_discharge_w[:3] == pytest.approx([0.0] * 3)
     assert first_actions[3] != "charge"
     assert len(set(first_charge_slots[:3])) == 1
     assert all(slot < 84 for slot in first_charge_slots)
