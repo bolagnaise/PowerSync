@@ -1905,7 +1905,7 @@ def test_advanced_controls_send_zero_and_soc_without_legacy_force_or_paperwork()
     assert all(p['body']['entry_id'] == 'entry-one' for p in posts)
     assert posts[3]['body']['import_limit_w'] == 12000
     assert all('force' not in p['path'] for p in posts)
-    assert 'Battery power and targets' in out['html'] and 'More controls' in out['html'] and 'Site limits' in out['html']
+    assert 'Battery power and targets' in out['html'] and 'Advanced battery controls' in out['html'] and 'Site limits' in out['html']
     assert 'Approval document' not in out['html'] and 'Approved installation' not in out['html']
 
 
@@ -1965,7 +1965,7 @@ def test_advanced_sections_and_confirmation_survive_independent_refreshes():
   release({schema_version:1,capabilities:{writable:true}});await read;waiting=null;
   await c._act('set');const unconfirmed=c._message.includes('unconfirmed_gateway_write')&&!c._message.includes('Control updated');
   rejectLimits=true;await c._refresh();const retained=c._limits===limits&&markup.includes('gateway_offline')&&c._draft.export_limit_w==='2000';
-  console.log(JSON.stringify({confirmed,independent,stable,unconfirmed,retained,mainBeforeMore:markup.indexOf('Battery power and targets')<markup.indexOf('More controls')}));
+  console.log(JSON.stringify({confirmed,independent,stable,unconfirmed,retained,advancedBeforeLimits:markup.indexOf('Advanced battery controls')<markup.indexOf('Site limits'), collapsedEditor:!markup.includes('data-advanced-section="battery" open'), flatGroups:!markup.includes('>More controls<')}));
 })().catch(e=>{console.error(e);process.exitCode=1});
 ''')
     assert all(out.values()), out
@@ -1993,3 +1993,20 @@ def test_advanced_dashboard_controls_require_a_tesla_local_capability_entity():
     result = subprocess.run(["node", "-e", script, str(STRATEGY_PATH)], check=True, capture_output=True, text=True)
     out = json.loads(result.stdout.strip().splitlines()[-1])
     assert out["controlsAdvanced"] is True, "Unpaired Tesla still gets setup feedback, other brands do not get Tesla-only controls"
+
+
+def test_plan_history_selects_charge_level_and_prices_at_the_requested_time():
+    out = _run_board(r"""
+  const now = Date.now(), base = now - 2 * 3600000;
+  const midnight = new Date(new Date().getFullYear(), new Date().getMonth(), new Date().getDate()).getTime();
+  const card = new T.PsPlanCard();
+  card._config = { entities: { soc: 'sensor.soc', importPrice: 'sensor.price' } };
+  card._hass = { states: { 'sensor.soc': {state:'80',attributes:{}}, 'sensor.price': {attributes:{unit_of_measurement:'c/kWh'}} } };
+  card._hist = { 'sensor.soc': [[base,65],[base+300000,0],[base+600000,NaN],[base+900000,40]],
+    'sensor.price': [[base,25],[base+300000,0],[base+600000,-5],[base+900000,35]] };
+  const model = card._buildModel({schedule:{}});
+  const at = offset => (base + offset + 60000 - midnight) / 3600000;
+  console.log(JSON.stringify({soc:[0,300000,600000,900000].map(t=>model.soc(at(t))),
+    prices:[0,300000,600000,900000].map(t=>model.imp(at(t)))}));
+""")
+    assert out == {"soc": [65, 0, None, 40], "prices": [25, 0, -5, 35]}

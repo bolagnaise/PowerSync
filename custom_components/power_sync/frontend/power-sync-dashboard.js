@@ -386,6 +386,16 @@ details.res .kv { margin-top: 10px; font-size: 13px; }
   .wx-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .wx-stat:first-child { grid-column: 1 / -1; flex-direction: row; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; }
 }
+
+.control-group{margin:14px 0;border:1px solid var(--border);border-radius:12px;overflow:hidden}
+.control-group>summary{position:relative;display:flex;flex-direction:column;justify-content:center;gap:5px;min-height:80px;box-sizing:border-box;padding:16px 80px 16px 16px;cursor:pointer;list-style:none;font-weight:600}
+.control-group>summary::-webkit-details-marker{display:none}
+.control-group>summary::after{content:'Show';position:absolute;right:16px;top:50%;transform:translateY(-50%);color:var(--cyan);font-size:13px}
+.control-group[open]>summary::after{content:'Hide'}
+.control-group>summary small{font-size:13px;font-weight:400;color:var(--fg-2);line-height:1.5}
+.control-group>summary:focus-visible{outline:2px solid var(--cyan);outline-offset:-3px;border-radius:12px}
+.control-group-body{padding:16px;border-top:1px solid var(--border)}
+
 `;
 
 // ─── Shared helpers ──────────────────────────────────────────────
@@ -2391,23 +2401,24 @@ class PsAdvancedBatteryControls extends HTMLElement {
     const notice = Object.keys(this._errors).map(path => `<p class="hint" role="alert">${psEsc(path.replace(/_/g, ' '))}: ${psEsc(this._errors[path])}. Use Refresh control state to retry.</p>`).join('');
     const max = Math.min(10000, o?.capabilities?.battery_output?.max_power_w ?? 10000);
     this.innerHTML = `<section aria-label="Battery controls">${this._loading.size ? '<p class="hint" role="status">Loading control state…</p>' : ''}${notice}
-      ${o?.capabilities?.battery_output?.supported || o?.operation?.active ? `<section><h4>Battery power and targets</h4><p class="hint">Positive battery watts discharge; negative watts charge; zero holds idle. Total battery power, not per battery or phase: −${max} to ${max} whole W (1000 W = 1 kW). Lower inverter/gateway limits and current solar/load can make an exact target too high or too low, including zero. Reserve and charging limits still apply.</p>
+      ${o?.capabilities?.battery_output?.supported || o?.operation?.active ? `<details class="control-group" data-advanced-section="battery"><summary>Advanced battery controls<small>Exact power, idle and battery-level targets</small></summary><div class="control-group-body"><h4>Battery power and targets</h4><p class="hint">Positive battery watts discharge; negative watts charge; zero holds idle. Total battery power, not per battery or phase: −${max} to ${max} whole W (1000 W = 1 kW). Lower inverter/gateway limits and current solar/load can make an exact target too high or too low, including zero. Reserve and charging limits still apply.</p>
       <label class="field"><span class="lab">Battery control</span><select style="width:100%;min-height:44px" data-advanced-field="mode" ${disabled}>${[['power','Fixed power'], ...(o.capabilities.battery_output.zero_hold_supported ? [['idle','Idle']] : []), ...(o.capabilities.battery_output.target_soc_supported ? [['charge','Charge to %'],['discharge','Discharge to %']] : [])].map(([value,label]) => `<option value="${value}" ${d.mode === value ? 'selected' : ''}>${label}</option>`).join('')}</select></label>
       ${d.mode === 'idle' ? '' : field('power_w', 'Battery power (W)')}${field('minutes', 'Maximum duration (1–1440 minutes)')}${d.mode !== 'idle' && o.capabilities.battery_output.target_soc_supported ? field('target_soc', d.mode === 'charge' || d.mode === 'discharge' ? 'Target battery level (1–100%)' : 'Target battery level (1–100%) — optional') : ''}
       <label><input type="checkbox" data-advanced-field="takeover" ${d.takeover ? 'checked' : ''} ${disabled}> Replace an active battery target</label>${btn('target', 'Apply battery target', !o.capabilities.battery_output.supported || !!this._errors.battery_dispatch || this._loading.has('battery_dispatch'))}
-      ${o.operation ? `<p class="hint">Battery target: ${psEsc(o.operation.power_w)} W${o.operation.target_soc === undefined ? '' : ` · ${psEsc(o.operation.target_soc)}%`} · ${psEsc(o.operation.phase.replace(/_/g, ' '))}</p>${o.operation.active ? btn('stop', 'Stop this battery target') : ''}` : ''}</section>` : ''}
-      <details data-advanced-section="more"><summary>More controls</summary>
-      ${n ? `<details data-advanced-section="limits"><summary>Site limits</summary><p class="hint">Current import ${psEsc(n.limits.import_limit_w.value_w ?? 'unknown')} W · export ${psEsc(n.limits.export_limit_w.value_w ?? 'unknown')} W. Zero is a hard limit. Blank fields stay unchanged. These limits persist. Whole-site net watts at the gateway meter, not per battery or phase. Each accepts 0–1,000,000 whole W (5000 W = 5 kW); hardware and connection limits can be lower. Import and export are independent ceilings.</p>
+      </div></details>` : ''}
+      ${o?.operation ? `<p class="hint">Battery target: ${psEsc(o.operation.power_w)} W${o.operation.target_soc === undefined ? '' : ` · ${psEsc(o.operation.target_soc)}%`} · ${psEsc(o.operation.phase.replace(/_/g, ' '))}</p>${o.operation.active ? btn('stop', 'Stop this battery target') : ''}` : ''}
+      ${n ? `<details class="control-group" data-advanced-section="limits" ${n.transaction && ['prepared','submitted','recovery_required'].includes(n.transaction.phase) ? 'open' : ''}><summary>Site limits<small>Advanced · persistent grid import and export limits</small></summary><div class="control-group-body"><p class="hint">Current import ${psEsc(n.limits.import_limit_w.value_w ?? 'unknown')} W · export ${psEsc(n.limits.export_limit_w.value_w ?? 'unknown')} W. Zero is a hard limit. Blank fields stay unchanged. These limits persist. Whole-site net watts at the gateway meter, not per battery or phase. Each accepts 0–1,000,000 whole W (5000 W = 5 kW); hardware and connection limits can be lower. Import and export are independent ceilings.</p>
       ${n.capabilities.identity_rebaseline_required ? `<p class="hint">Pairing changed. Controls are blocked. Confirm the new gateway to use these controls.</p>${btn('rebaseline', 'Confirm new gateway')}` : ''}${field('import_limit_w', 'Import limit (W)')}${field('export_limit_w', 'Export limit (W)')}${btn('set', 'Apply persistent limits', !n.capabilities.writable || !!this._errors.native_site_limits || this._loading.has('native_site_limits'))}
       ${!n.capabilities.writable ? `<p class="hint" role="status">${n.capabilities.readable === false ? 'Fresh gateway configuration unavailable. Retry the read.' : 'Another control, changed pairing or recovery is holding the site. Resolve it, then refresh.'}</p>` : ''}
       ${(n.snapshots || []).slice(-1).map(s => btn(`restore:${s.snapshot_id}`, 'Restore previous site limits', !n.capabilities.writable)).join('')}
       ${n.transaction ? `<p class="hint">${['prepared','submitted','recovery_required'].includes(n.transaction.phase) ? 'Check the previous change before applying another limit.' : 'Site limits updated.'}</p>${['prepared', 'submitted', 'recovery_required'].includes(n.transaction.phase) ? btn('reconcile', 'Check unresolved write') : ''}` : ''}
-      </details>` : ''}
-      ${this._backup ? `<details data-advanced-section="backup"><summary>Backup preparation</summary><p class="hint">Charge to full and keep energy ready for a backup window. The house stays connected to the grid.</p>
+      </div></details>` : ''}
+      ${this._backup ? `<details class="control-group" data-advanced-section="backup" ${this._backup.operation?.active || this._backup.recovery_required ? 'open' : ''}><summary>Backup preparation<small>Charge ahead of a planned backup window</small></summary><div class="control-group-body"><p class="hint">Charge to full and keep energy ready for a backup window. The house stays connected to the grid.</p>
       ${field('backup_minutes', 'Backup duration (1–1440 minutes)')}${btn('backup_start', 'Prepare backup', !this._backup.capabilities.writable)}
-      ${this._backup.operation ? `<p class="hint">Backup ${psEsc(this._backup.operation.phase)} · ends ${psEsc(new Date(this._backup.operation.ends_at * 1000).toLocaleString())}</p>${this._backup.operation.active ? btn('backup_cancel', 'End this backup window', !this._backup.operation.can_cancel) : ''}` : ''}
-      ${this._backup.recovery_required || this._backup.operation?.phase === 'recovery_required' ? btn('backup_reconcile', 'Check backup status') : ''}</details>` : ''}
-      </details>${btn('refresh', 'Refresh control state')}${this._message ? `<p class="hint" role="status">${psEsc(this._message)}</p>` : ''}</section>`;
+      </div></details>` : ''}
+      ${this._backup?.operation ? `<p class="hint">Backup ${psEsc(this._backup.operation.phase)} · ends ${psEsc(new Date(this._backup.operation.ends_at * 1000).toLocaleString())}</p>${this._backup.operation.active ? btn('backup_cancel', 'End this backup window', !this._backup.operation.can_cancel) : ''}` : ''}
+      ${this._backup?.recovery_required || this._backup?.operation?.phase === 'recovery_required' ? btn('backup_reconcile', 'Check backup status') : ''}
+      ${btn('refresh', 'Refresh control state')}${this._message ? `<p class="hint" role="status">${psEsc(this._message)}</p>` : ''}</section>`;
     for (const key of expanded) { const section = this.querySelector(`[data-advanced-section="${key}"]`); if (section) section.open = true; }
     if (focus) { const input = this.querySelector(`[data-advanced-field="${focus.key}"]`); input?.focus({ preventScroll: true }); if (input?.type === 'text' && focus.start != null) input.setSelectionRange(focus.start, focus.end); }
   }
@@ -2484,8 +2495,7 @@ class PsControlsCard extends PsCardBase {
     this.innerHTML = `
       ${monitoring ? '<div class="callout cyan"><b>Monitoring mode is on.</b><span>The optimizer won\'t act on its plan, but these controls still change the battery.</span></div>' : ''}
       ${active ? `<div class="callout amber"><b>${psEsc(active[0])}</b><span>${psEsc(active[1])}${Number.isFinite(remaining) ? ` ${psDuration(remaining)} left.` : ''}</span></div>` : ''}
-      ${this._config.advanced || this._advancedBatteryNode ? '<div data-advanced-controls></div>' : ''}
-      <h4>Timed battery / Max controls</h4>
+      <h4>Charge &amp; discharge</h4>
       <div class="field"><span class="lab" id="dur-l">Run for</span>
         <div class="chipsel" role="group" aria-labelledby="dur-l">${this._durations().map(m => `<button type="button" data-min="${m}" aria-pressed="${m === this._duration}">${m < 60 ? `${m}m` : `${m / 60}h`}</button>`).join('')}</div>
       </div>
@@ -2498,7 +2508,8 @@ class PsControlsCard extends PsCardBase {
         ${active ? `<button type="button" class="btn danger full${this._confirm === 'restore' ? ' confirming' : ''}" data-kind="restore">${restoring ? 'Restoring…' : this._confirm === 'restore' ? 'Confirm restore normal' : 'Restore normal'}</button>` : ''}
       </div>
       ${power ? `<label class="power-limit"><span class="row2"><span class="lab">Power limit<small>0 = Max · fastest rate allowed</small></span><output class="num" data-power-readout>${powerLabel}</output></span><input type="range" data-power-limit min="${Number(power.attributes?.min ?? 0)}" max="${Number(power.attributes?.max ?? 100)}" step="${Number(power.attributes?.step) || 1}" value="${Number.isFinite(powerKw) ? powerKw : 0}" aria-label="Power limit" aria-valuetext="${powerLabel}" ${Number.isFinite(powerKw) ? '' : 'disabled'}></label>` : ''}
-      <p class="hint">Tap a button twice to confirm. Hold charge and Power the home use the Run for preset. Use Battery power and targets for exact battery watts or Idle.</p>`;
+      <p class="hint">Tap a button twice to confirm. Hold charge and Power the home use the Run for preset. Open Advanced battery controls for exact battery watts or Idle.</p>
+      ${this._config.advanced || this._advancedBatteryNode ? '<div data-advanced-controls></div>' : ''}`;
     if (this._config.advanced || this._advancedBatteryNode) {
     this._advancedBatteryNode ||= document.createElement('power-sync-advanced-controls');
     this._advancedBatteryNode.entryId = this._config.entry_id;
