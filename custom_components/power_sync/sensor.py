@@ -776,6 +776,10 @@ ENERGY_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         name="Grid Status",
         icon="mdi:transmission-tower",
         value_fn=_grid_status_value,
+        attr_fn=lambda data: {
+            "on_off_grid_status": data.get("on_off_grid_status"),
+            "grid_sensor_connected": data.get("grid_sensor_connected"),
+        } if data and "on_off_grid_status" in data else {},
     ),
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_BATTERY_POWER,

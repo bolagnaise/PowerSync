@@ -59,6 +59,8 @@ class SigenergyController(InverterController):
     REG_ESS_POWER = 30037                 # Battery power (S32, gain 1000, kW)
     REG_RUNNING_STATE = 30051             # Plant running state (U16)
     REG_GRID_SENSOR_POWER = 30005         # Grid sensor active power (S32, gain 1000, kW)
+    REG_GRID_SENSOR_STATUS = 30004        # Gateway/meter connected (U16: 0=no, 1=yes)
+    REG_ON_OFF_GRID_STATUS = 30009        # U16: 0=on-grid, 1=off-grid auto, 2=off-grid manual
     REG_EMS_WORK_MODE = 30003             # EMS work mode (U16)
 
     # Input registers (read-only) - Battery health
@@ -804,6 +806,21 @@ class SigenergyController(InverterController):
                     error_message="No register data (inverter sleeping)",
                     attributes={"host": self.host, "model": self.model or "Sigenergy"},
                 )
+
+            # Grid state is plant-wide even when power telemetry falls back to
+            # an inverter slave. Reuse this connection and never infer an outage
+            # from a disconnected meter or zero grid power.
+            grid_regs = await self._read_input_registers(
+                self.REG_ON_OFF_GRID_STATUS, 1, slave_id=self.DEFAULT_SLAVE_ID,
+            )
+            grid_code = grid_regs[0] if grid_regs and len(grid_regs) == 1 else None
+            attrs["on_off_grid_status"] = grid_code
+            attrs["grid_status"] = {0: "Active", 1: "Inactive", 2: "Inactive"}.get(grid_code)
+            meter_regs = await self._read_input_registers(
+                self.REG_GRID_SENSOR_STATUS, 1, slave_id=self.DEFAULT_SLAVE_ID,
+            )
+            meter_code = meter_regs[0] if meter_regs and len(meter_regs) == 1 else None
+            attrs["grid_sensor_connected"] = {0: False, 1: True}.get(meter_code)
 
             # Get PV power for status determination
             pv_power_w = attrs.get("pv_power_w")

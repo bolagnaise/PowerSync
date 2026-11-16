@@ -57,6 +57,10 @@ async def async_setup_entry(
         from .amber_smartshift.entities import AmberConnectionSensor
         async_add_entities([AmberConnectionSensor(native_amber, entry)])
         return
+    sigenergy = hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get("sigenergy_coordinator")
+    if sigenergy is not None:
+        async_add_entities([SigenergyIslandedBinarySensor(sigenergy, entry)])
+        return
     tesla_site_id = entry.options.get(
         CONF_TESLA_ENERGY_SITE_ID,
         entry.data.get(CONF_TESLA_ENERGY_SITE_ID, ""),
@@ -104,6 +108,41 @@ async def async_setup_entry(
         _add_capability_gated_binary_sensors(),
         name=f"{DOMAIN}_capability_gated_binary_sensors",
     )
+
+
+class SigenergyIslandedBinarySensor(BinarySensorEntity):
+    """Report the entry's plant on/off-grid state from its existing Modbus poll."""
+
+    _attr_has_entity_name = True
+    _attr_name = "Sigenergy Off-Grid"
+    _attr_icon = "mdi:transmission-tower-off"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator, entry: ConfigEntry) -> None:
+        self._coordinator = coordinator
+        self._entry = entry
+        self._attr_unique_id = f"{entry.entry_id}_sigenergy_islanded"
+        self._attr_suggested_object_id = "power_sync_sigenergy_islanded"
+
+    @property
+    def device_info(self):
+        return family_device_info(self._entry.entry_id, SENSOR_FAMILY_GRID_HOME)
+
+    @property
+    def available(self) -> bool:
+        return self._coordinator.last_update_success
+
+    @property
+    def is_on(self) -> bool | None:
+        if not self.available:
+            return None
+        return _grid_status_is_off_grid((self._coordinator.data or {}).get("grid_status"))
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        self.async_on_remove(
+            self._coordinator.async_add_listener(self.async_write_ha_state)
+        )
 
 
 class _TeslaBinarySensorBase(BinarySensorEntity):

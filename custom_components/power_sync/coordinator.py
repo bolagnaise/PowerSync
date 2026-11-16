@@ -6019,9 +6019,17 @@ class SigenergyEnergyCoordinator(DataUpdateCoordinator):
                     _LOGGER.warning(
                         "Sigenergy Modbus returned no battery data — keeping previous readings"
                     )
+                    # Cached power readings must not retain an old grid state
+                    # after a failed poll.
+                    previous = {
+                        **self.data,
+                        "grid_status": None,
+                        "on_off_grid_status": None,
+                        "grid_sensor_connected": None,
+                    }
                     if getattr(self, "_additional_solar_enabled", False) is True:
-                        return self._energy_acc.invalidate_site_solar(self.data)
-                    return self.data
+                        return self._energy_acc.invalidate_site_solar(previous)
+                    return previous
                 raise UpdateFailed("Sigenergy Modbus connection failed — no data available")
 
             # Map Sigenergy data to standard format (same as Tesla)
@@ -6117,6 +6125,9 @@ class SigenergyEnergyCoordinator(DataUpdateCoordinator):
             energy_data = {
                 "solar_power": solar_kw,  # kW (DC + AC-coupled)
                 "grid_power": grid_kw,  # kW, positive = importing, negative = exporting
+                "grid_status": attrs.get("grid_status"),
+                "on_off_grid_status": attrs.get("on_off_grid_status"),
+                "grid_sensor_connected": attrs.get("grid_sensor_connected"),
                 "battery_power": battery_kw,  # kW, positive = discharging, negative = charging
                 "load_power": load_kw,  # kW, calculated from energy balance
                 "raw_home_load_power": raw_load_kw,

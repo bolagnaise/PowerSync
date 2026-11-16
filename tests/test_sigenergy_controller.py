@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import ast
 import importlib
+import logging
 import sys
 import types
 import typing
@@ -23,6 +24,160 @@ _STUB_MODULE_NAMES = (
     "pymodbus.client",
     "pymodbus.exceptions",
 )
+
+
+def _load_grid_nodes(filename, names, namespace):
+    tree = ast.parse((COMPONENT_ROOT / filename).read_text())
+    selected = [node for node in tree.body if getattr(node, "name", None) in names]
+    assert len(selected) == len(names)
+    source = "from __future__ import annotations\n" + "\n".join(ast.unparse(n) for n in selected)
+    exec(compile(source, filename, "exec"), namespace)
+    return namespace
+
+
+@pytest.mark.parametrize("inverter_fallback", [False, True])
+@pytest.mark.parametrize("code,expected", [(0, "Active"), (1, "Inactive"), (2, "Inactive"), (65535, None), (None, None)])
+def test_sigenergy_grid_status_uses_plant_slave_and_preserves_unknown(
+    sigenergy_module, inverter_fallback, code, expected,
+):
+    controller = sigenergy_module.SigenergyController(host="127.0.0.1", slave_id=2)
+    controller._use_inverter_registers = inverter_fallback
+    calls = []
+
+    async def connect():
+        return True
+
+    async def power_readings():
+        return {"battery_soc": 50, "pv_power_kw": 0, "_success_count": 2}
+
+    async def read_input(address, count=1, slave_id=None):
+        calls.append((address, count, slave_id))
+        # A disconnected meter does not establish that the plant is off-grid.
+        return {30009: None if code is None else [code], 30004: [0]}.get(address)
+
+    async def read_holding(*args):
+        return None
+
+    controller.connect = connect
+    controller._read_plant_registers = power_readings
+    controller._read_inverter_registers = power_readings
+    controller._read_input_registers = read_input
+    controller._read_holding_registers = read_holding
+    status = asyncio.run(controller.get_status())
+    assert status.status == sigenergy_module.InverterStatus.ONLINE
+    assert status.attributes.get("grid_status") == expected
+    assert status.attributes.get("grid_sensor_connected") is False
+    assert set(calls) == {(30009, 1, 247), (30004, 1, 247)}
+
+
+def _sigenergy_grid_coordinator(attrs, previous=None):
+    source = ast.parse((COMPONENT_ROOT / "coordinator.py").read_text())
+    cls = next(n for n in source.body if isinstance(n, ast.ClassDef) and n.name == "SigenergyEnergyCoordinator")
+    method = next(n for n in cls.body if getattr(n, "name", None) == "_async_update_data")
+    namespace = {
+        "_LOGGER": logging.getLogger(__name__),
+        "UpdateFailed": RuntimeError,
+        "dt_util": types.SimpleNamespace(utcnow=lambda: 123),
+        "_fresh_site_ev_load": lambda *args: (0, True),
+        "_get_current_prices": lambda *args: (0, 0),
+    }
+    exec(compile("from __future__ import annotations\n" + ast.unparse(method), "coordinator.py", "exec"), namespace)
+
+    async def get_status():
+        return types.SimpleNamespace(attributes=attrs, is_curtailed=False)
+
+    async def read_ev():
+        return None
+
+    coordinator = types.SimpleNamespace(
+        _controller=types.SimpleNamespace(get_status=get_status),
+        _energy_acc=types.SimpleNamespace(_last_update=1, update=lambda *args: None, as_dict=lambda: {}),
+        data=previous,
+        hass=types.SimpleNamespace(config_entries=types.SimpleNamespace(async_get_entry=lambda _: None)),
+        _entry_id="synthetic-site",
+        _rated_charge_power_kw=5,
+        _rated_discharge_power_kw=5,
+        _async_read_evdc_charger_state=read_ev,
+    )
+    return coordinator, namespace["_async_update_data"]
+
+
+@pytest.mark.parametrize("status", ["Active", "Inactive", None])
+def test_sigenergy_grid_status_reaches_energy_sensor(status):
+    coordinator, update = _sigenergy_grid_coordinator({"battery_soc": 50, "grid_status": status})
+    data = asyncio.run(update(coordinator))
+    value = _load_grid_nodes("sensor.py", {"_grid_status_value"}, {
+        "_SUPPORTED_GRID_STATUS_VALUES": {"active", "inactive"},
+    })["_grid_status_value"]
+    assert "grid_status" in data
+    assert value(data) == status
+
+
+def test_sigenergy_grid_status_does_not_survive_failed_battery_read():
+    previous = {"battery_level": 50, "grid_status": "Active", "on_off_grid_status": 0, "grid_sensor_connected": True}
+    coordinator, update = _sigenergy_grid_coordinator({}, previous)
+    data = asyncio.run(update(coordinator))
+    assert data["battery_level"] == 50
+    assert data["grid_status"] is None
+    assert data["on_off_grid_status"] is None
+    assert data["grid_sensor_connected"] is None
+    assert previous["grid_status"] == "Active"
+
+
+def _sigenergy_islanded_nodes():
+    class Entity:
+        async def async_added_to_hass(self):
+            pass
+
+        def async_on_remove(self, callback):
+            self.remove_callback = callback
+
+        def async_write_ha_state(self):
+            self.writes = getattr(self, "writes", 0) + 1
+
+    return _load_grid_nodes("binary_sensor.py", {
+        "SigenergyIslandedBinarySensor", "_grid_status_is_off_grid", "async_setup_entry",
+    }, {
+        "BinarySensorEntity": Entity,
+        "EntityCategory": types.SimpleNamespace(DIAGNOSTIC="diagnostic"),
+        "DOMAIN": "power_sync",
+        "CONF_TESLA_ENERGY_SITE_ID": "tesla_energy_site_id",
+        "SENSOR_FAMILY_GRID_HOME": "grid_home",
+        "family_device_info": lambda *args: args,
+    })
+
+
+def test_sigenergy_islanded_entity_is_entry_scoped_and_tracks_refreshes():
+    nodes = _sigenergy_islanded_nodes()
+    coord = types.SimpleNamespace(data={"grid_status": "Inactive"}, last_update_success=True)
+    listeners = []
+
+    def subscribe(callback):
+        listeners.append(callback)
+        return lambda: listeners.remove(callback)
+
+    coord.async_add_listener = subscribe
+    entry = types.SimpleNamespace(entry_id="synthetic-site", options={}, data={})
+    hass = types.SimpleNamespace(data={"power_sync": {entry.entry_id: {"sigenergy_coordinator": coord}}})
+    entities = []
+    asyncio.run(nodes["async_setup_entry"](hass, entry, entities.extend))
+    assert len(entities) == 1
+    entity = entities[0]
+    assert entity._attr_suggested_object_id == "power_sync_sigenergy_islanded"
+    assert entity.is_on is True
+    asyncio.run(entity.async_added_to_hass())
+    coord.data = {"grid_status": "Active"}
+    listeners[0]()
+    assert entity.writes == 1
+    assert entity.is_on is False
+    coord.data = {"grid_status": None}
+    assert entity.is_on is None
+    coord.data = {"grid_status": "Inactive"}
+    coord.last_update_success = False
+    assert entity.available is False
+    assert entity.is_on is None
+    entity.remove_callback()
+    assert listeners == []
 
 
 @pytest.fixture()
