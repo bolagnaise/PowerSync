@@ -355,10 +355,21 @@ def test_history_improves_away_recovery_after_arrival_without_mutating_live_fact
     from types import SimpleNamespace
     module = projection_module
     timestamps = _timestamps(12)
-    vehicle = _vehicle(module, location='work', plugged_in=False, ev_soc_percent=60)
+    vehicle = _vehicle(module, location='work', plugged_in=False, ev_soc_percent=60, observation_quality='low')
     arrival = SimpleNamespace(arrival=timestamps[3], soc=20)
     projection = _build(module, prices=[20] * 12, vehicles=[vehicle],
         timestamps=timestamps, historical_arrivals={'VIN_ONE': arrival}, preserve_home_battery=preserve)
     assert projection.expected_w[:3] == (0, 0, 0)
     assert any(projection.expected_w[3:]) is (not preserve)
     assert vehicle.location == 'work' and vehicle.ev_soc_percent == 60 and not vehicle.plugged_in
+
+
+@pytest.mark.parametrize("missing", [{"ev_soc_percent": None}, {"battery_capacity_kwh": None}, {"charger_power_known": False}])
+def test_history_does_not_replace_missing_vehicle_facts(projection_module, missing):
+    from types import SimpleNamespace
+    timestamps = _timestamps(12)
+    vehicle = _vehicle(projection_module, location="work", plugged_in=False,
+        observation_quality="low", **missing)
+    result = _build(projection_module, prices=[20] * 12, vehicles=[vehicle],
+        timestamps=timestamps, historical_arrivals={"VIN_ONE": SimpleNamespace(arrival=timestamps[3], soc=20)})
+    assert not any(result.expected_w)

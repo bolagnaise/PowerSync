@@ -354,3 +354,48 @@ async def test_physical_charger_remains_visible_and_metered_without_selected_soc
     observation = namespace[node.name](e.hass, e.entry.options)
     assert observation["ev_power_kw"] == 7
     assert observation["ev_soc"] is None
+
+
+@pytest.mark.asyncio
+async def test_historical_sources_follow_selected_profile_without_legacy_fallback(env, monkeypatch):
+    e = env
+    byd = await add(e)
+    zeekr = await add(e, "Zeekr", "sensor.zeekr_soc", 86)
+    # Load the real history discovery with only the HA registry boundary faked.
+    package = types.ModuleType("power_sync.optimization")
+    package.__path__ = [str(ROOT / "optimization")]
+    monkeypatch.setitem(sys.modules, package.__name__, package)
+    for leaf in ("ev_history", "ev_history_recorder"):
+        monkeypatch.delitem(sys.modules, f"power_sync.optimization.{leaf}", raising=False)
+    planner = sys.modules["power_sync.automations.ev_charging_planner"]
+    planner._iter_tesla_vehicle_devices = lambda registry: []
+    ble = types.ModuleType("power_sync.tesla_ble")
+    ble.get_tesla_ble_battery_state = lambda *args: None
+    monkeypatch.setitem(sys.modules, ble.__name__, ble)
+    ha = types.ModuleType("homeassistant")
+    helpers = types.ModuleType("homeassistant.helpers")
+    device_registry = types.ModuleType("homeassistant.helpers.device_registry")
+    entity_registry = types.ModuleType("homeassistant.helpers.entity_registry")
+    helpers.device_registry, helpers.entity_registry = device_registry, entity_registry
+    ha.helpers = helpers
+    for module in (ha, helpers, device_registry, entity_registry):
+        monkeypatch.setitem(sys.modules, module.__name__, module)
+    entities = {}
+    for car in ("byd", "zeekr"):
+        for entity in (f"sensor.{car}_soc", f"device_tracker.{car}_location"):
+            entities[entity] = NS(entity_id=entity, device_id=car, disabled_by=None)
+    monkeypatch.setattr(device_registry, "async_get", lambda hass: NS(), raising=False)
+    monkeypatch.setattr(entity_registry, "async_get", lambda hass: NS(entities=entities), raising=False)
+    for leaf in ("ev_history", "ev_history_recorder"):
+        name = f"power_sync.optimization.{leaf}"
+        spec = importlib.util.spec_from_file_location(name, ROOT / "optimization" / f"{leaf}.py")
+        recorder = importlib.util.module_from_spec(spec)
+        monkeypatch.setitem(sys.modules, name, recorder)
+        spec.loader.exec_module(recorder)
+    discover = lambda: recorder.discover_sources(e.hass, e.entry, {"generic_ev": "generic_ev"})
+    await e.shared.update(e.hass, e.entry, e.executor, {"operation": "select", "vehicle_id": byd})
+    assert discover()["generic_ev"].identity == "sensor.byd_soc|device_tracker.byd_location"
+    await e.shared.update(e.hass, e.entry, e.executor, {"operation": "select", "vehicle_id": zeekr})
+    assert discover()["generic_ev"].soc == "sensor.zeekr_soc"
+    await e.shared.update(e.hass, e.entry, e.executor, {"operation": "select", "vehicle_id": None})
+    assert discover() == {}

@@ -18062,8 +18062,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         can still opt into per-entity history subtraction. Returning an empty
         list leaves an already-normalized or unconfigured history unchanged.
         """
-        if not (getattr(self, "_ev_integration_enabled", False)
-                or getattr(self, "_use_historical_ev_data", False)):
+        if not getattr(self, "_ev_integration_enabled", False):
             return []
         load_entity_id = getattr(self._load_estimator, "load_entity_id", None)
         load_state = self.hass.states.get(load_entity_id) if load_entity_id else None

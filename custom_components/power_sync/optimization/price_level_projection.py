@@ -359,6 +359,10 @@ def build_price_level_projection(
             # This copy is used only by the advisory projection. The live
             # executor still receives the original presence and SOC facts.
             vehicle = replace(vehicle, ev_soc_percent=arrival.soc,
+                              # The collector marks known-away/unplugged telemetry low.
+                              # History replaces those two facts only; missing live SOC
+                              # and the independent capacity/power/ownership gates remain.
+                              observation_quality="high" if vehicle.ev_soc_percent is not None else vehicle.observation_quality,
                               location="home", plugged_in=True,
                               assumptions=(*vehicle.assumptions, "Weekday trip history; live data takes over on return"))
         else:

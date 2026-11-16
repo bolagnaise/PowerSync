@@ -7103,20 +7103,21 @@ class AutoScheduleExecutor:
         # and _evaluate_vehicle() must read staleness against this same
         # HA-local clock (OB-31) rather than a mismatched datetime.now().
         now = _ha_local_now_naive()
+        departure_reference = max(now, _as_ha_local_naive(available_from)) if available_from is not None else now
 
         # Determine target time from per-day departure_times
         target_time = None
         if settings.departure_times:
             # Find next applicable departure by walking forward through days
             for days_ahead in range(8):  # Check up to 7 days ahead
-                check_time = now + timedelta(days=days_ahead)
+                check_time = departure_reference + timedelta(days=days_ahead)
                 weekday = check_time.weekday()
                 if weekday in settings.departure_times:
                     dep_str = settings.departure_times[weekday]
                     try:
                         dep_hour, dep_min = map(int, dep_str.split(":"))
                         candidate = check_time.replace(hour=dep_hour, minute=dep_min, second=0, microsecond=0)
-                        if candidate > now:
+                        if candidate > departure_reference:
                             target_time = candidate
                             break
                     except ValueError:
@@ -7125,10 +7126,10 @@ class AutoScheduleExecutor:
             # Legacy fallback: single departure_time + departure_days
             try:
                 dep_hour, dep_min = map(int, settings.departure_time.split(":"))
-                target_time = now.replace(hour=dep_hour, minute=dep_min, second=0, microsecond=0)
+                target_time = departure_reference.replace(hour=dep_hour, minute=dep_min, second=0, microsecond=0)
 
                 # If departure is in the past today, use tomorrow
-                if target_time <= now:
+                if target_time <= departure_reference:
                     target_time += timedelta(days=1)
 
                 # Check if target day is in departure_days

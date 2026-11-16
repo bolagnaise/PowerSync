@@ -52,7 +52,13 @@ def discover_sources(hass, entry, identifiers) -> dict[str, EVHistorySources]:
                 result[identifier] = EVHistorySources(soc.entity_id, tracker.entity_id)
             continue
         if identifier in {"generic_ev", "_default", "ev"}:
-            soc_id = opts.get("generic_charger_soc_entity")
+            from ..automations.shared_generic_charger import shared_data, selected_profile
+            shared = shared_data(hass, entry)
+            if shared is not None:
+                profile = selected_profile(shared)
+                soc_id = str(profile.get("soc_entity") or "").strip() if profile else None
+            else:
+                soc_id = opts.get("generic_charger_soc_entity")
             registration = registry.entities.get(soc_id) if soc_id else None
             home_ids = [entity.entity_id for entity in registry.entities.values()
                         if registration and registration.device_id

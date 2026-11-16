@@ -4046,3 +4046,12 @@ def test_historical_mode_honours_only_a_future_explicit_external_zero(opt_module
     coordinator._use_historical_ev_data = True
     forecast = coordinator._get_planned_ev_load_forecast(6)
     assert forecast == ([0.0] * 6 if future else None)
+
+
+def test_history_alone_does_not_subtract_ev_without_replacement(opt_module):
+    coordinator = opt_module.OptimizationCoordinator(
+        hass=SimpleNamespace(), entry_id="entry-1", battery_system="sungrow",
+        battery_controller=SimpleNamespace(), entry=SimpleNamespace(data={}, options={
+            "optimization_ev_integration": False, "optimization_use_historical_ev_data": True,
+            "generic_charger_power_entity": "sensor.ev_power"}))
+    assert coordinator._ev_load_subtraction_entities() == []
