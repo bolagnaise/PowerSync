@@ -36,6 +36,11 @@ The card distinguishes a local stop from central cleanup that is still pending.
 Approval must be completed within the displayed setup window. Refreshing the
 card does not approve access.
 
+If support initialization times out during a busy HA startup, PowerSync retries
+once after HA has finished starting. This does not restore a temporary session
+or approve new access. If the card still returns `404: Not Found`, include the
+PowerSync support startup warning from the HA log in your existing ticket.
+
 ## Local recording and shared archives
 
 Local recording is off by default and separate from remote sharing. Its controls

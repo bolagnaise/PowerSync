@@ -701,11 +701,11 @@ class SupportView(HomeAssistantView):
             return web.json_response({"error": "support_unavailable"}, status=503)
 
 
-async def setup(hass, entry):
+async def _setup_once(hass, entry, *, timeout=5):
     runtimes = hass.data.setdefault(DATA, {})
     runtime = SupportRuntime(hass, entry)
     try:
-        await asyncio.wait_for(runtime.setup(), timeout=5)
+        await asyncio.wait_for(runtime.setup(), timeout=timeout)
         if not hass.data.get("power_sync_support_view_registered"):
             hass.http.register_view(SupportView(hass))
             hass.data["power_sync_support_view_registered"] = True
@@ -718,13 +718,64 @@ async def setup(hass, entry):
         value.recorder.trim(time.time())
 
 
+async def _retry_setup_after_start(hass, entry):
+    """Retry one transient startup timeout without entering HA's startup barrier."""
+    import logging
+    from homeassistant.helpers.start import async_at_started
+
+    started = asyncio.Event()
+
+    async def on_started(_hass):
+        started.set()
+
+    unsubscribe = async_at_started(hass, on_started)
+    try:
+        await started.wait()
+        # Storage/executor contention at startup must not disable support for
+        # the entire boot. Use a fresh runtime; failed setup was already stopped.
+        await _setup_once(hass, entry, timeout=30)
+        logging.getLogger(__name__).info("PowerSync support diagnostics recovered after startup")
+    except Exception as err:
+        # Never include exception messages, which may contain customer data.
+        logging.getLogger(__name__).warning(
+            "PowerSync support startup retry failed (%s); core integration remains active",
+            type(err).__name__,
+        )
+    finally:
+        unsubscribe()
+        pending = hass.data.get(DATA + "_pending", {})
+        if pending.get(entry.entry_id) is asyncio.current_task():
+            pending.pop(entry.entry_id)
+
+
+async def _cancel_setup_retry(hass, entry):
+    if task := hass.data.get(DATA + "_pending", {}).pop(entry.entry_id, None):
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def setup(hass, entry):
+    await _cancel_setup_retry(hass, entry)
+    try:
+        await _setup_once(hass, entry)
+    except TimeoutError:
+        # Keep the initial optional-setup boundary and its safe diagnostics.
+        # Recovery is bounded and grants no support session or hardware access.
+        hass.data.setdefault(DATA + "_pending", {})[entry.entry_id] = hass.async_create_background_task(
+            _retry_setup_after_start(hass, entry),
+            f"power_sync_support_startup_retry_{entry.entry_id}", eager_start=False)
+        raise
+
+
 async def unload(hass, entry):
+    await _cancel_setup_retry(hass, entry)
     if runtime := hass.data.get(DATA, {}).pop(entry.entry_id, None):
         await asyncio.wait_for(runtime.stop(), timeout=5)
 
 
 async def remove(hass, entry):
     """Erase local evidence and attempt remote cleanup without restoring read access."""
+    await _cancel_setup_retry(hass, entry)
     runtime = SupportRuntime(hass, entry)
     stored = await runtime.store.async_load() or {}
     if type(stored) is not dict:
