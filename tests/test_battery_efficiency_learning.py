@@ -37,6 +37,7 @@ def _record_cycle(
     discharge_kw: float = 1.6,
 ) -> datetime:
     """Record a 20%-SOC closed loop with 2 kWh in and known AC output."""
+    previous_cycles = len(learner.history)
     common = {
         "capacity_kwh": 10.0,
         "topology_fingerprint": "test|integrated_ac_power|ac_system|10000",
@@ -74,7 +75,9 @@ def _record_cycle(
         battery_power_kw=0.0,
         **common,
     )
-    assert result.accepted_cycle is True
+    # A continuously moving battery now closes at the actual SOC return,
+    # before the subsequent quiet sample. Exactly one new loop is accepted.
+    assert len(learner.history) == previous_cycles + 1
     return end
 
 
@@ -206,3 +209,162 @@ def test_store_round_trip_excludes_open_cycle_and_toggle_disables_application():
     assert resolved.charge_efficiency == pytest.approx(0.92)
     assert restored.to_dict()["version"] == 1
     assert BatteryEfficiencyLearner.from_dict({"version": 999}).history == []
+
+
+def _continuous_profile(start, *, lower=False, endpoint=1.0):
+    """54 kWh loop with no quiet anchor/return and known 80% AC energy ratio."""
+    first_power, second_power = (9.6, -12.0) if lower else (-12.0, 9.6)
+    peak = 0.0 if lower else endpoint
+    rows = [(start, 0.5, first_power)]
+    # Last outward sample ramps to zero for a single instant at the endpoint.
+    weights = [1.0] * 29 + [0.5]
+    total = sum(weights)
+    elapsed = 0
+    running = 0.0
+    for i, weight in enumerate(weights):
+        elapsed += 5
+        running += weight
+        soc = 0.5 + (peak - 0.5) * running / total
+        rows.append((start + timedelta(minutes=elapsed), soc, 0.0 if i == 29 else first_power))
+    weights = [0.5] + [1.0] * 29
+    running = 0.0
+    for i, weight in enumerate(weights):
+        elapsed += 5
+        running += weight
+        soc = peak + (0.5 - peak) * running / total
+        if i == 29:
+            soc = 0.5
+        rows.append((start + timedelta(minutes=elapsed), soc, second_power))
+    return rows
+
+
+def _feed_profile(learner, rows):
+    accepted = []
+    for at, soc, power in rows:
+        result = learner.observe(timestamp=at, soc=soc, battery_power_kw=power,
+            capacity_kwh=54.0, topology_fingerprint="synthetic-54kwh-ac")
+        if result.accepted_cycle:
+            accepted.append(learner.history[-1])
+    return accepted
+
+
+@pytest.mark.parametrize("lower", [False, True])
+def test_continuous_full_depth_loop_learns_without_quiet_anchor_or_return(lower):
+    start = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    learner = BatteryEfficiencyLearner()
+    accepted = _feed_profile(learner, _continuous_profile(start, lower=lower))
+    assert len(accepted) == 1
+    assert accepted[0].round_trip_efficiency == pytest.approx(0.8)
+    assert accepted[0].charge_kwh == pytest.approx(29.5)
+    assert accepted[0].discharge_kwh == pytest.approx(23.6)
+    assert "soc_boundary" not in learner.rejections
+
+
+def test_repeated_normal_full_depth_cycles_advance_confidence_and_survive_store():
+    learner = BatteryEfficiencyLearner()
+    for day in range(10):
+        start = datetime(2026, 7, 1 + day, tzinfo=timezone.utc)
+        # Like a process restart, an overnight telemetry gap must not bridge
+        # energy between separate daily loops. Accepted history survives.
+        learner = BatteryEfficiencyLearner.from_dict(learner.to_dict())
+        _feed_profile(learner, _continuous_profile(start, lower=bool(day % 2)))
+    now = start + timedelta(hours=6)
+    resolved = learner.resolved_parameters(now=now)
+    assert len(learner.history) == 10
+    assert resolved.battery_efficiency_source == "learned"
+    assert resolved.battery_efficiency_candidate_rte == pytest.approx(.8)
+    assert resolved.battery_efficiency_confidence > 0
+    assert resolved.physical_round_trip_efficiency < DEFAULT_RTE
+    assert resolved.economic_round_trip_efficiency <= DEFAULT_RTE
+
+
+def test_return_crossing_interpolates_energy_instead_of_counting_overshoot():
+    start = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    rows = _continuous_profile(start)
+    # Cross the anchor halfway through the final interval. The tail belongs
+    # to neither the completed cycle nor a fabricated second observation.
+    at, _, power = rows[-1]
+    previous_soc = rows[-2][1]
+    rows[-1] = at, .5 - (previous_soc - .5), power
+    learner = BatteryEfficiencyLearner()
+    accepted = _feed_profile(learner, rows)
+    assert len(accepted) == 1
+    assert accepted[0].discharge_kwh == pytest.approx(23.2)
+    assert accepted[0].timestamp == (at - timedelta(minutes=2.5)).isoformat()
+
+
+def test_near_return_without_crossing_is_not_a_completed_cycle():
+    rows = _continuous_profile(datetime(2026, 7, 1, tzinfo=timezone.utc))
+    at, _, power = rows[-1]
+    rows[-1] = at, .5001, power
+    learner = BatteryEfficiencyLearner()
+    assert _feed_profile(learner, rows) == []
+    assert learner.history == []
+
+
+def test_telemetry_gap_during_endpoint_visit_cannot_be_bridged():
+    rows = _continuous_profile(datetime(2026, 7, 1, tzinfo=timezone.utc))
+    rows = rows[:30] + [(at + timedelta(hours=1), soc, p) for at, soc, p in rows[30:]]
+    learner = BatteryEfficiencyLearner()
+    assert _feed_profile(learner, rows) == []
+    assert learner.rejections["telemetry_gap"] >= 1
+
+
+def _observation_method():
+    import ast
+    from typing import Any
+    path = MODULE_PATH.parent / "coordinator.py"
+    tree = ast.parse(path.read_text())
+    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "OptimizationCoordinator")
+    method = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "_observe_battery_efficiency")
+    namespace = {"datetime": datetime, "Any": Any}
+    exec(compile(ast.Module(body=[method], type_ignores=[]), str(path), "exec"), namespace)
+    return namespace[method.name]
+
+
+def test_coordinator_uses_acquisition_clock_and_paired_soc_not_solve_values():
+    from types import SimpleNamespace
+    now = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    captured = []
+    learner = SimpleNamespace(observe=lambda **kw: (captured.append(kw) or MODULE.ObservationResult(False)))
+    coordinator = SimpleNamespace(_get_energy_data=lambda: {"battery_level": 1.0, "battery_power": -12.0,
+        "last_update": now - timedelta(seconds=30)}, _battery_efficiency_learner=learner,
+        _battery_efficiency_topology_fingerprint=lambda _: "test-ac")
+    observe = _observation_method()
+    observe(coordinator, timestamp=now, soc=.5, capacity_wh=54000)
+    assert captured[-1]["soc"] == pytest.approx(.01)
+    assert captured[-1]["timestamp"] == now - timedelta(seconds=30)
+    assert captured[-1]["valid"] is True
+    coordinator._get_energy_data = lambda: {"battery_level": 50, "battery_power": -12,
+        "last_update": now - timedelta(minutes=5)}
+    observe(coordinator, timestamp=now, soc=.5, capacity_wh=54000)
+    assert captured[-1]["valid"] is False
+
+
+def test_published_diagnostics_keep_current_plan_values_separate_from_new_evidence():
+    learner = BatteryEfficiencyLearner()
+    for day in range(10):
+        start = datetime(2026, 7, 1 + day, tzinfo=timezone.utc)
+        _feed_profile(learner, _continuous_profile(start))
+    now = start + timedelta(hours=6)
+    diagnostics = learner.diagnostics(now=now,
+        planning_parameters=MODULE.ResolvedOptimizerParameters.legacy())
+    assert diagnostics["state"] == "learned"
+    assert diagnostics["candidate_round_trip_efficiency"] == pytest.approx(.8)
+    assert diagnostics["physical_round_trip_efficiency"] == pytest.approx(DEFAULT_RTE)
+    assert diagnostics["applied_one_way_efficiency"] == pytest.approx(.92)
+
+
+def test_sign_reversal_uses_interval_energy_direction_and_return_prefix():
+    # A final discharging sample does not erase the charging energy delivered
+    # during most of the preceding acquisition interval.
+    learner = BatteryEfficiencyLearner()
+    start = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    common = {"capacity_kwh":54,"topology_fingerprint":"synthetic-ac"}
+    learner.observe(timestamp=start,soc=.8,battery_power_kw=-12,**common)
+    result = learner.observe(timestamp=start+timedelta(minutes=5),soc=.81,battery_power_kw=2,**common)
+    assert result.rejection_reason is None
+    assert learner.state != "idle"
+    charge, discharge = MODULE._integrate_directional_energy(-4,4,1)
+    assert charge == pytest.approx(1)
+    assert discharge == pytest.approx(1)

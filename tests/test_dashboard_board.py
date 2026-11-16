@@ -1993,3 +1993,14 @@ def test_advanced_dashboard_controls_require_a_tesla_local_capability_entity():
     result = subprocess.run(["node", "-e", script, str(STRATEGY_PATH)], check=True, capture_output=True, text=True)
     out = json.loads(result.stdout.strip().splitlines()[-1])
     assert out["controlsAdvanced"] is True, "Unpaired Tesla still gets setup feedback, other brands do not get Tesla-only controls"
+
+
+def test_efficiency_display_distinguishes_assumption_measurement_and_applied_plan():
+    result = _run_board(
+        "console.log(JSON.stringify({cold:context.psBatteryEfficiencySummary({state:'cold_start',physical_round_trip_efficiency:.8464,valid_cycles:0,distinct_days:0}),learned:context.psBatteryEfficiencySummary({state:'learned',physical_round_trip_efficiency:.831744,candidate_round_trip_efficiency:.8139,confidence:.571,valid_cycles:6,distinct_days:4})}));"
+    )
+    assert "84.6% assumed" in result["cold"]
+    assert "No measured estimate yet" in result["cold"]
+    assert "81.4%" in result["learned"]
+    assert "Planning uses 83.2%" in result["learned"]
+    assert "6 cycles over 4 days" in result["learned"]

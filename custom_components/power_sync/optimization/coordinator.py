@@ -7670,7 +7670,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._track_actual_cost(force=True)
             self._reconcile_battery_provenance_from_telemetry(reason="optimizer_run")
             self._observe_battery_efficiency(
-                timestamp=solve_timestamp,
+                timestamp=dt_util.now(),
                 soc=soc,
                 capacity_wh=capacity,
             )
@@ -19242,15 +19242,28 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         data = self._get_energy_data()
         if not isinstance(data, dict):
             return
+        # Integrate paired SOC/power on the acquisition clock. A fresh solve
+        # timestamp must not make a repeated or stale provider cache look new.
+        observed_at = data.get("last_update")
+        fresh = (
+            isinstance(observed_at, datetime)
+            and observed_at.tzinfo is not None
+            and -5 <= (timestamp - observed_at).total_seconds() <= 120
+        )
+        level = data.get("battery_level")
+        try:
+            measured_soc = float(level) / 100.0
+        except (TypeError, ValueError):
+            measured_soc = None
         result = self._battery_efficiency_learner.observe(
-            timestamp=timestamp,
-            soc=soc,
+            timestamp=observed_at.astimezone(timestamp.tzinfo) if fresh else timestamp,
+            soc=measured_soc,
             battery_power_kw=data.get("battery_power"),
             capacity_kwh=float(capacity_wh) / 1000.0,
             topology_fingerprint=(
                 self._battery_efficiency_topology_fingerprint(capacity_wh)
             ),
-            valid=data.get("telemetry_ready") is not False,
+            valid=fresh and data.get("telemetry_ready") is not False,
             skip_reason="stale_telemetry",
         )
         if result.changed:
@@ -21317,6 +21330,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             data["battery_efficiency_learning"] = battery_learner.diagnostics(
                 application_enabled=self.battery_efficiency_learning_enabled,
                 now=dt_util.now(),
+                planning_parameters=getattr(
+                    self, "_last_resolved_optimizer_parameters", None
+                ),
             )
         if self._last_solar_nowcast_ratio is not None:
             data["solar_nowcast_ratio"] = round(self._last_solar_nowcast_ratio, 3)

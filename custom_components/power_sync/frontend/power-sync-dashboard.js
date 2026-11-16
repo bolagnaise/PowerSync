@@ -2685,6 +2685,16 @@ class PsControlsCard extends PsCardBase {
 
 }
 
+function psBatteryEfficiencySummary(value) {
+  if (!value || !Number.isFinite(value.physical_round_trip_efficiency)) return '';
+  const applied = (value.physical_round_trip_efficiency * 100).toFixed(1);
+  const measured = Number.isFinite(value.candidate_round_trip_efficiency)
+    ? (value.candidate_round_trip_efficiency * 100).toFixed(1) : null;
+  if (value.state === 'disabled') return `Battery round-trip efficiency: ${applied}% assumed; automatic learning is off.`;
+  if (value.state === 'learned') return `Measured round-trip estimate: ${measured}%. Planning uses ${applied}% after gradual adjustment (${value.valid_cycles} cycles over ${value.distinct_days} days; ${Math.round(value.confidence * 100)}% learning confidence).`;
+  return `Battery round-trip efficiency: ${applied}% assumed while learning. ${value.valid_cycles || 0} valid cycles over ${value.distinct_days || 0} days.${measured === null ? ' No measured estimate yet.' : ` Preliminary measured estimate: ${measured}%; more evidence is needed before applying it.`}`;
+}
+
 // ─── Optimizer plan ──────────────────────────────────────────────
 // Last 12 hours measured (history), next 24 hours planned (optimizer).
 
@@ -2904,6 +2914,7 @@ class PsPlanCard extends PsCardBase {
       <svg class="dayline" role="img" tabindex="0" aria-label="Import and export prices with the battery's measured and planned charge level. Use the left and right arrow keys to step through the hours."></svg>
       <div class="legend" aria-hidden="true">${legend}</div>
       ${psExportOfferHtml(hass, m.bonus)}
+      ${psBatteryEfficiencySummary(data.battery_efficiency_learning) ? `<p class="hint">${psEsc(psBatteryEfficiencySummary(data.battery_efficiency_learning))}</p>` : ''}
       <div class="plan-foot">
         <div class="windows">${winHtml}${hasBonusCap ? `<p class="hint">The daily cap limits premium-rate energy, not total export. ${zerohero.bonus_export_kwh_remaining != null && Number.isFinite(Number(zerohero.bonus_export_kwh_remaining)) ? `${psFix(zerohero.bonus_export_kwh_remaining)} kWh remaining today. ` : ''}Export earnings include the allowance shared with solar export.</p>` : ''}</div>
         ${resRows.length ? `<details class="res"><summary>Reserve details</summary><dl class="kv">${resRows.map(([k, v]) => `<dt>${psEsc(k)}</dt><dd>${psEsc(v)}</dd>`).join('')}</dl></details>` : ''}
