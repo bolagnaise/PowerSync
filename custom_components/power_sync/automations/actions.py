@@ -15030,6 +15030,12 @@ async def _dynamic_ev_update_surplus(
             charging_state=charging_state,
             restart_telemetry_pending=_tesla_restart_telemetry_pending(v_state),
         )
+        if (v_params.get("charger_type", "tesla") == "tesla"
+                and v_state.get("transport_recovery_pending")
+                and not observed_power_available):
+            # Retain possible commanded draw for electrical admission, but
+            # never count an unobserved uncertain Start as reusable solar.
+            actual_power_kw = 0.0
         total_ev_power_kw += actual_power_kw
 
     restart_telemetry_pending = _tesla_restart_telemetry_pending(state)
@@ -15868,7 +15874,14 @@ async def _dynamic_ev_update_surplus(
         state["low_surplus_start"] = None
         state.pop("stop_outcome", None)
 
-        if effective_current_amps == 0:
+        if effective_current_amps == 0 or (
+            params.get("charger_type", "tesla") == "tesla"
+            and state.get("transport_recovery_pending")
+        ):
+            # An uncertain Start retains possible draw in current_amps. Missing
+            # telemetry must not let that reservation bypass fresh-read recovery.
+            # Keep the reservation intact; the Start path must reconcile before
+            # it can submit another command, under current surplus and ownership.
             # Track how long we've had surplus before starting
             high_surplus_start = state.get("high_surplus_start")
             if high_surplus_start is None:

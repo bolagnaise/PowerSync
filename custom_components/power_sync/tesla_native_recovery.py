@@ -20,6 +20,13 @@ SETTLE_SECONDS = 60.0
 SAMPLE_SECONDS = 3.0
 METER_SAMPLE_SECONDS = 5.0
 TIMEOUT_SECONDS = 25.0
+CACHED_TIMEOUT_SECONDS = 75.0
+
+
+async def _cached_vehicle_report(hass, vin, preferred_entity_id):
+    from .tesla_ev_observation import get_tesla_vehicle_observation
+
+    return get_tesla_vehicle_observation(hass, vin, preferred_entity_id=preferred_entity_id)
 
 
 def _number(value, low, high):
@@ -110,7 +117,7 @@ def _sample(observation, vin, producer, after):
             "field_provenance": deepcopy(dict(getattr(observation, "field_provenance", {})))}
 
 
-async def async_reconcile_native_history(hass, entry, vin, *, authorize):
+async def async_reconcile_native_history(hass, entry, vin, *, authorize, allow_paid_refresh=True, cached_only=False):
     """Try once, read only, then durably release this exact operational hold.
 
     No control, wake, retry loop, historical value reconstruction or outcome
@@ -123,6 +130,18 @@ async def async_reconcile_native_history(hass, entry, vin, *, authorize):
     )
 
     runtime = manager._runtime(hass, entry)
+    passive = runtime.get(ACTIVE_KEY) if runtime is not None else None
+    if (not cached_only and isinstance(passive, dict) and passive.get("cached_only")
+            and passive.get("vehicle_id") == vin):
+        task = passive.get("task")
+        if isinstance(task, asyncio.Task) and task is not asyncio.current_task() and not task.done():
+            # A live request owns its existing read permission. Do not make
+            # it wait out passive sampling or transfer that permission to the
+            # background worker. Stop uses the same preemption event.
+            passive["interrupted"] = True
+            passive["interruption_reason"] = "recovery_superseded_by_live_request"
+            passive["interrupt_event"].set()
+            await asyncio.gather(task, return_exceptions=True)
     if (not isinstance(vin, str) or not re.fullmatch(r"[A-HJ-NPR-Z0-9]{17}", vin)
             or runtime is None or not manager._sidecar_ready(runtime)
             or runtime.get(manager._SIDECAR_HOLD_KEY) is not None
@@ -181,7 +200,8 @@ async def async_reconcile_native_history(hass, entry, vin, *, authorize):
         and callable(refresh_meter))
     receipts = []
     token = {"token": uuid4().hex, "vehicle_id": vin, "interrupted": False,
-             "interrupt_event": asyncio.Event()}
+             "interrupt_event": asyncio.Event(), "cached_only": cached_only,
+             "task": asyncio.current_task()}
     runtime[ACTIVE_KEY] = token
 
     def current():
@@ -197,18 +217,31 @@ async def async_reconcile_native_history(hass, entry, vin, *, authorize):
                 and _no_writers(manager, hass, vin) and authorize() is True
                 and independent_tesla_source_binding(hass, vin, preferred_entity_id=preferred) == source)
 
+    cached_contradiction = False
+
     async def read(after):
+        nonlocal cached_contradiction
         if not current():
             return None
-        observation = await async_read_tesla_vehicle(hass, vin, preferred_entity_id=preferred, timeout=5)
+        if cached_only:
+            observation = await _cached_vehicle_report(hass, vin, preferred)
+        else:
+            observation = await async_read_tesla_vehicle(hass, vin, preferred_entity_id=preferred, timeout=5)
         sample = _sample(observation, vin, producer, after)
-        if sample is None and current() and source is not None and producer[0] in {"tesla_fleet", "teslemetry", "tessie"}:
+        if (cached_only and observation is not None and sample is None
+                and _sample(observation, vin, producer, 0) is None):
+            cached_contradiction = True
+        if (not cached_only and sample is None and current() and source is not None
+                and producer[0] in {"tesla_fleet", "teslemetry", "tessie"}):
             observation = await async_read_independent_tesla_vehicle(
                 hass, vin, preferred_entity_id=preferred, timeout=5, updated_after=after,
-                allow_paid_refresh=producer[0] == "teslemetry", authorize=current)
+                allow_paid_refresh=allow_paid_refresh is True and producer[0] == "teslemetry", authorize=current)
             sample = _sample(observation, vin, producer, after)
         meter_at = None
-        if sample is not None and current() and managed_scope:
+        if sample is not None and current() and managed_scope and cached_only:
+            if getattr(local, "last_update_success", False):
+                meter_at = getattr(local, "last_success_ts", None)
+        if sample is not None and current() and managed_scope and not cached_only:
             try:
                 await asyncio.wait_for(refresh_meter(), timeout=5)
                 if getattr(local, "last_update_success", False):
@@ -224,12 +257,23 @@ async def async_reconcile_native_history(hass, entry, vin, *, authorize):
 
     success = False
     result = {"success": False, "error": "fresh_stopped_vehicle_reports_unavailable"}
+    if cached_only:
+        result["acquisition"] = "existing_vehicle_telemetry"
     try:
-        async with asyncio.timeout(TIMEOUT_SECONDS):
+        async with asyncio.timeout(CACHED_TIMEOUT_SECONDS if cached_only else TIMEOUT_SECONDS):
             started = time.time()
             # Providers may timestamp charge documents in whole seconds.
             # The reader itself verifies a new acquisition and source advance.
-            first = await read(math.floor(started) - 0.001)
+            cutoff = math.floor(started) - 0.001
+            if cached_only:
+                # Existing telemetry must be fresh and acquired after the
+                # uncertain commands settled, not merely after HA restarted.
+                settling = runtime[manager._SIDECAR_STATE_KEY].get("native_reconciliation_settling", {}).get(vin, {})
+                settle = 120.0 if producer[0] == "teslemetry" else SETTLE_SECONDS
+                cutoff = max(started - 90, *(row["submitted_epoch"] + settle
+                    if row.get("submitted_epoch") is not None else settling.get("settle_until", started)
+                    for row in rows.values()))
+            first = await read(cutoff)
             if first is None:
                 return False
             separation = max(SAMPLE_SECONDS, METER_SAMPLE_SECONDS) if managed_scope else SAMPLE_SECONDS
@@ -240,8 +284,19 @@ async def async_reconcile_native_history(hass, entry, vin, *, authorize):
             except TimeoutError:
                 pass
             second = await read(first["timestamp"] + separation - 0.01)
+            while second is None and cached_only and current() and not cached_contradiction:
+                # Wait for ordinary provider polling/streaming to advance.
+                # A cache lookup performs no refresh, wake or cloud request.
+                try:
+                    await asyncio.wait_for(token["interrupt_event"].wait(), timeout=SAMPLE_SECONDS)
+                    result["error"] = "recovery_preempted_by_stop"
+                    return False
+                except TimeoutError:
+                    pass
+                second = await read(first["timestamp"] + separation - 0.01)
             if (second is None or any(first[key] != second[key] for key in (
-                    "producer_identity", "requested_current", "charge_limit_soc"))):
+                    "producer_identity", "requested_current", "charge_limit_soc"))
+                    or time.time() - first["timestamp"] > 90):
                 return False
             async with manager._journal_lock(runtime):
                 if not current():
@@ -323,6 +378,8 @@ async def async_reconcile_native_history(hass, entry, vin, *, authorize):
     except asyncio.CancelledError:
         result["error"] = "recovery_cancelled"
         raise
+    except TimeoutError:
+        return False
     except Exception as error:
         if success:
             result["headroom_reconciled"] = False
@@ -334,7 +391,7 @@ async def async_reconcile_native_history(hass, entry, vin, *, authorize):
             runtime.pop(ACTIVE_KEY, None)
         if not success:
             if token["interrupted"]:
-                result["error"] = "recovery_preempted_by_stop"
+                result["error"] = token.get("interruption_reason", "recovery_preempted_by_stop")
             result["retry_after"] = time.time() + (0 if token["interrupted"] else SETTLE_SECONDS)
             runtime.setdefault(BACKOFF_KEY, {})[vin] = result["retry_after"]
         # Persist retry/status metadata independently of the immutable command

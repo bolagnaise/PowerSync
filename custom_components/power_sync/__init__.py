@@ -51469,6 +51469,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     from .tesla_native_rate import async_start as _start_tesla_native_rate
     await _start_tesla_native_rate(hass, entry)
 
+    from .tesla_ev_auto_recovery import start as _start_ev_auto_recovery
+    _start_ev_auto_recovery(hass, entry)
+
     _LOGGER.info("=" * 60)
     # Optional diagnostics must never make successful energy setup fail.
     try:
@@ -53308,6 +53311,8 @@ class OptimizationAISummaryView(HomeAssistantView):
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
     hass.data.get(DOMAIN, {}).get(entry.entry_id, {})["powerwall_local_dispatch_stopping"] = True
+    from .tesla_ev_auto_recovery import async_stop as _stop_ev_auto_recovery
+    await _stop_ev_auto_recovery(hass, entry)
     # Fence disclosure synchronously. Diagnostic disk cleanup waits until the
     # existing hardware/coordinator shutdown has completed below.
     try:

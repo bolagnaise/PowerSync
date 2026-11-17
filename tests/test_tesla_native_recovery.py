@@ -33,7 +33,8 @@ async def case(harness, monkeypatch, request):
                                                entry="native-entry", platform=platform)
     assert await recovery.async_load_recovery_state(hass, entry)
     monkeypatch.setattr(recovery, "time", SimpleNamespace(time=lambda: time.time()-180, monotonic=time.monotonic))
-    for operation in [operation, *(["stop"] * 5)]:
+    operations = [operation] if isinstance(parameter, dict) and parameter.get("only_start") else [operation, *(["stop"] * 5)]
+    for operation in operations:
         entity = {"rate": "number.fallback_current", "limit": "number.fallback_limit"}.get(operation, "switch.fallback")
         ticket = await recovery.async_begin_attempt(hass, entry, VIN_A, {"kind": "ha"}, operation, entity)
         assert ticket

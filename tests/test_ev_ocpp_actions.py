@@ -11983,6 +11983,53 @@ def test_tesla_stopped_state_is_not_charge_complete_at_partial_soc():
     assert asyncio.run(actions._is_vehicle_charge_complete(hass, "VIN123")) is False
 
 
+@pytest.mark.parametrize("recovered", [False, True])
+def test_solar_recovery_retries_with_possible_load_and_unavailable_telemetry(monkeypatch, recovered):
+    """An unknown Start must reach recovery even while its possible amps stay reserved."""
+    vehicle_id = "VIN123"
+    hass = _Hass([
+        _State("sensor.VIN123_charging_state", "unavailable"),
+        _State("sensor.VIN123_charger_power", "unavailable", {"unit_of_measurement": "W"}),
+    ])
+    actions._dynamic_ev_state.clear()
+    state = _solar_surplus_state(current_amps=14)
+    state["params"].update(vehicle_vin=vehicle_id,
+        charger_power_entity="sensor.VIN123_charger_power", household_buffer_kw=0)
+    state["high_surplus_start"] = datetime.now() - timedelta(minutes=4)
+    actions._mark_tesla_plan_pending(state, 14)
+    actions._dynamic_ev_state["entry-1"] = {vehicle_id: state}
+    set_calls = _install_solar_surplus_runtime_stubs(monkeypatch, {
+        "battery_soc": 100, "grid_power": -3500, "battery_power": 0,
+        "solar_power": 4000, "load_power": 500,
+    })
+    attempts = []
+
+    async def start(_hass, _entry, params, context=None):
+        attempts.append(dict(params))
+        # The possible load must survive through recovery admission.
+        assert state["current_amps"] == 14
+        assert params["_tesla_plan_recovery_attempt"] is True
+        params["_tesla_transport_recovery_pending"] = not recovered
+        return True if recovered else None
+
+    monkeypatch.setattr(actions, "_action_start_ev_charging", start)
+    monkeypatch.setattr(actions, "_is_vehicle_charge_complete", AsyncMock(return_value=False))
+    asyncio.run(actions._dynamic_ev_update_surplus(hass, _Entry(), "entry-1", vehicle_id))
+    assert len(attempts) == 1
+    # Possible load is an electrical reservation, not measured solar that
+    # can fund a new Start. Only the 3.5 kW export can fund this retry.
+    assert attempts[0]["amps"] <= round(3500 / 240)
+    if recovered:
+        assert not state.get("transport_recovery_pending")
+    else:
+        assert state["transport_recovery_pending"]
+        assert state["current_amps"] >= 14
+        assert set_calls == []
+        # A 30s update must not spin another expensive recovery request.
+        asyncio.run(actions._dynamic_ev_update_surplus(hass, _Entry(), "entry-1", vehicle_id))
+        assert len(attempts) == 1
+
+
 @pytest.mark.parametrize("current_suffix", ["charge_current", "charger_current"])
 @pytest.mark.parametrize("charging_suffix", ["charging_state", "charging"])
 def test_ble_solar_restart_uses_zero_current_without_power_sensor(monkeypatch, current_suffix, charging_suffix):

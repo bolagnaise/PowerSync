@@ -3804,6 +3804,8 @@ def ev_recovery_status(hass: Any, entry: Any, vehicle_id: Any) -> dict[str, Any]
         "native_state_reconciliation_available": reason == "native_recovery",
         "native_last_reconciliation": deepcopy(state.get("native_reconciliation", {}).get(vehicle_id))
             if isinstance(state, Mapping) else None,
+        "automatic_native_recovery": deepcopy(state.get("automatic_native_recovery", {}).get(vehicle_id))
+            if isinstance(state, Mapping) and isinstance(state.get("automatic_native_recovery", {}), Mapping) else None,
         "native_settling": deepcopy(state.get("native_reconciliation_settling", {}).get(vehicle_id))
             if isinstance(state, Mapping) else None,
         "historical_unknown_attempts": [
