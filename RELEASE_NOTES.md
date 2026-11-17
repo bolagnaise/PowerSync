@@ -1,4 +1,8 @@
-<!-- release: v2.12.1730 -->
+<!-- release: v2.12.1731 -->
+
+## Clearer ongoing support setup
+
+The Support card now explains recognized invitation problems, including an expired invitation, a different setup identity, an invalid public key or pending revocation. Follow the displayed next step and keep your current setup identity; reviewing an invitation still requires your separate approval before access begins.
 
 ## Automatic Tesla EV recovery
 
