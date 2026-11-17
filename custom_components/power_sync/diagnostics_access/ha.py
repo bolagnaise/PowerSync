@@ -33,6 +33,14 @@ class DiagnosticsView(HomeAssistantView):
     url = "/api/power_sync/diagnostics"
     name = "api:power_sync:diagnostics"
     requires_auth = True
+    # Only fixed, reviewed reason codes may leave the administrator API.
+    # Exception messages can contain private input and must remain undisclosed.
+    SAFE_REASONS = frozenset({
+        "invalid_authority_key", "invitation_invalid", "invitation_identity_mismatch",
+        "invitation_expired", "invitation_already_added", "revocation_pending",
+        "diagnostics_persistence_unconfirmed", "remote_request_denied",
+        "signature_denied", "binding_denied", "payload_changed", "invalid_envelope",
+    })
 
     def __init__(self, hass):
         self.hass = hass
@@ -74,8 +82,11 @@ class DiagnosticsView(HomeAssistantView):
             else:
                 raise WireError("unsupported_action")
             return web.json_response(result, headers={"Cache-Control": "no-store"})
-        except (WireError, KeyError, TypeError):
-            return web.json_response({"error": "diagnostics_request_denied"}, status=409)
+        except (WireError, KeyError, TypeError) as error:
+            payload = {"error": "diagnostics_request_denied"}
+            if isinstance(error, WireError) and str(error) in self.SAFE_REASONS:
+                payload["reason"] = str(error)
+            return web.json_response(payload, status=409, headers={"Cache-Control": "no-store"})
 
 
 async def setup(hass, entry):

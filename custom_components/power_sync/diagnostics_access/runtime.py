@@ -91,25 +91,36 @@ class AccessRuntime:
 
     async def review(self, user, code, authority_key):
         await self.setup_identity()
-        wire.unb64(authority_key, size=32)
+        try:
+            wire.unb64(authority_key, size=32)
+        except wire.WireError:
+            raise wire.WireError("invalid_authority_key") from None
         codes = [code]
         combined = type(code) is str and code.startswith("psa1.")
         if combined:
-            bundle = wire.loads(wire.unb64(code[5:], maximum=4096), maximum=4096)
+            try:
+                bundle = wire.loads(wire.unb64(code[5:], maximum=4096), maximum=4096)
+            except wire.WireError:
+                raise wire.WireError("invitation_invalid") from None
             if set(bundle) != {"invitations"} or type(bundle["invitations"]) is not list or len(bundle["invitations"]) != 2:
-                raise wire.WireError("invitation_denied")
+                raise wire.WireError("invitation_invalid")
             codes = bundle["invitations"]
         selections = []
         root = self.identity["root"]
         for invitation in codes:
             parts = invitation.split(".") if type(invitation) is str else []
-            if len(parts) != 4 or parts[0] != root or not wire.ID.fullmatch(parts[1]):
-                raise wire.WireError("invitation_denied")
+            if len(parts) != 4 or not wire.ID.fullmatch(parts[1]):
+                raise wire.WireError("invitation_invalid")
+            if parts[0] != root:
+                raise wire.WireError("invitation_identity_mismatch")
             response = await self.post("/descriptor", dict(zip(("root", "grant", "invitation", "challenge"), parts)))
             descriptor = wire.verify(response, authority_key, "authority", root, parts[1])["descriptor"]
             registration = descriptor["registration"]
-            if (descriptor["expires_at"] <= time.time() or registration["root"] != root
-                    or registration["grant"] != parts[1] or parts[1] in self.grants
+            if descriptor["expires_at"] <= time.time():
+                raise wire.WireError("invitation_expired")
+            if parts[1] in self.grants:
+                raise wire.WireError("invitation_already_added")
+            if (registration["root"] != root or registration["grant"] != parts[1]
                     or any(item["parts"][1] == parts[1] for item in selections)):
                 raise wire.WireError("invitation_denied")
             selections.append({"parts": parts, "descriptor": descriptor})

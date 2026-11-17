@@ -27,7 +27,7 @@ vm.runInContext(fs.readFileSync(process.argv[1]+'/power-sync-support.js','utf8')
  await card.load();assert.equal(card.shadowRoot.all().filter(node=>node.tag==='button').length,0);
  const scopes=['ha_read','optimizer_contribution'].map(kind=>({kind,processor:'<img onerror=bad()>',actor:'operator'}));
  const state={identity:{root:'root'},grants:[]};
- let temporary={state:'closed'},failSupport=false,failOngoing=false;
+ let temporary={state:'closed'},failSupport=false,failOngoing=false,reviewFailure;
  card._hass={user:{is_admin:true},callApi:async(method,path,value)=>{
    calls.push({method,path,value});
    if(path==='power_sync/support'){
@@ -37,7 +37,10 @@ vm.runInContext(fs.readFileSync(process.argv[1]+'/power-sync-support.js','utf8')
    }
    assert.equal(path,'power_sync/diagnostics');
    if(failOngoing)throw Error('ongoing unavailable');
-   if(value?.action==='review')return {combined:true,challenge:'reviewed-both',descriptors:scopes.map(ceiling=>({ceiling,disclosure:'Signed <b>disclosure</b>'}))};
+   if(value?.action==='review'){
+     if(reviewFailure)throw {body:{error:'diagnostics_request_denied',reason:reviewFailure},message:'CANARY_PRIVATE_ERROR'};
+     return {combined:true,challenge:'reviewed-both',descriptors:scopes.map(ceiling=>({ceiling,disclosure:'Signed <b>disclosure</b>'}))};
+   }
    if(value?.action==='confirm')state.grants=scopes.map((ceiling,index)=>({id:'grant-'+index,approval_set:'one-approval',ceiling,status:'connected'}));
    return state;
  }};
@@ -61,11 +64,28 @@ vm.runInContext(fs.readFileSync(process.argv[1]+'/power-sync-support.js','utf8')
    field('Authority public key').value='authority';field('Authority public key').oninput();
  };
  enterInvitation();assert.equal(button('Review invitation').disabled,false);
+ for(const [reason,expected] of [
+   ['invitation_identity_mismatch','different setup identity'],
+   ['invitation_expired','expired'],
+   ['invalid_authority_key','authority public key'],
+   ['invitation_already_added','already saved'],
+   ['revocation_pending','revocation'],
+   ['CANARY_PRIVATE_ERROR','could not be confirmed'],
+ ]){
+   reviewFailure=reason;await button('Review invitation').onclick();
+   assert.ok(nodes().some(node=>node.attributes.role==='alert'&&node.textContent.includes(expected)),reason);
+   assert.ok(!nodes().some(node=>node.textContent?.includes('CANARY_PRIVATE_ERROR')));
+   assert.ok(!button('Enable ongoing access'));assert.equal(state.grants.length,0);
+ }
+ reviewFailure=undefined;
  await button('Review invitation').onclick();
  assert.equal(calls.filter(call=>call.value?.action==='confirm').length,0,'review alone grants nothing');
  assert.ok(nodes().some(node=>node.textContent==='Signed <b>disclosure</b>'),'disclosures use inert text');
  assert.ok(nodes().some(node=>node.textContent==='Connected application: <img onerror=bad()>'));
  assert.equal(button('Enable ongoing access').disabled,true,'explicit consent required');
+ reviewFailure='invitation_expired';await button('Review invitation').onclick();
+ assert.ok(!button('Enable ongoing access'),'a failed review cannot leave an older approval form');
+ reviewFailure=undefined;await button('Review invitation').onclick();
  // A changed invitation cannot reuse a previously checked approval.
  field('Support invitation').value='changed';field('Support invitation').oninput();
  assert.ok(!button('Enable ongoing access'));

@@ -123,6 +123,13 @@ does not change existing access. Existing approvals and their revoke controls
 remain visible in either mode. Saved HA diagnostics cards open the same Support
 interface.
 
+If **Review invitation** fails, the card explains recognized setup problems,
+including an expired invitation, a different setup identity, an invalid authority
+key or revocation that is still awaiting confirmation. Keep the current setup
+identity and follow the displayed next step. A different-identity message means
+support needs the identity currently shown under **Ongoing support setup** to
+replace the invitation. Reviewing an invitation does not approve access.
+
 Combined approvals have a **Revoke ongoing access** button. Use **Revoke all
 ongoing access** to stop all ongoing approvals for the installation.
 Revoking either member of a combined approval blocks both purposes locally and

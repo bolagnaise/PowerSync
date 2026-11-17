@@ -57,6 +57,7 @@ class PowerSyncSupportCard extends HTMLElement {
   async run(action, data = {}, ongoing = false) {
     if (this._busy || !this._hass?.user?.is_admin) return;
     this._busy = true;
+    if (ongoing && action === 'review') this._review = undefined;
     this.shadowRoot.querySelectorAll('button,select,input').forEach(e => { e.disabled = true; });
     try {
       const result = await (ongoing ? this.diagnosticsApi(action, data) : this.api(action, data));
@@ -70,7 +71,19 @@ class PowerSyncSupportCard extends HTMLElement {
       this._message = '';
       if (ongoing) this._diagnosticsError = false;
     } catch (e) {
-      this._message = ongoing ? 'Ongoing support request could not be confirmed. Refresh status before retrying.' : e?.body?.error || 'Support request failed. Refresh the status before retrying.';
+      const reasons = {
+        invalid_authority_key: 'The authority public key is incomplete or invalid. Paste the complete key provided in your private support ticket.',
+        invitation_invalid: 'The invitation could not be read. Paste the complete ongoing-support invitation from your private ticket.',
+        invitation_identity_mismatch: 'This invitation is for a different setup identity. Open Ongoing support setup and share the currently displayed identity in your ticket so support can replace the invitation. Keep the current identity.',
+        invitation_expired: 'This invitation has expired. Ask support for a fresh ongoing-support invitation and keep your current setup identity.',
+        invitation_already_added: 'This invitation is already saved on this installation. Refresh status to check its connection.',
+        revocation_pending: 'Ongoing access revocation is awaiting confirmation. Keep the current setup and tell support; revocation must finish before another invitation can be reviewed.',
+        diagnostics_persistence_unconfirmed: 'Home Assistant could not confirm that support state was saved. Check available storage and the Home Assistant log before retrying.',
+      };
+      const unverified = new Set(['remote_request_denied', 'signature_denied', 'binding_denied', 'payload_changed', 'invalid_envelope']);
+      const reason = e?.body?.reason;
+      const safeReason = Object.prototype.hasOwnProperty.call(reasons, reason) ? reasons[reason] : unverified.has(reason) ? 'Home Assistant could not verify this invitation with the support service. Keep the current setup and report this message in your private ticket.' : undefined;
+      this._message = ongoing ? safeReason || 'Ongoing support request could not be confirmed. Refresh status before retrying.' : e?.body?.error || 'Support request failed. Refresh the status before retrying.';
     } finally {
       // A confirmation consumes its challenge, including uncertain responses.
       if (ongoing && action === 'confirm') this._review = undefined;

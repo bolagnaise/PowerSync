@@ -163,6 +163,49 @@ async def test_root_revocation_during_descriptor_fetch_prevents_review():
         await runtime.review('owner', code, public)
     assert not runtime.reviews and not runtime.grants
 
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('variant,reason', [
+    ('identity', 'invitation_identity_mismatch'),
+    ('expired', 'invitation_expired'),
+    ('key', 'invalid_authority_key'),
+    ('saved', 'invitation_already_added'),
+    ('revoking', 'revocation_pending'),
+    ('unknown', None),
+])
+async def test_review_http_failure_explains_safe_rejection_without_exposing_secrets(variant, reason):
+    from aiohttp import web
+    runtime, code, public, descriptors, _ = await setup()
+    if variant == 'identity':
+        runtime.identity['root'] = 'a' * 64
+    elif variant == 'expired':
+        descriptors['1' * 32]['expires_at'] = 0
+    elif variant == 'key':
+        public = 'not-a-public-key'
+    elif variant == 'saved':
+        runtime.grants['1' * 32] = {'existing': True}
+    elif variant == 'revoking':
+        runtime.root_pending = True
+    elif variant == 'unknown':
+        runtime.review = AsyncMock(side_effect=wire.WireError('CANARY_PRIVATE_ERROR'))
+    before = copy.deepcopy(runtime.grants)
+    source = ROOT / 'custom_components/power_sync/diagnostics_access/ha.py'
+    node = next(item for item in ast.parse(source.read_text()).body
+                if isinstance(item, ast.ClassDef) and item.name == 'DiagnosticsView')
+    namespace = {'HomeAssistantView': object, 'web': web, 'WireError': wire.WireError,
+                 'loads': wire.loads, 'DATA': module.DATA}
+    exec(compile(ast.Module(body=[node], type_ignores=[]), str(source), 'exec'), namespace)
+    hass = SimpleNamespace(data={module.DATA: {'runtime': runtime}})
+    class Request(dict):
+        content = _FragmentedContent([wire.json_bytes({'action': 'review', 'code': code, 'authority_key': public})])
+    request = Request(hass_user=SimpleNamespace(id='owner', is_admin=True))
+    response = await namespace['DiagnosticsView'](hass).post(request)
+    body = wire.loads(response.body)
+    assert response.status == 409 and body['error'] == 'diagnostics_request_denied'
+    assert body.get('reason') == reason
+    assert 'CANARY_PRIVATE_ERROR' not in response.text and code not in response.text and public not in response.text
+    assert runtime.grants == before and not runtime.reviews and not runtime.started
+
 class _FragmentedContent:
     def __init__(self, parts, failure=None):
         self.parts = list(parts)
