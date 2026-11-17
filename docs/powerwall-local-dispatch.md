@@ -194,6 +194,18 @@ Timed Local V1R battery-power commands are a separate actuator. A retained setti
 
 **Restore Normal** finishes a current forcing override. After that owner has finished, the retained basis is a reference for supervised manual recovery; it is not replayed over newer settings. If the old write later changes settings, explicitly apply the intended settings through the normal cloud controls. An unrelated active override must still complete its confirmed cleanup before a new manual setting takes over; cloud recovery permission remains available if cleanup needs another attempt.
 
+### Supervised adoption of current local settings
+
+If an old generic settings request cannot be settled, an administrator can explicitly accept its remaining risk and adopt the current native configuration. This is a separate choice from cloud resumption: the earlier full configuration may still apply later and overwrite newer settings, including permissions and site limits. It is not proof that the old request finished.
+
+In **Developer tools > Actions**, run **PowerSync: Recover Powerwall local settings under supervision** (`power_sync.recover_powerwall_local_settings`) with the affected `entry_id` and `operation: inspect`. The response supplies `site_id`, `incident_id`, and `recovery_revision`, plus the current import/export limits. Inspecting makes no settings change. If Repairs appears empty, check its ignored issues; ignoring a notice does not clear recovery.
+
+Only after accepting that full-configuration risk, run the same action with `operation: resume`, the returned entry/site/incident IDs, `expected_recovery_revision` set to the returned revision, and both `acknowledge: true` and `accept_unknown_full_configuration_write: true`. Any change in the incident, pairing, ownership or configuration invalidates that inspection. Active controls, submissions and unfinished restores must finish first; their records are retained on refusal.
+
+Recovery makes two fresh native configuration reads, saves the accepted baseline and administrator acknowledgement alongside the original unknown incident, then resumes local settings and persistent site-limit access. The action sends no device command and does not replay saved settings. A new uncertain write blocks access again. The accepted exception survives restart only for its exact site and pairing. A storage-verification failure keeps runtime access blocked; restart or reload before inspecting a transition that reached storage but could not be verified.
+
+The old outcome remains visible in the recovery inspection, control diagnostics and Repairs independently of whether the notice was ignored. A later genuine receipt updates only that historical incident. This recovery action applies to generic settings incidents; native site-limit transactions retain their own reconciliation path.
+
 ## Available grid-export targets
 
 The Force Power export range respects both the configured site export limit and

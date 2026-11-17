@@ -212,6 +212,12 @@ def control_obligations(runtime: Mapping, *, entry_id: str | None = None) -> dic
         "local_settings_unresolved": bool(pending),
         "cloud_resumed_local_suspended": incident.get("resume_cloud") is True,
         "settings_incident_id": incident.get("id"),
+        "supervised_local_settings_recoveries": [
+            {"incident_id": item.get("id"),
+             "old_outcome": "terminal" if item.get("terminal") is True else "unknown",
+             "accepted_at": item["supervised_local_recovery"].get("confirmed_at")}
+            for item in runtime.get("powerwall_settings_history", [])
+            if isinstance(item, Mapping) and isinstance(item.get("supervised_local_recovery"), Mapping)],
         "legacy_restore_pending": bool(runtime.get("pending_tesla_restore")),
         "restart_restore_pending": bool(runtime.get("optimizer_force_restart_restore_pending")),
         "native_restore_pending": bool(native and native.pending),
@@ -385,6 +391,21 @@ class PowerwallSiteControl:
                 yield self
             finally:
                 self.route_entry_id = previous
+
+    @asynccontextmanager
+    async def recovery_readback(self, *, entry_id: str, is_current, timeout=15):
+        """Quiesce site mutations for metadata recovery without an effect receipt."""
+        async with self.route_scope(entry_id):
+            async with asyncio.timeout(timeout):
+                await self._write_lock.__aenter__()
+            try:
+                if is_current() is not True:
+                    raise ControlRequestStale("Settings recovery identity changed")
+                yield
+                if is_current() is not True:
+                    raise ControlRequestStale("Settings recovery identity changed")
+            finally:
+                await self._write_lock.__aexit__(None, None, None)
 
     def request(self, label: str, target: ControlTarget | None = None,
                 deadline: float | None = None, *, entry_id: str | None = None) -> ControlRequest:

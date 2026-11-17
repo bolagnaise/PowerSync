@@ -25,6 +25,9 @@ native_grid_charging_reading = load_power_sync_submodule(
 def load_settings_startup(namespace):
     """Run the actual storage prelude and full runtime publication from setup."""
     import builtins
+    recovery = load_power_sync_submodule("powerwall_local.settings_recovery", "settings_startup_recovery_probe")
+    namespace.setdefault("settings_recovery_store_state", recovery.store_state)
+    namespace.setdefault("settings_recovery_identity", recovery.identity_for_entry)
 
     setup = next(node for node in ast.parse((ROOT / "__init__.py").read_text()).body
                  if isinstance(node, ast.AsyncFunctionDef) and node.name == "async_setup_entry")
