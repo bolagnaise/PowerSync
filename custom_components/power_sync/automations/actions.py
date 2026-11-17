@@ -7123,7 +7123,7 @@ async def _fresh_tesla_command_observation(hass, entry, vehicle, params, *, time
         current_config = {**entry.data, **entry.options}
         return (scope_current()
                 and source_binding is not None
-                and source_binding.get("domain") in {"tesla_fleet", "teslemetry"}
+                and source_binding.get("domain") in {"tesla_fleet", "teslemetry", "tessie"}
                 and current_config.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API) in (
                     EV_PROVIDER_BOTH, EV_PROVIDER_FLEET_API,
                 ))
