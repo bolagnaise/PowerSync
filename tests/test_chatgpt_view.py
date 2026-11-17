@@ -775,6 +775,11 @@ def test_auth_shutdown_failure_still_cleans_hardware_and_allows_ha_reload(fixtur
         calls.append("native-rate")
     native_rate.async_stop = stop_native_rate
     fixture.monkeypatch.setitem(sys.modules, native_rate.__name__, native_rate)
+    auto_recovery = ModuleType("_powersync_chatgpt_view_test.power_sync.tesla_ev_auto_recovery")
+    async def stop_auto_recovery(hass, entry):
+        calls.append("auto-recovery")
+    auto_recovery.async_stop = stop_auto_recovery
+    fixture.monkeypatch.setitem(sys.modules, auto_recovery.__name__, auto_recovery)
     ev_services = ModuleType("_powersync_chatgpt_view_test.power_sync.ev_charging_services")
     ev_services.unregister_services = lambda hass: calls.append("ev-actions-unregistered")
     fixture.monkeypatch.setitem(sys.modules, ev_services.__name__, ev_services)
@@ -791,7 +796,8 @@ def test_auth_shutdown_failure_still_cleans_hardware_and_allows_ha_reload(fixtur
     fixture.hass.config_entries.async_reload = ha_reload
     with caplog.at_level(logging.WARNING):
         asyncio.run(fixture.hass.config_entries.async_reload(fixture.entry.entry_id))
-    assert {"native-rate", "auth", "tesla", "aemo", "optimizer", "platforms", "setup", "ev-actions-unregistered"}.issubset(calls)
+    assert {"auto-recovery", "native-rate", "auth", "tesla", "aemo", "optimizer", "platforms", "setup", "ev-actions-unregistered"}.issubset(calls)
+    assert calls.index("auto-recovery") < calls.index("native-rate") < calls.index("platforms")
     assert fixture.hass.data["power_sync"][fixture.entry.entry_id]["_optimization_chatgpt_auth"] is manager
     assert "SECRET" not in caplog.text
 

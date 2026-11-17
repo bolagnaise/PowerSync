@@ -1306,13 +1306,15 @@ async def test_full_unload_and_settings_setup_boundary_keep_released_cloud_avail
         async def wait(self, tasks, *, timeout):
             assert timeout == 5.0
             return await real_asyncio.wait(tasks, timeout=.01)
-    ns.update(asyncio=BoundedClock(), _stop_tesla_native_rate=AsyncMock(), PLATFORMS=[],
+    ns.update(asyncio=BoundedClock(), _stop_ev_auto_recovery=AsyncMock(),
+              _stop_tesla_native_rate=AsyncMock(), PLATFORMS=[],
               SERVICE_SYNC_TOU="sync_tou", SERVICE_SYNC_NOW="sync_now",
               cleanup_dynamic_ev_entry=Mock(), STORAGE_VERSION=1, STORAGE_KEY="test",
               _unregister_ev_charging_services=Mock())
     unload = load_function(ROOT / "__init__.py", "async_unload_entry", ns, strip_imports=True)
     try:
         assert await asyncio.wait_for(unload(ns["hass"], ns["entry"]), .5)
+        ns["_stop_ev_auto_recovery"].assert_awaited_once_with(ns["hass"], ns["entry"])
         ns["_unregister_ev_charging_services"].assert_called_once_with(ns["hass"])
         assert not receipt.done()
         # A reload must not rely on an artificially pre-created entry mapping.

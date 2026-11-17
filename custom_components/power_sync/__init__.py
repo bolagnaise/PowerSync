@@ -53311,8 +53311,6 @@ class OptimizationAISummaryView(HomeAssistantView):
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
     hass.data.get(DOMAIN, {}).get(entry.entry_id, {})["powerwall_local_dispatch_stopping"] = True
-    from .tesla_ev_auto_recovery import async_stop as _stop_ev_auto_recovery
-    await _stop_ev_auto_recovery(hass, entry)
     # Fence disclosure synchronously. Diagnostic disk cleanup waits until the
     # existing hardware/coordinator shutdown has completed below.
     try:
@@ -53320,6 +53318,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             support_runtime.session.close("unloaded")
     except Exception:
         _LOGGER.warning("PowerSync support consent cleanup unavailable")
+    from .tesla_ev_auto_recovery import async_stop as _stop_ev_auto_recovery
+    await _stop_ev_auto_recovery(hass, entry)
     from .tesla_native_rate import async_stop as _stop_tesla_native_rate
     await _stop_tesla_native_rate(hass, entry)
     if license_manager := hass.data.get("power_sync_license_manager"):
