@@ -31,13 +31,18 @@ class Session:
         raw = encode(value)
         return {"signed": b64(raw), "signature": b64(self.key.sign(raw))}
 
-    def begin(self, owner, entry_ref, categories, history_start, duration, *, include_recorder=False):
+    def begin(self, owner, entry_ref, categories, history_start, duration, *, include_recorder=False, history_seconds=None):
         self.close("replaced")
         if not isinstance(categories, list) or not categories or set(categories) - CATEGORIES or len(categories) != len(set(categories)):
             raise SupportError("invalid_categories")
         if type(duration) is not int or not 60 <= duration <= 28800:
             raise SupportError("invalid_duration")
         now = self.wall()
+        if history_seconds is not None:
+            if history_start is not None or number(history_seconds) is None or not 0 <= history_seconds <= 86400:
+                raise SupportError("invalid_history_range")
+            # Derive and validate the selected lookback against the same clock.
+            history_start = now - history_seconds
         if number(history_start) is None or not now - 86400 <= history_start <= now:
             raise SupportError("invalid_history_range")
         self.key = Ed25519PrivateKey.generate()

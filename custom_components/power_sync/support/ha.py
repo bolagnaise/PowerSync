@@ -299,14 +299,14 @@ class SupportRuntime:
         policy = await self.request("/support/v1/policy")
         if not isinstance(policy.get("disclosure"), str) or not isinstance(policy.get("policy_digest"), str):
             raise SupportError("support_policy_unavailable")
-        now = time.time()
         if number(body.get("history_seconds", 0)) is None or not 0 <= body.get("history_seconds", 0) <= 86400:
             raise SupportError("invalid_history_range")
         for other in self.hass.data.get(DATA, {}).values():
             if other is not self and other.session.key is not None:
                 raise SupportError("another_session_active")
         scope = self.session.begin(owner, reference(self.entry.entry_id + self.mapping_digest), body.get("categories"),
-            now - body.get("history_seconds", 0), body.get("duration", 3600), include_recorder=body.get("ha_recorder") is True)
+            None, body.get("duration", 3600), include_recorder=body.get("ha_recorder") is True,
+            history_seconds=body.get("history_seconds", 0))
         generation = self.session.generation
         self.policy = policy
         self.descriptor = self.code = None

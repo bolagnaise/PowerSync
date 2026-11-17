@@ -715,3 +715,20 @@ async def test_tesla_preparation_is_projected_and_scoped_without_device_reads(ru
     count = len(rt.recorder.dump())
     rt.observe_preparation(raw)
     assert len(rt.recorder.dump()) == count
+
+
+@pytest.mark.asyncio
+async def test_start_full_day_history_survives_clock_advance(runtime, monkeypatch):
+    rt, *_ = runtime
+    base = 1_800_000_000.0
+    monkeypatch.setattr(time, 'time', lambda: base)
+    rt.session.wall = lambda: base + .01
+    async def request(path, body=None, **kwargs):
+        if path.endswith('/policy'):
+            return {'disclosure': 'test', 'policy_digest': 'a' * 64}
+        assert path.endswith('/register')
+        assert body['scope']['history_start'] == base + .01 - 86400
+        raise OSError('registration reached')
+    rt.request = request
+    with pytest.raises(OSError, match='registration reached'):
+        await rt.start('owner', {'categories': ['system'], 'history_seconds': 86400})
