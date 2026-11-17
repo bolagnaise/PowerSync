@@ -351,3 +351,60 @@ async def test_retired_runtime_cannot_save_late_passive_evidence(case, monkeypat
     await instance.async_stop()
     assert task.done()
     assert c.store.value == before and replacement == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("variant", ["new_session", "producer_changed", "no_owner", "foreign_owner", "cleanup_only", "revoked", "save_failed", "finite_cleanup", "owner_changed_during_save", "producer_changed_during_save"])
+async def test_new_plan_reclaims_only_completed_same_producer_session_route(case, monkeypatch, variant):
+    """Completed history must not strand a fresh owned plan on its old lease."""
+    import ast
+    from collections.abc import Mapping
+    from pathlib import Path
+    from conftest import load_source_node
+    c = case
+    await worker(c).async_tick()
+    c.owners[VIN_A] = {"owner": "powersync", "owner_mode": "solar_surplus", "session_id": "old-session"}
+    ticket = await recovery.async_begin_attempt(c.hass, c.entry, VIN_A,
+        {"kind": "ha"}, "start", "switch.fallback")
+    assert ticket and await recovery.async_finish_attempt(ticket, "accepted_unconfirmed")
+    history = deepcopy(c.runtime[recovery.RECOVERY_KEY]["vehicles"][VIN_A]["attempts"])
+    c.owners[VIN_A] = {"owner": "powersync", "owner_mode": "solar_surplus", "session_id": "new-session"}
+    if variant == "producer_changed":
+        c.registry["switch.fallback"].unique_id = "replacement"
+    elif variant == "no_owner":
+        c.owners.pop(VIN_A)
+    elif variant == "foreign_owner":
+        c.owners[VIN_A]["owner"] = "external"
+    elif variant == "cleanup_only":
+        c.runtime[recovery.RECOVERY_KEY]["vehicles"][VIN_A]["route"]["cleanup_only"] = True
+    elif variant == "save_failed":
+        c.store.fail = True
+    elif variant == "finite_cleanup":
+        c.runtime[recovery._SIDECAR_STATE_KEY]["obligations"]["ev_quick_control_obligations"] = {VIN_A: {"status": "pending_cleanup"}}
+    elif variant in {"owner_changed_during_save", "producer_changed_during_save"}:
+        save = c.store.async_save
+
+        async def changed(value):
+            if variant == "owner_changed_during_save":
+                c.owners[VIN_A]["session_id"] = "intervening-session"
+            else:
+                c.registry["switch.fallback"].unique_id = "intervening-producer"
+            return await save(value)
+
+        monkeypatch.setattr(c.store, "async_save", changed)
+    assert recovery.get_vehicle_route(c.hass, c.entry, VIN_A)["reason"] == "route_identity_changed"
+    diagnostics = recovery.ev_recovery_status(c.hass, c.entry, VIN_A)["native_route_diagnostics"]
+    assert diagnostics["producer_binding_matches"] is (variant != "producer_changed")
+    assert diagnostics["session_scope_matches"] is False
+    source = Path(__file__).parents[1] / "custom_components/power_sync/automations/actions.py"
+    node = load_source_node(source, "_tesla_transport_route")
+    scope = {"__name__": "power_sync.automations._route_probe", "__package__": "power_sync.automations",
+        "DOMAIN": "power_sync", "Mapping": Mapping,
+        "_tesla_transport_authority": lambda *a, **k: lambda: variant != "revoked"}
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[node], type_ignores=[])), str(source), "exec"), scope)
+    route = await scope["_tesla_transport_route"](c.hass, c.entry, {"vehicle_vin": VIN_A}, "start")
+    assert route["kind"] == ("ha" if variant == "new_session" else "blocked")
+    if variant == "new_session":
+        assert route["session_scope"]["session_id"] == "new-session"
+    assert c.runtime[recovery.RECOVERY_KEY]["vehicles"][VIN_A]["attempts"] == history
+    assert not c.hass.services.calls

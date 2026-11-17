@@ -217,6 +217,13 @@ load remains reserved for electrical safety; it does not count as measured
 solar surplus. Recovery must complete and the current charging plan must still
 permit charging before normal control can resume.
 
+When a completed session's old ownership lease is the only route mismatch,
+a new PowerSync-owned charging request can carry the same verified native
+producer into its new lease automatically. Unresolved commands, finite cleanup,
+changed providers/entities and other owners remain protected. Inspection reports
+producer-binding and session-scope matches separately so a real connection change
+is distinguishable from a completed session's old lease.
+
 A new charging request can reconcile old native Start, Stop, current or limit
 attempts when:
 

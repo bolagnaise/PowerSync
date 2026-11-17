@@ -5713,6 +5713,13 @@ async def _tesla_transport_route(hass, entry, params, operation):
             return {"kind": "ha"}
         return {"kind": "blocked", "reason": "ble_stop_recovery_active"}
     route = get_vehicle_route(hass, entry, vehicle)
+    if operation == "start" and route and route.get("reason") == "route_identity_changed":
+        from ..tesla_ev_recovery import async_resume_completed_native_route
+
+        authority = _tesla_transport_authority(
+            hass, entry, params, operation="start", ignore_recovery_gate=True)
+        if await async_resume_completed_native_route(hass, entry, vehicle, authorize=authority):
+            route = get_vehicle_route(hass, entry, vehicle)
     if (operation != "stop" and route and route.get("reason") == "native_recovery"):
         await _tesla_reconcile_native_history(hass, entry, params)
         route = get_vehicle_route(hass, entry, vehicle)

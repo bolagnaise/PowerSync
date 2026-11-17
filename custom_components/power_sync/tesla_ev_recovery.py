@@ -3363,6 +3363,7 @@ async def async_rebind_native_session_route(
     entity_id: str | None = None,
     expected_identity: Mapping[str, Any] | None = None,
     mode: str = "positive_resume",
+    authorize: Any = None,
 ) -> bool:
     """Rebind a persisted native producer to a recovered ownership lease.
 
@@ -3394,6 +3395,8 @@ async def async_rebind_native_session_route(
         return False
 
     async with _journal_lock(runtime):
+        if authorize is not None and authorize() is not True:
+            return False
         before = _snapshot_recovery(runtime)
         ledger = _ledger(runtime, vid, create=False)
         if ledger is None or not isinstance(ledger.get("route"), Mapping):
@@ -3500,6 +3503,7 @@ async def async_rebind_native_session_route(
             post_identity != current_identity
             or post_scope != current_scope
             or not post_compatible
+            or (authorize is not None and authorize() is not True)
             or bool(post_route.get("cleanup_only", False))
             != (mode == "cleanup_stop")
         ):
@@ -3511,6 +3515,48 @@ async def async_rebind_native_session_route(
                 raise
             return False
         return True
+
+
+async def async_resume_completed_native_route(hass, entry, vehicle_id, *, authorize):
+    """Carry the unchanged producer into a new owned plan after history settled."""
+    import sys
+    from .tesla_native_recovery import ACTIVE_KEY, _no_writers
+
+    runtime = _runtime(hass, entry)
+    vid = str(vehicle_id or "")
+    ledger = _ledger(runtime, vid, migrate=False) if runtime is not None else None
+    route = ledger.get("route") if isinstance(ledger, Mapping) else None
+    owner = _owner_snapshot(hass, entry, vid)
+    generation = current_vehicle_generation(hass, entry, vid)
+    if (not isinstance(route, Mapping) or route.get("kind") != "ha"
+            or not isinstance(route.get("session_scope"), Mapping)
+            or owner.get("owner") != "powersync"):
+        return False
+    expected_identity = deepcopy(route.get("entity_identity"))
+
+    def current():
+        current_ledger = _ledger(runtime, vid, migrate=False)
+        saved = current_ledger.get("route") if isinstance(current_ledger, Mapping) else None
+        return (_runtime(hass, entry) is runtime and _sidecar_ready(runtime)
+            and runtime.get(_SIDECAR_HOLD_KEY) is None
+            and not runtime.get(_RECOVERY_STOPPING_KEY)
+            and runtime.get(ACTIVE_KEY) is None
+            and recovery_control_allowed(hass, entry, vid, generation, "start")
+            and not _journal_malformed(runtime, vid)
+            and isinstance(saved, Mapping) and saved.get("cleanup_only") is not True
+            and not _unresolved_routes(current_ledger)
+            and not any(not item.get("recovery_retired") for item in _hazards(current_ledger))
+            and not any(vid in runtime[_SIDECAR_STATE_KEY].get("obligations", {}).get(family, {})
+                for family in ("ev_boost_sessions", "ev_quick_control_obligations"))
+            and _owner_snapshot(hass, entry, vid) == owner
+            and _no_writers(sys.modules[__name__], hass, vid)
+            and authorize() is True)
+
+    # The ordinary handoff validates every provider/config/device/entity and
+    # pairing field. Only the completed old lease can change; no command or
+    # unknown record is replayed, cleared or assigned to another producer.
+    return await async_rebind_native_session_route(hass, entry, vid,
+        expected_identity=expected_identity, mode="positive_resume", authorize=current)
 
 
 def _ble_binding(hass: Any, prefix: str, charger: str) -> dict[str, Any] | None:
@@ -3791,6 +3837,19 @@ def ev_recovery_status(hass: Any, entry: Any, vehicle_id: Any) -> dict[str, Any]
         for item in (state.get("incidents", {}) if isinstance(state, Mapping) else {}).values())
     if available and not malformed and activation_pending:
         reason = "ble_recovery_commit_pending"
+    route_diagnostics = None
+    saved_route = ledger.get("route") if isinstance(ledger, Mapping) and not malformed else None
+    if isinstance(saved_route, Mapping) and saved_route.get("kind") == "ha":
+        binding = dict(saved_route)
+        binding.pop("session_scope", None)
+        scoped = saved_route.get("session_scope")
+        route_diagnostics = {
+            "producer_binding_matches": _compatible(hass, entry, runtime, vehicle_id, binding),
+            "session_scope_matches": (
+                dict(scoped) == _session_scope(_owner_snapshot(hass, entry, vehicle_id))
+                if isinstance(scoped, Mapping) else None),
+            "cleanup_only": saved_route.get("cleanup_only") is True,
+        }
     return {
         "success": available and not malformed, "controls_issued": False,
         "entry_id": entry.entry_id, "vehicle_id": vehicle_id,
@@ -3798,6 +3857,7 @@ def ev_recovery_status(hass: Any, entry: Any, vehicle_id: Any) -> dict[str, Any]
         "generation": current_vehicle_generation(hass, entry, vehicle_id),
         "journal_revision": state.get("revision") if isinstance(state, Mapping) else None,
         "retained_attempts": rows, "reason": reason,
+        "native_route_diagnostics": route_diagnostics,
         "headroom_recovery": ev_headroom_recovery_status(hass, entry, vehicle_id),
         "recovery_required": malformed or bool(routes) or activation_pending if available else None,
         "native_retirement_available": False,
