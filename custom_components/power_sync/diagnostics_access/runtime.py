@@ -205,9 +205,17 @@ class AccessRuntime:
         result = await self.command(grant, {"type": "activate", "attempt": pending["attempt"],
                                            "continuation_hash": wire.secret_hash(pending["next"])})
         grant["lease"] = result["expires_at"]
-        grant["active"] = True
         del grant["boot_pending"]
-        await self.save()
+        try:
+            await self.save()
+        except BaseException:
+            # Until the final handoff is durable, keep sequence zero and replay
+            # this exact pending attempt. Polling first would make restart
+            # recovery look like an old installation snapshot to the authority.
+            grant["boot_pending"] = pending
+            grant["active"] = False
+            raise
+        grant["active"] = True
         return True
 
     async def boot_command(self, grant, command):
@@ -218,6 +226,10 @@ class AccessRuntime:
             return await self.command(grant, command, "boot")
         except Exception:
             grant["active"] = False
+            # The authority may still hold this boot's lease (including when a
+            # heartbeat committed but its response was lost). Never submit a
+            # new boot until owner_status confirms that lease has ended.
+            grant['resume_wait'] = True
             raise
 
     async def poll(self, grant):
@@ -310,26 +322,34 @@ class AccessRuntime:
             try:
                 async with self.lock:
                     await self.drain()
+                    connection_failed = False
                     for grant in list(self.grants.values()):
                         if grant.get("revoking"):
                             continue
-                        await self.approve(grant)
-                        if not grant.get("active"):
-                            if await self.boot(grant) is False:
-                                continue
-                        if grant["ceiling"]["kind"] == "ha_read":
-                            await self.poll(grant)
-                        else:
-                            result = await self.boot_command(grant, {"type": "heartbeat"})
-                            grant["lease"] = result["expires_at"]
-                            job = await self.command(grant, {"type": "job_poll"}, "boot")
-                            if job.get("state") == "ready" and (self.capture_task is None or self.capture_task.done()):
-                                from .private_capture import FreshCapture
-                                async def capture_job(g=grant, j=job):
-                                    with suppress(Exception):
-                                        await FreshCapture(self).run(g, j)
-                                self.capture_task = asyncio.create_task(capture_job())
-                if not self.root_pending and not any(grant.get("revoking") for grant in self.grants.values()):
+                        try:
+                            await self.approve(grant)
+                            if not grant.get("active"):
+                                if await self.boot(grant) is False:
+                                    continue
+                            if grant["ceiling"]["kind"] == "ha_read":
+                                await self.poll(grant)
+                            else:
+                                result = await self.boot_command(grant, {"type": "heartbeat"})
+                                grant["lease"] = result["expires_at"]
+                                job = await self.command(grant, {"type": "job_poll"}, "boot")
+                                if job.get("state") == "ready" and (self.capture_task is None or self.capture_task.done()):
+                                    from .private_capture import FreshCapture
+                                    async def capture_job(g=grant, j=job):
+                                        with suppress(Exception):
+                                            await FreshCapture(self).run(g, j)
+                                    self.capture_task = asyncio.create_task(capture_job())
+                        except Exception:
+                            # Independent owner-approved grants must be able to
+                            # connect even if an older grant needs replacement.
+                            connection_failed = True
+                    if connection_failed:
+                        self.last_error = "connection_unconfirmed"
+                if not connection_failed and not self.root_pending and not any(grant.get("revoking") for grant in self.grants.values()):
                     self.last_error = None
             except asyncio.CancelledError:
                 raise

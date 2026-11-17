@@ -1,11 +1,32 @@
 """HA admin API and lifecycle. Independent from ticket support and controls."""
 import asyncio
+import json
+from pathlib import Path
 from aiohttp import web
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.storage import Store
 from .runtime import AccessRuntime, DATA
 from .wire import WireError, loads
+
+
+class DiagnosticsStore(Store):
+    """Confirm the stored continuation before advancing a remote connection."""
+
+    async def async_save(self, data):
+        await super().async_save(data)
+
+        def read_data():
+            return json.loads(Path(self.path).read_text())["data"]
+
+        try:
+            written = await self.hass.async_add_executor_job(read_data)
+        except Exception:
+            raise WireError("diagnostics_persistence_unconfirmed") from None
+        if written != data:
+            # HA Store logs some write failures instead of raising them. Its
+            # memory cache cannot establish that restart continuity is durable.
+            raise WireError("diagnostics_persistence_unconfirmed")
 
 
 class DiagnosticsView(HomeAssistantView):
@@ -61,7 +82,7 @@ async def setup(hass, entry):
     data = hass.data.setdefault(DATA, {"entries": set()})
     if "runtime" not in data:
         from ..ha_read.adapters import create_backend
-        runtime = AccessRuntime(hass, Store(hass, 1, "power_sync.diagnostics_access", private=True, atomic_writes=True), async_get_clientsession(hass), create_backend(hass))
+        runtime = AccessRuntime(hass, DiagnosticsStore(hass, 1, "power_sync.diagnostics_access", private=True, atomic_writes=True), async_get_clientsession(hass), create_backend(hass))
         await runtime.load()
         data["runtime"] = runtime
         if not hass.data.get(DATA + "_view"):

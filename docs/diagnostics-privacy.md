@@ -24,6 +24,11 @@ Approval survives Home Assistant restarts until revoked. It avoids repeating
 setup for each covered request or test; it does not authorize unrelated browsing,
 settings changes, candidate installation or live hardware control.
 
+After a temporary connection failure, diagnostic reads pause while PowerSync
+waits for the previous connection's lease to end before reconnecting. Other
+approved connections can continue independently. An inactive authorization
+still requires a new invitation and approval in Home Assistant.
+
 ## What diagnostic support can read
 
 Diagnostic access can cover the wider Home Assistant installation, including
