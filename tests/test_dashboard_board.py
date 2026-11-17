@@ -147,6 +147,7 @@ def test_generate_hands_every_card_to_the_board():
     assert out["controls"]["chargeDuration"] == "select.power_sync_force_charge_duration"
     assert out["tariffMeta"] == "GloBird FOUR4FREE"
     assert out["planEntities"]["exportEarnings"] == "sensor.power_sync_daily_export_earnings"
+    assert out["planEntities"]["mode"] == "sensor.power_sync_battery_mode"
     assert out["tariffEntities"]["exportEarnings"] == "sensor.power_sync_daily_export_earnings"
 
 
@@ -1005,6 +1006,63 @@ def test_every_small_chart_has_working_pointer_and_keyboard_tooltips():
     assert out.pop('empty') is True
     for card, checks in out.items():
         assert all(checks.values()), (card, checks)
+
+
+def test_plan_current_control_follows_live_command_while_api_is_cached():
+    """An accepted force command must not retain the cached self-consumption chip."""
+    out = _run_board(r"""
+  const now = Date.now(), step = 300000;
+  const ts = [0, 1, 2].map(i => new Date(now - step + i * step).toISOString());
+  const data = {enabled: true, current_action: 'self_consumption',
+    effective_current_action: 'self_consumption', schedule: {
+      timestamps: ts, soc: [0.8, 0.79, 0.78], charge_w: [0, 0, 0],
+      discharge_w: [5000, 5000, 5000], battery_export_w: [5000, 5000, 5000],
+      battery_consume_w: [0, 0, 0], import_price: [0.4, 0.4, 0.4], export_price: [0.1, 0.1, 0.1],
+  }};
+  const card = new T.PsPlanCard();
+  card._config = {entities: {mode: 'sensor.mode'}};
+  card._api = () => data;
+  card._loadHistory = () => {};
+  card.querySelector = () => ({addEventListener() {}});
+  const samples = [];
+  for (const mode of ['force_discharge', 'force_charge', 'hold_soc', 'self_consumption', 'normal', 'unavailable']) {
+    for (const status of ['accepted', 'pending', 'restore_pending']) {
+      card._hass = {states: {'sensor.mode': {state: mode, attributes: {
+        control_source: 'optimizer', command_status: status, remaining_minutes: 138,
+      }}}, config: {}, locale: {}};
+      card._render();
+      samples.push({mode, status, chip: card.innerHTML.match(/<span>Current control<\/span><b>(.*?)<\/b>/)?.[1]});
+    }
+  }
+  console.log(JSON.stringify({samples}));
+""")
+    for sample in out["samples"]:
+        mode, status, chip = sample["mode"], sample["status"], sample["chip"]
+        if mode in ("normal", "unavailable"):
+            assert chip == "Self-consumption"
+        elif status == "restore_pending":
+            assert chip == "Restoring…"
+        elif status == "pending":
+            assert chip == "Waiting for command acknowledgement"
+        else:
+            request = {"force_discharge": "Discharge", "force_charge": "Charge",
+                       "hold_soc": "Battery hold", "self_consumption": "Self-consumption"}[mode]
+            assert chip == f"{request} requested by the optimiser. 2 h 18 min left."
+
+
+def test_plan_refreshes_effective_action_without_a_new_solve():
+    out = _run_board(r"""
+  const card = new T.PsPlanCard();
+  card._config = {entities: {}};
+  card._hass = {states: {}, config: {}, locale: {}};
+  const data = {last_optimization: '2026-11-17T07:50:00Z', current_action: 'self_consumption', effective_current_action: 'self_consumption'};
+  T.psApiCache.set('power_sync/optimization', {at: Date.now(), data, promise: null});
+  const before = card._signature();
+  data.effective_current_action = 'discharge';
+  const after = card._signature();
+  console.log(JSON.stringify({changed: before !== after}));
+""")
+    assert out["changed"] is True
 
 
 def test_battery_cards_identify_command_source_without_inferring_from_optimizer():

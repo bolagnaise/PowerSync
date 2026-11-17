@@ -8569,6 +8569,7 @@ function _boardCards(ctx) {
       meta: 'Last 12 hours measured, then the next 24 hours planned',
       config: { entities: {
         soc: se('battery_level'), battery: se('battery_power'), grid: se('grid_power'),
+        mode: se('battery_mode'),
         importPrice: se('current_import_price'), exportPrice: se('current_export_price'),
         exportEarnings: se('daily_export_earnings'),
       } },

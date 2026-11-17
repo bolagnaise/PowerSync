@@ -35,6 +35,8 @@ Existing `duration: Custom` discharge automations still resolve the saved custom
 
 The classic dashboard provides an editable custom duration and finish-at controls too. A request or countdown confirms command handling; fresh battery/grid telemetry is needed to establish the physical result. Safety limits, power limits, and restoration rules still apply.
 
+The optimiser plan's **Current control** follows the live battery command shown in **Battery controls**, including who requested it, its remaining time, and whether acknowledgement or restoration is pending. It can update between plan calculations. A discharge request is shown as a request; use measured battery and grid power to confirm export.
+
 <a id="minimum-battery-export-price"></a>
 
 ## Minimum battery export price and Solar Export
