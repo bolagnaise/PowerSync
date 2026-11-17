@@ -1,5 +1,11 @@
 <!-- release: v2.12.1731 -->
 
+## Consistent battery control status
+
+The optimiser plan's **Current control** now follows the live request in **Battery controls**, instead of showing Self-consumption during an active discharge request. It also shows pending acknowledgement and restoration, and updates between plan calculations. A request remains separate from measured battery or grid power.
+
+Update through HACS, restart Home Assistant, then refresh the dashboard.
+
 ## Clearer ongoing support setup
 
 The Support card now explains recognized invitation problems, including an expired invitation, a different setup identity, an invalid public key or pending revocation. Follow the displayed next step and keep your current setup identity; reviewing an invitation still requires your separate approval before access begins.
