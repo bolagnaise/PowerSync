@@ -636,3 +636,140 @@ def test_native_zero_import_cannot_fund_a_profitable_solar_hold(coordinator_meth
     assert coordinator_methods['_profit_max_solar_export_slots'](coordinator, *args)[0] is True
     coordinator._local_powerwall_plan_limits = lambda: {'max_grid_import_w': 0}
     assert coordinator_methods['_profit_max_solar_export_slots'](coordinator, *args) == [False, False]
+
+
+def test_existing_profit_max_uses_otherwise_clipped_solar_as_free_replenishment(coordinator_methods):
+    """Keep room for known surplus that cannot reach the configured grid cap."""
+    coordinator = _fake_coordinator(export_limit_kw=5.0)
+    coordinator._config.max_charge_w = 5000
+    coordinator._config.max_grid_export_w = 5000
+    mask = coordinator_methods["_profit_max_solar_export_slots"](
+        coordinator,
+        [0.30] * 3, [0.10, 0.20, 0.01],
+        [4.0, 10.0, 0.0], [0.0] * 3, 0.90,
+        [False] * 3, [False] * 3,
+    )
+    assert mask[0], coordinator._solar_export_capability_status
+
+
+
+@pytest.mark.parametrize(
+    "capability_cap,slot_cap,source_solar,charge_kw,morning_kw,source_price,blocked,expected",
+    [
+        (5.0, None, 10.0, 5.0, 4.0, 0.20, False, True),
+        (None, 5000, 10.0, 5.0, 4.0, 0.20, False, True),
+        (None, None, 10.0, 5.0, 4.0, 0.20, False, False),
+        (5.0, 0, 5.0, 5.0, 4.0, 0.20, False, True),
+        (5.0, 2000, 5.0, 5.0, 3.0, 0.20, False, True),
+        (5.0, None, 5.0, 5.0, 3.0, 0.20, False, False),
+        (8.0, None, 10.0, 5.0, 2.0, 0.20, False, True),
+        (8.0, None, 10.0, 5.0, 3.0, 0.20, False, False),
+        (5.0, None, 20.0, 2.0, 3.0, 0.20, False, True),
+        (5.0, None, 10.0, 5.0, 4.0, 0.20, True, False),
+        (5.0, None, 10.0, 5.0, 4.0, 0.05, False, True),
+    ],
+)
+def test_clipped_replenishment_respects_limits_and_opportunity_cost(
+    coordinator_methods, capability_cap, slot_cap, source_solar, charge_kw,
+    morning_kw, source_price, blocked, expected,
+):
+    coordinator = _fake_coordinator(export_limit_kw=capability_cap)
+    coordinator._config.max_charge_w = charge_kw * 1000
+    mask = coordinator_methods["_profit_max_solar_export_slots"](
+        coordinator, [0.30] * 3, [0.10, source_price, 0.01],
+        [morning_kw, source_solar, 0.0], [0.0] * 3, 0.20,
+        [False, blocked, False], [False] * 3,
+        [5000, slot_cap, 5000],
+    )
+    assert mask[0] is expected
+
+
+@pytest.mark.parametrize("source_price", [0.20, 0.05])
+def test_two_holds_share_free_and_priced_replenishment_capacity(
+    coordinator_methods, source_price,
+):
+    coordinator = _fake_coordinator(export_limit_kw=5.0)
+    coordinator._config.max_charge_w = 5000
+    mask = coordinator_methods["_profit_max_solar_export_slots"](
+        coordinator, [0.30] * 4, [0.10, 0.10, source_price, 0.01],
+        [4.0, 4.0, 6.0, 0.0], [0.0] * 4, 0.20,
+        [False] * 4, [False] * 4, [5000] * 4,
+    )
+    # Only 1 kW of the source is free; the remaining 4 kW earns the FiT.
+    # When it is cheap enough, the first 4 kW hold consumes 1 free + 3 priced.
+    # The second hold cannot reuse that capacity.
+    assert mask[:2] == ([False, False] if source_price > 0.10 else [True, False])
+
+
+def test_committed_clipped_recharge_is_not_itself_held(coordinator_methods):
+    coordinator = _fake_coordinator(export_limit_kw=5.0)
+    coordinator._config.max_charge_w = 5000
+    mask = coordinator_methods["_profit_max_solar_export_slots"](
+        coordinator, [0.30] * 3, [0.10, 0.20, 0.01],
+        [4.0, 10.0, 10.0], [0.0] * 3, 0.20,
+        [False] * 3, [False] * 3, [5000] * 3,
+    )
+    assert mask == [True, False, False]
+    assert coordinator._solar_export_capability_status["rejection_counts"] == {
+        "reserved_clipped_solar_replenishment": 1,
+    }
+
+
+def test_clipping_aware_holds_preserve_headroom_in_full_plan(
+    optimizer_module, coordinator_methods,
+):
+    n = 60
+    solar = [10.0] * 12 + [20.0] * 24 + [0.0] * 24
+    load = [1.0] * n
+    imports = [0.30] * 36 + [0.50] * 24
+    exports = [0.10] * 12 + [0.12] * 24 + [0.05] * 24
+    coordinator = _fake_coordinator()
+    coordinator._config.battery_capacity_wh = 34960
+    coordinator._config.max_charge_w = 15000
+    mask = coordinator_methods["_profit_max_solar_export_slots"](
+        coordinator, imports, exports, solar, load, 0.75,
+        [False] * n, [True] * n, [15000] * n,
+    )
+
+    def solve(held):
+        optimizer = optimizer_module.BatteryOptimizer(
+            capacity_wh=34960, max_charge_w=15000, max_discharge_w=15000,
+            max_grid_export_w=15000, efficiency=EFFICIENCY, backup_reserve=0.10,
+        )
+        return optimizer.optimize(
+            imports, exports, solar, load, 0.75, allow_battery_export=False,
+            block_battery_charge=held, profit_max_solar_export_slots=held,
+        )
+
+    held = solve(mask)
+    unheld = solve([False] * n)
+    assert held.feasible and unheld.feasible
+    assert held.solver_used == unheld.solver_used == "highs"
+    assert any(mask[:12])
+    morning = held.schedule.actions[:12]
+    assert morning[0].action == "solar_export"
+    assert morning[0].battery_charge_w == 0
+    assert morning[-1].soc < 0.90
+    assert any(action.battery_charge_w > 0 for action in held.schedule.actions[12:36])
+    assert held.objective_value <= unheld.objective_value + 1e-6
+    # The LP already knows how to preserve headroom. The selector must make
+    # that choice executable as an explicit charge hold, without worsening it.
+    assert sum(held.solar_curtailment_w) == pytest.approx(0)
+    assert sum(unheld.solar_curtailment_w) == pytest.approx(0)
+    assert morning[0].soc == pytest.approx(0.75)
+
+    async def run_optimizer(reserve, *, charge_blocked_slots, solar_export_slots):
+        return solve(charge_blocked_slots)
+
+    revised = coordinator_methods["_revise_solar_export_holds"](
+        coordinator, held, imports, exports, mask,
+    )
+    assert revised == mask
+    chosen, chosen_mask = asyncio.run(
+        coordinator_methods["_check_solar_export_counterfactual"](
+            coordinator, held, mask, [False] * n, run_optimizer, 0.10,
+        )
+    )
+    assert chosen_mask == mask
+    assert chosen.schedule.actions[0].action == "solar_export"
+    assert chosen is held
