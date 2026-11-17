@@ -1,4 +1,10 @@
-<!-- release: v2.12.1731 -->
+<!-- release: v2.12.1732 -->
+
+## Reliable 24-hour diagnostic setup
+
+Selecting **Previous 24 hours** in the Support card no longer fails with an invalid history error while preparing a pairing code. Existing approved sessions can continue; there is no need to pair again for this fix.
+
+Update through HACS and restart Home Assistant.
 
 ## Consistent battery control status
 
