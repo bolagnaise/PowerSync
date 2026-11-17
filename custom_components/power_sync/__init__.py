@@ -22070,6 +22070,11 @@ class EVLoadpointStatusView(HomeAssistantView):
         try:
             from .automations.actions import _dynamic_ev_state, _calculate_solar_surplus
             from .automations.generic_charger_soc import resolve_ocpp_charger_soc
+            from .ev_display import resolve_zaptec_display_soc
+            from .automations.ev_loadpoint_profiles import (
+                effective_profile,
+                profiles_for_loadpoint,
+            )
             from .automations.loadpoint_status import (
                 build_loadpoint_status,
                 resolve_loadpoint_surplus_power_kw,
@@ -22332,6 +22337,33 @@ class EVLoadpointStatusView(HomeAssistantView):
             except Exception as err:
                 _LOGGER.debug("Error checking HACS OCPP integration for loadpoints: %s", err)
 
+            if zaptec_cached:
+                zaptec_byd_vehicles = EVVehiclesView(self._hass)._get_byd_vehicles()
+                zaptec_observation = next(
+                    item for item in observed_vehicles
+                    if item.get("charger_id") == "zaptec_standalone"
+                )
+                if zaptec_observation.get("is_connected"):
+                    zaptec_profiles = profiles_for_loadpoint(
+                        vehicle_configs, "zaptec_standalone"
+                    )
+                    profile = effective_profile(
+                        vehicle_configs, stored_data, "zaptec_standalone"
+                    )
+                    selected_id = (profile or {}).get("vehicle_id")
+                    # The legacy charger profile names the hardware, not a car.
+                    # Keep that identity intact and enrich only its display SOC.
+                    zaptec_observation["ev_soc"] = resolve_zaptec_display_soc(
+                        zaptec_byd_vehicles,
+                        selected_vehicle_id=(
+                            selected_id if selected_id != "zaptec_standalone" else None
+                        ),
+                        allow_single_vehicle=(
+                            len(zaptec_profiles) <= 1
+                            and selected_id in (None, "zaptec_standalone")
+                        ) and len(observed_vehicles) == 1,
+                    )
+
             if observed_vehicle_sink is not None:
                 observed_vehicle_sink.extend(observed_vehicles)
 
@@ -22379,6 +22411,10 @@ class EVLoadpointStatusView(HomeAssistantView):
 
             for loadpoint in loadpoints:
                 loadpoint_id = loadpoint.get("loadpoint_id")
+                if zaptec_cached and zaptec_byd_vehicles and loadpoint_id == "zaptec_standalone":
+                    # A missing/ambiguous live BYD reading must not resurrect
+                    # another vehicle's SOC cached in a charging session.
+                    loadpoint["soc"] = zaptec_observation.get("ev_soc")
                 external_control_policy = get_external_control_policy(
                     self._hass,
                     self._config_entry,

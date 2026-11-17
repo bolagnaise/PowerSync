@@ -47,6 +47,7 @@ def canonical_energy_flow_harness(tmp_path_factory):
     "reconnect-in-flight", "cache-expiry", "cache-expiry-pending",
     "connection-change-in-flight", "selector-independent",
     "conflicting-duplicate-presence", "two-car-weather-scenes", "generated-layouts", "no-car-render",
+    "zaptec-byd-soc",
 ])
 def test_generated_energy_flow_uses_canonical_connected_vehicles(
     scenario, canonical_energy_flow_harness

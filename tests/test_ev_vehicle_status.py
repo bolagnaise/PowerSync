@@ -250,6 +250,56 @@ def test_ocpp_status_endpoint_exposes_shared_soc_without_generic_charger():
     assert chargers[0]["is_vehicle_connected"] is True
 
 
+@pytest.mark.parametrize("byd_plug", ["on", "off", "unavailable"])
+def test_byd_registry_soc_reaches_zaptec_canonical_display_and_sensors(monkeypatch, byd_plug):
+    """Exercise local BYD discovery through the actual display API route."""
+    import json
+    power_sync = _power_sync_module()
+    from power_sync.ev_display import display_snapshot_to_sensor_data, display_snapshot_to_widgets
+    monkeypatch.setattr(power_sync, "_configured_sigenergy_charger_state", lambda entry: None)
+
+    device_id = "byd-device-display"
+    states = [
+        _State("sensor.byd_test_battery_level", "70"),
+        _State("binary_sensor.byd_test_charger_connected", byd_plug),
+    ]
+    hass = _Hass(
+        states,
+        {state.entity_id: _entity(state.entity_id, device_id) for state in states},
+        {device_id: SimpleNamespace(
+            id=device_id, name="BYD Test", model="Test EV",
+            identifiers={("byd_vehicle", "provider-test")},
+        )},
+    )
+    hass.config_entries.async_domains = lambda: ["byd_vehicle"]
+    entry = SimpleNamespace(entry_id="byd-display-test", data={}, options={})
+    hass.data["power_sync"][entry.entry_id] = {
+        "zaptec_cached_state": {
+            "charger_operation_mode": "charging",
+            "total_charge_power_w": 10700,
+        },
+    }
+    from power_sync.automations.actions import _dynamic_ev_state
+    runtime_state = {"current_soc": 45, "params": {"charger_type": "zaptec"}}
+    monkeypatch.setitem(_dynamic_ev_state, entry.entry_id, {"zaptec_standalone": runtime_state})
+    response = asyncio.run(power_sync.EVLoadpointStatusView(hass, entry)._async_build_response(None))
+    payload = json.loads(response.body)
+    assert payload["success"] is True, payload
+    assert len(payload["loadpoints"]) == 1
+    row = payload["loadpoints"][0]
+    assert row["loadpoint_id"] == "zaptec_standalone"
+    assert row["soc"] == 70
+    assert row["current_power_kw"] == 10.7
+    assert display_snapshot_to_sensor_data(payload)["ev_soc"] == 70
+    assert display_snapshot_to_widgets(payload)[0]["current_soc"] == 70
+    hass.states.get("sensor.byd_test_battery_level").state = "unavailable"
+    response = asyncio.run(power_sync.EVLoadpointStatusView(hass, entry)._async_build_response(None))
+    payload = json.loads(response.body)
+    assert payload["success"] is True, payload
+    assert payload["loadpoints"][0]["soc"] is None
+    assert runtime_state["current_soc"] == 45  # Display reads never change session state.
+
+
 def _fake_site_snapshot(hass) -> dict:
     """Mirror ``EVLoadpointStatusView._site_snapshot`` for the stub views.
 

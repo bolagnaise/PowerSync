@@ -131,6 +131,22 @@ if (scenario === 'generated-idle' || scenario === 'generated-charging') {
   assert.ok(view.background.endsWith('_idle.png'), view.background);
   assert.equal(view.hidden['#ev-node-group'], true);
   assert.equal(view.hidden['#ev2-node-group'], true);
+} else if (scenario === 'zaptec-byd-soc') {
+  let soc = 70;
+  const {card} = create(async () => snapshot([row('zaptec_standalone', {
+    vehicle_name: 'Zaptec Charger', charger_type: 'zaptec',
+    actual_charging: true, current_power_kw: 10.7, soc,
+  })]));
+  await flush();
+  for (const expected of [70, 0, null, 82]) {
+    soc = expected;
+    await advance(30000);
+    const view = render(card);
+    assert.equal(view.texts['#flow-ev-pct'], expected === null ? '--%' : `${expected}%`);
+    assert.equal(view.texts['#flow-ev-power'], '10.7 kW');
+    assert.equal(view.texts['#flow-ev-label'], 'Zaptec Charger');
+    assert.equal(card._collectEvData().vehicles.length, 1);
+  }
 } else if (scenario === 'unknown-power') {
   const {card} = create(async () => snapshot([
     row('vin-a', {actual_charging: true, current_power_kw: null, soc: null, confidence: 'unknown'}),
