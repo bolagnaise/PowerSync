@@ -124,3 +124,41 @@ vm.runInContext(fs.readFileSync(process.argv[1]+'/power-sync-support.js','utf8')
 })().catch(error=>{console.error(error);process.exitCode=1;});
 '''
     subprocess.run(['node', '-e', script, str(frontend)], check=True, capture_output=True, text=True, timeout=20)
+
+
+def test_dashboard_support_imports_follow_resource_version_across_upgrades():
+    """An updated strategy must not reuse the previous release's cached card."""
+    frontend = Path(__file__).resolve().parents[1] / 'custom_components/power_sync/frontend'
+    script = r'''
+const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
+const source=fs.readFileSync(process.argv[1]+'/power-sync-strategy.js','utf8');
+(async()=>{
+ const cache=new Map();
+ for(const version of ['old','new']){
+  const requests=[];
+  const registry=new Map();
+  const context=vm.createContext({HTMLElement:class {},document:{},window:{},console,
+   customElements:{get:name=>registry.get(name),define:(name,value)=>registry.set(name,value)}});
+  const program=new vm.Script(source+`\nif (typeof _loadPowerSyncSupport === 'function') globalThis.loading = _loadPowerSyncSupport([{url:'/power_sync/frontend/power-sync-strategy.js?v=${version}'}]);`,{
+   importModuleDynamically:async specifier=>{
+    requests.push(specifier);
+    const key=new URL(specifier,'https://ha.example/power_sync/frontend/power-sync-strategy.js?v='+version).href;
+    if(!cache.has(key))cache.set(key,version);
+    const module=new vm.SyntheticModule([],()=>{}, {context});
+    await module.link(()=>{});await module.evaluate();return module;
+   }
+  });
+  program.runInContext(context);await context.loading;
+  await new Promise(resolve=>setImmediate(resolve));
+  for(const name of ['power-sync-support.js','power-sync-diagnostics.js']){
+   const matches=requests.filter(url=>url.split('?')[0].endsWith(name));
+   assert.equal(matches.length,1,'load each support entry once');
+   const url=new URL(matches[0],'https://ha.example');
+   assert.equal(url.searchParams.get('v'),version,'support follows the registered release');
+   assert.equal(cache.get(url.href),version,'new browser load cannot reuse previous release');
+  }
+ }
+})().catch(error=>{console.error(error);process.exitCode=1;});
+'''
+    subprocess.run(['node', '--experimental-vm-modules', '-e', script, str(frontend)],
+                   check=True, capture_output=True, text=True, timeout=20)

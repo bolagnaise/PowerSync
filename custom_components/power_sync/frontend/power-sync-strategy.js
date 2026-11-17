@@ -1,7 +1,4 @@
 if (typeof document !== 'undefined') import('./power-sync-referrals.js').catch(() => {});
-// Optional consent UI loads independently of the energy dashboard.
-if (typeof document !== 'undefined') import('./power-sync-support.js').catch(() => {});
-if (typeof document !== 'undefined') import('./power-sync-diagnostics.js').catch(() => {});
 /**
  * PowerSync Dynamic Dashboard Strategy
  *
@@ -7875,6 +7872,9 @@ class PowerSyncStrategy {
       if (Array.isArray(lr)) lovelaceResources.push(...lr);
     } catch (_) { /* YAML mode — skip */ }
 
+    // Consent cards must use this release rather than a cached older module.
+    _loadPowerSyncSupport(lovelaceResources);
+
     let forcePowerEntityId = null;
     let solarPermissionEntityId = null;
     let teslaControlMethodEntityId = null;
@@ -8485,6 +8485,18 @@ class PowerSyncStrategy {
 // Load the board module served next to this file, with the same cache-busting
 // version as the registered strategy resource. Returns false (classic layout)
 // when it cannot load, e.g. outside a browser.
+async function _loadPowerSyncSupport(lovelaceResources = []) {
+  if (typeof document === 'undefined') return;
+  const resource = lovelaceResources.find(r => String(r?.url || '').includes('power-sync-strategy.js'));
+  const query = resource ? String(resource.url).split('?')[1] : '';
+  const suffix = query ? `?${query}` : '';
+  try {
+    // Load Support first so the compatibility module extends the current card.
+    await import(`/power_sync/frontend/power-sync-support.js${suffix}`);
+    await import(`/power_sync/frontend/power-sync-diagnostics.js${suffix}`);
+  } catch (_) { /* Optional support UI must not block the energy dashboard. */ }
+}
+
 async function _loadPowerSyncBoard(lovelaceResources = []) {
   if (typeof customElements === 'undefined') return false;
   if (customElements.get('power-sync-board')) return true;
