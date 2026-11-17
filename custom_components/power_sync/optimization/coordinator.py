@@ -35,6 +35,7 @@ from .battery_efficiency import (
     ResolvedOptimizerParameters,
 )
 from .battery_optimizer import (
+    FUTURE_HOME_USE_HOLD_REASON,
     RTE_ECONOMIC_HOLD_REASON,
     BatteryOptimizer,
     OptimizerResult,
@@ -12712,14 +12713,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # Only execute IDLE when SOC is well above the optimizer reserve
             # (>5% above = meaningful charge to hold for later export).
             # Otherwise use self-consumption — battery serves load naturally.
-            # An RTE-justified hold is not the "not enough charge to bother
-            # holding" case this band was written for: the optimizer already
-            # proved that discharging now and rebuying the same energy later
-            # costs more. Remapping it here would silently undo that plan.
-            rte_economic_hold = (
-                getattr(action, "reason", None) == RTE_ECONOMIC_HOLD_REASON
+            # Explicit economic holds already prove a benefit: avoiding an
+            # uneconomic recharge or saving energy for higher-priced home use.
+            # They remain useful near reserve; natural self-use would spend
+            # the energy the planner deliberately preserved for later.
+            economic_hold = (
+                getattr(action, "reason", None)
+                in (RTE_ECONOMIC_HOLD_REASON, FUTURE_HOME_USE_HOLD_REASON)
             )
-            if effective_action == "idle" and not rte_economic_hold:
+            if effective_action == "idle" and not economic_hold:
                 try:
                     soc_now, _ = await self._get_battery_state()
                     opt_reserve = self._config.backup_reserve

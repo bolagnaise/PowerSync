@@ -53,6 +53,9 @@ BELOW_RESERVE_RECOVERY_HOLD_MARGIN_SOC = 0.02
 # remap these holds to self-consumption; doing so reinstates the exact cycle
 # the hold was emitted to avoid.
 RTE_ECONOMIC_HOLD_REASON = "rte_economic_hold"
+# Preserve usable energy for a later, higher-priced household import slot.
+# This hold also remains valuable within five SOC points of the reserve.
+FUTURE_HOME_USE_HOLD_REASON = "future_home_use_hold"
 PRE_WINDOW_REACHABLE_TARGET_MARGIN_SOC = 0.005
 PRE_WINDOW_REACHABILITY_MARGIN_SOC = 1e-6
 # Most horizons stabilize in two passes. A realistic two-day provider window
@@ -9552,6 +9555,7 @@ class BatteryOptimizer:
                     and future_home_use_price[t] > import_prices[t] + 0.001
                 ):
                     action = "idle"
+                    action_reason = FUTURE_HOME_USE_HOLD_REASON
                 elif meaningful_hold and export_prices is not None and import_prices is not None:
                     # Check if upcoming export prices justify holding battery
                     # over letting it serve load (avoiding import cost).

@@ -274,6 +274,7 @@ def _install_power_sync_stubs() -> None:
 
     battery_module = types.ModuleType("power_sync.optimization.battery_optimizer")
     battery_module.RTE_ECONOMIC_HOLD_REASON = "rte_economic_hold"
+    battery_module.FUTURE_HOME_USE_HOLD_REASON = "future_home_use_hold"
     battery_module.BatteryOptimizer = type("BatteryOptimizer", (), {})
     battery_module.OptimizerResult = type("OptimizerResult", (), {})
     sys.modules["power_sync.optimization.battery_optimizer"] = battery_module
@@ -8621,6 +8622,59 @@ def test_self_consumption_repairs_sungrow_reserve_when_it_blocks_discharge(opt_m
     assert battery.self_consumption_calls == 1
     assert battery.backup_reserve_calls == [5]
     assert coordinator._last_executed_action == "self_consumption"
+
+
+@pytest.mark.parametrize("soc", [0.21, 0.24])
+@pytest.mark.parametrize("route", ["tariff", "local"])
+@pytest.mark.parametrize("guard", [None, "disable_idle", "demand", "monitoring"])
+def test_future_home_hold_near_reserve_reaches_tesla_route(
+    opt_module, soc, route, guard,
+):
+    """A valuable household hold survives execution unless a policy blocks it."""
+    from unittest.mock import AsyncMock
+
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=soc)
+    coordinator._config.disable_idle_enabled = guard == "disable_idle"
+    coordinator._is_in_demand_window = lambda: guard == "demand"
+    coordinator._entry.options["monitoring_mode"] = guard == "monitoring"
+    zero_hold = AsyncMock(return_value=True)
+    coordinator._supports_local_powerwall_target_power = lambda direction="discharge": route == "local"
+    coordinator._entry.entry_id = coordinator.entry_id
+    coordinator.hass.data[opt_module.DOMAIN] = {
+        coordinator.entry_id: {"async_zero_power_optimizer_idle": zero_hold},
+    }
+
+    asyncio.run(coordinator._execute_optimizer_action(
+        SimpleNamespace(action="idle", power_w=0, reason="future_home_use_hold")
+    ))
+
+    if guard == "monitoring":
+        assert battery.self_consumption_calls == 0
+        assert battery.backup_reserve_calls == []
+        zero_hold.assert_not_awaited()
+    elif guard:
+        assert coordinator._last_executed_action == "self_consumption"
+        zero_hold.assert_not_awaited()
+        assert battery.backup_reserve_calls == []
+    else:
+        assert coordinator._last_executed_action == "idle"
+        if route == "local":
+            zero_hold.assert_awaited_once_with()
+            assert battery.backup_reserve_calls == []
+        else:
+            zero_hold.assert_not_awaited()
+            assert battery.backup_reserve_calls == [int(soc * 100)]
+
+
+def test_unmarked_idle_near_reserve_keeps_natural_self_consumption(opt_module):
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.24)
+    asyncio.run(coordinator._execute_optimizer_action(
+        SimpleNamespace(action="idle", power_w=0)
+    ))
+    assert coordinator._last_executed_action == "self_consumption"
+    assert battery.backup_reserve_calls == []
 
 
 def test_idle_at_reserve_floor_is_not_overridden_to_self_consumption(opt_module):

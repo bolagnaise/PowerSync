@@ -5736,8 +5736,10 @@ def test_hold_cheap_charge_for_later_home_import_peak(
     )
     if disable_idle:
         assert schedule.actions[0].action == "self_consumption"
+        assert schedule.actions[0].reason is None
     else:
         assert all(a.action == "idle" for a in schedule.actions[:12])
+        assert all(a.reason == "future_home_use_hold" for a in schedule.actions[:12])
         assert schedule.actions[11].soc == pytest.approx(starting_soc, abs=1e-4)
         assert schedule.actions[12].battery_discharge_w > 900
 
