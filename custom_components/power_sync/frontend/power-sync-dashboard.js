@@ -2271,6 +2271,37 @@ function psUntilPreview(value, timeZone, now = Date.now()) {
 
 /** Advanced controls have independent drafts and never send legacy Force. */
 class PsAdvancedBatteryControls extends HTMLElement {
+  _siteLimitBlockMessage(capabilities) {
+    const messages = {
+      configuration_unavailable: 'Fresh gateway configuration unavailable. Retry the read.',
+      pairing_changed: 'Pairing changed. Confirm the new gateway before changing limits.',
+      battery_system_unsupported: 'Native site limits require a Tesla Powerwall.',
+      control_site_unavailable: 'The Powerwall control site is unavailable.',
+      local_gateway_unconfigured: 'A paired local Powerwall gateway with a valid address is required.',
+      monitoring_handoff_active: 'The Monitoring Mode handoff is still in progress.',
+      generation_replaced: 'The integration was reloaded. Refresh control state.',
+      monitoring_only_profile: 'The selected battery connection is monitoring only and does not permit writes.',
+      settings_pending: 'A Powerwall settings change is unresolved. Check its recovery status before changing limits.',
+      foreign_site_owner: 'Another PowerSync entry has an active control or recovery obligation for this site.',
+      force_charge_active: 'A force-charge control is active. Site limits remain blocked until it finishes.',
+      force_discharge_active: 'A force-discharge control is active. Site limits remain blocked until it finishes.',
+      hold_soc_active: 'A Hold charge control is active. Site limits remain blocked until it finishes.',
+      self_consumption_active: 'A Power the home control is active. Site limits remain blocked until it finishes.',
+      dispatch_stopping: 'A local battery dispatch is stopping.',
+      settings_recovering: 'Powerwall settings recovery is in progress.',
+      control_method_changing: 'The battery control method is changing.',
+      native_max_startup_pending: 'Full-rate charging startup recovery is pending.',
+      local_recovery_pending: 'Local Powerwall dispatch recovery is pending.',
+      optimizer_restore_pending: 'A previous optimizer force control still needs to be restored.',
+      backup_preparation_active: 'Backup preparation is active.',
+      backup_recovery_unavailable: 'Backup preparation recovery is unresolved.',
+      battery_dispatch_pending: 'A local battery dispatch still has a pending release or recovery.',
+      native_max_charge_pending: 'Full-rate charging still has a pending release or recovery.',
+    };
+    return Object.hasOwn(messages, capabilities.block_reason) ? messages[capabilities.block_reason]
+      : capabilities.readable === false ? messages.configuration_unavailable
+      : 'Site-limit writes are unavailable. Refresh control state; if this persists, share the control status with support.';
+  }
   constructor() {
     super();
     this._contextGeneration = 0; this._readSerial = 0;
@@ -2409,7 +2440,7 @@ class PsAdvancedBatteryControls extends HTMLElement {
       ${o?.operation ? `<p class="hint">Battery target: ${psEsc(o.operation.power_w)} W${o.operation.target_soc === undefined ? '' : ` · ${psEsc(o.operation.target_soc)}%`} · ${psEsc(o.operation.phase.replace(/_/g, ' '))}</p>${o.operation.active ? btn('stop', 'Stop this battery target') : ''}` : ''}
       ${n ? `<details class="control-group" data-advanced-section="limits" ${n.transaction && ['prepared','submitted','recovery_required'].includes(n.transaction.phase) ? 'open' : ''}><summary>Site limits<small>Advanced · persistent grid import and export limits</small></summary><div class="control-group-body"><p class="hint">Current import ${psEsc(n.limits.import_limit_w.value_w ?? 'unknown')} W · export ${psEsc(n.limits.export_limit_w.value_w ?? 'unknown')} W. Zero is a hard limit. Blank fields stay unchanged. These limits persist. Whole-site net watts at the gateway meter, not per battery or phase. Each accepts 0–1,000,000 whole W (5000 W = 5 kW); hardware and connection limits can be lower. Import and export are independent ceilings.</p>
       ${n.capabilities.identity_rebaseline_required ? `<p class="hint">Pairing changed. Controls are blocked. Confirm the new gateway to use these controls.</p>${btn('rebaseline', 'Confirm new gateway')}` : ''}${field('import_limit_w', 'Import limit (W)')}${field('export_limit_w', 'Export limit (W)')}${btn('set', 'Apply persistent limits', !n.capabilities.writable || !!this._errors.native_site_limits || this._loading.has('native_site_limits'))}
-      ${!n.capabilities.writable ? `<p class="hint" role="status">${n.capabilities.readable === false ? 'Fresh gateway configuration unavailable. Retry the read.' : 'Another control, changed pairing or recovery is holding the site. Resolve it, then refresh.'}</p>` : ''}
+      ${!n.capabilities.writable ? `<p class="hint" role="status">${psEsc(this._siteLimitBlockMessage(n.capabilities))}</p>` : ''}
       ${(n.snapshots || []).slice(-1).map(s => btn(`restore:${s.snapshot_id}`, 'Restore previous site limits', !n.capabilities.writable)).join('')}
       ${n.transaction ? `<p class="hint">${['prepared','submitted','recovery_required'].includes(n.transaction.phase) ? 'Check the previous change before applying another limit.' : 'Site limits updated.'}</p>${['prepared', 'submitted', 'recovery_required'].includes(n.transaction.phase) ? btn('reconcile', 'Check unresolved write') : ''}` : ''}
       </div></details>` : ''}

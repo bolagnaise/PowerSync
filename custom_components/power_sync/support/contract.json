@@ -241,6 +241,32 @@
       "unverified",
       "verified",
       "changed"
+    ],
+    "native_site_limit_guard": [
+      "allowed",
+      "unavailable",
+      "battery_system_unsupported",
+      "control_site_unavailable",
+      "local_gateway_unconfigured",
+      "monitoring_handoff_active",
+      "generation_replaced",
+      "monitoring_only_profile",
+      "settings_pending",
+      "foreign_site_owner",
+      "force_charge_active",
+      "force_discharge_active",
+      "hold_soc_active",
+      "self_consumption_active",
+      "dispatch_stopping",
+      "settings_recovering",
+      "control_method_changing",
+      "native_max_startup_pending",
+      "local_recovery_pending",
+      "optimizer_restore_pending",
+      "backup_preparation_active",
+      "backup_recovery_unavailable",
+      "battery_dispatch_pending",
+      "native_max_charge_pending"
     ]
   }
 }

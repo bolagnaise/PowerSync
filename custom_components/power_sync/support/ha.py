@@ -142,6 +142,16 @@ class SupportRuntime:
         state = {**config, **fields(opt.get("_last_optimizer_result")), "enabled": opt.get("_enabled"), "monitoring_mode": monitoring,
             "planned_action": opt.get("_last_executed_planned_action"), "effective_action": opt.get("_last_executed_action")}
         force = dict(fields(opt.get("_optimizer_force_state")))
+        # This reviewed synchronous guard reads runtime admission only. It never
+        # calls NativeSiteLimits.read(), refreshes a gateway, or changes authority.
+        guard_status = "unavailable"
+        guard = runtime.get("native_site_limits_block_reason")
+        if callable(guard):
+            try:
+                guard_status = guard() or "allowed"
+            except Exception:
+                pass  # Do not disclose arbitrary exception text.
+        force["native_site_limit_guard"] = guard_status
         if isinstance(force.get("expires_at"), datetime):
             force["expires_at"] = stamp(force["expires_at"])
         self.frame = snapshot({"entities": entities, "schedule": slots, "optimizer": state,

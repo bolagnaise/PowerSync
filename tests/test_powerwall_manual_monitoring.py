@@ -8,7 +8,7 @@ import pytest
 
 def guards():
     source = Path(__file__).resolve().parents[1] / "custom_components/power_sync/__init__.py"
-    names = {"_battery_output_allowed", "_native_limits_allowed", "_backup_preparation_allowed"}
+    names = {"_battery_output_allowed", "_native_limits_allowed", "_native_limits_block_reason", "_backup_preparation_allowed"}
     nodes = [node for node in ast.walk(ast.parse(source.read_text()))
              if isinstance(node, ast.FunctionDef) and node.name in names]
 
@@ -64,4 +64,61 @@ def test_manual_monitoring_exception_preserves_active_owner_and_unsupported_prof
     ns["force_charge_state"].clear()
     profile.monitoring_only = True
     assert not ns["_battery_output_allowed"]()
+    assert not ns["_native_limits_allowed"](False)
+
+
+@pytest.mark.parametrize("key,reason", [
+    ("_monitoring_handoff_active", "monitoring_handoff_active"),
+    ("powerwall_settings_pending", "settings_pending"),
+    ("powerwall_local_dispatch_stopping", "dispatch_stopping"),
+    ("powerwall_settings_recovering", "settings_recovering"),
+    ("tesla_control_method_changing", "control_method_changing"),
+    ("native_max_startup_pending", "native_max_startup_pending"),
+    ("powerwall_local_recovery_pending", "local_recovery_pending"),
+    ("optimizer_force_restart_restore_pending", "optimizer_restore_pending"),
+    ("max_backup_end_ts", "backup_preparation_active"),
+    ("max_backup_recovery_unavailable", "backup_recovery_unavailable"),
+])
+def test_native_limit_status_identifies_runtime_fence_and_keeps_it_closed(key, reason):
+    ns, _, runtime, _ = guards()
+    runtime[key] = True
+    assert ns["_native_limits_block_reason"]() == reason
+    assert not ns["_native_limits_allowed"](False)
+
+
+@pytest.mark.parametrize("name", ["force_charge", "force_discharge", "hold_soc", "self_consumption"])
+def test_native_limit_status_names_the_active_control(name):
+    ns, _, _, _ = guards()
+    ns[name + "_state"]["active"] = True
+    assert ns["_native_limits_block_reason"]() == name + "_active"
+    assert not ns["_native_limits_allowed"](False)
+
+
+def test_native_limit_status_preserves_own_transaction_recovery_and_monitoring_policy():
+    ns, entry, runtime, profile = guards()
+    entry.options["monitoring_mode"] = True
+    assert ns["_native_limits_block_reason"]() is None
+    runtime["powerwall_settings_pending"] = {"kind": "native_site_limits"}
+    assert ns["_native_limits_block_reason"]() == "settings_pending"
+    assert ns["_native_limits_allowed"](True)
+    profile.monitoring_only = True
+    assert ns["_native_limits_block_reason"]() == "monitoring_only_profile"
+    assert not ns["_native_limits_allowed"](True)
+
+
+@pytest.mark.parametrize("setting,reason", [
+    ("system", "battery_system_unsupported"), ("site", "control_site_unavailable"),
+    ("gateway", "local_gateway_unconfigured"), ("generation", "generation_replaced"),
+    ("owner", "foreign_site_owner"), ("dispatch", "battery_dispatch_pending"),
+    ("native_max", "native_max_charge_pending"),
+])
+def test_native_limit_status_identifies_configuration_owner_and_pending_leases(setting, reason):
+    ns, _, runtime, _ = guards()
+    if setting == "system": ns["active_battery_system"] = "other"
+    elif setting == "site": ns["_control_site_id"] = None
+    elif setting == "gateway": ns["local_battery_dispatch_configured"] = lambda _: False
+    elif setting == "generation": ns["_local_powerwall_generation_current"] = lambda: False
+    elif setting == "owner": ns["foreign_site_owner"] = lambda *_: "private-owner-id"
+    else: runtime["powerwall_battery_dispatch" if setting == "dispatch" else "powerwall_native_max_charge"] = NS(pending=True)
+    assert ns["_native_limits_block_reason"]() == reason
     assert not ns["_native_limits_allowed"](False)

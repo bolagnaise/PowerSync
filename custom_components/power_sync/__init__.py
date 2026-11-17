@@ -37400,29 +37400,56 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         from .powerwall_local.native_site_limits import identity_for_entry
         return identity_for_entry(entry)
 
-    def _native_limits_allowed(allow_own_pending):
+    def _native_limits_block_reason(allow_own_pending=False):
         from .powerwall_host import local_battery_dispatch_configured
         from .battery_backend.profiles import resolve_connection_profile
         from .powerwall_control import foreign_site_owner
         pending = _local_powerwall_runtime.get("powerwall_settings_pending")
         pending_blocked = bool(pending and not (allow_own_pending and isinstance(pending, dict)
                                                and pending.get("kind") == "native_site_limits"))
-        return (active_battery_system == BATTERY_SYSTEM_TESLA
-                and _control_site_id is not None and local_battery_dispatch_configured(entry.data)
-                and not _local_powerwall_runtime.get("_monitoring_handoff_active")
-                and _local_powerwall_generation_current()
-                and not resolve_connection_profile(entry.data, entry.options).monitoring_only
-                and not pending_blocked
-                and foreign_site_owner(hass, entry.entry_id, _control_site_id) is None
-                and not any(state.get("active") for state in (
-                    force_charge_state, force_discharge_state, hold_soc_state, self_consumption_state))
-                and not any(_local_powerwall_runtime.get(key) for key in (
-                    "powerwall_local_dispatch_stopping", "powerwall_settings_recovering",
-                    "tesla_control_method_changing", "native_max_startup_pending",
-                    "powerwall_local_recovery_pending", "optimizer_force_restart_restore_pending",
-                    "max_backup_end_ts", "max_backup_recovery_unavailable"))
-                and not getattr(_local_powerwall_runtime.get("powerwall_battery_dispatch"), "pending", False)
-                and not getattr(_local_powerwall_runtime.get("powerwall_native_max_charge"), "pending", False))
+        if active_battery_system != BATTERY_SYSTEM_TESLA:
+            return "battery_system_unsupported"
+        if _control_site_id is None:
+            return "control_site_unavailable"
+        if not local_battery_dispatch_configured(entry.data):
+            return "local_gateway_unconfigured"
+        if _local_powerwall_runtime.get("_monitoring_handoff_active"):
+            return "monitoring_handoff_active"
+        if not _local_powerwall_generation_current():
+            return "generation_replaced"
+        if resolve_connection_profile(entry.data, entry.options).monitoring_only:
+            return "monitoring_only_profile"
+        if pending_blocked:
+            return "settings_pending"
+        if foreign_site_owner(hass, entry.entry_id, _control_site_id) is not None:
+            return "foreign_site_owner"
+        for name, state in (("force_charge", force_charge_state), ("force_discharge", force_discharge_state),
+                            ("hold_soc", hold_soc_state), ("self_consumption", self_consumption_state)):
+            if state.get("active"):
+                return name + "_active"
+        for key, reason in (
+            ("powerwall_local_dispatch_stopping", "dispatch_stopping"),
+            ("powerwall_settings_recovering", "settings_recovering"),
+            ("tesla_control_method_changing", "control_method_changing"),
+            ("native_max_startup_pending", "native_max_startup_pending"),
+            ("powerwall_local_recovery_pending", "local_recovery_pending"),
+            ("optimizer_force_restart_restore_pending", "optimizer_restore_pending"),
+            ("max_backup_end_ts", "backup_preparation_active"),
+            ("max_backup_recovery_unavailable", "backup_recovery_unavailable"),
+        ):
+            if _local_powerwall_runtime.get(key):
+                return reason
+        if getattr(_local_powerwall_runtime.get("powerwall_battery_dispatch"), "pending", False):
+            return "battery_dispatch_pending"
+        if getattr(_local_powerwall_runtime.get("powerwall_native_max_charge"), "pending", False):
+            return "native_max_charge_pending"
+        return None
+
+    def _native_limits_allowed(allow_own_pending):
+        return _native_limits_block_reason(allow_own_pending) is None
+
+    # Reviewed, synchronous status projection: no gateway read, mutation or owner identity.
+    _local_powerwall_runtime["native_site_limits_block_reason"] = _native_limits_block_reason
 
     async def _load_native_limits():
         saved = await store.async_load() or {}
@@ -37492,7 +37519,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         save=_save_native_limits, read=_read_native_limits_document, write=_write_native_limits_document,
         guard=_native_limits_allowed, lock=_local_powerwall_route_lock, changed=_native_limits_changed,
         approval_guard=_native_limits_approval_allowed,
-        automatic_guard=lambda: not _is_monitoring_mode())
+        automatic_guard=lambda: not _is_monitoring_mode(), block_reason=_native_limits_block_reason)
     _local_powerwall_runtime["native_site_limits_control"] = _limits_control
 
     async def handle_set_native_site_limits(call):

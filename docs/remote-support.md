@@ -68,3 +68,9 @@ vehicle state and charge-data timestamps before and after the existing refresh.
 These observations do not wake the vehicle or send commands. A successful
 preparation check is a decision, not proof that a command was sent or charging
 started. No VIN, entity name, credentials or provider error text is shared.
+
+Recorded control observations also include the runtime check blocking native
+Powerwall site-limit changes, such as an active manual control, a monitoring-only
+connection, or pending recovery. This status reads PowerSync's cached control
+state without polling the gateway or changing settings. An allowed runtime check
+does not establish fresh gateway configuration or successful hardware enforcement.

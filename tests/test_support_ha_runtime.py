@@ -95,6 +95,34 @@ def test_real_adapter_does_not_mutate_expired_force_state_or_poll_devices(runtim
     c.validate_evidence(result)
 
 
+def test_native_site_limit_capture_reports_runtime_guard_without_gateway_io(runtime):
+    rt, _, _, _, _ = runtime
+    local = rt.hass.data['power_sync'][rt.entry.entry_id]
+    local['native_site_limits_block_reason'] = lambda: 'self_consumption_active'
+    local['native_site_limits_control'] = SimpleNamespace(read=AsyncMock(side_effect=AssertionError('gateway read forbidden')))
+    local['pairing_secret'] = 'CANARY_SECRET'
+    result = rt.capture()
+    assert result['control_trace'][0]['state']['native_site_limit_guard'] == 'self_consumption_active'
+    assert 'native_site_limit_guard' not in json.dumps(c.select(result, 'system'))
+    assert 'CANARY_SECRET' not in json.dumps(result)
+    local['native_site_limits_control'].read.assert_not_called()
+    rt.hass.services.async_call.assert_not_called()
+    c.validate_evidence(c.select(result, 'control_trace'))
+    local['native_site_limits_block_reason'] = lambda: None
+    assert rt.capture()['control_trace'][0]['state']['native_site_limit_guard'] == 'allowed'
+
+
+def test_native_site_limit_capture_does_not_share_unknown_reasons_or_errors(runtime):
+    rt, _, _, _, _ = runtime
+    local = rt.hass.data['power_sync'][rt.entry.entry_id]
+    local['native_site_limits_block_reason'] = lambda: 'CANARY_SECRET'
+    assert 'CANARY_SECRET' not in json.dumps(rt.capture())
+    def broken():
+        raise ValueError('CANARY_SECRET')
+    local['native_site_limits_block_reason'] = broken
+    assert rt.capture()['control_trace'][0]['state']['native_site_limit_guard'] == 'unavailable'
+
+
 def test_real_adapter_preserves_power_units_represented_by_string_enums(runtime):
     from enum import StrEnum
 

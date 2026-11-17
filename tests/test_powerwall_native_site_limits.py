@@ -89,6 +89,32 @@ def fixture():
 
 
 @pytest.mark.asyncio
+async def test_readable_gateway_reports_specific_blocker_without_enabling_writes():
+    control, request, _, writes, behaviour, *_ = fixture()
+    behaviour["owned"] = True
+    control.block_reason = lambda: "self_consumption_active"
+    status = await control.read()
+    assert status["capabilities"]["readable"] is True
+    assert status["capabilities"]["writable"] is False
+    assert status["capabilities"]["block_reason"] == "self_consumption_active"
+    with pytest.raises(m.SiteLimitError):
+        await control.execute(await request(import_limit_w=10000))
+    assert writes == []
+
+
+@pytest.mark.asyncio
+async def test_block_reason_distinguishes_unavailable_configuration_and_changed_identity():
+    control, request, _, writes, behaviour, *_ = fixture()
+    assert (await control.read())["capabilities"]["block_reason"] is None
+    await control.execute(await request(import_limit_w=10000))
+    control.identity()["pairing"] = "replacement-key"
+    assert (await control.read())["capabilities"]["block_reason"] == "pairing_changed"
+    behaviour["online"] = False
+    assert (await control.read())["capabilities"]["block_reason"] == "configuration_unavailable"
+    assert len(writes) == 1
+
+
+@pytest.mark.asyncio
 async def test_tightening_is_persistent_and_does_not_change_permissions_or_other_fields():
     control, request, gateway, writes, behaviour, load, changes = fixture()
     other = deepcopy(gateway["unrelated"])
