@@ -404,6 +404,7 @@ def covau_price_series(
     import_bucket = ledger.bucket(COVAU_IMPORT_RULE_ID)
     export_bucket = ledger.bucket(COVAU_EXPORT_RULE_ID)
     bonus_enabled = ledger.state.confidence != "unknown"
+    current_day = ledger.state.tariff_day
     imports: list[float] = []
     exports: list[float] = []
     import_bonus: list[float] = []
@@ -413,14 +414,23 @@ def covau_price_series(
         base_import = import_price_c_per_kwh(snapshot, timestamp) / 100.0
         imports.append(base_import)
         exports.append(snapshot.export_base_c_per_kwh / 100.0)
+        future_day = (
+            current_day is not None
+            and tariff_datetime(timestamp, snapshot.timezone_token).date().isoformat()
+            > current_day
+        )
         import_bonus.append(
             import_rule.bonus_price_c_per_kwh / 100.0
-            if bonus_enabled and import_bucket.remaining_kwh > 1e-9 and import_rule.contains(timestamp)
+            if bonus_enabled
+            and (future_day or import_bucket.remaining_kwh > 1e-9)
+            and import_rule.contains(timestamp)
             else 0.0
         )
         export_bonus.append(
             export_rule.bonus_price_c_per_kwh / 100.0
-            if bonus_enabled and export_bucket.remaining_kwh > 1e-9 and export_rule.contains(timestamp)
+            if bonus_enabled
+            and (future_day or export_bucket.remaining_kwh > 1e-9)
+            and export_rule.contains(timestamp)
             else 0.0
         )
     return (
@@ -479,6 +489,22 @@ def covau_tariff_schedule(
 
     import_remaining = ledger.remaining_kwh(COVAU_IMPORT_RULE_ID)
     export_remaining = ledger.remaining_kwh(COVAU_EXPORT_RULE_ID)
+    unavailable_quota_windows = {}
+    for direction, start, end, remaining in (
+        ("import", snapshot.free_import_start, snapshot.free_import_end, import_remaining),
+        ("export", snapshot.premium_export_start, snapshot.premium_export_end, export_remaining),
+    ):
+        if ledger.state.confidence == "unknown":
+            reason = "unverified"
+        elif remaining <= 1e-9:
+            reason = "exhausted"
+        else:
+            continue
+        unavailable_quota_windows[direction] = {
+            "start": start,
+            "end": end,
+            "reason": reason,
+        }
     refresh_key = ":".join(
         (
             str(ledger.state.tariff_day or local_now.date().isoformat()),
@@ -496,6 +522,7 @@ def covau_tariff_schedule(
         "plan_name": snapshot.display_name,
         "price_source": "covau_aer_cdr",
         "last_sync": refresh_key,
+        "unavailable_quota_windows": unavailable_quota_windows,
     }
 
 

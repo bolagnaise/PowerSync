@@ -4883,6 +4883,8 @@ class TariffScheduleSensor(SensorEntity):
             "plan_name": tariff_data.get("plan_name"),
             "current_season": current_season,
         }
+        if unavailable_windows := tariff_data.get("unavailable_quota_windows"):
+            attrs["unavailable_quota_windows"] = unavailable_windows
 
         if buy_prices:
             schedule_list = []

@@ -3476,6 +3476,50 @@ def test_covau_forecast_partitions_caps_by_adelaide_tariff_day(opt_module):
     assert saved["settled_kwh"][opt_module.COVAU_IMPORT_RULE_ID] == 1.0
 
 
+@pytest.mark.parametrize("confidence", ["authoritative", "unknown"])
+def test_covau_forecast_resets_exhausted_allowances_per_day(opt_module, confidence):
+    now = datetime(2026, 5, 3, 9, 30, tzinfo=timezone.utc)  # 19:00 ACST
+    opt_module.dt_util.now = lambda: now
+    coordinator = _coordinator(
+        opt_module,
+        "covau",
+        covau_plan_snapshot=_covau_snapshot_dict(),
+    )
+    coordinator.hass = SimpleNamespace(data={}, states=SimpleNamespace(get=lambda _eid: None))
+    coordinator._config.horizon_hours = 24
+    coordinator._ensure_covau_ledger(
+        opt_module.QuotaLedgerState(
+            tariff_day="2026-05-03",
+            timezone_token="Australia/Adelaide",
+            confidence=confidence,
+            settled_kwh={
+                opt_module.COVAU_IMPORT_RULE_ID: 50.0,
+                opt_module.COVAU_EXPORT_RULE_ID: 30.0,
+            },
+        ),
+        now=now,
+    )
+    prices = coordinator._covau_price_forecast()
+    timestamps = coordinator._pending_price_timestamps
+    tomorrow_import = timestamps.index(datetime(2026, 5, 4, 1, 30, tzinfo=timezone.utc))
+    tomorrow_export = timestamps.index(datetime(2026, 5, 4, 8, 30, tzinfo=timezone.utc))
+    trusted = confidence == "authoritative"
+    assert coordinator._last_display_import_prices[tomorrow_import] == pytest.approx(
+        0.0 if trusted else 0.3517
+    )
+    assert coordinator._last_display_export_prices[tomorrow_export] == pytest.approx(
+        0.15 if trusted else 0.05
+    )
+    assert coordinator._last_display_export_prices[0] == pytest.approx(0.05)
+    coordinator._apply_covau_optimizer_inputs(*prices)
+    assert coordinator._last_import_bonus_caps_by_group == (
+        {"2026-05-04": 50.0} if trusted else {}
+    )
+    assert coordinator._last_export_bonus_caps_by_group == (
+        {"2026-05-04": 30.0} if trusted else {}
+    )
+
+
 def test_covau_cumulative_pcc_settlement_counts_only_matching_windows(opt_module):
     snapshot = _covau_snapshot_dict()
     options = {

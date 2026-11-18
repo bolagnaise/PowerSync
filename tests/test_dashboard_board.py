@@ -422,6 +422,27 @@ def test_tariff_spike_keeps_all_schedule_rates_in_minor_units():
     assert '<span class="i">-3.5</span><span class="e">-1.2</span>' in html
 
 
+def test_tariff_shows_configured_covau_windows_when_standard_rates_apply():
+    out = _run_board(r"""
+  const card = new T.PsTariffCard();
+  card._hass = {config: {currency: 'AUD', time_zone: 'UTC'}, states: {
+    tariff: {state: 'shoulder', attributes: {
+      schedule: [{time: '00:00', buy: 0.352, sell: 0.05}],
+      unavailable_quota_windows: {
+        import: {start: '11:00', end: '14:00', reason: 'unverified'},
+        export: {start: '18:00', end: '21:00', reason: 'exhausted'},
+      },
+    }},
+  }};
+  card._config = {entities: {tariff: 'tariff'}};
+  card._render();
+  console.log(JSON.stringify({html: card.innerHTML}));
+""")
+    assert "Free import (11:00–14:00) · remaining allowance could not be verified" in out["html"]
+    assert "Premium export (18:00–21:00) · today’s allowance is used up" in out["html"]
+    assert '<span class="i">35.2</span>' in out["html"]
+
+
 def test_tariff_names_distinguish_agl_reward_by_export_rate():
     out = _run_board(r"""
   const tou = [

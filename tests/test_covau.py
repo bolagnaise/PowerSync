@@ -274,7 +274,7 @@ def test_provider_contract_exposes_quota_aware_dashboard_tariff_schedule() -> No
     assert schedule["sell_prices"]["PERIOD_18_00"] == 0.15
 
 
-def test_dashboard_tariff_schedule_hides_bonuses_when_settlement_is_unknown() -> None:
+def test_dashboard_tariff_schedule_explains_unavailable_bonuses() -> None:
     snapshot = normalize_covau_plan(
         _raw("COV1117614MRE2@EME"),
         "COV1117614MRE2@EME",
@@ -296,6 +296,10 @@ def test_dashboard_tariff_schedule_hides_bonuses_when_settlement_is_unknown() ->
 
     assert schedule["buy_prices"]["PERIOD_11_00"] > 0.0
     assert schedule["sell_prices"]["PERIOD_18_00"] == 0.05
+    assert schedule["unavailable_quota_windows"] == {
+        "import": {"start": "11:00", "end": "14:00", "reason": "unverified"},
+        "export": {"start": "18:00", "end": "21:00", "reason": "unverified"},
+    }
 
     exhausted = QuotaLedger(
         covau_quota_rules(snapshot),
@@ -315,6 +319,10 @@ def test_dashboard_tariff_schedule_hides_bonuses_when_settlement_is_unknown() ->
     )
     assert exhausted_schedule["buy_prices"]["PERIOD_11_00"] > 0.0
     assert exhausted_schedule["sell_prices"]["PERIOD_18_00"] == 0.05
+    assert exhausted_schedule["unavailable_quota_windows"] == {
+        "import": {"start": "11:00", "end": "14:00", "reason": "exhausted"},
+        "export": {"start": "18:00", "end": "21:00", "reason": "exhausted"},
+    }
 
 
 def test_postcode_filters_but_keeps_distributor_confirmation_candidates() -> None:

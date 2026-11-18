@@ -3224,6 +3224,17 @@ class PsTariffCard extends PsCardBase {
       const range = `${hm(p.start)}–${endMin === 1440 ? hm(0) : hm(endMin)}`;
       return `<div class="prow ${isNow ? 'now' : ''}"><i style="--c:var(${c})"></i><span class="n"><b>${psEsc(name)}${isNow ? ', now' : ''}</b><span>${psEsc(range)}${isNow ? `, ends in ${psDuration(left)}` : ''}</span></span><span class="i">${p.buy.toFixed(1)}</span><span class="e">${p.sell.toFixed(1)}</span></div>`;
     }).join('');
+    const quotaNotes = [
+      ['import', 'Free import'],
+      ['export', 'Premium export'],
+    ].map(([direction, name]) => {
+      const window = attrs.unavailable_quota_windows?.[direction];
+      if (!window?.start || !window?.end) return '';
+      const status = window.reason === 'exhausted'
+        ? "today’s allowance is used up"
+        : 'remaining allowance could not be verified';
+      return `<p class="hint">${name} (${psEsc(window.start)}–${psEsc(window.end)}) · ${status}.</p>`;
+    }).join('');
     this.innerHTML = `
       <div class="tou-ribbon" aria-hidden="true">${ribbon}<i class="now-tick" style="left:calc(${(nowMin / 1440 * 100).toFixed(2)}% - 1px)"></i></div>
       <div class="tou-axis" aria-hidden="true"><span>00</span><span>06</span><span>12</span><span>18</span><span>24</span></div>
@@ -3231,7 +3242,8 @@ class PsTariffCard extends PsCardBase {
         <div class="prow phead"><span></span><span>Period</span><span>Import</span><span>Export</span></div>
         ${rowsHtml}
       </div>
-      <p class="hint">Prices in ${psEsc(unit)}/kWh.</p>`;
+      <p class="hint">Prices in ${psEsc(unit)}/kWh.</p>
+      ${quotaNotes}`;
     this.innerHTML += psExportOfferHtml(hass, psExportOffer(hass, this.ents));
   }
 }
