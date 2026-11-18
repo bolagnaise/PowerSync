@@ -3360,7 +3360,7 @@ def _get_ev_vehicles_status(hass, entry, *, include_control_evidence=False) -> l
                 if has_away_vehicle and not _site_vehicle_candidates(vehicles):
                     connector_connected = False
                     connector_charging = False
-            vehicles.append({
+            connector = {
                 "vehicle_id": f"wall_connector_{wc_id}",
                 "charger_id": f"wall_connector_{wc_id}",
                 "vehicle_name": "Wall Connector",
@@ -3371,7 +3371,11 @@ def _get_ev_vehicles_status(hass, entry, *, include_control_evidence=False) -> l
                 "_observed_at": wc_observed_at,
                 "_charging_observed_at": wc_observed_at,
                 "_connected_observed_at": wc_observed_at,
-            })
+            }
+            # Connection labels such as "connected" are not vehicle IDs.
+            if re.fullmatch(r"[A-HJ-NPR-Z0-9]{17}", str(wc_vin or "").strip().upper()):
+                connector["_wall_connector_vehicle_unmatched"] = True
+            vehicles.append(connector)
 
     coalesced = [dict(vehicle) for vehicle in coalesce_vehicle_observations(vehicles)]
     for vehicle in coalesced:

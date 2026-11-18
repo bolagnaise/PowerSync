@@ -3164,6 +3164,40 @@ def test_ev_vehicle_status_prefers_wall_connector_power_for_single_charging_tesl
     assert power_sync._get_external_tesla_ev_power_kw(hass, _Entry()) == 3.4
 
 
+@pytest.mark.parametrize("matching_vehicle", [True, False])
+def test_wall_connector_with_explicit_vehicle_keeps_exact_attribution(matching_vehicle):
+    now = datetime.now(timezone.utc)
+    vehicle_id = "5YJTEST0000000001"
+    hass = _tesla_hass([
+        _State("sensor.primary_ev_charger_power", "4.0",
+               {"unit_of_measurement": "kW"}, last_updated=now - timedelta(seconds=5)),
+        _State("sensor.primary_ev_charging", "charging", last_updated=now),
+        _State("device_tracker.primary_ev_location", "home", last_updated=now),
+    ])
+    hass.data["power_sync"]["entry-1"]["tesla_coordinator"] = SimpleNamespace(
+        data={
+            "last_update": now,
+            "wall_connectors_raw": [{
+                "wall_connector_id": "garage",
+                "wall_connector_state": 11,
+                "wall_connector_power": 7200,
+                "vin": vehicle_id if matching_vehicle else "LGXTEST0000000002",
+            }],
+        }
+    )
+    power_sync = _power_sync_module()
+    vehicles = power_sync._get_ev_vehicles_status(hass, _Entry())
+    loadpoint_status = importlib.import_module("power_sync.automations.loadpoint_status")
+
+    expected_power = {vehicle_id: 7.2} if matching_vehicle else {
+        vehicle_id: 4.0,
+        "wall_connector_garage": 7.2,
+    }
+    assert {row["vehicle_id"]: row["ev_power_kw"] for row in vehicles} == expected_power
+    loadpoints = loadpoint_status.build_loadpoint_status({}, vehicles)
+    assert {row["vehicle_id"]: row["current_power_kw"] for row in loadpoints} == expected_power
+
+
 @pytest.mark.parametrize("vehicle_current", ["0", "39.1"])
 @pytest.mark.parametrize("vehicle_name", ["PRIMARY EV", "Tesla EV"])
 @pytest.mark.parametrize("fleet_power,meter_power,raw_load", [(9.0, 8.7, 9.3), (5.1, 5.1, 5.7)])
