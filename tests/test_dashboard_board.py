@@ -402,6 +402,26 @@ def test_tariff_ribbon_uses_clock_positions_for_partial_cosy_day(start, expected
     assert '<span class="i">43.2</span>' in html
 
 
+def test_tariff_spike_keeps_all_schedule_rates_in_minor_units():
+    out = _run_board(r"""
+  const card = new T.PsTariffCard();
+  card._hass = {config: {currency: 'AUD', time_zone: 'UTC'}, states: {
+    tariff: {state: 'peak', attributes: {schedule: [
+      {time: '21:00', date_label: 'Today', buy: 2.7, sell: 0.2},
+      {time: '21:30', date_label: 'Today', buy: 0.246, sell: 0.132},
+      {time: '22:30', date_label: 'Today', buy: -0.035, sell: -0.012},
+    ]}}
+  }};
+  card._config = {entities: {tariff: 'tariff'}};
+  card._render();
+  console.log(JSON.stringify({html: card.innerHTML}));
+""")
+    html = out["html"]
+    assert '<span class="i">270.0</span><span class="e">20.0</span>' in html
+    assert '<span class="i">24.6</span><span class="e">13.2</span>' in html
+    assert '<span class="i">-3.5</span><span class="e">-1.2</span>' in html
+
+
 def test_tariff_names_distinguish_agl_reward_by_export_rate():
     out = _run_board(r"""
   const tou = [

@@ -3176,10 +3176,10 @@ class PsTariffCard extends PsCardBase {
     }
     const slotMin = s => { const [h, mm] = String(s.time || '0:0').split(':').map(Number); return h * 60 + (mm || 0); };
     slots = slots.slice().sort((a, b) => slotMin(a) - slotMin(b));
-    const scale = slots.some(s => Number(s.buy) > 2) ? 1 : 100;
     const periods = [];
     slots.forEach((s, i) => {
-      const buy = Number(s.buy) * scale, sell = Number(s.sell) * scale;
+      // TOU Schedule rows are in major currency units per kWh, even during spikes.
+      const buy = Number(s.buy) * 100, sell = Number(s.sell) * 100;
       const start = slotMin(s);
       const end = i + 1 < slots.length ? slotMin(slots[i + 1]) : 24 * 60;
       const last = periods[periods.length - 1];
