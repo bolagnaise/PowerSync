@@ -2718,40 +2718,43 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         return min(requested, safe_minutes), hardware_projected_soc
 
-    def tesla_tariff_export_still_allowed(self, duration_minutes: int) -> bool:
-        """Recheck a waiting Tesla discharge against the live plan and reserve."""
+    def tesla_tariff_export_safe_duration(self, duration_minutes: int) -> int:
+        """Bound a waiting Tesla discharge by the current plan and reserve."""
         if (not self._enabled or self._monitoring_mode_active()
                 or not self._energy_telemetry_ready()):
-            return False
+            return 0
         action = self._get_current_action()
         if getattr(action, "action", None) not in {"discharge", "export"}:
-            return False
+            return 0
         remaining_minutes = self._force_duration_for_action_window(
             action, {"discharge", "export"},
             allow_boundary_overrun=False, minimum_minutes=1,
         )
-        if remaining_minutes < duration_minutes:
-            return False
+        duration_minutes = min(duration_minutes, remaining_minutes)
+        if duration_minutes <= 0:
+            return 0
         if not self._battery_export_price_status(action)["price_allows_battery_export"]:
-            return False
+            return 0
         data = self._get_energy_data() or {}
         try:
             observed_at = data["last_update"]
             if not isinstance(observed_at, datetime):
-                return False
+                return 0
             if not 0 <= (dt_util.utcnow() - observed_at).total_seconds() <= 60:
-                return False
+                return 0
             soc = float(data["battery_level"]) / 100.0
         except (KeyError, TypeError, ValueError):
-            return False
+            return 0
         if not math.isfinite(soc) or not 0 <= soc <= 1:
-            return False
+            return 0
         floor = self._force_discharge_reserve_floor(action)
         reaches_floor, _ = self._force_discharge_reaches_reserve(action, soc, floor)
+        if reaches_floor:
+            return 0
         safe_minutes, _ = self._targetless_export_safe_duration(
             action, soc, floor, duration_minutes,
         )
-        return not reaches_floor and safe_minutes >= duration_minutes
+        return safe_minutes
 
     def _targetless_charge_safe_duration(
         self,
@@ -10495,6 +10498,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Record an optimizer-owned hardware force command."""
         now = dt_util.utcnow()
         expires_at = now + timedelta(minutes=max(1, int(duration_minutes)))
+        if force_type == "discharge" and self.battery_system == "tesla":
+            getter = getattr(self, "_force_state_getter", None)
+            confirmed = (getter() or {}) if getter else {}
+            if confirmed.get("type") == force_type and confirmed.get("commitment_eligible") is True:
+                confirmed_expiry = self._as_utc_datetime(confirmed.get("expires_at"))
+                if confirmed_expiry is not None:
+                    expires_at = min(expires_at, confirmed_expiry)
         existing_state = getattr(self, "_optimizer_force_state", None)
         started_at = None
         if (

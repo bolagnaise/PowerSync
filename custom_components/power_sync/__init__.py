@@ -39353,6 +39353,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             # confirmed disabled before the high-export tariff is uploaded, or
             # the gateway could import and charge during the force window.
             def _discharge_request_current() -> bool:
+                nonlocal duration, tariff_duration
                 if (_command_generation[0] != _restore_gen
                         or _monitoring_mode_should_block_control(call)
                         or not _local_powerwall_generation_current()
@@ -39370,8 +39371,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     coordinator = hass.data.get(DOMAIN, {}).get(
                         entry.entry_id, {}
                     ).get("optimization_coordinator")
-                    check = getattr(coordinator, "tesla_tariff_export_still_allowed", None)
-                    return callable(check) and check(duration)
+                    check = getattr(coordinator, "tesla_tariff_export_safe_duration", None)
+                    safe_duration = check(duration) if callable(check) else 0
+                    if safe_duration <= 0:
+                        return False
+                    if safe_duration < duration:
+                        _LOGGER.info(
+                            "Shortening Tesla force discharge during preparation "
+                            "from %dmin to %dmin after rechecking the plan and reserve",
+                            duration, safe_duration,
+                        )
+                        duration = tariff_duration = safe_duration
                 return True
 
             if not was_already_force_discharging:
@@ -39441,6 +39451,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
             if not _discharge_request_current():
                 raise HomeAssistantError("Tesla discharge request changed before tariff upload")
+            force_discharge_state["duration"] = duration
 
             if not mode_success:
                 _LOGGER.error(

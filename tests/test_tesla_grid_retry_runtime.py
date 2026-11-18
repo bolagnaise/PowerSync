@@ -133,16 +133,19 @@ def test_waiting_tariff_discharge_rechecks_live_eligibility(change):
         _get_energy_data=lambda: data,
         _force_discharge_reserve_floor=lambda action: .2,
         _force_discharge_reaches_reserve=lambda *args: (change == "soc_floor", None),
-        _targetless_export_safe_duration=lambda *args: (4 if change == "unsafe_duration" else 20, None),
+        _targetless_export_safe_duration=lambda *args: (min(args[-1], 4 if change == "unsafe_duration" else 20), None),
     )
-    check = _load(ROOT / "optimization/coordinator.py", "tesla_tariff_export_still_allowed", {
+    check = _load(ROOT / "optimization/coordinator.py", "tesla_tariff_export_safe_duration", {
         "datetime": datetime, "math": math, "dt_util": SimpleNamespace(utcnow=lambda: now),
     })
-    assert check(coordinator, 5) is (change is None)
+    expected = 5 if change is None else 4 if change in {"short_window", "unsafe_duration"} else 0
+    assert check(coordinator, 5) == expected
 
 
-@pytest.mark.parametrize("change", [None, "generation", "monitoring", "setup", "network", "plan", "restore"])
-def test_discharge_cannot_change_mode_after_admission_changes_during_grid_wait(change):
+@pytest.mark.parametrize("change", [
+    None, "generation", "monitoring", "setup", "network", "plan", "restore", "shorter_duration",
+])
+def test_discharge_rechecks_admission_and_duration_during_grid_wait(change):
     tree = ast.parse((ROOT / "__init__.py").read_text())
     handler = next(n for n in ast.walk(tree)
                    if isinstance(n, ast.AsyncFunctionDef) and n.name == "handle_force_discharge")
@@ -156,7 +159,12 @@ def test_discharge_cannot_change_mode_after_admission_changes_during_grid_wait(c
     function = ast.AsyncFunctionDef(
         name="prepare", args=ast.arguments(posonlyargs=[], args=[], kwonlyargs=[],
                                            kw_defaults=[], defaults=[]),
-        body=body[first:last], decorator_list=[],
+        body=(
+            ast.parse("duration, tariff_duration = requested_duration, requested_tariff_duration").body
+            + body[first:last]
+            + ast.parse("return duration, tariff_duration, force_discharge_state.get('duration')").body
+        ),
+        decorator_list=[],
     )
     flags = {"after_wait": False}
     generation = [1]
@@ -198,7 +206,34 @@ def test_discharge_cannot_change_mode_after_admission_changes_during_grid_wait(c
     def changed(name):
         return flags["after_wait"] and change == name
 
-    coordinator = SimpleNamespace(tesla_tariff_export_still_allowed=lambda minutes: not changed("plan"))
+    coordinator = SimpleNamespace(tesla_tariff_export_safe_duration=lambda minutes: 0 if changed("plan") else minutes)
+    requested_duration = 142 if change == "shorter_duration" else 10
+    if change == "shorter_duration":
+        now = datetime(2026, 10, 28, 0, tzinfo=timezone.utc)
+        coordinator._enabled = True
+        coordinator._monitoring_mode_active = lambda: False
+        coordinator._energy_telemetry_ready = lambda: True
+        coordinator._get_current_action = lambda: SimpleNamespace(action="export")
+        coordinator._force_duration_for_action_window = lambda *a, **kw: 175
+        coordinator._battery_export_price_status = lambda action: {"price_allows_battery_export": True}
+        coordinator._get_energy_data = lambda: {
+            "battery_level": 97.14 if flags["after_wait"] else 97.22,
+            "last_update": now,
+        }
+        coordinator._force_discharge_reserve_floor = lambda action: .17
+        coordinator._force_discharge_reaches_reserve = lambda *args: (False, None)
+        coordinator._supports_target_export_power = lambda: False
+        coordinator._config = SimpleNamespace(battery_capacity_wh=67500)
+        coordinator._export_command_power_w = lambda action: 21040
+        coordinator._optimizer = SimpleNamespace(efficiency=.92)
+        path = ROOT / "optimization/coordinator.py"
+        coordinator._targetless_export_safe_duration = _load(
+            path, "_targetless_export_safe_duration", {"Any": Any, "math": math},
+        ).__get__(coordinator)
+        coordinator.tesla_tariff_export_safe_duration = _load(
+            path, "tesla_tariff_export_safe_duration",
+            {"datetime": datetime, "math": math, "dt_util": SimpleNamespace(utcnow=lambda: now)},
+        ).__get__(coordinator)
     namespace = {
         "_command_generation": generation, "_restore_gen": 1,
         "_tesla_charge_kick_generation": [1],
@@ -208,7 +243,8 @@ def test_discharge_cannot_change_mode_after_admission_changes_during_grid_wait(c
         "_monitoring_mode_should_block_control": lambda call: changed("monitoring"),
         "_local_powerwall_generation_current": lambda: not changed("setup"),
         "_local_powerwall_runtime": runtime, "network_guard": guard,
-        "call": SimpleNamespace(data={}), "source": "optimizer", "duration": 10,
+        "call": SimpleNamespace(data={}), "source": "optimizer",
+        "requested_duration": requested_duration, "requested_tariff_duration": requested_duration + 5,
         "hass": SimpleNamespace(data={"power_sync": {"entry": {"optimization_coordinator": coordinator}}}),
         "DOMAIN": "power_sync", "entry": SimpleNamespace(entry_id="entry"),
         "site_configs": [("site", "token", "fleet")],
@@ -224,13 +260,36 @@ def test_discharge_cannot_change_mode_after_admission_changes_during_grid_wait(c
     }
     module = ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[]))
     exec(compile(module, str(ROOT / "__init__.py"), "exec"), namespace)
-    if change is None:
-        asyncio.run(namespace["prepare"]())
+    if change in (None, "shorter_duration"):
+        durations = asyncio.run(namespace["prepare"]())
         assert len(modes) == 1
+        assert durations == ((141, 141, 141) if change == "shorter_duration" else (10, 15, 10))
     else:
         with pytest.raises(RuntimeError):
             asyncio.run(namespace["prepare"]())
         assert not modes
+
+
+def test_optimizer_discharge_lease_uses_confirmed_tesla_expiry():
+    now = datetime(2026, 10, 28, tzinfo=timezone.utc)
+    confirmed_expiry = now + timedelta(minutes=141)
+    coordinator = SimpleNamespace(
+        battery_system="tesla",
+        _as_utc_datetime=lambda value: value,
+        _force_state_getter=lambda: {
+            "type": "discharge", "commitment_eligible": True,
+            "expires_at": confirmed_expiry,
+        },
+    )
+    set_force_state = _load(
+        ROOT / "optimization/coordinator.py", "_set_optimizer_force_state",
+        {"dt_util": SimpleNamespace(utcnow=lambda: now), "timedelta": timedelta},
+    )
+
+    set_force_state(coordinator, "discharge", 142, 21040)
+
+    assert coordinator._optimizer_force_state["expires_at"] == confirmed_expiry
+    assert coordinator._optimizer_force_state["hardware_expires_at"] == confirmed_expiry
 
 
 @pytest.mark.parametrize("superseded", [False, True])
