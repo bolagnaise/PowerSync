@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 from collections.abc import Mapping
 from copy import deepcopy
@@ -32,11 +33,13 @@ EXTERNAL_CONTROL_DEFAULT_LOADPOINT_TYPES = frozenset(
     {"generic", "ocpp", "sigenergy", "zaptec"}
 )
 MANUAL_STOP_HOLD_SECONDS = 15 * 60
+MANUAL_STOP_SAVE_TIMEOUT_SECONDS = 2
 RECOVERED_OWNERSHIP_MAX_AGE_SECONDS = 15 * 60
 EXTERNAL_COMMAND_SETTLE_SECONDS = 90
 POWERSYNC_STOP_CONFIRM_SECONDS = 15 * 60
 EV_QUICK_OBLIGATIONS_KEY = "ev_quick_control_obligations"
 _EV_QUICK_TIMERS_KEY = "_ev_quick_control_timers"
+_LOGGER = logging.getLogger(__name__)
 _EV_QUICK_PARAM_KEYS = frozenset(
     {
         "charger_type",
@@ -443,6 +446,7 @@ def record_manual_stop_hold(
     *,
     seconds: int = MANUAL_STOP_HOLD_SECONDS,
     reason: str | None = None,
+    _schedule_save: bool = True,
 ) -> dict[str, Any]:
     """Temporarily suppress automated EV restarts after a user stop."""
     vid = _ownership_loadpoint_id(hass, config_entry, vehicle_id)
@@ -458,8 +462,28 @@ def record_manual_stop_hold(
         "reason": reason or "manual stop",
     }
     holds[vid] = hold
-    _schedule_runtime_save(hass, config_entry)
+    if _schedule_save:
+        _schedule_runtime_save(hass, config_entry)
     return hold
+
+
+async def async_prepare_manual_stop_hold(
+    hass: Any, config_entry: Any, vehicle_id: Any, *, reason: str | None
+) -> None:
+    """Checkpoint the restart hold before Stop, with a bounded save wait."""
+    record_manual_stop_hold(
+        hass, config_entry, vehicle_id, reason=reason, _schedule_save=False
+    )
+    try:
+        async with asyncio.timeout(MANUAL_STOP_SAVE_TIMEOUT_SECONDS):
+            if await persist_ev_runtime_state(hass, config_entry):
+                return
+    except Exception:
+        _LOGGER.debug("Could not checkpoint EV manual stop hold", exc_info=True)
+    # Stop must remain usable if the storage service stalls or fails. Keep
+    # the in-memory hold active and retry the normal runtime save in background.
+    _LOGGER.warning("Proceeding with EV stop before its restart hold could be saved")
+    _schedule_runtime_save(hass, config_entry)
 
 
 def manual_stop_hold_reason(

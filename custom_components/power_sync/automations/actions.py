@@ -8428,6 +8428,8 @@ async def _execute_single_action(
             context,
         )
     elif action_type == "stop_ev_charging":
+        from .ev_ownership import async_prepare_manual_stop_hold, record_manual_stop_hold
+
         context_vehicle_id = context.get("ev_vehicle_id") if context else None
         if (
             context_vehicle_id
@@ -8435,33 +8437,41 @@ async def _execute_single_action(
             and not params.get("vehicle_vin")
         ):
             params = {**params, "vehicle_vin": context_vehicle_id}
+        reason = params.get("reason", "Manual automation stop")
+        tesla_stop = params.get("charger_type", "tesla") == "tesla"
+        loadpoint_id = (
+            _canonical_manual_stop_loadpoint_id(config_entry, params)
+            if not params.get("skip_ownership") else None
+        )
+        if loadpoint_id is not None and tesla_stop:
+            hold_vehicle_id = await _resolve_manual_stop_hold_vehicle_id(
+                hass, config_entry, params, loadpoint_id
+            )
+            if hold_vehicle_id is not None:
+                await async_prepare_manual_stop_hold(
+                    hass, config_entry, hold_vehicle_id, reason=reason
+                )
         success = await _action_stop_ev_charging(hass, config_entry, params)
-        if success and not params.get("skip_ownership"):
-            from .ev_ownership import record_manual_stop_hold
-
-            loadpoint_id = _canonical_manual_stop_loadpoint_id(config_entry, params)
+        if success and loadpoint_id is not None:
             # Resolve which vehicle to scope the restart-suppression hold to
             # BEFORE clearing tracked session state below — a "_default"
             # loadpoint_id makes clear_tracked_ev_charging_session drop every
             # tracked vehicle's dynamic-session entry (the "_default ↔ VIN
             # overlap" stop-all behavior), which would erase the very
             # "who was actively charging" signal this resolution depends on.
-            hold_vehicle_id = await _resolve_manual_stop_hold_vehicle_id(
-                hass, config_entry, params, loadpoint_id
+            hold_vehicle_id = (
+                await _resolve_manual_stop_hold_vehicle_id(
+                    hass, config_entry, params, loadpoint_id
+                ) if not tesla_stop else None
             )
             await clear_tracked_ev_charging_session(
                 hass,
                 config_entry,
                 loadpoint_id,
-                reason=params.get("reason", "Manual automation stop"),
+                reason=reason,
             )
             if hold_vehicle_id is not None:
-                record_manual_stop_hold(
-                    hass,
-                    config_entry,
-                    hold_vehicle_id,
-                    reason=params.get("reason", "Manual automation stop"),
-                )
+                record_manual_stop_hold(hass, config_entry, hold_vehicle_id, reason=reason)
         return success
     elif action_type == "set_ev_charge_limit":
         return await _action_set_ev_charge_limit(hass, config_entry, params)
