@@ -5277,3 +5277,70 @@ def test_native_powerwall_mode_reports_acknowledgement_separately_from_physical_
     assert attrs['physical_effect']=='unverified' and attrs['command_status']==status
     assert attrs['startup_kick_w']==force['startup_kick_w']
     assert 'being force' not in attrs['description']
+
+
+@pytest.mark.parametrize("reserve_verified", [True, False])
+def test_tesla_optimizer_idle_confirms_floor_before_mode_and_pulses_same_floor(
+    reserve_verified,
+):
+    """Run the Tesla service branch with distinct hold and exit reserves."""
+    handler = _find_function(ast.parse(INIT_PATH.read_text()), "handle_set_self_consumption")
+    tesla_branch = next(
+        node for node in handler.body
+        if isinstance(node, ast.Try)
+        and "_get_tesla_site_configs" in ast.unparse(node)
+    )
+    calls = []
+
+    async def write_reserve(_sites, percent, *, reason, is_current):
+        assert is_current()
+        calls.append(("reserve", percent))
+        return reserve_verified
+
+    async def write_mode(_sites, mode, **_kwargs):
+        calls.append(("mode", mode))
+        return True
+
+    async def pulse(_sites, percent, *, reason, is_current):
+        assert is_current()
+        calls.append(("pulse", percent))
+        return True
+
+    async def exit_reserve():
+        return 20
+
+    noop_logger = SimpleNamespace(info=lambda *_: None, error=lambda *_, **_kw: None)
+    env = {
+        "_get_tesla_site_configs": lambda *_: [("site", "token", "provider")],
+        "hass": SimpleNamespace(data={"power_sync": {"entry": {
+            "optimization_coordinator": SimpleNamespace(resolve_restore_target=exit_reserve),
+        }}}),
+        "entry": SimpleNamespace(entry_id="entry"),
+        "DOMAIN": "power_sync",
+        "_LOGGER": noop_logger,
+        "_command_generation": [1],
+        "_tesla_reserve_generation": [1],
+        "self_consumption_reserve_generation": 1,
+        "_guarded_self_consumption_write": object(),
+        "internal_hold_soc_transition": False,
+        "hold_soc_reserve_target": None,
+        "optimizer_idle_reserve": 27,
+        "_tesla_force_apply_backup_reserve": write_reserve,
+        "_tesla_force_apply_operation_mode": write_mode,
+        "_tesla_force_pulse_backup_reserve": pulse,
+        "_tesla_force_result_all_confirmed": lambda result, _sites: result,
+        "_normalize_tesla_backup_reserve_percent": int,
+        "HomeAssistantError": RuntimeError,
+    }
+    run = ast.parse("async def run(): pass").body[0]
+    run.body = [copy.deepcopy(tesla_branch)]
+    exec(compile(ast.fix_missing_locations(ast.Module([run], type_ignores=[])),
+                 "<Tesla self-consumption service>", "exec"), env)
+
+    if reserve_verified:
+        asyncio.run(env["run"]())
+        assert calls == [("reserve", 27), ("mode", "self_consumption"), ("pulse", 27)]
+    else:
+        with pytest.raises(RuntimeError, match="IDLE reserve did not verify"):
+            asyncio.run(env["run"]())
+        assert calls == [("reserve", 27)]

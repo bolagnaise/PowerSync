@@ -44191,6 +44191,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             manager = hass.data.get(_LICENSE_MANAGER_KEY)
 
         source = _control_call_source(call)
+        optimizer_idle_reserve = None
+        if "_tesla_idle_reserve" in call.data:
+            from .optimization.battery_controller import _TESLA_IDLE_RESERVE_TOKEN
+
+            target = call.data["_tesla_idle_reserve"]
+            if (
+                source != "optimizer"
+                or active_battery_system not in (None, "tesla")
+                or call.data.get("_tesla_idle_reserve_token") is not _TESLA_IDLE_RESERVE_TOKEN
+                or type(target) is not int
+                or not 0 <= target <= 80
+            ):
+                raise HomeAssistantError("Invalid internal Tesla IDLE reserve")
+            optimizer_idle_reserve = target
+
         raw_duration = call.data.get("duration", DEFAULT_DISCHARGE_DURATION)
         try:
             duration = int(raw_duration)
@@ -44222,6 +44237,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 duration,
                 source,
             )
+            if optimizer_idle_reserve is not None:
+                raise HomeAssistantError("Tesla IDLE blocked by Monitoring Mode")
             return
 
         # A Tesla force-charge can leave a delayed charge-kick task waiting to
@@ -44277,7 +44294,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if _sc_guard is not None and _sc_guard.manager.snapshot.mode != "off":
             _sc_snapshot = _sc_guard.manager.snapshot
             if _sc_snapshot.mode == "monitoring":
-                if internal_hold_soc_transition:
+                if internal_hold_soc_transition or optimizer_idle_reserve is not None:
                     raise HomeAssistantError(
                         "Hold SoC self-consumption transition blocked by "
                         "network envelope monitoring"
@@ -44289,7 +44306,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             await _sc_guard.clamp_requested_export_w(0.0)
             _sc_snapshot = _sc_guard.manager.snapshot
             if not _sc_snapshot.active_export_permitted or _sc_snapshot.fault:
-                if internal_hold_soc_transition:
+                if internal_hold_soc_transition or optimizer_idle_reserve is not None:
                     raise HomeAssistantError(
                         "Hold SoC self-consumption transition blocked by "
                         "network envelope"
@@ -44723,7 +44740,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         try:
             site_configs = _get_tesla_site_configs(hass, entry)
             if not site_configs:
-                if internal_hold_soc_transition:
+                if internal_hold_soc_transition or optimizer_idle_reserve is not None:
                     raise HomeAssistantError(
                         "Tesla site configuration unavailable for Hold SoC"
                     )
@@ -44747,6 +44764,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 )
                 return result
 
+            if optimizer_idle_reserve is not None:
+                # Verify the hold floor before activating discharge-capable mode.
+                hold_result = await _tesla_force_apply_backup_reserve(
+                    site_configs,
+                    optimizer_idle_reserve,
+                    reason="optimizer IDLE hold",
+                    is_current=_self_consumption_still_current,
+                )
+                if not (
+                    _tesla_force_result_all_confirmed(hold_result, site_configs)
+                    and _self_consumption_still_current()
+                ):
+                    raise HomeAssistantError("Tesla optimizer IDLE reserve did not verify")
+
             mode_result = await _write_tesla_self_consumption()
             mode_ok = _tesla_force_result_all_confirmed(
                 mode_result,
@@ -44760,6 +44791,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     hass.data.setdefault(DOMAIN, {})
                     .setdefault(entry.entry_id, {})
                 )
+                if optimizer_idle_reserve is not None:
+                    target_reserve = optimizer_idle_reserve
+                    target_source = "optimizer IDLE hold"
                 if target_reserve is None:
                     target_source = "configured reserve fallback"
                     opt_coord = self_entry_data.get("optimization_coordinator")
@@ -44846,6 +44880,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             raise
         except Exception as e:
             _LOGGER.error(f"Error setting self-consumption mode: {e}", exc_info=True)
+            if optimizer_idle_reserve is not None:
+                raise
 
     async def handle_set_autonomous(call: ServiceCall) -> None:
         """Set battery to autonomous (TOU) mode.

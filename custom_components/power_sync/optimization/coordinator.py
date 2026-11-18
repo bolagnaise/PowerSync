@@ -1507,6 +1507,18 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._idle_hold_reserve = non_tesla_hold_pct
             return True
 
+        if self.battery_system == "tesla" and hasattr(battery, "set_tesla_idle_hold"):
+            # Keep the existing hold floor if telemetry has slipped within the slot.
+            # The pre-IDLE reserve remains the separate exit/cleanup target.
+            reserve = min(max(soc_pct, getattr(self, "_idle_hold_reserve", None) or 0), 80)
+            if await fenced_call(
+                self, lambda: battery.set_tesla_idle_hold(reserve), "set_tesla_idle_hold"
+            ) is not True:
+                return False
+            self._idle_hold_reserve = reserve
+            _LOGGER.info("Optimizer: IDLE — holding with Tesla backup reserve=%d%%", reserve)
+            return True
+
         if hasattr(battery, "set_backup_reserve"):
             if hasattr(battery, "set_self_consumption_mode"):
                 reserve = min(max(soc_pct, 0), 80)

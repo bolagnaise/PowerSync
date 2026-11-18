@@ -14756,3 +14756,32 @@ def test_foxess_ev_preserve_restore_failure_or_supersession_keeps_state(opt_modu
         assert coordinator._last_executed_action == "no_discharge"
 
     asyncio.run(run())
+
+
+def test_tesla_idle_refresh_never_pulses_the_restore_baseline(opt_module):
+    class ReservePulseBattery(_FakeBattery):
+        async def set_self_consumption_mode(self, *, idle_reserve=None):
+            self.backup_reserve_calls.extend(
+                (21, 20) if idle_reserve is None else (idle_reserve + 1, idle_reserve)
+            )
+            return True
+
+        async def set_tesla_idle_hold(self, reserve):
+            self.backup_reserve_calls.append(reserve)
+            return await self.set_self_consumption_mode(idle_reserve=reserve)
+
+    battery = ReservePulseBattery(backup_reserve=27)
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.265)
+    coordinator._last_executed_action = "idle"
+    coordinator._pre_idle_backup_reserve = 20
+    coordinator._idle_hold_reserve = 27
+
+    assert asyncio.run(coordinator._set_idle_hold_mode(battery))
+    assert battery.backup_reserve_calls == [27, 28, 27]
+    assert coordinator._idle_hold_reserve == 27
+    assert coordinator._pre_idle_backup_reserve == 20
+
+    assert asyncio.run(coordinator._restore_pre_idle_backup_reserve(battery))
+    assert battery.backup_reserve_calls == [27, 28, 27, 20]
+    assert coordinator._idle_hold_reserve is None
+    assert coordinator._pre_idle_backup_reserve is None
