@@ -64,7 +64,7 @@ Blocked reconciliation saves its diagnostic while retaining the safety record, i
 
 ## Compatibility
 
-The runtime contract was checked against SolarEdge Modbus Multi `3.3.9`. The adapter requires matching registry identities, a timestamp coordinator, and a replacement storage dictionary after a successful poll. It rechecks runtime and identity bindings after the poll. Registry changes cannot redirect a retained control journal to another inverter. Other versions must satisfy that same contract.
+The adapter supports the legacy runtime mapping used by SolarEdge Modbus Multi `3.3.9` and the runtime on the loaded config entry in `4.0.15`. Both require matching registry identities and a successful newer poll from the bound coordinator. The legacy storage snapshot must be replaced, and a v4 inverter must report an available storage component. The adapter rechecks the bindings after the poll so registry or runtime changes cannot redirect a retained control journal to another inverter.
 
 This is a register-based policy, not a model-specific exception. It applies to supported SolarEdge storage hardware that exposes the required register block. Some SolarEdge inverters do not expose battery controls over Modbus, even with an attached battery. Firmware and installation settings also affect availability.
 
