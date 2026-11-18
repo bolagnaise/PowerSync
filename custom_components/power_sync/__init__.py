@@ -35530,7 +35530,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         is_allowed: Callable[[], bool] | None = None,
     ) -> dict[str, list[str]]:
         """Apply Tesla grid charging locally first and require real readback."""
-        from .powerwall_local.dispatch import dispatch_powerwall_setting
+        from .powerwall_local.dispatch import (
+            confirm_paired_gateway_grid_charging_disabled,
+            dispatch_powerwall_setting,
+        )
 
         result: dict[str, list[str]] = {
             "confirmed_sites": [],
@@ -35577,6 +35580,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                  "retry_after": 45.0, "operation_deadline": retry_deadline}
                 if retry_deadline is not None else {}
             )
+            if reason == "force discharge" and not enabled:
+                async def confirm_gateway_disabled() -> bool:
+                    return await confirm_paired_gateway_grid_charging_disabled(hass, entry, site_id)
+
+                retry_options["confirm_gateway_disabled"] = confirm_gateway_disabled
             outcome = await async_set_tesla_grid_charging_confirmed(
                 session,
                 api_base,

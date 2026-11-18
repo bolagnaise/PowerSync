@@ -19,7 +19,14 @@ from typing import Any, Awaitable, Callable
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
-from ..const import CONF_POWERWALL_LOCAL_IP, CONF_POWERWALL_LOCAL_PAIRED, DOMAIN
+from ..const import (
+    CONF_POWERWALL_LOCAL_DIN,
+    CONF_POWERWALL_LOCAL_ENERGY_SITE_ID,
+    CONF_POWERWALL_LOCAL_IP,
+    CONF_POWERWALL_LOCAL_PAIRED,
+    CONF_TESLA_ENERGY_SITE_ID,
+    DOMAIN,
+)
 from ..powerwall_host import normalize_powerwall_gateway_host
 from .exceptions import (
     PowerwallAuthError,
@@ -414,6 +421,32 @@ def get_local_transport(
     if client_local_enabled is False:
         return None
     return transport
+
+
+async def confirm_paired_gateway_grid_charging_disabled(hass, entry, site_id: str) -> bool:
+    """Read an explicit restrictive setting from the gateway bound to this site."""
+    config = entry.data
+    din = config.get(CONF_POWERWALL_LOCAL_DIN)
+    if (
+        not site_id
+        or not din
+        or str(config.get(CONF_POWERWALL_LOCAL_ENERGY_SITE_ID) or "") != site_id
+        or str(config.get(CONF_TESLA_ENERGY_SITE_ID) or "") != site_id
+    ):
+        return False
+    transport = get_local_transport(hass, entry)
+    if transport is None or transport.din != din:
+        return False
+    try:
+        reading = native_grid_charging_reading(await transport.read_config(din))
+    except _LOCAL_FALLBACK_EXC:
+        return False
+    return (
+        entry.data is config
+        and get_local_transport(hass, entry) is transport
+        and reading.source == "explicit"
+        and reading.disallowed is True
+    )
 
 
 async def dispatch_powerwall_write(

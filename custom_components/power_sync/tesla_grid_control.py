@@ -259,9 +259,10 @@ async def async_set_tesla_grid_charging_confirmed(
     monotonic: Callable[[], float] = time.monotonic,
     is_current: Callable[[], bool] | None = None,
     require_boolean_readback: bool = False,
+    confirm_gateway_disabled: Callable[[], Awaitable[bool]] | None = None,
     entry_id: str | None = None,
 ) -> TeslaGridWriteOutcome:
-    """Write Tesla grid charging and confirm it through direct site_info reads.
+    """Write Tesla grid charging and confirm it through fresh readback.
 
     Transport failures may retry the POST. By default an accepted POST is
     only polled. An opt-in retry permits one resend after a fresh explicit
@@ -462,6 +463,40 @@ async def async_set_tesla_grid_charging_confirmed(
                             TeslaGridWriteStatus.APPLIED,
                             last_status,
                         )
+                    if (
+                        not enabled
+                        and confirm_gateway_disabled is not None
+                        and offset >= 20.0
+                        and not invalid_site_info_read
+                        and valid_site_info_reads >= 2
+                        and last_valid_read_omitted_field
+                        and field_absent_reads == valid_site_info_reads
+                    ):
+                        # Give Fleet time to publish ordinary delayed readback.
+                        # An omission can trigger a single independent read,
+                        # but only the gateway's explicit setting can confirm.
+                        remaining = deadline_at - monotonic()
+                        if remaining <= 0:
+                            break
+                        read_gateway = confirm_gateway_disabled
+                        confirm_gateway_disabled = None
+                        try:
+                            async with asyncio.timeout(min(2.0, remaining)):
+                                gateway_confirmed = await read_gateway()
+                        except asyncio.TimeoutError:
+                            gateway_confirmed = False
+                        if is_current is not None and not is_current():
+                            return TeslaGridWriteOutcome(
+                                TeslaGridWriteStatus.ACCEPTED_UNCONFIRMED,
+                                last_status, "superseded",
+                            )
+                        if gateway_confirmed is True and monotonic() < deadline_at:
+                            _LOGGER.info(
+                                "Tesla grid charging disabled confirmed by the paired "
+                                "gateway for site %s after %.1fs",
+                                site_id, monotonic() - accepted_at,
+                            )
+                            return TeslaGridWriteOutcome(TeslaGridWriteStatus.APPLIED, last_status)
                     if (
                         retry_after is not None
                         and not resent

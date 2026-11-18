@@ -54,8 +54,11 @@ sys.modules["power_sync.powerwall_local"] = _pwl
 # transport.py, however, imports `aiohttp` and `cryptography` and large protobufs.
 # Stub the parts dispatch.py needs (the exception classes + transport class).
 _const_mod = types.ModuleType("power_sync.const")
+_const_mod.CONF_POWERWALL_LOCAL_DIN = "powerwall_local_din"
+_const_mod.CONF_POWERWALL_LOCAL_ENERGY_SITE_ID = "powerwall_local_energy_site_id"
 _const_mod.CONF_POWERWALL_LOCAL_IP = "powerwall_local_ip"
 _const_mod.CONF_POWERWALL_LOCAL_PAIRED = "powerwall_local_paired"
+_const_mod.CONF_TESLA_ENERGY_SITE_ID = "tesla_energy_site_id"
 _const_mod.DOMAIN = "power_sync"
 sys.modules["power_sync.const"] = _const_mod
 
