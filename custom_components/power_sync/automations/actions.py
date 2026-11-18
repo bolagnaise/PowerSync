@@ -10097,6 +10097,7 @@ async def _action_start_ev_charging(
     )
     route = await _tesla_transport_route(hass, config_entry, params, "start")
     if not request_authority():
+        _LOGGER.debug("Tesla Start withheld: authority_lost_before_read")
         return False
     recovering_route = route and route.get("kind") in {"blocked", "ha"}
     if recovering_route or params.get("_tesla_plan_recovery_attempt"):
@@ -10106,6 +10107,7 @@ async def _action_start_ev_charging(
             hass, config_entry, vehicle_vin, params)
         observed = _tesla_observed_command_state(observation)
         if not request_authority():
+            _LOGGER.debug("Tesla Start withheld: authority_lost_after_read")
             return None
         if observed == "charging":
             params["_tesla_start_observation"] = observation
@@ -10115,12 +10117,22 @@ async def _action_start_ev_charging(
             observation, observed,
         )
         if not recovery_ok:
+            _LOGGER.debug("Tesla Start withheld: recovery_step_failed")
             params["_tesla_transport_recovery_pending"] = True
             return None
         if observed == "charging":
             params["_tesla_start_observation"] = observation
             return True
-        if (route and route.get("kind") == "blocked") or observed != "stopped":
+        route_blocked = bool(route and route.get("kind") == "blocked")
+        if route_blocked or observed != "stopped":
+            reason = "route_blocked"
+            if not route_blocked:
+                reason = "read_unavailable" if observation is None else "read_unconfirmed"
+            _LOGGER.debug(
+                "Tesla Start withheld: %s (source_charge_timestamp=%s)",
+                reason,
+                getattr(observation, "source_charge_timestamp", None),
+            )
             params["_tesla_transport_recovery_pending"] = True
             return None
     if route and route.get("kind") == "ha" and ev_provider == EV_PROVIDER_BOTH:
