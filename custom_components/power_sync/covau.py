@@ -34,31 +34,40 @@ COVAU_STATE_TIMEZONES = {
 }
 
 SUPPORTED_SOLARMAX_PLANS: dict[str, dict[str, str]] = {
-    "COV1117610MRE2@EME": {
+    "COV1117610MRE3@EME": {
         "distributor": "Ausgrid",
         "state": "NSW",
         "display_name": "SolarMax NSW Ausgrid Residential TOU",
     },
-    "COV1117611MRE2@EME": {
+    "COV1117611MRE3@EME": {
         "distributor": "Endeavour Energy",
         "state": "NSW",
         "display_name": "SolarMax NSW Endeavour Residential TOU",
     },
-    "COV1117612MRE2@EME": {
+    "COV1117612MRE3@EME": {
         "distributor": "Essential Energy",
         "state": "NSW",
         "display_name": "SolarMax NSW Essential Residential TOU",
     },
-    "COV1117614MRE2@EME": {
+    "COV1117614MRE3@EME": {
         "distributor": "Energex",
         "state": "QLD",
         "display_name": "SolarMax QLD Energex Residential TOU",
     },
-    "COV1117616MRE2@EME": {
+    "COV1117616MRE3@EME": {
         "distributor": "SA Power Networks",
         "state": "SA",
         "display_name": "SolarMax SA Residential TOU",
     },
+}
+
+# Retired IDs still identify the stored, immutable snapshots of existing sites.
+RETIRED_SOLARMAX_PLAN_IDS = {
+    "COV1117610MRE2@EME": "COV1117610MRE3@EME",
+    "COV1117611MRE2@EME": "COV1117611MRE3@EME",
+    "COV1117612MRE2@EME": "COV1117612MRE3@EME",
+    "COV1117614MRE2@EME": "COV1117614MRE3@EME",
+    "COV1117616MRE2@EME": "COV1117616MRE3@EME",
 }
 
 
@@ -204,7 +213,10 @@ def normalize_covau_plan(
     """Normalize an AER/CDR snapshot using the customer's local tariff clock."""
     data = raw_response.get("data") or {}
     plan_id = str(data.get("planId") or "")
-    if plan_id != expected_plan_id or plan_id not in SUPPORTED_SOLARMAX_PLANS:
+    metadata = SUPPORTED_SOLARMAX_PLANS.get(
+        RETIRED_SOLARMAX_PLAN_IDS.get(plan_id, plan_id)
+    )
+    if plan_id != expected_plan_id or metadata is None:
         raise ValueError("CDR response did not match the selected SolarMax plan")
     contract = data.get("electricityContract") or {}
     source_timezone_token = str(contract.get("timeZone") or "")
@@ -260,7 +272,6 @@ def normalize_covau_plan(
     if premium_total < export_base:
         raise ValueError("SolarMax premium export price is below its base rate")
 
-    metadata = SUPPORTED_SOLARMAX_PLANS[plan_id]
     effective_timezone = _local_timezone_token(
         timezone_token,
         metadata["state"],

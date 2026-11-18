@@ -422,6 +422,31 @@ def test_tariff_spike_keeps_all_schedule_rates_in_minor_units():
     assert '<span class="i">-3.5</span><span class="e">-1.2</span>' in html
 
 
+def test_tariff_highlights_home_assistant_clock_when_browser_is_elsewhere():
+    out = _run_board(r"""
+  class FixedDate extends Date {
+    constructor(...args) { super(...(args.length ? args : ['2026-11-19T01:00:00Z'])); }
+    static now() { return new FixedDate().getTime(); }
+  }
+  context.Date = FixedDate;
+  const card = new T.PsTariffCard();
+  card._hass = {config: {currency: 'AUD', time_zone: 'Australia/Adelaide'},
+    locale: {language: 'en-GB', time_format: '24'}, states: {
+      tariff: {state: 'free', attributes: {current_time: '11:30', schedule: [
+        {time: '00:00', buy: 0.352, sell: 0.05},
+        {time: '11:00', buy: 0, sell: 0.05},
+        {time: '14:00', buy: 0.352, sell: 0.05},
+      ]}},
+    },
+  };
+  card._config = {entities: {tariff: 'tariff'}};
+  card._render();
+  console.log(JSON.stringify({html: card.innerHTML}));
+""")
+    assert "Free, now" in out["html"]
+    assert "11:00–14:00, ends in 2 h 30 min" in out["html"]
+
+
 def test_tariff_shows_configured_covau_windows_when_standard_rates_apply():
     out = _run_board(r"""
   const card = new T.PsTariffCard();

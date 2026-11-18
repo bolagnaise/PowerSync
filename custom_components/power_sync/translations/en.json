@@ -1294,7 +1294,7 @@
       "goodwe_entity_unavailable": "PowerSync could not validate the GoodWe PV power, grid export limit, and grid export limit switch entities for that prefix.",
       "invalid_globird_auth": "Email or password is incorrect. Check your GloBird portal login credentials.",
       "captcha_required": "GloBird requested captcha verification. Sign in through the GloBird portal in a browser, then try again.",
-      "covau_unsupported_plan": "Select one of the supported SolarMax plan IDs or keep the currently cached manual plan.",
+      "covau_unsupported_plan": "Select a current SolarMax offer, or turn off public refresh to keep the saved plan.",
       "covau_distributor_mismatch": "The distributor must match the selected AER SolarMax plan.",
       "covau_energy_meter_invalid": "Select a monotonic total_increasing energy sensor using Wh, kWh, or MWh.",
       "confirm_required": "Confirm the history relink before applying changes.",

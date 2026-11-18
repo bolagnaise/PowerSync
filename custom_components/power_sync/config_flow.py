@@ -688,6 +688,7 @@ from .battery_backend.discovery import (
     infer_entity_prefix,
 )
 from .covau import (
+    RETIRED_SOLARMAX_PLAN_IDS,
     SUPPORTED_SOLARMAX_PLANS,
     async_fetch_covau_plan,
     covau_plan_candidates,
@@ -2455,23 +2456,23 @@ class PowerSyncConfigFlow(AmberSetupMixin, config_entries.ConfigFlow, domain=DOM
         by_id = {item["plan_id"]: item for item in candidates}
         if user_input is not None:
             plan_id = str(user_input.get(CONF_COVAU_PLAN_ID) or "")
-            if plan_id == "manual":
-                self._covau_import_entity = user_input.get(CONF_COVAU_IMPORT_ENERGY_ENTITY) or ""
-                self._covau_export_entity = user_input.get(CONF_COVAU_EXPORT_ENERGY_ENTITY) or ""
-                return await self.async_step_covau_manual_tariff()
             metadata = by_id.get(plan_id)
             distributor = str(user_input.get(CONF_COVAU_DISTRIBUTOR) or "")
             import_entity = user_input.get(CONF_COVAU_IMPORT_ENERGY_ENTITY) or ""
             export_entity = user_input.get(CONF_COVAU_EXPORT_ENERGY_ENTITY) or ""
-            if metadata is None:
-                errors[CONF_COVAU_PLAN_ID] = "covau_unsupported_plan"
-            elif distributor != metadata["distributor"]:
-                errors[CONF_COVAU_DISTRIBUTOR] = "covau_distributor_mismatch"
-            elif import_entity and not self._covau_energy_entity_valid(import_entity):
+            if not self._covau_energy_entity_valid(import_entity):
                 errors[CONF_COVAU_IMPORT_ENERGY_ENTITY] = "covau_energy_meter_invalid"
-            elif export_entity and not self._covau_energy_entity_valid(export_entity):
+            if not self._covau_energy_entity_valid(export_entity):
                 errors[CONF_COVAU_EXPORT_ENERGY_ENTITY] = "covau_energy_meter_invalid"
-            else:
+            if not errors and plan_id == "manual":
+                self._covau_import_entity = import_entity
+                self._covau_export_entity = export_entity
+                return await self.async_step_covau_manual_tariff()
+            if plan_id != "manual" and metadata is None:
+                errors[CONF_COVAU_PLAN_ID] = "covau_unsupported_plan"
+            elif metadata is not None and distributor != metadata["distributor"]:
+                errors[CONF_COVAU_DISTRIBUTOR] = "covau_distributor_mismatch"
+            if not errors:
                 try:
                     raw = await async_fetch_covau_plan(self.hass, plan_id)
                     snapshot = normalize_covau_plan(
@@ -10346,11 +10347,20 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
                 and isinstance(current_snapshot, dict)
                 and bool(current_snapshot.get("manual"))
             )
-            if metadata is None and not keeping_cached_manual:
+            keeping_cached_retired = (
+                plan_id == current_plan_id
+                and plan_id in RETIRED_SOLARMAX_PLAN_IDS
+                and isinstance(current_snapshot, dict)
+                and current_snapshot.get("plan_id") == plan_id
+            )
+            keeping_cached_snapshot = keeping_cached_manual or keeping_cached_retired
+            if keeping_cached_retired and refresh_public_plan:
+                errors[CONF_COVAU_PLAN_ID] = "covau_unsupported_plan"
+            elif metadata is None and not keeping_cached_snapshot:
                 errors[CONF_COVAU_PLAN_ID] = "covau_unsupported_plan"
             elif metadata is not None and distributor != metadata["distributor"]:
                 errors[CONF_COVAU_DISTRIBUTOR] = "covau_distributor_mismatch"
-            elif keeping_cached_manual and distributor != current_distributor:
+            elif keeping_cached_snapshot and distributor != current_distributor:
                 errors[CONF_COVAU_DISTRIBUTOR] = "covau_distributor_mismatch"
             elif import_entity and not self._covau_options_energy_entity_valid(import_entity):
                 errors[CONF_COVAU_IMPORT_ENERGY_ENTITY] = "covau_energy_meter_invalid"
@@ -10360,7 +10370,7 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
                 snapshot_dict = current_snapshot
                 raw = current_raw
                 if (
-                    not keeping_cached_manual
+                    not keeping_cached_snapshot
                     and (
                         refresh_public_plan
                         or plan_id != current_plan_id
