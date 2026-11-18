@@ -2309,6 +2309,7 @@ def _get_ev_vehicles_status(hass, entry, *, include_control_evidence=False) -> l
         is_current_ev_power_observation,
         is_ev_power_contradicted_by_state,
     )
+    from .tesla_ble import get_tesla_ble_connected_charge_sample_time
     from .tesla_ev_recovery import ble_quarantined
 
     # Only explicit settled states prove stopped. Plug/zero-power semantics
@@ -3128,21 +3129,41 @@ def _get_ev_vehicles_status(hass, entry, *, include_control_evidence=False) -> l
         if current_amps is not None:
             ble_observation["current_amps"] = current_amps
         if ble_quarantined(hass, prefix):
-            # Retain the car/plug/SOC for the home picture, but do not present
-            # retained measurements as physical charging after containment.
-            ble_observation.update({
-                "ev_power_kw": 0.0,
-                "power_available": False,
-                "is_charging": False,
-                "_power_activity_unknown": True,
-                "_observed_at": None,
-                "_charging_observed_at": None,
-                "_connected_observed_at": None,
-                "_soc_observed_at": None,
-                "telemetry_state": "offline",
-                "_telemetry_observed_at": None,
-                "transport_quarantined": True,
-            })
+            # A held command blocks control and its evidence. Current positive
+            # draw can still be accounted for when the connected bridge reports
+            # paired charging and power samples for the same observation.
+            meter_at = None
+            if (
+                not include_control_evidence and power_available
+                and ble_observation["ev_power_kw"] > 0.05
+                and ble_observation["is_connected"] and ble_status.state == "on"
+                and getattr(charge_state, "state", "").strip().lower() == "charging"
+            ):
+                meter_at = get_tesla_ble_connected_charge_sample_time(
+                    hass, prefix, charge_state, power_state,
+                )
+            if is_current_ev_power_observation(meter_at, at=telemetry_now):
+                ble_observation.update({
+                    "_observed_at": meter_at,
+                    "_charging_observed_at": meter_at,
+                    "_connected_observed_at": meter_at,
+                    "telemetry_state": "live",
+                    "_telemetry_observed_at": meter_at,
+                })
+            else:
+                ble_observation.update({
+                    "ev_power_kw": 0.0,
+                    "power_available": False,
+                    "is_charging": False,
+                    "_power_activity_unknown": True,
+                    "_observed_at": None,
+                    "_charging_observed_at": None,
+                    "_connected_observed_at": None,
+                    "telemetry_state": "offline",
+                    "_telemetry_observed_at": None,
+                })
+            ble_observation["transport_quarantined"] = True
+            ble_observation["_soc_observed_at"] = None
             ble_observation.pop("current_amps", None)
             if include_control_evidence:
                 ble_observation["_boost_charging_state_evidence"] = {
@@ -16426,8 +16447,8 @@ class EVVehiclesView(HomeAssistantView):
                 quarantine_log.add(prefix)
                 _LOGGER.warning(
                     "EV BLE: bridge %s is held by retained Tesla command recovery history; "
-                    "its charging data is ignored and no charge commands are sent until "
-                    "recovered. Run power_sync.get_ble_recovery_status for the required step",
+                    "charging commands are blocked until recovery. "
+                    "Run power_sync.get_ble_recovery_status for the required step",
                     prefix,
                 )
             charging_state = "Unknown"

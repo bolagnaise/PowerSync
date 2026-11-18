@@ -212,6 +212,11 @@ needed, the exact PowerSync `entry_id`. It reports:
 This action reads existing HA data only. It does not refresh telemetry, restart
 bridges, change settings, clear journals or unlock control.
 
+During a recovery hold, the Energy flow card can still show charging power when
+the connected bridge provides fresh, matching native charging and power samples.
+PowerSync uses that measured draw to separate EV and household load. The recovery
+hold still blocks new charging commands and requires the normal recovery procedure.
+
 ### Recovering uncertain charging commands
 
 The companion firmware's protocol-2 whole-inventory transaction can now reconcile

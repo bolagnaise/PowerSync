@@ -3387,7 +3387,7 @@ async def _wait_for_ble_command_readback(
         if not await scope_current():
             return False
         if _TESLA_BLE_COMMAND_CONFIRMATION_SECONDS > 0 and loop.time() >= deadline:
-            return False
+            break
         if charge_binding is not _TESLA_BLE_BINDING_UNSET:
             if (
                 charge_binding is None
@@ -3462,8 +3462,7 @@ async def _wait_for_ble_command_readback(
                     pass
         remaining = deadline - loop.time()
         if remaining <= 0:
-            _LOGGER.warning("Tesla BLE command not confirmed by fresh vehicle readback from %s", entity_ids)
-            return False
+            break
         if (refresh_binding is not None and refresh_index < len(_TESLA_BLE_READBACK_REFRESH_AT)
                 and loop.time() - started >= _TESLA_BLE_READBACK_REFRESH_AT[refresh_index]):
             refresh_index += 1
@@ -3479,13 +3478,18 @@ async def _wait_for_ble_command_readback(
                         "entity_id": refresh_binding[0],
                     }, blocking=True)
             except TimeoutError:
-                return False
+                break
             except Exception as error:
                 _LOGGER.debug("Tesla BLE readback refresh unavailable: %s", error)
-            if not await scope_current() or loop.time() >= deadline:
+            if not await scope_current():
                 return False
+            if loop.time() >= deadline:
+                break
             continue
         await asyncio.sleep(min(1, remaining))
+
+    _LOGGER.warning("Tesla BLE command not confirmed by fresh vehicle readback from %s", entity_ids)
+    return False
 
 
 def _ble_block_report_due(

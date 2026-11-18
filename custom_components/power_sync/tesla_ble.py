@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import math
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .const import (
@@ -20,6 +20,7 @@ from .const import (
     TESLA_BLE_SENSOR_CHARGER_POWER,
     TESLA_BLE_SENSOR_CHARGING,
     TESLA_BLE_SENSOR_CHARGING_STATE,
+    TESLA_BLE_SWITCH_CHARGER,
 )
 
 _COMPANION_SUFFIXES = {"_sample": "sample", "_received": "received"}
@@ -221,6 +222,51 @@ def get_tesla_ble_status_state(hass: Any, prefix: str) -> Any | None:
     if node is not None and str(node.state).lower() != "on":
         return node
     return connection if connection is not None else node
+
+
+def get_tesla_ble_connected_charge_sample_time(
+    hass: Any, prefix: str, charge_state: Any, power_state: Any,
+) -> datetime | None:
+    """Find contemporaneous native samples from the currently connected bridge."""
+    if charge_state is None or power_state is None:
+        return None
+    connection = hass.states.get(TESLA_BLE_BINARY_CONNECTION_STATUS.format(prefix=prefix))
+    if connection is None or connection.state != "on":
+        return None
+    connected_at = getattr(connection, "last_changed", None) or getattr(connection, "last_updated", None)
+    if not isinstance(connected_at, datetime):
+        return None
+    if connected_at.tzinfo is None:
+        connected_at = connected_at.replace(tzinfo=timezone.utc)
+    registry = _entity_registry(hass)
+    if registry is None:
+        return None
+
+    def binding(entity_id: str) -> tuple[str, str] | None:
+        entry = registry.async_get(entity_id)
+        if entry is None or entry.platform != "esphome" or entry.disabled_by is not None:
+            return None
+        if not entry.config_entry_id or not entry.device_id:
+            return None
+        return entry.config_entry_id, entry.device_id
+
+    bridge = binding(TESLA_BLE_SWITCH_CHARGER.format(prefix=prefix))
+    if bridge is None or binding(connection.entity_id) != bridge:
+        return None
+    stamps = []
+    for state in (charge_state, power_state):
+        sample = get_tesla_ble_companion_state(hass, state.entity_id, "_sample")
+        if sample is None or binding(state.entity_id) != bridge or binding(sample.entity_id) != bridge:
+            return None
+        stamp = get_tesla_ble_observed_at(hass, state)
+        if stamp is None or stamp <= connected_at:
+            return None
+        stamps.append(stamp)
+    state_at, power_at = stamps
+    # Fields from one reply are timestamped separately with second precision.
+    if abs(state_at - power_at) > timedelta(seconds=1):
+        return None
+    return min(stamps)
 
 
 def get_tesla_ble_battery_state(hass: Any, prefix: str) -> Any | None:

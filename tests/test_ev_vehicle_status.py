@@ -1085,6 +1085,75 @@ def test_quarantined_ble_cannot_renew_telemetry_from_soc_or_connection(monkeypat
     assert row["current_power_kw"] is None
 
 
+@pytest.mark.parametrize("evidence", [
+    "fresh", "stale", "mismatched", "wrong_bridge", "reconnected",
+    "no_packet", "disconnected", "stopped", "sample_skew",
+])
+def test_held_ble_counts_only_current_paired_charging_power(monkeypatch, evidence):
+    """Fresh native charging samples can describe load while Start stays held."""
+    import json
+    from unittest.mock import AsyncMock
+
+    power_sync = _power_sync_module()
+    monkeypatch.setattr(power_sync, "_read_sigenergy_charger_state_for_entry", AsyncMock(return_value=None))
+    from power_sync.automations.loadpoint_status import build_loadpoint_status
+    from power_sync.ev_load import HomeLoadBasis, aggregate_ev_load, normalize_home_load
+
+    recovery = importlib.import_module("power_sync.tesla_ev_recovery")
+    monkeypatch.setattr(recovery, "ble_quarantined", lambda *_args: True)
+    now = datetime.now(timezone.utc)
+    original = now - timedelta(minutes=12)
+    sample_at = now - timedelta(seconds=12)
+    sample_at = original if evidence == "stale" else sample_at
+    power_at = sample_at - timedelta(seconds=30) if evidence == "sample_skew" else sample_at
+    state = "Stopped" if evidence == "stopped" else "Charging"
+    power = 0 if evidence == "stopped" else 3
+    states = [
+        _State("switch.car_charger", "on", last_updated=original),
+        _State("binary_sensor.car_ble_status", "off" if evidence == "disconnected" else "on",
+               last_updated=now if evidence == "reconnected" else original),
+        _State("sensor.car_charging_state", state, last_updated=original),
+        _State("sensor.car_charge_power", str(power), {"unit_of_measurement": "kW"},
+               last_updated=original),
+        _State("sensor.car_charging_state_sample", json.dumps({
+            "v": 1, "t": sample_at.isoformat(), "x": state,
+        }), last_updated=now),
+    ]
+    if evidence != "no_packet":
+        states.append(_State("sensor.car_charge_power_sample", json.dumps({
+            "v": 1, "t": power_at.isoformat(), "x": 2 if evidence == "mismatched" else power,
+        }), last_updated=now))
+    registry = {
+        state.entity_id: SimpleNamespace(
+            entity_id=state.entity_id, platform="esphome", config_entry_id="bridge-entry",
+            device_id="other-car" if evidence == "wrong_bridge" and state.entity_id.endswith("power_sample") else "car",
+            disabled_by=None,
+        )
+        for state in states
+    }
+    hass = _Hass(states, registry_entities=registry)
+    hass.entity_registry.async_get = registry.get
+    entry = SimpleNamespace(entry_id="entry-1", data={}, options={
+        "ev_provider": "tesla_ble", "tesla_ble_entity_prefix": "car",
+    })
+
+    vehicle = power_sync._get_ev_vehicles_status(hass, entry)[0]
+    rows = build_loadpoint_status({}, [vehicle])
+    observations = asyncio.run(power_sync._get_ev_load_observations(hass, entry))
+    load = normalize_home_load(4.9, HomeLoadBasis.INCLUDES_EV, aggregate_ev_load(observations))
+    if evidence == "fresh":
+        assert rows[0]["current_power_kw"] == 3.0
+        assert rows[0]["actual_charging"] is True
+        assert load.non_ev_home_load_kw == pytest.approx(1.9)
+    else:
+        assert all(row["current_power_kw"] is None for row in rows)
+        assert load.non_ev_home_load_kw is None
+    control = power_sync._get_ev_vehicles_status(hass, entry, include_control_evidence=True)[0]
+    assert control["_boost_charging_state_evidence"]["known"] is False
+    assert control["power_available"] is False
+    assert recovery.ble_quarantined(hass, "car") is True
+
+
 @pytest.mark.parametrize("reverse", [False, True])
 def test_native_battery_candidates_choose_newest_soc_report(reverse):
     power_sync = _power_sync_module()

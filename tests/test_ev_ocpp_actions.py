@@ -18092,7 +18092,7 @@ def test_ble_wake_rejects_charge_evidence_binding_change(monkeypatch, mutation):
 
 
 @pytest.mark.parametrize("outcome", ["delayed", "timeout", "preempt", "rebind", "other_car"])
-def test_ble_confirmation_acquires_bounded_exact_bridge_readback(monkeypatch, outcome):
+def test_ble_confirmation_acquires_bounded_exact_bridge_readback(monkeypatch, caplog, outcome):
     """A late sample can confirm once; reads cannot renew authority or write."""
     clock = [0.0]
     since = datetime.now(timezone.utc) - timedelta(seconds=1)
@@ -18135,6 +18135,9 @@ def test_ble_confirmation_acquires_bounded_exact_bridge_readback(monkeypatch, ou
     assert all(call == ("button", "press", {"entity_id": "button.car_force_data_update"})
                for call in hass.services.calls)
     assert clock[0] <= 35
+    assert ("Tesla BLE command not confirmed by fresh vehicle readback" in caplog.text) is (
+        outcome in {"timeout", "other_car"}
+    )
 
 
 @pytest.mark.parametrize("handover_seconds,expected", [(0, True), (34, False)])
