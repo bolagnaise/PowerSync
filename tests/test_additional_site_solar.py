@@ -662,7 +662,12 @@ def test_failed_checkpoint_releases_old_runtime_fence():
 
 
 def test_dual_sungrow_preserves_unknown_derived_load_from_composed_primary():
-    ns = {"_LOGGER":Mock(),"dt_util":NS(utcnow=lambda:NOW)}
+    telemetry = load("additional_solar_battery_telemetry", "custom_components/power_sync/battery_telemetry.py")
+    ns = {
+        "_LOGGER": Mock(),
+        "dt_util": NS(utcnow=lambda: NOW),
+        "oldest_paired_report": telemetry.oldest_paired_report,
+    }
     fn = extracted_method("custom_components/power_sync/coordinator.py", "DualSungrowCoordinator", "_async_update_data",ns)
     obj = NS(_coord1=NS(data={"solar_power":None,"solar_power_valid":False,"load_power":None}),
              _coord2=NS(data={"solar_power":1.,"load_power":1.}),
@@ -670,3 +675,4 @@ def test_dual_sungrow_preserves_unknown_derived_load_from_composed_primary():
              _children_control_ready=lambda:True,_combined_power_limit_w=lambda _:None)
     result = asyncio.run(fn(obj))
     assert result["solar_power"] is None and result["load_power"] is None
+    assert result["telemetry_observed_at"] == {"battery_level": None, "battery_power": None}
