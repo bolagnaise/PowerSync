@@ -324,6 +324,10 @@ class ControlWriteRejected(RuntimeError):
     """A final mutation fence rejected the request before submission."""
 
 
+class ControlTelemetryExpired(ControlWriteRejected):
+    """The raw-write boundary refused stale telemetry before network I/O."""
+
+
 class ControlRequestStale(ControlWriteRejected):
     pass
 
@@ -599,7 +603,11 @@ class PowerwallSiteControl:
             async with self.write_context(label, is_current=is_current, deadline=deadline, identity=identity, prepare=prepare) as receipt:
                 job["receipt"] = receipt
                 job["status"] = "submitted"
-                result = await callback()
+                try:
+                    result = await callback()
+                except ControlTelemetryExpired:
+                    self.mark_effect_not_submitted(receipt)
+                    raise
                 # A caller's cancellation is resolved by this worker's known
                 # completion.  An explicitly supplied unknown remains unknown.
                 effect = self._effects[receipt.id]

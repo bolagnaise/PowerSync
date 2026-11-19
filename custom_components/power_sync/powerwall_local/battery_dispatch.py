@@ -17,11 +17,16 @@ from uuid import uuid4
 from contextlib import suppress
 from typing import Any
 
+from ..powerwall_control import ControlTelemetryExpired
 from .dispatch_timing import record_telemetry_age, trace_renewal
 
 
 class DispatchCommandFailed(Exception):
     """Local access/command failed; fallback is safe only after release."""
+
+
+class _StaleRenewalTelemetry(ValueError):
+    """Telemetry expired before any watts request was submitted."""
 
 
 class GridChargingPermissionError(ValueError):
@@ -694,36 +699,40 @@ class LocalBatteryDispatch:
                 if old is not None and new is None and info.get(key) is None:
                     raise ValueError("Gateway site limits unavailable")
         self._site_limits = limits
-    async def _dispatch_snapshot(self, retry_stale_snapshot):
-        """Allow one bounded re-read before staging or writing anything."""
-        timeout = None
-        for attempt in range(2 if retry_stale_snapshot else 1):
-            observed_at = time.monotonic()
-            try:
-                async with asyncio.timeout(timeout):
-                    snapshot = await self.client.get_snapshot()
-            except Exception as err:
-                if attempt:
-                    raise ValueError("Fresh Powerwall telemetry unavailable for renewal") from err
-                raise DispatchCommandFailed("Local Powerwall telemetry is unavailable") from err
-            actual = getattr(snapshot, "observed_monotonic", None)
-            if type(actual) in (int, float) and observed_at <= actual <= time.monotonic():
-                observed_at = actual
-            age = time.monotonic() - observed_at
-            if age <= TELEMETRY_MAX_AGE_SECONDS:
-                return snapshot, observed_at
+    async def _dispatch_snapshot(self, timeout):
+        observed_at = time.monotonic()
+        try:
+            async with asyncio.timeout(timeout):
+                snapshot = await self.client.get_snapshot()
+        except Exception as err:
+            if timeout is not None:
+                raise ValueError("Fresh Powerwall telemetry unavailable for renewal") from err
+            raise DispatchCommandFailed("Local Powerwall telemetry is unavailable") from err
+        actual = getattr(snapshot, "observed_monotonic", None)
+        if type(actual) in (int, float) and observed_at <= actual <= time.monotonic():
+            observed_at = actual
+        age = time.monotonic() - observed_at
+        if age > TELEMETRY_MAX_AGE_SECONDS:
             record_telemetry_age("snapshot_age", age)
-            if attempt or not retry_stale_snapshot or not self.allowed(self._mode):
-                break
+            raise _StaleRenewalTelemetry("Local dispatch telemetry aged out before command")
+        return snapshot, observed_at
+
+    async def _write(self, *, retry_stale_snapshot=False) -> float:
+        try:
+            return await self._write_once(retry_stale_snapshot=retry_stale_snapshot)
+        except (_StaleRenewalTelemetry, ControlTelemetryExpired):
+            if not retry_stale_snapshot or not self.allowed(self._mode):
+                raise
             remaining = self._deadline - time.monotonic()
             if self._target_basis == "battery_output":
                 remaining -= FIXED_SIGNATURE_BUDGET_SECONDS
             if remaining < 1:
-                break
-            timeout = min(TELEMETRY_MAX_AGE_SECONDS, remaining)
-        raise ValueError("Local dispatch telemetry aged out before command")
+                raise
+        # Share one stale-telemetry retry across acquisition and submission.
+        # Recompute the request and admission checks against the fresh sample.
+        return await self._write_once(snapshot_timeout=min(TELEMETRY_MAX_AGE_SECONDS, remaining))
 
-    async def _write(self, *, retry_stale_snapshot=False) -> float:
+    async def _write_once(self, *, retry_stale_snapshot=False, snapshot_timeout=None) -> float:
         if self._target_basis != "battery_output":
             validate_dispatch_config(self._mode, self.config())
         if not self.allowed(self._mode):
@@ -731,12 +740,20 @@ class LocalBatteryDispatch:
         # Preparation can age telemetry. At most one successful enable is
         # possible for this owner, so reacquire the whole sample before watts.
         for _ in range(2):
-            snapshot, observed_at = await self._dispatch_snapshot(retry_stale_snapshot)
-            retry_stale_snapshot = False  # No extra reads after grid charging preparation.
+            try:
+                snapshot, observed_at = await self._dispatch_snapshot(snapshot_timeout)
+            except _StaleRenewalTelemetry as err:
+                if not retry_stale_snapshot:
+                    raise ValueError(str(err)) from err
+                raise
             self._check_site_limits(snapshot)
             if (self._mode != "charge" or self._target_basis == "battery_output" and self._target == 0
                     or not await self._prepare_grid_charging(snapshot)):
                 break
+            # A settings mutation needs its own readback. Preserve that path
+            # and disable any further stale-telemetry retry in this attempt.
+            retry_stale_snapshot = False
+            snapshot_timeout = None
         else:
             raise ValueError("Local grid charging preparation did not settle")
         config = self.config()
@@ -774,20 +791,27 @@ class LocalBatteryDispatch:
                     async def stage(expires_at):
                         if expires_at + 1 + remaining > time.time() + self._deadline - time.monotonic():
                             raise ValueError("Fixed output signature would exceed its deadline")
-                        self.power_acceptance_until = expires_at + 1
+                        self.power_acceptance_until = max(self.power_acceptance_until, expires_at + 1)
                         await self.persist()
 
                     def final_guard():
                         if not self.allowed(self._mode):
-                            raise ValueError("Fixed output authority or telemetry changed before submission")
-                        age = time.monotonic() - observed_at
+                            raise ValueError("Fixed output authority changed before submission")
+                        now = time.monotonic()
+                        age = now - observed_at
                         record_telemetry_age("pre_submission_age", age)
-                        if age > TELEMETRY_MAX_AGE_SECONDS or time.monotonic() >= self._deadline:
-                            raise ValueError("Fixed output authority or telemetry changed before submission")
+                        if now >= self._deadline:
+                            raise ValueError("Fixed output deadline reached before submission")
+                        if age > TELEMETRY_MAX_AGE_SECONDS:
+                            raise ControlTelemetryExpired("Fixed output telemetry aged out before submission")
 
                     accepted = await self.client.dispatch_battery_power(watts, remaining, before_submit=stage, before_write=final_guard)
                 else:
                     accepted = await self.client.dispatch_battery_power(watts, remaining)
+            except ControlTelemetryExpired as err:
+                if retry_stale_snapshot:
+                    raise
+                raise DispatchCommandFailed("Local battery dispatch stopped before submission") from err
             except Exception as err:
                 raise DispatchCommandFailed("Local battery dispatch transport failed") from err
             if not accepted:

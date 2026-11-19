@@ -243,9 +243,14 @@ Automatic refreshes DCQ after slow config work and rechecks admission at the fin
 submission boundary. Missing or stale SOC still blocks control; the five-second
 freshness limit and configured site limits remain in force.
 
-When a slow read leaves a local renewal with stale data, PowerSync can read the
-gateway once more before requesting power. That read must provide fresh data
+If telemetry goes stale during a local renewal, PowerSync can read the gateway
+once more before requesting power. This includes fixed-output renewals that age
+out during final submission checks. The new read must pass all safety checks
 within the original control window. If it cannot, PowerSync releases the lease.
+
+The paired Powerwall Force Power slider has a stable range. The live charge
+input and grid export limits are shown in its state attributes and still apply
+during operation.
 
 ### Troubleshooting renewal timing
 

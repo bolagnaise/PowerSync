@@ -362,9 +362,12 @@ class ForcePowerNumber(NumberEntity):
     @property
     def native_max_value(self) -> float:
         """Scale the force-power slider to the site instead of a universal 50 kW."""
-        local = self._local_power_limits_kw()
-        if local is not None:
-            return min(FORCE_POWER_FALLBACK_MAX_KW, max(local.values()))
+        if self._entry.data.get(CONF_POWERWALL_LOCAL_PAIRED):
+            from .powerwall_local.battery_dispatch import TIMED_DISPATCH_MAX_W
+
+            # Home Assistant treats the range as a capability. Keep live
+            # headroom in the state attributes and the selected-value clamp.
+            return TIMED_DISPATCH_MAX_W / 1000.0
         candidates = [
             *self._configured_power_limits_kw(),
             *self._coordinator_power_limits_kw(),

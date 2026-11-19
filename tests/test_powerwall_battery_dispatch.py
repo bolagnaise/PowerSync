@@ -120,7 +120,7 @@ def test_manual_export_slider_deducts_home_load_from_learned_battery_ceiling(loa
     assert module.manual_power_limits_kw(snap, cfg, 10000)['grid_export_max_kw'] == expected
 
 
-def test_force_power_number_does_not_keep_an_old_selection_above_new_limits():
+def test_force_power_number_keeps_capabilities_stable_and_clamps_live_selection():
     import ast
     import math
     import time
@@ -134,7 +134,8 @@ def test_force_power_number_does_not_keep_an_old_selection_above_new_limits():
                  UnitOfPower=SimpleNamespace(KILO_WATT='kW'), FORCE_POWER_STEP_KW=.05,
                  FORCE_POWER_FALLBACK_MAX_KW=50, CONF_POWERWALL_LOCAL_PAIRED='powerwall_local_paired',
                  DOMAIN='power_sync', TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS=90,
-                 manual_power_limits_kw=module.manual_power_limits_kw, math=math, time=time)
+                 manual_power_limits_kw=module.manual_power_limits_kw, TIMED_DISPATCH_MAX_W=module.TIMED_DISPATCH_MAX_W,
+                 math=math, time=time)
     exec(compile(ast.fix_missing_locations(ast.Module(body=[StripImports().visit(n) for n in nodes], type_ignores=[])),
                  str(ROOT / 'custom_components/power_sync/number.py'), 'exec', flags=__import__('__future__').annotations.compiler_flag), scope)
     coord = SimpleNamespace(data=site_snapshot(), last_success_monotonic=time.monotonic())
@@ -147,13 +148,13 @@ def test_force_power_number_does_not_keep_an_old_selection_above_new_limits():
     assert number.native_max_value == 10
     assert number.native_value == 10
     coord.data = site_snapshot(import_kw=4, export_kw=-2)
-    assert number.native_max_value == 3.2
+    assert number.native_max_value == 10
     assert number.native_value == 3.2
     coord.data = site_snapshot(import_kw=16, export_kw=-12)
     assert number.native_max_value == 10
     assert number.extra_state_attributes['grid_export_max_kw'] == 9.2
     coord.last_success_monotonic -= 100
-    assert number.native_max_value == 0
+    assert number.native_max_value == 10
     assert number.native_value == 20
     # Execute the actual switch routing with that stale entity value, then
     # the real local-force boundary. An explicit target cannot become Max.

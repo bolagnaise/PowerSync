@@ -410,7 +410,8 @@ async def test_missing_common_api_response_is_reported_in_diagnostics():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("slow_stage", [
     "dcq", "dcq_then_fresh", "dcq_then_revoked", "dcq_near_deadline",
-    "config", "event_loop", "signing", "none",
+    "config", "event_loop", "signing", "submission_then_fresh", "submission_revoked",
+    "submission_deadline", "dcq_then_submission_stale", "none",
 ])
 async def test_local_renewal_timing_preserves_freshness_fences(monkeypatch, caplog, slow_stage):
     dispatch = importlib.import_module(f"{_LOCAL_PKG}.battery_dispatch")
@@ -460,7 +461,7 @@ async def test_local_renewal_timing_preserves_freshness_fences(monkeypatch, capl
             else:
                 advance_with_responsive_loop(5.1)
         else:
-            if slow_stage == "none" and name == "config":
+            if slow_stage in ("none", "submission_then_fresh", "submission_revoked") and name == "config" and reads[name] == 1:
                 advance_with_responsive_loop(4.9)
             fast_read_finished.set()
         return data
@@ -497,6 +498,23 @@ async def test_local_renewal_timing_preserves_freshness_fences(monkeypatch, capl
     session = AsyncMock()
     session.__aenter__.return_value = SimpleNamespace(post=post)
     transport._session = AsyncMock(return_value=session)
+    async def delay_first_submission():
+        nonlocal allowed
+        if transport._session.await_count == 1:
+            if slow_stage in ("submission_then_fresh", "submission_revoked"):
+                advance_with_responsive_loop(.2)
+            if slow_stage == "submission_revoked":
+                allowed = False
+            if slow_stage == "submission_deadline":
+                advance_with_responsive_loop(600)
+            if slow_stage == "dcq_then_submission_stale":
+                advance_with_responsive_loop(5.1)
+        return session
+
+    transport._session.side_effect = delay_first_submission
+    control = importlib.import_module(f"{_PKG}.powerwall_control")
+    site = transport._site_control = control.PowerwallSiteControl("1", clock=clock)
+    transport._control_current = lambda: allowed
     controller = dispatch.LocalBatteryDispatch(
         client, lambda: {"optimization_max_charge_w": 5000, "optimization_max_grid_import_w": 14900,
                          "optimization_backup_reserve": .2},
@@ -514,13 +532,15 @@ async def test_local_renewal_timing_preserves_freshness_fences(monkeypatch, capl
     await controller._renew()
 
     controller._release.assert_awaited_once()
-    if slow_stage in ("none", "dcq_then_fresh"):
+    if slow_stage in ("none", "dcq_then_fresh", "submission_then_fresh"):
         assert controller.completion_reason == "timeout" and controller._last_watts == -300
         post.assert_called_once()
     else:
         assert controller.completion_reason == "safety_refused"
         post.assert_not_called()
-        if slow_stage != "signing":
+        if slow_stage not in (
+            "signing", "submission_revoked", "submission_deadline", "dcq_then_submission_stale",
+        ):
             controller.persist.assert_not_awaited()
     traces = [record.message for record in caplog.records if record.name == timing.__name__]
     assert len(traces) == 1
@@ -539,7 +559,17 @@ async def test_local_renewal_timing_preserves_freshness_fences(monkeypatch, capl
         assert "snapshot_age=8.700s" in trace and "pre_submission_age" not in trace
     elif slow_stage == "event_loop":
         assert "dcq=5.500s" in trace and "max_loop_delay=10.750s" in trace
+    elif slow_stage == "submission_then_fresh":
+        assert [effect["status"] for effect in site.snapshot()["effects"]] == ["not_submitted", "returned"]
+        assert reads == {"dcq": 2, "config": 2}
+        assert "pre_submission_age=5.100s" in trace and "pre_submission_age=0.000s" in trace
+    elif slow_stage in ("submission_revoked", "submission_deadline"):
+        assert reads == {"dcq": 1, "config": 1}
+    elif slow_stage == "dcq_then_submission_stale":
+        assert reads == {"dcq": 2, "config": 2}
+        assert "snapshot_age=8.700s" in trace and "pre_submission_age=5.100s" in trace
     elif slow_stage == "signing":
+        assert reads == {"dcq": 2, "config": 2}
         assert "signing=5.100s" in trace and "pre_submission_age=5.100s" in trace
     else:
         assert f"{slow_stage}=5.100s" in trace and "max_loop_delay=0.000s" in trace
