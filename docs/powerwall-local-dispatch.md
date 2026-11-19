@@ -259,7 +259,7 @@ Keep using the battery normally. If a renewal fails, look in **Settings →
 System → Logs** for the timestamped `Powerwall renewal timing` line from the
 same event. The line shows how long the gateway reads and signing took,
 observed Home Assistant event-loop delay, and the age of the sample at the
-command checks. To stop the capture, run the same action with `notset` in
+command checks. To stop the capture, run the same action with `warning` in
 place of `debug`.
 
 For literal zero-power idle, charge/discharge to a percentage, persistent site limits and native backup windows, see [Advanced Powerwall controls](powerwall-advanced-controls.md).
