@@ -1,11 +1,13 @@
 """Single owner confirmation covers the exact reviewed diagnostic/test selection."""
 import asyncio
+import ast
 import copy
 import importlib.util
 from pathlib import Path
 import sys
 import time
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -161,6 +163,49 @@ async def test_root_revocation_during_descriptor_fetch_prevents_review():
         await runtime.review('owner', code, public)
     assert not runtime.reviews and not runtime.grants
 
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('variant,reason', [
+    ('identity', 'invitation_identity_mismatch'),
+    ('expired', 'invitation_expired'),
+    ('key', 'invalid_authority_key'),
+    ('saved', 'invitation_already_added'),
+    ('revoking', 'revocation_pending'),
+    ('unknown', None),
+])
+async def test_review_http_failure_explains_safe_rejection_without_exposing_secrets(variant, reason):
+    from aiohttp import web
+    runtime, code, public, descriptors, _ = await setup()
+    if variant == 'identity':
+        runtime.identity['root'] = 'a' * 64
+    elif variant == 'expired':
+        descriptors['1' * 32]['expires_at'] = 0
+    elif variant == 'key':
+        public = 'not-a-public-key'
+    elif variant == 'saved':
+        runtime.grants['1' * 32] = {'existing': True}
+    elif variant == 'revoking':
+        runtime.root_pending = True
+    elif variant == 'unknown':
+        runtime.review = AsyncMock(side_effect=wire.WireError('CANARY_PRIVATE_ERROR'))
+    before = copy.deepcopy(runtime.grants)
+    source = ROOT / 'custom_components/power_sync/diagnostics_access/ha.py'
+    node = next(item for item in ast.parse(source.read_text()).body
+                if isinstance(item, ast.ClassDef) and item.name == 'DiagnosticsView')
+    namespace = {'HomeAssistantView': object, 'web': web, 'WireError': wire.WireError,
+                 'loads': wire.loads, 'DATA': module.DATA}
+    exec(compile(ast.Module(body=[node], type_ignores=[]), str(source), 'exec'), namespace)
+    hass = SimpleNamespace(data={module.DATA: {'runtime': runtime}})
+    class Request(dict):
+        content = _FragmentedContent([wire.json_bytes({'action': 'review', 'code': code, 'authority_key': public})])
+    request = Request(hass_user=SimpleNamespace(id='owner', is_admin=True))
+    response = await namespace['DiagnosticsView'](hass).post(request)
+    body = wire.loads(response.body)
+    assert response.status == 409 and body['error'] == 'diagnostics_request_denied'
+    assert body.get('reason') == reason
+    assert 'CANARY_PRIVATE_ERROR' not in response.text and code not in response.text and public not in response.text
+    assert runtime.grants == before and not runtime.reviews and not runtime.started
+
 class _FragmentedContent:
     def __init__(self, parts, failure=None):
         self.parts = list(parts)
@@ -247,3 +292,146 @@ async def test_http_transport_never_returns_a_frame_after_stream_interruption():
     with pytest.raises(OSError, match='connection closed'):
         await runtime.post('/descriptor', {})
     assert response.closed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('operation', ['heartbeat', 'poll', 'stage'])
+async def test_ambiguous_connection_failure_waits_for_old_boot_before_reconnecting(monkeypatch, operation):
+    runtime, code, public, _, _ = await setup()
+    review = await runtime.review('owner', code, public)
+    await runtime.confirm('owner', review['challenge'])
+    grant = next(iter(runtime.grants.values()))
+    grant.pop('approval')
+    grant['active'] = True
+    grant['boot'] = {'attempt': 'a' * 32, 'sequence': 7}
+    clock = [1700000000]
+    expiry = clock[0] + 90
+    boot_attempts = []
+    monkeypatch.setattr(module.time, 'time', lambda: clock[0])
+
+    async def authority(selected, command, purpose='installation'):
+        assert selected is grant
+        if command['type'] == operation:
+            raise OSError('lost response')
+        if command['type'] == 'owner_status':
+            return {'status': 'active', 'boot': {'state': 'active', 'expires_at': expiry}}
+        if command['type'] == 'boot':
+            boot_attempts.append(command)
+            assert clock[0] >= expiry, 'a concurrent boot would quarantine the approved grant'
+            return {}
+        if command['type'] == 'activate':
+            return {'expires_at': clock[0] + 90}
+        raise AssertionError(command['type'])
+
+    runtime.command = authority
+    with pytest.raises(OSError):
+        await runtime.boot_command(grant, {'type': operation})
+    assert not grant['active']
+    assert await runtime.boot(grant) is False
+    assert not boot_attempts and 'boot_pending' not in grant
+    clock[0] = expiry + 1
+    assert await runtime.boot(grant) is True
+    assert len(boot_attempts) == 1 and grant['active']
+    assert grant['generation'] == 2 and 'boot_pending' not in grant
+
+
+@pytest.mark.asyncio
+async def test_one_failed_grant_does_not_block_other_owner_approved_connections():
+    runtime, code, public, _, _ = await setup()
+    review = await runtime.review('owner', code, public)
+    await runtime.confirm('owner', review['challenge'])
+    grants = list(runtime.grants.values())
+    for grant in grants:
+        grant['active'] = True
+        grant['ceiling']['kind'] = 'ha_read'
+    runtime.drain = AsyncMock()
+    runtime.approve = AsyncMock()
+    reached = asyncio.Event()
+
+    async def poll(grant):
+        if grant is grants[0]:
+            raise wire.WireError('grant_inactive')
+        reached.set()
+
+    runtime.poll = poll
+    task = asyncio.create_task(runtime.loop())
+    try:
+        await asyncio.wait_for(reached.wait(), 0.2)
+        assert runtime.last_error == 'connection_unconfirmed'
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('commit_before_error', [False, True])
+async def test_boot_cannot_poll_until_completed_handoff_is_durable(commit_before_error):
+    runtime, code, public, _, _ = await setup()
+    review = await runtime.review('owner', code, public)
+    await runtime.confirm('owner', review['challenge'])
+    grant = next(iter(runtime.grants.values()))
+    grant.pop('approval')
+    save = runtime.store.async_save
+    saves = 0
+    attempts = []
+
+    async def uncertain_write(value):
+        nonlocal saves
+        saves += 1
+        if saves == 3:
+            if commit_before_error:
+                await save(value)
+            raise OSError('write outcome unavailable')
+        await save(value)
+
+    async def authority(selected, command, purpose='installation'):
+        if command['type'] == 'boot':
+            attempts.append(copy.deepcopy(command))
+            return {}
+        if command['type'] == 'activate':
+            return {'expires_at': time.time() + 90}
+        raise AssertionError('no poll or fresh boot may bypass the durable handoff')
+
+    runtime.store.async_save = uncertain_write
+    runtime.command = authority
+    with pytest.raises(OSError):
+        await runtime.boot(grant)
+    assert not grant['active'], 'polling now makes an old persisted pending boot unsafe to replay'
+    assert grant.get('boot_pending'), 'retain the exact idempotent attempt while sequence is still zero'
+    assert await runtime.boot(grant)
+    assert attempts[0] == attempts[1], 'retry the same handoff, not a second connection'
+    assert grant['active'] and 'boot_pending' not in grant
+    assert 'boot_pending' not in runtime.store.value['grants'][grant['id']]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('write', ['success', 'old_data', 'missing_file', 'invalid_json'])
+async def test_ha_store_confirms_disk_data_instead_of_trusting_silent_write_success(tmp_path, write):
+    path = tmp_path / 'diagnostics-store'
+    expected = {'grants': {'synthetic': {'generation': 2}}}
+
+    class HAStore:
+        async def async_save(self, data):
+            # HA can return normally after logging a failed write. Even a
+            # freshly loaded Store may return its optimistic in-memory data.
+            self.cached = copy.deepcopy(data)
+            if write == 'success':
+                path.write_text(module.wire.json_bytes({'data': data}).decode())
+            elif write == 'old_data':
+                path.write_text('{"data":{"grants":{}}}')
+            elif write == 'invalid_json':
+                path.write_text('partial')
+
+    source = ROOT / 'custom_components/power_sync/diagnostics_access/ha.py'
+    tree = ast.parse(source.read_text())
+    node = next(item for item in tree.body if isinstance(item, ast.ClassDef) and item.name == 'DiagnosticsStore')
+    namespace = {'Store': HAStore, 'json': __import__('json'), 'Path': Path, 'WireError': wire.WireError}
+    exec(compile(ast.Module(body=[node], type_ignores=[]), str(source), 'exec'), namespace)
+    store = namespace['DiagnosticsStore']()
+    store.path = path
+    store.hass = SimpleNamespace(async_add_executor_job=AsyncMock(side_effect=lambda fn: fn()))
+    if write == 'success':
+        await store.async_save(expected)
+    else:
+        with pytest.raises(wire.WireError, match='diagnostics_persistence_unconfirmed'):
+            await store.async_save(expected)

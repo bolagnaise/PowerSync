@@ -274,6 +274,7 @@ def _install_power_sync_stubs() -> None:
 
     battery_module = types.ModuleType("power_sync.optimization.battery_optimizer")
     battery_module.RTE_ECONOMIC_HOLD_REASON = "rte_economic_hold"
+    battery_module.FUTURE_HOME_USE_HOLD_REASON = "future_home_use_hold"
     battery_module.BatteryOptimizer = type("BatteryOptimizer", (), {})
     battery_module.OptimizerResult = type("OptimizerResult", (), {})
     sys.modules["power_sync.optimization.battery_optimizer"] = battery_module
@@ -3473,6 +3474,50 @@ def test_covau_forecast_partitions_caps_by_adelaide_tariff_day(opt_module):
     saved = coordinator._quota_state_v2_to_save()
     assert saved["provider"] == "covau"
     assert saved["settled_kwh"][opt_module.COVAU_IMPORT_RULE_ID] == 1.0
+
+
+@pytest.mark.parametrize("confidence", ["authoritative", "unknown"])
+def test_covau_forecast_resets_exhausted_allowances_per_day(opt_module, confidence):
+    now = datetime(2026, 5, 3, 9, 30, tzinfo=timezone.utc)  # 19:00 ACST
+    opt_module.dt_util.now = lambda: now
+    coordinator = _coordinator(
+        opt_module,
+        "covau",
+        covau_plan_snapshot=_covau_snapshot_dict(),
+    )
+    coordinator.hass = SimpleNamespace(data={}, states=SimpleNamespace(get=lambda _eid: None))
+    coordinator._config.horizon_hours = 24
+    coordinator._ensure_covau_ledger(
+        opt_module.QuotaLedgerState(
+            tariff_day="2026-05-03",
+            timezone_token="Australia/Adelaide",
+            confidence=confidence,
+            settled_kwh={
+                opt_module.COVAU_IMPORT_RULE_ID: 50.0,
+                opt_module.COVAU_EXPORT_RULE_ID: 30.0,
+            },
+        ),
+        now=now,
+    )
+    prices = coordinator._covau_price_forecast()
+    timestamps = coordinator._pending_price_timestamps
+    tomorrow_import = timestamps.index(datetime(2026, 5, 4, 1, 30, tzinfo=timezone.utc))
+    tomorrow_export = timestamps.index(datetime(2026, 5, 4, 8, 30, tzinfo=timezone.utc))
+    trusted = confidence == "authoritative"
+    assert coordinator._last_display_import_prices[tomorrow_import] == pytest.approx(
+        0.0 if trusted else 0.3517
+    )
+    assert coordinator._last_display_export_prices[tomorrow_export] == pytest.approx(
+        0.15 if trusted else 0.05
+    )
+    assert coordinator._last_display_export_prices[0] == pytest.approx(0.05)
+    coordinator._apply_covau_optimizer_inputs(*prices)
+    assert coordinator._last_import_bonus_caps_by_group == (
+        {"2026-05-04": 50.0} if trusted else {}
+    )
+    assert coordinator._last_export_bonus_caps_by_group == (
+        {"2026-05-04": 30.0} if trusted else {}
+    )
 
 
 def test_covau_cumulative_pcc_settlement_counts_only_matching_windows(opt_module):
@@ -8621,6 +8666,59 @@ def test_self_consumption_repairs_sungrow_reserve_when_it_blocks_discharge(opt_m
     assert battery.self_consumption_calls == 1
     assert battery.backup_reserve_calls == [5]
     assert coordinator._last_executed_action == "self_consumption"
+
+
+@pytest.mark.parametrize("soc", [0.21, 0.24])
+@pytest.mark.parametrize("route", ["tariff", "local"])
+@pytest.mark.parametrize("guard", [None, "disable_idle", "demand", "monitoring"])
+def test_future_home_hold_near_reserve_reaches_tesla_route(
+    opt_module, soc, route, guard,
+):
+    """A valuable household hold survives execution unless a policy blocks it."""
+    from unittest.mock import AsyncMock
+
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=soc)
+    coordinator._config.disable_idle_enabled = guard == "disable_idle"
+    coordinator._is_in_demand_window = lambda: guard == "demand"
+    coordinator._entry.options["monitoring_mode"] = guard == "monitoring"
+    zero_hold = AsyncMock(return_value=True)
+    coordinator._supports_local_powerwall_target_power = lambda direction="discharge": route == "local"
+    coordinator._entry.entry_id = coordinator.entry_id
+    coordinator.hass.data[opt_module.DOMAIN] = {
+        coordinator.entry_id: {"async_zero_power_optimizer_idle": zero_hold},
+    }
+
+    asyncio.run(coordinator._execute_optimizer_action(
+        SimpleNamespace(action="idle", power_w=0, reason="future_home_use_hold")
+    ))
+
+    if guard == "monitoring":
+        assert battery.self_consumption_calls == 0
+        assert battery.backup_reserve_calls == []
+        zero_hold.assert_not_awaited()
+    elif guard:
+        assert coordinator._last_executed_action == "self_consumption"
+        zero_hold.assert_not_awaited()
+        assert battery.backup_reserve_calls == []
+    else:
+        assert coordinator._last_executed_action == "idle"
+        if route == "local":
+            zero_hold.assert_awaited_once_with()
+            assert battery.backup_reserve_calls == []
+        else:
+            zero_hold.assert_not_awaited()
+            assert battery.backup_reserve_calls == [int(soc * 100)]
+
+
+def test_unmarked_idle_near_reserve_keeps_natural_self_consumption(opt_module):
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.24)
+    asyncio.run(coordinator._execute_optimizer_action(
+        SimpleNamespace(action="idle", power_w=0)
+    ))
+    assert coordinator._last_executed_action == "self_consumption"
+    assert battery.backup_reserve_calls == []
 
 
 def test_idle_at_reserve_floor_is_not_overridden_to_self_consumption(opt_module):
@@ -14658,3 +14756,32 @@ def test_foxess_ev_preserve_restore_failure_or_supersession_keeps_state(opt_modu
         assert coordinator._last_executed_action == "no_discharge"
 
     asyncio.run(run())
+
+
+def test_tesla_idle_refresh_never_pulses_the_restore_baseline(opt_module):
+    class ReservePulseBattery(_FakeBattery):
+        async def set_self_consumption_mode(self, *, idle_reserve=None):
+            self.backup_reserve_calls.extend(
+                (21, 20) if idle_reserve is None else (idle_reserve + 1, idle_reserve)
+            )
+            return True
+
+        async def set_tesla_idle_hold(self, reserve):
+            self.backup_reserve_calls.append(reserve)
+            return await self.set_self_consumption_mode(idle_reserve=reserve)
+
+    battery = ReservePulseBattery(backup_reserve=27)
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.265)
+    coordinator._last_executed_action = "idle"
+    coordinator._pre_idle_backup_reserve = 20
+    coordinator._idle_hold_reserve = 27
+
+    assert asyncio.run(coordinator._set_idle_hold_mode(battery))
+    assert battery.backup_reserve_calls == [27, 28, 27]
+    assert coordinator._idle_hold_reserve == 27
+    assert coordinator._pre_idle_backup_reserve == 20
+
+    assert asyncio.run(coordinator._restore_pre_idle_backup_reserve(battery))
+    assert battery.backup_reserve_calls == [27, 28, 27, 20]
+    assert coordinator._idle_hold_reserve is None
+    assert coordinator._pre_idle_backup_reserve is None

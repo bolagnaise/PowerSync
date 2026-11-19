@@ -2271,6 +2271,37 @@ function psUntilPreview(value, timeZone, now = Date.now()) {
 
 /** Advanced controls have independent drafts and never send legacy Force. */
 class PsAdvancedBatteryControls extends HTMLElement {
+  _siteLimitBlockMessage(capabilities) {
+    const messages = {
+      configuration_unavailable: 'Fresh gateway configuration unavailable. Retry the read.',
+      pairing_changed: 'Pairing changed. Confirm the new gateway before changing limits.',
+      battery_system_unsupported: 'Native site limits require a Tesla Powerwall.',
+      control_site_unavailable: 'The Powerwall control site is unavailable.',
+      local_gateway_unconfigured: 'A paired local Powerwall gateway with a valid address is required.',
+      monitoring_handoff_active: 'The Monitoring Mode handoff is still in progress.',
+      generation_replaced: 'The integration was reloaded. Refresh control state.',
+      monitoring_only_profile: 'The selected battery connection is monitoring only and does not permit writes.',
+      settings_pending: 'A Powerwall settings change is unresolved. Check its recovery status before changing limits.',
+      foreign_site_owner: 'Another PowerSync entry has an active control or recovery obligation for this site.',
+      force_charge_active: 'A force-charge control is active. Site limits remain blocked until it finishes.',
+      force_discharge_active: 'A force-discharge control is active. Site limits remain blocked until it finishes.',
+      hold_soc_active: 'A Hold charge control is active. Site limits remain blocked until it finishes.',
+      self_consumption_active: 'A Power the home control is active. Site limits remain blocked until it finishes.',
+      dispatch_stopping: 'A local battery dispatch is stopping.',
+      settings_recovering: 'Powerwall settings recovery is in progress.',
+      control_method_changing: 'The battery control method is changing.',
+      native_max_startup_pending: 'Full-rate charging startup recovery is pending.',
+      local_recovery_pending: 'Local Powerwall dispatch recovery is pending.',
+      optimizer_restore_pending: 'A previous optimizer force control still needs to be restored.',
+      backup_preparation_active: 'Backup preparation is active.',
+      backup_recovery_unavailable: 'Backup preparation recovery is unresolved.',
+      battery_dispatch_pending: 'A local battery dispatch still has a pending release or recovery.',
+      native_max_charge_pending: 'Full-rate charging still has a pending release or recovery.',
+    };
+    return Object.hasOwn(messages, capabilities.block_reason) ? messages[capabilities.block_reason]
+      : capabilities.readable === false ? messages.configuration_unavailable
+      : 'Site-limit writes are unavailable. Refresh control state; if this persists, share the control status with support.';
+  }
   constructor() {
     super();
     this._contextGeneration = 0; this._readSerial = 0;
@@ -2409,7 +2440,7 @@ class PsAdvancedBatteryControls extends HTMLElement {
       ${o?.operation ? `<p class="hint">Battery target: ${psEsc(o.operation.power_w)} W${o.operation.target_soc === undefined ? '' : ` · ${psEsc(o.operation.target_soc)}%`} · ${psEsc(o.operation.phase.replace(/_/g, ' '))}</p>${o.operation.active ? btn('stop', 'Stop this battery target') : ''}` : ''}
       ${n ? `<details class="control-group" data-advanced-section="limits" ${n.transaction && ['prepared','submitted','recovery_required'].includes(n.transaction.phase) ? 'open' : ''}><summary>Site limits<small>Advanced · persistent grid import and export limits</small></summary><div class="control-group-body"><p class="hint">Current import ${psEsc(n.limits.import_limit_w.value_w ?? 'unknown')} W · export ${psEsc(n.limits.export_limit_w.value_w ?? 'unknown')} W. Zero is a hard limit. Blank fields stay unchanged. These limits persist. Whole-site net watts at the gateway meter, not per battery or phase. Each accepts 0–1,000,000 whole W (5000 W = 5 kW); hardware and connection limits can be lower. Import and export are independent ceilings.</p>
       ${n.capabilities.identity_rebaseline_required ? `<p class="hint">Pairing changed. Controls are blocked. Confirm the new gateway to use these controls.</p>${btn('rebaseline', 'Confirm new gateway')}` : ''}${field('import_limit_w', 'Import limit (W)')}${field('export_limit_w', 'Export limit (W)')}${btn('set', 'Apply persistent limits', !n.capabilities.writable || !!this._errors.native_site_limits || this._loading.has('native_site_limits'))}
-      ${!n.capabilities.writable ? `<p class="hint" role="status">${n.capabilities.readable === false ? 'Fresh gateway configuration unavailable. Retry the read.' : 'Another control, changed pairing or recovery is holding the site. Resolve it, then refresh.'}</p>` : ''}
+      ${!n.capabilities.writable ? `<p class="hint" role="status">${psEsc(this._siteLimitBlockMessage(n.capabilities))}</p>` : ''}
       ${(n.snapshots || []).slice(-1).map(s => btn(`restore:${s.snapshot_id}`, 'Restore previous site limits', !n.capabilities.writable)).join('')}
       ${n.transaction ? `<p class="hint">${['prepared','submitted','recovery_required'].includes(n.transaction.phase) ? 'Check the previous change before applying another limit.' : 'Site limits updated.'}</p>${['prepared', 'submitted', 'recovery_required'].includes(n.transaction.phase) ? btn('reconcile', 'Check unresolved write') : ''}` : ''}
       </div></details>` : ''}
@@ -2729,7 +2760,7 @@ class PsPlanCard extends PsCardBase {
 
   _signature() {
     const data = psApiPeek('power_sync/optimization');
-    return `${super._signature()}|${this._hass?.config?.currency}|${data?.last_optimization || ''}|${data?.monitoring_mode}|${this._histAt}`;
+    return `${super._signature()}|${this._hass?.config?.currency}|${data?.last_optimization || ''}|${data?.monitoring_mode}|${data?.enabled}|${data?.current_action || ''}|${data?.effective_current_action || ''}|${this._histAt}`;
   }
 
   _loadHistory() {
@@ -2834,6 +2865,17 @@ class PsPlanCard extends PsCardBase {
     const curKey = psActionKey(data.effective_current_action || data.current_action);
     const nextChange = psNextChange(data, curKey, now);
     const nowRunEnd = psPlannedRunEnd(m.plan, m.interval, curKey, now);
+    // The live command can change before the cached optimizer API updates.
+    // Match Battery controls, keeping a request distinct from measured export.
+    const modeState = psState(hass, this.ents.mode);
+    const control = psBatteryControl(modeState);
+    const status = modeState?.attributes?.command_status;
+    const remaining = Number(modeState?.attributes?.remaining_minutes);
+    const controlText = control
+      ? status === 'restore_pending' ? 'Restoring…'
+        : status === 'pending' ? 'Waiting for command acknowledgement'
+        : `${control.message}${Number.isFinite(remaining) ? ` ${psDuration(remaining)} left.` : ''}`
+      : curKey ? `${curKey === 'self' ? 'Self-consumption' : PS_ACT[curKey][0]}${nowRunEnd ? ` until ${psWhen(hass, nowRunEnd)}` : ''}` : '';
     const floor = psPercent(data.reserve_visibility?.active_software_floor_percent);
     const zerohero = data.daily_cost_breakdown?.zerohero;
     const bonusCap = zerohero?.status === 'enabled' && zerohero.bonus_export_cap_kwh != null
@@ -2842,7 +2884,7 @@ class PsPlanCard extends PsCardBase {
     const actChip = key => (key === 'charge' ? 'gr' : key === 'export' ? 'rd' : key === 'self' ? 'pu' : '');
     const chips = [
       `<span class="chip ${data.monitoring_mode ? 'cy' : data.enabled ? 'gr' : ''}"><span>Mode</span><b>${data.monitoring_mode ? 'Monitoring' : data.enabled ? 'Optimizing' : 'Off'}</b></span>`,
-      curKey ? `<span class="chip ${actChip(curKey)}"><span>Current control</span><b>${psEsc(curKey === 'self' ? 'Self-consumption' : PS_ACT[curKey][0])}${nowRunEnd ? ` until ${psEsc(psWhen(hass, nowRunEnd))}` : ''}</b></span>` : '',
+      controlText ? `<span class="chip ${control ? 'am' : actChip(curKey)}"><span>Current control</span><b>${psEsc(controlText)}</b></span>` : '',
       nextChange ? `<span class="chip ${actChip(nextChange.key)}"><span>Next control</span><b>${psEsc(PS_ACT[nextChange.key][0])} ${psEsc(psWhen(hass, nextChange.t))}</b></span>` : '',
       data.last_optimization ? `<span class="chip"><span>Optimized</span><b class="num">${psEsc(psTime(hass, data.last_optimization))}</b></span>` : '',
       Number.isFinite(floor) && floor > 0 ? `<span class="chip"><span>Export floor</span><b class="num">${Math.round(floor)}%</b></span>` : '',
@@ -3130,7 +3172,7 @@ class PsTariffCard extends PsCardBase {
   _signature() {
     const s = psState(this._hass, this.ents.tariff);
     const minute = Math.floor(Date.now() / 60_000);
-    return `${super._signature()}|${this._hass?.config?.currency}|${s?.attributes?.last_sync}|${s?.state}|${minute}`;
+    return `${super._signature()}|${this._hass?.config?.currency}|${s?.attributes?.last_sync}|${s?.attributes?.current_time}|${s?.state}|${minute}`;
   }
 
   _render() {
@@ -3145,10 +3187,10 @@ class PsTariffCard extends PsCardBase {
     }
     const slotMin = s => { const [h, mm] = String(s.time || '0:0').split(':').map(Number); return h * 60 + (mm || 0); };
     slots = slots.slice().sort((a, b) => slotMin(a) - slotMin(b));
-    const scale = slots.some(s => Number(s.buy) > 2) ? 1 : 100;
     const periods = [];
     slots.forEach((s, i) => {
-      const buy = Number(s.buy) * scale, sell = Number(s.sell) * scale;
+      // TOU Schedule rows are in major currency units per kWh, even during spikes.
+      const buy = Number(s.buy) * 100, sell = Number(s.sell) * 100;
       const start = slotMin(s);
       const end = i + 1 < slots.length ? slotMin(slots[i + 1]) : 24 * 60;
       const last = periods[periods.length - 1];
@@ -3177,8 +3219,16 @@ class PsTariffCard extends PsCardBase {
       return [named ? pretty(named) : 'Shoulder', '--cyan', 0.45];
     };
     const now = new Date();
-    const nowMin = now.getHours() * 60 + now.getMinutes();
-    const hm = mins => psTime(hass, new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, mins));
+    // Slot labels and current_time are wall-clock values from the same HA sensor.
+    const nowMin = /^([01]\d|2[0-3]):[0-5]\d$/.test(attrs.current_time)
+      ? slotMin({time: attrs.current_time})
+      : now.getHours() * 60 + now.getMinutes();
+    const use12h = psUse12h(hass);
+    const wallClock = new Intl.DateTimeFormat(hass?.locale?.language || undefined, {
+      timeZone: 'UTC', hour: use12h ? 'numeric' : '2-digit', minute: '2-digit',
+      ...(use12h ? {hour12: true} : {hourCycle: 'h23'}),
+    });
+    const hm = mins => wallClock.format(new Date(Date.UTC(2000, 0, 1, 0, mins)));
     const ribbon = periods.map(p => {
       const [, c, op] = label(p);
       return `<span style="position:absolute;left:${(p.start / 1440 * 100).toFixed(4)}%;width:${((p.end - p.start) / 1440 * 100).toFixed(4)}%;height:100%;--c:var(${c});opacity:${op}"></span>`;
@@ -3193,6 +3243,17 @@ class PsTariffCard extends PsCardBase {
       const range = `${hm(p.start)}–${endMin === 1440 ? hm(0) : hm(endMin)}`;
       return `<div class="prow ${isNow ? 'now' : ''}"><i style="--c:var(${c})"></i><span class="n"><b>${psEsc(name)}${isNow ? ', now' : ''}</b><span>${psEsc(range)}${isNow ? `, ends in ${psDuration(left)}` : ''}</span></span><span class="i">${p.buy.toFixed(1)}</span><span class="e">${p.sell.toFixed(1)}</span></div>`;
     }).join('');
+    const quotaNotes = [
+      ['import', 'Free import'],
+      ['export', 'Premium export'],
+    ].map(([direction, name]) => {
+      const window = attrs.unavailable_quota_windows?.[direction];
+      if (!window?.start || !window?.end) return '';
+      const status = window.reason === 'exhausted'
+        ? "today’s allowance is used up"
+        : 'remaining allowance could not be verified';
+      return `<p class="hint">${name} (${psEsc(window.start)}–${psEsc(window.end)}) · ${status}.</p>`;
+    }).join('');
     this.innerHTML = `
       <div class="tou-ribbon" aria-hidden="true">${ribbon}<i class="now-tick" style="left:calc(${(nowMin / 1440 * 100).toFixed(2)}% - 1px)"></i></div>
       <div class="tou-axis" aria-hidden="true"><span>00</span><span>06</span><span>12</span><span>18</span><span>24</span></div>
@@ -3200,7 +3261,8 @@ class PsTariffCard extends PsCardBase {
         <div class="prow phead"><span></span><span>Period</span><span>Import</span><span>Export</span></div>
         ${rowsHtml}
       </div>
-      <p class="hint">Prices in ${psEsc(unit)}/kWh.</p>`;
+      <p class="hint">Prices in ${psEsc(unit)}/kWh.</p>
+      ${quotaNotes}`;
     this.innerHTML += psExportOfferHtml(hass, psExportOffer(hass, this.ents));
   }
 }

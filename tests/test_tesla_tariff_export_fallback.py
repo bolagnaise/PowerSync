@@ -44,7 +44,7 @@ def preparation(states, *, local_config=None, export_confirmed=True, grid_confir
     ns.update(force_discharge_state=state, _command_generation=[1], _restore_gen=1,
               _tesla_charge_kick_generation=[1], _local_powerwall_runtime=runtime,
               was_already_force_discharging=False, _monitoring_mode_should_block_control=lambda call: False,
-              network_guard=None, call=SimpleNamespace(data={}), source="user", duration=5,
+              network_guard=None, call=SimpleNamespace(data={}), source="user", requested_duration=5,
               site_configs=[(site, "token", "fleet") for site in states],
               persist_force_mode_state=persist, _tesla_force_apply_export_rule=export,
               _tesla_force_apply_grid_charging=grid, _tesla_force_apply_operation_mode=mode,
@@ -61,7 +61,8 @@ def preparation(states, *, local_config=None, export_confirmed=True, grid_confir
     start = next(i for i, n in enumerate(body) if isinstance(n, ast.FunctionDef) and n.name == "_discharge_request_current")
     end = next(i for i, n in enumerate(body[start:], start) if isinstance(n, ast.If) and ast.unparse(n.test) == "not mode_success")
     fn = ast.AsyncFunctionDef(name="prepare", args=ast.arguments(posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]),
-                              body=body[start:end], decorator_list=[])
+                              body=ast.parse("duration = tariff_duration = requested_duration").body + body[start:end],
+                              decorator_list=[])
     exec(compile(ast.fix_missing_locations(ast.Module(body=[fn], type_ignores=[])), "tariff preparation", "exec"), ns)
     return ns, state, persisted, writes
 

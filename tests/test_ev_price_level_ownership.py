@@ -8833,6 +8833,7 @@ def test_ocpp_soc_reaches_canonical_loadpoint_projection(backend):
         **vars(const), "__package__": "power_sync", "_LOGGER": ev_planner._LOGGER,
         "self": SimpleNamespace(_hass=hass, _config_entry=entry), "entry_data": runtime,
         "opts": entry.options, "observed_vehicles": observed,
+        "zaptec_cached": None,
         "resolve_ocpp_charger_soc": resolve_ocpp_charger_soc,
     }
     exec(compile(ast.Module(body=body[start:stop], type_ignores=[]), str(path), "exec"), namespace)

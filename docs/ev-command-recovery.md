@@ -197,6 +197,33 @@ historical uncertainty from the operational decision to resume charging control.
 
 ### Automatic recovery
 
+PowerSync checks retained native Tesla command holds automatically, including
+after a Home Assistant restart when no charging session remains active. These
+background checks use existing Tesla Fleet, Teslemetry or Tessie telemetry:
+they do not refresh the provider, wake the car or send charging commands. The
+checks back off when reports are missing or stale, and advancing vehicle data
+can bring the next check forward. The inspection action below shows the last
+automatic result and next attempt.
+
+Passive recovery needs complete, advancing reports close enough to satisfy the
+90-second freshness limit. A provider that updates less frequently, a sleeping
+or offline car, missing fields or conflicting readings keeps the hold in place.
+An eligible active charging request can still use the existing bounded provider
+refresh described below; passive checks never enable extra cloud polling.
+
+Solar Surplus also retries its existing recovery path when an uncertain Start
+left a nonzero possible current but vehicle telemetry is unavailable. Possible
+load remains reserved for electrical safety; it does not count as measured
+solar surplus. Recovery must complete and the current charging plan must still
+permit charging before normal control can resume.
+
+When a completed session's old ownership lease is the only route mismatch,
+a new PowerSync-owned charging request can carry the same verified native
+producer into its new lease automatically. Unresolved commands, finite cleanup,
+changed providers/entities and other owners remain protected. Inspection reports
+producer-binding and session-scope matches separately so a real connection change
+is distinguishable from a completed session's old lease.
+
 A new charging request can reconcile old native Start, Stop, current or limit
 attempts when:
 

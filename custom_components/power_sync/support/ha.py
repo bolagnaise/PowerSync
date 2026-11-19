@@ -15,6 +15,7 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.storage import Store
 
+from .admin_access import DATA as ADMIN_DATA, setup as setup_admin_access
 from .collector import snapshot, select, action_event
 from .history import Recorder
 from .protocol import BROKER, CATEGORIES, MAX_RESULT, ROLES, SupportError, digest, encode, reference, number, CONTRACT_DIGEST
@@ -142,6 +143,16 @@ class SupportRuntime:
         state = {**config, **fields(opt.get("_last_optimizer_result")), "enabled": opt.get("_enabled"), "monitoring_mode": monitoring,
             "planned_action": opt.get("_last_executed_planned_action"), "effective_action": opt.get("_last_executed_action")}
         force = dict(fields(opt.get("_optimizer_force_state")))
+        # This reviewed synchronous guard reads runtime admission only. It never
+        # calls NativeSiteLimits.read(), refreshes a gateway, or changes authority.
+        guard_status = "unavailable"
+        guard = runtime.get("native_site_limits_block_reason")
+        if callable(guard):
+            try:
+                guard_status = guard() or "allowed"
+            except Exception:
+                pass  # Do not disclose arbitrary exception text.
+        force["native_site_limit_guard"] = guard_status
         if isinstance(force.get("expires_at"), datetime):
             force["expires_at"] = stamp(force["expires_at"])
         self.frame = snapshot({"entities": entities, "schedule": slots, "optimizer": state,
@@ -289,14 +300,14 @@ class SupportRuntime:
         policy = await self.request("/support/v1/policy")
         if not isinstance(policy.get("disclosure"), str) or not isinstance(policy.get("policy_digest"), str):
             raise SupportError("support_policy_unavailable")
-        now = time.time()
         if number(body.get("history_seconds", 0)) is None or not 0 <= body.get("history_seconds", 0) <= 86400:
             raise SupportError("invalid_history_range")
         for other in self.hass.data.get(DATA, {}).values():
             if other is not self and other.session.key is not None:
                 raise SupportError("another_session_active")
         scope = self.session.begin(owner, reference(self.entry.entry_id + self.mapping_digest), body.get("categories"),
-            now - body.get("history_seconds", 0), body.get("duration", 3600), include_recorder=body.get("ha_recorder") is True)
+            None, body.get("duration", 3600), include_recorder=body.get("ha_recorder") is True,
+            history_seconds=body.get("history_seconds", 0))
         generation = self.session.generation
         self.policy = policy
         self.descriptor = self.code = None
@@ -647,9 +658,13 @@ class SupportView(HomeAssistantView):
         self.hass = hass
 
     async def get(self, request):
-        if not request.get("hass_user") or not request["hass_user"].is_admin:
+        user = request.get("hass_user")
+        if not user or not user.is_admin:
             return web.json_response({"error": "admin_required"}, status=403)
-        return web.json_response({"entries": [{"entry_id": key, "status": runtime.status()} for key, runtime in self.hass.data.get(DATA, {}).items()]})
+        result = {"entries": [{"entry_id": key, "status": runtime.status()} for key, runtime in self.hass.data.get(DATA, {}).items()]}
+        if getattr(user, "is_owner", False) and (manager := self.hass.data.get(ADMIN_DATA)):
+            result["admin_access"] = manager.status()
+        return web.json_response(result)
 
     async def post(self, request):
         user = request.get("hass_user")
@@ -701,11 +716,11 @@ class SupportView(HomeAssistantView):
             return web.json_response({"error": "support_unavailable"}, status=503)
 
 
-async def setup(hass, entry):
+async def _setup_once(hass, entry, *, timeout=5):
     runtimes = hass.data.setdefault(DATA, {})
     runtime = SupportRuntime(hass, entry)
     try:
-        await asyncio.wait_for(runtime.setup(), timeout=5)
+        await asyncio.wait_for(runtime.setup(), timeout=timeout)
         if not hass.data.get("power_sync_support_view_registered"):
             hass.http.register_view(SupportView(hass))
             hass.data["power_sync_support_view_registered"] = True
@@ -716,15 +731,67 @@ async def setup(hass, entry):
     for value in runtimes.values():
         value.recorder.max_bytes = 8 * 1024 * 1024 // len(runtimes)
         value.recorder.trim(time.time())
+    setup_admin_access(hass)
+
+
+async def _retry_setup_after_start(hass, entry):
+    """Retry one transient startup timeout without entering HA's startup barrier."""
+    import logging
+    from homeassistant.helpers.start import async_at_started
+
+    started = asyncio.Event()
+
+    async def on_started(_hass):
+        started.set()
+
+    unsubscribe = async_at_started(hass, on_started)
+    try:
+        await started.wait()
+        # Storage/executor contention at startup must not disable support for
+        # the entire boot. Use a fresh runtime; failed setup was already stopped.
+        await _setup_once(hass, entry, timeout=30)
+        logging.getLogger(__name__).info("PowerSync support diagnostics recovered after startup")
+    except Exception as err:
+        # Never include exception messages, which may contain customer data.
+        logging.getLogger(__name__).warning(
+            "PowerSync support startup retry failed (%s); core integration remains active",
+            type(err).__name__,
+        )
+    finally:
+        unsubscribe()
+        pending = hass.data.get(DATA + "_pending", {})
+        if pending.get(entry.entry_id) is asyncio.current_task():
+            pending.pop(entry.entry_id)
+
+
+async def _cancel_setup_retry(hass, entry):
+    if task := hass.data.get(DATA + "_pending", {}).pop(entry.entry_id, None):
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def setup(hass, entry):
+    await _cancel_setup_retry(hass, entry)
+    try:
+        await _setup_once(hass, entry)
+    except TimeoutError:
+        # Keep the initial optional-setup boundary and its safe diagnostics.
+        # Recovery is bounded and grants no support session or hardware access.
+        hass.data.setdefault(DATA + "_pending", {})[entry.entry_id] = hass.async_create_background_task(
+            _retry_setup_after_start(hass, entry),
+            f"power_sync_support_startup_retry_{entry.entry_id}", eager_start=False)
+        raise
 
 
 async def unload(hass, entry):
+    await _cancel_setup_retry(hass, entry)
     if runtime := hass.data.get(DATA, {}).pop(entry.entry_id, None):
         await asyncio.wait_for(runtime.stop(), timeout=5)
 
 
 async def remove(hass, entry):
     """Erase local evidence and attempt remote cleanup without restoring read access."""
+    await _cancel_setup_retry(hass, entry)
     runtime = SupportRuntime(hass, entry)
     stored = await runtime.store.async_load() or {}
     if type(stored) is not dict:

@@ -38,6 +38,8 @@ def adapter():
         'digest':p.digest,'encode':p.encode,'reference':p.reference,'number':p.number,'DATA':'power_sync_support','CONTRACT_DIGEST':p.CONTRACT_DIGEST}
     from collections import deque
     ns['deque'] = deque
+    ns['ADMIN_DATA'] = 'power_sync_support_admin'
+    ns['setup_admin_access'] = lambda hass: None
     exec(compile(ast.Module(body=nodes,type_ignores=[]),str(ROOT/'ha.py'),'exec'),ns)
     return ns
 
@@ -93,6 +95,34 @@ def test_real_adapter_does_not_mutate_expired_force_state_or_poll_devices(runtim
     assert 'CANARY_SECRET' not in json.dumps(result)
     rt.hass.services.async_call.assert_not_called()
     c.validate_evidence(result)
+
+
+def test_native_site_limit_capture_reports_runtime_guard_without_gateway_io(runtime):
+    rt, _, _, _, _ = runtime
+    local = rt.hass.data['power_sync'][rt.entry.entry_id]
+    local['native_site_limits_block_reason'] = lambda: 'self_consumption_active'
+    local['native_site_limits_control'] = SimpleNamespace(read=AsyncMock(side_effect=AssertionError('gateway read forbidden')))
+    local['pairing_secret'] = 'CANARY_SECRET'
+    result = rt.capture()
+    assert result['control_trace'][0]['state']['native_site_limit_guard'] == 'self_consumption_active'
+    assert 'native_site_limit_guard' not in json.dumps(c.select(result, 'system'))
+    assert 'CANARY_SECRET' not in json.dumps(result)
+    local['native_site_limits_control'].read.assert_not_called()
+    rt.hass.services.async_call.assert_not_called()
+    c.validate_evidence(c.select(result, 'control_trace'))
+    local['native_site_limits_block_reason'] = lambda: None
+    assert rt.capture()['control_trace'][0]['state']['native_site_limit_guard'] == 'allowed'
+
+
+def test_native_site_limit_capture_does_not_share_unknown_reasons_or_errors(runtime):
+    rt, _, _, _, _ = runtime
+    local = rt.hass.data['power_sync'][rt.entry.entry_id]
+    local['native_site_limits_block_reason'] = lambda: 'CANARY_SECRET'
+    assert 'CANARY_SECRET' not in json.dumps(rt.capture())
+    def broken():
+        raise ValueError('CANARY_SECRET')
+    local['native_site_limits_block_reason'] = broken
+    assert rt.capture()['control_trace'][0]['state']['native_site_limit_guard'] == 'unavailable'
 
 
 def test_real_adapter_preserves_power_units_represented_by_string_enums(runtime):
@@ -191,6 +221,135 @@ async def test_recorder_does_not_block_ha_startup_and_unload_cancels_it(runtime)
         await rt.stop()
     assert rt.task.done()
     assert not background_tasks
+
+
+def startup_retry_harness(runtime, monkeypatch):
+    """Exercise real timeout/cancellation with a gated HA storage read."""
+    rt, _, _, ns, _ = runtime
+    callbacks, tasks, attempts, views = [], [], [], []
+    started = ModuleType('homeassistant.helpers.start')
+
+    def at_started(hass, callback):
+        callbacks.append(callback)
+        return lambda: callbacks.remove(callback) if callback in callbacks else None
+
+    started.async_at_started = at_started
+    monkeypatch.setitem(sys.modules, started.__name__, started)
+    original_wait = asyncio.wait_for
+
+    async def short_wait(awaitable, timeout):
+        return await original_wait(awaitable, timeout=0.02 if timeout == 5 else 0.1)
+
+    ns['asyncio'] = SimpleNamespace(**{name: getattr(asyncio, name) for name in dir(asyncio)})
+    ns['asyncio'].wait_for = short_wait
+    real_type = ns['SupportRuntime']
+
+    def construct(hass, entry):
+        candidate = real_type(hass, entry)
+        attempts.append(candidate)
+        if len(attempts) == 1:
+            async def busy_storage():
+                await asyncio.Event().wait()
+            candidate.store.async_load = busy_storage
+        return candidate
+
+    def background(coro, name, **kwargs):
+        task = asyncio.create_task(coro, name=name)
+        tasks.append(task)
+        return task
+
+    ns['SupportRuntime'] = construct
+    rt.hass.data.pop('power_sync_support')
+    rt.hass.async_create_background_task = background
+    rt.hass.http.register_view = views.append
+    return rt, ns, callbacks, tasks, attempts, views
+
+
+@pytest.mark.asyncio
+async def test_slow_startup_storage_recovers_support_after_ha_started(runtime, monkeypatch):
+    rt, ns, callbacks, tasks, attempts, views = startup_retry_harness(runtime, monkeypatch)
+    try:
+        with pytest.raises(TimeoutError):
+            await ns['setup'](rt.hass, rt.entry)
+        await asyncio.sleep(0)
+        assert callbacks, 'transient startup timeout must schedule recovery'
+        assert len(attempts) == 1 and attempts[0].closed
+        assert not views, 'partially initialized support must not be exposed'
+        assert not rt.hass.data['power_sync_support']
+        await callbacks[0](rt.hass)
+        await asyncio.sleep(0)
+        await asyncio.wait_for(tasks[0], 1)
+        recovered = rt.hass.data['power_sync_support'][rt.entry.entry_id]
+        assert recovered is attempts[1] and recovered.ready
+        assert recovered.session.key is None and recovered.session.state == 'closed'
+        assert len(views) == 1
+        response = await views[0].get({'hass_user': SimpleNamespace(is_admin=True)})
+        assert response.status == 200 and rt.entry.entry_id in response.text
+        rt.hass.services.async_call.assert_not_called()
+    finally:
+        await ns['unload'](rt.hass, rt.entry)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('during_retry', [False, True])
+async def test_unload_cancels_pending_support_startup_recovery(runtime, monkeypatch, during_retry):
+    rt, ns, callbacks, tasks, attempts, views = startup_retry_harness(runtime, monkeypatch)
+    with pytest.raises(TimeoutError):
+        await ns['setup'](rt.hass, rt.entry)
+    await asyncio.sleep(0)
+    assert callbacks, 'timeout must retain one cancellable recovery'
+    if during_retry:
+        # A second storage read may still be in flight when the entry unloads.
+        async def blocked_load(self):
+            await asyncio.Event().wait()
+        monkeypatch.setattr(MemoryStore, 'async_load', blocked_load)
+        await callbacks[0](rt.hass)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+    await ns['unload'](rt.hass, rt.entry)
+    assert tasks[0].done() and tasks[0].cancelled()
+    assert not callbacks and not views
+    assert not rt.hass.data['power_sync_support']
+    assert all(candidate.closed for candidate in attempts)
+    assert not rt.hass.data.get('power_sync_support_pending')
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('failure', [TimeoutError, ValueError])
+async def test_support_startup_recovery_is_bounded_and_logs_no_secrets(runtime, monkeypatch, caplog, failure):
+    rt, ns, callbacks, tasks, attempts, views = startup_retry_harness(runtime, monkeypatch)
+    with pytest.raises(TimeoutError):
+        await ns['setup'](rt.hass, rt.entry)
+    await asyncio.sleep(0)
+
+    async def failed_storage(self):
+        raise failure('CANARY_PRIVATE_STORAGE_PATH')
+
+    monkeypatch.setattr(MemoryStore, 'async_load', failed_storage)
+    await callbacks[0](rt.hass)
+    await asyncio.wait_for(tasks[0], 1)
+    assert len(attempts) == 2 and len(tasks) == 1
+    assert all(candidate.closed and candidate.session.key is None for candidate in attempts)
+    assert not views and not callbacks
+    assert not rt.hass.data['power_sync_support']
+    assert not rt.hass.data.get('power_sync_support_pending')
+    assert failure.__name__ in caplog.text
+    assert 'CANARY_PRIVATE_STORAGE_PATH' not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_non_timeout_support_setup_failure_does_not_retry(runtime):
+    rt, _, _, ns, _ = runtime
+    rt.hass.data['power_sync_support'].clear()
+    ns['SupportRuntime'] = lambda hass, entry: rt
+    rt.store.async_load = AsyncMock(side_effect=ValueError('invalid storage'))
+    with pytest.raises(ValueError):
+        await ns['setup'](rt.hass, rt.entry)
+    assert rt.closed and not rt.hass.data['power_sync_support']
+    assert not rt.hass.data.get('power_sync_support_pending')
 
 
 def test_existing_event_observer_filters_entry_and_never_copies_identifiers(runtime):
@@ -511,7 +670,8 @@ def test_diagnostic_cleanup_does_not_delay_existing_hardware_unload():
     tree=ast.parse(source)
     node=next(n for n in tree.body if isinstance(n,ast.AsyncFunctionDef) and n.name=='async_unload_entry')
     awaits=sorted((n for n in ast.walk(node) if isinstance(n,ast.Await)),key=lambda n:n.lineno)
-    assert ast.unparse(awaits[0].value).startswith('_stop_tesla_native_rate(')
+    assert ast.unparse(awaits[0].value).startswith('_stop_ev_auto_recovery(')
+    assert ast.unparse(awaits[1].value).startswith('_stop_tesla_native_rate(')
     close=next(n for n in ast.walk(node) if isinstance(n,ast.Call) and ast.unparse(n.func)=='support_runtime.session.close')
     assert close.lineno<awaits[0].lineno
     platform=next(n for n in awaits if 'async_unload_platforms' in ast.unparse(n.value))
@@ -557,3 +717,20 @@ async def test_tesla_preparation_is_projected_and_scoped_without_device_reads(ru
     count = len(rt.recorder.dump())
     rt.observe_preparation(raw)
     assert len(rt.recorder.dump()) == count
+
+
+@pytest.mark.asyncio
+async def test_start_full_day_history_survives_clock_advance(runtime, monkeypatch):
+    rt, *_ = runtime
+    base = 1_800_000_000.0
+    monkeypatch.setattr(time, 'time', lambda: base)
+    rt.session.wall = lambda: base + .01
+    async def request(path, body=None, **kwargs):
+        if path.endswith('/policy'):
+            return {'disclosure': 'test', 'policy_digest': 'a' * 64}
+        assert path.endswith('/register')
+        assert body['scope']['history_start'] == base + .01 - 86400
+        raise OSError('registration reached')
+    rt.request = request
+    with pytest.raises(OSError, match='registration reached'):
+        await rt.start('owner', {'categories': ['system'], 'history_seconds': 86400})

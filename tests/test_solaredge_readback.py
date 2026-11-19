@@ -726,6 +726,90 @@ def test_readback_distinguishes_busy_unavailable_and_timeout(
     hass.services.async_call.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    "change",
+    [None, "unloaded", "runtime_replaced", "entry_replaced", "wrong_hub", "hub_rebound"],
+)
+def test_readback_uses_bound_v4_config_entry_runtime(monkeypatch, change):
+    from unittest.mock import AsyncMock
+
+    from power_sync.inverters.solaredge_readback import async_read_storage_result
+
+    coordinator = _Coordinator()
+    inverter = _V4Inverter("SE5000_SERIAL-A")
+    hub = _Hub([inverter])
+    hub.entry_id = "entry-b" if change == "wrong_hub" else "entry-a"
+    coordinator._hub = hub
+    upstream_entry = types.SimpleNamespace(
+        domain="solaredge_modbus_multi",
+        state=types.SimpleNamespace(value="loaded"),
+        runtime_data=types.SimpleNamespace(hub=hub, coordinator=coordinator),
+    )
+    entries = {"entry-a": upstream_entry}
+    hass = types.SimpleNamespace(
+        data={},
+        config_entries=types.SimpleNamespace(async_get_entry=entries.get),
+        services=types.SimpleNamespace(async_call=AsyncMock()),
+    )
+    _install_ha_modules(
+        monkeypatch,
+        _Entry(),
+        _Device({"entry-a"}, {("solaredge_modbus_multi", "SE5000_SERIAL-A")}),
+    )
+    refresh = coordinator.async_request_refresh
+
+    async def refresh_and_change_binding():
+        await refresh()
+        inverter.storage_control_data.backup_reserve = 23.0
+        if change == "unloaded":
+            upstream_entry.state.value = "not_loaded"
+        elif change == "runtime_replaced":
+            upstream_entry.runtime_data = types.SimpleNamespace(
+                hub=hub, coordinator=coordinator
+            )
+        elif change == "entry_replaced":
+            entries["entry-a"] = types.SimpleNamespace(**vars(upstream_entry))
+        elif change == "hub_rebound":
+            hub.entry_id = "entry-b"
+
+    coordinator.async_request_refresh = refresh_and_change_binding
+    result = asyncio.run(async_read_storage_result(hass, "select.command"))
+    assert coordinator.refreshes == (0 if change == "wrong_hub" else 1)
+    assert coordinator.listeners == []
+    hass.services.async_call.assert_not_called()
+    if change:
+        assert result.state is None
+        assert result.reason == (
+            "readback_unavailable" if change == "unloaded" else "identity_mismatch"
+        )
+    else:
+        assert result.reason == "fresh_upstream_storage_poll"
+        assert result.state["backup_reserve"] == 23.0
+
+
+def test_readback_uses_legacy_runtime_with_loaded_config_entry(monkeypatch):
+    from power_sync.inverters.solaredge_readback import async_read_storage_result
+
+    coordinator = _Coordinator()
+    hass = _hass(coordinator, [_Inverter("SE5000_SERIAL-A")])
+    entries = {
+        "entry-a": types.SimpleNamespace(
+            domain="solaredge_modbus_multi", state=types.SimpleNamespace(value="loaded")
+        ),
+    }
+    hass.config_entries = types.SimpleNamespace(async_get_entry=entries.get)
+    _install_ha_modules(
+        monkeypatch,
+        _Entry(),
+        _Device({"entry-a"}, {("solaredge_modbus_multi", "SE5000_SERIAL-A")}),
+    )
+
+    result = asyncio.run(async_read_storage_result(hass, "select.command"))
+
+    assert result.reason == "fresh_upstream_storage_poll"
+    assert coordinator.refreshes == 1
+
+
 @pytest.mark.parametrize("mode", [1, 4])
 @pytest.mark.parametrize(
     "field,value",

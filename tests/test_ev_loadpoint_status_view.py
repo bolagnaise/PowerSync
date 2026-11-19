@@ -7,6 +7,113 @@ import math
 from pathlib import Path
 from types import SimpleNamespace
 
+import importlib.util
+
+import pytest
+
+
+def _zaptec_display_projection(byd_vehicles, other_observations=(), stored_data=None,
+                               mode="charging"):
+    """Execute the shipped display enrichment without HA or device commands."""
+    method = _get_method()
+    body = method.body[1].body
+    # Use the real observation-to-display block before canonical normalization.
+    start = next(i for i, node in enumerate(body) if isinstance(node, ast.If)
+                 and ast.unparse(node.test) == 'zaptec_cached')
+    end = next(i for i, node in enumerate(body) if isinstance(node, ast.If)
+               and ast.unparse(node.test) == 'observed_vehicle_sink is not None')
+    blocks = [node for node in body[start:end]
+              if isinstance(node, ast.If) and ast.unparse(node.test) == 'zaptec_cached']
+    spec = importlib.util.spec_from_file_location(
+        'zaptec_display_test', ROOT / 'custom_components/power_sync/ev_display.py')
+    display = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(display)
+    spec = importlib.util.spec_from_file_location(
+        'zaptec_profiles_test', ROOT / 'custom_components/power_sync/automations/ev_loadpoint_profiles.py')
+    profiles = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(profiles)
+
+    stored_data = stored_data or {}
+    namespace = {
+        'zaptec_cached': {'charger_operation_mode': mode, 'total_charge_power_w': 10700 if mode == 'charging' else 0},
+        'observed_vehicles': list(other_observations),
+        'stored_data': stored_data,
+        'vehicle_configs': stored_data.get('vehicle_charging_configs', []),
+        'self': SimpleNamespace(_hass=object()),
+        'EVVehiclesView': lambda hass: SimpleNamespace(_get_byd_vehicles=lambda: byd_vehicles),
+        'resolve_zaptec_display_soc': getattr(display, 'resolve_zaptec_display_soc', None),
+        'effective_profile': profiles.effective_profile,
+        'profiles_for_loadpoint': profiles.profiles_for_loadpoint,
+    }
+    module = ast.Module(body=blocks, type_ignores=[])
+    ast.fix_missing_locations(module)
+    exec(compile(module, str(INIT_PATH), 'exec'), namespace)
+    return next(row for row in namespace['observed_vehicles'] if row.get('charger_type') == 'zaptec')
+
+
+def test_zaptec_energy_flow_receives_available_byd_percentage():
+    row = _zaptec_display_projection([
+        {'vehicle_id': 'byd_device_a', 'battery_level': 70, 'is_plugged_in': True},
+    ])
+    assert row.get('ev_soc') == 70
+    assert row['charger_id'] == 'zaptec_standalone'
+    assert row['ev_power_kw'] == 10.7
+
+
+@pytest.mark.parametrize('mode', ['connected_waiting', 'connected_finished', 'disconnected'])
+def test_zaptec_byd_percentage_follows_physical_connection(mode):
+    row = _zaptec_display_projection([
+        {'vehicle_id': 'byd_device_a', 'battery_level': 0, 'is_plugged_in': True},
+    ], mode=mode)
+    assert row.get('ev_soc') == (None if mode == 'disconnected' else 0)
+
+
+@pytest.mark.parametrize('soc', [None, 'unknown', 'unavailable', -1, 101, True, float('nan'), float('inf')])
+def test_zaptec_byd_display_keeps_invalid_soc_unknown(soc):
+    assert _zaptec_display_projection([
+        {'vehicle_id': 'byd_device_a', 'battery_level': soc, 'is_plugged_in': True},
+    ]).get('ev_soc') is None
+
+
+def test_zaptec_connection_can_supply_presence_when_byd_plug_sensor_is_off():
+    assert _zaptec_display_projection([
+        {'vehicle_id': 'byd_device_a', 'battery_level': 70, 'is_plugged_in': False},
+    ]).get('ev_soc') == 70
+
+
+@pytest.mark.parametrize('other_type', ['tesla', 'generic', 'ocpp', 'sigenergy'])
+def test_zaptec_byd_display_does_not_borrow_soc_across_loadpoints(other_type):
+    assert _zaptec_display_projection([
+        {'vehicle_id': 'byd_device_a', 'battery_level': 70, 'is_plugged_in': True},
+    ], [{'vehicle_id': 'other_car', 'charger_type': other_type}]).get('ev_soc') is None
+
+
+@pytest.mark.parametrize('selected', [None, 'byd_device_a', 'byd_device_b', 'byd_missing'])
+def test_zaptec_shared_profiles_use_only_the_explicitly_selected_byd(selected):
+    vehicles = [
+        {'vehicle_id': 'byd_device_a', 'battery_level': 70, 'is_plugged_in': True},
+        {'vehicle_id': 'byd_device_b', 'battery_level': 82, 'is_plugged_in': True},
+    ]
+    stored_data = {
+        'vehicle_charging_configs': [
+            {'vehicle_id': 'byd_device_a', 'charger_type': 'zaptec'},
+            {'vehicle_id': 'byd_device_b', 'charger_type': 'zaptec'},
+        ],
+        'connected_ev_by_loadpoint': {'zaptec_standalone': selected},
+    }
+    row = _zaptec_display_projection(vehicles, stored_data=stored_data)
+    expected = {'byd_device_a': 70, 'byd_device_b': 82}.get(selected)
+    assert row.get('ev_soc') == expected
+    assert row['charger_id'] == 'zaptec_standalone'
+
+
+def test_zaptec_display_does_not_guess_when_second_byd_soc_is_unavailable():
+    row = _zaptec_display_projection([
+        {'vehicle_id': 'byd_device_a', 'battery_level': 70, 'is_plugged_in': True},
+        {'vehicle_id': 'byd_device_b', 'battery_level': None, 'is_plugged_in': False},
+    ])
+    assert row.get('ev_soc') is None
+
 
 ROOT = Path(__file__).resolve().parent.parent
 INIT_PATH = ROOT / "custom_components" / "power_sync" / "__init__.py"

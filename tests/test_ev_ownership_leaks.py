@@ -39,6 +39,7 @@ import asyncio
 import importlib
 import sys
 import types
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -1147,6 +1148,63 @@ def test_solar_surplus_start_respects_matching_manual_stop_hold(monkeypatch):
 
     assert result is True
     assert actions._dynamic_ev_state["entry-1"]["generic_ev"]["active"] is True
+
+
+@pytest.mark.asyncio
+async def test_tesla_manual_stop_fences_automatic_restart_before_command(monkeypatch):
+    hass = _two_fleet_vehicle_hass()
+    entry = _both_provider_entry("primary_ev_bridge")
+    store = hass.data["power_sync"][entry.entry_id]["automation_store"]
+    on_disk = {}
+    actions._dynamic_ev_state.clear()
+    _install_ev_planner_stub(monkeypatch, plugged_in=True)
+
+    async def save():
+        on_disk.update(deepcopy(store._data))
+
+    async def stop(*_args):
+        # Reload at the instant the hardware receives Stop. An in-memory
+        # hold or a save queued after this call cannot survive that restart.
+        recovered = _two_fleet_vehicle_hass()
+        ev_ownership.restore_ev_runtime_state(recovered, entry, SimpleNamespace(_data=on_disk))
+        assert ev_ownership.manual_stop_hold_reason(recovered, entry, VIN_B) is None
+        assert not await actions._action_start_ev_charging_dynamic(recovered, entry, {
+            "charger_type": "tesla", "vehicle_vin": VIN_A,
+            "dynamic_mode": "solar_surplus", "owner_mode": "solar_surplus",
+        })
+        return True
+
+    store.async_save = save
+    monkeypatch.setattr(actions, "_resolve_tesla_active_charger_capability", AsyncMock(return_value={
+        "max_charge_amps": 32, "max_charge_amps_source": "configured", "voltage": 240,
+        "phases": 1, "association_known": False, "capability_known": False,
+    }))
+    actuator = AsyncMock(side_effect=stop)
+    monkeypatch.setattr(actions, "_action_stop_ev_charging", actuator)
+    assert await actions._execute_single_action(hass, entry, "stop_ev_charging", {
+        "charger_type": "tesla", "vehicle_vin": VIN_A,
+    })
+    actuator.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_tesla_manual_stop_can_proceed_when_restart_hold_save_stalls(monkeypatch):
+    hass = _two_fleet_vehicle_hass()
+    entry = _both_provider_entry("primary_ev_bridge")
+    store = hass.data["power_sync"][entry.entry_id]["automation_store"]
+
+    async def stalled_save():
+        await asyncio.Event().wait()
+
+    store.async_save = stalled_save
+    monkeypatch.setattr(ev_ownership, "MANUAL_STOP_SAVE_TIMEOUT_SECONDS", 0)
+    actuator = AsyncMock(return_value=True)
+    monkeypatch.setattr(actions, "_action_stop_ev_charging", actuator)
+    assert await actions._execute_single_action(hass, entry, "stop_ev_charging", {
+        "charger_type": "tesla", "vehicle_vin": VIN_A,
+    })
+    actuator.assert_awaited_once()
+    assert ev_ownership.manual_stop_hold_reason(hass, entry, VIN_A) is not None
 
 
 def test_manual_solar_surplus_start_bypasses_matching_manual_stop_hold(monkeypatch):

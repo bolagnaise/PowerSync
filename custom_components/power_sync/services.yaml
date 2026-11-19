@@ -870,6 +870,53 @@ recover_max_backup:
       selector:
         boolean:
 
+recover_powerwall_local_settings:
+  name: Recover Powerwall local settings under supervision
+  description: >-
+    Administrator-only recovery for an old unresolved local full-configuration
+    request. Inspect first and use the returned recovery revision to resume.
+    Resume adopts the current native configuration without a device command.
+    The original request and restore evidence are retained as unknown: that
+    full configuration may still overwrite newer settings, including site
+    limits. Both acknowledgements are required. New uncertain writes block again.
+  fields:
+    entry_id:
+      name: PowerSync entry ID
+      required: true
+      selector:
+        text:
+    operation:
+      name: Recovery operation
+      default: inspect
+      selector:
+        select:
+          options:
+            - inspect
+            - resume
+    site_id:
+      name: Site ID returned by inspection
+      selector:
+        text:
+    incident_id:
+      name: Incident ID returned by inspection
+      selector:
+        text:
+    expected_recovery_revision:
+      name: Recovery revision returned by inspection
+      selector:
+        text:
+    acknowledge:
+      name: Adopt current settings under supervision
+      default: false
+      selector:
+        boolean:
+    accept_unknown_full_configuration_write:
+      name: Accept the earlier full configuration may still apply
+      description: The unresolved request may overwrite newer settings, including unrelated permissions and site limits.
+      default: false
+      selector:
+        boolean:
+
 resume_powerwall_settings:
   name: Resume Powerwall settings through cloud
   description: >-

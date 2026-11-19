@@ -48,6 +48,9 @@ def snapshot(raw: dict, *, captured_at: float, version: str) -> dict:
     schedule = [project_fields(slot) for slot in raw.get("schedule", [])[:576] if type(slot) is dict]
     optimizer = project_fields(raw.get("optimizer", {}))
     force = project_fields(raw.get("force", {}))
+    guard = raw.get("force", {}).get("native_site_limit_guard")
+    if type(guard) is str and guard in CONTRACT["string_fields"]["native_site_limit_guard"]:
+        force["native_site_limit_guard"] = guard
     # The envelope is deliberately explicit that cached state is not a command receipt.
     result = {"schema_version": 1, "captured_at": captured_at, "source": "ha_cache",
         "coherence": "mixed", "installation_assurance": "self_asserted",

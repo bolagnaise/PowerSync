@@ -250,6 +250,56 @@ def test_ocpp_status_endpoint_exposes_shared_soc_without_generic_charger():
     assert chargers[0]["is_vehicle_connected"] is True
 
 
+@pytest.mark.parametrize("byd_plug", ["on", "off", "unavailable"])
+def test_byd_registry_soc_reaches_zaptec_canonical_display_and_sensors(monkeypatch, byd_plug):
+    """Exercise local BYD discovery through the actual display API route."""
+    import json
+    power_sync = _power_sync_module()
+    from power_sync.ev_display import display_snapshot_to_sensor_data, display_snapshot_to_widgets
+    monkeypatch.setattr(power_sync, "_configured_sigenergy_charger_state", lambda entry: None)
+
+    device_id = "byd-device-display"
+    states = [
+        _State("sensor.byd_test_battery_level", "70"),
+        _State("binary_sensor.byd_test_charger_connected", byd_plug),
+    ]
+    hass = _Hass(
+        states,
+        {state.entity_id: _entity(state.entity_id, device_id) for state in states},
+        {device_id: SimpleNamespace(
+            id=device_id, name="BYD Test", model="Test EV",
+            identifiers={("byd_vehicle", "provider-test")},
+        )},
+    )
+    hass.config_entries.async_domains = lambda: ["byd_vehicle"]
+    entry = SimpleNamespace(entry_id="byd-display-test", data={}, options={})
+    hass.data["power_sync"][entry.entry_id] = {
+        "zaptec_cached_state": {
+            "charger_operation_mode": "charging",
+            "total_charge_power_w": 10700,
+        },
+    }
+    from power_sync.automations.actions import _dynamic_ev_state
+    runtime_state = {"current_soc": 45, "params": {"charger_type": "zaptec"}}
+    monkeypatch.setitem(_dynamic_ev_state, entry.entry_id, {"zaptec_standalone": runtime_state})
+    response = asyncio.run(power_sync.EVLoadpointStatusView(hass, entry)._async_build_response(None))
+    payload = json.loads(response.body)
+    assert payload["success"] is True, payload
+    assert len(payload["loadpoints"]) == 1
+    row = payload["loadpoints"][0]
+    assert row["loadpoint_id"] == "zaptec_standalone"
+    assert row["soc"] == 70
+    assert row["current_power_kw"] == 10.7
+    assert display_snapshot_to_sensor_data(payload)["ev_soc"] == 70
+    assert display_snapshot_to_widgets(payload)[0]["current_soc"] == 70
+    hass.states.get("sensor.byd_test_battery_level").state = "unavailable"
+    response = asyncio.run(power_sync.EVLoadpointStatusView(hass, entry)._async_build_response(None))
+    payload = json.loads(response.body)
+    assert payload["success"] is True, payload
+    assert payload["loadpoints"][0]["soc"] is None
+    assert runtime_state["current_soc"] == 45  # Display reads never change session state.
+
+
 def _fake_site_snapshot(hass) -> dict:
     """Mirror ``EVLoadpointStatusView._site_snapshot`` for the stub views.
 
@@ -1033,6 +1083,75 @@ def test_quarantined_ble_cannot_renew_telemetry_from_soc_or_connection(monkeypat
     assert row["telemetry_state"] == "offline"
     assert row["observed_at"] is None
     assert row["current_power_kw"] is None
+
+
+@pytest.mark.parametrize("evidence", [
+    "fresh", "stale", "mismatched", "wrong_bridge", "reconnected",
+    "no_packet", "disconnected", "stopped", "sample_skew",
+])
+def test_held_ble_counts_only_current_paired_charging_power(monkeypatch, evidence):
+    """Fresh native charging samples can describe load while Start stays held."""
+    import json
+    from unittest.mock import AsyncMock
+
+    power_sync = _power_sync_module()
+    monkeypatch.setattr(power_sync, "_read_sigenergy_charger_state_for_entry", AsyncMock(return_value=None))
+    from power_sync.automations.loadpoint_status import build_loadpoint_status
+    from power_sync.ev_load import HomeLoadBasis, aggregate_ev_load, normalize_home_load
+
+    recovery = importlib.import_module("power_sync.tesla_ev_recovery")
+    monkeypatch.setattr(recovery, "ble_quarantined", lambda *_args: True)
+    now = datetime.now(timezone.utc)
+    original = now - timedelta(minutes=12)
+    sample_at = now - timedelta(seconds=12)
+    sample_at = original if evidence == "stale" else sample_at
+    power_at = sample_at - timedelta(seconds=30) if evidence == "sample_skew" else sample_at
+    state = "Stopped" if evidence == "stopped" else "Charging"
+    power = 0 if evidence == "stopped" else 3
+    states = [
+        _State("switch.car_charger", "on", last_updated=original),
+        _State("binary_sensor.car_ble_status", "off" if evidence == "disconnected" else "on",
+               last_updated=now if evidence == "reconnected" else original),
+        _State("sensor.car_charging_state", state, last_updated=original),
+        _State("sensor.car_charge_power", str(power), {"unit_of_measurement": "kW"},
+               last_updated=original),
+        _State("sensor.car_charging_state_sample", json.dumps({
+            "v": 1, "t": sample_at.isoformat(), "x": state,
+        }), last_updated=now),
+    ]
+    if evidence != "no_packet":
+        states.append(_State("sensor.car_charge_power_sample", json.dumps({
+            "v": 1, "t": power_at.isoformat(), "x": 2 if evidence == "mismatched" else power,
+        }), last_updated=now))
+    registry = {
+        state.entity_id: SimpleNamespace(
+            entity_id=state.entity_id, platform="esphome", config_entry_id="bridge-entry",
+            device_id="other-car" if evidence == "wrong_bridge" and state.entity_id.endswith("power_sample") else "car",
+            disabled_by=None,
+        )
+        for state in states
+    }
+    hass = _Hass(states, registry_entities=registry)
+    hass.entity_registry.async_get = registry.get
+    entry = SimpleNamespace(entry_id="entry-1", data={}, options={
+        "ev_provider": "tesla_ble", "tesla_ble_entity_prefix": "car",
+    })
+
+    vehicle = power_sync._get_ev_vehicles_status(hass, entry)[0]
+    rows = build_loadpoint_status({}, [vehicle])
+    observations = asyncio.run(power_sync._get_ev_load_observations(hass, entry))
+    load = normalize_home_load(4.9, HomeLoadBasis.INCLUDES_EV, aggregate_ev_load(observations))
+    if evidence == "fresh":
+        assert rows[0]["current_power_kw"] == 3.0
+        assert rows[0]["actual_charging"] is True
+        assert load.non_ev_home_load_kw == pytest.approx(1.9)
+    else:
+        assert all(row["current_power_kw"] is None for row in rows)
+        assert load.non_ev_home_load_kw is None
+    control = power_sync._get_ev_vehicles_status(hass, entry, include_control_evidence=True)[0]
+    assert control["_boost_charging_state_evidence"]["known"] is False
+    assert control["power_available"] is False
+    assert recovery.ble_quarantined(hass, "car") is True
 
 
 @pytest.mark.parametrize("reverse", [False, True])
@@ -3043,6 +3162,40 @@ def test_ev_vehicle_status_prefers_wall_connector_power_for_single_charging_tesl
         "site_presence": "home",
     }]
     assert power_sync._get_external_tesla_ev_power_kw(hass, _Entry()) == 3.4
+
+
+@pytest.mark.parametrize("matching_vehicle", [True, False])
+def test_wall_connector_with_explicit_vehicle_keeps_exact_attribution(matching_vehicle):
+    now = datetime.now(timezone.utc)
+    vehicle_id = "5YJTEST0000000001"
+    hass = _tesla_hass([
+        _State("sensor.primary_ev_charger_power", "4.0",
+               {"unit_of_measurement": "kW"}, last_updated=now - timedelta(seconds=5)),
+        _State("sensor.primary_ev_charging", "charging", last_updated=now),
+        _State("device_tracker.primary_ev_location", "home", last_updated=now),
+    ])
+    hass.data["power_sync"]["entry-1"]["tesla_coordinator"] = SimpleNamespace(
+        data={
+            "last_update": now,
+            "wall_connectors_raw": [{
+                "wall_connector_id": "garage",
+                "wall_connector_state": 11,
+                "wall_connector_power": 7200,
+                "vin": vehicle_id if matching_vehicle else "LGXTEST0000000002",
+            }],
+        }
+    )
+    power_sync = _power_sync_module()
+    vehicles = power_sync._get_ev_vehicles_status(hass, _Entry())
+    loadpoint_status = importlib.import_module("power_sync.automations.loadpoint_status")
+
+    expected_power = {vehicle_id: 7.2} if matching_vehicle else {
+        vehicle_id: 4.0,
+        "wall_connector_garage": 7.2,
+    }
+    assert {row["vehicle_id"]: row["ev_power_kw"] for row in vehicles} == expected_power
+    loadpoints = loadpoint_status.build_loadpoint_status({}, vehicles)
+    assert {row["vehicle_id"]: row["current_power_kw"] for row in loadpoints} == expected_power
 
 
 @pytest.mark.parametrize("vehicle_current", ["0", "39.1"])

@@ -520,7 +520,9 @@ async def test_unknown_start_retains_hazard_without_fresh_physical_draw(modern, 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cloud_recovery", [False, True])
-async def test_unknown_start_journal_blocks_repeated_commands_and_paid_reads(monkeypatch, cloud_recovery):
+async def test_unknown_start_journal_blocks_repeated_commands_and_paid_reads(
+    monkeypatch, cloud_recovery, caplog,
+):
     """An unresolved command cannot spend again through a repeated adapter call."""
     hass, entry = _both_native_action_harness()
     _pin_registry_bindings(monkeypatch, hass)
@@ -590,6 +592,7 @@ async def test_unknown_start_journal_blocks_repeated_commands_and_paid_reads(mon
              "transport_recovery_pending": True,
              "last_physical_restart_attempt_at": datetime.now().astimezone()}
     monkeypatch.setitem(actions._dynamic_ev_state, entry.entry_id, {VIN: state})
+    caplog.set_level("DEBUG", logger=actions.__name__)
     for retry in range(1, 4):
         assert not actions._tesla_dynamic_restart_due(state)
         state["last_physical_restart_attempt_at"] -= timedelta(seconds=300)
@@ -600,6 +603,11 @@ async def test_unknown_start_journal_blocks_repeated_commands_and_paid_reads(mon
         assert submitted == [target.entity_id]
         assert state["params"]["_boost_start_deadline"] == params["_boost_start_deadline"]
     assert hass.services.calls == []
+    refusals = [
+        record.getMessage() for record in caplog.records
+        if record.getMessage().startswith("Tesla Start withheld:")
+    ]
+    assert refusals == ["Tesla Start withheld: route_blocked (source_charge_timestamp=None)"] * 3
 
 
 @pytest.mark.asyncio

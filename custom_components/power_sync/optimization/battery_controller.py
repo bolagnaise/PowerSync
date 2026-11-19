@@ -24,6 +24,7 @@ from ..powerwall_local.native_max_charge import NativeMaxRestorePending
 _LOGGER = logging.getLogger(__name__)
 
 TESLA_SITE_INFO_MAX_AGE_SECONDS = 900
+_TESLA_IDLE_RESERVE_TOKEN = object()
 
 
 class ReserveTrust(enum.Enum):
@@ -295,6 +296,25 @@ class BatteryControllerWrapper:
         except Exception as e:
             _LOGGER.error(f"Set self-consumption mode failed: {e}", exc_info=True)
             return False
+
+    @optimizer_command
+    async def set_tesla_idle_hold(self, reserve: int) -> bool:
+        """Enter self-consumption without releasing the optimizer hold reserve."""
+        try:
+            await self.hass.services.async_call(
+                "power_sync",
+                "set_self_consumption",
+                optimizer_service_data(self, {
+                    "source": "optimizer",
+                    "_tesla_idle_reserve": reserve,
+                    "_tesla_idle_reserve_token": _TESLA_IDLE_RESERVE_TOKEN,
+                }),
+                blocking=True,
+            )
+        except Exception:
+            _LOGGER.exception("Tesla optimizer IDLE reserve transition failed")
+            return False
+        return True
 
     @optimizer_command
     async def set_autonomous_mode(self) -> bool:

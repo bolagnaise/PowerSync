@@ -34,31 +34,40 @@ COVAU_STATE_TIMEZONES = {
 }
 
 SUPPORTED_SOLARMAX_PLANS: dict[str, dict[str, str]] = {
-    "COV1117610MRE2@EME": {
+    "COV1117610MRE3@EME": {
         "distributor": "Ausgrid",
         "state": "NSW",
         "display_name": "SolarMax NSW Ausgrid Residential TOU",
     },
-    "COV1117611MRE2@EME": {
+    "COV1117611MRE3@EME": {
         "distributor": "Endeavour Energy",
         "state": "NSW",
         "display_name": "SolarMax NSW Endeavour Residential TOU",
     },
-    "COV1117612MRE2@EME": {
+    "COV1117612MRE3@EME": {
         "distributor": "Essential Energy",
         "state": "NSW",
         "display_name": "SolarMax NSW Essential Residential TOU",
     },
-    "COV1117614MRE2@EME": {
+    "COV1117614MRE3@EME": {
         "distributor": "Energex",
         "state": "QLD",
         "display_name": "SolarMax QLD Energex Residential TOU",
     },
-    "COV1117616MRE2@EME": {
+    "COV1117616MRE3@EME": {
         "distributor": "SA Power Networks",
         "state": "SA",
         "display_name": "SolarMax SA Residential TOU",
     },
+}
+
+# Retired IDs still identify the stored, immutable snapshots of existing sites.
+RETIRED_SOLARMAX_PLAN_IDS = {
+    "COV1117610MRE2@EME": "COV1117610MRE3@EME",
+    "COV1117611MRE2@EME": "COV1117611MRE3@EME",
+    "COV1117612MRE2@EME": "COV1117612MRE3@EME",
+    "COV1117614MRE2@EME": "COV1117614MRE3@EME",
+    "COV1117616MRE2@EME": "COV1117616MRE3@EME",
 }
 
 
@@ -204,7 +213,10 @@ def normalize_covau_plan(
     """Normalize an AER/CDR snapshot using the customer's local tariff clock."""
     data = raw_response.get("data") or {}
     plan_id = str(data.get("planId") or "")
-    if plan_id != expected_plan_id or plan_id not in SUPPORTED_SOLARMAX_PLANS:
+    metadata = SUPPORTED_SOLARMAX_PLANS.get(
+        RETIRED_SOLARMAX_PLAN_IDS.get(plan_id, plan_id)
+    )
+    if plan_id != expected_plan_id or metadata is None:
         raise ValueError("CDR response did not match the selected SolarMax plan")
     contract = data.get("electricityContract") or {}
     source_timezone_token = str(contract.get("timeZone") or "")
@@ -260,7 +272,6 @@ def normalize_covau_plan(
     if premium_total < export_base:
         raise ValueError("SolarMax premium export price is below its base rate")
 
-    metadata = SUPPORTED_SOLARMAX_PLANS[plan_id]
     effective_timezone = _local_timezone_token(
         timezone_token,
         metadata["state"],
@@ -404,6 +415,7 @@ def covau_price_series(
     import_bucket = ledger.bucket(COVAU_IMPORT_RULE_ID)
     export_bucket = ledger.bucket(COVAU_EXPORT_RULE_ID)
     bonus_enabled = ledger.state.confidence != "unknown"
+    current_day = ledger.state.tariff_day
     imports: list[float] = []
     exports: list[float] = []
     import_bonus: list[float] = []
@@ -413,14 +425,23 @@ def covau_price_series(
         base_import = import_price_c_per_kwh(snapshot, timestamp) / 100.0
         imports.append(base_import)
         exports.append(snapshot.export_base_c_per_kwh / 100.0)
+        future_day = (
+            current_day is not None
+            and tariff_datetime(timestamp, snapshot.timezone_token).date().isoformat()
+            > current_day
+        )
         import_bonus.append(
             import_rule.bonus_price_c_per_kwh / 100.0
-            if bonus_enabled and import_bucket.remaining_kwh > 1e-9 and import_rule.contains(timestamp)
+            if bonus_enabled
+            and (future_day or import_bucket.remaining_kwh > 1e-9)
+            and import_rule.contains(timestamp)
             else 0.0
         )
         export_bonus.append(
             export_rule.bonus_price_c_per_kwh / 100.0
-            if bonus_enabled and export_bucket.remaining_kwh > 1e-9 and export_rule.contains(timestamp)
+            if bonus_enabled
+            and (future_day or export_bucket.remaining_kwh > 1e-9)
+            and export_rule.contains(timestamp)
             else 0.0
         )
     return (
@@ -479,6 +500,22 @@ def covau_tariff_schedule(
 
     import_remaining = ledger.remaining_kwh(COVAU_IMPORT_RULE_ID)
     export_remaining = ledger.remaining_kwh(COVAU_EXPORT_RULE_ID)
+    unavailable_quota_windows = {}
+    for direction, start, end, remaining in (
+        ("import", snapshot.free_import_start, snapshot.free_import_end, import_remaining),
+        ("export", snapshot.premium_export_start, snapshot.premium_export_end, export_remaining),
+    ):
+        if ledger.state.confidence == "unknown":
+            reason = "unverified"
+        elif remaining <= 1e-9:
+            reason = "exhausted"
+        else:
+            continue
+        unavailable_quota_windows[direction] = {
+            "start": start,
+            "end": end,
+            "reason": reason,
+        }
     refresh_key = ":".join(
         (
             str(ledger.state.tariff_day or local_now.date().isoformat()),
@@ -496,6 +533,7 @@ def covau_tariff_schedule(
         "plan_name": snapshot.display_name,
         "price_source": "covau_aer_cdr",
         "last_sync": refresh_key,
+        "unavailable_quota_windows": unavailable_quota_windows,
     }
 
 

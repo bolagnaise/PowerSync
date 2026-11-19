@@ -9,6 +9,7 @@ import types
 from zoneinfo import ZoneInfo
 
 import pytest
+import voluptuous as vol
 
 ROOT = Path(__file__).resolve().parents[1]
 TEST_PACKAGE = "powersync_covau_testpkg"
@@ -55,13 +56,15 @@ PLAN_RATES = {
 
 
 def _raw(plan_id: str) -> dict:
-    supply, peak, offpeak = PLAN_RATES[plan_id]
-    metadata = SUPPORTED_SOLARMAX_PLANS[plan_id]
+    supply, peak, offpeak = PLAN_RATES[plan_id.replace("MRE3@", "MRE2@")]
+    metadata = SUPPORTED_SOLARMAX_PLANS[covau.RETIRED_SOLARMAX_PLAN_IDS.get(plan_id, plan_id)]
     return {
         "data": {
             "planId": plan_id,
             "displayName": metadata["display_name"],
-            "effectiveFrom": "2026-07-01T00:00:00.000Z",
+            "effectiveFrom": (
+                "2026-10-01T00:00:00.000Z" if "MRE3@" in plan_id else "2026-07-01T00:00:00.000Z"
+            ),
             "lastUpdated": "2026-06-30T14:06:51.584Z",
             "electricityContract": {
                 "timeZone": "AEST",
@@ -88,10 +91,11 @@ def _raw(plan_id: str) -> dict:
     }
 
 
-@pytest.mark.parametrize("plan_id", PLAN_RATES)
+@pytest.mark.parametrize("plan_id", [*PLAN_RATES, *(plan_id.replace("MRE2@", "MRE3@") for plan_id in PLAN_RATES)])
 def test_all_supported_solarmax_fixtures_normalize_gst_and_quotas(plan_id: str) -> None:
     snapshot = normalize_covau_plan(_raw(plan_id), plan_id)
-    supply, peak, offpeak = (float(value) for value in PLAN_RATES[plan_id])
+    supply, peak, offpeak = (float(value) for value in PLAN_RATES[plan_id.replace("MRE3@", "MRE2@")])
+    assert snapshot.plan_id == plan_id
     assert snapshot.supply_c_per_day == pytest.approx(supply * 110)
     assert snapshot.import_periods[0].c_per_kwh == pytest.approx(peak * 110)
     assert any(period.c_per_kwh == pytest.approx(offpeak * 110) for period in snapshot.import_periods)
@@ -274,7 +278,7 @@ def test_provider_contract_exposes_quota_aware_dashboard_tariff_schedule() -> No
     assert schedule["sell_prices"]["PERIOD_18_00"] == 0.15
 
 
-def test_dashboard_tariff_schedule_hides_bonuses_when_settlement_is_unknown() -> None:
+def test_dashboard_tariff_schedule_explains_unavailable_bonuses() -> None:
     snapshot = normalize_covau_plan(
         _raw("COV1117614MRE2@EME"),
         "COV1117614MRE2@EME",
@@ -296,6 +300,10 @@ def test_dashboard_tariff_schedule_hides_bonuses_when_settlement_is_unknown() ->
 
     assert schedule["buy_prices"]["PERIOD_11_00"] > 0.0
     assert schedule["sell_prices"]["PERIOD_18_00"] == 0.05
+    assert schedule["unavailable_quota_windows"] == {
+        "import": {"start": "11:00", "end": "14:00", "reason": "unverified"},
+        "export": {"start": "18:00", "end": "21:00", "reason": "unverified"},
+    }
 
     exhausted = QuotaLedger(
         covau_quota_rules(snapshot),
@@ -315,14 +323,114 @@ def test_dashboard_tariff_schedule_hides_bonuses_when_settlement_is_unknown() ->
     )
     assert exhausted_schedule["buy_prices"]["PERIOD_11_00"] > 0.0
     assert exhausted_schedule["sell_prices"]["PERIOD_18_00"] == 0.05
+    assert exhausted_schedule["unavailable_quota_windows"] == {
+        "import": {"start": "11:00", "end": "14:00", "reason": "exhausted"},
+        "export": {"start": "18:00", "end": "21:00", "reason": "exhausted"},
+    }
 
 
 def test_postcode_filters_but_keeps_distributor_confirmation_candidates() -> None:
-    assert {item["distributor"] for item in covau_plan_candidates("5000")} == {"SA Power Networks"}
+    assert covau_plan_candidates("5000") == [
+        {"plan_id": "COV1117616MRE3@EME", **SUPPORTED_SOLARMAX_PLANS["COV1117616MRE3@EME"]}
+    ]
     assert len(covau_plan_candidates("2150")) == 3
     assert covau_plan_candidates("3000") == []
     assert len(covau_plan_candidates(None)) == 5
+    assert all(item["plan_id"].endswith("MRE3@EME") for item in covau_plan_candidates(None))
     assert {rule.rule_id for rule in covau_quota_rules(normalize_covau_plan(_raw("COV1117616MRE2@EME"), "COV1117616MRE2@EME"))} == {COVAU_IMPORT_RULE_ID, COVAU_EXPORT_RULE_ID}
+
+
+def _covau_flow_methods(*method_names):
+    source = ROOT / "custom_components" / "power_sync" / "config_flow.py"
+    tree = ast.parse(source.read_text())
+    methods = [
+        node for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name in method_names
+    ]
+    prelude = ast.parse("from __future__ import annotations").body
+    namespace = {
+        name: name.removeprefix("CONF_").lower()
+        for node in methods
+        for child in ast.walk(node)
+        if isinstance(child, ast.Name) and (name := child.id).startswith("CONF_")
+    }
+    namespace.update(
+        vol=vol,
+        covau_plan_candidates=covau_plan_candidates,
+        SUPPORTED_SOLARMAX_PLANS=SUPPORTED_SOLARMAX_PLANS,
+        RETIRED_SOLARMAX_PLAN_IDS=covau.RETIRED_SOLARMAX_PLAN_IDS,
+        SelectSelectorMode=types.SimpleNamespace(DROPDOWN="dropdown"),
+    )
+    for name in (
+        "SelectOptionDict", "SelectSelectorConfig", "EntitySelectorConfig",
+    ):
+        namespace[name] = dict
+    for name in ("SelectSelector", "EntitySelector", "BooleanSelector"):
+        namespace[name] = lambda *_: lambda value: value
+    exec(compile(ast.Module(body=prelude + methods, type_ignores=[]), str(source), "exec"), namespace)
+    return namespace
+
+
+def test_manual_solarmax_rejects_power_sensor_and_keeps_no_meter_fallback():
+    methods = _covau_flow_methods("async_step_covau_plan", "_covau_energy_entity_valid")
+    power_sensor = types.SimpleNamespace(
+        attributes={
+            "state_class": "measurement", "device_class": "power",
+            "unit_of_measurement": "W",
+        },
+        state="200",
+    )
+
+    async def manual_form():
+        return {"step_id": "covau_manual_tariff"}
+
+    flow = types.SimpleNamespace(
+        hass=types.SimpleNamespace(states={"sensor.grid_power": power_sensor}),
+        async_show_form=lambda **kwargs: kwargs,
+        async_step_covau_manual_tariff=manual_form,
+        _auto_detect_covau_energy_entity=lambda _direction: "",
+    )
+    flow._covau_energy_entity_valid = types.MethodType(methods["_covau_energy_entity_valid"], flow)
+    plan_step = methods["async_step_covau_plan"]
+    invalid = asyncio.run(plan_step(flow, {
+        "covau_plan_id": "manual",
+        "covau_import_energy_entity": "sensor.grid_power",
+        "covau_export_energy_entity": "sensor.grid_power",
+    }))
+    assert invalid["step_id"] == "covau_plan"
+    assert invalid["errors"] == {
+        "covau_import_energy_entity": "covau_energy_meter_invalid",
+        "covau_export_energy_entity": "covau_energy_meter_invalid",
+    }
+    assert covau._energy_state_kwh(power_sensor) is None
+    assert asyncio.run(plan_step(flow, {"covau_plan_id": "manual"}))["step_id"] == "covau_manual_tariff"
+
+
+def test_retired_public_plan_can_keep_cached_snapshot_without_substitution():
+    plan_id = "COV1117616MRE2@EME"
+    raw = _raw(plan_id)
+    saved = normalize_covau_plan(raw, plan_id).to_dict()
+    current = {
+        "covau_plan_id": plan_id,
+        "covau_distributor": saved["distributor"],
+        "covau_plan_raw": raw,
+        "covau_plan_snapshot": saved,
+    }
+    options_step = _covau_flow_methods("async_step_covau_options")["async_step_covau_options"]
+    flow = types.SimpleNamespace(
+        _get_option=current.get,
+        _save_connection_and_reload=lambda data: data,
+        async_show_form=lambda **kwargs: kwargs,
+    )
+    user_input = {
+        "covau_plan_id": plan_id,
+        "covau_distributor": saved["distributor"],
+    }
+    result = asyncio.run(options_step(flow, user_input))
+    assert result == {"electricity_provider": "covau", **current, "covau_import_energy_entity": "", "covau_export_energy_entity": ""}
+    refresh = asyncio.run(options_step(flow, {**user_input, "covau_refresh_public_plan": True}))
+    assert refresh["errors"] == {"covau_plan_id": "covau_unsupported_plan"}
 
 
 def test_standalone_runtime_uses_current_read_time_for_unchanged_new_day_totals() -> None:
@@ -451,7 +559,7 @@ def test_covau_startup_contract_and_translations_are_wired() -> None:
         ROOT / "custom_components" / "power_sync" / "config_flow.py"
     ).read_text(encoding="utf-8")
     assert 'refresh_key = "covau_refresh_public_plan"' in config_flow_source
-    assert "not keeping_cached_manual" in config_flow_source
+    assert "not keeping_cached_snapshot" in config_flow_source
 
 
 def test_covau_entry_title_wins_over_legacy_aemo_spike_fallback() -> None:

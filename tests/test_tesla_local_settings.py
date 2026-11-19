@@ -25,6 +25,9 @@ native_grid_charging_reading = load_power_sync_submodule(
 def load_settings_startup(namespace):
     """Run the actual storage prelude and full runtime publication from setup."""
     import builtins
+    recovery = load_power_sync_submodule("powerwall_local.settings_recovery", "settings_startup_recovery_probe")
+    namespace.setdefault("settings_recovery_store_state", recovery.store_state)
+    namespace.setdefault("settings_recovery_identity", recovery.identity_for_entry)
 
     setup = next(node for node in ast.parse((ROOT / "__init__.py").read_text()).body
                  if isinstance(node, ast.AsyncFunctionDef) and node.name == "async_setup_entry")
@@ -1303,13 +1306,15 @@ async def test_full_unload_and_settings_setup_boundary_keep_released_cloud_avail
         async def wait(self, tasks, *, timeout):
             assert timeout == 5.0
             return await real_asyncio.wait(tasks, timeout=.01)
-    ns.update(asyncio=BoundedClock(), _stop_tesla_native_rate=AsyncMock(), PLATFORMS=[],
+    ns.update(asyncio=BoundedClock(), _stop_ev_auto_recovery=AsyncMock(),
+              _stop_tesla_native_rate=AsyncMock(), PLATFORMS=[],
               SERVICE_SYNC_TOU="sync_tou", SERVICE_SYNC_NOW="sync_now",
               cleanup_dynamic_ev_entry=Mock(), STORAGE_VERSION=1, STORAGE_KEY="test",
               _unregister_ev_charging_services=Mock())
     unload = load_function(ROOT / "__init__.py", "async_unload_entry", ns, strip_imports=True)
     try:
         assert await asyncio.wait_for(unload(ns["hass"], ns["entry"]), .5)
+        ns["_stop_ev_auto_recovery"].assert_awaited_once_with(ns["hass"], ns["entry"])
         ns["_unregister_ev_charging_services"].assert_called_once_with(ns["hass"])
         assert not receipt.done()
         # A reload must not rely on an artificially pre-created entry mapping.

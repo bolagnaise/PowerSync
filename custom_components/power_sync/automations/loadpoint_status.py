@@ -611,11 +611,12 @@ def _merge_duplicate_generic_observations(
 def _merge_single_bridge_loadpoint(
     observations: list[Mapping[str, Any]],
 ) -> list[Mapping[str, Any]]:
-    """Collapse a Wall Connector bridge row into the single active Tesla row."""
+    """Collapse an unidentified Wall Connector bridge into the single active Tesla row."""
     bridge_indexes = [
         index for index, observation in enumerate(observations)
         if (
             _is_bridge_loadpoint(observation)
+            and not observation.get("_wall_connector_vehicle_unmatched")
             and (
                 bool(observation.get("is_connected"))
                 or bool(observation.get("is_charging"))

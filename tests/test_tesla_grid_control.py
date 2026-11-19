@@ -7,7 +7,9 @@ import importlib.util
 import math
 import functools
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -94,6 +96,118 @@ def test_missing_fields_never_authorize_a_resend_or_confirm_disable():
     result = asyncio.run(_set_with_retry(session, clock))
     assert not result.applied
     assert result.status is tesla_grid_control.TeslaGridWriteStatus.ACCEPTED_FIELD_ABSENT
+    assert len(session.post_calls) == 1
+
+
+@pytest.mark.parametrize("gateway_disabled", [True, False])
+def test_gateway_can_confirm_an_accepted_disable_when_cloud_omits_field(gateway_disabled):
+    clock = _Clock()
+    session = _DelayedSession(clock, missing=True)
+    gateway_reads = []
+
+    async def confirm_gateway_disabled():
+        gateway_reads.append(clock.now)
+        # The device applies the write before the cloud exposes its state.
+        return gateway_disabled and clock.now >= 18
+
+    result = asyncio.run(_set_with_retry(
+        session, clock, confirm_gateway_disabled=confirm_gateway_disabled,
+    ))
+
+    assert result.applied is gateway_disabled
+    assert gateway_reads == [20]
+    assert len(session.post_calls) == 1
+    if not gateway_disabled:
+        assert result.status is tesla_grid_control.TeslaGridWriteStatus.ACCEPTED_FIELD_ABSENT
+
+
+@pytest.mark.parametrize(
+    ("paired_site", "gateway_din", "site_info", "confirmed", "read"),
+    [
+        ("123", "gateway", {"disallow_charge_from_grid_with_solar_installed": True}, True, True),
+        ("456", "gateway", {"disallow_charge_from_grid_with_solar_installed": True}, False, False),
+        ("123", "wrong", {"disallow_charge_from_grid_with_solar_installed": True}, False, False),
+        ("123", "gateway", {}, False, True),
+    ],
+)
+def test_force_discharge_confirms_only_an_explicit_read_from_the_paired_site(
+    paired_site, gateway_din, site_info, confirmed, read,
+):
+    from test_tesla_local_settings import load_function, settings_context
+
+    clock = _Clock()
+    session = _DelayedSession(clock, missing=True)
+    gateway = SimpleNamespace(
+        din=gateway_din, read_config=AsyncMock(return_value={"site_info": site_info}),
+        write_config=AsyncMock(),
+    )
+    namespace, _ = settings_context(gateway, method="tariff")
+    namespace["entry"].data.update(tesla_energy_site_id="123", powerwall_local_din="gateway",
+                                   powerwall_local_energy_site_id=paired_site)
+    namespace.update({
+        "time": SimpleNamespace(monotonic=clock.monotonic),
+        "CONF_POWERWALL_LOCAL_DIN": "powerwall_local_din",
+        "CONF_POWERWALL_LOCAL_ENERGY_SITE_ID": "powerwall_local_energy_site_id",
+        "CONF_FLEET_API_BASE_URL": "fleet_api_base_url",
+        "GRID_CONFIRMATION_POLL_OFFSETS": tesla_grid_control.GRID_CONFIRMATION_POLL_OFFSETS,
+        "TeslaGridWriteStatus": tesla_grid_control.TeslaGridWriteStatus,
+        "_command_generation": [0], "_tesla_charge_kick_generation": [0],
+        "_record_tesla_settings_submission": AsyncMock(),
+        "async_get_clientsession": lambda _: session,
+        "get_tesla_api_base_url": lambda *_: "https://example.invalid",
+        "async_set_tesla_grid_charging_confirmed": functools.partial(
+            tesla_grid_control.async_set_tesla_grid_charging_confirmed,
+            sleep=clock.sleep, monotonic=clock.monotonic,
+        ),
+    })
+    component = MODULE_PATH.parent
+    load_function(component / "powerwall_local/dispatch.py",
+                  "confirm_paired_gateway_grid_charging_disabled", namespace)
+    apply_grid = load_function(component / "__init__.py", "_tesla_force_apply_grid_charging",
+                               namespace, strip_imports=True)
+
+    result = asyncio.run(apply_grid([("123", "test-token", "fleet")], False, reason="force discharge"))
+
+    assert result["confirmed_sites"] == (["123"] if confirmed else [])
+    assert gateway.read_config.await_count == int(read)
+    gateway.write_config.assert_not_called()
+    assert len(session.post_calls) == 1
+
+
+def test_contrary_cloud_readback_does_not_use_gateway_omission_fallback():
+    clock = _Clock()
+    session = _DelayedSession(clock)
+    session.on_read = lambda: setattr(session, "missing", clock.now >= 20)
+
+    async def unexpected_read():
+        pytest.fail("Cloud supplied explicit contrary evidence")
+
+    result = asyncio.run(_set_with_retry(session, clock, confirm_gateway_disabled=unexpected_read))
+
+    assert not result.applied
+    assert len(session.post_calls) == 1
+
+
+@pytest.mark.parametrize("expires", [True, False])
+def test_gateway_readback_cannot_survive_command_expiry_or_supersession(expires):
+    clock = _Clock()
+    session = _DelayedSession(clock, missing=True)
+    current = True
+
+    async def confirm_gateway_disabled():
+        nonlocal current
+        if expires:
+            clock.now = 60
+        else:
+            current = False
+        return True
+
+    result = asyncio.run(_set_with_retry(
+        session, clock, is_current=lambda: current,
+        confirm_gateway_disabled=confirm_gateway_disabled,
+    ))
+
+    assert not result.applied
     assert len(session.post_calls) == 1
 
 

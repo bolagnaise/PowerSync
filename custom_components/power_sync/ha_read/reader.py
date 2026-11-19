@@ -127,6 +127,11 @@ def sanitized(value, *, key="", depth=0, budget=None):
     if type(value) is dict:
         result = {}
         for name, item in value.items():
+            # HA 2026.11 uses string enums for standard entity attributes.
+            # Read the underlying string without invoking custom formatters;
+            # other opaque keys remain unsupported and redaction still runs.
+            if isinstance(name, str) and isinstance(name, Enum):
+                name = str.__str__(name)
             if type(name) is not str or len(name) > 1024:
                 raise ReadError("unsupported_attribute")
             budget[0] -= len(name.encode())

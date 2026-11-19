@@ -440,13 +440,15 @@ async def test_managed_planning_allowance_requires_same_fresh_native_proof(admis
 @pytest.mark.asyncio
 @pytest.mark.parametrize('cached,failed', [(False, False), (True, False), (False, True)])
 async def test_actual_snapshot_reader_never_renews_supplied_or_failed_config(cached, failed):
-    from conftest import load_power_sync_function
+    from conftest import load_power_sync_function, load_power_sync_submodule
     from pathlib import Path
     import logging
     root = Path(__file__).parents[1] / 'custom_components/power_sync'
     class Unreachable(Exception): pass
     class Signature(Exception): pass
+    timing = load_power_sync_submodule("powerwall_local.dispatch_timing")
     ns = {'asyncio': asyncio, 'time': NS(monotonic=lambda: 321.0),
+        'timed_renewal_read': timing.timed_renewal_read,
         'is_loopback_host': lambda _: False, '_LOGGER': logging.getLogger(__name__),
         'PowerwallUnreachableError': Unreachable, 'PowerwallSignatureError': Signature,
         '_snapshot_from_dcq': lambda dcq, cfg: NS(soc=50, battery_w=-10000,

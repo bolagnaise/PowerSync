@@ -569,6 +569,9 @@ def test_covau_price_and_quota_sensors_use_live_provider_contract():
             "plan_name": "SolarMax SA Residential TOU",
             "price_source": "covau_aer_cdr",
             "last_sync": "2026-05-03:authoritative",
+            "unavailable_quota_windows": {
+                "export": {"start": "18:00", "end": "21:00", "reason": "exhausted"},
+            },
         },
     }
     coordinator = SimpleNamespace(get_provider_contract=lambda: contract)
@@ -623,6 +626,10 @@ def test_covau_price_and_quota_sensors_use_live_provider_contract():
     assert free_remaining.native_value == 42.5
     assert premium_remaining.native_value == 21.25
     assert tariff_schedule.native_value == "PEAK (25.00c/kWh)"
+    assert (
+        tariff_schedule.extra_state_attributes["unavailable_quota_windows"]
+        == contract["tariff_schedule"]["unavailable_quota_windows"]
+    )
     assert tariff_schedule.extra_state_attributes["schedule"] == [
         {
             "time": "12:00",

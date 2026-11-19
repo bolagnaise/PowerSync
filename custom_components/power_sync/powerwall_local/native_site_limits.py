@@ -165,12 +165,13 @@ def plan_changes(config, requested, approval, identity):
 class NativeSiteLimits:
     """One persistent limits journal behind the existing site route lock."""
 
-    def __init__(self, *, identity, load, save, read, write, guard, lock, changed, clock=time.time, approval_guard=lambda: True, automatic_guard=lambda: True):
+    def __init__(self, *, identity, load, save, read, write, guard, lock, changed, clock=time.time, approval_guard=lambda: True, automatic_guard=lambda: True, block_reason=lambda: "control_unavailable"):
         self.approval_guard = approval_guard
         self.automatic_guard = automatic_guard
         self.identity, self.load, self._save = identity, load, save
         self.read_document, self.write_document = read, write
         self.guard, self.lock, self.changed, self.clock = guard, lock, changed, clock
+        self.block_reason = block_reason
 
     async def save(self, state, pending):
         transaction = state.get("transaction")
@@ -187,11 +188,14 @@ class NativeSiteLimits:
             document = None
         fields = native_fields(document["config"] if document else {"site_info": {}})
         same_identity = not state or state.get("identity", self.identity()) == self.identity()
+        writable = document is not None and same_identity and self.guard(False)
+        reason = (None if writable else "configuration_unavailable" if document is None
+                  else "pairing_changed" if not same_identity else self.block_reason() or "control_unavailable")
         return {"schema_version": 1, "configuration_revision": configuration_revision(document, self.identity()) if document else "",
                 "approval_revision": approval_revision(state), "read_at": self.clock(), "source": "local" if document else "stored_authority",
                 "limits": fields, "approval": state.get("approval", {}),
                 "transaction": state.get("transaction"), "snapshots": state.get("snapshots", []),
-                "capabilities": {"readable": document is not None, "writable": document is not None and same_identity and self.guard(False),
+                "capabilities": {"readable": document is not None, "writable": writable, "block_reason": reason,
                     "zero_is_a_limit": True, "unlimited_supported": False,
                     "absent_field_restore_supported": False, "physical_enforcement_verified": False,
                     "identity_rebaseline_required": not same_identity}}

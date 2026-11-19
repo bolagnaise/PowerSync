@@ -1,9 +1,8 @@
 """Guarded readback from SolarEdge Modbus Multi's completed poll data.
 
 This module does not open a Modbus connection or call a Home Assistant service.
-Its runtime contract was checked against SolarEdge Modbus Multi 3.3.9. It
-accepts data only while the upstream identity, coordinator, enum maps, and
-register shape still match that contract.
+It supports the legacy hub mapping and the config-entry runtime used by newer
+SolarEdge Modbus Multi versions, with identity and freshness checks for both.
 """
 
 from __future__ import annotations
@@ -69,6 +68,28 @@ def _device_belongs_to_entry(device: Any, entry_id: str) -> bool:
         return entry_id in set(getattr(device, "config_entries", ()))
 
 
+def _storage_runtime(hass: Any, entry_id: str) -> tuple[Any, Any, Any, Any] | None:
+    """Resolve the upstream entry, runtime, hub and coordinator for this binding."""
+    get_entry = getattr(getattr(hass, "config_entries", None), "async_get_entry", None)
+    entry = get_entry(entry_id) if callable(get_entry) else None
+    if callable(get_entry) and (
+        entry is None
+        or entry.domain != _DOMAIN
+        or entry.state.value != "loaded"
+    ):
+        return None
+    runtime = getattr(entry, "runtime_data", None)
+    if runtime is not None:
+        hub = getattr(runtime, "hub", None)
+        return entry, runtime, hub, getattr(runtime, "coordinator", None)
+
+    domain_data = getattr(hass, "data", {}).get(_DOMAIN)
+    runtime = domain_data.get(entry_id) if isinstance(domain_data, Mapping) else None
+    if not isinstance(runtime, Mapping):
+        return None
+    return entry, runtime, runtime.get("hub"), runtime.get("coordinator")
+
+
 async def async_read_storage_result(
     hass: Any, command_entity_id: str
 ) -> StorageReadbackResult:
@@ -122,14 +143,11 @@ async def async_read_storage_result(
         if unique_id != f"{inverter_uid}{_COMMAND_SUFFIX}":
             return StorageReadbackResult(None, "identity_mismatch")
 
-        domain_data = getattr(hass, "data", {}).get(_DOMAIN)
-        runtime = (
-            domain_data.get(entry_id) if isinstance(domain_data, Mapping) else None
-        )
-        if not isinstance(runtime, Mapping):
+        binding = _storage_runtime(hass, entry_id)
+        if binding is None:
             return StorageReadbackResult(None, "readback_unavailable")
-        hub = runtime.get("hub")
-        coordinator = runtime.get("coordinator")
+        upstream_entry, runtime, hub, coordinator = binding
+        uses_entry_runtime = runtime is getattr(upstream_entry, "runtime_data", None)
         if hub is None or not isinstance(coordinator, TimestampDataUpdateCoordinator):
             return StorageReadbackResult(None, "readback_unavailable")
         if (
@@ -137,6 +155,8 @@ async def async_read_storage_result(
             or getattr(hub, "option_storage_control", None) is not True
         ):
             return StorageReadbackResult(None, "readback_unavailable")
+        if uses_entry_runtime and getattr(hub, "entry_id", None) != entry_id:
+            return StorageReadbackResult(None, "identity_mismatch")
 
         if getattr(hub, "has_write", None) is not None:
             return StorageReadbackResult(None, "upstream_write_busy")
@@ -221,14 +241,16 @@ async def async_read_storage_result(
 
         # Refresh and transport settling can yield across an integration reload.
         # The old coordinator's completed poll must not validate a new binding.
-        current_domain = getattr(hass, "data", {}).get(_DOMAIN)
-        if not isinstance(current_domain, Mapping) or entry_id not in current_domain:
+        current_binding = _storage_runtime(hass, entry_id)
+        if current_binding is None:
             return StorageReadbackResult(None, "readback_unavailable")
         if (
-            current_domain.get(entry_id) is not runtime
-            or runtime.get("hub") is not hub
-            or runtime.get("coordinator") is not coordinator
+            any(
+                current is not original
+                for current, original in zip(current_binding, binding, strict=True)
+            )
             or getattr(coordinator, "_hub", None) is not hub
+            or (uses_entry_runtime and getattr(hub, "entry_id", None) != entry_id)
         ):
             return StorageReadbackResult(None, "identity_mismatch")
         current_entity = er.async_get(hass).async_get(command_entity_id)

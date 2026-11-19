@@ -13,6 +13,40 @@ from typing import Any
 ACTIVE_POWER_THRESHOLD_KW = 0.05
 
 
+def resolve_zaptec_display_soc(
+    vehicles: list[dict[str, Any]],
+    *,
+    selected_vehicle_id: str | None = None,
+    allow_single_vehicle: bool = False,
+) -> float | None:
+    """Read BYD SOC for display without assigning charger/control identity.
+
+    A persisted vehicle selection is authoritative. Otherwise only a sole
+    discovered BYD on a site with no competing loadpoint may supply its SOC.
+    The caller establishes physical connection from Zaptec, since BYD's plug
+    sensor does not reliably reflect that cable. Count vehicles before
+    validating SOC so an unavailable second car cannot
+    silently associate the first car with the charger.
+    """
+    if selected_vehicle_id:
+        candidates = [
+            vehicle for vehicle in vehicles
+            if selected_vehicle_id == vehicle.get("vehicle_id")
+        ]
+    elif allow_single_vehicle:
+        candidates = vehicles
+    else:
+        return None
+    if len(candidates) != 1:
+        return None
+    vehicle = candidates[0]
+    value = vehicle.get("battery_level")
+    if isinstance(value, bool):
+        return None
+    soc = _optional_float_value(value)
+    return soc if soc is not None and 0 <= soc <= 100 else None
+
+
 def _float_value(value: Any, default: float = 0.0) -> float:
     try:
         return float(value)

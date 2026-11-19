@@ -475,6 +475,15 @@ directly, then replenish the battery from a cheaper, reachable solar or
 grid-charge interval later in the 48-hour plan. This is an intrinsic Profit Max
 decision, not a separate switch or target SOC.
 
+Forecast solar above a known site export limit can replenish the battery without
+forgoing feed-in income, because that portion would otherwise be curtailed.
+Profit Max can use this finite portion to fund an earlier solar-export hold,
+even when the later feed-in rate is higher. Solar within the export limit keeps
+its normal feed-in opportunity cost. This uses the forecast PowerSync receives;
+it cannot recover solar potential already clipped out of that forecast or model
+a separate hybrid inverter AC conversion limit. Export holds still block all
+battery charging, including DC solar above that conversion limit.
+
 The replenishment has to survive the solve, not just the estimate. A hold is
 selected before the plan is built, from the charge capacity each later interval
 could physically absorb, and on a charge-capacity-constrained day the rest of

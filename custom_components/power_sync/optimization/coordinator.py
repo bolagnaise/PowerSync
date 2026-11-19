@@ -35,6 +35,7 @@ from .battery_efficiency import (
     ResolvedOptimizerParameters,
 )
 from .battery_optimizer import (
+    FUTURE_HOME_USE_HOLD_REASON,
     RTE_ECONOMIC_HOLD_REASON,
     BatteryOptimizer,
     OptimizerResult,
@@ -1506,6 +1507,18 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._idle_hold_reserve = non_tesla_hold_pct
             return True
 
+        if self.battery_system == "tesla" and hasattr(battery, "set_tesla_idle_hold"):
+            # Keep the existing hold floor if telemetry has slipped within the slot.
+            # The pre-IDLE reserve remains the separate exit/cleanup target.
+            reserve = min(max(soc_pct, getattr(self, "_idle_hold_reserve", None) or 0), 80)
+            if await fenced_call(
+                self, lambda: battery.set_tesla_idle_hold(reserve), "set_tesla_idle_hold"
+            ) is not True:
+                return False
+            self._idle_hold_reserve = reserve
+            _LOGGER.info("Optimizer: IDLE — holding with Tesla backup reserve=%d%%", reserve)
+            return True
+
         if hasattr(battery, "set_backup_reserve"):
             if hasattr(battery, "set_self_consumption_mode"):
                 reserve = min(max(soc_pct, 0), 80)
@@ -2717,40 +2730,43 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         return min(requested, safe_minutes), hardware_projected_soc
 
-    def tesla_tariff_export_still_allowed(self, duration_minutes: int) -> bool:
-        """Recheck a waiting Tesla discharge against the live plan and reserve."""
+    def tesla_tariff_export_safe_duration(self, duration_minutes: int) -> int:
+        """Bound a waiting Tesla discharge by the current plan and reserve."""
         if (not self._enabled or self._monitoring_mode_active()
                 or not self._energy_telemetry_ready()):
-            return False
+            return 0
         action = self._get_current_action()
         if getattr(action, "action", None) not in {"discharge", "export"}:
-            return False
+            return 0
         remaining_minutes = self._force_duration_for_action_window(
             action, {"discharge", "export"},
             allow_boundary_overrun=False, minimum_minutes=1,
         )
-        if remaining_minutes < duration_minutes:
-            return False
+        duration_minutes = min(duration_minutes, remaining_minutes)
+        if duration_minutes <= 0:
+            return 0
         if not self._battery_export_price_status(action)["price_allows_battery_export"]:
-            return False
+            return 0
         data = self._get_energy_data() or {}
         try:
             observed_at = data["last_update"]
             if not isinstance(observed_at, datetime):
-                return False
+                return 0
             if not 0 <= (dt_util.utcnow() - observed_at).total_seconds() <= 60:
-                return False
+                return 0
             soc = float(data["battery_level"]) / 100.0
         except (KeyError, TypeError, ValueError):
-            return False
+            return 0
         if not math.isfinite(soc) or not 0 <= soc <= 1:
-            return False
+            return 0
         floor = self._force_discharge_reserve_floor(action)
         reaches_floor, _ = self._force_discharge_reaches_reserve(action, soc, floor)
+        if reaches_floor:
+            return 0
         safe_minutes, _ = self._targetless_export_safe_duration(
             action, soc, floor, duration_minutes,
         )
-        return not reaches_floor and safe_minutes >= duration_minutes
+        return safe_minutes
 
     def _targetless_charge_safe_duration(
         self,
@@ -10494,6 +10510,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Record an optimizer-owned hardware force command."""
         now = dt_util.utcnow()
         expires_at = now + timedelta(minutes=max(1, int(duration_minutes)))
+        if force_type == "discharge" and self.battery_system == "tesla":
+            getter = getattr(self, "_force_state_getter", None)
+            confirmed = (getter() or {}) if getter else {}
+            if confirmed.get("type") == force_type and confirmed.get("commitment_eligible") is True:
+                confirmed_expiry = self._as_utc_datetime(confirmed.get("expires_at"))
+                if confirmed_expiry is not None:
+                    expires_at = min(expires_at, confirmed_expiry)
         existing_state = getattr(self, "_optimizer_force_state", None)
         started_at = None
         if (
@@ -12712,14 +12735,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # Only execute IDLE when SOC is well above the optimizer reserve
             # (>5% above = meaningful charge to hold for later export).
             # Otherwise use self-consumption — battery serves load naturally.
-            # An RTE-justified hold is not the "not enough charge to bother
-            # holding" case this band was written for: the optimizer already
-            # proved that discharging now and rebuying the same energy later
-            # costs more. Remapping it here would silently undo that plan.
-            rte_economic_hold = (
-                getattr(action, "reason", None) == RTE_ECONOMIC_HOLD_REASON
+            # Explicit economic holds already prove a benefit: avoiding an
+            # uneconomic recharge or saving energy for higher-priced home use.
+            # They remain useful near reserve; natural self-use would spend
+            # the energy the planner deliberately preserved for later.
+            economic_hold = (
+                getattr(action, "reason", None)
+                in (RTE_ECONOMIC_HOLD_REASON, FUTURE_HOME_USE_HOLD_REASON)
             )
-            if effective_action == "idle" and not rte_economic_hold:
+            if effective_action == "idle" and not economic_hold:
                 try:
                     soc_now, _ = await self._get_battery_state()
                     opt_reserve = self._config.backup_reserve
@@ -14822,6 +14846,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # repayment. Consuming this budget prevents multiple high-FIT slots
         # from claiming the same later recharge opportunity.
         future_capacity_kwh = [0.0] * n
+        future_clipped_capacity_kwh = [0.0] * n
+        clipped_funding_slots: set[int] = set()
         future_cost_per_input_kwh = [math.inf] * n
         for idx in range(n):
             if idx < len(hard_charge_blocks) and hard_charge_blocks[idx]:
@@ -14854,6 +14880,34 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     future_cost_per_input_kwh[idx], export_prices[idx]
                 )
             future_capacity_kwh[idx] = best_charge_kw * interval_hours * efficiency
+            # The part above a known site export cap cannot earn the FiT.
+            # Keep it separate from solar that displaces paid export, sharing
+            # the same battery charge-capacity pool rather than adding to it.
+            slot_limit_w = (
+                grid_export_limits_w[idx]
+                if grid_export_limits_w is not None
+                and idx < len(grid_export_limits_w) else None
+            )
+            known_limits_kw = []
+            for value, scale in (
+                (capability.get("export_limit_kw"), 1.0),
+                (getattr(self._config, "max_grid_export_w", None), 1000.0),
+                (slot_limit_w, 1000.0),
+            ):
+                try:
+                    limit_kw = float(value) / scale
+                except (TypeError, ValueError):
+                    continue
+                if math.isfinite(limit_kw) and limit_kw >= 0:
+                    known_limits_kw.append(limit_kw)
+            if known_limits_kw:
+                clipped_kw = min(
+                    solar_charge_kw,
+                    max(0.0, solar_surplus_kw - min(known_limits_kw)),
+                )
+                future_clipped_capacity_kwh[idx] = (
+                    clipped_kw * interval_hours * efficiency
+                )
 
         remaining_headroom_kwh = capacity_kwh * max(
             0.0, 1.0 - max(0.0, min(1.0, current_soc))
@@ -14918,6 +14972,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if idx < len(hard_charge_blocks) and hard_charge_blocks[idx]:
                 _record_slot(idx, "hard_charge_block")
                 continue
+            if idx in clipped_funding_slots:
+                # A zero-charge hold here would destroy the clipped-solar
+                # recharge already committed to an earlier deferral.
+                _record_slot(idx, "reserved_clipped_solar_replenishment")
+                continue
             if (
                 grid_export_limits_w is not None
                 and idx < len(grid_export_limits_w)
@@ -14953,20 +15012,29 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if deadline_slot is not None and idx < deadline_slot
                 else n
             )
-            candidates = [
-                future_idx
-                for future_idx in range(idx + 1, repayment_end)
-                if future_capacity_kwh[future_idx] > 1e-9
-                and future_cost_per_input_kwh[future_idx] + margin
-                < export_prices[idx]
-            ]
-            candidates.sort(key=lambda future_idx: future_cost_per_input_kwh[future_idx])
-            available = sum(future_capacity_kwh[future_idx] for future_idx in candidates)
-            cheapest_cost = (
-                future_cost_per_input_kwh[candidates[0]]
-                if candidates
-                else None
+            # A source has two marginal costs: free otherwise-curtailed
+            # solar, then its remaining priced capacity. Both debit the same
+            # finite pool, so a small clipped peak cannot fund an entire day.
+            candidates: list[tuple[float, int, bool]] = []
+            for future_idx in range(idx + 1, repayment_end):
+                clipped = future_clipped_capacity_kwh[future_idx]
+                priced = max(0.0, future_capacity_kwh[future_idx] - clipped)
+                if clipped > 1e-9 and margin < export_prices[idx]:
+                    candidates.append((0.0, future_idx, True))
+                cost = future_cost_per_input_kwh[future_idx]
+                if priced > 1e-9 and cost + margin < export_prices[idx]:
+                    candidates.append((cost, future_idx, False))
+            candidates.sort()
+
+            def _candidate_capacity(future_idx: int, clipped: bool) -> float:
+                free = future_clipped_capacity_kwh[future_idx]
+                return free if clipped else max(0.0, future_capacity_kwh[future_idx] - free)
+
+            available = sum(
+                _candidate_capacity(future_idx, clipped)
+                for _, future_idx, clipped in candidates
             )
+            cheapest_cost = candidates[0][0] if candidates else None
             funding_details = {
                 **slot_details,
                 "deferred_kwh": round(deferred_kwh, 6),
@@ -15007,9 +15075,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     )
                     continue
             remaining = deferred_kwh
-            for future_idx in candidates:
-                used = min(remaining, future_capacity_kwh[future_idx])
+            for _, future_idx, clipped in candidates:
+                used = min(remaining, _candidate_capacity(future_idx, clipped))
                 future_capacity_kwh[future_idx] -= used
+                if clipped:
+                    future_clipped_capacity_kwh[future_idx] -= used
+                    if used > 1e-9:
+                        clipped_funding_slots.add(future_idx)
                 remaining -= used
                 if remaining <= 1e-9:
                     break

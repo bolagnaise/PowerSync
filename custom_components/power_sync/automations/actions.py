@@ -3387,7 +3387,7 @@ async def _wait_for_ble_command_readback(
         if not await scope_current():
             return False
         if _TESLA_BLE_COMMAND_CONFIRMATION_SECONDS > 0 and loop.time() >= deadline:
-            return False
+            break
         if charge_binding is not _TESLA_BLE_BINDING_UNSET:
             if (
                 charge_binding is None
@@ -3462,8 +3462,7 @@ async def _wait_for_ble_command_readback(
                     pass
         remaining = deadline - loop.time()
         if remaining <= 0:
-            _LOGGER.warning("Tesla BLE command not confirmed by fresh vehicle readback from %s", entity_ids)
-            return False
+            break
         if (refresh_binding is not None and refresh_index < len(_TESLA_BLE_READBACK_REFRESH_AT)
                 and loop.time() - started >= _TESLA_BLE_READBACK_REFRESH_AT[refresh_index]):
             refresh_index += 1
@@ -3479,13 +3478,18 @@ async def _wait_for_ble_command_readback(
                         "entity_id": refresh_binding[0],
                     }, blocking=True)
             except TimeoutError:
-                return False
+                break
             except Exception as error:
                 _LOGGER.debug("Tesla BLE readback refresh unavailable: %s", error)
-            if not await scope_current() or loop.time() >= deadline:
+            if not await scope_current():
                 return False
+            if loop.time() >= deadline:
+                break
             continue
         await asyncio.sleep(min(1, remaining))
+
+    _LOGGER.warning("Tesla BLE command not confirmed by fresh vehicle readback from %s", entity_ids)
+    return False
 
 
 def _ble_block_report_due(
@@ -5713,6 +5717,13 @@ async def _tesla_transport_route(hass, entry, params, operation):
             return {"kind": "ha"}
         return {"kind": "blocked", "reason": "ble_stop_recovery_active"}
     route = get_vehicle_route(hass, entry, vehicle)
+    if operation == "start" and route and route.get("reason") == "route_identity_changed":
+        from ..tesla_ev_recovery import async_resume_completed_native_route
+
+        authority = _tesla_transport_authority(
+            hass, entry, params, operation="start", ignore_recovery_gate=True)
+        if await async_resume_completed_native_route(hass, entry, vehicle, authorize=authority):
+            route = get_vehicle_route(hass, entry, vehicle)
     if (operation != "stop" and route and route.get("reason") == "native_recovery"):
         await _tesla_reconcile_native_history(hass, entry, params)
         route = get_vehicle_route(hass, entry, vehicle)
@@ -7116,7 +7127,7 @@ async def _fresh_tesla_command_observation(hass, entry, vehicle, params, *, time
         current_config = {**entry.data, **entry.options}
         return (scope_current()
                 and source_binding is not None
-                and source_binding.get("domain") in {"tesla_fleet", "teslemetry"}
+                and source_binding.get("domain") in {"tesla_fleet", "teslemetry", "tessie"}
                 and current_config.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API) in (
                     EV_PROVIDER_BOTH, EV_PROVIDER_FLEET_API,
                 ))
@@ -8417,6 +8428,8 @@ async def _execute_single_action(
             context,
         )
     elif action_type == "stop_ev_charging":
+        from .ev_ownership import async_prepare_manual_stop_hold, record_manual_stop_hold
+
         context_vehicle_id = context.get("ev_vehicle_id") if context else None
         if (
             context_vehicle_id
@@ -8424,33 +8437,41 @@ async def _execute_single_action(
             and not params.get("vehicle_vin")
         ):
             params = {**params, "vehicle_vin": context_vehicle_id}
+        reason = params.get("reason", "Manual automation stop")
+        tesla_stop = params.get("charger_type", "tesla") == "tesla"
+        loadpoint_id = (
+            _canonical_manual_stop_loadpoint_id(config_entry, params)
+            if not params.get("skip_ownership") else None
+        )
+        if loadpoint_id is not None and tesla_stop:
+            hold_vehicle_id = await _resolve_manual_stop_hold_vehicle_id(
+                hass, config_entry, params, loadpoint_id
+            )
+            if hold_vehicle_id is not None:
+                await async_prepare_manual_stop_hold(
+                    hass, config_entry, hold_vehicle_id, reason=reason
+                )
         success = await _action_stop_ev_charging(hass, config_entry, params)
-        if success and not params.get("skip_ownership"):
-            from .ev_ownership import record_manual_stop_hold
-
-            loadpoint_id = _canonical_manual_stop_loadpoint_id(config_entry, params)
+        if success and loadpoint_id is not None:
             # Resolve which vehicle to scope the restart-suppression hold to
             # BEFORE clearing tracked session state below — a "_default"
             # loadpoint_id makes clear_tracked_ev_charging_session drop every
             # tracked vehicle's dynamic-session entry (the "_default ↔ VIN
             # overlap" stop-all behavior), which would erase the very
             # "who was actively charging" signal this resolution depends on.
-            hold_vehicle_id = await _resolve_manual_stop_hold_vehicle_id(
-                hass, config_entry, params, loadpoint_id
+            hold_vehicle_id = (
+                await _resolve_manual_stop_hold_vehicle_id(
+                    hass, config_entry, params, loadpoint_id
+                ) if not tesla_stop else None
             )
             await clear_tracked_ev_charging_session(
                 hass,
                 config_entry,
                 loadpoint_id,
-                reason=params.get("reason", "Manual automation stop"),
+                reason=reason,
             )
             if hold_vehicle_id is not None:
-                record_manual_stop_hold(
-                    hass,
-                    config_entry,
-                    hold_vehicle_id,
-                    reason=params.get("reason", "Manual automation stop"),
-                )
+                record_manual_stop_hold(hass, config_entry, hold_vehicle_id, reason=reason)
         return success
     elif action_type == "set_ev_charge_limit":
         return await _action_set_ev_charge_limit(hass, config_entry, params)
@@ -10086,6 +10107,7 @@ async def _action_start_ev_charging(
     )
     route = await _tesla_transport_route(hass, config_entry, params, "start")
     if not request_authority():
+        _LOGGER.debug("Tesla Start withheld: authority_lost_before_read")
         return False
     recovering_route = route and route.get("kind") in {"blocked", "ha"}
     if recovering_route or params.get("_tesla_plan_recovery_attempt"):
@@ -10095,6 +10117,7 @@ async def _action_start_ev_charging(
             hass, config_entry, vehicle_vin, params)
         observed = _tesla_observed_command_state(observation)
         if not request_authority():
+            _LOGGER.debug("Tesla Start withheld: authority_lost_after_read")
             return None
         if observed == "charging":
             params["_tesla_start_observation"] = observation
@@ -10104,12 +10127,22 @@ async def _action_start_ev_charging(
             observation, observed,
         )
         if not recovery_ok:
+            _LOGGER.debug("Tesla Start withheld: recovery_step_failed")
             params["_tesla_transport_recovery_pending"] = True
             return None
         if observed == "charging":
             params["_tesla_start_observation"] = observation
             return True
-        if (route and route.get("kind") == "blocked") or observed != "stopped":
+        route_blocked = bool(route and route.get("kind") == "blocked")
+        if route_blocked or observed != "stopped":
+            reason = "route_blocked"
+            if not route_blocked:
+                reason = "read_unavailable" if observation is None else "read_unconfirmed"
+            _LOGGER.debug(
+                "Tesla Start withheld: %s (source_charge_timestamp=%s)",
+                reason,
+                getattr(observation, "source_charge_timestamp", None),
+            )
             params["_tesla_transport_recovery_pending"] = True
             return None
     if route and route.get("kind") == "ha" and ev_provider == EV_PROVIDER_BOTH:
@@ -15030,6 +15063,12 @@ async def _dynamic_ev_update_surplus(
             charging_state=charging_state,
             restart_telemetry_pending=_tesla_restart_telemetry_pending(v_state),
         )
+        if (v_params.get("charger_type", "tesla") == "tesla"
+                and v_state.get("transport_recovery_pending")
+                and not observed_power_available):
+            # Retain possible commanded draw for electrical admission, but
+            # never count an unobserved uncertain Start as reusable solar.
+            actual_power_kw = 0.0
         total_ev_power_kw += actual_power_kw
 
     restart_telemetry_pending = _tesla_restart_telemetry_pending(state)
@@ -15868,7 +15907,14 @@ async def _dynamic_ev_update_surplus(
         state["low_surplus_start"] = None
         state.pop("stop_outcome", None)
 
-        if effective_current_amps == 0:
+        if effective_current_amps == 0 or (
+            params.get("charger_type", "tesla") == "tesla"
+            and state.get("transport_recovery_pending")
+        ):
+            # An uncertain Start retains possible draw in current_amps. Missing
+            # telemetry must not let that reservation bypass fresh-read recovery.
+            # Keep the reservation intact; the Start path must reconcile before
+            # it can submit another command, under current surplus and ownership.
             # Track how long we've had surplus before starting
             high_surplus_start = state.get("high_surplus_start")
             if high_surplus_start is None:

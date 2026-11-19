@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from conftest import load_power_sync_function
+from conftest import load_power_sync_function, load_power_sync_submodule
 from test_service_calls import CurrentServiceCall
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -17,9 +17,7 @@ _hybrid_spec.loader.exec_module(_hybrid)
 prefers_native_tariff = _hybrid.prefers_native_tariff
 routing_site_info = _hybrid.routing_site_info
 native_capacity_w = _hybrid.native_capacity_w
-spec = importlib.util.spec_from_file_location('pw_dispatch_under_test', ROOT / 'custom_components/power_sync/powerwall_local/battery_dispatch.py')
-module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(module)
+module = load_power_sync_submodule("powerwall_local.battery_dispatch", package="_pw_dispatch_test")
 
 
 def snapshot(**kw):

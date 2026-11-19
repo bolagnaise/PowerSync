@@ -484,11 +484,31 @@ class SolarEdgeController(InverterController):
             return None
 
     async def restore(self) -> bool:
-        """Restore SolarEdge active power limit to 100%."""
-        ok = await self._set_active_power_limit(100)
-        if ok:
-            _LOGGER.info("SolarEdge active power limit restored to 100%%")
-        return ok
+        """Restore the limit only after fresh device confirmation.
+
+        A write acknowledgement does not prove the inverter applied the limit.
+        Keep callers' existing restore obligations on a missing/contrary readback.
+        Poll briefly for delayed application, without retransmitting the write.
+        """
+        if not await self._set_active_power_limit(100):
+            return False
+        for attempt in range(3):
+            if attempt:
+                await asyncio.sleep(1)
+            try:
+                limit = await self.read_active_power_limit()
+            except Exception as err:
+                _LOGGER.debug("SolarEdge restore readback unavailable: %s", err)
+                limit = None
+            if limit == 100:
+                _LOGGER.info("SolarEdge active power limit restored to 100%% (readback confirmed)")
+                return True
+        _LOGGER.warning(
+            "SolarEdge restore not confirmed: active power limit=%s%%; "
+            "retaining existing curtailment state",
+            limit,
+        )
+        return False
 
     async def read_active_power_limit(self) -> float | None:
         """Read the selected limit, refreshing upstream entities before trusting them."""

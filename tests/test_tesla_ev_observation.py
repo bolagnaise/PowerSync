@@ -1938,6 +1938,29 @@ async def test_tessie_coordinator_refresh_uses_advancing_charge_timestamp(indepe
 
 
 @pytest.mark.asyncio
+async def test_command_recovery_tessie_cache_uses_exact_independent_read(command_recovery_read):
+    probe = command_recovery_read
+    probe.registration.platform = "tessie"
+    probe.vehicle.device.identifiers = {("tessie", VIN_A)}
+    probe.vehicle.data_coordinator = probe.coordinator
+    del probe.vehicle.coordinator
+    probe.hass.config_entries.async_entries = lambda domain: {
+        "power_sync": [probe.control], "tessie": [probe.native_entry],
+        "tesla_fleet": [probe.fleet_entry],
+    }.get(domain, [])
+    probe.coordinator.refresh = None
+    probe.coordinator.api.response = {"vin": VIN_A,
+        **_charge(probe.clock["now"], current=32, power=7, requested=32, limit=100)}
+    result = await probe.read(probe.hass, probe.control, VIN_A, probe.params)
+    assert result is not None and result.domain == "tessie"
+    assert result.charger_actual_current == 32
+    assert probe.coordinator.api.calls == [{"use_cache": False}]
+    assert probe.coordinator.api.refresh_calls == []
+    assert probe.coordinator.api.wake_calls == []
+    assert probe.fleet.api.calls == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize('variant,reason', [
     ('unchanged', 'charge_timestamp_before_refresh'),
     ('not_advanced', 'charge_timestamp_not_advanced'),

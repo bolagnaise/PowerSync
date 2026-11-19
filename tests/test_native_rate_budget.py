@@ -8,6 +8,7 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
+from conftest import load_power_sync_submodule
 
 path = Path(__file__).parents[1] / 'custom_components/power_sync/native_rate_budget.py'
 spec = importlib.util.spec_from_file_location('native_budget_probe', path)
@@ -25,9 +26,7 @@ async def test_restored_setpoint_keeps_battery_headroom_through_ramp_and_restart
     rate = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = rate
     spec.loader.exec_module(rate)
-    spec = importlib.util.spec_from_file_location('settlement_battery', root/'powerwall_local/battery_dispatch.py')
-    battery = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(battery)
+    battery = load_power_sync_submodule("powerwall_local.battery_dispatch", package="_settlement_battery")
     clock = [NOW]
     store = Store()
     budget = m.SharedRateBudget(store, clock=lambda: clock[0])

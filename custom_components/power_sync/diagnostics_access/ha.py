@@ -1,5 +1,7 @@
 """HA admin API and lifecycle. Independent from ticket support and controls."""
 import asyncio
+import json
+from pathlib import Path
 from aiohttp import web
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -8,10 +10,37 @@ from .runtime import AccessRuntime, DATA
 from .wire import WireError, loads
 
 
+class DiagnosticsStore(Store):
+    """Confirm the stored continuation before advancing a remote connection."""
+
+    async def async_save(self, data):
+        await super().async_save(data)
+
+        def read_data():
+            return json.loads(Path(self.path).read_text())["data"]
+
+        try:
+            written = await self.hass.async_add_executor_job(read_data)
+        except Exception:
+            raise WireError("diagnostics_persistence_unconfirmed") from None
+        if written != data:
+            # HA Store logs some write failures instead of raising them. Its
+            # memory cache cannot establish that restart continuity is durable.
+            raise WireError("diagnostics_persistence_unconfirmed")
+
+
 class DiagnosticsView(HomeAssistantView):
     url = "/api/power_sync/diagnostics"
     name = "api:power_sync:diagnostics"
     requires_auth = True
+    # Only fixed, reviewed reason codes may leave the administrator API.
+    # Exception messages can contain private input and must remain undisclosed.
+    SAFE_REASONS = frozenset({
+        "invalid_authority_key", "invitation_invalid", "invitation_identity_mismatch",
+        "invitation_expired", "invitation_already_added", "revocation_pending",
+        "diagnostics_persistence_unconfirmed", "remote_request_denied",
+        "signature_denied", "binding_denied", "payload_changed", "invalid_envelope",
+    })
 
     def __init__(self, hass):
         self.hass = hass
@@ -53,15 +82,18 @@ class DiagnosticsView(HomeAssistantView):
             else:
                 raise WireError("unsupported_action")
             return web.json_response(result, headers={"Cache-Control": "no-store"})
-        except (WireError, KeyError, TypeError):
-            return web.json_response({"error": "diagnostics_request_denied"}, status=409)
+        except (WireError, KeyError, TypeError) as error:
+            payload = {"error": "diagnostics_request_denied"}
+            if isinstance(error, WireError) and str(error) in self.SAFE_REASONS:
+                payload["reason"] = str(error)
+            return web.json_response(payload, status=409, headers={"Cache-Control": "no-store"})
 
 
 async def setup(hass, entry):
     data = hass.data.setdefault(DATA, {"entries": set()})
     if "runtime" not in data:
         from ..ha_read.adapters import create_backend
-        runtime = AccessRuntime(hass, Store(hass, 1, "power_sync.diagnostics_access", private=True, atomic_writes=True), async_get_clientsession(hass), create_backend(hass))
+        runtime = AccessRuntime(hass, DiagnosticsStore(hass, 1, "power_sync.diagnostics_access", private=True, atomic_writes=True), async_get_clientsession(hass), create_backend(hass))
         await runtime.load()
         data["runtime"] = runtime
         if not hass.data.get(DATA + "_view"):

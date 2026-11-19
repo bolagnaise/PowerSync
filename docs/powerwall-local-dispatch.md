@@ -12,6 +12,8 @@ The Tesla-only **Preferred battery control** selector is saved per Home Assistan
 - **Local V1R**: use timed gateway commands capped at 10 kW or a lower learned charge/discharge ceiling. This requires pairing and fails explicitly if local control is unavailable; it does not silently upload a tariff.
 - **Automatic**: choose charge and discharge independently using fresh home load, solar, connection limits and available battery power. A multi-Powerwall site can therefore use Local V1R for a modest export and Tariff for charging. Missing or unsafe telemetry selects Tariff, whose own safety checks must still pass. A running native tariff action retains its route until restored.
 
+During Tariff discharge, Tesla may accept the request to turn grid charging off but omit the setting from its response. PowerSync can verify that grid charging is off directly on the reachable paired gateway before continuing.
+
 Explicit positive kW requests retain local wattage control regardless of this preference. They cannot become unrestricted tariff actions. Local inverter output includes home consumption as well as export, so the same grid-export target may fit the local ceiling at one load and exceed it at another.
 
 For optimiser-planned export at or below **20% usable SOC**, paired Powerwalls use tariff forcing even when **Local V1R** is selected. This changes the actuator, not your reserve floor: reserve, export permission and site-limit checks still apply. Crossing 20% during local export releases the timed command and requests a fresh tariff-compatible plan. The tariff route remains selected until that action is restored, and its original settings are recovered through the normal restart-safe cleanup. No local startup pulse is used for this low-SOC export. Manual kW targets retain their existing behaviour.
@@ -194,6 +196,18 @@ Timed Local V1R battery-power commands are a separate actuator. A retained setti
 
 **Restore Normal** finishes a current forcing override. After that owner has finished, the retained basis is a reference for supervised manual recovery; it is not replayed over newer settings. If the old write later changes settings, explicitly apply the intended settings through the normal cloud controls. An unrelated active override must still complete its confirmed cleanup before a new manual setting takes over; cloud recovery permission remains available if cleanup needs another attempt.
 
+### Supervised adoption of current local settings
+
+If an old generic settings request cannot be settled, an administrator can explicitly accept its remaining risk and adopt the current native configuration. This is a separate choice from cloud resumption: the earlier full configuration may still apply later and overwrite newer settings, including permissions and site limits. It is not proof that the old request finished.
+
+In **Developer tools > Actions**, run **PowerSync: Recover Powerwall local settings under supervision** (`power_sync.recover_powerwall_local_settings`) with the affected `entry_id` and `operation: inspect`. The response supplies `site_id`, `incident_id`, and `recovery_revision`, plus the current import/export limits. Inspecting makes no settings change. If Repairs appears empty, check its ignored issues; ignoring a notice does not clear recovery.
+
+Only after accepting that full-configuration risk, run the same action with `operation: resume`, the returned entry/site/incident IDs, `expected_recovery_revision` set to the returned revision, and both `acknowledge: true` and `accept_unknown_full_configuration_write: true`. Any change in the incident, pairing, ownership or configuration invalidates that inspection. Active controls, submissions and unfinished restores must finish first; their records are retained on refusal.
+
+Recovery makes two fresh native configuration reads, saves the accepted baseline and administrator acknowledgement alongside the original unknown incident, then resumes local settings and persistent site-limit access. The action sends no device command and does not replay saved settings. A new uncertain write blocks access again. The accepted exception survives restart only for its exact site and pairing. A storage-verification failure keeps runtime access blocked; restart or reload before inspecting a transition that reached storage but could not be verified.
+
+The old outcome remains visible in the recovery inspection, control diagnostics and Repairs independently of whether the notice was ignored. A later genuine receipt updates only that historical incident. This recovery action applies to generic settings incidents; native site-limit transactions retain their own reconciliation path.
+
 ## Available grid-export targets
 
 The Force Power export range respects both the configured site export limit and
@@ -228,5 +242,28 @@ from different attempts. Each returned sample carries its own acquisition start;
 Automatic refreshes DCQ after slow config work and rechecks admission at the final
 submission boundary. Missing or stale SOC still blocks control; the five-second
 freshness limit and configured site limits remain in force.
+
+When a slow read leaves a local renewal with stale data, PowerSync can read the
+gateway once more before requesting power. That read must provide fresh data
+within the original control window. If it cannot, PowerSync releases the lease.
+
+### Troubleshooting renewal timing
+
+If support asks for renewal timing, open **Developer tools → Actions** in Home
+Assistant and run this action in YAML mode after updating PowerSync and
+restarting Home Assistant.
+
+```yaml
+action: logger.set_level
+data:
+  custom_components.power_sync.powerwall_local.dispatch_timing: debug
+```
+
+Keep using the battery normally. If a renewal fails, look in **Settings →
+System → Logs** for the timestamped `Powerwall renewal timing` line from the
+same event. The line shows how long the gateway reads and signing took,
+observed Home Assistant event-loop delay, and the age of the sample at the
+command checks. To stop the capture, run the same action with `warning` in
+place of `debug`.
 
 For literal zero-power idle, charge/discharge to a percentage, persistent site limits and native backup windows, see [Advanced Powerwall controls](powerwall-advanced-controls.md).

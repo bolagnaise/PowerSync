@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from enum import Enum, StrEnum
 from types import SimpleNamespace
 
 import pytest
@@ -148,6 +149,53 @@ async def test_search_does_not_invoke_unknown_attribute_formatters():
     backend.hass.states.async_all()[0].attributes["friendly_name"] = Unsafe()
     result = await backend.read(context, "ha_search_entities", {"search": "not present"})
     assert result["result"]["records"] == []
+
+
+@pytest.mark.asyncio
+async def test_live_state_accepts_ha_string_enum_attribute_keys_and_redacts_secrets():
+    # HA 2026.11 writes standard entity attributes with StrEnum keys. Recorder
+    # JSON restores plain strings, so history-only fixtures miss this live path.
+    class Attribute(StrEnum):
+        FRIENDLY_NAME = "friendly_name"
+        UNIT_OF_MEASUREMENT = "unit_of_measurement"
+        API_KEY = "api_key"
+
+        def __str__(self):
+            raise AssertionError("do not invoke an attribute key formatter")
+
+    backend, context, _, _ = harness(count=1)
+    backend.hass.states.async_all()[0].attributes = {
+        Attribute.FRIENDLY_NAME: "Example power",
+        Attribute.UNIT_OF_MEASUREMENT: "W",
+        "nested": {Attribute.API_KEY: "CANARY_SECRET", "power": 12},
+    }
+    result = await backend.read(context, "ha_get_states", {"limit": 1})
+    attrs = result["result"]["records"][0]["attributes"]
+    assert attrs == {
+        "friendly_name": "Example power", "unit_of_measurement": "W",
+        "nested": {"api_key": {"redacted": True}, "power": 12},
+    }
+    assert all(type(key) is str for key in attrs)
+    assert "CANARY_SECRET" not in str(result)
+
+
+@pytest.mark.parametrize("key", [1, None, object()])
+def test_unknown_attribute_keys_remain_rejected_without_formatting(key):
+    with pytest.raises(ReadError, match="unsupported_attribute"):
+        _reader.sanitized({key: "value"})
+
+
+def test_non_string_enums_and_arbitrary_string_subclasses_remain_rejected():
+    class Number(Enum):
+        VALUE = 1
+
+    class OpaqueString(str):
+        def __str__(self):
+            raise AssertionError("do not format unknown keys")
+
+    for key in (Number.VALUE, OpaqueString("friendly_name")):
+        with pytest.raises(ReadError, match="unsupported_attribute"):
+            _reader.sanitized({key: "value"})
 
 
 @pytest.mark.asyncio

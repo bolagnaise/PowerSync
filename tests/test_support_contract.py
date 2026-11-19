@@ -251,3 +251,19 @@ def test_real_iso_event_keeps_parsed_timestamp_and_closed_reason_is_stable():
     assert value['timestamp']==1800000123
     session=s.Session();session.close('mapping_changed')
     assert session.status()['reason']=='mapping_changed'
+
+
+@pytest.mark.parametrize("lookback", [0, 600, 3600, 86400])
+def test_session_relative_history_uses_own_clock(lookback):
+    now = 1_800_000_000.01
+    session = s.Session(wall=lambda: now)
+    session.begin('owner', 'entry_reference_00001', ['system'], None, 3600, history_seconds=lookback)
+    assert session.scope['history_start'] == now - lookback
+
+
+@pytest.mark.parametrize("lookback", [-1, 86400.01, True, float('nan'), float('inf'), '86400'])
+def test_session_relative_history_preserves_strict_bounds(lookback):
+    session = s.Session(wall=lambda: 1_800_000_000)
+    with pytest.raises(p.SupportError, match='invalid_history_range'):
+        session.begin('owner', 'entry_reference_00001', ['system'], None, 3600, history_seconds=lookback)
+    assert session.key is None
