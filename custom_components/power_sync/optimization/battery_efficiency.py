@@ -38,7 +38,6 @@ RETURN_SOC_TOLERANCE = 0.015
 ANCHOR_SOC_MIN = 0.05
 ANCHOR_SOC_MAX = 0.95
 EXCLUDED_SOC_MIN = 0.02
-EXCLUDED_SOC_MAX = 0.99
 ANCHOR_POWER_KW = 0.15
 MIN_DIRECTIONAL_ENERGY_KWH = 0.25
 MIN_DIRECTIONAL_CAPACITY_FRACTION = 0.08
@@ -366,7 +365,9 @@ class BatteryEfficiencyLearner:
             return ObservationResult(True, False, "topology_changed")
 
         self._prune(timestamp)
-        if soc_value <= EXCLUDED_SOC_MIN or soc_value >= EXCLUDED_SOC_MAX:
+        # A full charge can be part of an interior-to-interior loop. Keep
+        # counting AC energy through the plateau without anchoring there.
+        if soc_value <= EXCLUDED_SOC_MIN:
             return self._reject("soc_boundary")
 
         active = self._active
