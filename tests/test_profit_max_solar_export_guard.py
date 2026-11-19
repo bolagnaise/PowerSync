@@ -45,6 +45,7 @@ _STUBS = (
 _METHODS = (
     "_profit_max_solar_export_slots", "_revise_solar_export_holds",
     "_check_solar_export_counterfactual", "_effective_charge_and_import_limits",
+    "_solar_hold_delays_deadline_charge",
 )
 
 INTERVAL_MINUTES = 5
@@ -112,6 +113,7 @@ def coordinator_methods():
     assert {node.name for node in methods} == set(_METHODS)
     namespace: dict[str, Any] = {
         "Any": Any, "math": math, "OptimizerResult": Any,
+        "ACTION_THRESHOLD_W": 100.0,
         "_LOGGER": logging.getLogger(__name__),
     }
     exec(
@@ -600,6 +602,126 @@ def test_pre_deadline_hold_preserves_reachable_charge_by_time_target(
     )
     assert result.feasible
     assert result.schedule.actions[-1].soc >= target_soc - 1e-6
+
+
+def test_equal_value_replans_use_available_solar_toward_charge_deadline(
+    optimizer_module, coordinator_methods
+):
+    """A 0.3c spread can repeatedly defer today's charge without improving the plan."""
+    start = datetime(2026, 10, 13, 7, tzinfo=timezone.utc)
+    soc = 0.26
+    target = 0.50
+    slots = 576
+    for offset in (0, 12):
+        timestamps = [start + timedelta(minutes=5 * (offset + i)) for i in range(slots)]
+        hours = [timestamp.hour + timestamp.minute / 60 for timestamp in timestamps]
+        imports = [0.30] * slots
+        exports = [0.091 if hour < 14.5 else 0.088 for hour in hours]
+        solar = [
+            8 + 9 * max(0.0, math.sin((hour - 7) * math.pi / 9))
+            if 7 <= hour < 16.1 else 0.0
+            for hour in hours
+        ]
+        load = [1.0] * slots
+        hard_blocks = [False] * slots
+        optimizer = optimizer_module.BatteryOptimizer(
+            capacity_wh=46800, max_charge_w=22000, max_discharge_w=22000,
+            max_grid_import_w=22000, max_grid_export_w=22000,
+            efficiency=EFFICIENCY, backup_reserve=0.15, hardware_reserve=0.05,
+            terminal_weight=0.3, interval_minutes=5, horizon_hours=48,
+        )
+        optimizer.pre_window_slot = 108 - offset
+        optimizer.pre_window_soc_target = target
+        coordinator = _fake_coordinator(export_limit_kw=22.0)
+        coordinator._optimizer = optimizer
+        coordinator.charge_by_time_enabled = True
+        coordinator._config.battery_capacity_wh = 46800
+        coordinator._config.max_charge_w = 22000
+        coordinator._config.max_grid_import_w = 22000
+        coordinator._solar_hold_delays_deadline_charge = types.MethodType(
+            coordinator_methods["_solar_hold_delays_deadline_charge"], coordinator
+        )
+        held_mask = coordinator_methods["_profit_max_solar_export_slots"](
+            coordinator, imports, exports, solar, load, soc, hard_blocks, [True] * slots
+        )
+        assert held_mask[0]
+
+        def solve(charge_blocks, solar_holds):
+            return optimizer.optimize(
+                import_prices=imports, export_prices=exports, solar_forecast=solar,
+                load_forecast=load, current_soc=soc, schedule_timestamps=timestamps,
+                acquisition_cost_kwh=0.12, allow_battery_export=True,
+                grid_charge_allowed=[True] * slots, price_valid_slots=[True] * slots,
+                block_battery_charge=charge_blocks, profit_max_solar_export_slots=solar_holds,
+                export_reserve_floor=0.15,
+            )
+
+        held = solve(held_mask, held_mask)
+
+        async def run_optimizer(_reserve, *, charge_blocked_slots, solar_export_slots):
+            assert charge_blocked_slots == hard_blocks
+            return solve(charge_blocked_slots, solar_export_slots)
+
+        chosen, mask = asyncio.run(coordinator_methods["_check_solar_export_counterfactual"](
+            coordinator, held, held_mask, hard_blocks, run_optimizer, None, current_soc=soc
+        ))
+        assert chosen.objective_value == pytest.approx(held.objective_value, rel=0, abs=1e-6)
+        assert held.schedule.actions[0].action == "solar_export"
+        assert chosen.schedule.actions[0].battery_charge_w > 100
+        assert chosen.schedule.actions[optimizer.pre_window_slot - 1].soc >= target
+        assert not any(mask)
+        assert coordinator._solar_export_capability_status["post_solve_comparison"]["reason"] == (
+            "equivalent_plan_charges_earlier"
+        )
+
+
+@pytest.mark.parametrize("variant", [
+    "later_target", "held_misses_target", "target_already_met", "mode_not_converged",
+    "no_soc_gain", "grid_charge", "missing_soc", "nonfinite_soc",
+])
+def test_deadline_preference_requires_native_charge_now_and_both_plans_on_time(
+    coordinator_methods, variant
+):
+    start = datetime(2026, 10, 13, 7, tzinfo=timezone.utc)
+
+    def plan(action, charge_w, levels):
+        return SimpleNamespace(
+            lp_stats={"mode_converged": True},
+            schedule=SimpleNamespace(actions=[
+                SimpleNamespace(timestamp=start + timedelta(minutes=5 * i),
+                                action=action, battery_charge_w=charge_w, soc=level)
+                for i, level in enumerate(levels)
+            ]),
+        )
+
+    held = plan("solar_export", 0, [0.30, 0.50, 0.50])
+    unheld = plan("self_consumption", 1500, [0.35, 0.50, 0.50])
+    coordinator = _fake_coordinator()
+    coordinator.charge_by_time_enabled = True
+    coordinator._optimizer.pre_window_slot = 2
+    coordinator._optimizer.pre_window_soc_target = 0.50
+    current_soc = 0.30
+    prefers = coordinator_methods["_solar_hold_delays_deadline_charge"]
+    assert prefers(coordinator, held, unheld, current_soc)
+
+    if variant == "later_target":
+        unheld.schedule.actions[1].soc = 0.49
+    elif variant == "held_misses_target":
+        held.schedule.actions[1].soc = 0.49
+    elif variant == "target_already_met":
+        current_soc = 0.50
+    elif variant == "mode_not_converged":
+        unheld.lp_stats["mode_converged"] = False
+    elif variant == "no_soc_gain":
+        unheld.schedule.actions[0].soc = 0.30
+    elif variant == "grid_charge":
+        unheld.schedule.actions[0].action = "charge"
+    elif variant == "missing_soc":
+        held.schedule.actions[0].soc = None
+    else:
+        unheld.schedule.actions[1].soc = math.nan
+
+    assert not prefers(coordinator, held, unheld, current_soc)
 
 
 def test_pre_deadline_hold_remains_allowed_when_target_is_unreachable(

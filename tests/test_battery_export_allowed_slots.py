@@ -274,6 +274,7 @@ def _install_power_sync_stubs() -> None:
 
     battery_module = types.ModuleType("power_sync.optimization.battery_optimizer")
     battery_module.RTE_ECONOMIC_HOLD_REASON = "rte_economic_hold"
+    battery_module.ACTION_THRESHOLD_W = 100.0
     battery_module.FUTURE_HOME_USE_HOLD_REASON = "future_home_use_hold"
     battery_module.BatteryOptimizer = type("BatteryOptimizer", (), {})
     battery_module.OptimizerResult = type("OptimizerResult", (), {})

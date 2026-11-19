@@ -35,6 +35,7 @@ from .battery_efficiency import (
     ResolvedOptimizerParameters,
 )
 from .battery_optimizer import (
+    ACTION_THRESHOLD_W,
     FUTURE_HOME_USE_HOLD_REASON,
     RTE_ECONOMIC_HOLD_REASON,
     BatteryOptimizer,
@@ -8487,6 +8488,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     hard_battery_charge_blocked,
                     _run_optimizer_once,
                     solve_reserve_override,
+                    current_soc=soc,
                 )
             )
             if checked_solar_export_slots != profit_max_solar_export_slots:
@@ -15187,8 +15189,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         hard_charge_blocks: list[bool],
         run_optimizer: Any,
         reserve_floor: float | None,
+        *,
+        current_soc: float | None = None,
     ) -> tuple[OptimizerResult, list[bool]]:
-        """Reject holds that lose value before their native-solar repayment.
+        """Compare discretionary holds with the same plan free to charge.
 
         The selector can fund a hold from solar arriving after a valuable
         battery-use window. The grid-repayment guard cannot see that loss.
@@ -15212,17 +15216,32 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             or unheld.solver_used != "highs"
             or not math.isfinite(result.objective_value)
             or not math.isfinite(unheld.objective_value)
-            or unheld.objective_value >= result.objective_value - 1e-6
         ):
             return result, solar_export_slots
+        if unheld.objective_value < result.objective_value - 1e-6:
+            reason = "unheld_plan_has_better_objective"
+            explanation = "storing solar has a better full-horizon objective"
+        elif (
+            solar_export_slots[0]
+            and not hard_charge_blocks[0]
+            # Auto-Apply may solve again with a different export reserve.
+            and reserve_floor is None
+            and current_soc is not None
+            and math.isclose(
+                unheld.objective_value, result.objective_value, rel_tol=0, abs_tol=1e-6
+            )
+            and self._solar_hold_delays_deadline_charge(result, unheld, current_soc)
+        ):
+            reason = "equivalent_plan_charges_earlier"
+            explanation = "storing solar now advances Charge By Time at equal value"
+        else:
+            return result, solar_export_slots
         _LOGGER.info(
-            "Profit Max: removed %d solar-export holds because storing solar "
-            "has a better full-horizon objective (%.6f vs %.6f)",
-            sum(solar_export_slots), unheld.objective_value, result.objective_value,
+            "Profit Max: removed %d solar-export holds because %s (%.6f vs %.6f)",
+            sum(solar_export_slots), explanation, unheld.objective_value, result.objective_value,
         )
         previous_status = getattr(self, "_solar_export_capability_status", {}) or {}
         current_status = previous_status.get("current_slot")
-        reason = "unheld_plan_has_better_objective"
         if solar_export_slots[0] and isinstance(current_status, dict):
             current_status = {**current_status, "selected": False, "reason": reason}
         self._solar_export_capability_status = {
@@ -15237,6 +15256,45 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             },
         }
         return unheld, unheld_slots
+
+    def _solar_hold_delays_deadline_charge(
+        self, held: OptimizerResult, unheld: OptimizerResult, current_soc: float
+    ) -> bool:
+        """Prefer solar charging now when both plans reach the configured target."""
+        optimizer = self._optimizer
+        deadline = optimizer.pre_window_slot
+        target = optimizer.pre_window_soc_target
+        soc_tolerance = 0.0001  # Schedule SOC is rounded to four decimal places.
+        if (
+            not self.charge_by_time_enabled
+            or deadline is None
+            or deadline <= 0
+            or not 0 <= current_soc < target - soc_tolerance
+            or not held.lp_stats.get("mode_converged")
+            or not unheld.lp_stats.get("mode_converged")
+        ):
+            return False
+        held_actions = held.schedule.actions
+        unheld_actions = unheld.schedule.actions
+        if deadline > min(len(held_actions), len(unheld_actions)):
+            return False
+        held_now, unheld_now = held_actions[0], unheld_actions[0]
+        held_at_deadline = held_actions[deadline - 1]
+        unheld_at_deadline = unheld_actions[deadline - 1]
+        if not all(
+            action.soc is not None and 0 <= action.soc <= 1
+            for action in (held_now, unheld_now, held_at_deadline, unheld_at_deadline)
+        ):
+            return False
+        return (
+            held_now.timestamp == unheld_now.timestamp
+            and held_at_deadline.timestamp == unheld_at_deadline.timestamp
+            and held_now.action == "solar_export"
+            and unheld_now.action == "self_consumption"
+            and unheld_now.battery_charge_w > ACTION_THRESHOLD_W
+            and unheld_now.soc > max(current_soc, held_now.soc) + soc_tolerance
+            and min(held_at_deadline.soc, unheld_at_deadline.soc) >= target - soc_tolerance
+        )
 
     def _time_window_slots(
         self,

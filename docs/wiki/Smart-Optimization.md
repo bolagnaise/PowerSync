@@ -505,6 +505,11 @@ deadline. The comparison is exposed under
 `profit_max_solar_export.capability.post_solve_comparison` with reason
 `unheld_plan_has_better_objective` when it removes holds.
 
+When using the configured optimizer reserve, PowerSync can also release the
+current hold if both plans reach the Charge By Time target at the same modeled
+value and storing solar now makes progress toward that target. The comparison
+reports `equivalent_plan_charges_earlier` when it makes this choice.
+
 The supported control paths are Sigenergy Modbus, Sungrow SH Modbus (including
 dual-inverter systems), FoxESS Modbus/entity/cloud variants with authoritative
 charge-limit readback, SolaX Modbus entities, Fronius Reserva/GEN24 Block
