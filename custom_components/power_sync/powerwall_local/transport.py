@@ -31,6 +31,7 @@ import aiohttp
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
+from .dispatch_timing import measure_renewal_step
 from .energy_device import (
     authorization_types_pb2,
     device_pb2,
@@ -364,7 +365,8 @@ class TEDAPIv1rTransport:
         tlv = self._build_tlv_payload(
             din, expires_at, routable.protobuf_message_as_bytes
         )
-        signature = self._sign(tlv)
+        with measure_renewal_step("signing"):
+            signature = self._sign(tlv)
 
         routable.signature_data.signer_identity.public_key = self._public_key_der
         routable.signature_data.rsa_data.expires_at = expires_at

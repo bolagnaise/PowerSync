@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Awaitable, Callable
 
+from .dispatch_timing import timed_renewal_read
 from .exceptions import (
     PowerwallLocalError,
     PowerwallSignatureError,
@@ -291,12 +292,13 @@ class PowerwallLocalClient:
             started = time.monotonic()
             if native_config is None:
                 dcq, cfg = await asyncio.gather(
-                    self._fetch_dcq_local(), self._transport.read_config(self._din),
+                    timed_renewal_read("dcq", self._fetch_dcq_local),
+                    timed_renewal_read("config", self._transport.read_config, self._din),
                     return_exceptions=True,
                 )
             else:
                 # No cached/last-good SOC: each attempt replaces the whole DCQ.
-                dcq, cfg = (await asyncio.gather(self._fetch_dcq_local(),
+                dcq, cfg = (await asyncio.gather(timed_renewal_read("dcq", self._fetch_dcq_local),
                                                return_exceptions=True))[0], native_config
 
             if isinstance(dcq, BaseException):

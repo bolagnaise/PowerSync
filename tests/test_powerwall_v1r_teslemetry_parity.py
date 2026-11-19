@@ -13,7 +13,7 @@ import textwrap
 import types
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -405,6 +405,123 @@ async def test_missing_common_api_response_is_reported_in_diagnostics():
     assert "system_info" in result["errors"]
     assert "networking" not in result["errors"]
     assert "internet" not in result["errors"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("slow_stage", ["dcq", "config", "event_loop", "signing", "none"])
+async def test_local_renewal_timing_preserves_freshness_fences(monkeypatch, caplog, slow_stage):
+    dispatch = importlib.import_module(f"{_LOCAL_PKG}.battery_dispatch")
+    timing = importlib.import_module(f"{_LOCAL_PKG}.dispatch_timing")
+    now = 100.0
+    timer = SimpleNamespace(cancel=lambda: None)
+
+    def clock():
+        return now
+
+    def call_at(timestamp, callback):
+        timer.timestamp, timer.callback = timestamp, callback
+        return timer
+
+    def advance_with_responsive_loop(seconds):
+        nonlocal now
+        until = now + seconds
+        while timer.timestamp <= until:
+            now = timer.timestamp
+            timer.callback()
+        now = until
+
+    loop = SimpleNamespace(time=clock, call_at=call_at)
+    monkeypatch.setattr(timing, "asyncio", SimpleNamespace(get_running_loop=lambda: loop))
+    fake_time = SimpleNamespace(monotonic=clock, time=lambda: 1800000000)
+    monkeypatch.setattr(client_mod, "time", fake_time)
+    monkeypatch.setattr(dispatch, "time", fake_time)
+    monkeypatch.setattr(transport_mod, "time", fake_time)
+    monkeypatch.setattr(dispatch, "RENEW_SECONDS", 0)
+    caplog.set_level("DEBUG", logger=timing.__name__)
+    fast_read_finished = asyncio.Event()
+
+    async def read(name, data):
+        nonlocal now
+        if slow_stage == name or (slow_stage == "event_loop" and name == "dcq"):
+            await fast_read_finished.wait()
+            if slow_stage == "event_loop":
+                now += 5.5
+            else:
+                advance_with_responsive_loop(5.1)
+        else:
+            if slow_stage == "none" and name == "config":
+                advance_with_responsive_loop(4.9)
+            fast_read_finished.set()
+        return data
+
+    client = client_mod.PowerwallLocalClient.__new__(client_mod.PowerwallLocalClient)
+    client._local_access_enabled, client._host, client._din = True, "gateway.test", "private-din"
+    client._fetch_dcq_local = lambda: read("dcq", {"present": True})
+    transport = client._transport = _transport_without_key()
+    transport._host, transport._public_key_der = client._host, b"test"
+    site_config = {"site_info": {"max_site_meter_power_ac": 14.9, "min_site_meter_power_ac": -10}}
+    transport.read_config = lambda _: read("config", site_config)
+    monkeypatch.setattr(client_mod, "_snapshot_from_dcq", lambda _, cfg: SimpleNamespace(
+        soc=60, grid_status="SystemGridConnected", load_w=5000, solar_w=1000,
+        battery_w=0, grid_w=4000, backup_reserve_percent=20, grid_charging_enabled=True,
+        raw={"config": cfg},
+    ))
+
+    def sign(_):
+        nonlocal now
+        if slow_stage == "signing":
+            now += 5.1
+        return b"test"
+
+    transport._sign = sign
+    reply = transport_pb2.MessageEnvelope()
+    reply.teg.dispatch_battery_power_response.SetInParent()
+    signed_reply = transport_mod.signed_message_pb2.RoutableMessage()
+    signed_reply.protobuf_message_as_bytes = reply.SerializeToString()
+    response = AsyncMock()
+    response.__aenter__.return_value = SimpleNamespace(
+        status=200, read=AsyncMock(return_value=signed_reply.SerializeToString()),
+    )
+    post = MagicMock(return_value=response)
+    session = AsyncMock()
+    session.__aenter__.return_value = SimpleNamespace(post=post)
+    transport._session = AsyncMock(return_value=session)
+    controller = dispatch.LocalBatteryDispatch(
+        client, lambda: {"optimization_max_charge_w": 5000, "optimization_max_grid_import_w": 14900,
+                         "optimization_backup_reserve": .2},
+        lambda _: True, AsyncMock(), AsyncMock(),
+    )
+    controller._mode, controller._target = "charge", 300
+    controller._target_basis, controller._deadline = "battery_output", 700
+    controller._release = AsyncMock()
+
+    async def stop_after_acknowledgement(_watts, _seconds):
+        controller._deadline = clock()
+
+    controller.acknowledged = stop_after_acknowledgement
+    await controller._renew()
+
+    controller._release.assert_awaited_once()
+    if slow_stage == "none":
+        assert controller.completion_reason == "timeout" and controller._last_watts == -300
+        post.assert_called_once()
+    else:
+        assert controller.completion_reason == "safety_refused"
+        post.assert_not_called()
+    traces = [record.message for record in caplog.records if record.name == timing.__name__]
+    assert len(traces) == 1
+    trace = traces[0]
+    assert "dcq=" in trace and "config=" in trace and "private-din" not in trace
+    if slow_stage == "none":
+        assert "pre_command_age=4.900s" in trace and "pre_submission_age=4.900s" in trace
+    elif slow_stage == "event_loop":
+        assert "dcq=5.500s" in trace and "max_loop_delay=5.250s" in trace
+    elif slow_stage == "signing":
+        assert "signing=5.100s" in trace and "pre_submission_age=5.100s" in trace
+    else:
+        assert f"{slow_stage}=5.100s" in trace and "max_loop_delay=0.000s" in trace
+    if slow_stage in ("dcq", "config", "event_loop"):
+        assert "pre_command_age=5." in trace and "pre_submission_age" not in trace
 
 
 @async_test

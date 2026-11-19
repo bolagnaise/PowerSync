@@ -243,4 +243,23 @@ Automatic refreshes DCQ after slow config work and rechecks admission at the fin
 submission boundary. Missing or stale SOC still blocks control; the five-second
 freshness limit and configured site limits remain in force.
 
+### Troubleshooting renewal timing
+
+If support asks for renewal timing, open **Developer tools → Actions** in Home
+Assistant and run this action in YAML mode after updating PowerSync and
+restarting Home Assistant.
+
+```yaml
+action: logger.set_level
+data:
+  custom_components.power_sync.powerwall_local.dispatch_timing: debug
+```
+
+Keep using the battery normally. If a renewal fails, look in **Settings →
+System → Logs** for the timestamped `Powerwall renewal timing` line from the
+same event. The line shows how long the gateway reads and signing took,
+observed Home Assistant event-loop delay, and the age of the sample at the
+command checks. To stop the capture, run the same action with `notset` in
+place of `debug`.
+
 For literal zero-power idle, charge/discharge to a percentage, persistent site limits and native backup windows, see [Advanced Powerwall controls](powerwall-advanced-controls.md).
