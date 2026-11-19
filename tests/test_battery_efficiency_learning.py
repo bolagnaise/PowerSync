@@ -97,6 +97,47 @@ def test_cold_start_preserves_legacy_physical_and_economic_values():
     assert resolved.economic_round_trip_efficiency == pytest.approx(DEFAULT_RTE)
 
 
+@pytest.mark.parametrize("peak_soc", [0.98, 1.0])
+def test_daily_cycle_returns_to_reserve_after_full_charge(peak_soc):
+    learner = BatteryEfficiencyLearner()
+    start = datetime(2026, 7, 1, 7, tzinfo=timezone.utc)
+    reserve_soc = 0.20
+    span = peak_soc - reserve_soc
+    common = {"capacity_kwh": 46.8, "topology_fingerprint": "ac-battery"}
+
+    for day in range(6):
+        morning = start + timedelta(days=day)
+        observations = [(0, reserve_soc, 0.0)]
+        observations.extend(
+            (5 * i, reserve_soc + span * i / 60, -8.0)
+            for i in range(1, 61)
+        )
+        observations.extend((5 * i, peak_soc, 0.0) for i in range(61, 121))
+        observations.extend(
+            (600 + 5 * i, peak_soc - span * i / 60, 7.36)
+            for i in range(1, 61)
+        )
+        observations.append((905, reserve_soc, 0.0))
+        accepted_cycles = 0
+        for minutes, soc, power in observations:
+            observed_at = morning + timedelta(minutes=minutes)
+            result = learner.observe(
+                timestamp=observed_at, soc=soc, battery_power_kw=power, **common
+            )
+            accepted_cycles += result.accepted_cycle
+        assert accepted_cycles == 1
+
+    assert learner.evidence(observed_at)[:2] == (6, 6)
+    # The return closes on the SOC crossing, before the final ramp to idle.
+    assert learner.candidate_round_trip_efficiency(observed_at) == pytest.approx(
+        0.92 * 59.5 / 60
+    )
+    resolved = learner.resolved_parameters(now=observed_at)
+    assert resolved.battery_efficiency_source == "learned"
+    assert resolved.physical_round_trip_efficiency > DEFAULT_RTE
+    assert resolved.economic_round_trip_efficiency == pytest.approx(DEFAULT_RTE)
+
+
 def test_learning_requires_cycles_days_and_equivalent_cycle_evidence():
     learner = BatteryEfficiencyLearner()
     last = None
@@ -356,7 +397,6 @@ def test_coordinator_uses_acquisition_clock_and_paired_soc():
 
 
 def test_custom_entity_reports_learn_a_daily_full_cycle_and_reject_unpaired_data():
-    from datetime import timedelta
     from functools import partial
 
     read_numeric, read_custom, observe = _coordinator_methods(
