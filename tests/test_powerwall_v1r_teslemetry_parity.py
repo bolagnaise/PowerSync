@@ -408,7 +408,10 @@ async def test_missing_common_api_response_is_reported_in_diagnostics():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("slow_stage", ["dcq", "config", "event_loop", "signing", "none"])
+@pytest.mark.parametrize("slow_stage", [
+    "dcq", "dcq_then_fresh", "dcq_then_revoked", "dcq_near_deadline",
+    "config", "event_loop", "signing", "none",
+])
 async def test_local_renewal_timing_preserves_freshness_fences(monkeypatch, caplog, slow_stage):
     dispatch = importlib.import_module(f"{_LOCAL_PKG}.battery_dispatch")
     timing = importlib.import_module(f"{_LOCAL_PKG}.dispatch_timing")
@@ -439,10 +442,18 @@ async def test_local_renewal_timing_preserves_freshness_fences(monkeypatch, capl
     monkeypatch.setattr(dispatch, "RENEW_SECONDS", 0)
     caplog.set_level("DEBUG", logger=timing.__name__)
     fast_read_finished = asyncio.Event()
+    reads = {"dcq": 0, "config": 0}
+    allowed = True
 
     async def read(name, data):
-        nonlocal now
-        if slow_stage == name or (slow_stage == "event_loop" and name == "dcq"):
+        nonlocal allowed, now
+        reads[name] += 1
+        if slow_stage.startswith("dcq_") and name == "dcq" and reads[name] == 1:
+            await fast_read_finished.wait()
+            advance_with_responsive_loop(8.7)
+        elif slow_stage == "dcq_then_revoked" and name == "dcq":
+            allowed = False
+        elif slow_stage == name or (slow_stage == "event_loop" and name == "dcq"):
             await fast_read_finished.wait()
             if slow_stage == "event_loop":
                 now += 5.5
@@ -489,10 +500,11 @@ async def test_local_renewal_timing_preserves_freshness_fences(monkeypatch, capl
     controller = dispatch.LocalBatteryDispatch(
         client, lambda: {"optimization_max_charge_w": 5000, "optimization_max_grid_import_w": 14900,
                          "optimization_backup_reserve": .2},
-        lambda _: True, AsyncMock(), AsyncMock(),
+        lambda _: allowed, AsyncMock(), AsyncMock(),
     )
     controller._mode, controller._target = "charge", 300
-    controller._target_basis, controller._deadline = "battery_output", 700
+    controller._target_basis = "battery_output"
+    controller._deadline = 122 if slow_stage == "dcq_near_deadline" else 700
     controller._release = AsyncMock()
 
     async def stop_after_acknowledgement(_watts, _seconds):
@@ -502,26 +514,38 @@ async def test_local_renewal_timing_preserves_freshness_fences(monkeypatch, capl
     await controller._renew()
 
     controller._release.assert_awaited_once()
-    if slow_stage == "none":
+    if slow_stage in ("none", "dcq_then_fresh"):
         assert controller.completion_reason == "timeout" and controller._last_watts == -300
         post.assert_called_once()
     else:
         assert controller.completion_reason == "safety_refused"
         post.assert_not_called()
+        if slow_stage != "signing":
+            controller.persist.assert_not_awaited()
     traces = [record.message for record in caplog.records if record.name == timing.__name__]
     assert len(traces) == 1
     trace = traces[0]
     assert "dcq=" in trace and "config=" in trace and "private-din" not in trace
     if slow_stage == "none":
         assert "pre_command_age=4.900s" in trace and "pre_submission_age=4.900s" in trace
+    elif slow_stage == "dcq_then_fresh":
+        assert reads == {"dcq": 2, "config": 2}
+        assert "dcq=8.700s" in trace and "pre_submission_age=0.000s" in trace
+    elif slow_stage == "dcq_then_revoked":
+        assert reads == {"dcq": 2, "config": 2}
+        assert "snapshot_age=8.700s" in trace and "pre_submission_age" not in trace
+    elif slow_stage == "dcq_near_deadline":
+        assert reads == {"dcq": 1, "config": 1}
+        assert "snapshot_age=8.700s" in trace and "pre_submission_age" not in trace
     elif slow_stage == "event_loop":
-        assert "dcq=5.500s" in trace and "max_loop_delay=5.250s" in trace
+        assert "dcq=5.500s" in trace and "max_loop_delay=10.750s" in trace
     elif slow_stage == "signing":
         assert "signing=5.100s" in trace and "pre_submission_age=5.100s" in trace
     else:
         assert f"{slow_stage}=5.100s" in trace and "max_loop_delay=0.000s" in trace
     if slow_stage in ("dcq", "config", "event_loop"):
-        assert "pre_command_age=5." in trace and "pre_submission_age" not in trace
+        assert reads == {"dcq": 2, "config": 2}
+        assert trace.count("snapshot_age=5.") == 2 and "pre_submission_age" not in trace
 
 
 @async_test
