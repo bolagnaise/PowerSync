@@ -202,6 +202,7 @@ def test_status_preserves_selected_source_observation_times():
     assert status["telemetry_observed_at"]["load_power"] == load_state.last_reported
     assert status["telemetry_observed_at"]["grid_power"] == now
     assert status["telemetry_observed_at"]["battery_power"] == now
+    assert status["telemetry_observed_at"]["battery_level"] == now
 
 
 def test_upstream_config_entry_state_is_reported_when_available():

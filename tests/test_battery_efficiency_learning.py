@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import importlib.util
+import logging
+import math
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -310,35 +313,104 @@ def test_telemetry_gap_during_endpoint_visit_cannot_be_bridged():
     assert learner.rejections["telemetry_gap"] >= 1
 
 
-def _observation_method():
+def _coordinator_methods(*names):
     import ast
     from typing import Any
+
     path = MODULE_PATH.parent / "coordinator.py"
     tree = ast.parse(path.read_text())
     cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "OptimizationCoordinator")
-    method = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "_observe_battery_efficiency")
-    namespace = {"datetime": datetime, "Any": Any}
-    exec(compile(ast.Module(body=[method], type_ignores=[]), str(path), "exec"), namespace)
-    return namespace[method.name]
+    methods = [n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name in names]
+    namespace = {
+        "datetime": datetime,
+        "Any": Any,
+        "math": math,
+        "_LOGGER": logging.getLogger(__name__),
+        "CUSTOM_BATTERY_SYSTEM": "custom",
+        "CUSTOM_BATTERY_LEVEL_ENTITY": "level",
+        "CUSTOM_BATTERY_POWER_ENTITY": "power",
+        "CUSTOM_GRID_POWER_ENTITY": "grid",
+        "CUSTOM_SOLAR_POWER_ENTITY": "solar",
+        "CUSTOM_LOAD_POWER_ENTITY": "load",
+    }
+    exec(compile(ast.Module(body=methods, type_ignores=[]), str(path), "exec"), namespace)
+    return tuple(namespace[name] for name in names)
 
 
-def test_coordinator_uses_acquisition_clock_and_paired_soc_not_solve_values():
-    from types import SimpleNamespace
+def test_coordinator_uses_acquisition_clock_and_paired_soc():
     now = datetime(2026, 7, 1, tzinfo=timezone.utc)
     captured = []
     learner = SimpleNamespace(observe=lambda **kw: (captured.append(kw) or MODULE.ObservationResult(False)))
     coordinator = SimpleNamespace(_get_energy_data=lambda: {"battery_level": 1.0, "battery_power": -12.0,
         "last_update": now - timedelta(seconds=30)}, _battery_efficiency_learner=learner,
         _battery_efficiency_topology_fingerprint=lambda _: "test-ac")
-    observe = _observation_method()
-    observe(coordinator, timestamp=now, soc=.5, capacity_wh=54000)
+    (observe,) = _coordinator_methods("_observe_battery_efficiency")
+    observe(coordinator, timestamp=now, capacity_wh=54000)
     assert captured[-1]["soc"] == pytest.approx(.01)
     assert captured[-1]["timestamp"] == now - timedelta(seconds=30)
     assert captured[-1]["valid"] is True
     coordinator._get_energy_data = lambda: {"battery_level": 50, "battery_power": -12,
         "last_update": now - timedelta(minutes=5)}
-    observe(coordinator, timestamp=now, soc=.5, capacity_wh=54000)
+    observe(coordinator, timestamp=now, capacity_wh=54000)
     assert captured[-1]["valid"] is False
+
+
+def test_custom_entity_reports_learn_a_daily_full_cycle_and_reject_unpaired_data():
+    from datetime import timedelta
+    from functools import partial
+
+    read_numeric, read_custom, observe = _coordinator_methods(
+        "_read_numeric_state", "_read_custom_energy_data", "_observe_battery_efficiency"
+    )
+    states = {}
+    learner = BatteryEfficiencyLearner()
+    coordinator = SimpleNamespace(
+        battery_system="custom",
+        hass=SimpleNamespace(states=states),
+        _last_custom_energy_warning=None,
+        _get_custom_entity_id=lambda key: key if key in ("level", "power") else "",
+        _power_to_kw=lambda value, unit: value / 1000 if unit == "W" else value,
+        _battery_efficiency_learner=learner,
+        _battery_efficiency_topology_fingerprint=lambda _: "custom-battery",
+        _schedule_battery_efficiency_learning_save=lambda: None,
+        battery_efficiency_learning_enabled=True,
+    )
+    coordinator._read_numeric_state = partial(read_numeric, coordinator)
+    coordinator._get_energy_data = partial(read_custom, coordinator)
+
+    rows = _continuous_profile(datetime(2026, 7, 1, tzinfo=timezone.utc))
+    at, _, _ = rows[30]
+    # Six hours at 100% with fresh, zero-power observations.
+    plateau = [(at + timedelta(minutes=5 * index), 1.0, 0.0) for index in range(1, 73)]
+    rows = rows[:31] + plateau + [
+        (at + timedelta(hours=6), soc, power) for at, soc, power in rows[31:]
+    ]
+    for at, soc, power in rows:
+        states["level"] = SimpleNamespace(
+            state=str(soc * 100), attributes={}, last_reported=at
+        )
+        states["power"] = SimpleNamespace(
+            state=str(power * 1000), attributes={"unit_of_measurement": "W"},
+            last_reported=at + timedelta(seconds=8),
+        )
+        observe(coordinator, timestamp=at + timedelta(seconds=15), capacity_wh=54000)
+
+    assert len(learner.history) == 1
+    assert learner.history[-1].round_trip_efficiency == pytest.approx(.8)
+    assert learner.history[-1].timestamp == at.isoformat()
+
+    report_time = at + timedelta(minutes=1)
+    states["power"].last_reported = report_time
+    observe(coordinator, timestamp=report_time, capacity_wh=54000)
+    assert learner.rejections["stale_telemetry"] == 1
+
+    # An explicitly missing field timestamp must never fall back to a poll time.
+    stale_data = coordinator._get_energy_data()
+    stale_data["last_update"] = report_time
+    stale_data["telemetry_observed_at"]["battery_level"] = None
+    coordinator._get_energy_data = lambda: stale_data
+    observe(coordinator, timestamp=report_time, capacity_wh=54000)
+    assert learner.rejections["stale_telemetry"] == 2
 
 
 def test_published_diagnostics_keep_current_plan_values_separate_from_new_evidence():

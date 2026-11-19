@@ -63,6 +63,7 @@ from .const import (
     SIGENERGY_CHARGER_EVDC,
 )
 from .sensitive_logging import obfuscate_log_arg, obfuscate_vin_tokens
+from .battery_telemetry import oldest_entity_report
 from .demand_charge_config import (
     normalize_demand_charge_billing_day,
     normalize_demand_charge_days,
@@ -6008,6 +6009,7 @@ class SigenergyEnergyCoordinator(DataUpdateCoordinator):
         if not self._energy_acc._last_update:
             await self._energy_acc.async_restore()
         try:
+            battery_observed_at = dt_util.utcnow()
             status = await self._controller.get_status()
 
             attrs = status.attributes or {}
@@ -6148,6 +6150,12 @@ class SigenergyEnergyCoordinator(DataUpdateCoordinator):
                 "ev_soc": evdc_state.vehicle_soc if evdc_state else None,
                 "battery_level": attrs.get("battery_soc", 0),  # %
                 "last_update": dt_util.utcnow(),
+                "telemetry_observed_at": {
+                    "battery_level": battery_observed_at,
+                    "battery_power": (
+                        battery_observed_at if attrs.get("battery_power_kw") is not None else None
+                    ),
+                },
                 # Extra Sigenergy-specific data
                 "active_power_kw": attrs.get("active_power_kw", 0),
                 "export_limit_kw": attrs.get("export_limit_kw"),
@@ -9187,6 +9195,10 @@ class CustomEntityEnergyCoordinator(DataUpdateCoordinator):
             "battery_power": battery_kw,
             "load_power": load_kw,
             "battery_level": battery_level,
+            "telemetry_observed_at": {
+                key: oldest_entity_report(self.hass, self._source_entities.get(key))
+                for key in ("battery_level", "battery_power")
+            },
             "source_entities": dict(self._source_entities),
             "energy_summary": self._energy_acc.as_dict(),
             "last_update": dt_util.utcnow(),
@@ -9453,6 +9465,7 @@ class FoxESSEntityEnergyCoordinator(
             "battery_power": battery_kw,
             "load_power": load_kw,
             "battery_level": soc,
+            "telemetry_observed_at": status.get("telemetry_observed_at", {}),
             "last_update": dt_util.utcnow(),
             "ct2_power": ct2_kw,
             "battery_voltage_v": status.get("battery_voltage_v"),
@@ -10181,6 +10194,7 @@ class GoodWeEnergyCoordinator(
                 energy_data["work_mode_name"] = data.get("work_mode_name")
             if data.get("entity_telemetry"):
                 energy_data["entity_telemetry"] = True
+                energy_data["telemetry_observed_at"] = data.get("telemetry_observed_at", {})
             for status_key, summary_key in (
                 ("daily_solar_energy_kwh", "pv_today_kwh"),
                 ("daily_grid_import_kwh", "grid_import_today_kwh"),
@@ -10652,6 +10666,7 @@ class SolaxBatteryEnergyCoordinator(
             "battery_power": battery_kw,
             "load_power": load_kw,
             "battery_level": soc,
+            "telemetry_observed_at": status.get("telemetry_observed_at", {}),
             "battery_temperature": status.get("battery_temperature"),
             "pv1_power": status.get("pv1_power"),
             "pv2_power": status.get("pv2_power"),
@@ -11345,6 +11360,7 @@ class SajH2EnergyCoordinator(
             "battery_power": battery_kw,
             "load_power": load_kw,
             "battery_level": soc,
+            "telemetry_observed_at": status.get("telemetry_observed_at", {}),
             "pv1_power": status.get("pv1_power"),
             "pv2_power": status.get("pv2_power"),
             "pv3_power": status.get("pv3_power"),
@@ -11690,6 +11706,7 @@ class NeovoltEnergyCoordinator(
             "battery_power": battery_kw,
             "load_power": load_kw,
             "battery_level": soc,
+            "telemetry_observed_at": status.get("telemetry_observed_at", {}),
             "battery_capacity_kwh": status.get("battery_capacity_kwh"),
             "battery_soh": status.get("battery_soh"),
             "battery_max_charge_power_w": status.get("battery_max_charge_power_w"),
@@ -11874,6 +11891,8 @@ class AnkerSolixEnergyCoordinator(
             "battery_power": battery_kw,
             "load_power": load_kw,
             "battery_level": soc,
+            "last_update": status.get("last_update"),
+            "telemetry_observed_at": status.get("telemetry_observed_at", {}),
             "battery_capacity_kwh": status.get("battery_capacity_kwh"),
             "battery_max_charge_power_w": status.get("battery_max_charge_power_w"),
             "battery_max_discharge_power_w": status.get("battery_max_discharge_power_w"),
@@ -12161,6 +12180,13 @@ class ESYSunhomeEnergyCoordinator(
             "battery_power": battery_kw,
             "load_power": load_kw,
             "battery_level": battery_level,
+            "telemetry_observed_at": {
+                "battery_level": oldest_entity_report(self.hass, self._entity_map.get("batterySoc")),
+                # The magnitude-only fallback gives no charge/discharge direction.
+                "battery_power": oldest_entity_report(
+                    self.hass, self._entity_map.get("batteryImport"), self._entity_map.get("batteryExport"),
+                ),
+            },
             "last_update": dt_util.utcnow(),
             "work_mode": work_mode_name,
             "work_mode_name": work_mode_name,

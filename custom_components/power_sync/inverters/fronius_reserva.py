@@ -15,6 +15,8 @@ from typing import Any
 
 from homeassistant.helpers import entity_registry as er
 
+from ..battery_telemetry import oldest_paired_report
+
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -416,8 +418,9 @@ class FroniusReservaBatteryController:
         return updated_at if isinstance(updated_at, datetime) else None
 
     def _telemetry_observed_at(self) -> dict[str, datetime | None]:
-        """Preserve source observation times for live-control power fields."""
+        """Preserve source observation times for site power and battery SOC."""
         source_keys = {
+            "battery_level": ("battery_level",),
             "load_power": ("load_power",),
             "grid_power": ("grid_power",),
             "solar_power": ("solar_power",),
@@ -431,12 +434,11 @@ class FroniusReservaBatteryController:
             selected_keys = [key for key in keys if key in self._entity_map]
             if not selected_keys:
                 continue
-            timestamps = [self._read_observed_at(key) for key in selected_keys]
-            observed_at[output_key] = (
-                min(timestamps)
-                if all(timestamp is not None for timestamp in timestamps)
-                else None
-            )
+            timestamps = [
+                self._read_observed_at(key) if self._read_float(key) is not None else None
+                for key in selected_keys
+            ]
+            observed_at[output_key] = oldest_paired_report(timestamps)
         return observed_at
 
     def telemetry_ready(self) -> bool:

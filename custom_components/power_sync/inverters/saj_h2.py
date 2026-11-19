@@ -74,6 +74,8 @@ from typing import Any
 
 from homeassistant.helpers import entity_registry as er
 
+from ..battery_telemetry import oldest_entity_report
+
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -384,7 +386,8 @@ class SajH2BatteryController:
         )
 
         # Battery power: SAJ typically reports absolute value + direction sensor
-        battery_w_raw = self._read_float("battery_power") or 0.0
+        measured_battery_w = self._read_float("battery_power")
+        battery_w_raw = measured_battery_w or 0.0
         dir_bat = self._read_direction("direction_battery")
         if dir_bat == "active_b":       # discharging → positive (convention: + = export from battery)
             battery_kw = abs(battery_w_raw) / 1000.0
@@ -393,6 +396,9 @@ class SajH2BatteryController:
         else:
             # No direction info — trust the raw value's sign (some versions report signed)
             battery_kw = battery_w_raw / 1000.0
+        battery_power_entities = [self._entity_map.get("battery_power")]
+        if dir_bat in ("active_a", "active_b"):
+            battery_power_entities.append(self._entity_map.get("direction_battery"))
 
         # Grid power: positive = import, negative = export
         grid_w_raw = self._read_float("grid_power") or 0.0
@@ -441,6 +447,14 @@ class SajH2BatteryController:
             "telemetry_ready":            telemetry_ready,
             "battery_level":              battery_level,
             "battery_power":              battery_kw,
+            "telemetry_observed_at": {
+                "battery_level": oldest_entity_report(self.hass, self._entity_map.get("battery_level")),
+                "battery_power": (
+                    oldest_entity_report(self.hass, *battery_power_entities, numeric=False)
+                    if measured_battery_w is not None
+                    else None
+                ),
+            },
             "grid_power":                 grid_kw,
             "solar_power":                solar_kw,
             "load_power":                 load_kw,

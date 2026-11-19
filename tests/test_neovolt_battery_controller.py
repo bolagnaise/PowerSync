@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 import sys
 import types
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -317,6 +318,11 @@ def test_fleet_status_aggregates_power_and_capacity_weighted_soc():
         pv_power="0",
         grid_power="19",
     ) + _control_states_for(2)
+    now = datetime.now(timezone.utc)
+    for state in entry_1_states:
+        state.last_reported = now
+    for state in entry_2_states:
+        state.last_reported = now - timedelta(seconds=10)
     hass = _FakeHass(
         entry_1_states + entry_2_states,
         {
@@ -339,6 +345,10 @@ def test_fleet_status_aggregates_power_and_capacity_weighted_soc():
     assert status["load_power"] == pytest.approx(1.961)
     assert status["battery_capacity_kwh"] == pytest.approx(50.3)
     assert status["battery_level"] == pytest.approx(29.5904, rel=1e-4)
+    assert status["telemetry_observed_at"] == {
+        "battery_level": now - timedelta(seconds=10),
+        "battery_power": now - timedelta(seconds=10),
+    }
     assert status["battery_soh"] == pytest.approx(97.7992, rel=1e-4)
     assert status["battery_max_charge_power_w"] == 10000.0
     assert status["battery_max_discharge_power_w"] == 10000.0

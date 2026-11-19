@@ -8,6 +8,7 @@ entities when PowerSync is not the Modbus owner.
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import logging
 import math
 from typing import Any
@@ -17,6 +18,8 @@ from homeassistant.helpers import entity_registry as er
 from pymodbus.client import AsyncModbusTcpClient
 from pymodbus.exceptions import ModbusException
 import pymodbus
+
+from ..battery_telemetry import oldest_entity_report
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -106,7 +109,8 @@ class AnkerSolixX1ModbusController:
             third_party_pv_w = (
                 await self._read_s32_input(self.REG_THIRD_PARTY_PV_POWER)
             ) or 0
-            battery_w = (await self._read_s32_input(self.REG_BATTERY_POWER)) or 0
+            battery_observed_at = datetime.now(timezone.utc)
+            battery_w = await self._read_s32_input(self.REG_BATTERY_POWER)
             load_w = (await self._read_s32_input(self.REG_LOAD_POWER)) or 0
             grid_w = (await self._read_s32_input(self.REG_GRID_POWER)) or 0
             soc = await self._read_u16_input(self.REG_BATTERY_SOC)
@@ -125,9 +129,10 @@ class AnkerSolixX1ModbusController:
         return {
             "solar_power": max(0.0, (float(pv_w) + float(third_party_pv_w)) / 1000.0),
             "grid_power": float(grid_w) / 1000.0,
-            "battery_power": float(battery_w) / 1000.0,
+            "battery_power": float(battery_w or 0) / 1000.0,
             "load_power": max(0.0, float(load_w) / 1000.0),
             "battery_level": float(soc) if soc is not None else None,
+            "last_update": battery_observed_at if soc is not None and battery_w is not None else None,
             "battery_capacity_kwh": capacity_kwh,
             "battery_max_charge_power_w": abs(max_charge_w)
             if max_charge_w
@@ -395,6 +400,15 @@ class AnkerSolixEntityController:
             "battery_power": battery_w / 1000.0,
             "load_power": max(0.0, (self._read_float("load_power") or 0.0) / 1000.0),
             "battery_level": self._read_float("battery_level"),
+            # Preset output values can drive dispatch but do not measure it.
+            "telemetry_observed_at": {
+                "battery_level": oldest_entity_report(self.hass, self._entity_map.get("battery_level")),
+                "battery_power": oldest_entity_report(
+                    self.hass,
+                    self._entity_map.get("battery_charge_power"),
+                    self._entity_map.get("battery_discharge_power"),
+                ),
+            },
             "battery_capacity_kwh": capacity_kwh or self._battery_capacity_kwh,
             "battery_max_charge_power_w": self._read_float("battery_max_charge_power_w")
             or self._max_charge_w,

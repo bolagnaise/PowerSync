@@ -20,6 +20,8 @@ from typing import Any
 
 from homeassistant.helpers import entity_registry as er
 
+from ..battery_telemetry import oldest_entity_report, oldest_paired_report
+
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -188,6 +190,10 @@ class NeovoltBatteryController:
             "battery_power": battery_w / 1000.0,
             "load_power": max(0.0, load_w / 1000.0),
             "battery_level": self._read_float("battery_level"),
+            "telemetry_observed_at": {
+                "battery_level": oldest_entity_report(self.hass, self._entity_map.get("battery_level")),
+                "battery_power": oldest_entity_report(self.hass, self._entity_map.get("battery_power")),
+            },
             "battery_capacity_kwh": self._battery_capacity_kwh
             if self._battery_capacity_kwh is not None
             else self._read_float("battery_capacity_kwh"),
@@ -616,6 +622,11 @@ class NeovoltFleetBatteryController:
         reported_load = sum(status.get("load_power", 0.0) or 0.0 for status in statuses)
         balanced_load = max(0.0, solar_power + grid_power + battery_power)
         load_power = balanced_load if len(statuses) > 1 else reported_load
+        observed_at = {}
+        for key in ("battery_level", "battery_power"):
+            observed_at[key] = oldest_paired_report([
+                status.get("telemetry_observed_at", {}).get(key) for status in statuses
+            ])
 
         return {
             "telemetry_ready": all(
@@ -626,6 +637,7 @@ class NeovoltFleetBatteryController:
             "battery_power": battery_power,
             "load_power": load_power,
             "battery_level": self._weighted_average(statuses, "battery_level", capacities),
+            "telemetry_observed_at": observed_at,
             "battery_capacity_kwh": total_capacity or None,
             "battery_soh": self._weighted_average(statuses, "battery_soh", capacities),
             "battery_max_charge_power_w": sum(

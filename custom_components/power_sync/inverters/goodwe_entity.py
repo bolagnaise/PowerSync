@@ -12,6 +12,7 @@ import logging
 import math
 from typing import Any
 
+from ..battery_telemetry import oldest_entity_report
 from .base import InverterController, InverterState, InverterStatus
 
 _LOGGER = logging.getLogger(__name__)
@@ -133,6 +134,11 @@ class GoodWeEntityTelemetryController:
             )
 
         battery_kw = self._battery_power_kw()
+        battery_power_keys = (
+            ("battery_power",)
+            if self._power_kw("battery_power") is not None
+            else ("battery_charge", "battery_discharge")
+        )
         grid_kw = self._grid_power_kw()
         solar_kw = self._power_kw("solar_power") or 0.0
         load_kw = self._power_kw("load_power")
@@ -144,6 +150,12 @@ class GoodWeEntityTelemetryController:
             "solar_power": max(0.0, solar_kw),
             "grid_power": grid_kw,
             "battery_power": battery_kw,
+            "telemetry_observed_at": {
+                "battery_level": oldest_entity_report(self.hass, self._entity_map.get("battery_level")),
+                "battery_power": oldest_entity_report(
+                    self.hass, *(self._entity_map.get(key) for key in battery_power_keys),
+                ),
+            },
             "load_power": max(0.0, load_kw),
             "battery_level": self._read_float("battery_level"),
             "battery_temperature": self._read_float("battery_temperature"),

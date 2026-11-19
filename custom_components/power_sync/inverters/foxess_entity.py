@@ -16,6 +16,8 @@ from typing import Any
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 
+from ..battery_telemetry import oldest_entity_report
+
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -162,6 +164,11 @@ class FoxESSEntityController:
         soc = self._read_float("battery_level")
         telemetry_ready = self.telemetry_ready()
         battery_kw = self._battery_power_kw()
+        battery_power_keys = (
+            ("battery_power",)
+            if self._power_kw("battery_power") is not None
+            else ("battery_charge", "battery_discharge")
+        )
         grid_kw = self._grid_power_kw()
         solar_kw = self._solar_power_kw()
         ct2_kw = self._power_kw("ct2_power") or 0.0
@@ -174,6 +181,12 @@ class FoxESSEntityController:
             "telemetry_ready": telemetry_ready,
             "battery_level": soc,
             "battery_power": battery_kw,
+            "telemetry_observed_at": {
+                "battery_level": oldest_entity_report(self.hass, self._entity_map.get("battery_level")),
+                "battery_power": oldest_entity_report(
+                    self.hass, *(self._entity_map.get(key) for key in battery_power_keys),
+                ),
+            },
             "battery_voltage_v": battery_voltage_v,
             "grid_power": grid_kw,
             "solar_power": max(0.0, total_solar_kw),

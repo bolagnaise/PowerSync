@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import importlib
 import sys
 import types
@@ -210,12 +211,14 @@ def test_anker_modbus_status_decodes_signed_power_and_capacity_scaling():
         }
         _FakeModbusClient.holding_registers = {controller.REG_OPERATING_MODE: 0}
 
+        started = datetime.now(timezone.utc)
         status = asyncio.run(controller.get_status())
 
         assert status["solar_power"] == 3.3
         assert status["battery_power"] == -2.0
         assert status["grid_power"] == 0.8
         assert status["battery_level"] == 63.0
+        assert started <= status["last_update"] <= datetime.now(timezone.utc)
         assert status["battery_capacity_kwh"] == 10.0
     finally:
         restore_module()
