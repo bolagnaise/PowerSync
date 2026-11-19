@@ -11907,6 +11907,58 @@ def test_solar_surplus_stop_delay_stops_after_elapsed_delay(monkeypatch):
     assert set_amps_calls == [0]
 
 
+@pytest.mark.parametrize("pending_start", [False, True])
+def test_solar_surplus_restarts_start_delay_after_surplus_drops(monkeypatch, pending_start):
+    vehicle_id = "VIN123"
+    hass = _Hass([
+        _State("sensor.VIN123_charging_state", "unavailable" if pending_start else "stopped"),
+        _State(
+            "sensor.VIN123_charger_power",
+            "unavailable" if pending_start else "0",
+            {"unit_of_measurement": "W"},
+            last_updated=datetime.now(timezone.utc),
+        ),
+    ])
+    actions._dynamic_ev_state.clear()
+    state = _solar_surplus_state(current_amps=14 if pending_start else 0)
+    if pending_start:
+        actions._mark_tesla_plan_pending(state, 14)
+    state["params"].update(
+        vehicle_vin=vehicle_id,
+        charger_power_entity="sensor.VIN123_charger_power",
+        household_buffer_kw=0,
+    )
+    state["high_surplus_start"] = datetime.now() - timedelta(minutes=4)
+    actions._dynamic_ev_state["entry-1"] = {vehicle_id: state}
+    start = AsyncMock(return_value=True)
+    monkeypatch.setattr(actions, "_action_start_ev_charging", start)
+    monkeypatch.setattr(actions, "_is_vehicle_charge_complete", AsyncMock(return_value=False))
+    live_status = {
+        "battery_soc": 100,
+        "grid_power": 0,
+        "battery_power": 0,
+        "solar_power": 0,
+        "load_power": 0,
+    }
+    set_amps_calls = _install_solar_surplus_runtime_stubs(monkeypatch, live_status)
+
+    asyncio.run(actions._dynamic_ev_update_surplus(hass, _Entry(), "entry-1", vehicle_id))
+    assert state["high_surplus_start"] is None
+
+    # Low-surplus floor handling is independent from the new Start window.
+    amps_after_dip = state["current_amps"]
+    commands_after_dip = set_amps_calls.copy()
+    live_status["grid_power"] = -3500
+    asyncio.run(actions._dynamic_ev_update_surplus(hass, _Entry(), "entry-1", vehicle_id))
+    assert state["high_surplus_start"] is not None
+    asyncio.run(actions._dynamic_ev_update_surplus(hass, _Entry(), "entry-1", vehicle_id))
+    start.assert_not_awaited()
+    assert set_amps_calls == commands_after_dip
+    assert state["current_amps"] == amps_after_dip
+    if pending_start:
+        assert state["transport_recovery_pending"]
+
+
 def test_solar_surplus_restarts_tesla_when_stopped_observation_replaces_commanded_load(
     monkeypatch,
 ):

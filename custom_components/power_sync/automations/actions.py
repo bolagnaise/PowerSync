@@ -15880,7 +15880,8 @@ async def _dynamic_ev_update_surplus(
         state["high_surplus_start"] = None
         new_amps = 0
     elif executable_available_amps + 1e-9 < min_amps:
-        # Not enough surplus
+        # A later Start must build a new uninterrupted surplus window.
+        state["high_surplus_start"] = None
         if effective_current_amps > 0:
             # Track how long we've been below threshold
             low_surplus_start = state.get("low_surplus_start")
@@ -15907,20 +15908,20 @@ async def _dynamic_ev_update_surplus(
         state["low_surplus_start"] = None
         state.pop("stop_outcome", None)
 
-        if effective_current_amps == 0 or (
+        tesla_start_pending = (
             params.get("charger_type", "tesla") == "tesla"
             and state.get("transport_recovery_pending")
-        ):
+        )
+        if effective_current_amps == 0 or tesla_start_pending:
             # An uncertain Start retains possible draw in current_amps. Missing
             # telemetry must not let that reservation bypass fresh-read recovery.
-            # Keep the reservation intact; the Start path must reconcile before
-            # it can submit another command, under current surplus and ownership.
-            # Track how long we've had surplus before starting
             high_surplus_start = state.get("high_surplus_start")
             if high_surplus_start is None:
                 state["high_surplus_start"] = datetime.now()
-                new_amps = 0  # Don't set amps yet, wait for sustained surplus
-            elif (datetime.now() - high_surplus_start).total_seconds() >= sustained_minutes * 60:
+            if (
+                high_surplus_start is not None
+                and (datetime.now() - high_surplus_start).total_seconds() >= sustained_minutes * 60
+            ):
                 # Start charging after sustained surplus
                 _LOGGER.info(f"⚡ Solar surplus EV: Starting - sustained surplus for {sustained_minutes} min")
 
@@ -16004,7 +16005,10 @@ async def _dynamic_ev_update_surplus(
                     if _session_was_replaced("start notification"):
                         return
             else:
-                # Don't start yet, waiting for sustained surplus
+                # A pending Start's possible draw is not a reason to send Stop
+                # while sufficient surplus is rebuilding the Start delay.
+                if tesla_start_pending and effective_current_amps > 0:
+                    return
                 new_amps = 0
         else:
             state["high_surplus_start"] = None
