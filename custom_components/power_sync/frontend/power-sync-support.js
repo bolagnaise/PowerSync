@@ -1,4 +1,4 @@
-/* HA-only support consent. No mobile settings, model calls or MCP credentials. */
+/* Home Assistant support consent. */
 class PowerSyncSupportCard extends HTMLElement {
   constructor() { super(); this.attachShadow({ mode: 'open' }); this._entries = []; this._busy = false; }
   set hass(value) { this._hass = value; if (!this._loaded && value?.user?.is_admin) { this._loaded = true; this.load(); } }
@@ -10,7 +10,7 @@ class PowerSyncSupportCard extends HTMLElement {
   disconnectedCallback() { this._connected = false; clearTimeout(this._refresh); }
   scheduleRefresh() {
     clearTimeout(this._refresh);
-    if (this._connected && this._hass?.user?.is_admin && (['pending', 'activating', 'active'].includes(this._status?.state) || this._diagnostics?.grants?.length || this._diagnostics?.root_revocation)) {
+    if (this._connected && this._hass?.user?.is_admin && (['pending', 'activating', 'active'].includes(this._status?.state) || this._diagnostics?.grants?.length || this._diagnostics?.root_revocation || ['pending', 'active', 'cleanup_pending'].includes(this._adminAccess?.state))) {
       this._refresh = setTimeout(() => this.load(true), 5000);
     }
   }
@@ -22,7 +22,7 @@ class PowerSyncSupportCard extends HTMLElement {
     const { recorder_bytes, dropped_records, audit, access_receipt, ...status } = this._status || {};
     const diagnostics = this._diagnostics && { ...this._diagnostics,
       grants: (this._diagnostics.grants || []).map(({ activity, ...grant }) => grant) };
-    return JSON.stringify([this._entry, status, diagnostics, this._ongoing, this._review, this._message, this._refreshError, this._diagnosticsError]);
+    return JSON.stringify([this._entry, status, diagnostics, this._ongoing, this._review, this._message, this._refreshError, this._diagnosticsError, this._adminAccess]);
   }
   async load(background = false) {
     if (!this._hass?.user?.is_admin) { this.render(); return; }
@@ -35,6 +35,7 @@ class PowerSyncSupportCard extends HTMLElement {
         this._entries = session.value.entries || [];
         if (!this._entries.some(x => x.entry_id === this._entry)) this._entry = this._entries[0]?.entry_id;
         this._status = this._entries.find(x => x.entry_id === this._entry)?.status;
+        this._adminAccess = session.value.admin_access;
       }
       this._refreshError = session.status === 'rejected';
       if (ongoing.status === 'fulfilled') {
@@ -53,6 +54,57 @@ class PowerSyncSupportCard extends HTMLElement {
   node(tag, text, parent) { const e = document.createElement(tag); if (text !== undefined) e.textContent = text; parent?.append(e); return e; }
   async diagnosticsApi(action, extra = {}) {
     return this._hass.callApi(action ? 'POST' : 'GET', 'power_sync/diagnostics', action ? { action, ...extra } : undefined);
+  }
+  async updateAdminAccess(action, challenge) {
+    if (this._busy || !this._adminAccess) return;
+    this._busy = true;
+    this.shadowRoot.querySelectorAll('button,select,input').forEach(element => { element.disabled = true; });
+    try {
+      const body = action === 'approve' ? { action, challenge } : { action };
+      this._adminAccess = await this._hass.callApi('POST', 'power_sync/support/admin', body);
+      this._message = '';
+    } catch {
+      this._message = 'Home Assistant could not confirm the change to administrator access. Check the current status.';
+    } finally {
+      this._busy = false;
+      await this.load();
+    }
+  }
+  renderAdminAccess(box, { button, checkbox, details, field, date }) {
+    if (!this._adminAccess) return;
+    const { state, expires_at } = this._adminAccess;
+    const section = details('Temporary administrator access', box);
+    section.open = state !== 'closed';
+    if (state === 'unavailable') {
+      this.node('p', 'Temporary administrator access is unavailable.', section);
+      button('Check and remove temporary access', () => this.updateAdminAccess('revoke'), section, '', true);
+    } else if (state === 'cleanup_pending') {
+      this.node('p', 'Home Assistant could not confirm that the temporary account was removed.', section);
+      button('Retry removing temporary access', () => this.updateAdminAccess('revoke'), section, '', true);
+    } else if (section.open) {
+      this.node('p', state === 'pending'
+        ? `Waiting for your investigator to connect by ${date(expires_at)}.`
+        : 'Administrator access is active and renews while the investigator is connected.', section);
+      button(state === 'pending' ? 'Deny administrator access' : 'Stop administrator access',
+        () => this.updateAdminAccess('revoke'), section, '', true);
+    } else {
+      this.node('p', 'Approve only a challenge from the investigator you are working with. They will be able to read and change this Home Assistant system, including integrations and devices. Access renews while the investigator is connected. You can stop it at any time. Stopping access does not undo changes.', section);
+      const challenge = field('Investigator challenge', 'input', section);
+      challenge.maxLength = 64; challenge.autocomplete = 'off'; challenge.spellcheck = false;
+      const consent = checkbox('I approve full Home Assistant administrator access for this repair.', false, section);
+      const approve = button('Approve temporary administrator access', () => this.updateAdminAccess('approve', challenge.value.trim()), section, 'primary', true);
+      const deny = button('Deny administrator access', () => {
+        challenge.value = '';
+        consent.checked = false;
+        update();
+      }, section, '', true);
+      const update = () => {
+        approve.disabled = this._busy || !consent.checked || !/^[a-f0-9]{64}$/.test(challenge.value.trim());
+        deny.disabled = this._busy || !challenge.value.trim();
+      };
+      challenge.oninput = consent.onchange = update;
+      update();
+    }
   }
   async run(action, data = {}, ongoing = false) {
     if (this._busy || !this._hass?.user?.is_admin) return;
@@ -198,6 +250,7 @@ class PowerSyncSupportCard extends HTMLElement {
     const details = (title, parent = box) => { const d = this.node('details', undefined, parent); this.node('summary', title, d); return d; };
     const field = (label, tag, parent) => { const l = this.node('label', label, parent), e = this.node(tag, undefined, l); e.setAttribute('aria-label', label); return e; };
     const row = (list, label, value) => { this.node('dt', label, list); this.node('dd', value, list); };
+    this.renderAdminAccess(box, { button, checkbox, details, field, date });
     const ongoing = checkbox('Allow ongoing support', !!this._ongoing);
     ongoing.disabled = this._busy;
     ongoing.onchange = () => { this._ongoing = ongoing.checked; this._review = undefined; this._message = ''; this.render(); };

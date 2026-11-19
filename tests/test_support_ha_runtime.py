@@ -38,6 +38,8 @@ def adapter():
         'digest':p.digest,'encode':p.encode,'reference':p.reference,'number':p.number,'DATA':'power_sync_support','CONTRACT_DIGEST':p.CONTRACT_DIGEST}
     from collections import deque
     ns['deque'] = deque
+    ns['ADMIN_DATA'] = 'power_sync_support_admin'
+    ns['setup_admin_access'] = lambda hass: None
     exec(compile(ast.Module(body=nodes,type_ignores=[]),str(ROOT/'ha.py'),'exec'),ns)
     return ns
 

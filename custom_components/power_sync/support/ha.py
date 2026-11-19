@@ -15,6 +15,7 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.storage import Store
 
+from .admin_access import DATA as ADMIN_DATA, setup as setup_admin_access
 from .collector import snapshot, select, action_event
 from .history import Recorder
 from .protocol import BROKER, CATEGORIES, MAX_RESULT, ROLES, SupportError, digest, encode, reference, number, CONTRACT_DIGEST
@@ -657,9 +658,13 @@ class SupportView(HomeAssistantView):
         self.hass = hass
 
     async def get(self, request):
-        if not request.get("hass_user") or not request["hass_user"].is_admin:
+        user = request.get("hass_user")
+        if not user or not user.is_admin:
             return web.json_response({"error": "admin_required"}, status=403)
-        return web.json_response({"entries": [{"entry_id": key, "status": runtime.status()} for key, runtime in self.hass.data.get(DATA, {}).items()]})
+        result = {"entries": [{"entry_id": key, "status": runtime.status()} for key, runtime in self.hass.data.get(DATA, {}).items()]}
+        if getattr(user, "is_owner", False) and (manager := self.hass.data.get(ADMIN_DATA)):
+            result["admin_access"] = manager.status()
+        return web.json_response(result)
 
     async def post(self, request):
         user = request.get("hass_user")
@@ -726,6 +731,7 @@ async def _setup_once(hass, entry, *, timeout=5):
     for value in runtimes.values():
         value.recorder.max_bytes = 8 * 1024 * 1024 // len(runtimes)
         value.recorder.trim(time.time())
+    setup_admin_access(hass)
 
 
 async def _retry_setup_after_start(hass, entry):

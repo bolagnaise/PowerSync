@@ -1,10 +1,10 @@
-# Read-only support diagnostics
-
-PowerSync Support lets a Home Assistant administrator share selected diagnostics
-with an assigned investigator. Sharing is optional and requires approval in HA.
-It does not permit shell access, settings changes or hardware commands.
+# Home Assistant support
 
 ## Share diagnostics
+
+PowerSync Support lets a Home Assistant administrator share selected read-only
+diagnostics with an assigned investigator. Sharing is optional and requires
+approval in Home Assistant.
 
 Open **Support** in the PowerSync HA dashboard using an administrator account.
 Use the local diagnostic download when a remote session is unnecessary.
@@ -40,6 +40,33 @@ If support initialization times out during a busy HA startup, PowerSync retries
 once after HA has finished starting. This does not restore a temporary session
 or approve new access. If the card still returns `404: Not Found`, include the
 PowerSync support startup warning from the HA log in your existing ticket.
+
+## Approve a temporary administrator for a repair
+
+Use **Temporary administrator access** in the **Support** card when you have
+arranged a repair with a verified investigator. Sign in as the Home Assistant
+owner. The investigator needs a trusted HTTPS address already configured for
+your Home Assistant installation and reachable from their support client.
+
+1. Ask the investigator for the challenge for this repair. Confirm the
+   investigator and the intended work in your existing support conversation.
+2. Paste the challenge into **Investigator challenge**, review the access
+   description, and tick the approval box. Select **Approve temporary
+   administrator access** to grant access or **Deny administrator access**
+   to clear the request.
+3. The investigator has five minutes to connect. Home Assistant then creates a
+   temporary administrator. That account can read or change what a Home
+   Assistant administrator can access through its APIs, including
+   integrations, automations and device controls. Its short-lived credentials
+   renew automatically while the investigator remains connected. You approve
+   access once for the repair.
+4. Ask the investigator to log out when finished, or select **Stop
+   administrator access** at any time. Check the card for confirmation.
+
+The investigator does not need your password or a long-lived access token.
+Home Assistant removes the temporary account on logout, on revocation, or
+when a disconnected session stops renewing. Restarting Home Assistant also
+ends the session. Ending access leaves repairs and configuration changes in place.
 
 ## Local recording and shared archives
 
