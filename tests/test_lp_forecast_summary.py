@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import json
+from functools import partial
 from pathlib import Path
 import subprocess
 from types import SimpleNamespace
@@ -60,7 +61,9 @@ console.log(JSON.stringify(metrics));
 
 @pytest.mark.parametrize("interval,solar_steps,price_steps", [(5, 576, 288), (30, 48, 24)])
 def test_summary_windows_follow_actual_solar_load_and_price_data(interval, solar_steps, price_steps):
-    get_forecasts = _extract_function(COMPONENT / "optimization/coordinator.py", "get_forecast_data")
+    coordinator_path = COMPONENT / "optimization/coordinator.py"
+    get_forecasts = _extract_function(coordinator_path, "get_forecast_data")
+    efficiency_diagnostics = _extract_function(coordinator_path, "_battery_efficiency_diagnostics")
     coordinator = SimpleNamespace(
         _solar_forecaster=SimpleNamespace(forecast_status={
             "preferred_provider": "solcast", "active_provider": "open_meteo",
@@ -79,6 +82,7 @@ def test_summary_windows_follow_actual_solar_load_and_price_data(interval, solar
         _last_export_prices=[0.15] * solar_steps,
         _current_schedule=None,
     )
+    coordinator._battery_efficiency_diagnostics = partial(efficiency_diagnostics, coordinator)
     data = get_forecasts(coordinator)
     sensor_path = COMPONENT / "sensor.py"
     solar_attrs = _extract_function(sensor_path, "_lp_solar_forecast_attributes")

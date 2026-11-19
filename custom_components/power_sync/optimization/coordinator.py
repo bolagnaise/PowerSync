@@ -3122,10 +3122,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Normalize a power value to kW using unit metadata or a W/kW heuristic."""
         return normalize_custom_power_kw(value, unit)
 
-    def _read_numeric_state(self, entity_id: str) -> tuple[float | None, str]:
-        """Read a numeric HA state and return its value plus unit."""
+    def _read_numeric_state(
+        self, entity_id: str
+    ) -> tuple[float | None, str, datetime | None]:
+        """Read a numeric HA state with the report time of that same state."""
         if not entity_id:
-            return None, ""
+            return None, "", None
         state = self.hass.states.get(entity_id)
         if not state or state.state in ("unknown", "unavailable", "None", None):
             if self._last_custom_energy_warning != entity_id:
@@ -3134,7 +3136,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     entity_id,
                 )
                 self._last_custom_energy_warning = entity_id
-            return None, ""
+            return None, "", None
         try:
             value = float(state.state)
         except (TypeError, ValueError):
@@ -3144,7 +3146,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     entity_id,
                 )
                 self._last_custom_energy_warning = entity_id
-            return None, ""
+            return None, "", None
         if not math.isfinite(value):
             if self._last_custom_energy_warning != entity_id:
                 _LOGGER.warning(
@@ -3152,8 +3154,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     entity_id,
                 )
                 self._last_custom_energy_warning = entity_id
-            return None, ""
-        return value, str((state.attributes or {}).get("unit_of_measurement") or "")
+            return None, "", None
+        reported_at = getattr(state, "last_reported", getattr(state, "last_updated", None))
+        return value, str((state.attributes or {}).get("unit_of_measurement") or ""), reported_at
 
     def _read_custom_energy_data(self) -> dict[str, Any] | None:
         """Read custom battery/site telemetry from user-selected entities."""
@@ -3175,21 +3178,31 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return None
 
         data: dict[str, Any] = {"source_entities": source_entities}
-        battery_level, _battery_level_unit = self._read_numeric_state(
+        battery_level, _, level_reported_at = self._read_numeric_state(
             source_entities["battery_level"]
         )
         if battery_level is not None:
             data["battery_level"] = max(0.0, min(100.0, battery_level))
 
+        observed_at = {
+            "battery_level": (
+                level_reported_at
+                if battery_level is not None and 0 <= battery_level <= 100
+                else None
+            ),
+        }
         for target in ("battery_power", "grid_power", "solar_power", "load_power"):
-            raw, unit = self._read_numeric_state(source_entities[target])
+            raw, unit, reported_at = self._read_numeric_state(source_entities[target])
             kw = self._power_to_kw(raw, unit)
             if kw is not None:
                 data[target] = kw
+            if target == "battery_power":
+                observed_at[target] = reported_at if kw is not None else None
 
         if len(data) == 1:
             return None
 
+        data["telemetry_observed_at"] = observed_at
         self._last_custom_energy_warning = None
         return data
 
@@ -3244,6 +3257,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "load_power": values["load_w"] / 1000.0,
             "raw_home_load_power": values["load_w"] / 1000.0,
             "last_update": observed_at,
+            "telemetry_observed_at": {
+                "battery_level": observed_at,
+                "battery_power": observed_at,
+            },
             "data_source": "powerwall_local",
         }
 
@@ -7686,8 +7703,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._track_actual_cost(force=True)
             self._reconcile_battery_provenance_from_telemetry(reason="optimizer_run")
             self._observe_battery_efficiency(
-                timestamp=solve_timestamp,
-                soc=soc,
+                timestamp=dt_util.now(),
                 capacity_wh=capacity,
             )
 
@@ -8707,6 +8723,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 return False
             self._current_schedule = result.schedule
             self._last_optimizer_result = result
+            self._last_published_optimizer_parameters = resolved_parameters
             self._octopus_schedule_revision = octopus_revision
             self._adopt_solved_ev_series(result)
             self._commit_price_forecast_cache(import_prices, export_prices)
@@ -19307,23 +19324,54 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self,
         *,
         timestamp: datetime,
-        soc: float,
         capacity_wh: float,
     ) -> None:
         """Feed one normalized telemetry sample to the closed-cycle learner."""
         data = self._get_energy_data()
         if not isinstance(data, dict):
             return
+        # Integrate paired SOC/power on the acquisition clock. A fresh solve
+        # timestamp must not make a repeated or stale provider cache look new.
+        field_times = data.get("telemetry_observed_at")
+        times = (
+            (field_times.get("battery_level"), field_times.get("battery_power"))
+            if isinstance(field_times, dict)
+            and ("battery_level" in field_times or "battery_power" in field_times)
+            else (data.get("last_update"),)
+        )
+        fresh = all(
+            isinstance(at, datetime)
+            and at.utcoffset() is not None
+            and -5 <= (timestamp - at).total_seconds() <= 120
+            for at in times
+        )
+        if fresh:
+            observed_at = min(times)
+            # Entity-backed readings may be published a few seconds apart.
+            # Split readings further apart do not describe one SOC/power pair.
+            fresh = (max(times) - observed_at).total_seconds() <= 30
+        try:
+            level_percent = float(data.get("battery_level"))
+        except (TypeError, ValueError):
+            level_percent = None
+        measured_soc = (
+            level_percent / 100.0
+            if level_percent is not None and 0 <= level_percent <= 100
+            else None
+        )
         result = self._battery_efficiency_learner.observe(
-            timestamp=timestamp,
-            soc=soc,
+            timestamp=observed_at.astimezone(timestamp.tzinfo) if fresh else timestamp,
+            soc=measured_soc,
             battery_power_kw=data.get("battery_power"),
             capacity_kwh=float(capacity_wh) / 1000.0,
             topology_fingerprint=(
                 self._battery_efficiency_topology_fingerprint(capacity_wh)
             ),
-            valid=data.get("telemetry_ready") is not False,
-            skip_reason="stale_telemetry",
+            valid=fresh and data.get("telemetry_ready") is not False,
+            skip_reason=(
+                "stale_telemetry" if not fresh or data.get("telemetry_ready") is False
+                else None
+            ),
         )
         if result.changed:
             self._schedule_battery_efficiency_learning_save()
@@ -21360,6 +21408,28 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Return non-breaking mobile metadata for grouped optimizer settings."""
         return optimizer_settings_groups()
 
+    def _battery_efficiency_diagnostics(self) -> dict[str, Any] | None:
+        """Report current learning evidence alongside the displayed plan's values."""
+        learner = getattr(self, "_battery_efficiency_learner", None)
+        if learner is None:
+            return None
+        planning_parameters = (
+            getattr(self, "_last_published_optimizer_parameters", None)
+            if self._current_schedule is not None
+            else None
+        )
+        diagnostics = learner.diagnostics(
+            application_enabled=self.battery_efficiency_learning_enabled,
+            now=dt_util.now(),
+            planning_parameters=planning_parameters,
+        )
+        diagnostics["planning_source"] = (
+            planning_parameters.battery_efficiency_source
+            if planning_parameters is not None
+            else diagnostics["state"]
+        )
+        return diagnostics
+
     def get_forecast_data(self) -> dict[str, Any]:
         """Get forecast data for LP forecast sensors.
 
@@ -21384,12 +21454,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self, "_last_solar_effective_error_margin_kwh", None
             )
             data["solar_forecast_learning"] = learning_diagnostics
-        battery_learner = getattr(self, "_battery_efficiency_learner", None)
-        if battery_learner is not None:
-            data["battery_efficiency_learning"] = battery_learner.diagnostics(
-                application_enabled=self.battery_efficiency_learning_enabled,
-                now=dt_util.now(),
-            )
+        if (efficiency := self._battery_efficiency_diagnostics()) is not None:
+            data["battery_efficiency_learning"] = efficiency
         if self._last_solar_nowcast_ratio is not None:
             data["solar_nowcast_ratio"] = round(self._last_solar_nowcast_ratio, 3)
         dt_h = self._config.interval_minutes / 60
@@ -22016,6 +22082,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "projected_slots": 0,
             }
         data["manual_control_projection"] = cached_manual_projection
+
+        if (efficiency := self._battery_efficiency_diagnostics()) is not None:
+            data["battery_efficiency_learning"] = efficiency
 
         energy_data = self._get_energy_data()
         if isinstance(energy_data, dict):

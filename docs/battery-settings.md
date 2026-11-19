@@ -1,5 +1,6 @@
 # Battery settings and manual controls
 
+- [Learning battery round-trip efficiency](#learning-battery-round-trip-efficiency)
 - [Manual charge and discharge timing](#manual-battery-timing)
 - [Minimum battery export price and Solar Export](#minimum-battery-export-price)
 - [Powerwall calibration deferral](#powerwall-calibration-delay)
@@ -135,3 +136,31 @@ settings or the optimiser plan, and does not confirm battery power flow. Check
 Battery Power and Grid Power for measured charging or discharging.
 
 Update through HACS and restart Home Assistant to receive these notifications.
+
+## Learning battery round-trip efficiency
+
+Round-trip efficiency is the energy returned by the battery divided by the energy
+used to charge it. At 80%, each 10 kWh charged returns about 8 kWh. Compare a
+complete cycle that returns to the same charge level; energy still stored at the
+end is not a loss.
+
+**Learn battery efficiency** uses measured battery power and charge level. A
+cycle can charge to 100%, discharge to 0%, or keep moving without a quiet pause.
+Its measurement starts and finishes at a charge level away from those limits.
+Missing or stale measurements, changed battery configuration and contradictory
+power/charge-level readings invalidate the unfinished cycle. Learning does not
+send battery commands or change your charge limits to collect evidence.
+
+The plan distinguishes the **measured estimate** from the **planning efficiency**.
+The estimate needs at least five valid cycles over three days and enough measured
+energy before it can affect planning. Until then, Home Assistant uses its 84.64%
+assumption. Once sufficient evidence exists, the planning value moves gradually;
+it can differ from the measured estimate. Higher measured efficiency does not
+relax the optimizer's conservative arbitrage margin.
+
+Accepted history is retained for 30 days. A Home Assistant restart retains that
+history but discards any unfinished cycle, so learning can take longer after
+frequent restarts. Disabling learning returns planning to the default assumption.
+The Battery Power Forecast sensor's `efficiency_learning` attributes show cycle
+counts, evidence confidence and the reason the most recent incomplete cycle was
+rejected.

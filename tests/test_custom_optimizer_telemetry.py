@@ -60,7 +60,7 @@ def test_custom_optimizer_telemetry_parser_reads_selected_entities():
     assert "CUSTOM_GRID_POWER_ENTITY" in coordinator_source
     assert "CUSTOM_SOLAR_POWER_ENTITY" in coordinator_source
     assert "CUSTOM_LOAD_POWER_ENTITY" in coordinator_source
-    assert "def _read_numeric_state(self, entity_id: str)" in coordinator_source
+    assert "def _read_numeric_state(" in coordinator_source
     assert "source_entities" in coordinator_source
     assert "def _get_energy_data(self) -> dict[str, Any] | None:" in coordinator_source
     assert "custom_data = self._read_custom_energy_data()" in coordinator_source

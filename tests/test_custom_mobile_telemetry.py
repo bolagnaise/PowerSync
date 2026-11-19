@@ -15,6 +15,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 COORDINATOR_PATH = ROOT / "custom_components" / "power_sync" / "coordinator.py"
+BATTERY_TELEMETRY_PATH = COORDINATOR_PATH.with_name("battery_telemetry.py")
 INIT_PATH = ROOT / "custom_components" / "power_sync" / "__init__.py"
 SENSOR_PATH = ROOT / "custom_components" / "power_sync" / "sensor.py"
 
@@ -66,7 +67,12 @@ def _custom_coordinator_namespace() -> dict[str, Any]:
         and node.name == "CustomEntityEnergyCoordinator"
     )
     module = ast.Module(
-        body=[normalize_node, accumulator_update_node, class_node],
+        body=[
+            *ast.parse(BATTERY_TELEMETRY_PATH.read_text()).body,
+            normalize_node,
+            accumulator_update_node,
+            class_node,
+        ],
         type_ignores=[],
     )
     ast.fix_missing_locations(module)
@@ -102,6 +108,7 @@ def _state(value: str, unit: str = "") -> SimpleNamespace:
     return SimpleNamespace(
         state=value,
         attributes={"unit_of_measurement": unit},
+        last_reported=datetime(2026, 7, 17, 7, 29, 58, tzinfo=timezone.utc),
     )
 
 
@@ -143,6 +150,10 @@ def test_custom_entity_coordinator_normalizes_mobile_energy_data():
 
     assert data["battery_level"] == pytest.approx(62.5)
     assert data["battery_power"] == pytest.approx(-2.4)
+    assert data["telemetry_observed_at"] == {
+        "battery_level": datetime(2026, 7, 17, 7, 29, 58, tzinfo=timezone.utc),
+        "battery_power": datetime(2026, 7, 17, 7, 29, 58, tzinfo=timezone.utc),
+    }
     assert data["grid_power"] == pytest.approx(-1.1)
     assert data["solar_power"] == pytest.approx(4.0)
     assert data["load_power"] == pytest.approx(1.8)

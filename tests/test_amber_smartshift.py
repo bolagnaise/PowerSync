@@ -183,6 +183,10 @@ async def test_manual_modes_have_durable_id_and_reported_readback(native, mode):
     assert native.coordinator.owner() == "manual"
     assert native.client.calls[0][2] == mode
     assert "test-password" not in json.dumps(native.coordinator.api_data())
+    assert native.coordinator.data["telemetry_observed_at"] == {
+        "battery_level": native.coordinator.last_read,
+        "battery_power": native.coordinator.last_read,
+    }
 
 
 @pytest.mark.asyncio

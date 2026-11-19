@@ -7,9 +7,12 @@ frontend sources under node with minimal browser stubs.
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 from pathlib import Path
 import subprocess
 import pytest
+
+from test_current_export_reserve_decision import clock, opt_module
 
 
 FRONTEND = (
@@ -2117,6 +2120,62 @@ def test_advanced_dashboard_controls_require_a_tesla_local_capability_entity():
     result = subprocess.run(["node", "-e", script, str(STRATEGY_PATH)], check=True, capture_output=True, text=True)
     out = json.loads(result.stdout.strip().splitlines()[-1])
     assert out["controlsAdvanced"] is True, "Unpaired Tesla still gets setup feedback, other brands do not get Tesla-only controls"
+
+
+def test_plan_renders_battery_efficiency_from_the_coordinator_api(opt_module, clock):
+    from test_battery_efficiency_learning import _record_cycle
+    from test_current_export_reserve_decision import _controller, _prepare_api
+
+    coordinator, _, _, _ = _controller(opt_module)
+    _prepare_api(opt_module, coordinator)
+    coordinator._is_in_demand_window_at = lambda timestamp: False
+    now = clock.now
+    learner = opt_module.BatteryEfficiencyLearner()
+    coordinator._battery_efficiency_learner = learner
+    coordinator._last_published_optimizer_parameters = learner.resolved_parameters(now=now)
+    payloads = {"cold": coordinator.get_api_data()}
+
+    for index in range(10):
+        _record_cycle(learner, now - timedelta(days=10 - index))
+    next_parameters = learner.resolved_parameters(now=now)
+    coordinator._last_resolved_optimizer_parameters = next_parameters
+    payloads["pending"] = coordinator.get_api_data()
+    coordinator._last_published_optimizer_parameters = next_parameters
+    payloads["learned"] = coordinator.get_api_data()
+
+    result = _run_board(f"const payloads = {json.dumps(payloads)};" + r"""
+  (async () => {
+    const result = {};
+    for (const [name, data] of Object.entries(payloads)) {
+      T.psApiCache.clear();
+      const card = new T.PsPlanCard();
+      card._config = {entities: {}};
+      card._hass = {states: {}, config: {}, locale: {}, callApi: async (method, path) => {
+        if (method !== 'GET' || path !== 'power_sync/optimization') throw new Error(path);
+        return data;
+      }};
+      card._loadHistory = () => {};
+      card._invalidate = () => {};
+      card.querySelector = () => ({addEventListener() {}});
+      card._render();
+      await T.psApiCache.get('power_sync/optimization').promise;
+      card._render();
+      result[name] = card.innerHTML.match(/<p class="hint">([^<]*round-trip[^<]*)<\/p>/)?.[1];
+    }
+    console.log(JSON.stringify(result));
+  })();
+""")
+
+    assert "This plan assumes 84.6% battery round-trip efficiency" in result["cold"]
+    assert "No measured estimate yet" in result["cold"]
+    assert "This plan assumes 84.6% battery round-trip efficiency" in result["pending"]
+    measured = f"{next_parameters.battery_efficiency_candidate_rte:.1%}"
+    assert f"Measured round-trip estimate is {measured}" in result["pending"]
+    assert "10 valid cycles over 10 days" in result["pending"]
+    confidence = f"{next_parameters.battery_efficiency_confidence:.0%}"
+    assert f"{confidence} learning confidence" in result["pending"]
+    expected = f"{next_parameters.physical_round_trip_efficiency:.1%}"
+    assert f"This plan uses {expected} battery round-trip efficiency" in result["learned"]
 
 
 def test_plan_history_selects_charge_level_and_prices_at_the_requested_time():

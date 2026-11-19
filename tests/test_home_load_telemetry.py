@@ -128,8 +128,11 @@ _OWNED_STUB_MODULES = {
 sys.modules.pop("power_sync.coordinator", None)
 
 from power_sync.coordinator import (  # noqa: E402
+    AlphaESSEnergyCoordinator,
     DOMAIN,
+    FoxESSCloudEnergyCoordinator,
     TeslaEnergyCoordinator,
+    UpdateFailed,
     _fresh_site_ev_load,
     _mapped_tesla_other_charger_power_kw,
     _update_energy_accumulator_with_ev_load,
@@ -951,6 +954,79 @@ def test_teslemetry_sse_snapshot_maps_directly_and_skips_repeat_rest_poll():
     repeated = asyncio.run(coordinator._async_update_data())
     assert repeated is result
     assert len(coordinator._energy_acc.updates) == 1
+
+
+@pytest.mark.parametrize("missing_field", ["percentage_charged", "battery_power"])
+def test_tesla_efficiency_sample_requires_both_battery_measurements(missing_field):
+    coordinator = _new_stream_tesla_coordinator()
+    coordinator.async_request_refresh = AsyncMock()
+    live_status = {"battery_power": 1200, "percentage_charged": 82.5}
+
+    async def publish(created_at, status):
+        await coordinator._async_handle_teslemetry_stream_event({
+            "createdAt": created_at,
+            "site_id": "12345",
+            "live_status": status,
+        })
+        return await coordinator._async_update_data()
+
+    first = asyncio.run(publish("2026-07-08T00:59:15Z", live_status))
+    coordinator.data = first
+    incomplete = {key: value for key, value in live_status.items() if key != missing_field}
+
+    if missing_field == "battery_power":
+        with pytest.raises(UpdateFailed, match="omitted valid battery_power"):
+            asyncio.run(publish("2026-07-08T00:59:50Z", incomplete))
+        return
+
+    second = asyncio.run(publish("2026-07-08T00:59:50Z", incomplete))
+    assert second["battery_level"] == first["battery_level"] == 82.5
+    assert second["last_update"] > first["last_update"]
+    assert second["telemetry_observed_at"] == {
+        "battery_level": None,
+        "battery_power": second["last_update"],
+    }
+    assert first["telemetry_observed_at"] == {
+        "battery_level": first["last_update"],
+        "battery_power": first["last_update"],
+    }
+
+
+@pytest.mark.parametrize("reported_power", [None, 0])
+@pytest.mark.parametrize("system", ["alphaess", "foxess"])
+def test_cloud_battery_efficiency_distinguishes_missing_power_from_zero(system, reported_power):
+    if system == "alphaess":
+        coordinator = AlphaESSEnergyCoordinator.__new__(AlphaESSEnergyCoordinator)
+        coordinator._controller = None
+        coordinator._cloud = types.SimpleNamespace(
+            get_last_power_data=AsyncMock(return_value={"soc": 50, "pbat": reported_power}),
+        )
+        coordinator.connection_type = "cloud_only"
+        coordinator.supports_dispatch = False
+    else:
+        coordinator = FoxESSCloudEnergyCoordinator.__new__(FoxESSCloudEnergyCoordinator)
+        coordinator._client = types.SimpleNamespace(
+            get_real_data=AsyncMock(return_value={"datas": [
+                {"variable": "SoC", "value": 50},
+                {"variable": "batPower", "value": reported_power},
+            ]}),
+        )
+    coordinator._entry_id = "battery"
+    coordinator.hass = types.SimpleNamespace(data={})
+    coordinator._energy_acc = _StreamEnergyAccumulator()
+    coordinator._energy_acc.as_dict = lambda: {
+        "charge_today_kwh": 0.0,
+        "discharge_today_kwh": 0.0,
+    }
+
+    data = asyncio.run(coordinator._async_update_data())
+
+    assert data["battery_level"] == 50
+    assert data["battery_power"] == 0
+    assert data["telemetry_observed_at"] == {
+        "battery_level": data["last_update"],
+        "battery_power": data["last_update"] if reported_power is not None else None,
+    }
 
 
 def test_teslemetry_additional_pv_refreshes_without_readding_old_total():

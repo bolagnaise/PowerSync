@@ -305,8 +305,16 @@ class AmberBatteryCoordinator(DataUpdateCoordinator):
         data["idle_hold_reserve"] = data["idle_hold_reserve_percent"] = None
         return data
 
+    def _coordinator_data(self):
+        data = self.api_data()
+        data["telemetry_observed_at"] = {
+            "battery_level": self.last_read if data["battery_level"] is not None else None,
+            "battery_power": self.last_read if data["battery_power"] is not None else None,
+        }
+        return data
+
     def publish(self):
-        self.async_set_updated_data(self.api_data())
+        self.async_set_updated_data(self._coordinator_data())
 
     async def _cancel_owned(self):
         active = self.active_override()
@@ -472,7 +480,7 @@ class AmberBatteryCoordinator(DataUpdateCoordinator):
                         self.earnings_read = utcnow()
                     except AmberError:
                         self.earnings_read = None
-                return self.api_data()
+                return self._coordinator_data()
             except AmberAuthError:
                 raise ConfigEntryAuthFailed("Reconnect Amber Smart Shift") from None
             except (AmberError, HomeAssistantError):

@@ -34,14 +34,11 @@ MIN_EQUIVALENT_FULL_CYCLES = 1.5
 FULL_CONFIDENCE_EQUIVALENT_CYCLES = 4.0
 
 MIN_SOC_EXCURSION = 0.10
-RETURN_SOC_TOLERANCE = 0.015
 ANCHOR_SOC_MIN = 0.05
 ANCHOR_SOC_MAX = 0.95
-EXCLUDED_SOC_MIN = 0.02
 ANCHOR_POWER_KW = 0.15
 MIN_DIRECTIONAL_ENERGY_KWH = 0.25
 MIN_DIRECTIONAL_CAPACITY_FRACTION = 0.08
-RETURN_DWELL_SECONDS = 5 * 60
 MIN_SAMPLE_GAP_SECONDS = 30
 MAX_SAMPLE_GAP_SECONDS = 15 * 60
 MAX_CYCLE_DURATION = timedelta(hours=72)
@@ -61,6 +58,55 @@ def _finite(value: Any) -> float | None:
 
 def _clamp(value: float, lower: float, upper: float) -> float:
     return max(lower, min(upper, value))
+
+
+def _integrate_nonnegative_linear(
+    start: float,
+    end: float,
+    duration_hours: float,
+) -> float:
+    """Integrate the positive part of a linearly changing signal.
+
+    Power telemetry can change sign between two observations.  Integrating
+    ``max(start, 0)`` and ``max(end, 0)`` as one trapezoid counts both sides of
+    that sign change as if the signal were positive for the full interval.
+    Split the interval at the analytic zero crossing instead.
+    """
+    if duration_hours <= 0.0:
+        return 0.0
+    if start <= 0.0 and end <= 0.0:
+        return 0.0
+    if start >= 0.0 and end >= 0.0:
+        return (start + end) * 0.5 * duration_hours
+    if start < 0.0 < end:
+        zero_fraction = -start / (end - start)
+        return end * (1.0 - zero_fraction) * 0.5 * duration_hours
+    if start > 0.0 > end:
+        zero_fraction = start / (start - end)
+        return start * zero_fraction * 0.5 * duration_hours
+    # One endpoint is exactly zero.  The same-sign branches above already
+    # handle it, but retain a finite fallback for unusual float inputs.
+    return max(0.0, start, end) * 0.5 * duration_hours
+
+
+def _integrate_directional_energy(
+    start_power_kw: float,
+    end_power_kw: float,
+    duration_hours: float,
+) -> tuple[float, float]:
+    """Return charge and discharge energy for one linear power interval."""
+    return (
+        _integrate_nonnegative_linear(
+            -start_power_kw,
+            -end_power_kw,
+            duration_hours,
+        ),
+        _integrate_nonnegative_linear(
+            start_power_kw,
+            end_power_kw,
+            duration_hours,
+        ),
+    )
 
 
 def _parse_datetime(value: Any) -> datetime | None:
@@ -216,7 +262,6 @@ class _ActiveCycle:
     discharge_kwh: float = 0.0
     min_soc: float = 1.0
     max_soc: float = 0.0
-    return_started_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -281,8 +326,6 @@ class BatteryEfficiencyLearner:
     ) -> bool:
         if not ANCHOR_SOC_MIN <= soc <= ANCHOR_SOC_MAX:
             return False
-        if abs(power_kw) > ANCHOR_POWER_KW:
-            return False
         self._active = _ActiveCycle(
             state="anchored",
             anchor_timestamp=timestamp,
@@ -297,6 +340,90 @@ class BatteryEfficiencyLearner:
             max_soc=soc,
         )
         return True
+
+    @staticmethod
+    def _return_crossing_fraction(
+        active: _ActiveCycle,
+        soc: float,
+    ) -> float | None:
+        """Return the interval fraction at which the anchor SOC is crossed.
+
+        A return is directional: after an upward excursion, the previous
+        sample must be above the anchor and the current sample must be at or
+        below it.  The downward case is the mirror image.  Merely being near
+        the anchor therefore cannot close a cycle.
+        """
+        anchor = active.anchor_soc
+        if active.max_soc - anchor + 1e-9 >= MIN_SOC_EXCURSION:
+            if active.last_soc > anchor and soc <= anchor:
+                denominator = active.last_soc - soc
+                if denominator > 0.0:
+                    return _clamp(
+                        (active.last_soc - anchor) / denominator,
+                        0.0,
+                        1.0,
+                    )
+        if anchor - active.min_soc + 1e-9 >= MIN_SOC_EXCURSION:
+            if active.last_soc < anchor and soc >= anchor:
+                denominator = soc - active.last_soc
+                if denominator > 0.0:
+                    return _clamp(
+                        (anchor - active.last_soc) / denominator,
+                        0.0,
+                        1.0,
+                    )
+        return None
+
+    def _accept_and_reanchor(
+        self,
+        active: _ActiveCycle,
+        *,
+        crossing_timestamp: datetime,
+        current_timestamp: datetime,
+        current_soc: float,
+        current_power_kw: float,
+    ) -> ObservationResult:
+        """Accept one loop and seed the next loop from the current sample.
+
+        ``crossing_timestamp`` is the exact end of the accepted loop.  When
+        the current sample overshoots that crossing, the remainder is
+        deliberately discarded and the next loop starts at the current
+        observation; this avoids reusing energy in two accepted loops.
+        """
+        result = self._accept_cycle(active, crossing_timestamp)
+        if result.accepted_cycle and ANCHOR_SOC_MIN <= current_soc <= ANCHOR_SOC_MAX:
+            self._start_anchor(
+                timestamp=current_timestamp,
+                soc=current_soc,
+                power_kw=current_power_kw,
+                capacity_kwh=active.capacity_kwh,
+                topology_fingerprint=active.topology_fingerprint,
+                energy_source=active.energy_source,
+            )
+        return result
+
+    def _reject_and_reanchor(
+        self,
+        reason: str,
+        *,
+        timestamp: datetime,
+        soc: float,
+        power_kw: float,
+        capacity_kwh: float,
+        topology_fingerprint: str,
+        energy_source: str,
+    ) -> ObservationResult:
+        """Discard a stale loop while seeding a new loop from this sample."""
+        result = self._reject(reason)
+        self._start_anchor(
+            timestamp=timestamp,
+            soc=soc,
+            power_kw=power_kw,
+            capacity_kwh=capacity_kwh,
+            topology_fingerprint=topology_fingerprint,
+            energy_source=energy_source,
+        )
+        return result
 
     def _accept_cycle(
         self,
@@ -365,21 +492,19 @@ class BatteryEfficiencyLearner:
             return ObservationResult(True, False, "topology_changed")
 
         self._prune(timestamp)
-        # A full charge can be part of an interior-to-interior loop. Keep
-        # counting AC energy through the plateau without anchoring there.
-        if soc_value <= EXCLUDED_SOC_MIN:
-            return self._reject("soc_boundary")
-
         active = self._active
         if active is None:
-            self._start_anchor(
+            if not self._start_anchor(
                 timestamp=timestamp,
                 soc=soc_value,
                 power_kw=power_kw,
                 capacity_kwh=capacity,
                 topology_fingerprint=topology_fingerprint,
                 energy_source=energy_source,
-            )
+            ):
+                # Clipped SOC samples are useful once a cycle is active, but
+                # cannot establish an anchor for a new cycle.
+                return self._reject("soc_boundary")
             # Open-cycle state is deliberately not persisted. Only the first
             # topology fingerprint changes serialized state here.
             return ObservationResult(topology_changed)
@@ -392,9 +517,25 @@ class BatteryEfficiencyLearner:
         if gap_seconds < MIN_SAMPLE_GAP_SECONDS:
             return ObservationResult(False)
         if gap_seconds > MAX_SAMPLE_GAP_SECONDS:
-            return self._reject("telemetry_gap")
+            return self._reject_and_reanchor(
+                "telemetry_gap",
+                timestamp=timestamp,
+                soc=soc_value,
+                power_kw=power_kw,
+                capacity_kwh=capacity,
+                topology_fingerprint=topology_fingerprint,
+                energy_source=energy_source,
+            )
         if timestamp - active.anchor_timestamp > MAX_CYCLE_DURATION:
-            return self._reject("cycle_timeout")
+            return self._reject_and_reanchor(
+                "cycle_timeout",
+                timestamp=timestamp,
+                soc=soc_value,
+                power_kw=power_kw,
+                capacity_kwh=capacity,
+                topology_fingerprint=topology_fingerprint,
+                energy_source=energy_source,
+            )
         if (
             active.topology_fingerprint != topology_fingerprint
             or active.energy_source != energy_source
@@ -403,20 +544,75 @@ class BatteryEfficiencyLearner:
 
         average_power_kw = (active.last_power_kw + power_kw) * 0.5
         soc_delta = soc_value - active.last_soc
+        if active.state == "anchored":
+            prior_excursion = max(
+                abs(active.max_soc - active.anchor_soc),
+                abs(active.min_soc - active.anchor_soc),
+            )
+            if prior_excursion + 1e-9 >= MIN_SOC_EXCURSION:
+                active.state = "excursion"
+        crossing_fraction = (
+            self._return_crossing_fraction(active, soc_value)
+            if active.state == "excursion"
+            else None
+        )
+        # Validate the same interval prefix whose energy will be recorded.
+        # At a sign change, the final power alone cannot describe the SOC
+        # movement accumulated since the previous acquisition.
+        direction_power_kw = average_power_kw
+        if crossing_fraction is not None:
+            crossing_power = active.last_power_kw + (
+                power_kw - active.last_power_kw
+            ) * crossing_fraction
+            direction_power_kw = (active.last_power_kw + crossing_power) * 0.5
         if (
             abs(soc_delta) >= 0.002
-            and abs(average_power_kw) > ANCHOR_POWER_KW
-            and average_power_kw * soc_delta > 0
+            and abs(direction_power_kw) > ANCHOR_POWER_KW
+            and direction_power_kw * soc_delta > 0
         ):
             return self._reject("power_soc_direction_mismatch")
 
         dt_hours = gap_seconds / 3600.0
-        active.charge_kwh += (
-            max(0.0, -active.last_power_kw) + max(0.0, -power_kw)
-        ) * 0.5 * dt_hours
-        active.discharge_kwh += (
-            max(0.0, active.last_power_kw) + max(0.0, power_kw)
-        ) * 0.5 * dt_hours
+        if crossing_fraction is not None:
+            crossing_timestamp = active.last_timestamp + timedelta(
+                seconds=gap_seconds * crossing_fraction
+            )
+            crossing_power_kw = active.last_power_kw + (
+                power_kw - active.last_power_kw
+            ) * crossing_fraction
+            charge_kwh, discharge_kwh = _integrate_directional_energy(
+                active.last_power_kw,
+                crossing_power_kw,
+                dt_hours * crossing_fraction,
+            )
+            min_energy = max(
+                MIN_DIRECTIONAL_ENERGY_KWH,
+                active.capacity_kwh * MIN_DIRECTIONAL_CAPACITY_FRACTION,
+            )
+            if (
+                active.charge_kwh + charge_kwh >= min_energy
+                and active.discharge_kwh + discharge_kwh >= min_energy
+            ):
+                active.charge_kwh += charge_kwh
+                active.discharge_kwh += discharge_kwh
+                # Do not integrate or retain the post-crossing remainder in
+                # this cycle.  _accept_and_reanchor starts a fresh cycle from
+                # the current observation, so accepted loops cannot overlap.
+                return self._accept_and_reanchor(
+                    active,
+                    crossing_timestamp=crossing_timestamp,
+                    current_timestamp=timestamp,
+                    current_soc=soc_value,
+                    current_power_kw=power_kw,
+                )
+
+        charge_kwh, discharge_kwh = _integrate_directional_energy(
+            active.last_power_kw,
+            power_kw,
+            dt_hours,
+        )
+        active.charge_kwh += charge_kwh
+        active.discharge_kwh += discharge_kwh
         active.last_timestamp = timestamp
         active.last_soc = soc_value
         active.last_power_kw = power_kw
@@ -427,34 +623,11 @@ class BatteryEfficiencyLearner:
             abs(active.max_soc - active.anchor_soc),
             abs(active.min_soc - active.anchor_soc),
         )
-        if active.state == "anchored" and excursion >= MIN_SOC_EXCURSION:
+        if (
+            active.state == "anchored"
+            and excursion + 1e-9 >= MIN_SOC_EXCURSION
+        ):
             active.state = "excursion"
-
-        min_energy = max(
-            MIN_DIRECTIONAL_ENERGY_KWH,
-            active.capacity_kwh * MIN_DIRECTIONAL_CAPACITY_FRACTION,
-        )
-        evidence_ready = (
-            excursion >= MIN_SOC_EXCURSION
-            and active.charge_kwh >= min_energy
-            and active.discharge_kwh >= min_energy
-        )
-        inside_return_band = abs(soc_value - active.anchor_soc) <= RETURN_SOC_TOLERANCE
-
-        if active.state == "excursion" and evidence_ready and inside_return_band:
-            active.state = "return_pending"
-            active.return_started_at = timestamp
-        elif active.state == "return_pending":
-            if not inside_return_band:
-                active.state = "excursion"
-                active.return_started_at = None
-            elif (
-                active.return_started_at is not None
-                and (timestamp - active.return_started_at).total_seconds()
-                >= RETURN_DWELL_SECONDS
-                and abs(power_kw) <= ANCHOR_POWER_KW
-            ):
-                return self._accept_cycle(active, timestamp)
 
         # Integrated open-cycle state is not serialized.
         return ObservationResult(False)
@@ -589,6 +762,7 @@ class BatteryEfficiencyLearner:
         *,
         application_enabled: bool = True,
         now: datetime | None = None,
+        planning_parameters: ResolvedOptimizerParameters | None = None,
     ) -> dict[str, Any]:
         now = now or datetime.now(timezone.utc)
         resolved = self.resolved_parameters(
@@ -596,18 +770,22 @@ class BatteryEfficiencyLearner:
             now=now,
         )
         cycles, days, equivalent_cycles = self.evidence(now)
+        # A loop completed during a solve becomes eligible on the next solve.
+        # Show the frozen conversion values used by the published plan while
+        # retaining the newest measured estimate and evidence below.
+        applied = planning_parameters or resolved
         return {
             "state": resolved.battery_efficiency_source,
             "cycle_state": self.state,
             "application_enabled": application_enabled,
             "default_one_way_efficiency": DEFAULT_ONE_WAY_EFFICIENCY,
-            "applied_one_way_efficiency": round(resolved.charge_efficiency, 3),
+            "applied_one_way_efficiency": round(applied.charge_efficiency, 3),
             "physical_round_trip_efficiency": round(
-                resolved.physical_round_trip_efficiency,
+                applied.physical_round_trip_efficiency,
                 4,
             ),
             "economic_round_trip_efficiency": round(
-                resolved.economic_round_trip_efficiency,
+                applied.economic_round_trip_efficiency,
                 4,
             ),
             "candidate_round_trip_efficiency": (

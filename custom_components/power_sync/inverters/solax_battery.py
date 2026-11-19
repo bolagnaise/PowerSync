@@ -29,6 +29,8 @@ from typing import Any
 from homeassistant.helpers import entity_registry as er
 from homeassistant.util import dt as dt_util
 
+from ..battery_telemetry import oldest_entity_report
+
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -475,6 +477,10 @@ class SolaxBatteryController:
             "telemetry_ready": telemetry_ready,
             "battery_level": soc,
             "battery_power": battery_kw,
+            "telemetry_observed_at": {
+                "battery_level": oldest_entity_report(self.hass, self._entity_map.get("battery_level")),
+                "battery_power": oldest_entity_report(self.hass, self._entity_map.get("battery_power_raw")),
+            },
             "grid_power": grid_kw,
             "solar_power": solar_kw,
             "load_power": load_kw,
