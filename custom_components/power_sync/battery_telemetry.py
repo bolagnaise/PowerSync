@@ -10,7 +10,9 @@ MAX_BATTERY_SAMPLE_SKEW_SECONDS = 30
 
 def oldest_paired_report(stamps: list[datetime | None]) -> datetime | None:
     """Require all components of a reading to come from one time window."""
-    if not stamps or any(stamp is None for stamp in stamps):
+    if not stamps or any(
+        not isinstance(stamp, datetime) or stamp.utcoffset() is None for stamp in stamps
+    ):
         return None
     earliest = min(stamps)
     latest = max(stamps)

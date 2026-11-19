@@ -63,7 +63,7 @@ from .const import (
     SIGENERGY_CHARGER_EVDC,
 )
 from .sensitive_logging import obfuscate_log_arg, obfuscate_vin_tokens
-from .battery_telemetry import oldest_entity_report
+from .battery_telemetry import oldest_entity_report, oldest_paired_report
 from .demand_charge_config import (
     normalize_demand_charge_billing_day,
     normalize_demand_charge_days,
@@ -3928,6 +3928,13 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
                         pass
 
             soc_pct = self._resolve_battery_level_pct(live_status)
+            measured_soc = _finite_float(live_status.get("percentage_charged"))
+            # A cached SOC keeps displays stable through partial responses.
+            # Only the raw SOC and power from this acquisition can form a
+            # battery efficiency observation.
+            battery_observed_at = (
+                stream_created_at if stream_live_status is not None else sample_observed_at
+            )
             energy_left_kwh: float | None = None
             el_w = live_status.get("energy_left")
             if el_w is not None:
@@ -3979,6 +3986,13 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
                 ),
                 "wall_connectors_raw": wall_connectors_raw,
                 "last_update": sample_observed_at,
+                "telemetry_observed_at": {
+                    "battery_level": (
+                        battery_observed_at if measured_soc is not None and 0 <= measured_soc <= 100
+                        else None
+                    ),
+                    "battery_power": battery_observed_at,
+                },
                 "energy_summary": self._energy_acc.as_dict(),
                 "firmware": self._firmware,
                 # BMS ceiling for the mobile force-mode picker's Max chip
@@ -6444,6 +6458,9 @@ class AlphaESSEnergyCoordinator(DataUpdateCoordinator):
         max_charge_w = attrs.get("battery_max_charge_power_w")
         max_discharge_w = attrs.get("battery_max_discharge_power_w")
 
+        observed_at = dt_util.utcnow()
+        observed_soc = _finite_float(attrs.get("battery_soc"))
+        observed_power = _finite_float(attrs.get("battery_power_kw"))
         energy_data = {
             "solar_power": solar_kw,
             "grid_power": grid_kw,
@@ -6463,7 +6480,11 @@ class AlphaESSEnergyCoordinator(DataUpdateCoordinator):
             "data_source": source,
             "connection_type": self.connection_type,
             "supports_dispatch": self.supports_dispatch,
-            "last_update": dt_util.utcnow(),
+            "last_update": observed_at,
+            "telemetry_observed_at": {
+                "battery_level": observed_at if observed_soc is not None else None,
+                "battery_power": observed_at if observed_power is not None else None,
+            },
             "energy_summary": self._energy_acc.as_dict(),
         }
 
@@ -8578,6 +8599,9 @@ class DualSungrowCoordinator(DataUpdateCoordinator):
         charge_limit_w = self._combined_power_limit_w("charge")
         discharge_limit_w = self._combined_power_limit_w("discharge")
 
+        battery_observed_at = oldest_paired_report(
+            [d1.get("last_update"), d2.get("last_update")]
+        )
         return {
             "telemetry_ready": self._children_control_ready(),
             "solar_power": (
@@ -8590,6 +8614,10 @@ class DualSungrowCoordinator(DataUpdateCoordinator):
             "load_power": load,
             "battery_level": combined_soc,
             "last_update": dt_util.utcnow(),
+            "telemetry_observed_at": {
+                "battery_level": battery_observed_at,
+                "battery_power": battery_observed_at,
+            },
             # Use primary's Sungrow-specific fields
             "battery_soh": d1.get("battery_soh"),
             "battery_voltage": d1.get("battery_voltage"),
@@ -8862,6 +8890,9 @@ class FoxESSEnergyCoordinator(DataUpdateCoordinator):
                 acc["charge_today_kwh"] = energy_summary.get("charge_today_kwh", acc["charge_today_kwh"])
                 acc["discharge_today_kwh"] = energy_summary.get("discharge_today_kwh", acc["discharge_today_kwh"])
 
+            observed_at = dt_util.utcnow()
+            observed_soc = _finite_float(attrs.get("battery_soc"))
+            observed_power = _finite_float(attrs.get("battery_power_kw"))
             energy_data = {
                 "solar_power": max(0, total_solar_kw),
                 "ct2_power": ct2_kw,
@@ -8873,7 +8904,11 @@ class FoxESSEnergyCoordinator(DataUpdateCoordinator):
                 "battery_power": battery_kw,
                 "load_power": load_kw,
                 "battery_level": attrs.get("battery_soc", 0),
-                "last_update": dt_util.utcnow(),
+                "last_update": observed_at,
+                "telemetry_observed_at": {
+                    "battery_level": observed_at if observed_soc is not None else None,
+                    "battery_power": observed_at if observed_power is not None else None,
+                },
                 # FoxESS-specific data
                 "work_mode": attrs.get("work_mode"),
                 "work_mode_name": attrs.get("work_mode_name"),
@@ -9738,10 +9773,16 @@ class FoxESSCloudEnergyCoordinator(DataUpdateCoordinator):
             inv_bat = _first_present("invBatPower", "batPower")
             if inv_bat is not None:
                 battery_kw = self._to_float(inv_bat) / 1000.0
+                battery_power_measured = _finite_float(inv_bat) is not None
             else:
-                charge_kw = self._to_float(_first_present("batChargePower", "chargePower")) / 1000.0
-                discharge_kw = self._to_float(_first_present("batDischargePower", "dischargePower")) / 1000.0
+                charge = _first_present("batChargePower", "chargePower")
+                discharge = _first_present("batDischargePower", "dischargePower")
+                charge_kw = self._to_float(charge) / 1000.0
+                discharge_kw = self._to_float(discharge) / 1000.0
                 battery_kw = discharge_kw - charge_kw
+                battery_power_measured = (
+                    _finite_float(charge) is not None and _finite_float(discharge) is not None
+                )
 
             # Grid power: prefer a finite meter reading; otherwise compute the
             # net value only when both finite import and feed-in readings exist.
@@ -9798,6 +9839,7 @@ class FoxESSCloudEnergyCoordinator(DataUpdateCoordinator):
             acc["charge_today_kwh"] = charge_total
             acc["discharge_today_kwh"] = discharge_total
 
+            observed_at = dt_util.utcnow()
             data = {
                 "solar_power": max(0, solar_kw),
                 "grid_power": grid_kw,
@@ -9805,7 +9847,11 @@ class FoxESSCloudEnergyCoordinator(DataUpdateCoordinator):
                 "battery_power": battery_kw,
                 "load_power": load_kw,
                 "battery_level": soc,
-                "last_update": dt_util.utcnow(),
+                "last_update": observed_at,
+                "telemetry_observed_at": {
+                    "battery_level": observed_at if 0 <= soc <= 100 else None,
+                    "battery_power": observed_at if battery_power_measured else None,
+                },
                 "work_mode": values.get("workMode"),
                 "work_mode_name": values.get("workMode"),
                 "energy_summary": acc,
@@ -10194,7 +10240,8 @@ class GoodWeEnergyCoordinator(
                 energy_data["work_mode_name"] = data.get("work_mode_name")
             if data.get("entity_telemetry"):
                 energy_data["entity_telemetry"] = True
-                energy_data["telemetry_observed_at"] = data.get("telemetry_observed_at", {})
+            if "telemetry_observed_at" in data:
+                energy_data["telemetry_observed_at"] = data["telemetry_observed_at"]
             for status_key, summary_key in (
                 ("daily_solar_energy_kwh", "pv_today_kwh"),
                 ("daily_grid_import_kwh", "grid_import_today_kwh"),

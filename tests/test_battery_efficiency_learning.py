@@ -395,6 +395,12 @@ def test_coordinator_uses_acquisition_clock_and_paired_soc():
     observe(coordinator, timestamp=now, capacity_wh=54000)
     assert captured[-1]["valid"] is False
 
+    coordinator._get_energy_data = lambda: {
+        "battery_level": 110, "battery_power": -12, "last_update": now,
+    }
+    observe(coordinator, timestamp=now, capacity_wh=54000)
+    assert captured[-1]["soc"] is None
+
 
 def test_custom_entity_reports_learn_a_daily_full_cycle_and_reject_unpaired_data():
     from functools import partial

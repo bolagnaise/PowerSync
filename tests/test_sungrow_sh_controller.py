@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import ast
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import importlib
 import importlib.util
 from pathlib import Path
@@ -950,8 +950,22 @@ def test_dual_sungrow_requires_both_coordinators_to_be_ready():
         assert coordinator.startup_control_ready() is False
 
         coordinator._coord2.ready = True
+        observed_at = datetime(2026, 11, 20, 12, tzinfo=timezone.utc)
+        coordinator._coord1.data["last_update"] = observed_at
+        coordinator._coord2.data["last_update"] = observed_at + timedelta(seconds=10)
         first_snapshot = await coordinator._async_update_data()
         assert first_snapshot["telemetry_ready"] is True
+        assert first_snapshot["telemetry_observed_at"] == {
+            "battery_level": observed_at,
+            "battery_power": observed_at,
+        }
+
+        coordinator._coord2.data["last_update"] = observed_at + timedelta(seconds=45)
+        unpaired = await coordinator._async_update_data()
+        assert unpaired["telemetry_observed_at"] == {
+            "battery_level": None,
+            "battery_power": None,
+        }
 
         coordinator.data = first_snapshot
         coordinator.last_update_success = True

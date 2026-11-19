@@ -8,7 +8,9 @@ Separate from inverters/goodwe.py which handles AC-coupled curtailment via pymod
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import logging
+import math
 import time
 from typing import Any
 
@@ -215,6 +217,7 @@ class GoodWeBatteryController:
           model_name, serial_number, rated_power
         """
         data = await self._inverter.read_runtime_data()
+        observed_at = datetime.now(timezone.utc)
 
         # Map to PowerSync standard format with correct sign conventions:
         # GoodWe active_power: positive=export, negative=import
@@ -242,6 +245,14 @@ class GoodWeBatteryController:
             "battery_power": battery_kw,
             "load_power": max(0, load_kw),
             "battery_level": soc,
+            "telemetry_observed_at": {
+                key: (
+                    observed_at
+                    if type(data.get(sensor)) in (int, float) and math.isfinite(data[sensor])
+                    else None
+                )
+                for key, sensor in (("battery_level", "battery_soc"), ("battery_power", "pbattery1"))
+            },
             "battery_temperature": data.get("battery_temperature"),
             "battery_soh": data.get("battery_soh"),
             "model_name": self._inverter.model_name,

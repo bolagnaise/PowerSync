@@ -5,6 +5,7 @@ import importlib
 import sys
 import types
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -93,6 +94,31 @@ class _RetainedZeroExportLimitGoodWeInverter(_FakeGoodWeInverter):
         if setting_id == "grid_export_limit":
             return 0
         return await super().read_setting(setting_id)
+
+
+def test_runtime_data_distinguishes_missing_battery_readings_from_zero():
+    module, restore_module = _load_goodwe_controller_module()
+    try:
+        controller = module.GoodWeBatteryController("192.0.2.10")
+        controller._inverter = types.SimpleNamespace(
+            model_name="synthetic", serial_number="synthetic", rated_power=5000,
+            read_runtime_data=AsyncMock(side_effect=[{}, {"battery_soc": 0, "pbattery1": 0}]),
+        )
+        missing = asyncio.run(controller.get_runtime_data())
+        measured = asyncio.run(controller.get_runtime_data())
+
+        for data in (missing, measured):
+            assert data["battery_level"] == 0
+            assert data["battery_power"] == 0
+        assert missing["telemetry_observed_at"] == {
+            "battery_level": None,
+            "battery_power": None,
+        }
+        observed = measured["telemetry_observed_at"]
+        assert observed["battery_level"] == observed["battery_power"]
+        assert observed["battery_level"].utcoffset() is not None
+    finally:
+        restore_module()
 
 
 def test_restore_uses_goodwe_export_limit_register_maximum():

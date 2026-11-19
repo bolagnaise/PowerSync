@@ -19350,11 +19350,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # Entity-backed readings may be published a few seconds apart.
             # Split readings further apart do not describe one SOC/power pair.
             fresh = (max(times) - observed_at).total_seconds() <= 30
-        level = data.get("battery_level")
         try:
-            measured_soc = float(level) / 100.0
+            level_percent = float(data.get("battery_level"))
         except (TypeError, ValueError):
-            measured_soc = None
+            level_percent = None
+        measured_soc = (
+            level_percent / 100.0
+            if level_percent is not None and 0 <= level_percent <= 100
+            else None
+        )
         result = self._battery_efficiency_learner.observe(
             timestamp=observed_at.astimezone(timestamp.tzinfo) if fresh else timestamp,
             soc=measured_soc,
