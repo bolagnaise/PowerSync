@@ -17,6 +17,58 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1] / "custom_components/power_sync"
 
 
+@pytest.mark.parametrize("same_vehicle", [False, True])
+def test_solar_surplus_uses_only_the_selected_loadpoints_charger_settings(
+    monkeypatch, same_vehicle,
+):
+    tree = ast.parse((ROOT / "__init__.py").read_text())
+    timer = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "auto_evaluate_automations"
+    )
+    start_loop = next(
+        node for node in ast.walk(timer)
+        if isinstance(node, ast.For)
+        and isinstance(node.iter, ast.Name) and node.iter.id == "configs_to_start"
+    )
+    # Drive the real timer's dispatch loop with one eligible EV and a stored
+    # three-phase Smart Schedule profile for either this EV or another EV.
+    selected_id, other_id = "5YJ3E1EA7KF000001", "5YJ3E1EA7KF000002"
+    settings = types.SimpleNamespace(
+        phases=3, min_charge_amps=6, max_charge_amps=16, voltage=230,
+        charger_status_entity="sensor.three_phase_status",
+    )
+    executor = types.SimpleNamespace(
+        _settings={selected_id if same_vehicle else other_id: settings},
+    )
+    const = types.ModuleType("_solar_timer.const")
+    for key in ("AMPS_ENTITY", "ENABLED", "POWER_ENTITY", "STATUS_ENTITY", "SWITCH_ENTITY"):
+        setattr(const, "CONF_GENERIC_CHARGER_" + key, key.lower())
+    monkeypatch.setitem(sys.modules, const.__name__, const)
+    start = AsyncMock()
+    space = {
+        "__package__": "_solar_timer",
+        "hass": object(),
+        "entry": types.SimpleNamespace(data={}, options={}),
+        "configs_to_start": [{"vehicle_id": selected_id, "charger_type": "tesla"}],
+        "surplus_config": {}, "min_battery_soc": 20, "allow_parallel": False,
+        "_LOGGER": logging.getLogger(__name__),
+        "_action_start_ev_charging_dynamic": start,
+        "get_auto_schedule_executor": lambda: executor,
+    }
+    wrapper = ast.parse("async def run():\n    pass").body[0]
+    wrapper.body = [start_loop]
+    exec(compile(ast.Module(body=[wrapper], type_ignores=[]), str(ROOT / "__init__.py"), "exec"), space)
+    asyncio.run(space["run"]())
+    params = start.await_args.args[2]
+    assert params["vehicle_vin"] == selected_id
+    assert params["phases"] == (3 if same_vehicle else 1)
+    assert params["max_charge_amps"] == (16 if same_vehicle else 32)
+    assert params["charger_status_entity"] == (
+        settings.charger_status_entity if same_vehicle else None
+    )
+
+
 @pytest.fixture
 def control(monkeypatch):
     # Load real pure config helpers, without installing any shared HA stubs.

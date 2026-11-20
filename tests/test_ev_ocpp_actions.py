@@ -7702,10 +7702,24 @@ def test_solar_surplus_restart_preserves_exact_native_route_for_handoff(monkeypa
     assert "_tesla_command_entity_id" not in params
 
 
-def test_app_solar_surplus_start_rechecks_disabled_persisted_toggle():
+@pytest.mark.parametrize("disabled_globally", [True, False])
+def test_app_solar_surplus_start_rechecks_disabled_persisted_toggle(
+    monkeypatch, disabled_globally,
+):
+    from power_sync.automations import ev_ownership
+
+    def unexpected_admission(*args, **kwargs):
+        pytest.fail("Disabled Solar Surplus reached vehicle admission")
+
+    monkeypatch.setattr(ev_ownership, "manual_stop_hold_reason", unexpected_admission)
     hass = _Hass([])
     hass.data["power_sync"]["entry-1"]["automation_store"] = SimpleNamespace(
-        _data={"solar_surplus_config": {"enabled": False}}
+        _data={
+            "solar_surplus_config": {"enabled": not disabled_globally},
+            "vehicle_charging_configs": [
+                {"vehicle_id": "VIN123", "solar_charging_enabled": disabled_globally},
+            ],
+        }
     )
     actions._dynamic_ev_state.clear()
 
@@ -7728,6 +7742,75 @@ def test_app_solar_surplus_start_rechecks_disabled_persisted_toggle():
     command = hass.data["power_sync"]["entry-1"]["ev_last_command"]["VIN123"]
     assert command["success"] is False
     assert "disabled before the session started" in command["reason"]
+
+
+@pytest.mark.parametrize(
+    "owner_mode,disabled_vehicle,should_stop",
+    [
+        ("solar_surplus", "vin123", True),
+        ("solar_surplus", "vin456", False),
+        ("manual_solar_surplus", "vin123", False),
+        ("smart_schedule_solar_surplus", "vin123", False),
+    ],
+)
+def test_solar_surplus_runtime_respects_only_its_own_vehicle_toggle(
+    monkeypatch, owner_mode, disabled_vehicle, should_stop,
+):
+    hass = _Hass([])
+    entry = _Entry()
+    hass.data["power_sync"]["entry-1"]["automation_store"] = SimpleNamespace(
+        _data={
+            "solar_surplus_config": {"enabled": True},
+            "vehicle_charging_configs": [
+                {"vehicle_id": disabled_vehicle, "solar_charging_enabled": False},
+            ],
+        }
+    )
+    state = _solar_surplus_state()
+    state["params"]["owner_mode"] = owner_mode
+    monkeypatch.setitem(actions._dynamic_ev_state, "entry-1", {"VIN123": state})
+    stop = AsyncMock(return_value=True)
+    location_check = AsyncMock(return_value=True)
+    monkeypatch.setattr(actions, "_action_stop_ev_charging_dynamic", stop)
+    monkeypatch.setattr(actions, "_release_dynamic_tesla_if_away", location_check)
+
+    asyncio.run(actions._dynamic_ev_update_surplus(hass, entry, "entry-1", "VIN123"))
+
+    if should_stop:
+        stop.assert_awaited_once()
+        params = stop.await_args.args[2]
+        assert params["vehicle_id"] == "VIN123"
+        assert params["stop_charging"] is True
+        assert params["_expected_state"] is state
+        location_check.assert_not_awaited()
+    else:
+        stop.assert_not_awaited()
+        location_check.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    "vin_preference,expected",
+    [(True, False), (False, True), (None, True)],
+)
+def test_solar_surplus_vehicle_toggle_prefers_the_vin_profile(
+    vin_preference, expected,
+):
+    vin = "5YJ3E1EA7KF000001"
+    entry = _Entry()
+    entry.options = {
+        "ev_provider": "both",
+        "tesla_ble_entity_prefix": "bridge_alpha,bridge_beta",
+        "tesla_ble_vehicle_mapping": f"{vin}=bridge_alpha",
+    }
+    profiles = [{"vehicle_id": "ble_bridge_alpha", "solar_charging_enabled": False}]
+    if vin_preference is not None:
+        profiles.append({"vehicle_id": vin, "solar_charging_enabled": vin_preference})
+    hass = _Hass([])
+    hass.data["power_sync"]["entry-1"]["automation_store"] = SimpleNamespace(
+        _data={"vehicle_charging_configs": profiles}
+    )
+
+    assert actions._solar_surplus_vehicle_opted_out(hass, entry, vin) is expected
 
 
 def test_solar_surplus_dynamic_start_blocks_full_ev(monkeypatch):

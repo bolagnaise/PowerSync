@@ -88,6 +88,7 @@ from ..solar_surplus_config import (
 )
 from ..tesla_ble_mapping import (
     canonical_tesla_vehicle_id,
+    coalesce_paired_vehicle_configs,
     resolve_ble_prefixes,
     vehicle_ble_prefix,
 )
@@ -14658,6 +14659,32 @@ async def _update_smart_schedule_battery_target_group(
         _LOGGER.debug("Dynamic EV group: session tracking failed: %s", err)
 
 
+def _solar_surplus_vehicle_opted_out(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    vehicle_id: str,
+) -> bool:
+    from .ev_ownership import external_control_vehicle_ids_match
+
+    entry_data = hass.data.get(DOMAIN, {}).get(config_entry.entry_id, {})
+    store = entry_data.get("automation_store")
+    stored_data = getattr(store, "_data", {}) or {}
+    configs = stored_data.get("vehicle_charging_configs")
+    if not configs or not isinstance(configs, list):
+        return False
+    options = {**config_entry.data, **config_entry.options}
+    profiles = coalesce_paired_vehicle_configs(
+        options, configs, resolve_ble_prefixes(hass, options)
+    )
+    return any(
+        config.get("solar_charging_enabled") is False
+        and external_control_vehicle_ids_match(
+            hass, config_entry, config.get("vehicle_id"), vehicle_id
+        )
+        for config in profiles
+    )
+
+
 def _refresh_solar_surplus_runtime_params(
     hass: HomeAssistant,
     entry_id: str,
@@ -14862,7 +14889,25 @@ async def _dynamic_ev_update_surplus(
         )
         return True
 
+    from .ev_ownership import owner_family
+
     params = state.get("params", {})
+    if (
+        owner_family(params.get("owner_mode") or params.get("dynamic_mode"))
+        == "solar_surplus"
+        and _solar_surplus_vehicle_opted_out(hass, config_entry, vehicle_id)
+    ):
+        await _action_stop_ev_charging_dynamic(
+            hass,
+            config_entry,
+            {
+                "vehicle_id": vehicle_id,
+                "stop_charging": True,
+                "stop_reason": "Solar Surplus disabled for this vehicle",
+                "_expected_state": state,
+            },
+        )
+        return
     params = _refresh_solar_surplus_runtime_params(hass, entry_id, params)
     params = _with_sigenergy_charger_capabilities(config_entry, params, hass)
     state["params"] = params
@@ -18427,11 +18472,14 @@ async def _action_start_ev_charging_dynamic_locked(
         )
         stored_data = getattr(automation_store, "_data", {}) or {}
         stored_solar_config = stored_data.get("solar_surplus_config")
-        if (
+        disabled_globally = (
             isinstance(stored_solar_config, dict)
             and not normalize_solar_surplus_config(
                 stored_solar_config
             ).get("enabled", False)
+        )
+        if disabled_globally or _solar_surplus_vehicle_opted_out(
+            hass, config_entry, vehicle_id
         ):
             reason = "Solar Surplus was disabled before the session started"
             record_ev_command(
@@ -18443,8 +18491,8 @@ async def _action_start_ev_charging_dynamic_locked(
                 reason=reason,
             )
             _LOGGER.info(
-                "Solar surplus EV: stale start blocked for %s because the "
-                "persisted toggle is disabled",
+                "Solar surplus EV: stale start blocked for %s because "
+                "Solar Surplus is disabled globally or for this vehicle",
                 vehicle_id,
             )
             return False

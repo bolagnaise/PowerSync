@@ -50239,46 +50239,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             configs_to_start = []
 
                         for vc in configs_to_start:
-                            # Get phases from vehicle config, falling back to auto-schedule
-                            # settings (the app may store phases in either location)
-                            vc_phases = vc.get("phases")
-                            if vc_phases is None or vc_phases <= 1:
-                                try:
-                                    from .automations.ev_charging_planner import get_auto_schedule_executor as _get_exec
-                                    _exec = _get_exec()
-                                    if _exec:
-                                        # Try to match by vehicle_id first
-                                        _matched = False
-                                        for _vid, _settings in _exec._settings.items():
-                                            if _vid == vc.get("vehicle_id") and _settings.phases > 1:
-                                                vc_phases = _settings.phases
-                                                if vc.get("min_amps") is None and vc.get("min_charge_amps") is None:
-                                                    vc["min_amps"] = _settings.min_charge_amps
-                                                if vc.get("max_amps") is None and vc.get("max_charge_amps") is None:
-                                                    vc["max_amps"] = _settings.max_charge_amps
-                                                if vc.get("voltage") is None:
-                                                    vc["voltage"] = _settings.voltage
-                                                if vc.get("charger_status_entity") is None:
-                                                    vc["charger_status_entity"] = _settings.charger_status_entity
-                                                _matched = True
-                                                break
-                                        if not _matched:
-                                            for _vid, _settings in _exec._settings.items():
-                                                if _settings.phases > 1:
-                                                    vc_phases = _settings.phases
-                                                    if vc.get("min_amps") is None and vc.get("min_charge_amps") is None:
-                                                        vc["min_amps"] = _settings.min_charge_amps
-                                                    if vc.get("max_amps") is None and vc.get("max_charge_amps") is None:
-                                                        vc["max_amps"] = _settings.max_charge_amps
-                                                    if vc.get("voltage") is None:
-                                                        vc["voltage"] = _settings.voltage
-                                                    if vc.get("charger_status_entity") is None:
-                                                        vc["charger_status_entity"] = _settings.charger_status_entity
-                                                    break
-                                except Exception:
-                                    pass
-                            if vc_phases is None:
-                                vc_phases = 1
+                            vc = dict(vc)
+                            vc_phases = vc.get("phases") or 1
+                            if vc_phases <= 1:
+                                # Older profiles can store three-phase charger
+                                # settings in Smart Schedule for this vehicle.
+                                executor = get_auto_schedule_executor()
+                                settings = (
+                                    executor._settings.get(vc.get("vehicle_id"))
+                                    if executor is not None else None
+                                )
+                                if settings is not None and settings.phases > 1:
+                                    vc_phases = settings.phases
+                                    if vc.get("min_amps") is None and vc.get("min_charge_amps") is None:
+                                        vc["min_amps"] = settings.min_charge_amps
+                                    if vc.get("max_amps") is None and vc.get("max_charge_amps") is None:
+                                        vc["max_amps"] = settings.max_charge_amps
+                                    if vc.get("voltage") is None:
+                                        vc["voltage"] = settings.voltage
+                                    if vc.get("charger_status_entity") is None:
+                                        vc["charger_status_entity"] = settings.charger_status_entity
 
                             # Determine charger_type: vehicle config > config entry > default
                             vc_charger_type = vc.get("charger_type")
