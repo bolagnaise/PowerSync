@@ -444,11 +444,15 @@ def test_canonical_sensor_and_mobile_share_solar_and_never_restore_invalid_total
     ns = {"SENSOR_TYPE_SOLAR_POWER":"solar_power", "SENSOR_TYPE_HOME_LOAD":"home_load",
           "SENSOR_TYPE_GRID_STATUS":"grid_status", "_LOCAL_OVERRIDABLE":{"solar_power"},
           "_sungrow_ac_inverter_power_kw":lambda *args: (_ for _ in ()).throw(AssertionError("late sum"))}
-    getter = extracted_method("custom_components/power_sync/sensor.py", "TeslaEnergySensor", "native_value", ns)
+    source = "custom_components/power_sync/sensor.py"
+    getter = extracted_method(source, "TeslaEnergySensor", "native_value", ns)
     sensor = NS(_entry=policy.entry, entity_description=NS(key="solar_power", value_fn=lambda d:d["solar_power"]),
                 _normalized_energy_data=lambda:normalized,
                 _local_coordinator=lambda: (_ for _ in ()).throw(AssertionError("local bypass")),
                 _restored_numeric_value=lambda _:99.)
+    for name in ("_additional_solar_enabled", "_local_sensor_reading"):
+        helper = extracted_method(source, "TeslaEnergySensor", name, ns)
+        setattr(sensor, name, MethodType(helper, sensor))
     assert getter(sensor) == 5.5
     view = NS(_config_entry=policy.entry, _hass=NS(data={"power_sync":{"site":{
         "goodwe_coordinator":NS(data=normalized)}}}))
