@@ -293,16 +293,41 @@ async def test_cancelled_journal_commit_cannot_resurrect_intent_after_cleanup():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('revocation', ['expiry','policy','stop'])
-async def test_pending_provider_wait_is_interrupted_before_cleanup(revocation):
-    s,a,store,clock=setup();entered=asyncio.Event();never=asyncio.Event()
-    async def delayed():entered.set();await never.wait()
-    a.apply_hook=delayed
-    start=asyncio.create_task(s.start(120));await entered.wait()
-    if revocation=='expiry':clock.now+=121
-    elif revocation=='policy':a.policy=False
-    else:await asyncio.wait_for(s.stop(),1)
-    with pytest.raises(m.NativeMaxChargeError):await asyncio.wait_for(start,1)
-    assert 'apply_tariff' not in a.events and a.events.count('restore')==1
+async def test_pending_provider_wait_is_interrupted_before_cleanup(revocation, monkeypatch):
+    s, a, store, clock = setup()
+    entered = asyncio.Event()
+    never = asyncio.Event()
+    watch_poll = asyncio.Event()
+    real_sleep = asyncio.sleep
+
+    async def sleep(delay):
+        if asyncio.current_task() is s._watch_task and delay == s.interval:
+            await watch_poll.wait()
+            watch_poll.clear()
+        else:
+            await real_sleep(delay)
+
+    monkeypatch.setattr(m.asyncio, 'sleep', sleep)
+
+    async def delayed():
+        entered.set()
+        await never.wait()
+
+    a.apply_hook = delayed
+    start = asyncio.create_task(s.start(120))
+    await entered.wait()
+    if revocation == 'expiry':
+        clock.now += 121
+    elif revocation == 'policy':
+        a.policy = False
+    else:
+        await asyncio.wait_for(s.stop(), 1)
+    # Allow one watchdog poll. The outer timeout detects a stalled test
+    # without cancelling the restoration whose outcome we are asserting.
+    watch_poll.set()
+    with pytest.raises(m.NativeMaxChargeError):
+        await asyncio.wait_for(asyncio.shield(start), 5)
+    assert 'apply_tariff' not in a.events and a.events.count('restore') == 1
     assert not s.pending and store.data is None and a.barrier is None
     await s.stop()
 
