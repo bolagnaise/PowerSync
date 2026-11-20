@@ -52,6 +52,10 @@ For a Tessie recovery already bound to the car in Home Assistant, PowerSync can
 use that car's Wake button. It checks for a new charging-state report from the
 same car before attempting Start.
 
+During charging, Solar Surplus tracks the current it sent after Home
+Assistant's Tesla current limit. If that limit rises and surplus still
+supports a higher current, PowerSync can request the increase.
+
 ### Battery-powered charging near zero grid flow
 
 Scheduled charging with no grid import holds its rate while the home battery keeps measured grid flow within the configured tolerance. Small fluctuations inside that tolerance do not reduce the rate repeatedly. Inverter capacity limits and reductions for grid imports above tolerance still apply.

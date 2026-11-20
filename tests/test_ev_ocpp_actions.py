@@ -10309,6 +10309,66 @@ def test_solar_surplus_tesla_set_amps_falls_back_after_range_rejection(monkeypat
     assert params["max_charge_amps"] == 16
 
 
+def test_solar_surplus_retries_tessie_increase_after_temporary_entity_cap(monkeypatch):
+    """A capped Tessie write cannot satisfy the original Solar Surplus target."""
+    vin = "5YJTEST00000000A1"
+    now = datetime.now(timezone.utc)
+    rate = _State("number.car_charge_current", "12", {"min": 0, "max": 32})
+    charging = _State("sensor.car_charging", "Charging", last_updated=now)
+    power = _State(
+        "sensor.car_charger_power", "2880", {"unit_of_measurement": "W"}, last_updated=now
+    )
+    hass = _Hass([rate, charging, power])
+    _install_native_ha_writer(
+        hass, vin, rate.entity_id, charging.entity_id, power.entity_id, platform="tessie"
+    )
+    state = _solar_surplus_state(current_amps=12)
+    state["params"].update(vehicle_vin=vin, charger_power_entity=power.entity_id)
+    monkeypatch.setitem(actions._dynamic_ev_state, "entry-1", {vin: state})
+
+    live_status = {
+        "battery_soc": 100,
+        "grid_power": -3380,
+        "battery_power": 0,
+        "solar_power": 0,
+        "load_power": 0,
+    }
+    set_vehicle_amps = actions._set_vehicle_amps
+    _install_solar_surplus_runtime_stubs(monkeypatch, live_status)
+    monkeypatch.setattr(actions, "_set_vehicle_amps", set_vehicle_amps)
+    monkeypatch.setattr(actions, "_wake_tesla_ev_for_command", AsyncMock(return_value=True))
+    resolve_command_entity = actions._tesla_ha_command_entity
+
+    async def resolve_with_temporary_cap(hass, entry, params, operation):
+        entity_id = await resolve_command_entity(hass, entry, params, operation)
+        if operation == "rate" and not hass.services.calls:
+            # The vehicle report arrives after the Solar Surplus calculation.
+            rate.attributes["max"] = 16
+        return entity_id
+
+    monkeypatch.setattr(actions, "_tesla_ha_command_entity", resolve_with_temporary_cap)
+
+    async def run_updates():
+        await actions._dynamic_ev_update_surplus(hass, _Entry(), "entry-1", vin)
+        capped_amps = state["current_amps"], state["target_amps"]
+        rate.state = "16"
+        rate.attributes["max"] = 32
+        power.state = "3840"
+        live_status["grid_power"] = -2420
+        await actions._dynamic_ev_update_surplus(hass, _Entry(), "entry-1", vin)
+        return capped_amps
+
+    capped_amps = asyncio.run(run_updates())
+
+    assert hass.services.calls == [
+        ("number", "set_value", {"entity_id": rate.entity_id, "value": 16}),
+        ("number", "set_value", {"entity_id": rate.entity_id, "value": 24}),
+    ]
+    assert capped_amps == (16, 16)
+    assert (state["current_amps"], state["target_amps"]) == (24, 24)
+    assert state["params"]["max_charge_amps"] == 32
+
+
 
 def test_exact_wall_connector_range_fallback_continues_to_vin_provider(monkeypatch):
     """An unhealthy BLE session goes directly to the exact-VIN write."""

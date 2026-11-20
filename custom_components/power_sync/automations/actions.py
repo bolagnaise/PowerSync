@@ -11027,6 +11027,7 @@ async def _action_set_ev_charging_amps(
     Set EV charging amperage via Tesla, OCPP, generic, or Zaptec charger.
     """
     params.pop("_tesla_stock_recovery_attempted", None)
+    params.pop("_tesla_native_submitted_amps", None)
     # Accept both "amps" and "charging_amps" for flexibility. Preserve 0A
     # values for charger APIs that use amps=0 as a pause/stop command.
     amps = params.get("amps")
@@ -11348,6 +11349,7 @@ async def _action_set_ev_charging_amps(
                     return False
                 if fallback_mutation.outcome != "accepted_unconfirmed":
                     return False
+                params["_tesla_native_submitted_amps"] = fallback_amps
                 params["max_charge_amps"] = fallback_amps
                 params["_tesla_entity_range_fallback_amps"] = fallback_amps
                 _LOGGER.info(
@@ -11358,6 +11360,7 @@ async def _action_set_ev_charging_amps(
                 return True
             if mutation.outcome != "accepted_unconfirmed":
                 return False
+            params["_tesla_native_submitted_amps"] = amps
             params.pop("_tesla_entity_range_fallback_amps", None)
             if configured_max_amps is not None:
                 params["max_charge_amps"] = configured_max_amps
@@ -12846,6 +12849,9 @@ async def _set_vehicle_amps(
 ) -> bool:
     """Apply the final per-phase clamp to an owned rate command."""
     from .shared_generic_charger import start_allowed, stop_allowed
+    params.pop("_tesla_native_submitted_amps", None)
+    params.pop("_tesla_entity_range_fallback_amps", None)
+    params.pop("_phase_load_management_applied_amps", None)
     if amps <= 0 and config_entry is not None and not stop_allowed(hass, config_entry, params):
         return False
     if amps > 0 and config_entry is not None and not start_allowed(hass, config_entry, params):
@@ -12983,11 +12989,11 @@ async def _set_vehicle_amps_unchecked(
             command_params,
         )
         params["max_charge_amps"] = command_params.get("max_charge_amps")
-        fallback_key = "_tesla_entity_range_fallback_amps"
-        if fallback_key in command_params:
-            params[fallback_key] = command_params[fallback_key]
-        else:
-            params.pop(fallback_key, None)
+        for key in ("_tesla_native_submitted_amps", "_tesla_entity_range_fallback_amps"):
+            if key in command_params:
+                params[key] = command_params[key]
+            else:
+                params.pop(key, None)
         return success
 
     elif charger_type == "ocpp":
@@ -14688,7 +14694,9 @@ async def _update_smart_schedule_battery_target_group(
             target_amps,
             params,
         )
-        target_amps = _phase_applied_amps(params, target_amps)
+        target_amps = _phase_applied_amps(
+            params, target_amps, native_rate_accepted=bool(amps_set)
+        )
         if not _plan_still_owns_vehicle(vehicle_id):
             return False
 
@@ -14989,10 +14997,11 @@ async def _refresh_dynamic_tesla_charger_capability(
         if current_state is not state or not current_state.get("active"):
             return False
         if success:
-            state["current_amps"] = new_max
+            submitted_amps = _phase_applied_amps(params, new_max)
+            state["current_amps"] = submitted_amps
             state["target_amps"] = min(
-                _coerce_positive_int(state.get("target_amps"), new_max) or new_max,
-                new_max,
+                _coerce_positive_int(state.get("target_amps"), submitted_amps) or submitted_amps,
+                submitted_amps,
             )
 
     state["entity_max_rechecked"] = True
@@ -16685,21 +16694,18 @@ async def _phase_load_managed_target_amps(
     return applied_amps
 
 
-def _phase_applied_amps(params: Mapping[str, Any], requested_amps: int) -> int:
-    """Return the final amps most recently applied by the command wrapper."""
-    try:
-        return max(
-            0,
-            int(
-                params.get(
-                    "_tesla_entity_range_fallback_amps",
-                    params.get(
-                        "_phase_load_management_applied_amps",
-                        requested_amps,
-                    ),
-                )
-            ),
+def _phase_applied_amps(
+    params: Mapping[str, Any], requested_amps: int, *, native_rate_accepted: bool = True
+) -> int:
+    """Return the rate after phase and provider limits for this request."""
+    applied_amps = params.get("_tesla_native_submitted_amps") if native_rate_accepted else None
+    if applied_amps is None:
+        applied_amps = params.get(
+            "_tesla_entity_range_fallback_amps",
+            params.get("_phase_load_management_applied_amps", requested_amps),
         )
+    try:
+        return max(0, int(applied_amps))
     except (TypeError, ValueError):
         return max(0, int(requested_amps))
 
@@ -18405,7 +18411,9 @@ async def _dynamic_ev_update(
             new_amps,
             params,
         )
-        applied_amps = _phase_applied_amps(params, new_amps)
+        applied_amps = _phase_applied_amps(
+            params, new_amps, native_rate_accepted=bool(amps_set)
+        )
         success = amps_set
         if amps_set is None or params.get("_tesla_transport_recovery_pending"):
             _mark_tesla_plan_pending(state, new_amps)
@@ -19788,7 +19796,9 @@ async def _action_start_ev_charging_dynamic_locked(
                 amps_success = await _set_vehicle_amps(
                     hass, config_entry, vehicle_id, start_amps, params
                 )
-                applied_start_amps = _phase_applied_amps(params, start_amps)
+                applied_start_amps = _phase_applied_amps(
+                    params, start_amps, native_rate_accepted=bool(amps_success)
+                )
                 if amps_success or applied_start_amps != start_amps:
                     start_amps = applied_start_amps
                 if not amps_success:
