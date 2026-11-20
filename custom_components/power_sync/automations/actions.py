@@ -2484,7 +2484,7 @@ async def _wake_tesla_ha_recovery_route(
 ) -> Optional[bool]:
     """Wake an isolated native Tesla route before its exact source is read.
 
-    Tesla Fleet and native Teslemetry coordinators can return an unchanged
+    Native Tesla coordinators can return an unchanged
     asleep cache after a refresh, so a post-BLE-isolation recovery read may
     never produce a fresh stopped sample.  A registered provider-owned Wake
     button is the only separate producer that can safely wake before that
@@ -2500,7 +2500,7 @@ async def _wake_tesla_ha_recovery_route(
     if route.get("kind") != "ha" or not isinstance(identity, Mapping):
         return None
     route_platform = str(identity.get("platform") or "")
-    if route_platform not in {"tesla_fleet", "teslemetry"}:
+    if route_platform not in {"tesla_fleet", "teslemetry", "tessie"}:
         return None
 
     try:
@@ -2609,22 +2609,28 @@ async def _tesla_recovery_wake_read_if_missing(
     authorize: Callable[[], Any],
     observation: Any,
     observed: Optional[str],
-) -> tuple[Any, Optional[str], bool]:
+) -> tuple[Any, Optional[str], bool, str | None]:
     """Wake an exact native Tesla fallback only after its first read is missing."""
     if observed is not None or not route or route.get("kind") != "ha":
-        return observation, observed, True
+        return observation, observed, True, None
+    wake_started_at = datetime.now(dt_timezone.utc).timestamp()
     wake_result = await _wake_tesla_ha_recovery_route(
         hass, vehicle_vin, route, params, authorize
     )
     if wake_result is not True:
-        return observation, observed, wake_result is not False
+        return observation, observed, wake_result is not False, None
     observation = await _fresh_tesla_command_observation(
-        hass, entry, vehicle_vin, params
+        hass, entry, vehicle_vin, params, start_recovery_after=wake_started_at
     )
     observed = _tesla_observed_command_state(observation)
     if not authorize():
-        return observation, observed, False
-    return observation, observed, True
+        return observation, observed, False, None
+    tessie_wake_anchor = (
+        route.get("entity_id")
+        if route["entity_identity"].get("platform") == "tessie"
+        else None
+    )
+    return observation, observed, True, tessie_wake_anchor
 
 
 def _get_ev_config(config_entry: ConfigEntry) -> dict:
@@ -7144,11 +7150,14 @@ async def _run_native_tesla_service_command(
     return _TeslaNativeMutationResult("accepted_unconfirmed")
 
 
-async def _fresh_tesla_command_observation(hass, entry, vehicle, params, *, timeout=10):
+async def _fresh_tesla_command_observation(
+    hass, entry, vehicle, params, *, timeout=10, start_recovery_after=None
+):
     """Make one exact-vehicle provider read only during command recovery."""
     from ..tesla_ev_observation import (
         async_read_independent_tesla_vehicle,
         async_read_tesla_vehicle,
+        get_tesla_vehicle_observation,
         independent_tesla_source_binding,
     )
     from ..tesla_ev_recovery import get_vehicle_route
@@ -7211,10 +7220,45 @@ async def _fresh_tesla_command_observation(hass, entry, vehicle, params, *, time
 
     if not scope_current():
         return None
+    tessie_start_after = (
+        start_recovery_after
+        if independent_read_allowed() and source_binding.get("domain") == "tessie"
+        else None
+    )
+
+    def tessie_recovery_snapshot():
+        # A controller can receive Tessie's report while the Wake call is
+        # still in flight. Use the vehicle's timestamp from the exact source.
+        cached = get_tesla_vehicle_observation(
+            hass, canonical, preferred_entity_id=preferred_entity,
+            updated_after=tessie_start_after,
+        )
+        if (
+            cached is not None
+            and cached.charger_actual_current is not None
+            and cached.charger_power is not None
+            and cached.source_charge_timestamp <= datetime.now(dt_timezone.utc).timestamp()
+            and _tesla_observed_command_state(cached) is not None
+            and independent_read_allowed()
+        ):
+            return cached
+        return None
+
+    if tessie_start_after is not None:
+        cached = tessie_recovery_snapshot()
+        if cached is not None:
+            return cached
     observation = await async_read_tesla_vehicle(hass, canonical,
         preferred_entity_id=preferred_entity, timeout=remaining_timeout())
     if not scope_current():
         return None
+    if tessie_start_after is not None and (
+        observation is None or not (
+            tessie_start_after < observation.source_charge_timestamp
+            <= datetime.now(dt_timezone.utc).timestamp()
+        )
+    ):
+        observation = tessie_recovery_snapshot()
     if observation is not None or not independent_read_allowed():
         return observation
     # A native coordinator refresh can retain its old vehicle document. This
@@ -7224,6 +7268,7 @@ async def _fresh_tesla_command_observation(hass, entry, vehicle, params, *, time
         hass, canonical, preferred_entity_id=preferred_entity,
         timeout=remaining_timeout(), allow_paid_refresh=source_binding.get("domain") == "teslemetry",
         authorize=independent_read_allowed,
+        tessie_start_recovery_after=tessie_start_after,
     )
     return observation if independent_read_allowed() else None
 
@@ -10187,11 +10232,14 @@ async def _action_start_ev_charging(
         _LOGGER.debug("Tesla Start withheld: authority_lost_before_read")
         return False
     recovering_route = route and route.get("kind") in {"blocked", "ha"}
+    tessie_wake_anchor = None
     if recovering_route or params.get("_tesla_plan_recovery_attempt"):
         # A previous local command may already have taken effect. Reconcile
         # physical state before issuing another Start, even after isolation.
         observation = await _fresh_tesla_command_observation(
-            hass, config_entry, vehicle_vin, params)
+            hass, config_entry, vehicle_vin, params,
+            start_recovery_after=datetime.now(dt_timezone.utc).timestamp(),
+        )
         observed = _tesla_observed_command_state(observation)
         if not request_authority():
             _LOGGER.debug("Tesla Start withheld: authority_lost_after_read")
@@ -10199,9 +10247,11 @@ async def _action_start_ev_charging(
         if observed == "charging":
             params["_tesla_start_observation"] = observation
             return True
-        observation, observed, recovery_ok = await _tesla_recovery_wake_read_if_missing(
-            hass, config_entry, vehicle_vin, params, route, request_authority,
-            observation, observed,
+        observation, observed, recovery_ok, tessie_wake_anchor = (
+            await _tesla_recovery_wake_read_if_missing(
+                hass, config_entry, vehicle_vin, params, route, request_authority,
+                observation, observed,
+            )
         )
         if not recovery_ok:
             _LOGGER.debug("Tesla Start withheld: recovery_step_failed")
@@ -10276,7 +10326,7 @@ async def _action_start_ev_charging(
                     if not route or route.get("kind") != "ha":
                         params["_tesla_transport_recovery_pending"] = True
                         return None
-                    observation, observed, recovery_ok = (
+                    observation, observed, recovery_ok, tessie_wake_anchor = (
                         await _tesla_recovery_wake_read_if_missing(
                             hass, config_entry, vehicle_vin, params, route,
                             request_authority, observation, observed,
@@ -10356,10 +10406,23 @@ async def _action_start_ev_charging(
                 _LOGGER.warning("Skipping EV charging start - API credits exhausted, in cooldown period")
                 return False
 
-            wake_success = await _wake_tesla_ev_for_command(
+            if tessie_wake_anchor:
+                from ..teslemetry_bluetooth_commands import native_command_entity
+
+                # The exact Tessie Wake and subsequent read prepared this
+                # source. A different Start entity cannot reuse that proof.
+                current_anchor = _tesla_native_binding_identity(
+                    _tesla_native_binding(hass, tessie_wake_anchor, vehicle_vin)
+                )
+                if (
+                    current_anchor != route.get("entity_identity")
+                    or native_command_entity(hass, tessie_wake_anchor, "start") != charge_switch_entity
+                ):
+                    params["_tesla_transport_recovery_pending"] = True
+                    return None
+            elif not await _wake_tesla_ev_for_command(
                 hass, vehicle_vin, charge_switch_entity, config_entry.entry_id
-            )
-            if not wake_success:
+            ):
                 _LOGGER.warning("Wake failed (possibly due to API credits), skipping charge command")
                 return False
 

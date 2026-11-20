@@ -962,7 +962,8 @@ def command_recovery_read(independent_source, monkeypatch):
         **_charge(clock["now"] + 0.25, current=0, power=0, requested=15, limit=70)}}
     constants = load_power_sync_submodule("const", "command_recovery_observation_probe")
     source = ROOT / "automations/actions.py"
-    names = {"_fresh_tesla_command_observation", "_tesla_transport_authority",
+    names = {"_fresh_tesla_command_observation", "_tesla_observed_command_state",
+             "_tesla_transport_authority",
              "_tesla_native_deadline_token", "_tesla_native_binding",
              "_tesla_legacy_entity_identity"}
     nodes = [node for node in ast.parse(source.read_text()).body if getattr(node, "name", None) in names]
@@ -1938,7 +1939,14 @@ async def test_tessie_coordinator_refresh_uses_advancing_charge_timestamp(indepe
 
 
 @pytest.mark.asyncio
-async def test_command_recovery_tessie_cache_uses_exact_independent_read(command_recovery_read):
+@pytest.mark.parametrize(
+    "sample_offset, published_before_read, accepted",
+    [(1, None, True), (-1, None, False), (0, None, False),
+     (1, "complete", True), (1, "incomplete", False), (4, None, False)],
+)
+async def test_command_recovery_tessie_reads_telemetry_published_during_refresh(
+    command_recovery_read, sample_offset, published_before_read, accepted
+):
     probe = command_recovery_read
     probe.registration.platform = "tessie"
     probe.vehicle.device.identifiers = {("tessie", VIN_A)}
@@ -1948,16 +1956,40 @@ async def test_command_recovery_tessie_cache_uses_exact_independent_read(command
         "power_sync": [probe.control], "tessie": [probe.native_entry],
         "tesla_fleet": [probe.fleet_entry],
     }.get(domain, [])
-    probe.coordinator.refresh = None
+    recovery_started_at = probe.clock["now"]
+
+    async def refresh_keeps_cache(coordinator):
+        # Tessie can publish a new vehicle report while HA is refreshing its
+        # own cached copy. By the time the SDK read starts the report exists.
+        probe.clock["now"] += 3
+
+    probe.coordinator.refresh = refresh_keeps_cache
     probe.coordinator.api.response = {"vin": VIN_A,
-        **_charge(probe.clock["now"], current=32, power=7, requested=32, limit=100)}
-    result = await probe.read(probe.hass, probe.control, VIN_A, probe.params)
-    assert result is not None and result.domain == "tessie"
-    assert result.charger_actual_current == 32
-    assert probe.coordinator.api.calls == [{"use_cache": False}]
+        **_charge(recovery_started_at + sample_offset, state="Charging",
+                  current=32, power=7, requested=32, limit=100)}
+    if published_before_read:
+        # A report emitted while Wake was in flight may already be published
+        # by the coordinator by the time post-Wake acquisition starts.
+        probe.coordinator.data = deepcopy(probe.coordinator.api.response)
+        if published_before_read == "incomplete":
+            probe.coordinator.data["charge_state"].pop("charger_power")
+        probe.clock["now"] += 3
+    result = await probe.read(
+        probe.hass, probe.control, VIN_A, probe.params,
+        start_recovery_after=recovery_started_at,
+    )
+    assert probe.coordinator.api.calls == (
+        [] if published_before_read == "complete" else [{"use_cache": False}]
+    )
     assert probe.coordinator.api.refresh_calls == []
     assert probe.coordinator.api.wake_calls == []
     assert probe.fleet.api.calls == []
+    if not accepted:
+        assert result is None
+        return
+    assert result is not None and result.domain == "tessie"
+    assert result.charger_actual_current == 32
+    assert result.source_charge_timestamp == recovery_started_at + sample_offset
 
 
 @pytest.mark.asyncio

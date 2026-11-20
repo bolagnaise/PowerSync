@@ -962,6 +962,7 @@ async def async_read_independent_tesla_vehicle(
     updated_after: Any | None = None,
     allow_paid_refresh: bool = False,
     authorize: Callable[[], bool] | None = None,
+    tessie_start_recovery_after: float | None = None,
 ) -> TeslaVehicleObservation | None:
     """Read one exact cloud charge-state response using the native HA client.
 
@@ -989,6 +990,11 @@ async def async_read_independent_tesla_vehicle(
     source = _select_source(hass, canonical, preferred_entity_id)
     if source is None:
         return None
+    tessie_recovery_cutoff = None
+    if tessie_start_recovery_after is not None:
+        tessie_recovery_cutoff = _timestamp(tessie_start_recovery_after)
+        if source.domain != "tessie" or tessie_recovery_cutoff is None or authorize is None:
+            return None
     contract = _cloud_contract(source)
     identity = _independent_identity(hass, source, preferred_entity_id)
     if contract is None or identity is None:
@@ -1003,7 +1009,10 @@ async def async_read_independent_tesla_vehicle(
     key = (*source.key(), id(api), id(debouncer))
     # Authorization belongs to a recovery request. Never let a paid task
     # inherit a default cache read or another request's policy callback.
-    in_flight_key = (*key, paid_refresh, id(authorize) if authorize is not None else None)
+    in_flight_key = (
+        *key, paid_refresh, id(authorize) if authorize is not None else None,
+        tessie_recovery_cutoff,
+    )
 
     def current() -> bool:
         if authorize is not None:
@@ -1043,11 +1052,20 @@ async def async_read_independent_tesla_vehicle(
                     charge = _charge_state(deepcopy(data))
                     stamp = _timestamp(charge.get("timestamp"))
                     now = time.time()
-                    if (stamp is None or stamp < math.floor(started)
+                    if (stamp is None
                             or stamp > now + 5 or now - stamp > MAX_SOURCE_AGE_SECONDS
                             or (before is not None and stamp <= before)
                             or (previous is not None and stamp <= previous)
                             or (cutoff is not None and stamp <= cutoff)):
+                        return None
+                    # Tessie can publish asynchronously on newer vehicles,
+                    # even when GET requests bypass the cache. For Start
+                    # recovery, require a vehicle sample newer than the
+                    # recovery attempt and the coordinator snapshot.
+                    if tessie_recovery_cutoff is not None:
+                        if not tessie_recovery_cutoff < stamp <= now:
+                            return None
+                    elif stamp < math.floor(started):
                         return None
                     result = _observation(source, charge, stamp)
                     if (result is None or result.charge_state.lower() not in {
@@ -1088,8 +1106,8 @@ async def async_read_independent_tesla_vehicle(
                     # an instance command router override is never selected.
                     if source.domain == "tessie":
                         # Tessie's ordinary coordinator explicitly uses its
-                        # cache. This bounded recovery read obtains current
-                        # source data through the inspected GET state API.
+                        # cache. The report timestamp still determines
+                        # whether this bounded GET returned new vehicle data.
                         response = {"response": await type(api).state(api, use_cache=False)}
                     else:
                         response = await type(api).vehicle_data(api, endpoints=[endpoint])

@@ -86,10 +86,12 @@ def _recovery_route(
         "kind": "ha",
         "entity_id": command,
         "entity_identity": {
+            "entity_id": command,
             "platform": platform,
             "config_entry_id": config_entry_id,
             "device_id": device_id,
             "unique_id": command_unique_id,
+            "disabled_by": None,
         },
     }
 
@@ -103,7 +105,7 @@ def _patch_action_seams(
     for registration in hass.entity_registry.entities.values():
         platform = getattr(registration, "platform", None)
         device_id = getattr(registration, "device_id", None)
-        if platform not in {"tesla_fleet", "teslemetry"} or not device_id:
+        if platform not in {"tesla_fleet", "teslemetry", "tessie"} or not device_id:
             continue
         hass.device_registry.devices.setdefault(
             device_id,
@@ -134,9 +136,21 @@ def _patch_action_seams(
 
 
 @pytest.mark.asyncio
-async def test_fleet_recovery_wakes_then_reads_before_charge_start(monkeypatch):
-    """A Fleet Wake entity may wake an asleep coordinator before Start."""
-    entities = _fleet_registry(include_wake=True)
+@pytest.mark.parametrize("platform, anchor, rebind", [
+    ("tesla_fleet", COMMAND, False),
+    ("tessie", COMMAND, False),
+    ("tessie", "number.tessie_charging_amps", False),
+    ("tessie", COMMAND, True),
+])
+async def test_native_recovery_wakes_then_reads_before_charge_start(
+    monkeypatch, platform, anchor, rebind
+):
+    """An exact Wake entity may prepare a source that could not provide readback."""
+    entities = _fleet_registry(include_wake=True, platform=platform)
+    if anchor != COMMAND:
+        entities.update(_fleet_registry(
+            include_wake=False, platform=platform, command=anchor, command_unique_id="tessie-rate",
+        ))
     hass = _Hass(
         [_State(COMMAND, "off"), _State(WAKE, "unknown")],
         entities,
@@ -148,13 +162,20 @@ async def test_fleet_recovery_wakes_then_reads_before_charge_start(monkeypatch):
         charger_actual_current=0,
         charger_power=0,
     )
-    _patch_action_seams(monkeypatch, hass, observation=observation,
-                        route=_recovery_route(), events=events)
+    _patch_action_seams(
+        monkeypatch, hass, observation=observation, events=events,
+        route=_recovery_route(
+            platform=platform, command=anchor, command_unique_id=entities[anchor].unique_id,
+        ),
+    )
     reads = iter((None, observation))
 
     async def recover_read(*args, **kwargs):
         events.append("observe")
-        return next(reads)
+        result = next(reads)
+        if result is not None and rebind:
+            entities[anchor].unique_id = "rebound-tessie-entity"
+        return result
 
     monkeypatch.setattr(actions, "_fresh_tesla_command_observation", recover_read)
 
@@ -164,6 +185,11 @@ async def test_fleet_recovery_wakes_then_reads_before_charge_start(monkeypatch):
         {"charger_type": "tesla", "vehicle_vin": VIN},
     )
 
+    assert actions._wake_tesla_ev_for_command.await_count == (platform == "tesla_fleet")
+    if rebind:
+        assert result is None
+        assert events == ["observe", "button.press", "observe"]
+        return
     assert result is True
     assert events == ["observe", "button.press", "observe", "switch.turn_on"]
     assert hass.services.calls == [
