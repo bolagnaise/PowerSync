@@ -4,7 +4,6 @@
   "after_dependencies": [
     "lovelace",
     "recorder",
-    "tesla_fleet",
     "zeroconf",
     "esy_sunhome",
     "octopus_energy"
@@ -28,5 +27,5 @@
     "highspy>=1.7.0",
     "pycognito==2024.5.1"
   ],
-    "version": "2.12.1755"
+    "version": "2.12.1756"
 }

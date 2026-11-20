@@ -16,6 +16,13 @@ import pytest
 COMPONENT = Path(__file__).resolve().parents[1] / "custom_components/power_sync"
 
 
+def test_tesla_fleet_failure_cannot_block_power_sync_startup():
+    manifest = json.loads((COMPONENT / "manifest.json").read_text())
+
+    assert "tesla_fleet" not in manifest.get("dependencies", [])
+    assert "tesla_fleet" not in manifest.get("after_dependencies", [])
+
+
 @pytest.fixture
 def recovery(monkeypatch):
     spec = importlib.util.spec_from_file_location(
@@ -25,6 +32,36 @@ def recovery(monkeypatch):
     monkeypatch.setitem(sys.modules, spec.name, module)
     spec.loader.exec_module(module)
     return module
+
+
+@pytest.fixture
+def tesla_token_reader():
+    tree = ast.parse((COMPONENT / "__init__.py").read_text())
+    function = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "get_tesla_api_token"
+    )
+    module = ast.Module(
+        body=ast.parse("from __future__ import annotations").body + [function],
+        type_ignores=[],
+    )
+    namespace = {
+        "CONF_TESLA_API_PROVIDER": "tesla_api_provider",
+        "CONF_TESLEMETRY_API_TOKEN": "teslemetry_api_token",
+        "CONF_TOKEN": "token",
+        "CONF_ACCESS_TOKEN": "access_token",
+        "TESLA_PROVIDER_TESLEMETRY": "teslemetry",
+        "TESLA_PROVIDER_FLEET_API": "fleet_api",
+        "TESLA_PROVIDER_POWERSYNC": "powersync",
+        "ConfigEntryState": SimpleNamespace(LOADED="loaded"),
+        "_LOGGER": SimpleNamespace(warning=lambda *args, **kwargs: None),
+    }
+    exec(
+        compile(ast.fix_missing_locations(module), "power_sync/__init__.py", "exec"),
+        namespace,
+    )
+    return namespace["get_tesla_api_token"]
 
 
 def _install_metadata(monkeypatch, recovery, *, protocol="1.4.0", protobuf="7.36.0", fleet_requires=None):
@@ -210,3 +247,43 @@ def test_startup_callback_checks_dependencies_before_dashboard(monkeypatch):
     exec(compile(ast.Module(body=[callback], type_ignores=[]), str(COMPONENT / "__init__.py"), "exec"), namespace)
     asyncio.run(namespace["_on_ha_started"]())
     assert calls == ["dependency_check", "resource", "dashboard"]
+
+
+def test_fleet_token_is_available_only_after_fleet_entry_loads(tesla_token_reader):
+    fleet_entry = SimpleNamespace(
+        state="setup_in_progress",
+        data={"token": {"access_token": "fleet-access-token"}},
+    )
+    hass = SimpleNamespace(
+        config_entries=SimpleNamespace(async_entries=lambda domain: [fleet_entry])
+    )
+    power_sync_entry = SimpleNamespace(data={"tesla_api_provider": "fleet_api"})
+
+    assert tesla_token_reader(hass, power_sync_entry) == (None, "fleet_api")
+
+    fleet_entry.state = "loaded"
+    assert tesla_token_reader(hass, power_sync_entry) == (
+        "fleet-access-token",
+        "fleet_api",
+    )
+
+
+@pytest.mark.parametrize(
+    "provider",
+    ["powersync", "teslemetry"],
+)
+def test_independent_tesla_token_provider_works_while_fleet_is_unavailable(
+    tesla_token_reader, provider
+):
+    hass = SimpleNamespace()
+    power_sync_entry = SimpleNamespace(
+        data={
+            "tesla_api_provider": provider,
+            "teslemetry_api_token": "independent-provider-token",
+        }
+    )
+
+    assert tesla_token_reader(hass, power_sync_entry) == (
+        "independent-provider-token",
+        provider,
+    )
