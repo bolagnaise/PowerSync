@@ -8056,7 +8056,7 @@ def test_solar_surplus_active_default_session_debounces_resolved_vin_unplug(
     }
 
 
-def test_dynamic_start_uses_home_power_grid_import_limit(monkeypatch):
+def test_dynamic_session_refreshes_optimizer_limit_and_keeps_home_power_limit(monkeypatch):
     async def fake_live_status(*args, **kwargs):
         return {
             "battery_power": 0,
@@ -8111,6 +8111,10 @@ def test_dynamic_start_uses_home_power_grid_import_limit(monkeypatch):
     params = actions._dynamic_ev_state["entry-1"]["VIN123"]["params"]
     assert asyncio.run(actions._resolve_max_grid_import_kw(hass, _Entry(), params)) == 13.0
     config.max_grid_import_w = None
+    assert asyncio.run(actions._resolve_max_grid_import_kw(hass, _Entry(), params)) == 19.2
+    config.max_grid_import_w = 10000
+    assert asyncio.run(actions._resolve_max_grid_import_kw(hass, _Entry(), params)) == 10.0
+
 
 def test_dynamic_single_smart_schedule_start_waits_for_site_headroom(monkeypatch):
     """A first Smart Schedule EV must not worsen an existing site-cap breach."""
