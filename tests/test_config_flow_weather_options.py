@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import ast
 import asyncio
+from datetime import datetime
 import json
 import textwrap
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
+from conftest import load_power_sync_submodule, load_real_power_sync_const
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -2155,6 +2158,79 @@ def test_options_menu_keeps_optimizer_grouped_and_specialists_under_advanced():
         assert "network_export" not in steps["init"]["menu_options"]
         assert "network_export" in steps["advanced"]["menu_options"]
         assert "safely leave these alone" in steps["advanced"]["description"]
+
+
+@pytest.mark.parametrize(("previous", "new_charge"), [(0.0, 1.42), (1.42, 0.0)])
+def test_native_optimizer_saves_daily_supply_charge_for_custom_tou(
+    previous, new_charge,
+):
+    constants = load_real_power_sync_const()
+    settings = load_power_sync_submodule("settings_metadata")
+    daily_cost = load_power_sync_submodule("daily_cost")
+    namespace = {
+        **{name: value for name, value in vars(constants).items() if name.isupper()},
+        "__package__": settings.__package__,
+        "_default_optimizer_specs_for": lambda system: (10000, 5000, 5000),
+        "merge_optimization_section_input": settings.merge_optimization_section_input,
+        "apply_ai_summary_settings": lambda options, changes: (options, {}),
+        "configured_local_timeout": lambda entry: 30,
+        "configured_openai_model": lambda entry: "",
+        "configured_auto_refresh_interval": lambda entry: 60,
+    }
+    methods = [
+        _options_flow_method(name, implementation=False)
+        for name in ("async_step_optimization", "_async_optimization_section", "_async_step_optimization")
+    ]
+    module = ast.Module(
+        body=[ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0), *methods],
+        type_ignores=[],
+    )
+    exec(compile(ast.fix_missing_locations(module), str(CONFIG_FLOW_PATH), "exec"), namespace)
+
+    class Flow:
+        async_step_optimization = namespace["async_step_optimization"]
+        _async_optimization_section = namespace["_async_optimization_section"]
+
+        def __init__(self):
+            self.config_entry = SimpleNamespace(
+                entry_id="test",
+                data={"electricity_provider": "tou_only", "optimization_provider": "native"},
+                options={"daily_supply_charge": previous},
+            )
+            self.hass = SimpleNamespace(
+                data={},
+                config_entries=SimpleNamespace(
+                    async_update_entry=lambda entry, **kwargs: vars(entry).update(kwargs),
+                    async_reload=lambda entry_id: None,
+                ),
+                async_create_task=lambda task: None,
+            )
+
+        async def _async_step_optimization(self, user_input, **kwargs):
+            if user_input is None:
+                self._optimization_visible_fields = {"daily_supply_charge", "optimization_provider"}
+                self._optimization_form_values = {}
+                return
+            return await namespace["_async_step_optimization"](self, user_input, **kwargs)
+
+        def _get_option(self, key, default=None):
+            return self.config_entry.options.get(key, self.config_entry.data.get(key, default))
+
+        def _effective_battery_system(self):
+            return constants.BATTERY_SYSTEM_GOODWE
+
+        def async_create_entry(self, **kwargs):
+            return kwargs
+
+    flow = Flow()
+    result = asyncio.run(flow.async_step_optimization(
+        {"core_goals": {"optimization_provider": "native", "daily_supply_charge": new_charge}}
+    ))
+
+    assert result["data"]["daily_supply_charge"] == new_charge
+    assert flow.config_entry.data["daily_supply_charge"] == new_charge
+    assert flow.config_entry.data["optimization_provider"] == "native"
+    assert daily_cost.configured_supply_charge(flow.config_entry, datetime(2026, 11, 20)) == new_charge
 
 
 def test_optimization_options_use_one_grouped_form_without_stale_replay():
