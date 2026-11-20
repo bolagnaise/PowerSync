@@ -73,7 +73,7 @@ sys.modules.pop("power_sync.const", None)
 ev_planner = importlib.import_module("power_sync.automations.ev_charging_planner")
 
 
-def test_optimizer_battery_params_include_persisted_grid_import_limit():
+def test_optimizer_battery_params_do_not_snapshot_grid_import_limit():
     config = types.SimpleNamespace(
         max_charge_w=7160,
         max_discharge_w=10000,
@@ -93,7 +93,6 @@ def test_optimizer_battery_params_include_persisted_grid_import_limit():
     assert ev_planner._get_optimizer_battery_params(hass, entry) == {
         "max_inverter_kw": 10.0,
         "max_battery_charge_rate_kw": 7.16,
-        "optimizer_max_grid_import_kw": 14.9,
     }
 
 
@@ -1216,11 +1215,7 @@ def test_stale_synthetic_ocpp_start_uses_configured_generic_backend(monkeypatch)
         captured.update(params)
         return True
 
-    async def fake_grid_limit(*args, **kwargs):
-        return None
-
     fake_actions._action_start_ev_charging_dynamic = fake_start
-    fake_actions._resolve_max_grid_import_kw = fake_grid_limit
     monkeypatch.setitem(
         sys.modules,
         "power_sync.automations.actions",
@@ -1283,11 +1278,7 @@ def test_failed_start_backoff_suppresses_immediate_retry(monkeypatch):
         calls.append(True)
         return True
 
-    async def fake_grid_limit(*args, **kwargs):
-        return None
-
     fake_actions._action_start_ev_charging_dynamic = fake_start
-    fake_actions._resolve_max_grid_import_kw = fake_grid_limit
     monkeypatch.setitem(
         sys.modules,
         "power_sync.automations.actions",

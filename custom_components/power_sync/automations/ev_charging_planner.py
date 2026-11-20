@@ -8239,10 +8239,7 @@ class AutoScheduleExecutor:
         force_max_rate: bool = False,
     ) -> bool:
         """Start dynamic charging after per-vehicle admission succeeds."""
-        from .actions import (
-            _action_start_ev_charging_dynamic,
-            _resolve_max_grid_import_kw,
-        )
+        from .actions import _action_start_ev_charging_dynamic
 
         failure = getattr(self, "_start_failure_state", {}).get(vehicle_id)
         if failure:
@@ -8328,13 +8325,6 @@ class AutoScheduleExecutor:
             include_target=control_battery_target,
         )
         target_battery_charge_kw = battery_params.get("target_battery_charge_kw", 0)
-        max_grid_import_kw = None
-        if control_battery_target:
-            max_grid_import_kw = await _resolve_max_grid_import_kw(
-                self.hass,
-                self.config_entry,
-                battery_params,
-            )
 
         if source == "solar_surplus":
             dynamic_mode = "solar_surplus"
@@ -8401,8 +8391,6 @@ class AutoScheduleExecutor:
                 source == "solar_surplus" and force_max_rate
             ),
         }
-        if max_grid_import_kw is not None:
-            params["max_grid_import_kw"] = max_grid_import_kw
         params = _with_configured_charger_entities(self.hass, params, opts, charger_type)
         if charger_type != "tesla":
             configured_vehicle_id = None if settings.vehicle_id == "_default" else settings.vehicle_id
@@ -10317,9 +10305,6 @@ def _get_optimizer_battery_params(
         if opt_coordinator and hasattr(opt_coordinator, '_config'):
             max_charge_kw = opt_coordinator._config.max_charge_w / 1000.0
             max_discharge_kw = opt_coordinator._config.max_discharge_w / 1000.0
-            max_grid_import_kw = float(
-                getattr(opt_coordinator._config, "max_grid_import_w", 0) or 0
-            ) / 1000.0
             params = {}
             if max_charge_kw > 0 and max_discharge_kw > 0:
                 params = {
@@ -10328,11 +10313,6 @@ def _get_optimizer_battery_params(
                 }
                 if include_target:
                     params["target_battery_charge_kw"] = max_charge_kw
-            # The optimizer's persisted import envelope must follow coordinated
-            # EV starts too.  Keep it separate from an explicit action limit:
-            # actions.py combines this source with any lower runtime safety cap.
-            if max_grid_import_kw > 0:
-                params["optimizer_max_grid_import_kw"] = max_grid_import_kw
             return params
     except Exception:
         pass

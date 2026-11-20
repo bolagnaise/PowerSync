@@ -16860,12 +16860,24 @@ async def _resolve_max_grid_import_kw(
     params: Optional[dict] = None,
 ) -> Optional[float]:
     """Resolve site import capacity without bypassing a lower safety limit."""
-    params = params or {}
+    if params is None:
+        params = {}
     explicit = _coerce_positive_float(params.get("max_grid_import_kw"))
-    optimizer_limit = _coerce_positive_float(
-        params.get("optimizer_max_grid_import_kw")
-    )
     tesla_limit = await _get_tesla_max_site_meter_power_kw(hass, config_entry)
+    # Keep the provider ceiling when a later read is temporarily unavailable.
+    if tesla_limit is not None:
+        params["_last_tesla_site_import_kw"] = tesla_limit
+    else:
+        tesla_limit = params.get("_last_tesla_site_import_kw")
+
+    runtime = getattr(hass, "data", {}).get("power_sync", {}).get(
+        getattr(config_entry, "entry_id", None), {}
+    )
+    optimizer = runtime.get("optimization_coordinator")
+    optimizer_limit_w = _coerce_positive_float(
+        getattr(getattr(optimizer, "_config", None), "max_grid_import_w", None)
+    )
+    optimizer_limit = optimizer_limit_w / 1000 if optimizer_limit_w is not None else None
     home_power_limit = _get_home_power_max_grid_import_kw(hass, config_entry)
 
     # An explicit session target is another ceiling, not permission to exceed
@@ -16874,7 +16886,6 @@ async def _resolve_max_grid_import_kw(
         limit for limit in (explicit, optimizer_limit, tesla_limit, home_power_limit)
         if limit is not None
     ]
-    runtime = getattr(hass, "data", {}).get("power_sync", {}).get(getattr(config_entry, "entry_id", None), {})
     if recorded := runtime.get("native_site_limits_state"):
         from ..powerwall_local.native_site_limits import recorded_limits_w, identity_for_entry
         imported, _ = recorded_limits_w(recorded, identity_for_entry(config_entry))
@@ -19334,10 +19345,10 @@ async def _action_start_ev_charging_dynamic_locked(
         )
         no_grid_import = params.get("no_grid_import", False)
         resolved_import_kw = await _resolve_max_grid_import_kw(hass, config_entry, params)
+        max_grid_import_kw = 12.5 if resolved_import_kw is None else resolved_import_kw
         mode_params = {
             "target_battery_charge_kw": target_battery_charge_kw,
             "reserve_battery_charge": params.get("reserve_battery_charge", True),
-            "max_grid_import_kw": 12.5 if resolved_import_kw is None else resolved_import_kw,
             "no_grid_import": no_grid_import,
             "grid_import_tolerance_kw": params.get("grid_import_tolerance_kw", 0.1),
             "max_inverter_kw": params.get("max_inverter_kw", 10.0),
@@ -19369,7 +19380,7 @@ async def _action_start_ev_charging_dynamic_locked(
         no_grid_info = f", no_grid_import=enabled (inverter={mode_params['max_inverter_kw']}kW)" if no_grid_import else ""
         _LOGGER.info(
             f"⚡ Starting dynamic EV charging: target_battery_charge={target_battery_charge_kw}kW, "
-            f"max_grid_import={mode_params['max_grid_import_kw']}kW, amps={min_charge_amps}-{max_charge_amps}A, "
+            f"max_grid_import={max_grid_import_kw}kW, amps={min_charge_amps}-{max_charge_amps}A, "
             f"phases={resolved_phases}{no_grid_info}"
         )
 
@@ -19644,7 +19655,7 @@ async def _action_start_ev_charging_dynamic_locked(
         )
         initial_amps = _initial_smart_schedule_battery_target_amps(
             live_status,
-            max_grid_import_kw=mode_params["max_grid_import_kw"],
+            max_grid_import_kw=max_grid_import_kw,
             target_battery_charge_kw=_resolve_battery_reservation_kw(
                 session_target_kw=target_battery_charge_kw,
                 reserve_battery_charge=params.get("reserve_battery_charge", True),
@@ -20062,6 +20073,10 @@ async def _action_start_ev_charging_dynamic_locked(
         "charger_type": charger_type,
         "zaptec_pending_start": bool(params.get("_zaptec_pending_start")),
         **mode_params,
+        # Resolve site settings again on each tick. Keep only the session's
+        # explicit ceiling here so a live setting change can take effect.
+        "max_grid_import_kw": params.get("max_grid_import_kw"),
+        "_last_tesla_site_import_kw": params.get("_last_tesla_site_import_kw"),
         # Pass through generic charger entities if present
         "charger_switch_entity": params.get("charger_switch_entity"),
         "charger_amps_entity": params.get("charger_amps_entity"),

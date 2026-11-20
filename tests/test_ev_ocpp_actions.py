@@ -8087,6 +8087,10 @@ def test_dynamic_start_uses_home_power_grid_import_limit(monkeypatch):
             }
         }
     )
+    config = SimpleNamespace(max_grid_import_w=13000)
+    hass.data["power_sync"]["entry-1"]["optimization_coordinator"] = SimpleNamespace(
+        _config=config
+    )
     actions._dynamic_ev_state.clear()
 
     result = asyncio.run(
@@ -8105,8 +8109,8 @@ def test_dynamic_start_uses_home_power_grid_import_limit(monkeypatch):
 
     assert result is True
     params = actions._dynamic_ev_state["entry-1"]["VIN123"]["params"]
-    assert params["max_grid_import_kw"] == 19.2
-
+    assert asyncio.run(actions._resolve_max_grid_import_kw(hass, _Entry(), params)) == 13.0
+    config.max_grid_import_w = None
 
 def test_dynamic_single_smart_schedule_start_waits_for_site_headroom(monkeypatch):
     """A first Smart Schedule EV must not worsen an existing site-cap breach."""
@@ -8919,7 +8923,10 @@ def test_dynamic_start_prefers_tesla_site_meter_limit_over_home_power(monkeypatc
 
     assert result is True
     params = actions._dynamic_ev_state["entry-1"]["VIN123"]["params"]
-    assert params["max_grid_import_kw"] == 16.1
+    assert asyncio.run(actions._resolve_max_grid_import_kw(hass, _Entry(), params)) == 16.1
+
+    hass.data["power_sync"]["entry-1"]["tesla_coordinator"]._site_info_cache = {}
+    assert asyncio.run(actions._resolve_max_grid_import_kw(hass, _Entry(), params)) == 16.1
 
 
 def test_dynamic_deadline_start_never_overrides_unknown_tesla_charger_cap(monkeypatch):
@@ -9263,9 +9270,13 @@ def test_scheduled_sigenergy_start_uses_persisted_optimizer_import_limit(monkeyp
     )
     actions._dynamic_ev_state.clear()
 
+    hass = _Hass([])
+    hass.data["power_sync"]["entry-1"]["optimization_coordinator"] = SimpleNamespace(
+        _config=SimpleNamespace(max_grid_import_w=14900)
+    )
     result = asyncio.run(
         actions._action_start_ev_charging_dynamic(
-            _Hass([]),
+            hass,
             _Entry(),
             {
                 "vehicle_id": "sigenergy_charger",
@@ -9274,7 +9285,6 @@ def test_scheduled_sigenergy_start_uses_persisted_optimizer_import_limit(monkeyp
                 "owner_mode": "scheduled",
                 "charger_type": "sigenergy",
                 "target_battery_charge_kw": 7.16,
-                "optimizer_max_grid_import_kw": 14.9,
                 "min_charge_amps": 6,
                 "max_charge_amps": 32,
             },
@@ -9298,13 +9308,10 @@ def test_optimizer_import_limit_yields_to_lower_home_power_cap():
         }
     )
 
-    assert asyncio.run(
-        actions._resolve_max_grid_import_kw(
-            hass,
-            _Entry(),
-            {"optimizer_max_grid_import_kw": 14.9},
-        )
-    ) == 12.0
+    hass.data["power_sync"]["entry-1"]["optimization_coordinator"] = SimpleNamespace(
+        _config=SimpleNamespace(max_grid_import_w=14900)
+    )
+    assert asyncio.run(actions._resolve_max_grid_import_kw(hass, _Entry())) == 12.0
 
 
 @pytest.mark.parametrize('kind,expected', [('zero', 0.0), ('pending', 3.0), ('identity', 0.0)])
@@ -9322,7 +9329,10 @@ def test_dynamic_ev_import_resolver_keeps_recorded_hard_bounds(monkeypatch, kind
         record['identity'] = {**identity, 'gateway': 'other-gateway'}
     hass.data['power_sync']['entry-1']['native_site_limits_state'] = record
     monkeypatch.setattr(actions, '_get_tesla_max_site_meter_power_kw', AsyncMock(return_value=None))
-    assert asyncio.run(actions._resolve_max_grid_import_kw(hass, entry, {'optimizer_max_grid_import_kw': 14.9})) == expected
+    hass.data["power_sync"]["entry-1"]["optimization_coordinator"] = SimpleNamespace(
+        _config=SimpleNamespace(max_grid_import_w=14900)
+    )
+    assert asyncio.run(actions._resolve_max_grid_import_kw(hass, entry)) == expected
 
 
 @pytest.mark.parametrize("force_max_rate", [False, True])
@@ -9350,6 +9360,11 @@ def test_smart_schedule_start_preserves_optimizer_import_limit(monkeypatch, forc
 
     async def start(hass, entry, params, context=None):
         limits.append(await actions._resolve_max_grid_import_kw(hass, entry, params))
+        config = hass.data["power_sync"]["entry-1"]["optimization_coordinator"]._config
+        config.max_grid_import_w = 0
+        limits.append(await actions._resolve_max_grid_import_kw(hass, entry, params))
+        config.max_grid_import_w = 10000
+        limits.append(await actions._resolve_max_grid_import_kw(hass, entry, params))
         assert not params.get("fixed_charge_amps")
         assert params.get("reserve_battery_charge", True) is not force_max_rate
         return True
@@ -9368,7 +9383,7 @@ def test_smart_schedule_start_preserves_optimizer_import_limit(monkeypatch, forc
     assert asyncio.run(executor._start_charging(
         "generic_ev", settings, state, "grid_offpeak", force_max_rate=force_max_rate
     )) is True
-    assert limits == [13.5]
+    assert limits == [13.5, 1000000.0, 10.0]
 
 
 @pytest.mark.parametrize(
@@ -9382,9 +9397,13 @@ def test_grid_import_constraints_cannot_be_widened(
     hass = _Hass([])
     monkeypatch.setattr(actions, "_get_tesla_max_site_meter_power_kw", AsyncMock(return_value=tesla))
     monkeypatch.setattr(actions, "_get_home_power_max_grid_import_kw", lambda *args: 15)
+    hass.data["power_sync"]["entry-1"]["optimization_coordinator"] = SimpleNamespace(
+        _config=SimpleNamespace(
+            max_grid_import_w=optimizer * 1000 if optimizer is not None else None
+        )
+    )
     result = asyncio.run(actions._resolve_max_grid_import_kw(
-        hass, _Entry(),
-        {"max_grid_import_kw": explicit, "optimizer_max_grid_import_kw": optimizer},
+        hass, _Entry(), {"max_grid_import_kw": explicit},
     ))
     assert result == expected
 
