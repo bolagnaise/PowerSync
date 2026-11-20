@@ -29,6 +29,14 @@ target:
   entity_id: switch.power_sync_solar_surplus_ev_charging
 ```
 
+### Tesla Start waiting for fresh charging data
+
+While Solar Surplus remains eligible, PowerSync waits at least five minutes
+between Tesla Start recovery attempts. A retry requires the configured sustained
+surplus. PowerSync clears the pending state when fresh vehicle data confirms
+charging or when the plan ends. A Tesla can come online before its next fresh
+charging-state report arrives.
+
 ### Battery-powered charging near zero grid flow
 
 Scheduled charging with no grid import holds its rate while the home battery keeps measured grid flow within the configured tolerance. Small fluctuations inside that tolerance do not reduce the rate repeatedly. Inverter capacity limits and reductions for grid imports above tolerance still apply.
