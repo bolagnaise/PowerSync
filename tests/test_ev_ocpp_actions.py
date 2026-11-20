@@ -11897,6 +11897,112 @@ def test_solar_surplus_stop_delay_uses_cloud_entity_positive_floor(monkeypatch):
     assert set_amps_calls == [1]
 
 
+@pytest.mark.parametrize(
+    "case,expected",
+    [
+        ("fresh", [0]),
+        ("stale_power", []),
+        ("stale_state", []),
+        ("standby", []),
+        ("stopped", []),
+        ("different_vin", []),
+        ("yield", []),
+        ("manual", []),
+        ("monitoring", []),
+        ("retry", [0]),
+    ],
+)
+def test_waiting_solar_surplus_checks_tesla_plugin_charge_below_battery_floor(
+    monkeypatch, case, expected
+):
+    vin = "5YJ3E1EA1JF000001"
+    charging_entity = f"sensor.{vin.lower()}_charging_state"
+    now = datetime.now(timezone.utc)
+    stale = now - timedelta(minutes=5)
+    charging = _State(
+        charging_entity,
+        "stopped" if case == "stopped" else "charging",
+        last_changed=stale if case == "stale_state" else now,
+    )
+    entry = SimpleNamespace(entry_id="entry-1", data={}, options={
+        "monitoring_mode": case == "monitoring",
+    })
+    hass = _Hass([charging])
+    _set_external_policy(hass, vin, "yield" if case == "yield" else "override")
+    ownership = importlib.import_module("power_sync.automations.ev_ownership")
+    ownership.claim_ev_ownership(
+        hass, entry, vin, owner_mode="manual" if case == "manual" else "solar_surplus",
+    )
+    connector_vin = "5YJ3E1EA1JF000002" if case == "different_vin" else vin
+    site_data = {
+        "last_update": stale if case == "stale_power" else now,
+        "ev_power_fallback_by_physical_key": {
+            f"vehicle:{connector_vin.lower()}": 0.05 if case == "standby" else 1.19,
+        },
+    }
+    hass.data["power_sync"][entry.entry_id]["tesla_coordinator"] = SimpleNamespace(data=site_data)
+    state = _solar_surplus_state(current_amps=0)
+    state.update(charging_started=False, paused=True)
+    state["params"].update(
+        owner_mode="solar_surplus",
+        tesla_charging_state_entity=charging_entity,
+    )
+    monkeypatch.setitem(actions._dynamic_ev_state, entry.entry_id, {vin: state})
+    _install_solar_surplus_runtime_stubs(monkeypatch, {
+        "battery_soc": 11.5,
+        "grid_power": 0,
+        "battery_power": 1590,
+        "solar_power": 0,
+    })
+    monkeypatch.setattr(actions, "_refresh_dynamic_tesla_charger_capability",
+                        AsyncMock(return_value=True))
+    monkeypatch.setattr(
+        actions, "_get_observed_ev_power_reading_kw", AsyncMock(return_value=(0.0, False)),
+    )
+    monkeypatch.setattr(actions, "_get_tesla_ev_entity", AsyncMock(return_value=None))
+    stop = AsyncMock(return_value=case != "retry")
+    monkeypatch.setattr(actions, "_set_vehicle_amps", stop)
+
+    def tick():
+        asyncio.run(actions._dynamic_ev_update_surplus(hass, entry, entry.entry_id, vin))
+
+    tick()
+    assert [call.args[3] for call in stop.await_args_list] == expected
+    assert state["charging_started"] is False
+    if not expected:
+        assert "stop_outcome" not in state
+        return
+
+    outcome = state["stop_outcome"]
+    assert outcome["status"] == ("failed" if case == "retry" else "unconfirmed")
+    tick()
+    assert stop.await_count == 1
+    state["_battery_floor_stop_retry_at"] = 0
+    site_data["last_update"] = stale
+    tick()
+    assert stop.await_count == 1
+    assert state["stop_outcome"] == outcome
+    site_data["last_update"] = outcome["requested_at"] + timedelta(microseconds=1)
+    if case == "retry":
+        stop.return_value = True
+        tick()
+        assert stop.await_count == 2
+        outcome = state["stop_outcome"]
+        assert outcome["status"] == "unconfirmed"
+    calls_before_readback = stop.await_count
+    site_data["ev_power_fallback_by_physical_key"][f"vehicle:{vin.lower()}"] = 0.0
+    charging.state = "stopped"
+    charging.last_changed = outcome["requested_at"] + timedelta(microseconds=1)
+    charging.last_updated = charging.last_changed
+    site_data["last_update"] = outcome["requested_at"] - timedelta(microseconds=1)
+    tick()
+    assert state["stop_outcome"] == outcome
+    site_data["last_update"] = charging.last_changed
+    tick()
+    assert stop.await_count == calls_before_readback
+    assert "stop_outcome" not in state
+
+
 def test_solar_surplus_external_tesla_start_suspends_until_charge_ends(monkeypatch):
     stop_command_at = datetime.now(timezone.utc) - timedelta(minutes=1)
     hass = _Hass([

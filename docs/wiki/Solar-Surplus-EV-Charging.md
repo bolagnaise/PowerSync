@@ -25,6 +25,11 @@ When the car reports stopped, an open contactor and fresh readings from the
 same Wall Connector let PowerSync distinguish standby draw from charging.
 Solar Surplus can then start the car when the configured conditions are met.
 
+While Solar Surplus is waiting for the home battery to reach its minimum, it
+can request a stop if the Tesla starts charging on plug-in. This requires
+PowerSync control of that vehicle and fresh, matching charging state and power.
+The hands-off external charging setting continues to leave those sessions alone.
+
 If Home Assistant has more than one location tracker for the same Tesla,
 PowerSync uses the latest report for that car when deciding whether it is home.
 

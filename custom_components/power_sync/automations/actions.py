@@ -55,6 +55,7 @@ from ..native_rate_admission import (
 from ..const import (
     DOMAIN,
     CONF_EV_PROVIDER,
+    CONF_MONITORING_MODE,
     CONF_GENERIC_CHARGER_START_CONFIRMATION_TIMEOUT,
     DEFAULT_GENERIC_CHARGER_START_CONFIRMATION_TIMEOUT,
     EV_PROVIDER_FLEET_API,
@@ -15653,9 +15654,15 @@ async def _dynamic_ev_update_surplus(
         state["low_surplus_start"] = None
         state["high_surplus_start"] = None
 
-    async def _request_battery_floor_stop() -> None:
+    waiting_tesla_power_at: datetime | None = None
+
+    async def _request_battery_floor_stop(*, waiting_tesla: bool = False) -> None:
         """Retain unsuccessful stops and reconcile them while the floor holds."""
         stop_outcome = state.get("stop_outcome") or {}
+        if waiting_tesla and stop_outcome and not _datetime_is_after(
+            waiting_tesla_power_at, stop_outcome.get("requested_at"),
+        ):
+            return
         if (
             stop_outcome
             and params.get("charger_type", "tesla") == "tesla"
@@ -15675,7 +15682,14 @@ async def _dynamic_ev_update_surplus(
             state["current_amps"] = 0
             state["target_amps"] = 0
             return
-        if state.get("current_amps", 0) <= 0 and not stop_outcome:
+        if waiting_tesla:
+            if not (
+                current_vehicle_power_available
+                and observed_current_power_kw >= voltage * phases / 1000
+                and current_vehicle_charging_state == "charging"
+            ):
+                return
+        elif state.get("current_amps", 0) <= 0 and not stop_outcome:
             return
         if (
             stop_outcome.get("battery_floor")
@@ -15702,16 +15716,16 @@ async def _dynamic_ev_update_surplus(
             hass, config_entry, vehicle_id, command="stop",
             success=bool(success), reason=state.get("paused_reason"),
         )
-        if success:
+        if success and not waiting_tesla:
             state.pop("stop_outcome", None)
             state.pop("_battery_floor_stop_retry_at", None)
             state["current_amps"] = 0
         else:
             state["stop_outcome"].update(
-                status="unconfirmed" if success is None else "failed",
+                status="failed" if success is False else "unconfirmed",
                 reason=(
                     "Battery floor stop unconfirmed; retry pending"
-                    if success is None
+                    if success is not False
                     else "Battery floor stop unsuccessful; retry pending"
                 ),
             )
@@ -15803,6 +15817,77 @@ async def _dynamic_ev_update_surplus(
                 _LOGGER.debug(f"Solar surplus EV: {state['paused_reason']}")
                 if external_generic_floor_stop:
                     await _request_external_generic_stop(state["paused_reason"])
+                elif (
+                    params.get("charger_type") == "tesla"
+                    and _is_explicit_tesla_vin(vehicle_id)
+                    and _dynamic_ev_vehicle_vin(vehicle_id, params) == vehicle_id
+                    and not yield_external_control
+                    and not restart_telemetry_pending
+                ):
+                    # A waiting Tesla can auto-start on plug-in, even though
+                    # Solar Surplus has never set a positive charging rate.
+                    # Read this VIN without the shared Wall Connector fallback.
+                    power_entity = await _get_tesla_ev_entity(
+                        hass,
+                        r"sensor\..*(charger_power|charging_power|charge_power)(?:_\d+)?$",
+                        vehicle_id,
+                        warn_on_missing=False,
+                    )
+                    if _session_was_replaced("waiting Tesla charge observation"):
+                        return
+                    lease_id, lease = get_ev_ownership(hass, config_entry, vehicle_id)
+                    if (
+                        lease_id == vehicle_id.upper()
+                        and lease
+                        and lease.get("owner") == "powersync"
+                        and owner_family(lease.get("owner_mode")) == "solar_surplus"
+                        and owner_family(params.get("owner_mode") or params.get("dynamic_mode"))
+                        == "solar_surplus"
+                        and get_external_control_policy(hass, config_entry, vehicle_id)
+                        != EXTERNAL_CONTROL_POLICY_YIELD
+                        and not config_entry.options.get(
+                            CONF_MONITORING_MODE,
+                            config_entry.data.get(CONF_MONITORING_MODE, False),
+                        )
+                    ):
+                        power = hass.states.get(power_entity) if power_entity else None
+                        waiting_tesla_power_at = (
+                            getattr(power, "last_reported", None)
+                            or getattr(power, "last_updated", None)
+                        )
+                        observed_current_power_kw, current_vehicle_power_available = (
+                            _power_state_kw_reading(power)
+                        )
+                        current_vehicle_power_available &= is_current_ev_power_observation(
+                            waiting_tesla_power_at,
+                        )
+                        # The Powerwall site meter is also usable when it
+                        # explicitly names this VIN in a current sample.
+                        if not current_vehicle_power_available:
+                            entry_data = hass.data.get(DOMAIN, {}).get(entry_id, {})
+                            coordinator = entry_data.get("tesla_coordinator")
+                            data = getattr(coordinator, "data", None) or {}
+                            if is_current_ev_power_observation(data.get("last_update")):
+                                power_kw = (data.get("ev_power_fallback_by_physical_key") or {}).get(
+                                    f"vehicle:{vehicle_id.lower()}"
+                                )
+                                if type(power_kw) in (int, float) and math.isfinite(power_kw) and power_kw >= 0:
+                                    observed_current_power_kw = power_kw
+                                    current_vehicle_power_available = True
+                                    waiting_tesla_power_at = data["last_update"]
+                        entity_id = params.get("tesla_charging_state_entity") or (
+                            f"sensor.{vehicle_id.lower()}_charging_state"
+                        )
+                        charging = hass.states.get(entity_id)
+                        current_vehicle_charging_state = None
+                        current_vehicle_charging_state_changed_at = None
+                        if is_current_ev_power_observation(
+                            getattr(charging, "last_reported", None)
+                            or getattr(charging, "last_updated", None)
+                        ):
+                            current_vehicle_charging_state = str(charging.state).strip().lower()
+                            current_vehicle_charging_state_changed_at = charging.last_changed
+                        await _request_battery_floor_stop(waiting_tesla=True)
                 return
         else:
             state["paused"] = False
