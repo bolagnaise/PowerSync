@@ -12179,6 +12179,110 @@ def test_tesla_stopped_state_is_not_charge_complete_at_partial_soc():
 
 
 @pytest.mark.parametrize(
+    ("scenario", "expect_start"),
+    [
+        ("open_contactor", True),
+        ("closed_at_one_amp", False),
+        ("stale_meter", False),
+        ("meter_before_plug", False),
+        ("different_vin", False),
+        ("retained_previous_vin", False),
+        ("newer_vehicle_charging", False),
+        ("newer_charging_other_provider", False),
+        ("newer_charging_other_car", True),
+        ("contradictory_high_draw", False),
+        ("contradictory_current", False),
+        ("restart_grace", False),
+    ],
+)
+def test_solar_surplus_uses_exact_wall_connector_contactor_for_standby_draw(
+    monkeypatch, scenario, expect_start,
+):
+    vin = "5YJTEST0000000001"
+    now = datetime.now(timezone.utc)
+    serial = "GARAGE-WALL-CONNECTOR"
+    power_entity = "sensor.tesla_wall_connector_total_power_2"
+    charging_entity = "sensor.ev_charging_state"
+    plug = _State("binary_sensor.tesla_wall_connector_vehicle_connected_2", "on",
+                  last_changed=now - timedelta(seconds=60), last_reported=now)
+    contactor = _State("binary_sensor.tesla_wall_connector_contactor_closed_2",
+                       "on" if scenario == "closed_at_one_amp" else "off",
+                       last_changed=now - timedelta(seconds=240),
+                       last_reported=now - timedelta(seconds=240))
+    identity = _State("sensor.wall_connector_2_vehicle",
+                      "5YJTEST0000000002" if scenario == "different_vin" else vin,
+                      last_changed=now - timedelta(seconds=70 if scenario == "retained_previous_vin" else 54))
+    power_kw = {"closed_at_one_amp": "0.235", "contradictory_high_draw": "7.0"}.get(scenario, "0.1428")
+    charging = scenario in {"closed_at_one_amp", "newer_vehicle_charging"}
+    meter_age = {"stale_meter": 120, "meter_before_plug": 70}.get(scenario, 4)
+    power = _State(power_entity, power_kw, {"unit_of_measurement": "kW"},
+                   last_reported=now - timedelta(seconds=meter_age))
+    current = _State("sensor.tesla_wall_connector_vehicle_current_2",
+                     "1.0" if scenario in {"closed_at_one_amp", "contradictory_current"} else "0.6",
+                     {"unit_of_measurement": "A"}, last_reported=now - timedelta(seconds=4))
+    states = [
+        plug, contactor, identity, power, current,
+        _State("sensor.ev_reported_power", power_kw, {"unit_of_measurement": "kW"}, last_reported=now),
+        _State(charging_entity, "charging" if charging else "stopped",
+               last_changed=now - timedelta(seconds=1)),
+    ]
+    hass = _Hass(states, registry_entities={
+        state.entity_id: SimpleNamespace(
+            entity_id=state.entity_id, device_id=device_id, platform=platform,
+        )
+        for state, device_id, platform in (
+            (plug, "local", "tesla_wall_connector"),
+            (contactor, "local", "tesla_wall_connector"),
+            (power, "local", "tesla_wall_connector"),
+            (current, "local", "tesla_wall_connector"),
+            (identity, "cloud", "teslemetry"),
+        )
+    }, registry_devices={
+        "local": SimpleNamespace(id="local", serial_number=serial, identifiers={("tesla_wall_connector", serial)}),
+        "cloud": SimpleNamespace(id="cloud", serial_number=serial, identifiers={("teslemetry", serial)}),
+    })
+    state = _solar_surplus_state(current_amps=0)
+    state.update(charging_started=False, high_surplus_start=datetime.now() - timedelta(minutes=4))
+    state["params"].update(owner_mode="smart_schedule_solar_surplus", vehicle_vin=vin,
+                           tesla_charging_state_entity=charging_entity,
+                           charger_power_entity="sensor.ev_reported_power")
+    if scenario == "restart_grace":
+        state["last_start_command_at"] = now
+    if scenario in {"newer_charging_other_provider", "newer_charging_other_car"}:
+        fleet_charging = _State("sensor.fleet_ev_charging", "charging",
+                                last_changed=now - timedelta(seconds=1))
+        hass.states._states[fleet_charging.entity_id] = fleet_charging
+        hass.entity_registry.entities[fleet_charging.entity_id] = SimpleNamespace(
+            entity_id=fleet_charging.entity_id, device_id="fleet", platform="tesla_fleet",
+        )
+        fleet_vin = vin if scenario == "newer_charging_other_provider" else "5YJTEST0000000002"
+        hass.device_registry.devices["fleet"] = SimpleNamespace(id="fleet", identifiers={("tesla_fleet", fleet_vin)})
+    monkeypatch.setitem(actions._dynamic_ev_state, "entry-1", {vin: state})
+    start = AsyncMock(return_value=True)
+    monkeypatch.setattr(actions, "_action_start_ev_charging", start)
+    monkeypatch.setattr(actions, "_is_vehicle_charge_complete", AsyncMock(return_value=False))
+    monkeypatch.setattr(actions, "_refresh_dynamic_tesla_charger_capability", AsyncMock(return_value=True))
+    monkeypatch.setattr(actions.dt_util, "utcnow", lambda: now)
+    set_amps_calls = _install_solar_surplus_runtime_stubs(monkeypatch, {
+        "battery_soc": 100,
+        "grid_power": -9000,
+        "battery_power": 0,
+        "solar_power": 9500,
+        "load_power": 500,
+    })
+
+    asyncio.run(actions._dynamic_ev_update_surplus(hass, _Entry(), "entry-1", vin))
+
+    if expect_start:
+        start.assert_awaited_once()
+        assert start.await_args.args[2]["vehicle_vin"] == vin
+        assert start.await_args.args[2]["amps"] == 32
+    else:
+        start.assert_not_awaited()
+    assert set_amps_calls == [32]
+
+
+@pytest.mark.parametrize(
     ("charging", "amps", "age", "pending", "takeover", "release"),
     [
         ("Stopped", 0, 1, False, False, True),

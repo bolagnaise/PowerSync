@@ -21,6 +21,10 @@ recent unplug can still be used if Tesla clears the charger’s vehicle identity
 first and PowerSync observed the plug session. A newer vehicle cable-on report
 lets PowerSync evaluate the next charge session.
 
+When the car reports stopped, an open contactor and fresh readings from the
+same Wall Connector let PowerSync distinguish standby draw from charging.
+Solar Surplus can then start the car when the configured conditions are met.
+
 If Home Assistant has more than one location tracker for the same Tesla,
 PowerSync uses the latest report for that car when deciding whether it is home.
 

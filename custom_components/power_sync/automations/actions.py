@@ -15231,12 +15231,26 @@ async def _dynamic_ev_update_surplus(
         if _session_was_replaced("charger-power lookup"):
             return
         charging_state = None
+        waiting_for_start_readback = _tesla_restart_telemetry_pending(v_state)
         if v_params.get("charger_type", "tesla") == "tesla":
+            vin = _dynamic_ev_vehicle_vin(vid, v_params)
             charging_state = _get_tesla_charging_state(
                 hass,
-                _dynamic_ev_vehicle_vin(vid, v_params),
+                vin,
                 v_params.get("tesla_charging_state_entity"),
             )
+            one_amp_kw = v_voltage * v_phases / 1000
+            if (
+                charging_state == "stopped" and not waiting_for_start_readback
+                and observed_power_available
+                and _ACTIVE_EV_POWER_EPSILON_KW < observed_power_kw < one_amp_kw
+                and _exact_wall_connector_confirms_standby(
+                    hass, config_entry, vin, v_params, one_amp_kw,
+                )
+            ):
+                # Standby metering behind an open contactor cannot satisfy an
+                # EV Start or be reused as controllable charging load.
+                observed_power_kw = 0.0
         if vid == vehicle_id:
             observed_current_power_kw = observed_power_kw
             current_vehicle_power_available = observed_power_available
@@ -15254,7 +15268,7 @@ async def _dynamic_ev_update_surplus(
             observed_power_kw,
             observed_power_available,
             charging_state=charging_state,
-            restart_telemetry_pending=_tesla_restart_telemetry_pending(v_state),
+            restart_telemetry_pending=waiting_for_start_readback,
         )
         if (v_params.get("charger_type", "tesla") == "tesla"
                 and v_state.get("transport_recovery_pending")
@@ -17426,16 +17440,16 @@ def _exact_tesla_wall_connector_vehicle_associations(
             continue
         vin = next(iter(identified_vins))
         serial_by_vin.setdefault(vin, set()).add(serial)
-    return {
-        vin: {
-            "serial": next(iter(serials)),
-            "connected_observed_at": connected_serials.get(
-                next(iter(serials))
-            ),
-        }
-        for vin, serials in serial_by_vin.items()
-        if len(serials) == 1
-    }
+    associations = {}
+    for vin, serials in serial_by_vin.items():
+        if len(serials) == 1:
+            serial = next(iter(serials))
+            associations[vin] = {
+                "serial": serial,
+                "connected_observed_at": connected_serials[serial],
+                "vehicle_identified_at": identified_vins_by_serial[serial][vin],
+            }
+    return associations
 
 
 def _exact_tesla_wall_connector_vehicle_vins(
@@ -17451,6 +17465,88 @@ def _exact_tesla_wall_connector_vehicle_vins(
             device_registry,
         )
     )
+
+
+def _exact_wall_connector_confirms_standby(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    vin: str | None,
+    params: dict,
+    one_amp_kw: float,
+) -> bool:
+    """Use native electrical samples to verify an open contactor is still current."""
+    if not _is_explicit_tesla_vin(vin):
+        return False
+    entity_registry = er.async_get(hass)
+    device_registry = dr.async_get(hass)
+    association = _exact_tesla_wall_connector_vehicle_associations(
+        hass, entity_registry, device_registry,
+    ).get(vin.upper())
+    if not association:
+        return False
+    connected_at = association["connected_observed_at"]
+    identified_at = association["vehicle_identified_at"]
+    if connected_at is None or identified_at is None or identified_at.timestamp() < connected_at:
+        return False
+
+    native_entities = [
+        entity for entity in entity_registry.entities.values()
+        if getattr(entity, "platform", None) == "tesla_wall_connector"
+        and getattr(entity, "disabled_by", None) is None
+        and _tesla_wall_connector_serial(device_registry.async_get(entity.device_id)) == association["serial"]
+    ]
+
+    def read_sensor(domain: str, key: str, suffix: str):
+        matches = [
+            entity for entity in native_entities
+            if entity.entity_id.startswith(f"{domain}.")
+            and (getattr(entity, "translation_key", None) == key
+                 or re.search(rf"_{suffix}(?:_\d+)?$", entity.entity_id))
+        ]
+        if len(matches) != 1:
+            return None, None
+        return matches[0].device_id, hass.states.get(matches[0].entity_id)
+
+    contactor_device, contactor = read_sensor("binary_sensor", "contactor_closed", "contactor_closed")
+    edge = getattr(contactor, "last_changed", None)
+    if contactor is None or contactor.state != "off" or not isinstance(edge, datetime):
+        return False
+    # Binary state may only publish on transitions. Require current meter
+    # samples from the very same physical device, after that edge and plug.
+    proof_after = max(connected_at, identified_at.timestamp(), edge.timestamp())
+    watts_device, watts = read_sensor("sensor", "total_power_w", "total_power")
+    amps_device, amps = read_sensor("sensor", "vehicle_current_a", "vehicle_current")
+    if watts_device != contactor_device or amps_device != contactor_device:
+        return False
+    sample_times = []
+    for sample in (watts, amps):
+        reported_at = getattr(sample, "last_reported", None) or getattr(sample, "last_updated", None)
+        if (
+            not is_current_ev_power_observation(reported_at)
+            or reported_at.timestamp() < proof_after
+            or str(sample.state).lstrip().startswith("-")
+        ):
+            return False
+        sample_times.append(reported_at.timestamp())
+    power_kw, available = _power_state_kw_reading(watts)
+    current, _, _ = _phase_current_state_amps(amps)
+    if not available or power_kw >= one_amp_kw or current is None or current >= 1.0:
+        return False
+
+    # Another exact Tesla provider can have observed a charging transition
+    # after the Wall Connector sample or while its fields were updating.
+    oldest_sample = min(sample_times)
+    for entity_id in _tesla_start_confirmation_entity_ids(hass, entry, vin, params):
+        if not re.search(r"^sensor\..*_(?:charging|charging_state|charge_state)(?:_\d+)?$", entity_id):
+            continue
+        state = hass.states.get(entity_id)
+        changed_at = getattr(state, "last_changed", None)
+        if (
+            state is not None and str(state.state).strip().lower() == "charging"
+            and isinstance(changed_at, datetime) and changed_at.timestamp() >= oldest_sample
+        ):
+            return False
+    return True
 
 
 async def _resolve_tesla_active_charger_capability(
