@@ -13,6 +13,14 @@ immediately requests a stop for Solar Surplus sessions; other charging modes
 keep their own controls. A failed charger stop is logged, so an off switch is
 not confirmation that the physical charger stopped.
 
+For a Tesla Wall Connector with a local Home Assistant entry, PowerSync can
+match the connector's serial number to the vehicle reported by Tesla Fleet or
+Teslemetry. A fresh unplugged reading prevents a Solar Surplus start while
+older Tesla telemetry still shows the car connected. The matching connector's
+recent unplug can still be used if Tesla clears the charger’s vehicle identity
+first and PowerSync observed the plug session. A newer vehicle cable-on report
+lets PowerSync evaluate the next charge session.
+
 The setting survives restarts and stays synchronized with app changes. It is
 off by default on installations without a saved Solar Surplus setting and is
 unavailable while automation storage is not ready. Configure your EVs and

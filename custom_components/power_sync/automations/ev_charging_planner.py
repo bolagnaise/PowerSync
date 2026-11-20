@@ -1291,6 +1291,10 @@ async def is_ev_plugged_in(
     # Teslemetry below. Identity-safe mapping returns no prefix for ambiguous
     # multi-vehicle configurations, so another car's BLE state is never used.
     if vehicle_vin and not vehicle_vin.startswith("ble_"):
+        from .actions import _fresh_wall_connector_unplugged_at
+
+        if _fresh_wall_connector_unplugged_at(hass, config_entry, vehicle_vin) is not None:
+            return False
         for prefix in _configured_ble_prefixes(
             config_entry,
             vehicle_vin,

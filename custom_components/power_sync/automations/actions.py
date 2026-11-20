@@ -32,7 +32,7 @@ import inspect
 import math
 import re
 import time
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import List, Dict, Any, Optional, Callable
@@ -5718,6 +5718,10 @@ def _tesla_transport_authority(
         else current_vehicle_generation(hass, entry, vehicle)
     )
     authority_operation = "stop" if cleanup else str(operation or "start")
+    solar_start = authority_operation == "start" and (
+        params.get("dynamic_mode") == "solar_surplus"
+        or params.get("owner_mode") in ("solar_surplus", "smart_schedule_solar_surplus")
+    )
     owners = ev_owner_snapshot(hass, entry, vehicle)
     def stop_holds():
         holds = (runtime or {}).get("ev_manual_stop_holds", {})
@@ -5746,6 +5750,7 @@ def _tesla_transport_authority(
                 and not runtime.get("powerwall_local_dispatch_stopping")
                 and binding_ok
                 and pairing() == original_pairing
+                and (not solar_start or _fresh_wall_connector_unplugged_at(hass, entry, vehicle) is None)
                 and (
                     ignore_recovery_gate
                     or recovery_control_allowed(
@@ -17041,6 +17046,242 @@ def _tesla_wall_connector_serial(device: Any) -> Optional[str]:
     return serial or None
 
 
+def _tesla_wall_connector_identities_by_serial(
+    sensor_states: Iterable[Any], entity_registry: Any, device_registry: Any
+) -> tuple[dict[str, dict[str, datetime | None]], dict[str, list[str]]]:
+    identified_vins: dict[str, dict[str, datetime | None]] = {}
+    identity_entities: dict[str, list[str]] = {}
+    for state in sensor_states:
+        entity_id = str(getattr(state, "entity_id", "") or "").lower()
+        if "wall_connector" not in entity_id or "vehicle" not in entity_id:
+            continue
+        registered = entity_registry.entities.get(state.entity_id)
+        if (
+            getattr(registered, "platform", None) not in TESLA_EV_INTEGRATIONS
+            or getattr(registered, "disabled_by", None)
+        ):
+            continue
+        device = device_registry.async_get(getattr(registered, "device_id", None))
+        serial = _tesla_wall_connector_serial(device)
+        if not serial:
+            continue
+        identity_entities.setdefault(serial, []).append(state.entity_id)
+        candidate = str(getattr(state, "state", "") or "").strip().upper()
+        if _is_explicit_tesla_vin(candidate):
+            vins = identified_vins.setdefault(serial, {})
+            changed_at = getattr(state, "last_changed", None)
+            previous = vins.setdefault(candidate, None)
+            if isinstance(changed_at, datetime) and (previous is None or changed_at > previous):
+                vins[candidate] = changed_at
+    return identified_vins, identity_entities
+
+
+_WALL_CONNECTOR_RECENT_SESSION_AGE = timedelta(minutes=3)
+
+
+@dataclass
+class _TeslaWallConnectorSession:
+    serial: str
+    binding: tuple[str, str | None, str | None, str | None]
+    connected_since: datetime
+    connected_at: datetime
+    unplugged_since: datetime | None = None
+    unsubscribe: Callable[[], None] | None = None
+
+
+def _forget_wall_connector_session(sessions: dict[str, _TeslaWallConnectorSession], vin: str) -> None:
+    session = sessions.pop(vin, None)
+    if session and session.unsubscribe:
+        session.unsubscribe()
+
+
+def _observe_wall_connector_session(
+    hass: HomeAssistant,
+    sessions: dict[str, _TeslaWallConnectorSession],
+    vin: str,
+    session: _TeslaWallConnectorSession,
+    identity_entities: Iterable[str],
+) -> None:
+    from homeassistant.core import callback
+    from homeassistant.helpers.event import async_track_state_change_event
+
+    @callback
+    def session_state_changed(event):
+        if sessions.get(vin) is not session:
+            return
+        old_state = event.data["old_state"]
+        new_state = event.data["new_state"]
+        if event.data["entity_id"] != session.binding[0]:
+            candidate = str(new_state.state).strip().upper() if new_state is not None else ""
+            if _is_explicit_tesla_vin(candidate) and candidate != vin:
+                _forget_wall_connector_session(sessions, vin)
+            return
+        if (
+            new_state and old_state and new_state.state == old_state.state
+            and new_state.last_changed == old_state.last_changed
+        ):
+            return
+        if (
+            old_state and old_state.state == "on" and old_state.last_changed == session.connected_since
+            and new_state and new_state.state == "off"
+            and new_state.last_changed > session.connected_at
+        ):
+            session.unplugged_since = new_state.last_changed
+        else:
+            _forget_wall_connector_session(sessions, vin)
+
+    session.unsubscribe = async_track_state_change_event(
+        hass, (session.binding[0], *identity_entities), session_state_changed,
+    )
+    sessions[vin] = session
+
+
+def _fresh_wall_connector_unplugged_at(
+    hass: HomeAssistant, entry: ConfigEntry | None, vehicle_id: Any,
+) -> datetime | None:
+    """Return unplug proof only for an unambiguous VIN and physical connector."""
+    if not _is_explicit_tesla_vin(vehicle_id):
+        return None
+    try:
+        entity_registry = er.async_get(hass)
+        device_registry = dr.async_get(hass)
+        sensor_states = hass.states.async_all("sensor")
+        binary_states = hass.states.async_all("binary_sensor")
+        identified_vins, identity_entities = _tesla_wall_connector_identities_by_serial(
+            sensor_states, entity_registry, device_registry
+        )
+    except (AttributeError, TypeError):
+        return None
+
+    vin = str(vehicle_id).upper()
+    matches = [serial for serial, vins in identified_vins.items() if vin in vins]
+    runtime = hass.data.get(DOMAIN, {}).get(getattr(entry, "entry_id", None))
+    session_key = "_tesla_wall_connector_recent_sessions"
+    recent_sessions = runtime.get(session_key, {}) if runtime is not None else {}
+    session = recent_sessions.get(vin)
+    if session and not is_current_ev_power_observation(
+        session.connected_at, max_age=_WALL_CONNECTOR_RECENT_SESSION_AGE
+    ):
+        _forget_wall_connector_session(recent_sessions, vin)
+        session = None
+    if len(matches) > 1 or (matches and len(identified_vins[matches[0]]) != 1):
+        _forget_wall_connector_session(recent_sessions, vin)
+        return None
+    if matches and session and matches[0] != session.serial:
+        _forget_wall_connector_session(recent_sessions, vin)
+        session = None
+    serial = session.serial if session else None
+    if matches:
+        serial = matches[0]
+    if not serial:
+        return None
+    if not matches and identified_vins.get(serial):
+        _forget_wall_connector_session(recent_sessions, vin)
+        return None
+
+    native_states = []
+    for state in binary_states:
+        if "wall_connector" not in state.entity_id or "vehicle_connected" not in state.entity_id:
+            continue
+        registered = entity_registry.entities.get(state.entity_id)
+        if (
+            getattr(registered, "platform", None) != "tesla_wall_connector"
+            or getattr(registered, "disabled_by", None)
+        ):
+            continue
+        device_id = getattr(registered, "device_id", None)
+        device = device_registry.async_get(device_id)
+        if _tesla_wall_connector_serial(device) != serial:
+            continue
+        native_states.append((state, (
+            state.entity_id, device_id, getattr(registered, "config_entry_id", None),
+            getattr(registered, "unique_id", None),
+        )))
+
+    if len(native_states) != 1:
+        _forget_wall_connector_session(recent_sessions, vin)
+        return None
+    state, binding = native_states[0]
+    if session and binding != session.binding:
+        _forget_wall_connector_session(recent_sessions, vin)
+        session = None
+    connector_reported_at = (
+        getattr(state, "last_reported", None) or getattr(state, "last_updated", None)
+    )
+    if not is_current_ev_power_observation(connector_reported_at):
+        return None
+    changed_at = getattr(state, "last_changed", None)
+    if state.state == "on":
+        if session and changed_at != session.connected_since:
+            _forget_wall_connector_session(recent_sessions, vin)
+            session = None
+        vin_acquired_at = identified_vins.get(serial, {}).get(vin)
+        if (
+            isinstance(changed_at, datetime) and vin_acquired_at is not None
+            and changed_at <= vin_acquired_at <= connector_reported_at
+        ):
+            # Keep only a VIN acquired during this observed local plug episode.
+            # The connector's state-change event must witness its next unplug.
+            if session:
+                session.connected_at = connector_reported_at
+            elif runtime is not None and hasattr(entry, "async_on_unload"):
+                if session_key not in runtime:
+                    runtime[session_key] = recent_sessions
+
+                    def clear_sessions():
+                        for previous_vin in tuple(recent_sessions):
+                            _forget_wall_connector_session(recent_sessions, previous_vin)
+
+                    entry.async_on_unload(clear_sessions)
+                _observe_wall_connector_session(
+                    hass, recent_sessions, vin,
+                    _TeslaWallConnectorSession(serial, binding, changed_at, connector_reported_at),
+                    identity_entities[serial],
+                )
+        return None
+    if state.state != "off" or (not matches and not (
+        session and session.unplugged_since is not None and changed_at == session.unplugged_since
+    )):
+        return None
+    disconnected_since = (
+        changed_at if isinstance(changed_at, datetime) and changed_at <= connector_reported_at
+        else connector_reported_at
+    )
+
+    # The provider can retain the last VIN after this connector is unplugged.
+    # A fresh vehicle reading following a later cable-on transition may come
+    # from another EVSE. Repeated local off polls do not move the unplug event.
+    for state in binary_states:
+        if "charge_cable" not in state.entity_id or state.state != "on":
+            continue
+        changed_at = getattr(state, "last_changed", None)
+        reported_at = (
+            getattr(state, "last_reported", None)
+            or getattr(state, "last_updated", None)
+            or changed_at
+        )
+        if (
+            not is_current_ev_power_observation(reported_at)
+            or not isinstance(changed_at, datetime)
+            or changed_at <= disconnected_since
+            or changed_at > reported_at
+        ):
+            continue
+        registered = entity_registry.entities.get(state.entity_id)
+        if getattr(registered, "platform", None) not in TESLA_EV_INTEGRATIONS:
+            continue
+        device = device_registry.async_get(getattr(registered, "device_id", None))
+        if any(
+            len(identifier) >= 2
+            and identifier[0] in TESLA_EV_INTEGRATIONS
+            and str(identifier[1]).upper() == vin
+            for identifier in (getattr(device, "identifiers", ()) or ())
+        ):
+            _forget_wall_connector_session(recent_sessions, vin)
+            return None
+    return connector_reported_at
+
+
 def _exact_tesla_wall_connector_vehicle_associations(
     hass: HomeAssistant,
     entity_registry: Any,
@@ -17102,31 +17343,13 @@ def _exact_tesla_wall_connector_vehicle_associations(
     if not connected_serials:
         return {}
 
-    identified_vins_by_serial: dict[str, set[str]] = {}
-    for state in sensor_states:
-        entity_id = str(getattr(state, "entity_id", "") or "").lower()
-        if "wall_connector" not in entity_id or "vehicle" not in entity_id:
-            continue
-        registered = entity_registry.entities.get(state.entity_id)
-        if (
-            registered is None
-            or getattr(registered, "platform", None)
-            not in TESLA_EV_INTEGRATIONS
-        ):
-            continue
-        device = device_registry.async_get(
-            getattr(registered, "device_id", None)
-        )
-        serial = _tesla_wall_connector_serial(device)
-        if not serial or serial not in connected_serials:
-            continue
-        candidate = str(getattr(state, "state", "") or "").strip().upper()
-        if re.fullmatch(r"[A-HJ-NPR-Z0-9]{17}", candidate):
-            identified_vins_by_serial.setdefault(serial, set()).add(candidate)
+    identified_vins_by_serial, _ = _tesla_wall_connector_identities_by_serial(
+        sensor_states, entity_registry, device_registry
+    )
 
     serial_by_vin: dict[str, set[str]] = {}
     for serial, identified_vins in identified_vins_by_serial.items():
-        if len(identified_vins) != 1:
+        if serial not in connected_serials or len(identified_vins) != 1:
             continue
         vin = next(iter(identified_vins))
         serial_by_vin.setdefault(vin, set()).add(serial)

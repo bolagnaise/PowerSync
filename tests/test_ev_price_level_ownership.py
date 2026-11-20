@@ -2328,8 +2328,13 @@ class _FakeStates:
     def get(self, entity_id: str):
         return self._states.get(entity_id)
 
-    def async_all(self):
-        return list(self._states.values())
+    def async_all(self, domain=None):
+        if domain is None:
+            return list(self._states.values())
+        return [
+            state for state in self._states.values()
+            if state.entity_id.startswith(f"{domain}.")
+        ]
 
     def async_entity_ids(self, domain: str):
         prefix = f"{domain}."
@@ -5035,6 +5040,191 @@ def test_mapped_ble_plug_state_wins_over_stale_fleet_row(monkeypatch):
         )
         is True
     )
+
+
+@pytest.mark.parametrize(
+    ("sensor_age", "local_state", "same_vin", "newer_cable", "expect_plugged"),
+    (
+        (timedelta(seconds=5), "off", True, False, False),
+        (timedelta(minutes=5), "off", True, False, True),
+        (timedelta(seconds=5), "off", False, False, True),
+        (timedelta(seconds=5), "on", True, False, True),
+        (timedelta(seconds=5), "off", True, True, True),
+    ),
+)
+def test_plug_detection_uses_fresh_exact_wall_connector_unplug_readback(
+    monkeypatch, sensor_age, local_state, same_vin, newer_cable, expect_plugged,
+):
+    first_vin = "XP7YHCEL7TB811704"
+    second_vin = "LRWYHCEKXTC687964"
+    cable = "binary_sensor.tesla_yf88_charge_cable"
+    local = "binary_sensor.tesla_wall_connector_vehicle_connected"
+    fleet = "sensor.wall_connector_vehicle"
+    hass = _paired_ble_plug_hass(
+        {
+            "binary_sensor.tesla_yf88_charge_flap": "on",
+            cable: "on",
+            local: local_state,
+            fleet: second_vin if same_vin else first_vin,
+        },
+        first_vin,
+        second_vin,
+    )
+    entry = _paired_ble_plug_entry(first_vin, second_vin)
+    now = datetime.now(timezone.utc)
+    hass.states.get(local).last_reported = now - sensor_age
+    hass.states.get(local).last_changed = now - timedelta(hours=1)
+    hass.states.get(cable).last_changed = now - (
+        timedelta(minutes=30) if newer_cable else timedelta(hours=1)
+    )
+    hass.states.get(cable).last_reported = now - timedelta(seconds=2)
+    hass.entity_registry.entities[cable].platform = "tesla_fleet"
+    hass.entity_registry.entities.update({
+        local: SimpleNamespace(entity_id=local, device_id="wall-local",
+                               platform="tesla_wall_connector"),
+        fleet: SimpleNamespace(entity_id=fleet, device_id="wall-fleet",
+                               platform="tesla_fleet"),
+    })
+    hass.device_registry.devices.update({
+        "wall-local": SimpleNamespace(
+            id="wall-local", identifiers={("tesla_wall_connector", "TEST-SERIAL")},
+            serial_number="TEST-SERIAL",
+        ),
+        "wall-fleet": SimpleNamespace(
+            id="wall-fleet", identifiers={("tesla_fleet", "TEST-SERIAL")},
+            serial_number="TEST-SERIAL",
+        ),
+    })
+    hass.device_registry.async_get = hass.device_registry.devices.get
+    monkeypatch.setattr(_ha_dr, "async_get", lambda value: value.device_registry)
+
+    assert asyncio.run(ev_planner.is_ev_plugged_in(
+        hass, entry, vehicle_vin=second_vin,
+    )) is expect_plugged
+    if not expect_plugged:
+        actions = importlib.import_module("power_sync.automations.actions")
+        params = {"vehicle_vin": second_vin, "owner_mode": "smart_schedule_solar_surplus"}
+        authority = actions._tesla_transport_authority(
+            hass, entry, params,
+            operation="start", ignore_recovery_gate=True,
+        )
+        assert not authority()
+        assert actions._tesla_transport_authority(
+            hass, entry, params,
+            cleanup=True, operation="stop", ignore_recovery_gate=True,
+        )()
+
+        # The same captured request consults the current connector report.
+        hass.states.get(local).state = "on"
+        assert authority()
+
+
+@pytest.mark.parametrize(
+    ("transition", "veto"),
+    (
+        ("unplug", True),
+        ("expired", False),
+        ("unobserved", False),
+        ("replacement_vin", False),
+        ("intervening_vin", False),
+        ("intervening_plug_cycle", False),
+        ("unavailable", False),
+        ("registry_rebind", False),
+        ("vin_from_old_episode", False),
+        ("integration_unloaded", False),
+    ),
+)
+def test_solar_start_veto_when_tesla_clears_connector_vin_before_cable_off(
+    monkeypatch, transition, veto,
+):
+    vin = "LRWYHCEKXTC687964"
+    other_vin = "XP7YHCEL7TB811704"
+    local = "binary_sensor.tesla_wall_connector_vehicle_connected"
+    fleet = "sensor.wall_connector_vehicle"
+    cable = "binary_sensor.tesla_yf88_charge_cable"
+    hass = _paired_ble_plug_hass({local: "on", fleet: vin, cable: "on"}, other_vin, vin)
+    entry = _paired_ble_plug_entry(other_vin, vin)
+    ev_load = importlib.import_module("power_sync.ev_load")
+    actions = importlib.import_module("power_sync.automations.actions")
+    clock = datetime.now(timezone.utc)
+    monkeypatch.setattr(ev_load, "utc_now", lambda: clock)
+    local_state = hass.states.get(local)
+    fleet_state = hass.states.get(fleet)
+    cable_state = hass.states.get(cable)
+    local_state.last_changed = clock - timedelta(minutes=3)
+    local_state.last_reported = clock
+    fleet_state.last_changed = local_state.last_changed + timedelta(seconds=10)
+    cable_state.last_changed = local_state.last_changed
+    cable_state.last_reported = clock
+    hass.entity_registry.entities[cable].platform = "tesla_fleet"
+    hass.entity_registry.entities.update({
+        local: SimpleNamespace(device_id="wall-local", platform="tesla_wall_connector"),
+        fleet: SimpleNamespace(device_id="wall-fleet", platform="tesla_fleet"),
+    })
+    hass.device_registry.devices.update({
+        "wall-local": SimpleNamespace(serial_number="EXACT-TEST-SERIAL"),
+        "wall-fleet": SimpleNamespace(serial_number="EXACT-TEST-SERIAL"),
+    })
+    hass.device_registry.async_get = hass.device_registry.devices.get
+    monkeypatch.setattr(_ha_dr, "async_get", lambda value: value.device_registry)
+
+    listeners = {}
+    on_unload = []
+    entry.async_on_unload = on_unload.append
+
+    def subscribe(current_hass, entities, handler):
+        assert current_hass is hass and set(entities) == {local, fleet}
+        listeners.update({entity: handler for entity in entities})
+        return listeners.clear
+
+    def dispatch(entity, previous, current):
+        if listener := listeners.get(entity):
+            listener(SimpleNamespace(data={
+                "entity_id": entity, "old_state": previous, "new_state": current,
+            }))
+
+    def emit(previous_state, new_state, changed_at):
+        previous = SimpleNamespace(state=previous_state, last_changed=local_state.last_changed)
+        local_state.state = new_state
+        local_state.last_changed = changed_at
+        local_state.last_reported = clock
+        dispatch(local, previous, local_state)
+
+    monkeypatch.setattr(_ha_core, "callback", lambda func: func, raising=False)
+    monkeypatch.setattr(_ha_event, "async_track_state_change_event", subscribe, raising=False)
+    if transition == "vin_from_old_episode":
+        fleet_state.last_changed = local_state.last_changed - timedelta(seconds=1)
+    if transition != "unobserved":
+        assert actions._fresh_wall_connector_unplugged_at(hass, entry, vin) is None
+
+    if transition == "integration_unloaded":
+        assert len(on_unload) == 1
+        on_unload[0]()
+
+    clock += timedelta(seconds=181 if transition == "expired" else 110)
+    if transition == "intervening_vin":
+        fleet_state.state = other_vin
+        dispatch(fleet, None, fleet_state)
+    fleet_state.state = other_vin if transition == "replacement_vin" else "unknown"
+    if transition == "unavailable":
+        emit("on", "unavailable", clock - timedelta(seconds=80))
+    if transition == "registry_rebind":
+        hass.entity_registry.entities[local].config_entry_id = "rebound"
+    emit(local_state.state, "off", clock - timedelta(seconds=75))
+    if transition == "intervening_plug_cycle":
+        emit("off", "on", clock - timedelta(seconds=50))
+        emit("on", "off", clock - timedelta(seconds=31))
+    cable_state.last_reported = clock
+
+    assert (actions._fresh_wall_connector_unplugged_at(hass, entry, vin) is not None) is veto
+    authority = actions._tesla_transport_authority(
+        hass, entry, {"vehicle_vin": vin, "owner_mode": "smart_schedule_solar_surplus"},
+        operation="start", ignore_recovery_gate=True,
+    )
+    assert authority() is not veto
+    cable_state.last_changed = clock - timedelta(seconds=1)
+    assert authority()
+    assert not listeners
 
 
 def test_unavailable_mapped_ble_falls_back_to_fleet_plug_state(monkeypatch):
