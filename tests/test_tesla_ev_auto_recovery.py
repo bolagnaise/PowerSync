@@ -31,7 +31,6 @@ def existing_telemetry(case, monkeypatch):
         raise AssertionError("Automatic recovery must not call a live provider reader")
 
     monkeypatch.setattr(native, "_cached_vehicle_report", cached)
-    monkeypatch.setattr(native, "CACHED_TIMEOUT_SECONDS", 0.08)
     monkeypatch.setattr(observation, "async_read_tesla_vehicle", forbidden)
     monkeypatch.setattr(observation, "async_read_independent_tesla_vehicle", forbidden)
 
@@ -129,6 +128,7 @@ async def test_worker_failure_keeps_hold_and_persists_read_budget(case, variant,
     stamp = None
     if variant == "unchanged":
         from power_sync import tesla_native_recovery
+        monkeypatch.setattr(tesla_native_recovery, "CACHED_TIMEOUT_SECONDS", 0.08)
         monkeypatch.setattr(tesla_native_recovery, "SAMPLE_SECONDS", 0.03)
 
     async def alter(sample, index):
