@@ -228,9 +228,9 @@ def _number_or_none(value: Any) -> float | None:
     return number
 
 
-def _positive_number_or_none(value: Any) -> float | None:
+def _nonnegative_number_or_none(value: Any) -> float | None:
     number = _number_or_none(value)
-    return number if number is not None and number > 0 else None
+    return number if number is not None and number >= 0 else None
 
 
 def _string_or_none(value: Any) -> str | None:
@@ -328,7 +328,7 @@ def normalize_pw3_components_strings(data: dict[str, Any]) -> dict[str, Any] | N
         for letter in _PW3_STRING_LETTERS:
             state = _string_or_none((by_name.get(f"PCH_PvState_{letter}") or {}).get("textValue"))
             voltage_v = _number_or_none((by_name.get(f"PCH_PvVoltage{letter}") or {}).get("value"))
-            current_a = _positive_number_or_none((by_name.get(f"PCH_PvCurrent{letter}") or {}).get("value"))
+            current_a = _nonnegative_number_or_none((by_name.get(f"PCH_PvCurrent{letter}") or {}).get("value"))
             reading = {
                 "id": f"{device_id or 'pch'}:{letter}",
                 "label": f"{device_index + 1}{letter}" if len(pch) > 1 else letter,
@@ -387,7 +387,7 @@ def normalize_legacy_pvac_strings(data: dict[str, Any]) -> dict[str, Any] | None
 
         for letter in _LEGACY_STRING_LETTERS:
             voltage_v = _number_or_none(logging_data.get(f"PVAC_PVMeasuredVoltage_{letter}"))
-            current_a = _positive_number_or_none(logging_data.get(f"PVAC_PVCurrent_{letter}"))
+            current_a = _nonnegative_number_or_none(logging_data.get(f"PVAC_PVCurrent_{letter}"))
             connected = _bool_or_none(pvs_status.get(f"PVS_String{letter}_Connected"))
             state = (
                 _string_or_none(status.get("PVAC_State"))

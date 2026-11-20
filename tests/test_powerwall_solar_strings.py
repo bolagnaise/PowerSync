@@ -90,6 +90,31 @@ def test_pw3_components_standby_only_is_suppressed():
     assert mod.normalize_pw3_components_strings(payload) is None
 
 
+def test_pw3_components_distinguish_zero_current_from_missing_or_invalid():
+    mod = _fleet_api_bms_module()
+    payload = {
+        "components": {
+            "pch": [
+                {
+                    "signals": [
+                        {"name": "PCH_PvState_A", "textValue": "PV_Active"},
+                        {"name": "PCH_PvVoltageA", "value": 295.2},
+                        {"name": "PCH_PvCurrentA", "value": 0},
+                        {"name": "PCH_PvVoltageB", "value": 294.8},
+                        {"name": "PCH_PvVoltageC", "value": 295.0},
+                        {"name": "PCH_PvCurrentC", "value": -1},
+                    ],
+                }
+            ]
+        }
+    }
+
+    diagnostics = mod.normalize_pw3_components_strings(payload)
+
+    assert [string["current_a"] for string in diagnostics["strings"]] == [0.0, None, None]
+    assert [string["power_w"] for string in diagnostics["strings"]] == [0.0, None, None]
+
+
 def test_legacy_pvac_strings_use_pvs_connected_flags():
     mod = _fleet_api_bms_module()
     payload = {
@@ -123,4 +148,5 @@ def test_legacy_pvac_strings_use_pvs_connected_flags():
     assert diagnostics["source"] == "legacy_pvac"
     assert [reading["label"] for reading in diagnostics["strings"]] == ["A"]
     assert diagnostics["strings"][0]["voltage_v"] == 360.5
+    assert diagnostics["strings"][0]["current_a"] == 4.2
     assert diagnostics["strings"][0]["connected"] is True

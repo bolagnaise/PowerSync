@@ -1918,9 +1918,61 @@ def test_powerwall_solar_string_voltage_sensor_metadata_and_value():
     assert entity.native_value == 295.2
     assert entity.available is True
     assert entity._attr_name == "Solar String A Voltage"
+    assert entity._attr_unique_id == "entry-1_solar_string_pch_a_voltage"
+    assert entity._attr_suggested_object_id == "powerwall_solar_string_pch_a_voltage"
     assert entity.extra_state_attributes["source"] == "pw3_components"
     assert entity.extra_state_attributes["transport_source"] == "ha_fleet_api_relay"
     assert entity.extra_state_attributes["group_label"] == "MPPT A+B"
+    assert entity.extra_state_attributes["current_a"] == 3.1
+
+
+def test_powerwall_solar_string_current_sensor_discovery_and_updates(monkeypatch):
+    sensor = _sensor_module()
+    entry = SimpleNamespace(entry_id="entry-1", data={}, options={})
+    reading_a = {"id": "unit1:A", "label": "1A", "voltage_v": 295.24, "current_a": 3.12345}
+    reading_b = {"id": "unit2:A", "label": "2A", "voltage_v": 294.8}
+    diagnostics = {"strings": [reading_a, reading_b]}
+    entry_data = {"solar_string_diagnostics": diagnostics}
+    hass = SimpleNamespace(data={"power_sync": {entry.entry_id: entry_data}})
+    entities = []
+    listeners = {}
+
+    def connect(hass, signal, handler):
+        listeners[signal] = handler
+        return lambda: None
+
+    monkeypatch.setattr(sensor, "async_dispatcher_connect", connect)
+    sensor._setup_powerwall_solar_string_sensor_additions(hass, entry, entities.extend)
+    assert [entity._attr_name for entity in entities] == [
+        "Solar String 1A Voltage",
+        "Solar String 1A Current",
+        "Solar String 2A Voltage",
+    ]
+    current = entities[1]
+    assert current._attr_unique_id == "entry-1_solar_string_unit1_a_current"
+    assert current._attr_suggested_object_id == "powerwall_solar_string_unit1_a_current"
+    assert current._attr_device_class == "current"
+    assert current._attr_native_unit_of_measurement == "A"
+    assert current._attr_state_class == "measurement"
+    assert current.native_value == 3.12345
+    assert current.available is True
+    assert current.extra_state_attributes["voltage_v"] == 295.24
+
+    reading_a["current_a"] = 0.0
+    reading_b["current_a"] = 4.0
+    update = listeners["power_sync_solar_strings_update_entry-1"]
+    update(diagnostics)
+    update(diagnostics)
+    assert current.available is True
+    assert current.native_value == 0.0
+    assert len(entities) == 4
+    assert entities[-1]._attr_name == "Solar String 2A Current"
+    assert entities[-1].native_value == 4.0
+
+    del reading_a["current_a"]
+    assert current.available is False
+    assert current.native_value is None
+    assert entities[-1].native_value == 4.0
 
 
 def test_powerwall_pack_builder_skips_missing_optional_metrics():
