@@ -167,7 +167,9 @@ def fixed_battery_watts(mode: str, target_w: float, snapshot: Any, config: dict)
     # Signed PV meters include standby consumption. Preserve that draw in
     # the site-flow calculation rather than rejecting it or clamping it away.
     if load < 0:
-        raise ValueError("Fixed battery output requires coherent load and solar")
+        raise ValueError(
+            f"Fixed battery output requires coherent load and solar (gateway Home Load: {load:g} W)"
+        )
     imported, exported = site_grid_limits_w(snapshot, config)
     software_import = config.get("optimization_max_grid_import_w")
     if software_import not in (None, 0):

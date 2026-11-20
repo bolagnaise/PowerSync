@@ -876,6 +876,11 @@ def test_local_powerwall_home_load_excludes_observed_ev_power():
     )
 
     assert round(entity.native_value, 3) == 3.6
+    attrs = entity.extra_state_attributes
+    assert attrs["raw_home_load_kw"] == 10.7
+    assert attrs["observed_ev_power_kw"] == 7.1
+    assert attrs["home_load_basis"] == "excludes_ev"
+    assert attrs["normalization_quality"] == "complete"
 
 
 def test_local_powerwall_home_load_uses_site_ev_snapshot_when_coordinator_is_zero():
@@ -1028,6 +1033,15 @@ def test_local_powerwall_home_load_never_goes_negative_after_ev_subtraction():
     )
 
     assert entity.native_value == 0.0
+    local_coord.data.load_w = -12.0
+    assert entity.native_value == 0.0
+    assert entity.extra_state_attributes["raw_home_load_kw"] == -0.012
+
+    local_coord.last_success_monotonic = None
+    cloud_data = entity.coordinator.data
+    cloud_data.update(load_power=0.2, raw_home_load_power=0.2, ev_power=0.0)
+    assert entity.native_value == 0.2
+    assert entity.extra_state_attributes["raw_home_load_kw"] == 0.2
 
 
 def test_home_load_sensor_never_publishes_negative_history_value():

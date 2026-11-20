@@ -94,13 +94,18 @@ async def test_fixed_output_renewal_survives_solar_entering_standby():
         resume_battery_operation=AsyncMock(return_value=True))
     controller = module.LocalBatteryDispatch(client, fixed_config, lambda mode: True,
         AsyncMock(), AsyncMock())
+
+    async def guarded_write(write, _controlled_export, *, requested_export_w):
+        return await write(requested_export_w)
+
     try:
-        await controller.start("discharge", 1800, 600, target_basis="battery_output")
+        await controller.start("discharge", 1800, 600, target_basis="battery_output",
+                               guarded_write=guarded_write)
         client.get_snapshot.return_value = fixed_snapshot(solar=-3)
         assert await controller._write() == 1800
         assert client.dispatch_battery_power.await_count == 2
         client.get_snapshot.return_value = fixed_snapshot(load=-3)
-        with pytest.raises(ValueError, match="coherent"):
+        with pytest.raises(ValueError, match="coherent.*gateway Home Load: -3 W"):
             await controller._write()
         assert client.dispatch_battery_power.await_count == 2
     finally:

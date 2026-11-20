@@ -3283,6 +3283,35 @@ class TeslaEnergySensor(PowerSyncCurrencyMixin, CoordinatorEntity, RestoredNumer
         """Return False when the backing energy coordinator is stale."""
         return _coordinator_data_is_fresh(self.coordinator)
 
+    def _additional_solar_enabled(self) -> bool:
+        entry = getattr(self, "_entry", None)
+        return getattr(entry, "options", {}).get(
+            "additional_solar_enabled",
+            getattr(entry, "data", {}).get("additional_solar_enabled", False),
+        )
+
+    def _local_sensor_reading(self, additional_solar: bool):
+        """Select the local value and the inputs used to derive it."""
+        key = self.entity_description.key
+        if key not in _LOCAL_OVERRIDABLE or (
+            additional_solar and key in (SENSOR_TYPE_SOLAR_POWER, SENSOR_TYPE_HOME_LOAD)
+        ):
+            return None
+        local_coord = self._local_coordinator()
+        if not _local_data_is_fresh(local_coord):
+            return None
+        snapshot = local_coord.data
+        ev_snapshot = self._observed_ev_snapshot()
+        value = _local_value_for(
+            key,
+            snapshot,
+            ev_power_kw=ev_snapshot.power_kw,
+            ev_load_complete=ev_snapshot.quality.value == "complete",
+        )
+        if value is None and key != SENSOR_TYPE_GRID_STATUS:
+            return None
+        return value, snapshot, ev_snapshot
+
     @property
     def native_value(self) -> Any:
         """Prefer local snapshot value when paired AND fresh; else cloud value_fn.
@@ -3294,26 +3323,10 @@ class TeslaEnergySensor(PowerSyncCurrencyMixin, CoordinatorEntity, RestoredNumer
         the last successful snapshot. Without this guard, sensors would
         cling to that stale value indefinitely.
         """
-        solar_entry = getattr(self, "_entry", None)
-        additional_solar = getattr(solar_entry, "options", {}).get(
-            "additional_solar_enabled", getattr(solar_entry, "data", {}).get("additional_solar_enabled", False))
-        if self.entity_description.key in _LOCAL_OVERRIDABLE and not (
-            additional_solar and self.entity_description.key in (
-                SENSOR_TYPE_SOLAR_POWER, SENSOR_TYPE_HOME_LOAD)
-        ):
-            local_coord = self._local_coordinator()
-            if local_coord is not None and _local_data_is_fresh(local_coord):
-                ev_snapshot = self._observed_ev_snapshot()
-                local_v = _local_value_for(
-                    self.entity_description.key,
-                    local_coord.data,
-                    ev_power_kw=ev_snapshot.power_kw,
-                    ev_load_complete=ev_snapshot.quality.value == "complete",
-                )
-                if self.entity_description.key == SENSOR_TYPE_GRID_STATUS:
-                    return local_v
-                if local_v is not None:
-                    return local_v
+        additional_solar = self._additional_solar_enabled()
+        local_reading = self._local_sensor_reading(additional_solar)
+        if local_reading is not None:
+            return local_reading[0]
         if self.entity_description.value_fn:
             energy_data = self._normalized_energy_data()
             value = self.entity_description.value_fn(energy_data)
@@ -3416,16 +3429,22 @@ class TeslaEnergySensor(PowerSyncCurrencyMixin, CoordinatorEntity, RestoredNumer
                     }
                 )
         if self.entity_description.key == SENSOR_TYPE_HOME_LOAD:
-            attrs.update(
-                {
-                    "home_load_basis": energy_data.get("home_load_basis"),
-                    "raw_home_load_kw": energy_data.get("raw_home_load_power"),
-                    "observed_ev_power_kw": energy_data.get("observed_ev_power"),
-                    "normalization_quality": energy_data.get(
-                        "home_load_normalization_quality"
-                    ),
-                }
-            )
+            local_reading = self._local_sensor_reading(self._additional_solar_enabled())
+            load_attrs = {
+                "home_load_basis": energy_data.get("home_load_basis"),
+                "raw_home_load_kw": energy_data.get("raw_home_load_power"),
+                "observed_ev_power_kw": energy_data.get("observed_ev_power"),
+                "normalization_quality": energy_data.get("home_load_normalization_quality"),
+            }
+            if local_reading is not None:
+                _, snapshot, ev_snapshot = local_reading
+                load_attrs.update(
+                    home_load_basis="excludes_ev",
+                    raw_home_load_kw=snapshot.load_w / 1000.0,
+                    observed_ev_power_kw=ev_snapshot.power_kw,
+                    normalization_quality=ev_snapshot.quality.value,
+                )
+            attrs.update(load_attrs)
         energy_summary = energy_data.get("energy_summary") or {}
         if self.entity_description.key in (
             SENSOR_TYPE_DAILY_NET_COST, SENSOR_TYPE_DAILY_AVG_COST_PER_KWH,
