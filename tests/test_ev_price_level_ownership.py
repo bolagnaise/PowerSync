@@ -4925,6 +4925,55 @@ def test_specific_tesla_unavailable_location_is_not_permissive_unknown(monkeypat
     )
 
 
+@pytest.mark.parametrize(
+    ("fleet_location", "secondary_location", "secondary_age", "expected"),
+    [
+        ("not_home", "home", timedelta(minutes=2), "home"),
+        ("home", "not_home", timedelta(minutes=2), "not_home"),
+        ("home", "work", timedelta(minutes=8), "work"),
+        ("not_home", "home", timedelta(minutes=8), "not_home"),
+        ("not_home", "home", None, "not_home"),
+        ("home", "not_home", None, "not_home"),
+        ("not_home", "home", timedelta(minutes=-2), "not_home"),
+        ("unavailable", "unavailable", None, "home"),
+    ],
+)
+def test_exact_vin_location_prefers_newer_report_and_keeps_away_on_conflict(
+    monkeypatch, fleet_location, secondary_location, secondary_age, expected,
+):
+    vin = "LRWYTEST000000001"
+    other_vin = "LRWYTEST000000002"
+    fleet = "device_tracker.first_location"
+    secondary = "device_tracker.second_location"
+    home_binary = "binary_sensor.second_located_at_home"
+    other = "binary_sensor.other_located_at_home"
+    hass = _FakeHass(states={
+        fleet: fleet_location, secondary: secondary_location, home_binary: "on", other: "on",
+    })
+    hass.device_registry = SimpleNamespace(devices={
+        "fleet": SimpleNamespace(id="fleet", identifiers={("tesla_fleet", vin)}),
+        "secondary": SimpleNamespace(id="secondary", identifiers={("teslemetry", vin)}),
+        "other": SimpleNamespace(id="other", identifiers={("teslemetry", other_vin)}),
+    })
+    hass.entity_registry = SimpleNamespace(entities={
+        entity: SimpleNamespace(entity_id=entity, device_id=device)
+        for entity, device in (
+            (fleet, "fleet"), (secondary, "secondary"), (home_binary, "secondary"), (other, "other"),
+        )
+    })
+    monkeypatch.setattr(_ha_dr, "async_get", lambda _hass: _hass.device_registry)
+    now = datetime.now(timezone.utc)
+    first = hass.states.get(fleet)
+    first.last_reported = now - timedelta(minutes=8)
+    second = hass.states.get(secondary)
+    if secondary_age is not None:
+        second.last_updated = now - secondary_age
+    hass.states.get(home_binary).last_reported = now
+    hass.states.get(other).last_reported = now
+
+    assert asyncio.run(ev_planner.get_ev_location(hass, _FakeConfigEntry(), vin)) == expected
+
+
 def test_unspecified_ev_plug_state_checks_later_home_vehicle(monkeypatch):
     first_vin = "XP7YHCEL7TB811704"
     second_vin = "LRWYHCEKXTC687964"

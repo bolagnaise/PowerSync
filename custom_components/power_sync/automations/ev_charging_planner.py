@@ -843,6 +843,8 @@ async def get_ev_location(
 
     location = "unknown"
     specific_location_entity_unavailable = False
+    exact_location_reports: list[tuple[datetime | None, str]] = []
+    exact_home_presence = False
 
     # Zaptec standalone — charger is at home by definition
     if config_entry:
@@ -857,6 +859,25 @@ async def get_ev_location(
         if opts.get(CONF_OCPP_ENABLED):
             _LOGGER.debug("OCPP charger configured, assuming location=home")
             return "home"
+
+    def record_exact_location(state: Any, candidate: str) -> None:
+        nonlocal specific_location_entity_unavailable
+        reported_at = (
+            getattr(state, "last_reported", None)
+            or getattr(state, "last_updated", None)
+            or getattr(state, "last_changed", None)
+        )
+        if isinstance(reported_at, datetime):
+            if reported_at.tzinfo is None:
+                reported_at = reported_at.replace(tzinfo=timezone.utc)
+            if reported_at > datetime.now(timezone.utc):
+                if candidate == "home":
+                    specific_location_entity_unavailable = True
+                    return
+                reported_at = None
+        else:
+            reported_at = None
+        exact_location_reports.append((reported_at, candidate))
 
     # Method 0: Teslemetry Bluetooth - has real device_tracker with location
     import re
@@ -874,9 +895,11 @@ async def get_ev_location(
                     if loc_state and loc_state.state not in ("unavailable", "unknown", "None", None):
                         candidate_location = loc_state.state.lower()
                         _LOGGER.debug(f"Teslemetry BT location from {loc_entity}: {candidate_location}")
-                        if vehicle_vin is not None or candidate_location == "home":
+                        if vehicle_vin is not None:
+                            record_exact_location(loc_state, candidate_location)
+                        elif candidate_location == "home":
                             return candidate_location
-                        if location == "unknown":
+                        elif location == "unknown":
                             location = candidate_location
                     elif vehicle_vin is not None:
                         specific_location_entity_unavailable = True
@@ -886,9 +909,6 @@ async def get_ev_location(
     device_registry = dr.async_get(hass)
 
     for device, device_vin in _iter_tesla_vehicle_devices(device_registry):
-        if vehicle_vin is not None and location != "unknown":
-            break
-
         # If specific VIN requested, skip other vehicles
         if vehicle_vin is not None and device_vin != vehicle_vin:
             continue
@@ -905,7 +925,10 @@ async def get_ev_location(
                 if state and state.state not in ("unavailable", "unknown", "None", None):
                     candidate_location = state.state.lower()
                     _LOGGER.debug(f"Found EV location from {entity_id} (VIN: {device_vin}): {candidate_location}")
-                    if vehicle_vin is not None or candidate_location == "home":
+                    if vehicle_vin is not None:
+                        record_exact_location(state, candidate_location)
+                        continue
+                    if candidate_location == "home":
                         location = candidate_location
                     elif location == "unknown":
                         location = candidate_location
@@ -916,12 +939,36 @@ async def get_ev_location(
             elif entity_id.startswith("binary_sensor.") and "located_at_home" in entity_id_lower:
                 state = hass.states.get(entity_id)
                 if state and state.state == "on":
+                    if vehicle_vin is not None:
+                        exact_home_presence = True
+                        continue
                     location = "home"
                     _LOGGER.debug(f"Found EV at home from {entity_id} (VIN: {device_vin})")
                     break
 
         if vehicle_vin is None and location == "home":
             break
+
+    if exact_location_reports:
+        # Registry order does not indicate freshness. When an away report has
+        # no timestamp, there is no evidence a competing home report supersedes it.
+        untimed_away = next(
+            (zone for reported_at, zone in exact_location_reports
+             if reported_at is None and zone != "home"),
+            None,
+        )
+        if untimed_away is not None:
+            location = untimed_away
+        else:
+            earliest = datetime.min.replace(tzinfo=timezone.utc)
+            _, location = max(
+                exact_location_reports,
+                key=lambda report: (report[0] or earliest, report[1] != "home"),
+            )
+    elif exact_home_presence:
+        # The positive binary flag is a fallback for missing trackers. A
+        # republished flag alone does not supersede explicit geographic away.
+        location = "home"
 
     # Method 2 (fallback): Tesla BLE - only current presence/plug signals imply home.
     # Do not treat the charger switch entity merely existing as presence; HA keeps

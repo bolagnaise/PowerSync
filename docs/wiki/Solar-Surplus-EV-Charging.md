@@ -21,6 +21,9 @@ recent unplug can still be used if Tesla clears the charger’s vehicle identity
 first and PowerSync observed the plug session. A newer vehicle cable-on report
 lets PowerSync evaluate the next charge session.
 
+If Home Assistant has more than one location tracker for the same Tesla,
+PowerSync uses the latest report for that car when deciding whether it is home.
+
 The setting survives restarts and stays synchronized with app changes. It is
 off by default on installations without a saved Solar Surplus setting and is
 unavailable while automation storage is not ready. Configure your EVs and
