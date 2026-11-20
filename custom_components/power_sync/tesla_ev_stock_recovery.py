@@ -37,9 +37,9 @@ STOCK_PROFILES = {
 # identity checks run on the event loop without touching package metadata.
 HOST_CONTRACT_CACHE_KEY = "_tesla_stock_host_contract"
 _HOST_CONTRACT_LOCK_KEY = "_tesla_stock_host_contract_lock"
-_EXPECTED_HOST_CONTRACT = {
-    "homeassistant": "2026.10.4",
-    "aioesphomeapi": "46.6.0",
+STOCK_HOST_PROFILES = {
+    ("2026.10.4", "46.6.0"): "homeassistant/core@2026.10.4;aioesphomeapi@46.6.0",
+    ("2026.11.2", "46.25.0"): "homeassistant/core@2026.11.2;aioesphomeapi@46.25.0",
 }
 
 
@@ -49,12 +49,15 @@ def _host_contract_cache(hass: Any) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
 
 
-def _host_contract_cached(hass: Any) -> bool:
+def _stock_host_source(hass: Any) -> str | None:
     value = _host_contract_cache(hass)
-    return isinstance(value, dict) and value.get("state") == "ready" and all(
-        value.get(key) == expected
-        for key, expected in _EXPECTED_HOST_CONTRACT.items()
-    )
+    if value is None or value.get("state") != "ready":
+        return None
+    core_version = value.get("homeassistant")
+    api_version = value.get("aioesphomeapi")
+    if not isinstance(core_version, str) or not isinstance(api_version, str):
+        return None
+    return STOCK_HOST_PROFILES.get((core_version, api_version))
 
 
 def _read_host_contract_versions() -> tuple[str, str]:
@@ -72,7 +75,7 @@ async def async_prepare_stock_host_contract(hass: Any) -> bool:
         return False
     cached = _host_contract_cache(hass)
     if isinstance(cached, dict) and cached.get("state") in {"ready", "failed"}:
-        return _host_contract_cached(hass)
+        return _stock_host_source(hass) is not None
     lock = data.get(_HOST_CONTRACT_LOCK_KEY)
     if not isinstance(lock, asyncio.Lock):
         lock = asyncio.Lock()
@@ -80,7 +83,7 @@ async def async_prepare_stock_host_contract(hass: Any) -> bool:
     async with lock:
         cached = _host_contract_cache(hass)
         if isinstance(cached, dict) and cached.get("state") in {"ready", "failed"}:
-            return _host_contract_cached(hass)
+            return _stock_host_source(hass) is not None
         try:
             executor = getattr(hass, "async_add_executor_job", None)
             if callable(executor):
@@ -106,7 +109,7 @@ async def async_prepare_stock_host_contract(hass: Any) -> bool:
             )
             data[HOST_CONTRACT_CACHE_KEY] = {"state": "failed"}
             return False
-    return _host_contract_cached(hass)
+    return _stock_host_source(hass) is not None
 
 
 def _identity(hass: Any, entity_id: str) -> dict[str, str] | None:
@@ -157,6 +160,7 @@ class StockBridge:
     runtime_data: Any
     runtime_ref: Any
     metadata: tuple[str, str, str]
+    host_source: str
 
     @property
     def producer(self) -> str:
@@ -176,7 +180,7 @@ class StockBridge:
                 "queue_persistence": "ram_only", "host_replay": "none",
                 "qualification": "source_and_runtime_exercise",
                 "source": STOCK_PROFILES[self.metadata],
-                "host_source": "homeassistant/core@2026.10.4;aioesphomeapi@46.6.0",
+                "host_source": self.host_source,
                 "max_uptime_after_reset": 120.0, "advance_wait": 0.0}
 
 
@@ -186,7 +190,8 @@ def resolve_stock_bridge(
     """Resolve only the configured VIN's enabled exact ESPHome producer."""
     # This synchronous function is called repeatedly from await-boundary
     # fences.  It must never perform package metadata I/O on the event loop.
-    if not _host_contract_cached(hass):
+    host_source = _stock_host_source(hass)
+    if host_source is None:
         return None
     from .tesla_ble_mapping import resolve_ble_prefixes, vehicle_ble_prefix
     config = {**entry.data, **entry.options}
@@ -217,7 +222,9 @@ def resolve_stock_bridge(
         require_uptime and _uptime(hass, entities["uptime"]) is None
     ):
         return None
-    return StockBridge(str(vin), prefix, identities, runtime_data, runtime, metadata)
+    return StockBridge(
+        str(vin), prefix, identities, runtime_data, runtime, metadata, host_source
+    )
 
 
 class StockBridgeTransaction:
@@ -237,6 +244,7 @@ class StockBridgeTransaction:
             self.hass, self.entry, self.bridge.vin, require_uptime=False,
         )
         return bool(current is not None and current.identity == self.bridge.identity
+                    and current.host_source == self.bridge.host_source
                     and current.runtime_data is self.bridge.runtime_data
                     and current.runtime_ref is self.bridge.runtime_ref
                     and (self.generation is None or self.generation == current_vehicle_generation(

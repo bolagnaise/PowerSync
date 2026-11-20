@@ -266,6 +266,41 @@ async def test_host_contract_prime_uses_executor_once_and_current_is_io_free(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("core_version", "api_version", "qualified"),
+    (
+        ("2026.11.2", "46.25.0", True),
+        ("2026.11.2", "46.6.0", False),
+        ("2026.10.4", "46.25.0", False),
+    ),
+)
+async def test_stock_recovery_qualifies_reviewed_host_pairs_for_first_bridge_profile(
+    harness, monkeypatch, core_version, api_version, qualified,
+):
+    hass, entry = harness
+    hass.data.pop(stock.HOST_CONTRACT_CACHE_KEY)
+    info = hass.config_entries.async_get_entry("ble-config").runtime_data.device_info
+    info.project_version = "2026.2.0"
+    info.esphome_version = "2026.1.5"
+    monkeypatch.setattr(sys.modules["homeassistant.const"], "__version__", core_version)
+    package_metadata = importlib.import_module("importlib.metadata")
+    monkeypatch.setattr(package_metadata, "version", lambda name: api_version)
+
+    assert await stock.async_prepare_stock_host_contract(hass) is qualified
+    bridge = stock.resolve_stock_bridge(hass, entry, VIN_A)
+    if qualified:
+        assert bridge is not None
+        assert bridge.profile["host_source"] == (
+            f"homeassistant/core@{core_version};aioesphomeapi@{api_version}"
+        )
+        assert bridge.profile["host_replay"] == "none"
+        assert stock.StockBridgeTransaction(hass, entry, bridge).current()
+    else:
+        assert bridge is None
+    assert hass.services.calls == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("failure", ["unsupported", "exception"])
 async def test_failed_or_unsupported_host_contract_stays_fail_closed(
     harness, monkeypatch, failure,

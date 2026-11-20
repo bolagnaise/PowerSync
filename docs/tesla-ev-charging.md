@@ -288,11 +288,12 @@ operation.
 
 The initial stock profiles cover the two reviewed project/ESPHome pairs:
 `PedroKTFC.esphome-tesla-ble` 2026.2.0 / ESPHome 2026.1.5, and project 2026.8.0 /
-ESPHome 2026.6.5. Host submission qualification is currently HA 2026.10.4 with
-`aioesphomeapi` 46.6.0. These are supported source and runtime profiles, not a
-claim of cryptographic binary attestation. Other versions remain held unless
-another implemented producer-isolation mechanism qualifies. Profile expansion
-requires source review and the same runtime checks.
+ESPHome 2026.6.5. The reviewed host pairs are HA 2026.10.4 with
+`aioesphomeapi` 46.6.0 and HA 2026.11.2 with `aioesphomeapi` 46.25.0.
+Source review establishes profile eligibility. Each recovery still checks the
+bridge restart and fresh vehicle reports. Other versions require another
+supported producer-isolation mechanism. Profile expansion requires source
+review and the same runtime checks.
 
 A reboot retires RAM queues; it cannot undo a command already accepted by the
 car. Recovery separately reads the exact configured native Fleet or Teslemetry
