@@ -1545,6 +1545,77 @@ async def _reconcile_stopped_smart_schedule_tesla(
     return True
 
 
+async def _release_stopped_scheduled_tesla(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    vehicle_id: str,
+) -> bool:
+    """Retire stale Scheduled control so its policy can admit a fresh Start."""
+    from .ev_ownership import get_ev_ownerships
+
+    state = _dynamic_ev_state.get(config_entry.entry_id, {}).get(vehicle_id)
+    lease = get_ev_ownerships(hass, config_entry).get(vehicle_id)
+    params = (state or {}).get("params") or {}
+    if (
+        not state or not state.get("active")
+        or params.get("owner_mode") != "scheduled"
+        or params.get("charger_type", "tesla") != "tesla"
+        or not lease or lease.get("owner") != "powersync" or lease.get("owner_mode") != "scheduled"
+        or int(state.get("current_amps", 0) or 0) <= 0
+        or state.get("transport_recovery_pending")
+        or _tesla_restart_telemetry_pending(state)
+    ):
+        return False
+
+    entity_id = await _get_tesla_ev_entity(
+        hass, r"sensor\..*_(charging_state|charging|charge_state)(?:_\d+)?$",
+        vehicle_id, warn_on_missing=False, config_entry=config_entry,
+    )
+    charging = hass.states.get(entity_id) if entity_id else None
+    observed_at = getattr(charging, "last_reported", None) or getattr(charging, "last_updated", None)
+    started_at = state.get("last_start_command_at")
+    if (
+        str(getattr(charging, "state", "")).strip().lower() != "stopped"
+        or not is_current_ev_power_observation(observed_at)
+        or (started_at is not None and not _datetime_is_after(observed_at, started_at))
+    ):
+        return False
+
+    current_entity = await _get_tesla_ev_entity(
+        hass,
+        r"sensor\..*_(charge_current|charging_current|charger_current|charger_actual_current)(?:_\d+)?$",
+        vehicle_id,
+        warn_on_missing=False,
+        config_entry=config_entry,
+    )
+    power_kw, power_available = await _get_observed_ev_power_reading_kw(hass, vehicle_id, {})
+    current = hass.states.get(current_entity) if current_entity else None
+    amps, _error, _age = _phase_current_state_amps(current)
+    if (
+        hass.states.get(entity_id) is not charging
+        or (amps is None and not power_available)
+        or (amps is not None and amps > 0.5)
+        or (power_available and power_kw > _ACTIVE_EV_POWER_EPSILON_KW)
+    ):
+        return False
+
+    # A concurrent Start can transfer the dynamic controller in place.
+    if _start_dynamic_lock.locked():
+        return False
+    async with _start_dynamic_lock:
+        await _action_stop_ev_charging_dynamic(hass, config_entry, {
+            "vehicle_id": vehicle_id,
+            "stop_charging": False,
+            "stop_reason": "Scheduled Tesla reports stopped and zero draw",
+            "_expected_state": state,
+            "_expected_lease": lease,
+        })
+    return (
+        _dynamic_ev_state.get(config_entry.entry_id, {}).get(vehicle_id) is not state
+        and get_ev_ownerships(hass, config_entry).get(vehicle_id) is None
+    )
+
+
 def _tesla_start_confirmation_entity_ids(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
@@ -19735,6 +19806,8 @@ async def _action_start_ev_charging_dynamic_locked(
         if obligation_timer is not None:
             _dynamic_ev_state[entry_id][vehicle_id]["quick_stop_timer"] = obligation_timer
     registered_state = _dynamic_ev_state[entry_id][vehicle_id]
+    if owner_mode == "scheduled" and charger_type == "tesla" and registered_state["charging_started"]:
+        registered_state["last_start_command_at"] = datetime.now().astimezone()
 
     def registration_is_current():
         return (_dynamic_ev_state.get(entry_id, {}).get(vehicle_id) is registered_state
@@ -20054,7 +20127,15 @@ async def _action_stop_ev_charging_dynamic(
     replaced_vehicle_ids: set[str] = set()
     notify_after_physical_stop: Dict[str, dict] = {}
 
-    from .ev_ownership import owner_family
+    from .ev_ownership import get_ev_ownerships, owner_family
+
+    expected_lease = params.get("_expected_lease")
+
+    def session_matches(vid, state):
+        return vehicles.get(vid) is state and (
+            expected_lease is None
+            or get_ev_ownerships(hass, config_entry).get(vid) is expected_lease
+        )
 
     for vid in vehicle_ids_to_stop:
         state = vehicles.get(vid)
@@ -20086,7 +20167,7 @@ async def _action_stop_ev_charging_dynamic(
                     away_location,
                 )
 
-        if state is not None and vehicles.get(vid) is not state:
+        if state is not None and not session_matches(vid, state):
             replaced_vehicle_ids.add(vid)
             continue
 
@@ -20130,7 +20211,7 @@ async def _action_stop_ev_charging_dynamic(
             # the downstream charger command has returned success.
             notify_after_physical_stop[vid] = state.get("params", {})
 
-            if vehicles.get(vid) is not state:
+            if not session_matches(vid, state):
                 replaced_vehicle_ids.add(vid)
                 _LOGGER.debug(
                     "Dynamic EV: Session for %s was replaced during teardown; "

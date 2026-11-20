@@ -12554,9 +12554,18 @@ class ScheduledChargingExecutor:
                     results[vin]["reason"] = f"{blocked} owns this loadpoint"
                     continue
                 if modes and all(owner_family(mode) == "scheduled" for mode in modes):
-                    # Its dynamic controller owns restart/readback/retry policy.
-                    # Re-running start here would reset that controller.
-                    results[vin] = {"active": True, "reason": "Scheduled control active"}
+                    from .actions import _release_stopped_scheduled_tesla
+
+                    # Keep the current controller unless exact-vehicle telemetry
+                    # proves its remembered charging state is stale.
+                    if vin in self._pending_stops or not await _release_stopped_scheduled_tesla(
+                        self.hass, self.config_entry, vin,
+                    ):
+                        results[vin] = {"active": True, "reason": "Scheduled control active"}
+                    else:
+                        # Re-evaluate the price, schedule and battery on the next
+                        # cycle before issuing a fresh start after teardown.
+                        results[vin]["reason"] = "Vehicle stopped; Scheduled will recheck on the next cycle"
                     continue
                 if vin in self._pending_stops:
                     results[vin]["reason"] = "Previous stop unconfirmed; awaiting vehicle observation"

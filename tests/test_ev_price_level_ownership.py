@@ -2619,6 +2619,7 @@ def fake_actions(monkeypatch):
     actions._canonical_dynamic_tesla_vehicle_id = lambda h, e, vin: vin
     actions._dynamic_ev_state = {}
     actions._is_vehicle_charge_complete = AsyncMock(return_value=False)
+    actions._release_stopped_scheduled_tesla = AsyncMock(return_value=False)
 
     async def resolve_max_grid_import_kw(hass, config_entry, params=None):
         explicit = (params or {}).get("max_grid_import_kw")
@@ -9535,6 +9536,156 @@ def scheduled_reconciliation(monkeypatch, fake_actions):
     monkeypatch.setattr(ev_planner, "_price_level_executor", None)
     return SimpleNamespace(hass=hass, entry=entry, vins=vins, failed=failed, scheduled=scheduled,
                            coordinator=coordinator, actions=fake_actions, ownership=ownership)
+
+
+@pytest.fixture
+def stopped_scheduled_session(monkeypatch, scheduled_reconciliation):
+    """One scheduled Tesla owner whose fresh telemetry says it is stopped."""
+    f = scheduled_reconciliation
+    vin = f.vins[0]
+    for existing_vin in f.vins:
+        f.ownership.release_ev_ownership(f.hass, f.entry, existing_vin)
+    f.actions._dynamic_ev_state["entry-1"].clear()
+
+    f.ownership.claim_ev_ownership(f.hass, f.entry, vin, owner_mode="scheduled")
+    original_state = {
+        "active": True,
+        "session_id": "scheduled-session-before-stop",
+        "current_amps": 32,
+        "target_amps": 32,
+        "charging_started": True,
+        "params": {
+            "vehicle_id": vin,
+            "vehicle_vin": vin,
+            "charger_type": "tesla",
+            "charger_power_entity": f"sensor.{vin}_charger_power",
+            "owner_mode": "scheduled",
+            "dynamic_mode": "battery_target",
+        },
+    }
+    f.actions._dynamic_ev_state["entry-1"][vin] = original_state
+    observed_at = datetime.now(timezone.utc)
+    f.hass.states._states.update({
+        f"sensor.{vin}_charging_state": SimpleNamespace(
+            entity_id=f"sensor.{vin}_charging_state",
+            state="Stopped",
+            last_updated=observed_at,
+            attributes={},
+        ),
+        f"sensor.{vin}_charge_current": SimpleNamespace(
+            entity_id=f"sensor.{vin}_charge_current",
+            state="0",
+            last_updated=observed_at,
+            attributes={"unit_of_measurement": "A"},
+        ),
+        f"sensor.{vin}_charger_power": SimpleNamespace(
+            entity_id=f"sensor.{vin}_charger_power",
+            state="0",
+            last_updated=observed_at,
+            attributes={"unit_of_measurement": "kW"},
+        ),
+    })
+    monkeypatch.setattr(
+        ev_planner,
+        "discover_all_tesla_vehicles",
+        AsyncMock(return_value=[{"vin": vin}]),
+    )
+    monkeypatch.setattr(
+        ev_planner,
+        "is_ev_actively_charging",
+        AsyncMock(return_value=False),
+    )
+    return SimpleNamespace(**vars(f), vin=vin, original_state=original_state)
+
+
+@pytest.mark.parametrize("recovery_succeeds", [True, False])
+def test_scheduled_owner_with_fresh_stopped_telemetry_retries_start(
+    stopped_scheduled_session,
+    recovery_succeeds,
+):
+    f = stopped_scheduled_session
+    vin = f.vin
+    stopped = f.hass.states.get(f"sensor.{vin}_charging_state")
+    current = f.hass.states.get(f"sensor.{vin}_charge_current")
+    power = f.hass.states.get(f"sensor.{vin}_charger_power")
+    observed_at = datetime.now(timezone.utc)
+
+    async def release_stopped(_hass, _entry, vehicle_vin):
+        assert vehicle_vin == vin
+        assert stopped.state.lower() == "stopped"
+        assert float(current.state) == 0
+        assert float(power.state) == 0
+        assert (observed_at - stopped.last_updated).total_seconds() < 5
+        assert (observed_at - current.last_updated).total_seconds() < 5
+        assert (observed_at - power.last_updated).total_seconds() < 5
+        if not recovery_succeeds:
+            return False
+
+        params = {
+            "vehicle_id": vin,
+            "stop_charging": False,
+            "_expected_state": f.original_state,
+        }
+        released = await f.actions._action_stop_ev_charging_dynamic(
+            f.hass,
+            f.entry,
+            params,
+        )
+        return released
+
+    f.actions._release_stopped_scheduled_tesla = AsyncMock(
+        side_effect=release_stopped
+    )
+
+    asyncio.run(f.coordinator.evaluate({}, 10))
+
+    f.actions._release_stopped_scheduled_tesla.assert_awaited_once_with(
+        f.hass,
+        f.entry,
+        vin,
+    )
+    if recovery_succeeds:
+        f.actions._action_stop_ev_charging_dynamic.assert_awaited_once()
+        stop_params = f.actions._action_stop_ev_charging_dynamic.await_args.args[2]
+        assert stop_params["stop_charging"] is False
+        f.actions._action_start_ev_charging_dynamic.assert_not_awaited()
+        assert vin not in f.actions._dynamic_ev_state.get("entry-1", {})
+        assert f.ownership.get_active_ev_owner_mode(f.hass, f.entry, vin) is None
+
+        f.hass.data["power_sync"]["entry-1"]["force_charge_state"] = {"active": True}
+        asyncio.run(f.coordinator.evaluate({}, 10))
+        f.actions._release_stopped_scheduled_tesla.assert_awaited_once()
+        f.actions._action_start_ev_charging_dynamic.assert_not_awaited()
+
+        f.hass.data["power_sync"]["entry-1"]["force_charge_state"] = {"active": False}
+        asyncio.run(f.coordinator.evaluate({}, 10))
+        f.actions._action_start_ev_charging_dynamic.assert_awaited_once()
+        start_params = f.actions._action_start_ev_charging_dynamic.await_args.args[2]
+        assert start_params["vehicle_id"] == vin
+        assert start_params["vehicle_vin"] == vin
+        assert f.ownership.get_active_ev_owner_mode(f.hass, f.entry, vin) == "scheduled"
+        assert f.actions._dynamic_ev_state["entry-1"][vin] is not f.original_state
+    else:
+        f.actions._action_stop_ev_charging_dynamic.assert_not_awaited()
+        f.actions._action_start_ev_charging_dynamic.assert_not_awaited()
+        assert f.actions._dynamic_ev_state["entry-1"][vin] is f.original_state
+        assert f.ownership.get_active_ev_owner_mode(f.hass, f.entry, vin) == "scheduled"
+
+
+def test_scheduled_stopped_session_recovery_waits_for_force_charge_to_end(
+    stopped_scheduled_session,
+):
+    f = stopped_scheduled_session
+    f.hass.data["power_sync"]["entry-1"]["force_charge_state"] = {"active": True}
+    f.actions._release_stopped_scheduled_tesla = AsyncMock(return_value=True)
+
+    asyncio.run(f.coordinator.evaluate({}, 10))
+
+    f.actions._release_stopped_scheduled_tesla.assert_not_awaited()
+    f.actions._action_stop_ev_charging_dynamic.assert_not_awaited()
+    f.actions._action_start_ev_charging_dynamic.assert_not_awaited()
+    assert f.actions._dynamic_ev_state["entry-1"][f.vin] is f.original_state
+    assert f.ownership.get_active_ev_owner_mode(f.hass, f.entry, f.vin) == "scheduled"
 
 
 @pytest.mark.parametrize("already_charging", [True, False])

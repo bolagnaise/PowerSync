@@ -12,7 +12,7 @@ import types
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -12116,6 +12116,64 @@ def test_tesla_stopped_state_is_not_charge_complete_at_partial_soc():
     ])
 
     assert asyncio.run(actions._is_vehicle_charge_complete(hass, "VIN123")) is False
+
+
+@pytest.mark.parametrize(
+    ("charging", "amps", "age", "pending", "takeover", "release"),
+    [
+        ("Stopped", 0, 1, False, False, True),
+        ("Charging", 0, 1, False, False, False),
+        ("Complete", 0, 1, False, False, False),
+        ("Stopped", 8, 1, False, False, False),
+        ("Stopped", 0, 900, False, False, False),
+        ("Stopped", 0, 1, True, False, False),
+        ("Stopped", 0, 1, False, True, False),
+    ],
+)
+def test_scheduled_tesla_only_releases_fresh_stopped_zero_draw_session(
+    monkeypatch, charging, amps, age, pending, takeover, release,
+):
+    from power_sync.automations.ev_ownership import claim_ev_ownership, get_ev_ownership
+
+    vehicle = "5YJTEST00000000R4"
+    now = datetime.now(timezone.utc)
+    status_entity = "sensor.test_vehicle_charging"
+    current_entity = "sensor.test_vehicle_charger_current"
+    hass = _Hass([
+        _State(status_entity, charging, last_reported=now - timedelta(seconds=age)),
+        _State(current_entity, str(amps), {"unit_of_measurement": "A"}, last_reported=now),
+    ])
+    _install_native_ha_writer(hass, vehicle, status_entity, current_entity)
+    monkeypatch.setattr(actions.dt_util, "utcnow", lambda: now)
+    physical_stop = AsyncMock()
+    monkeypatch.setattr(actions, "_action_stop_ev_charging", physical_stop)
+    entry = _Entry()
+    lease = claim_ev_ownership(hass, entry, vehicle, owner_mode="scheduled")
+    cancel_timer = Mock()
+    actions._dynamic_ev_state[entry.entry_id] = {vehicle: {
+        "active": True,
+        "current_amps": 32,
+        "last_start_command_at": now - timedelta(minutes=10),
+        "cancel_timer": cancel_timer,
+        "transport_recovery_pending": pending,
+        "params": {
+            "owner_mode": "scheduled",
+            "charger_type": "tesla",
+        },
+    }}
+    if takeover:
+        async def read_power_after_manual_takeover(*args):
+            nonlocal lease
+            lease = claim_ev_ownership(hass, entry, vehicle, owner_mode="manual")
+            return 0.0, True
+
+        monkeypatch.setattr(actions, "_get_observed_ev_power_reading_kw", read_power_after_manual_takeover)
+
+    assert asyncio.run(actions._release_stopped_scheduled_tesla(hass, entry, vehicle)) is release
+    assert (vehicle in actions._dynamic_ev_state.get(entry.entry_id, {})) is not release
+    assert get_ev_ownership(hass, entry, vehicle)[1] is (None if release else lease)
+    assert cancel_timer.call_count == int(release)
+    physical_stop.assert_not_awaited()
 
 
 @pytest.mark.parametrize("recovered", [False, True])
