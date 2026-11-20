@@ -12230,6 +12230,8 @@ async def stop_solar_surplus_ev_charging(
                     "vehicle_id": vehicle_id,
                     "stop_charging": True,
                     "stop_reason": reason,
+                    "_expected_state": state,
+                    "_automatic_solar_disable": True,
                 },
             )
             all_stopped = bool(stopped) and all_stopped
@@ -15053,6 +15055,7 @@ async def _dynamic_ev_update_surplus(
                 "stop_charging": True,
                 "stop_reason": "Solar Surplus disabled for this vehicle",
                 "_expected_state": state,
+                "_automatic_solar_disable": True,
             },
         )
         return
@@ -20417,6 +20420,53 @@ async def _action_start_ev_charging_dynamic_locked(
     return True
 
 
+async def _waiting_solar_tesla_is_stopped(hass, entry, vehicle_id, state, params):
+    """Prove that a waiting Solar Surplus session has no Tesla charge to stop."""
+    from ..tesla_ev_observation import MAX_SOURCE_AGE_SECONDS, get_tesla_vehicle_observation
+    from ..tesla_ev_recovery import ev_recovery_status, get_vehicle_route
+
+    def still_waiting():
+        return (
+            state.get("active") is True
+            and state.get("charging_started") is False
+            and state.get("current_amps") == state.get("target_amps") == 0
+            and not any(state.get(key) for key in (
+                "last_physical_restart_attempt_at", "last_start_command_at",
+                "transport_recovery_pending", "stop_outcome", "external_manual_override",
+            ))
+        )
+
+    if params.get("charger_type", "tesla") != "tesla" or not still_waiting():
+        return False
+    route = get_vehicle_route(hass, entry, vehicle_id)
+    if route is None:
+        if _get_ev_config(entry)["ev_provider"] != EV_PROVIDER_FLEET_API:
+            return False
+    elif route.get("kind") != "ha" or route.get("cleanup_only"):
+        return False
+
+    entity = await _tesla_ha_command_entity(hass, entry, {**params, "vehicle_vin": vehicle_id}, "stop")
+    if not entity or not still_waiting() or get_vehicle_route(hass, entry, vehicle_id) != route:
+        return False
+    if ev_recovery_status(hass, entry, vehicle_id).get("recovery_required") is not False:
+        return False
+    binding = _tesla_native_binding(hass, entity, vehicle_id)
+    identity = _tesla_native_binding_identity(binding)
+    if not identity or identity["platform"] != "tesla_fleet":
+        return False
+    observed = get_tesla_vehicle_observation(hass, vehicle_id, preferred_entity_id=entity)
+    return (
+        observed is not None
+        and (observed.vin, observed.domain, observed.config_entry_id, observed.device_id)
+        == (binding[1], identity["platform"], identity["config_entry_id"], identity["device_id"])
+        and 0 <= time.time() - observed.source_charge_timestamp <= MAX_SOURCE_AGE_SECONDS
+        and str(observed.charge_state).lower() in {"stopped", "complete", "disconnected", "nopower"}
+        and all(type(value) in (int, float) and value == 0 for value in (
+            observed.charger_actual_current, observed.charger_power,
+        ))
+    )
+
+
 @guard_ev_control
 async def _action_stop_ev_charging_dynamic(
     hass: HomeAssistant,
@@ -20569,6 +20619,16 @@ async def _action_stop_ev_charging_dynamic(
                     vid,
                     away_location,
                 )
+            elif (
+                params.get("_automatic_solar_disable") is True
+                and state_owner == "solar_surplus"
+                and state is not None
+            ):
+                try:
+                    if await _waiting_solar_tesla_is_stopped(hass, config_entry, vid, state, state_params):
+                        passive_vehicle_ids.add(vid)
+                except Exception:
+                    _LOGGER.debug("Could not verify the waiting Tesla is stopped", exc_info=True)
 
         if state is not None and not session_matches(vid, state):
             replaced_vehicle_ids.add(vid)

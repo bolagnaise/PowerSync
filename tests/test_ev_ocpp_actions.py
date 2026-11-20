@@ -7059,6 +7059,106 @@ def test_solar_surplus_disable_preserves_manual_solar_policy(monkeypatch):
     assert lease["owner_mode"] == "manual_solar_surplus"
 
 
+@pytest.mark.parametrize(
+    ("scenario", "expect_physical_stop"),
+    [
+        ("waiting", False),
+        ("start_attempted", True),
+        ("unknown_route", True),
+        ("unresolved_history", True),
+        ("observation_error", True),
+        ("stale", True),
+        ("wrong_producer", True),
+        ("missing_current", True),
+        ("nonzero_power", True),
+    ],
+)
+@pytest.mark.parametrize("disable", ["global", "vehicle"])
+def test_solar_surplus_disable_releases_only_verified_idle_tesla(
+    monkeypatch, scenario, expect_physical_stop, disable,
+):
+    from power_sync import tesla_ev_observation, tesla_ev_recovery
+    from power_sync.automations import ev_ownership
+
+    vehicle_id = "LRW3F7FS1NC484342"
+    charge_switch = "switch.test_tesla_charge"
+    entry = _Entry()
+    hass = _Hass([_State(charge_switch, "off")])
+    _install_native_ha_writer(hass, vehicle_id, charge_switch)
+    binding = actions._tesla_native_binding_identity(
+        actions._tesla_native_binding(hass, charge_switch, vehicle_id)
+    )
+    assert binding is not None
+    now = datetime.now(timezone.utc)
+    cancel_timer = Mock()
+    state = {
+        "active": True,
+        "current_amps": 0,
+        "target_amps": 0,
+        "charging_started": False,
+        "cancel_timer": cancel_timer,
+        "params": {
+            "owner_mode": "solar_surplus",
+            "dynamic_mode": "solar_surplus",
+            "charger_type": "tesla",
+            "vehicle_vin": vehicle_id,
+            "notify_on_complete": False,
+        },
+    }
+    if scenario == "start_attempted":
+        state["last_physical_restart_attempt_at"] = now - timedelta(seconds=5)
+    monkeypatch.setitem(actions._dynamic_ev_state, entry.entry_id, {vehicle_id: state})
+    ev_ownership.claim_ev_ownership(hass, entry, vehicle_id, owner_mode="solar_surplus")
+
+    route = {"kind": "ha", "entity_id": charge_switch, "entity_identity": binding}
+    if scenario == "unknown_route":
+        route = {**route, "kind": "blocked", "reason": "native_recovery"}
+    monkeypatch.setattr(tesla_ev_recovery, "get_vehicle_route", Mock(return_value=route))
+    monkeypatch.setattr(tesla_ev_recovery, "ev_recovery_status", Mock(return_value={
+        "recovery_required": scenario == "unresolved_history",
+    }))
+    monkeypatch.setattr(actions, "_tesla_ha_command_entity", AsyncMock(return_value=charge_switch))
+    monkeypatch.setattr(actions, "_tesla_vehicle_away_location", AsyncMock(return_value=None))
+    observed_device_id = (
+        "different-fleet-device" if scenario == "wrong_producer" else binding["device_id"]
+    )
+    observation = tesla_ev_observation.TeslaVehicleObservation(
+        vin=vehicle_id,
+        domain="tesla_fleet",
+        config_entry_id=binding["config_entry_id"],
+        device_id=observed_device_id,
+        producer_identity=f"tesla_fleet:{binding['config_entry_id']}:{observed_device_id}:{vehicle_id}",
+        source_charge_timestamp=(now - timedelta(seconds=900 if scenario == "stale" else 1)).timestamp(),
+        charge_state="Stopped",
+        charger_actual_current=None if scenario == "missing_current" else 0,
+        charger_power=1 if scenario == "nonzero_power" else 0,
+        charge_limit_soc=70,
+        requested_current=16,
+    )
+    observe = Mock(return_value=observation)
+    if scenario == "observation_error":
+        observe.side_effect = RuntimeError("cache unavailable")
+    monkeypatch.setattr(tesla_ev_observation, "get_tesla_vehicle_observation", observe)
+    physical_stop = AsyncMock(return_value=True)
+    monkeypatch.setattr(actions, "_action_stop_ev_charging", physical_stop)
+
+    if disable == "global":
+        assert asyncio.run(actions.stop_solar_surplus_ev_charging(hass, entry)) is True
+    else:
+        monkeypatch.setattr(actions, "_solar_surplus_vehicle_opted_out", lambda *args: True)
+        asyncio.run(actions._dynamic_ev_update_surplus(hass, entry, entry.entry_id, vehicle_id))
+    assert vehicle_id not in actions._dynamic_ev_state.get(entry.entry_id, {})
+    assert vehicle_id not in ev_ownership.get_ev_ownerships(hass, entry)
+    cancel_timer.assert_called_once_with()
+    if expect_physical_stop:
+        physical_stop.assert_awaited_once()
+        assert physical_stop.await_args.args[2]["vehicle_vin"] == vehicle_id
+    else:
+        physical_stop.assert_not_awaited()
+        assert observe.call_args.args == (hass, vehicle_id)
+        assert observe.call_args.kwargs["preferred_entity_id"] == charge_switch
+
+
 def test_direct_ev_start_action_can_skip_ownership(monkeypatch):
     async def fake_start(*args, **kwargs):
         return True
