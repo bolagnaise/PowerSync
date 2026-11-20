@@ -1505,6 +1505,58 @@ def _ev_power_observed_at(state: Any) -> datetime | None:
     ) or _ev_observed_at(getattr(state, "last_updated", None))
 
 
+def _wall_connector_display_currents(hass) -> dict[str, float]:
+    """Return actual current from a fresh local meter for an exact VIN."""
+    from .automations.actions import (
+        _exact_tesla_wall_connector_vehicle_associations,
+        _phase_current_state_amps,
+        _tesla_wall_connector_serial,
+    )
+    from .ev_load import is_current_ev_power_observation
+
+    entity_registry = er.async_get(hass)
+    device_registry = dr.async_get(hass)
+    meters: dict[str, list[tuple[float, float]]] = {}
+    for state in hass.states.async_all("sensor"):
+        entity = entity_registry.entities.get(state.entity_id)
+        if (
+            getattr(entity, "platform", None) != "tesla_wall_connector"
+            or getattr(entity, "disabled_by", None) is not None
+        ):
+            continue
+        if (
+            getattr(entity, "translation_key", None) != "vehicle_current_a"
+            and not re.search(r"_vehicle_current(?:_\d+)?$", state.entity_id)
+        ):
+            continue
+        observed_at = _ev_power_observed_at(state)
+        if observed_at is None or not is_current_ev_power_observation(observed_at):
+            continue
+        current, _, _ = _phase_current_state_amps(state)
+        if current is None or current <= 0.5 or str(state.state).lstrip().startswith("-"):
+            continue
+        device = device_registry.async_get(entity.device_id)
+        serial = _tesla_wall_connector_serial(device)
+        if serial:
+            meters.setdefault(serial, []).append((current, observed_at.timestamp()))
+
+    if not meters:
+        return {}
+    associations = _exact_tesla_wall_connector_vehicle_associations(
+        hass, entity_registry, device_registry,
+    )
+    currents = {}
+    for vin, association in associations.items():
+        connected_at = association["connected_observed_at"]
+        samples = meters.get(association["serial"], ())
+        if len(samples) != 1 or connected_at is None:
+            continue
+        current, observed_at = samples[0]
+        if observed_at >= connected_at:
+            currents[vin] = current
+    return currents
+
+
 _TESLA_CONNECTIVITY_RANK = {"online": 2, "asleep": 1, "offline": 0}
 
 
@@ -22179,9 +22231,10 @@ class EVLoadpointStatusView(HomeAssistantView):
             solar_config = get_stored_solar_surplus_config(entry_data)
 
             observed_vehicles = []
+            wall_connector_currents = _wall_connector_display_currents(self._hass)
             for vehicle in _get_ev_vehicles_status(self._hass, self._config_entry):
                 vehicle_id = vehicle.get("vehicle_id")
-                observed_vehicles.append({
+                observation = {
                     "vehicle_id": vehicle_id,
                     "vehicle_name": vehicle.get("vehicle_name"),
                     "bridge_vehicle_id": vehicle.get("bridge_vehicle_id"),
@@ -22214,7 +22267,17 @@ class EVLoadpointStatusView(HomeAssistantView):
                         vehicle_ids_match(configured_id, vehicle_id)
                         for configured_id in configured_vehicle_ids
                     ),
-                })
+                }
+                if (
+                    observation["current_amps"] is None
+                    and observation["is_charging"]
+                    and observation["site_presence"] != "away"
+                    and observation["power_available"] is not False
+                ):
+                    observation["current_amps"] = wall_connector_currents.get(
+                        str(vehicle_id).strip().upper()
+                    )
+                observed_vehicles.append(observation)
 
             zaptec_cached = entry_data.get("zaptec_cached_state")
             if zaptec_cached:
