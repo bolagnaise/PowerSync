@@ -17076,7 +17076,7 @@ def _tesla_wall_connector_identities_by_serial(
     return identified_vins, identity_entities
 
 
-_WALL_CONNECTOR_RECENT_SESSION_AGE = timedelta(minutes=3)
+_WALL_CONNECTOR_RECENT_UNPLUG_AGE = timedelta(minutes=3)
 
 
 @dataclass
@@ -17084,7 +17084,6 @@ class _TeslaWallConnectorSession:
     serial: str
     binding: tuple[str, str | None, str | None, str | None]
     connected_since: datetime
-    connected_at: datetime
     unplugged_since: datetime | None = None
     unsubscribe: Callable[[], None] | None = None
 
@@ -17124,7 +17123,7 @@ def _observe_wall_connector_session(
         if (
             old_state and old_state.state == "on" and old_state.last_changed == session.connected_since
             and new_state and new_state.state == "off"
-            and new_state.last_changed > session.connected_at
+            and new_state.last_changed > session.connected_since
         ):
             session.unplugged_since = new_state.last_changed
         else:
@@ -17159,8 +17158,11 @@ def _fresh_wall_connector_unplugged_at(
     session_key = "_tesla_wall_connector_recent_sessions"
     recent_sessions = runtime.get(session_key, {}) if runtime is not None else {}
     session = recent_sessions.get(vin)
-    if session and not is_current_ev_power_observation(
-        session.connected_at, max_age=_WALL_CONNECTOR_RECENT_SESSION_AGE
+    if (
+        session and session.unplugged_since is not None
+        and not is_current_ev_power_observation(
+            session.unplugged_since, max_age=_WALL_CONNECTOR_RECENT_UNPLUG_AGE
+        )
     ):
         _forget_wall_connector_session(recent_sessions, vin)
         session = None
@@ -17205,11 +17207,6 @@ def _fresh_wall_connector_unplugged_at(
     if session and binding != session.binding:
         _forget_wall_connector_session(recent_sessions, vin)
         session = None
-    connector_reported_at = (
-        getattr(state, "last_reported", None) or getattr(state, "last_updated", None)
-    )
-    if not is_current_ev_power_observation(connector_reported_at):
-        return None
     changed_at = getattr(state, "last_changed", None)
     if state.state == "on":
         if session and changed_at != session.connected_since:
@@ -17217,31 +17214,38 @@ def _fresh_wall_connector_unplugged_at(
             session = None
         vin_acquired_at = identified_vins.get(serial, {}).get(vin)
         if (
-            isinstance(changed_at, datetime) and vin_acquired_at is not None
-            and changed_at <= vin_acquired_at <= connector_reported_at
+            not session and runtime is not None and hasattr(entry, "async_on_unload")
+            and isinstance(changed_at, datetime) and vin_acquired_at is not None
+            and changed_at <= vin_acquired_at <= datetime.now(dt_timezone.utc)
         ):
             # Keep only a VIN acquired during this observed local plug episode.
-            # The connector's state-change event must witness its next unplug.
-            if session:
-                session.connected_at = connector_reported_at
-            elif runtime is not None and hasattr(entry, "async_on_unload"):
-                if session_key not in runtime:
-                    runtime[session_key] = recent_sessions
+            # Native binary sensors may stay available without republishing ON.
+            if session_key not in runtime:
+                runtime[session_key] = recent_sessions
 
-                    def clear_sessions():
-                        for previous_vin in tuple(recent_sessions):
-                            _forget_wall_connector_session(recent_sessions, previous_vin)
+                def clear_sessions():
+                    for previous_vin in tuple(recent_sessions):
+                        _forget_wall_connector_session(recent_sessions, previous_vin)
 
-                    entry.async_on_unload(clear_sessions)
-                _observe_wall_connector_session(
-                    hass, recent_sessions, vin,
-                    _TeslaWallConnectorSession(serial, binding, changed_at, connector_reported_at),
-                    identity_entities[serial],
-                )
+                entry.async_on_unload(clear_sessions)
+            _observe_wall_connector_session(
+                hass, recent_sessions, vin,
+                _TeslaWallConnectorSession(serial, binding, changed_at),
+                identity_entities[serial],
+            )
         return None
-    if state.state != "off" or (not matches and not (
+    if state.state != "off":
+        return None
+    connector_reported_at = (
+        getattr(state, "last_reported", None) or getattr(state, "last_updated", None)
+    )
+    observed_unplug = (
         session and session.unplugged_since is not None and changed_at == session.unplugged_since
-    )):
+        and is_current_ev_power_observation(
+            connector_reported_at, max_age=_WALL_CONNECTOR_RECENT_UNPLUG_AGE
+        )
+    )
+    if not observed_unplug and not (matches and is_current_ev_power_observation(connector_reported_at)):
         return None
     disconnected_since = (
         changed_at if isinstance(changed_at, datetime) and changed_at <= connector_reported_at

@@ -5172,6 +5172,7 @@ def test_plug_detection_uses_fresh_exact_wall_connector_unplug_readback(
     ("transition", "veto"),
     (
         ("unplug", True),
+        ("edge_only_report", True),
         ("expired", False),
         ("unobserved", False),
         ("replacement_vin", False),
@@ -5243,6 +5244,10 @@ def test_solar_start_veto_when_tesla_clears_connector_vin_before_cable_off(
     monkeypatch.setattr(_ha_event, "async_track_state_change_event", subscribe, raising=False)
     if transition == "vin_from_old_episode":
         fleet_state.last_changed = local_state.last_changed - timedelta(seconds=1)
+    if transition == "edge_only_report":
+        # The native coordinator's binary sensor may publish only on a change,
+        # including when Tesla's VIN arrives a few seconds after the ON edge.
+        local_state.last_reported = local_state.last_changed
     if transition != "unobserved":
         assert actions._fresh_wall_connector_unplugged_at(hass, entry, vin) is None
 
@@ -5250,7 +5255,7 @@ def test_solar_start_veto_when_tesla_clears_connector_vin_before_cable_off(
         assert len(on_unload) == 1
         on_unload[0]()
 
-    clock += timedelta(seconds=181 if transition == "expired" else 110)
+    clock += timedelta(minutes=30) if transition == "edge_only_report" else timedelta(seconds=210)
     if transition == "intervening_vin":
         fleet_state.state = other_vin
         dispatch(fleet, None, fleet_state)
@@ -5259,7 +5264,10 @@ def test_solar_start_veto_when_tesla_clears_connector_vin_before_cable_off(
         emit("on", "unavailable", clock - timedelta(seconds=80))
     if transition == "registry_rebind":
         hass.entity_registry.entities[local].config_entry_id = "rebound"
-    emit(local_state.state, "off", clock - timedelta(seconds=75))
+    unplug_age = {"edge_only_report": 105, "expired": 181}.get(transition, 75)
+    emit(local_state.state, "off", clock - timedelta(seconds=unplug_age))
+    if transition == "edge_only_report":
+        local_state.last_reported = local_state.last_changed
     if transition == "intervening_plug_cycle":
         emit("off", "on", clock - timedelta(seconds=50))
         emit("on", "off", clock - timedelta(seconds=31))
