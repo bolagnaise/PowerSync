@@ -13,6 +13,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from conftest import pin_power_sync_clock
+
 
 ROOT = Path(__file__).resolve().parent.parent / "custom_components"
 
@@ -3286,7 +3288,7 @@ def test_loadpoint_display_uses_measured_current_for_exact_wall_connector(
     import json
 
     power_sync = _power_sync_module()
-    from power_sync.automations.actions import _dynamic_ev_state
+    actions = importlib.import_module("power_sync.automations.actions")
     monkeypatch.setattr(power_sync, "_configured_sigenergy_charger_state", lambda entry: None)
 
     vin = "5YJTEST0000000001"
@@ -3363,8 +3365,9 @@ def test_loadpoint_display_uses_measured_current_for_exact_wall_connector(
         "reason": "Surplus: 10.4kW, Allocated: 10.4kW, Battery: 58%, Target: 32A",
         "params": {"charger_type": "tesla", "vehicle_vin": vin, "voltage": 240, "phases": 1},
     }
-    monkeypatch.setitem(_dynamic_ev_state, _Entry.entry_id, {vin: state})
-    response = asyncio.run(power_sync.EVLoadpointStatusView(hass, _Entry())._async_build_response(None))
+    monkeypatch.setitem(actions._dynamic_ev_state, _Entry.entry_id, {vin: state})
+    with pin_power_sync_clock(power_sync, actions, utcnow=lambda: now):
+        response = asyncio.run(power_sync.EVLoadpointStatusView(hass, _Entry())._async_build_response(None))
     payload = json.loads(response.body)
     assert payload["success"] is True, payload
     row = next(row for row in payload["loadpoints"] if row["vehicle_id"] == vin)
