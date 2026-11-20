@@ -12177,7 +12177,9 @@ def test_scheduled_tesla_only_releases_fresh_stopped_zero_draw_session(
 
 
 @pytest.mark.parametrize("recovered", [False, True])
-def test_solar_recovery_retries_with_possible_load_and_unavailable_telemetry(monkeypatch, recovered):
+def test_solar_recovery_retries_with_possible_load_and_unavailable_telemetry(
+    monkeypatch, caplog, recovered,
+):
     """An unknown Start must reach recovery even while its possible amps stay reserved."""
     vehicle_id = "VIN123"
     hass = _Hass([
@@ -12216,6 +12218,8 @@ def test_solar_recovery_retries_with_possible_load_and_unavailable_telemetry(mon
         assert not state.get("transport_recovery_pending")
     else:
         assert state["transport_recovery_pending"]
+        assert "Tesla Start is waiting for fresh charging-state confirmation" in caplog.text
+        assert "Failed to send start charging command" not in caplog.text
         assert state["current_amps"] >= 14
         assert set_calls == []
         # A 30s update must not spin another expensive recovery request.

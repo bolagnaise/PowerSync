@@ -16089,6 +16089,13 @@ async def _dynamic_ev_update_surplus(
                         await _solar_surplus_switch_to_next_vehicle(
                             hass, config_entry, entry_id, vehicle_id, params
                         )
+                    elif (
+                        params.get("charger_type", "tesla") == "tesla"
+                        and state.get("transport_recovery_pending")
+                    ):
+                        _LOGGER.warning(
+                            "⚡ Solar surplus EV: Tesla Start is waiting for fresh charging-state confirmation"
+                        )
                     else:
                         _LOGGER.warning("⚡ Solar surplus EV: Failed to send start charging command")
                     return
