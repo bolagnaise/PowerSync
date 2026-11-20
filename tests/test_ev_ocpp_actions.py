@@ -7071,6 +7071,9 @@ def test_solar_surplus_disable_preserves_manual_solar_policy(monkeypatch):
         ("wrong_producer", True),
         ("missing_current", True),
         ("nonzero_power", True),
+        ("newer_exact_draw", True),
+        ("older_exact_draw", False),
+        ("other_vehicle_draw", False),
     ],
 )
 @pytest.mark.parametrize("disable", ["global", "vehicle"])
@@ -7109,6 +7112,13 @@ def test_solar_surplus_disable_releases_only_verified_idle_tesla(
         state["last_physical_restart_attempt_at"] = now - timedelta(seconds=5)
     monkeypatch.setitem(actions._dynamic_ev_state, entry.entry_id, {vehicle_id: state})
     ev_ownership.claim_ev_ownership(hass, entry, vehicle_id, owner_mode="solar_surplus")
+    if scenario in {"newer_exact_draw", "older_exact_draw", "other_vehicle_draw"}:
+        observed_vehicle = "LRW3F7FS1NC484343" if scenario == "other_vehicle_draw" else vehicle_id
+        measured_at = now - timedelta(seconds=3) if scenario == "older_exact_draw" else now
+        hass.data["power_sync"][entry.entry_id]["tesla_coordinator"] = SimpleNamespace(data={
+            "ev_power_fallback_by_physical_key": {f"vehicle:{observed_vehicle.lower()}": 4.2},
+            "last_update": measured_at,
+        })
 
     route = {"kind": "ha", "entity_id": charge_switch, "entity_identity": binding}
     if scenario == "unknown_route":

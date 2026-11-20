@@ -20455,7 +20455,7 @@ async def _waiting_solar_tesla_is_stopped(hass, entry, vehicle_id, state, params
     if not identity or identity["platform"] != "tesla_fleet":
         return False
     observed = get_tesla_vehicle_observation(hass, vehicle_id, preferred_entity_id=entity)
-    return (
+    if not (
         observed is not None
         and (observed.vin, observed.domain, observed.config_entry_id, observed.device_id)
         == (binding[1], identity["platform"], identity["config_entry_id"], identity["device_id"])
@@ -20464,7 +20464,13 @@ async def _waiting_solar_tesla_is_stopped(hass, entry, vehicle_id, state, params
         and all(type(value) in (int, float) and value == 0 for value in (
             observed.charger_actual_current, observed.charger_power,
         ))
+    ):
+        return False
+    physical = _tesla_physical_charging_snapshot(
+        hass, entry, vehicle_id, params,
+        updated_after=datetime.fromtimestamp(observed.source_charge_timestamp, dt_timezone.utc),
     )
+    return not physical["fresh_measurements"]
 
 
 @guard_ev_control
