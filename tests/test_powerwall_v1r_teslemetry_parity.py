@@ -411,7 +411,7 @@ async def test_missing_common_api_response_is_reported_in_diagnostics():
 @pytest.mark.parametrize("slow_stage", [
     "dcq", "dcq_then_fresh", "dcq_then_revoked", "dcq_near_deadline",
     "config", "event_loop", "signing", "submission_then_fresh", "submission_revoked",
-    "submission_deadline", "dcq_then_submission_stale", "none",
+    "submission_deadline", "renewal_window_budget", "dcq_then_submission_stale", "none",
 ])
 async def test_local_renewal_timing_preserves_freshness_fences(monkeypatch, caplog, slow_stage):
     dispatch = importlib.import_module(f"{_LOCAL_PKG}.battery_dispatch")
@@ -463,6 +463,8 @@ async def test_local_renewal_timing_preserves_freshness_fences(monkeypatch, capl
         else:
             if slow_stage in ("none", "submission_then_fresh", "submission_revoked") and name == "config" and reads[name] == 1:
                 advance_with_responsive_loop(4.9)
+            if slow_stage == "renewal_window_budget" and name == "config":
+                advance_with_responsive_loop(1.2)
             fast_read_finished.set()
         return data
 
@@ -522,7 +524,7 @@ async def test_local_renewal_timing_preserves_freshness_fences(monkeypatch, capl
     )
     controller._mode, controller._target = "charge", 300
     controller._target_basis = "battery_output"
-    controller._deadline = 122 if slow_stage == "dcq_near_deadline" else 700
+    controller._deadline = {"dcq_near_deadline": 122, "renewal_window_budget": 116}.get(slow_stage, 700)
     controller._release = AsyncMock()
 
     async def stop_after_acknowledgement(_watts, _seconds):
@@ -535,6 +537,12 @@ async def test_local_renewal_timing_preserves_freshness_fences(monkeypatch, capl
     if slow_stage in ("none", "dcq_then_fresh", "submission_then_fresh"):
         assert controller.completion_reason == "timeout" and controller._last_watts == -300
         post.assert_called_once()
+    elif slow_stage == "renewal_window_budget":
+        assert controller.completion_reason == "timeout"
+        post.assert_not_called()
+        transport._session.assert_not_awaited()
+        controller.persist.assert_not_awaited()
+        assert all(record.levelno < 40 for record in caplog.records)
     else:
         assert controller.completion_reason == "safety_refused"
         post.assert_not_called()
@@ -563,7 +571,7 @@ async def test_local_renewal_timing_preserves_freshness_fences(monkeypatch, capl
         assert [effect["status"] for effect in site.snapshot()["effects"]] == ["not_submitted", "returned"]
         assert reads == {"dcq": 2, "config": 2}
         assert "pre_submission_age=5.100s" in trace and "pre_submission_age=0.000s" in trace
-    elif slow_stage in ("submission_revoked", "submission_deadline"):
+    elif slow_stage in ("submission_revoked", "submission_deadline", "renewal_window_budget"):
         assert reads == {"dcq": 1, "config": 1}
     elif slow_stage == "dcq_then_submission_stale":
         assert reads == {"dcq": 2, "config": 2}

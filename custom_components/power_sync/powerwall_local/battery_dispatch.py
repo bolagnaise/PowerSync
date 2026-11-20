@@ -25,6 +25,10 @@ class DispatchCommandFailed(Exception):
     """Local access/command failed; fallback is safe only after release."""
 
 
+class _DispatchWindowExpired(ValueError):
+    """The dispatch window cannot fit another power request."""
+
+
 class _StaleRenewalTelemetry(ValueError):
     """Telemetry expired before any watts request was submitted."""
 
@@ -763,7 +767,7 @@ class LocalBatteryDispatch:
             raise ValueError("Local dispatch blocked by control ownership or safety policy")
         remaining = min(LEASE_SECONDS, (math.floor if self._target_basis == "battery_output" else math.ceil)(self._deadline - time.monotonic()) - (FIXED_SIGNATURE_BUDGET_SECONDS if self._target_basis == "battery_output" else 0))
         if remaining < 1:
-            raise ValueError("Local dispatch window expired")
+            raise _DispatchWindowExpired("Local dispatch window expired")
 
         async def write(target):
             # Recheck after the network-envelope await and before the command.
@@ -775,7 +779,7 @@ class LocalBatteryDispatch:
                 raise ValueError("Local dispatch telemetry aged out before command")
             remaining = min(LEASE_SECONDS, (math.floor if self._target_basis == "battery_output" else math.ceil)(self._deadline - time.monotonic()) - (FIXED_SIGNATURE_BUDGET_SECONDS if self._target_basis == "battery_output" else 0))
             if remaining < 1:
-                raise ValueError("Local dispatch window expired before command")
+                raise _DispatchWindowExpired("Local dispatch window expired before command")
             current_config = dict(self.config())
             if self._snapshot_check is not None:
                 self._snapshot_check(snapshot, observed_at)
@@ -864,10 +868,14 @@ class LocalBatteryDispatch:
         except asyncio.CancelledError:
             raise
         except Exception as err:
-            self.completion_reason = "target_reached" if getattr(err, "code", None) == "battery_target_reached" else "safety_refused"
-            if self.completion_reason == "target_reached":
+            if isinstance(err, _DispatchWindowExpired):
+                self.completion_reason = "timeout"
+                _LOGGER.info("Powerwall local dispatch window exhausted; releasing lease")
+            elif getattr(err, "code", None) == "battery_target_reached":
+                self.completion_reason = "target_reached"
                 _LOGGER.info("Powerwall battery target reached; releasing lease")
             else:
+                self.completion_reason = "safety_refused"
                 _LOGGER.exception("Powerwall local dispatch renewal stopped; releasing lease")
             # Retry release only; never renew power after a failed cycle.
             for attempt in range(3):

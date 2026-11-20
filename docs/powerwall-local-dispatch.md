@@ -248,6 +248,10 @@ once more before requesting power. This includes fixed-output renewals that age
 out during final submission checks. The new read must pass all safety checks
 within the original control window. If it cannot, PowerSync releases the lease.
 
+When the remaining dispatch window is too short for a new signed request,
+PowerSync ends the renewal and releases the lease. The end of the window is
+reported as a timeout.
+
 The paired Powerwall Force Power slider has a stable range. The live charge
 input and grid export limits are shown in its state attributes and still apply
 during operation.
