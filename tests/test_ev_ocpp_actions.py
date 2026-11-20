@@ -10081,6 +10081,70 @@ def test_dynamic_update_clears_unplugged_ble_session(monkeypatch):
     )
 
 
+@pytest.mark.parametrize(
+    ("confirmed", "owner_mode", "same_entry", "reconciled"),
+    [
+        (True, "price_level_opportunity", True, True),
+        (False, "price_level_opportunity", True, False),
+        (True, "solar_surplus", True, False),
+        (True, "price_level_opportunity", False, False),
+    ],
+)
+def test_evac_unplug_cleanup_notifies_only_its_price_level_executor(
+    monkeypatch, confirmed, owner_mode, same_entry, reconciled,
+):
+    hass = _Hass([])
+    entry = _Entry()
+    vehicle_id = "sigenergy_charger"
+    planner = types.ModuleType("power_sync.automations.ev_charging_planner")
+    planner.is_ev_plugged_in = AsyncMock(return_value=False)
+    observed = object() if confirmed else None
+    controller = types.SimpleNamespace(
+        read_state=AsyncMock(return_value=observed), disconnect=AsyncMock(),
+    )
+    create_controller = Mock(return_value=controller)
+    monkeypatch.setattr(actions, "_new_sigenergy_charger", create_controller)
+    planner._is_disconnected_sigenergy_evac = lambda state: state is not None
+    reconcile = Mock()
+    planner.get_price_level_executor = lambda: types.SimpleNamespace(
+        hass=hass, config_entry=entry if same_entry else _Entry(),
+        reconcile_evac_unplug=reconcile,
+    )
+    monkeypatch.setitem(sys.modules, planner.__name__, planner)
+    params = {
+        "charger_type": "sigenergy", "owner_mode": owner_mode,
+        "sigenergy_charger_host": "192.0.2.10", "sigenergy_charger_port": 1502,
+        "sigenergy_charger_slave_id": 7, "sigenergy_charger_type": "evac",
+    }
+    state = {"active": True, "params": params}
+    monkeypatch.setattr(
+        actions, "_dynamic_ev_state", {entry.entry_id: {vehicle_id: state}},
+    )
+
+    async def unplug():
+        return await actions._clear_ble_dynamic_session_if_unplugged(
+            hass, entry, vehicle_id, params, expected_state=state,
+        )
+
+    assert not asyncio.run(unplug())
+    reconcile.assert_not_called()
+    cleaned_up = confirmed or owner_mode != "price_level_opportunity"
+    assert asyncio.run(unplug())
+    assert bool(actions._dynamic_ev_state) is not cleaned_up
+    if owner_mode == "price_level_opportunity":
+        create_controller.assert_called_once_with({
+            "host": "192.0.2.10", "port": 1502, "slave_id": 7, "charger_type": "evac",
+        })
+        controller.read_state.assert_awaited_once()
+    else:
+        create_controller.assert_not_called()
+    assert hass.services.calls == []
+    if reconciled:
+        reconcile.assert_called_once_with(vehicle_id)
+    else:
+        reconcile.assert_not_called()
+
+
 def test_dynamic_update_keeps_plugged_ble_session(monkeypatch):
     ev_planner = types.ModuleType("power_sync.automations.ev_charging_planner")
 

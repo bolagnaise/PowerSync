@@ -2251,19 +2251,7 @@ async def _read_sigenergy_charger_power_kw(
     if hass is None or str(params.get("charger_type") or "").lower() != "sigenergy":
         return None
 
-    config = _sigenergy_charger_config(config_entry, params)
-    if not config.get("host"):
-        return None
-
-    controller = _new_sigenergy_charger(config)
-    try:
-        state = await controller.read_state()
-    except Exception as err:
-        _LOGGER.debug("Solar surplus EV: Sigenergy charger power read failed: %s", err)
-        return None
-    finally:
-        await controller.disconnect()
-
+    state = await _read_dynamic_sigenergy_charger_state(config_entry, params)
     if state is None or state.power_kw is None:
         return None
     try:
@@ -2271,6 +2259,23 @@ async def _read_sigenergy_charger_power_kw(
     except (TypeError, ValueError):
         return None
 
+
+async def _read_dynamic_sigenergy_charger_state(
+    config_entry: ConfigEntry, params: Dict[str, Any],
+) -> Any:
+    """Read the same Sigenergy endpoint used by the dynamic session."""
+    config = _sigenergy_charger_config(config_entry, params)
+    if not config.get("host"):
+        return None
+
+    controller = _new_sigenergy_charger(config)
+    try:
+        return await controller.read_state()
+    except Exception as err:
+        _LOGGER.debug("Dynamic EV: Sigenergy charger state read failed: %s", err)
+        return None
+    finally:
+        await controller.disconnect()
 
 async def _wake_tesla_ev(
     hass: HomeAssistant,
@@ -12696,8 +12701,9 @@ async def _clear_ble_dynamic_session_if_unplugged(
     ``state["consecutive_unplugged"]`` in the dynamic-session dict. A single
     unplugged read (which may just be a momentary cloud-telemetry gap) keeps the
     session; a plugged read resets the counter. BLE sessions (local plug read)
-    keep the original clear-on-first-read behavior. Returns True only on the
-    cycle that actually clears the session.
+    keep the original clear-on-first-read behavior. Return True when the
+    update must stop, including when the final EVAC check is inconclusive
+    and cleanup must wait for fresh evidence.
     """
     vehicle_vin = _dynamic_ev_vehicle_vin(vehicle_id, params)
     is_ble = bool(vehicle_vin) and str(vehicle_vin).startswith("ble_")
@@ -12744,19 +12750,41 @@ async def _clear_ble_dynamic_session_if_unplugged(
             )
             return False
 
+    from .ev_ownership import owner_family
+
+    price_level_evac = (
+        params.get("charger_type") == "sigenergy"
+        and params.get("sigenergy_charger_type", "evac") == "evac"
+        and owner_family(params.get("owner_mode")) == "price_level"
+    )
+    if price_level_evac:
+        from .ev_charging_planner import _is_disconnected_sigenergy_evac
+
+        read_started = datetime.now(dt_timezone.utc)
+        observed = await _read_dynamic_sigenergy_charger_state(config_entry, params)
+        if not (
+            is_current_ev_power_observation(read_started)
+            and _is_disconnected_sigenergy_evac(observed)
+        ):
+            return True
+        if _dynamic_ev_state.get(config_entry.entry_id, {}).get(vehicle_id) is not state:
+            return True
+
     _LOGGER.info(
         "⚡ Dynamic EV: clearing stale session for %s because vehicle is not "
         "plugged in",
         vehicle_id,
     )
+    stop_params = {
+        "vehicle_id": vehicle_id,
+        "stop_charging": False,
+        "stop_reason": "vehicle unplugged",
+    }
+    if price_level_evac:
+        stop_params["_expected_state"] = state
+        stop_params["_confirmed_evac_unplug"] = True
     await _action_stop_ev_charging_dynamic(
-        hass,
-        config_entry,
-        {
-            "vehicle_id": vehicle_id,
-            "stop_charging": False,
-            "stop_reason": "vehicle unplugged",
-        },
+        hass, config_entry, stop_params,
     )
     return True
 
@@ -20807,6 +20835,17 @@ async def _action_stop_ev_charging_dynamic(
             )
             released_vehicle_ids.add(vid)
             del vehicles[vid]
+            if (
+                not stop_charging
+                and params.get("_confirmed_evac_unplug")
+                and state_params.get("charger_type") == "sigenergy"
+                and owner_family(state_owner) == "price_level"
+            ):
+                from .ev_charging_planner import get_price_level_executor
+
+                executor = get_price_level_executor()
+                if executor and executor.hass is hass and executor.config_entry is config_entry:
+                    executor.reconcile_evac_unplug(vid)
             _LOGGER.info(f"⚡ Dynamic EV charging stopped for {vid}")
 
     # Clean up entry if no vehicles remain

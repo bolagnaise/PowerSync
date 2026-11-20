@@ -10529,3 +10529,76 @@ def test_sigenergy_unplugged_price_level_releases_only_confirmed_ev_ac_hold(
             asyncio.run(executor.evaluate_all_vehicles(45))
             assert entry_data["scheduled_ev_preserve_state"]["active"] is True
             assert entry_data["scheduled_ev_preserve_state"]["source"] == "scheduled_charging"
+
+
+@pytest.mark.parametrize(("status", "power_kw", "expected"), [
+    ("a1_a2", 0.0, True),
+    ("b1", 0.0, False),
+    ("a1_a2", 1.0, False),
+    ("a1_a2", None, False),
+    (None, None, False),
+])
+def test_sigenergy_evac_unplug_confirmation_requires_explicit_readback(
+    status, power_kw, expected,
+):
+    observation = None if status is None else SimpleNamespace(
+        charger_type="evac", status=status, power_kw=power_kw,
+        is_connected=status != "a1_a2", is_charging=False, is_discharging=False,
+    )
+    assert ev_planner._is_disconnected_sigenergy_evac(observation) is expected
+
+
+def test_sigenergy_price_level_restarts_for_next_ev_after_unplug_cleanup(
+    monkeypatch, fake_actions,
+):
+    hass = _FakeHass(price_settings={
+        "recovery_soc": 0,
+        "recovery_price_cents": 1,
+        "opportunity_price_cents": 1,
+    })
+    entry = SimpleNamespace(entry_id="entry-1", data={}, options={
+        "sigenergy_charger_enabled": True,
+        "sigenergy_charger_type": "evac",
+    })
+    loadpoint_id = "sigenergy_charger"
+    entry_data = hass.data["power_sync"][entry.entry_id]
+    monkeypatch.setattr(ev_planner, "discover_all_tesla_vehicles", _no_vehicles)
+    monkeypatch.setattr(ev_planner, "get_ev_location", AsyncMock(return_value="home"))
+    plugged = AsyncMock(return_value=False)
+    monkeypatch.setattr(ev_planner, "_read_sigenergy_charger_plugged_state", plugged)
+    fake_actions._action_start_ev_charging_dynamic = AsyncMock(return_value=True)
+    fake_actions._action_stop_ev_charging_dynamic = AsyncMock()
+    executor = ev_planner.PriceLevelChargingExecutor(hass, entry)
+    executor._get_ev_soc = AsyncMock(return_value=None)
+    state = executor._get_or_create_vehicle_state(loadpoint_id)
+    state.is_charging = True
+    state.charging_mode = "price_level_opportunity"
+    sessions = fake_actions._dynamic_ev_state.setdefault(entry.entry_id, {})
+    sessions[loadpoint_id] = {
+        "active": True,
+        "params": {"owner_mode": "price_level_opportunity"},
+    }
+    entry_data["observed_sigenergy_charger_state"] = SimpleNamespace(
+        charger_type="evac", status="a1_a2", power_kw=0,
+        is_connected=False, is_charging=False, is_discharging=False,
+    )
+    entry_data["observed_sigenergy_charger_state_at"] = datetime.now(timezone.utc)
+
+    asyncio.run(executor.evaluate_all_vehicles(0))
+    assert state.is_charging
+    # The next EV can connect before another evaluation sees an unplugged EVSE.
+    del sessions[loadpoint_id]
+    executor.reconcile_evac_unplug(loadpoint_id)
+    fake_actions._action_start_ev_charging_dynamic.assert_not_awaited()
+    fake_actions._action_stop_ev_charging_dynamic.assert_not_awaited()
+
+    plugged.return_value = True
+    entry_data["observed_sigenergy_charger_state"] = SimpleNamespace(
+        charger_type="evac", status="b1", power_kw=0,
+        is_connected=True, is_charging=False, is_discharging=False,
+    )
+    result = asyncio.run(executor.evaluate_all_vehicles(0))
+    assert result[loadpoint_id][0]
+    fake_actions._action_start_ev_charging_dynamic.assert_awaited_once()
+    assert fake_actions._action_start_ev_charging_dynamic.await_args.args[2]["vehicle_id"] == loadpoint_id
+    fake_actions._action_stop_ev_charging_dynamic.assert_not_awaited()

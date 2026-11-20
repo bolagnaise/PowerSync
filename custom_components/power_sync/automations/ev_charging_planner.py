@@ -10365,6 +10365,11 @@ def _has_current_disconnected_sigenergy_evac(
         entry_data.get("observed_sigenergy_charger_state_at")
     ):
         return False
+    return _is_disconnected_sigenergy_evac(observed)
+
+
+def _is_disconnected_sigenergy_evac(observed: Any) -> bool:
+    """Require explicit EVAC disconnection with no contradictory power or status."""
     try:
         power_kw = float(getattr(observed, "power_kw", None))
     except (TypeError, ValueError):
@@ -11621,6 +11626,15 @@ class PriceLevelChargingExecutor:
                 )
         await self.apply_preserve_home_battery(preserve_charging, reason)
         return decision
+
+    def reconcile_evac_unplug(self, loadpoint_id: str) -> None:
+        """Retire this executor's flag after verified dynamic unplug cleanup."""
+        state = self._vehicle_states.get(loadpoint_id)
+        if state and not state.start_pending and not state.stop_pending:
+            state.is_charging = False
+            state.charging_mode = ""
+            state.last_decision = "unplugged"
+            state.last_decision_reason = "Vehicle not plugged in"
 
     def _has_current_non_tesla_charge(self, loadpoint_id: str) -> bool:
         """Read exact configured charger telemetry; switch-on is not delivered power."""

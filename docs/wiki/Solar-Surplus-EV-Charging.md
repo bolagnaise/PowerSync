@@ -73,6 +73,10 @@ an away report blocks the request.
 
 Scheduled charging with no grid import holds its rate while the home battery keeps measured grid flow within the configured tolerance. Small fluctuations inside that tolerance do not reduce the rate repeatedly. Inverter capacity limits and reductions for grid imports above tolerance still apply.
 
+### Price Level charging on a shared Sigenergy AC charger
+
+After PowerSync confirms the first EV was unplugged and ends its charging session, it evaluates the next EV connected to that charger against the current Price Level settings. You can leave Price Level enabled between cars.
+
 ### Zaptec and Price Level charging
 
 When Price Level is enabled, **PowerSync controls charging** applies your price limit to Zaptec-authenticated starts too. **Allow hands-off external charging** leaves those sessions alone until unplugged. Pending PowerSync commands retain battery protection until fresh, valid charger readings confirm the outcome; completed charging releases that session's protection without repeated starts. See the [EV charging guide](https://github.com/bolagnaise/PowerSync/blob/main/docs/ev-charging.md#zaptec-price-level-charging).
