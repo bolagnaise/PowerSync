@@ -18,6 +18,11 @@ off by default on installations without a saved Solar Surplus setting and is
 unavailable while automation storage is not ready. Configure your EVs and
 chargers before enabling it.
 
+In the mobile app, use **Solar Charging** in a vehicle's charging settings to
+include that vehicle in automatic Solar Surplus. Turning it off ends the
+vehicle's Solar Surplus session on the next control update. Check the vehicle
+or charger power reading to confirm charging has stopped.
+
 ```yaml
 action: switch.turn_on
 target:
