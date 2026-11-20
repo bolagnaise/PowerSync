@@ -35,6 +35,10 @@ Re-enable it with the same action and `enabled: true`. Check battery charge both
 
 These actions change the mode's saved eligibility, not the physical charger directly. Scheduled Charging, Price Level and Smart Schedule apply changes on the normal EV evaluation cycle. Solar Surplus also uses its existing disable cleanup. Enabling a mode does not force a charging start, and disabling one mode does not disable other eligible charging modes. A successful action confirms the setting was saved, not that the charger physically stopped. Monitoring Mode and existing ownership and provider safeguards still apply.
 
+## Site import limits during EV charging
+
+From v2.12.1766, Dynamic EV reads Smart Optimization’s **Maximum grid import** on each charging control cycle. Changing or clearing that setting takes effect during the active session. Independent site and charger limits still apply. With no configured site limit, battery-target charging uses a 12.5 kW fallback.
+
 ## EV SoC sensors with OCPP
 
 In the integration's **EV Charging** options, set **EV battery SoC sensor** and, optionally, **Fallback EV battery SoC sensor** to percentage sensors for the same car. These existing fields also work with a single OCPP charger; leave **Enable generic charger** off when OCPP controls it. Previously saved sensor choices are reused.
