@@ -1679,6 +1679,54 @@ def _latest_ev_site_presence(
     return presence, observed_at
 
 
+def _exact_native_ev_site_presence(hass, vehicle_vin: str | None) -> str | None:
+    """Resolve explicit location reports from native Tesla devices for one VIN."""
+    vin = str(vehicle_vin or "").strip().upper()
+    if not re.fullmatch(r"[A-HJ-NPR-Z0-9]{17}", vin):
+        return None
+
+    native_sources = {
+        (device.id, identifier[0])
+        for device in iter_device_entries(dr.async_get(hass))
+        for identifier in device.identifiers
+        if len(identifier) >= 2
+        and identifier[0] in TESLA_INTEGRATIONS
+        and str(identifier[1]).upper() == vin
+    }
+    if not native_sources:
+        return None
+
+    now = datetime.now(timezone.utc)
+    future_home = False
+    observations = []
+    for entity in er.async_get(hass).entities.values():
+        source = (entity.device_id, getattr(entity, "platform", None))
+        if source not in native_sources or getattr(entity, "disabled_by", None):
+            continue
+        entity_id = entity.entity_id.lower()
+        if re.fullmatch(r"device_tracker\..*_location(?:_\d+)?", entity_id):
+            state = hass.states.get(entity.entity_id)
+            presence = _ev_tracker_site_presence(state)
+        elif re.fullmatch(r"binary_sensor\..*_located_at_home(?:_\d+)?", entity_id):
+            state = hass.states.get(entity.entity_id)
+            presence = {"on": "home", "off": "away"}.get(getattr(state, "state", None))
+        else:
+            continue
+        if presence is None:
+            continue
+        observed_at = _ev_observed_at(getattr(state, "last_updated", None))
+        if observed_at is not None and observed_at > now:
+            if presence == "home":
+                future_home = True
+                continue
+            observed_at = None
+        observations.append((presence, observed_at))
+
+    presence, _ = _latest_ev_site_presence(observations)
+    # A future home report alone cannot fall through to legacy unknown handling.
+    return presence or ("unavailable" if future_home else None)
+
+
 def _site_vehicle_candidates(vehicles: list[dict]) -> list[dict]:
     """Return one onsite candidate per physical vehicle identity."""
     grouped: dict[str, list[dict]] = {}
@@ -17468,9 +17516,12 @@ class EVVehicleCommandView(HomeAssistantView):
         return await self._wait_for_vehicle_awake(vehicle_vin, timeout=30)
 
     async def _is_vehicle_at_home(self, vehicle_vin: str | None = None) -> bool:
-        """Check if vehicle is at home using binary_sensor or device_tracker."""
-        # First try: binary_sensor.*_located_at_home (Teslemetry)
-        # This is the most reliable method
+        """Check native location before falling back to legacy provider lookup."""
+        site_presence = _exact_native_ev_site_presence(self._hass, vehicle_vin)
+        if site_presence is not None:
+            return site_presence == "home"
+
+        # Preserve legacy lookup and unknown handling when no exact report exists.
         home_entity = await self._get_tesla_ev_entity(r"binary_sensor\..*_located_at_home$", vehicle_vin)
         if home_entity:
             state = self._hass.states.get(home_entity)

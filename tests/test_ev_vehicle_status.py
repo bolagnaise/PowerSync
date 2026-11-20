@@ -5494,6 +5494,90 @@ def test_manual_start_uses_healthy_suffixed_provider_for_same_vehicle(monkeypatc
     assert asyncio.run(view._is_vehicle_at_home(other_vin)) is False
 
 
+@pytest.mark.parametrize(
+    ("home_state", "tracker_state", "home_offset", "site_presence", "ready"),
+    [
+        pytest.param("off", "home", -60, "home", True, id="stale-away"),
+        pytest.param("on", "not_home", -60, "away", False, id="stale-home"),
+        pytest.param("on", "not_home", 0, "away", False, id="tied-away"),
+        pytest.param("on", "not_home", 60, "home", False, id="future-home-with-away"),
+        pytest.param("on", "unavailable", 60, "home", False, id="lone-future-home"),
+        pytest.param("unavailable", "not_home", -60, "away", False, id="sole-away"),
+        pytest.param("unavailable", "unknown", -60, None, True, id="legacy-unknown"),
+    ],
+)
+def test_manual_start_uses_current_exact_vin_site_presence(
+    monkeypatch, home_state, tracker_state, home_offset, site_presence, ready
+):
+    power_sync = _power_sync_module()
+    actions = importlib.import_module("power_sync.automations.actions")
+    monkeypatch.setattr(actions, "dr", power_sync.dr)
+    monkeypatch.setattr(actions, "er", power_sync.er)
+    vin, other_vin = "5YJTEST0000000001", "5YJTEST0000000002"
+    observed_at = datetime.now(timezone.utc) - timedelta(seconds=5)
+    devices = {
+        name: SimpleNamespace(id=name, name=name, identifiers={(provider, identity)})
+        for name, provider, identity in [
+            ("fleet", "tesla_fleet", vin),
+            ("teslemetry", "teslemetry", vin),
+            ("other", "teslemetry", other_vin),
+        ]
+    }
+    observations = [
+        ("fleet", "device_tracker.car_location", tracker_state, observed_at),
+        ("fleet", "binary_sensor.car_charge_cable", "on", observed_at),
+        (
+            "teslemetry",
+            "binary_sensor.car_located_at_home_2",
+            home_state,
+            observed_at + timedelta(seconds=home_offset),
+        ),
+        (
+            "other",
+            "device_tracker.other_location",
+            "home",
+            observed_at + timedelta(seconds=1),
+        ),
+    ]
+    entry = _Entry()
+    hass = _Hass(
+        [
+            _State(entity_id, state, last_updated=updated_at)
+            for _, entity_id, state, updated_at in observations
+        ],
+        {
+            entity_id: SimpleNamespace(
+                entity_id=entity_id,
+                device_id=device,
+                domain=entity_id.split(".", 1)[0],
+                platform=next(iter(devices[device].identifiers))[0],
+            )
+            for device, entity_id, _, _ in observations
+        },
+        devices,
+        entry_data={
+            "tesla_coordinator": SimpleNamespace(data={
+                "wall_connectors_raw": [{
+                    "wall_connector_state": 11,
+                    "wall_connector_power": 0,
+                    "vin": vin,
+                }],
+                "last_update": observed_at + timedelta(seconds=2),
+            }),
+        },
+        config_entries=[entry],
+    )
+
+    vehicles = power_sync._get_ev_vehicles_status(hass, entry)
+    vehicle = next(vehicle for vehicle in vehicles if vehicle["vehicle_id"] == vin)
+    assert vehicle.get("site_presence") == site_presence
+
+    view = power_sync.EVVehicleCommandView(hass)
+    assert asyncio.run(
+        view._loadpoint_ready_for_manual_start(vin, {"charger_type": "tesla"})
+    ) == (ready, "" if ready else "Vehicle is not at home")
+
+
 def test_manual_start_cannot_borrow_other_vehicles_ble_plug_cache():
     power_sync = _power_sync_module()
     vin, other_vin = "5YJTEST0000000001", "5YJTEST0000000002"
