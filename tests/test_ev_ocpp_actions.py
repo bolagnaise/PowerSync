@@ -9654,6 +9654,129 @@ def test_dynamic_update_restarts_stopped_tesla_with_stale_commanded_amps(
     assert state["charging_started"] is True
 
 
+@pytest.mark.parametrize(
+    "evidence, should_restart",
+    [
+        ("stale_fleet", True),
+        ("conflicting_fleet", False),
+        ("positive_draw", False),
+        ("stale_stopped", False),
+        ("other_vehicle", False),
+        ("no_draw_reading", False),
+        ("start_not_settled", False),
+        ("writable_limit_only", False),
+    ],
+)
+def test_smart_schedule_restart_with_duplicate_tesla_providers(
+    monkeypatch, evidence, should_restart,
+):
+    vehicle_id = "5YJTEST00000000R4"
+    other_vehicle_id = "5YJTEST00000000R5"
+    now = datetime.now(timezone.utc)
+    monkeypatch.setattr(actions.dt_util, "utcnow", lambda: now)
+    started_at = now - timedelta(minutes=5)
+    if evidence == "start_not_settled":
+        started_at = now - timedelta(seconds=30)
+    fleet_at = (
+        now - timedelta(seconds=10)
+        if evidence == "conflicting_fleet" else now - timedelta(minutes=4)
+    )
+    stopped_at = (
+        now - timedelta(minutes=2)
+        if evidence == "stale_stopped" else now - timedelta(seconds=15)
+    )
+    fleet = SimpleNamespace(id="fleet", identifiers={("tesla_fleet", vehicle_id)})
+    teslemetry = SimpleNamespace(
+        id="teslemetry",
+        identifiers={(
+            "teslemetry",
+            other_vehicle_id if evidence == "other_vehicle" else vehicle_id,
+        )},
+    )
+    states = [
+        _State(
+            "sensor.car_charging", "charging", last_updated=fleet_at, last_reported=now,
+        ),
+        _State("sensor.car_charging_2", "stopped", last_updated=stopped_at),
+    ]
+    if evidence not in {"no_draw_reading", "writable_limit_only"}:
+        states.append(_State(
+            "sensor.car_charger_power_2", "0", {"unit_of_measurement": "kW"},
+            last_updated=now - timedelta(seconds=10),
+        ))
+    if evidence == "writable_limit_only":
+        states.append(_State(
+            "number.car_charge_current_2", "0", {"unit_of_measurement": "A"},
+            last_updated=now - timedelta(seconds=5),
+        ))
+    if evidence == "positive_draw":
+        states.append(_State(
+            "sensor.car_charger_current", "16", {"unit_of_measurement": "A"},
+            last_updated=now - timedelta(seconds=5),
+        ))
+    hass = _Hass(
+        states,
+        registry_entities={
+            sample.entity_id: SimpleNamespace(
+                entity_id=sample.entity_id,
+                device_id=teslemetry.id if sample.entity_id.endswith("_2") else fleet.id,
+            )
+            for sample in states
+        },
+        registry_devices={fleet.id: fleet, teslemetry.id: teslemetry},
+    )
+    entry = _Entry()
+    status_entity = asyncio.run(actions._get_tesla_ev_entity(
+        hass, r"sensor\..*_(?:charging|charging_state)(?:_\d+)?$", vehicle_id,
+    ))
+    assert status_entity == "sensor.car_charging"
+    state = {
+        "active": True,
+        "charging_started": True,
+        "current_amps": 32,
+        "target_amps": 32,
+        "last_start_command_at": started_at,
+        "params": {
+            "dynamic_mode": "battery_target",
+            "owner_mode": "smart_schedule",
+            "charger_type": "tesla",
+            "vehicle_vin": vehicle_id,
+            "tesla_charging_state_entity": status_entity,
+            "reserve_battery_charge": False,
+            "min_charge_amps": 1,
+            "max_charge_amps": 32,
+            "target_battery_charge_kw": 0,
+            "max_grid_import_kw": 12.5,
+            "voltage": 230,
+            "phases": 1,
+        },
+    }
+    actions._dynamic_ev_state[entry.entry_id] = {vehicle_id: state}
+    start_calls = AsyncMock(return_value=True)
+    rate_calls = AsyncMock(return_value=True)
+    monkeypatch.setattr(actions, "_action_start_ev_charging", start_calls)
+    monkeypatch.setattr(actions, "_set_vehicle_amps", rate_calls)
+    monkeypatch.setattr(actions, "_release_dynamic_tesla_if_away", AsyncMock(return_value=False))
+    monkeypatch.setattr(actions, "_clear_ble_dynamic_session_if_unplugged", AsyncMock(return_value=False))
+    monkeypatch.setattr(actions, "_refresh_dynamic_tesla_charger_capability", AsyncMock(return_value=True))
+    monkeypatch.setattr(actions, "_get_tesla_live_status", AsyncMock(return_value={
+        "battery_power": 0, "grid_power": 0, "solar_power": 0,
+        "load_power": 0, "ev_power": 0, "battery_soc": 50,
+    }))
+    monkeypatch.setattr(actions, "_optimizer_planned_ev_charge_kw", lambda *args, **kwargs: 7.36)
+
+    asyncio.run(actions._dynamic_ev_update(hass, entry, entry.entry_id, vehicle_id))
+
+    if should_restart:
+        start_calls.assert_awaited_once()
+        rate_calls.assert_awaited_once()
+        start_params = start_calls.await_args.args[2]
+        assert start_params["vehicle_vin"] == vehicle_id
+        assert start_params["amps"] == 32
+    else:
+        start_calls.assert_not_awaited()
+
+
 @pytest.mark.parametrize("deadline", [False, True])
 def test_dynamic_multi_tesla_restarts_only_stopped_owned_loadpoint(monkeypatch, deadline):
     """Two Wall Connector sessions reconcile their own VIN telemetry."""

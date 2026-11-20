@@ -1486,6 +1486,65 @@ async def _restart_owned_tesla(hass, entry, vehicle_id, state, amps):
     return bool(success)
 
 
+def _has_fresh_tesla_stop_evidence(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    vehicle_id: str,
+    params: Dict[str, Any],
+    started_at: Optional[datetime],
+) -> bool:
+    """Resolve a conflicting charging flag using the same VIN's fresh telemetry."""
+    at = dt_util.utcnow()
+    charging_observations: list[tuple[bool, Optional[float]]] = []
+    zero_draw_timestamps: list[float] = []
+    for entity_id in _tesla_start_confirmation_entity_ids(
+        hass, config_entry, vehicle_id, params,
+    ):
+        if not entity_id.startswith("sensor."):
+            continue
+        sample = hass.states.get(entity_id)
+        # A provider can repeatedly publish its cached value. Compare the
+        # state update time across sources, ignoring repeated HA reports.
+        observed_at = getattr(sample, "last_updated", None) or getattr(
+            sample, "last_changed", None,
+        )
+        if not is_current_ev_power_observation(observed_at, at=at) or (
+            started_at is not None and not _datetime_is_after(observed_at, started_at)
+        ):
+            continue
+        timestamp = _tesla_connection_observation_timestamp(sample)
+        if timestamp is None:
+            continue
+
+        if re.search(r"_(?:charging|charging_state|charge_state)(?:_\d+)?$", entity_id):
+            value = str(sample.state or "").strip().lower()
+            if value not in {"", "unknown", "unavailable", "none"}:
+                charging_observations.append((value == "stopped", timestamp))
+        elif re.search(
+            r"_(?:charger_current|charge_current|charging_current|charger_actual_current)(?:_\d+)?$",
+            entity_id,
+        ):
+            amps, error, _age = _phase_current_state_amps(sample)
+            if error is None:
+                if amps > 0.5:
+                    return False
+                zero_draw_timestamps.append(timestamp)
+        elif re.search(r"_(?:charger_power|charge_power|charging_power)(?:_\d+)?$", entity_id):
+            power_kw, available = _power_state_kw_reading(sample)
+            if available and float(sample.state) >= 0:
+                if power_kw > _ACTIVE_EV_POWER_EPSILON_KW:
+                    return False
+                zero_draw_timestamps.append(timestamp)
+
+    stopped, stopped_at = _reconcile_tesla_connection_observations(charging_observations)
+    if stopped is not True or stopped_at is None:
+        return False
+    return any(
+        timestamp >= stopped_at - TESLA_CONNECTION_CONFLICT_FRESHNESS_SECONDS
+        for timestamp in zero_draw_timestamps
+    )
+
+
 async def _reconcile_stopped_smart_schedule_tesla(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
@@ -1528,19 +1587,26 @@ async def _reconcile_stopped_smart_schedule_tesla(
             or params.get("charger_status_entity")
         ),
     )
-    if observed_amps is None or observed_amps > 0.5 or charging_state != "stopped":
+    if observed_amps is not None and observed_amps > 0.5:
         return False
-
+    if observed_amps is None or charging_state != "stopped":
+        if (
+            charging_state != "charging"
+            or not _is_explicit_tesla_vin(vehicle_id)
+            or not _has_fresh_tesla_stop_evidence(
+                hass, config_entry, vehicle_id, params, state.get("last_start_command_at"),
+            )
+        ):
+            return False
     state["physical_restart_required"] = True
     state["current_amps"] = 0
     state["target_amps"] = 0
     state["charging_started"] = False
     _LOGGER.warning(
-        "Dynamic EV: Tesla %s reports stopped at %.1fA while the Smart "
-        "Schedule controller still holds a %sA command; restarting the "
-        "active deadline session",
+        "Dynamic EV: Tesla %s reports stopped with near-zero draw while "
+        "Smart Schedule still holds a %sA command. Rechecking eligibility "
+        "for a restart.",
         vehicle_id,
-        observed_amps,
         current_amps,
     )
     return True
