@@ -60,6 +60,10 @@ During charging, Solar Surplus tracks the current it sent after Home
 Assistant's Tesla current limit. If that limit rises and surplus still
 supports a higher current, PowerSync can request the increase.
 
+When Tesla Fleet and Teslemetry report different locations for the same car,
+manual charging checks the newest report. If equally recent reports disagree,
+an away report blocks the request.
+
 ### Battery-powered charging near zero grid flow
 
 Scheduled charging with no grid import holds its rate while the home battery keeps measured grid flow within the configured tolerance. Small fluctuations inside that tolerance do not reduce the rate repeatedly. Inverter capacity limits and reductions for grid imports above tolerance still apply.
