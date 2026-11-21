@@ -426,7 +426,7 @@ def _reconcile_ev_sources_to_schedule(
 
     return sources
 
-# Try to import the HiGHS solver; fall back to greedy if unavailable.
+# HiGHS is required for an executable economic plan in Home Assistant.
 try:
     import highspy
 
@@ -435,8 +435,7 @@ except ImportError:
     HIGHS_AVAILABLE = False
     highspy = None
     _LOGGER.warning(
-        "highspy not available — using greedy fallback optimizer. "
-        "Install highspy for optimal LP-based scheduling."
+        "highspy not available — LP-based scheduling is unavailable."
     )
 
 
@@ -940,6 +939,7 @@ class OptimizerResult:
     future_export_protection_floor_slots: list[float] | None = None
     free_import_command_slots: list[bool] = field(default_factory=list)
     solar_curtailment_w: list[float] | None = None
+    degraded: bool = False
 
 
 class BatteryOptimizer:
@@ -966,7 +966,9 @@ class BatteryOptimizer:
         horizon_hours: int = 48,
         terminal_weight: float = 1.0,
         target_charge_power_supported: bool = True,
+        allow_greedy_fallback: bool = True,
     ):
+        self.allow_greedy_fallback = allow_greedy_fallback
         self.capacity_wh = capacity_wh
         self.max_charge_w = max_charge_w
         self.max_discharge_w = max_discharge_w
@@ -1540,6 +1542,29 @@ class BatteryOptimizer:
         fallback_details = {"fallback_reason": "highs_unavailable"}
         suppressed_export_slots: set[int] = set()
 
+        def _native_fallback(stats: dict[str, Any]) -> OptimizerResult:
+            hold = self._solve_self_consumption_hold(
+                n_steps, import_prices, export_prices, solar_forecast,
+                load_forecast, current_soc, cost_function,
+                export_bonus_prices=export_bonus_prices,
+                export_bonus_cap_kwh=export_bonus_cap_kwh,
+                import_bonus_prices=import_bonus_prices,
+                import_bonus_cap_kwh=import_bonus_cap_kwh,
+                schedule_timestamps=schedule_timestamps,
+                ev_plan=ev_plan,
+            )
+            hold.lp_stats = stats
+            return hold
+
+        def _finish(result: OptimizerResult) -> OptimizerResult:
+            result.solve_time_s = time.monotonic() - start_time
+            result.modeled_backup_reserve = modeled_backup_reserve
+            result.modeled_export_reserve_floor = modeled_export_reserve_floor
+            result.modeled_export_reserve_floor_slots = (
+                modeled_export_reserve_floor_slots
+            )
+            return result
+
         def _micro_export_slots(result: OptimizerResult) -> list[int]:
             if cost_neutral_plan is None:
                 return []
@@ -1641,6 +1666,8 @@ class BatteryOptimizer:
                                 ev_plan,
                                 price_valid_slots,
                             )
+                            if not self.allow_greedy_fallback and not result.feasible:
+                                return result
                             small_slots = _micro_export_slots(result)
                             if not small_slots or micro_pass == 3:
                                 break
@@ -1692,7 +1719,11 @@ class BatteryOptimizer:
                         if isinstance(account_for_planned_imports, dict)
                         else account_for_planned_imports
                     )
-                    if seeded_plan is not None and not all_days_account_for_imports:
+                    if (
+                        seeded_plan is not None
+                        and not all_days_account_for_imports
+                        and (self.allow_greedy_fallback or result.feasible)
+                    ):
                         # A clipped zero cap or negative fixed balance must
                         # first produce a safe static-cap plan. Required imports
                         # in that emitted plan may then reopen only the uncovered
@@ -1772,6 +1803,8 @@ class BatteryOptimizer:
                                 account_for_planned_imports,
                             )
                             reconciliation_iterations += 1
+                            if not self.allow_greedy_fallback and not result.feasible:
+                                break
                     if cost_neutral_plan is not None:
                         baseline_caps = {
                             day: round(cap, 6)
@@ -1790,22 +1823,24 @@ class BatteryOptimizer:
                         result.lp_stats[
                             "cost_neutral_reconciliation_iterations"
                         ] = reconciliation_iterations
-                    result.solve_time_s = time.monotonic() - start_time
-                    result.modeled_backup_reserve = modeled_backup_reserve
-                    result.modeled_export_reserve_floor = modeled_export_reserve_floor
-                    result.modeled_export_reserve_floor_slots = (
-                        modeled_export_reserve_floor_slots
-                    )
-                    return result
+                    if (
+                        not self.allow_greedy_fallback
+                        and (not result.feasible or result.solver_used != "highs")
+                        and not result.degraded
+                    ):
+                        result = _native_fallback(result.lp_stats)
+                    return _finish(result)
                 except Exception as e:
-                    _LOGGER.error(f"LP solver failed, falling back to greedy: {e}")
+                    _LOGGER.error("Battery optimizer solver failed: %s", e)
                     fallback_details = {
                         "fallback_reason": "lp_exception",
                         "error": type(e).__name__,
                         "message": str(e),
                     }
 
-            # Greedy fallback
+            if not self.allow_greedy_fallback:
+                return _finish(_native_fallback(fallback_details))
+
             result = self._solve_greedy(
                 n_steps,
                 import_prices,
@@ -1839,13 +1874,7 @@ class BatteryOptimizer:
             )
             result.lp_stats.update(fallback_details)
             result = _finish_micro_exports(result, cost_neutral_plan)
-            result.solve_time_s = time.monotonic() - start_time
-            result.modeled_backup_reserve = modeled_backup_reserve
-            result.modeled_export_reserve_floor = modeled_export_reserve_floor
-            result.modeled_export_reserve_floor_slots = (
-                modeled_export_reserve_floor_slots
-            )
-            return result
+            return _finish(result)
         finally:
             if export_reserve_floor is not None:
                 self.export_reserve_floor = previous_export_floor
@@ -6421,9 +6450,9 @@ class BatteryOptimizer:
                 )
             else:
                 _LOGGER.warning("LP solver status: %s", result.message)
-            if (
-                "infeasible" in result.message.lower()
-                and not any(mode is not None for mode in manual_control_slots)
+            infeasible = "infeasible" in result.message.lower()
+            if not self.allow_greedy_fallback or (
+                infeasible and not any(mode is not None for mode in manual_control_slots)
             ):
                 # The LP could not be satisfied with the real backup-reserve
                 # floor. Rather than relaxing that floor to 5% and re-solving
@@ -6434,10 +6463,11 @@ class BatteryOptimizer:
                 # drops below the genuine reserve.
                 if not projection_pass:
                     _LOGGER.warning(
-                        "LP infeasible — holding in self-consumption: battery "
-                        "serves home load and charges from solar only (no grid "
-                        "export/charge), drawing down to the hardware reserve "
-                        "floor as the inverter would natively",
+                        "%s — holding in self-consumption: battery serves home "
+                        "load and charges from solar only (no grid export/charge), "
+                        "drawing down to the hardware reserve floor as the inverter "
+                        "would natively",
+                        "LP infeasible" if infeasible else "LP plan unavailable",
                     )
                 hold = self._solve_self_consumption_hold(
                     n, import_prices, export_prices, solar, load, soc_0, cost_function,
@@ -6454,7 +6484,12 @@ class BatteryOptimizer:
                     disable_idle=disable_idle,
                     ev_plan=ev_plan,
                 )
-                hold.lp_stats = {**lp_stats, "fallback_reason": "infeasible_self_consumption_hold"}
+                hold.lp_stats = {
+                    **lp_stats,
+                    "fallback_reason": (
+                        "infeasible_self_consumption_hold" if infeasible else "solver_failed"
+                    ),
+                }
                 return hold
             # Fall back to greedy
             greedy = self._solve_greedy(
@@ -7020,6 +7055,14 @@ class BatteryOptimizer:
         eff = self.efficiency
         cap = self.capacity_kwh
         dt = self.dt_hours
+        degraded = not self.allow_greedy_fallback
+        if degraded:
+            # Native operation authorizes no economic battery command or
+            # planned EV dispatch. Dedicated EV modes keep their own control.
+            allow_grid_charge = False
+            disable_idle = True
+            block_battery_charge = None
+            ev_plan = None
         # The coordinator blanks its EV load overlay whenever it hands the
         # solver an ev_plan, because the LP models the car as a decision
         # variable. This hold has no such variable, so without folding the car
@@ -7140,13 +7183,15 @@ class BatteryOptimizer:
             soc = max(self_consumption_floor, min(1.0, soc))
 
         load = [base + extra for base, extra in zip(house_load, ev_load_kw)]
-        free_import_command_slots = self._quota_backed_free_import_command_slots(
-            import_prices,
-            import_bonus_prices,
-            import_bonus_cap_kwh,
-            solar,
-            load,
-        )
+        free_import_command_slots = []
+        if not degraded:
+            free_import_command_slots = self._quota_backed_free_import_command_slots(
+                import_prices,
+                import_bonus_prices,
+                import_bonus_cap_kwh,
+                solar,
+                load,
+            )
         schedule = self._build_schedule(
             n, grid_import, grid_export, battery_charge, battery_discharge,
             solar, house_load, soc_0, import_prices,
@@ -7201,6 +7246,7 @@ class BatteryOptimizer:
             solver_used="self_consumption_hold",
             # Fallback solve: never let Auto-Apply ratchet the reserve off this.
             feasible=False,
+            degraded=degraded,
             grid_import_w=[v * 1000 for v in grid_import],
             grid_export_w=[v * 1000 for v in grid_export],
             reserve_recommendation={},
@@ -10466,7 +10512,10 @@ class BatteryOptimizer:
         _suppress_micro_exports: bool = True,
     ) -> OptimizerResult:
         """Make result flows and economics describe the final emitted schedule."""
-        if result.lp_stats.get("ev_sources_reconciled_to_schedule") is False:
+        if (
+            getattr(result, "degraded", False)
+            or result.lp_stats.get("ev_sources_reconciled_to_schedule") is False
+        ):
             # A later coordinator overlay cannot re-authorize a rejected plan.
             return result
 

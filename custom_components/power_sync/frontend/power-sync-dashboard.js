@@ -2941,7 +2941,8 @@ class PsPlanCard extends PsCardBase {
       hasBonusCap ? `<span class="chip"><span>Super Export bonus cap</span><b class="num">${psFix(bonusCap)} kWh/day</b></span>` : '',
       Number.isFinite(Number(data.predicted_cost)) ? `<span class="chip"><span>Cost today</span><b class="num">${psEsc(psMoney(hass, data.predicted_cost))}</b></span>` : '',
       Number.isFinite(Number(data.predicted_savings)) && Number(data.predicted_savings) > 0 ? `<span class="chip gr"><span>Saved today</span><b class="num">${psEsc(psMoney(hass, data.predicted_savings))}</b></span>` : '',
-      data.is_stale || data.optimization_status === 'stale' ? '<span class="chip am"><span>Plan</span><b>Out of date</b></span>' : '',
+      data.is_stale || data.optimization_status === 'stale' ? '<span class="chip am"><span>Plan</span><b>Out of date</b></span>'
+        : data.optimization_status === 'degraded' ? '<span class="chip am"><span>Plan</span><b>Optimizer degraded</b></span>' : '',
     ].join('');
 
     // Upcoming charge and export windows.

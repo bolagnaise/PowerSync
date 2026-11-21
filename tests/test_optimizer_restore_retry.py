@@ -699,6 +699,49 @@ def test_successful_self_consumption_restore_advances_marker(opt_module):
     asyncio.run(_run())
 
 
+@pytest.mark.parametrize("source", ["optimizer", "user"])
+@pytest.mark.parametrize("planned_action", ["charge", "export"])
+def test_degraded_plan_restores_optimizer_force_and_respects_manual_force(
+    opt_module, source, planned_action,
+):
+    from unittest.mock import AsyncMock
+
+    battery = SimpleNamespace(
+        restore_normal=AsyncMock(return_value=True),
+        set_self_consumption_mode=AsyncMock(return_value=True),
+        force_charge=AsyncMock(return_value=True),
+        force_discharge=AsyncMock(return_value=True),
+    )
+    coordinator = _execute_coordinator(opt_module, battery)
+    coordinator._last_optimizer_result = SimpleNamespace(degraded=True)
+    coordinator.price_coordinator = type("OctopusPriceCoordinator", (), {
+        "last_update_success": False,
+        "data": {"revision": "new"},
+    })()
+    coordinator._octopus_schedule_revision = "old"
+    state = {
+        "active": True, "source": source, "type": "discharge",
+        "scope": source, "power_w": 12000,
+    }
+    coordinator._optimizer_force_state = dict(state) if source == "optimizer" else None
+    coordinator._get_active_force_state = lambda: state
+    coordinator._optimizer_force_discharge_commitment_remaining = lambda *_: None
+    action = _self_consumption_action()
+    action.action = planned_action
+    action.power_w = 12600.0
+
+    asyncio.run(coordinator._execute_optimizer_action(action))
+
+    battery.force_charge.assert_not_awaited()
+    battery.force_discharge.assert_not_awaited()
+    if source == "optimizer":
+        battery.restore_normal.assert_awaited_once()
+        assert coordinator._last_executed_action == "self_consumption"
+    else:
+        battery.restore_normal.assert_not_awaited()
+        battery.set_self_consumption_mode.assert_not_awaited()
+
+
 @pytest.mark.parametrize("failure", ["false", "exception"])
 def test_foxess_service_failure_reaches_optimizer_retry(opt_module, failure):
     """A FoxESS restore failure must cross service and wrapper boundaries."""
