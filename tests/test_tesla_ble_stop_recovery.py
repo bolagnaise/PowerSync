@@ -744,3 +744,55 @@ async def test_retry_after_captured_pending_stop_finishes(inventory, outcome, pr
     for attempt_id in unknown_ids:
         assert refs[attempt_id]["outcome"] == "sent_unknown"
         assert refs[attempt_id]["recovery_retired"]["incident_id"] == result["incident_id"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("proof_state", ["not_sent", "wrong_operation", "confirmed"])
+async def test_stop_only_retry_after_general_inventory_proves_pending_start_was_not_sent(inventory, proof_state):
+    c = inventory
+    assert (await recover(c))["success"]
+    c.calls.clear()
+    prefix = "bridge_a"
+    alias = c.aliases[prefix]
+    route = {"kind": "ble", "prefix": prefix, "entity_id": f"switch.{prefix}_charger"}
+    pending_start = await recovery.async_begin_attempt(
+        c.hass, c.entry, alias, route, "start", route["entity_id"])
+    assert pending_start
+    unknown_stop = await recovery.async_begin_attempt(
+        c.hass, c.entry, alias, route, "stop", route["entity_id"])
+    assert unknown_stop and await recovery.async_finish_attempt(unknown_stop, "sent_unknown")
+
+    async def finish_unsent_start(_, action):
+        if action == "prepare":
+            assert await recovery.async_finish_attempt(pending_start, "not_sent")
+
+    c.hook["call"] = finish_unsent_start
+    with pytest.raises(stop.StopRecoveryRefused, match="recovery_scope_changed"):
+        await stop.async_recover_ble_history(c.hass, c.entry, c.declared[:1], confirm_complete_history=True)
+    assert not any(action == "commit" for _, action, _ in c.calls)
+    assert {ref["attempt_id"] for ref in stop._live_refs(c.runtime)} == {unknown_stop.attempt_id}
+    c.hook["call"] = None
+    retry_start = len(c.calls)
+
+    if proof_state != "not_sent":
+        proof = c.runtime[recovery._SIDECAR_STATE_KEY]["recovery"]["terminal_removals"][alias][pending_start.attempt_id]
+        if proof_state == "wrong_operation":
+            proof["operation"] = "rate"
+        else:
+            proof["outcome"] = "confirmed"
+        with pytest.raises(stop.StopRecoveryRefused, match="retained_recovery_scope_changed"):
+            await stop.async_recover_ble_stops(c.hass, c.entry, c.declared[:1], confirm_complete_history=True)
+        assert len(c.calls) == retry_start
+        assert {ref["attempt_id"] for ref in stop._live_refs(c.runtime)} == {unknown_stop.attempt_id}
+        return
+
+    result = await stop.async_recover_ble_stops(c.hass, c.entry, c.declared[:1], confirm_complete_history=True)
+
+    assert result["success"]
+    assert [action for _, action, _ in c.calls[retry_start:]] == ["prepare", "commit"]
+    assert not stop._live_refs(c.runtime)
+    durable = c.store.value["recovery"]
+    assert durable["terminal_removals"][alias][pending_start.attempt_id]["outcome"] == "not_sent"
+    saved_stop = durable["vehicles"][alias]["attempts"][unknown_stop.attempt_id]
+    assert saved_stop["outcome"] == "sent_unknown"
+    assert saved_stop["recovery_retired"]["incident_id"] == result["incident_id"]

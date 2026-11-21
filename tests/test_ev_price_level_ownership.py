@@ -9701,6 +9701,79 @@ def test_price_forecast_uses_the_configured_tariff_for_custom_tou(monkeypatch):
     assert by_hour[9] < by_hour[6]
 
 
+@pytest.mark.parametrize("unavailable", [None, "gap", "missing_price", "stale", "failed"])
+def test_localvolts_forecast_covers_each_remaining_interval(monkeypatch, unavailable):
+    adelaide_tz = timezone(timedelta(hours=9, minutes=30))
+    now = datetime(2026, 7, 3, 20, 51, tzinfo=adelaide_tz)
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda: now)
+    monkeypatch.setattr(
+        ev_planner.dt_util, "as_local", lambda value: value.astimezone(adelaide_tz),
+        raising=False,
+    )
+    current, forecast_rows = [], []
+    for minute in range(0, 120, 5):
+        start = now.replace(minute=0) + timedelta(minutes=minute)
+        if unavailable == "gap" and minute == 55:
+            continue
+        items = current if minute == 50 else forecast_rows
+        for channel, price in (
+            ("general", {0: -30.0, 50: -2.0, 55: 52.0, 60: -4.0}.get(
+                minute, 13.0 if minute < 60 else -1.0
+            )),
+            ("feedIn", -8.0 if minute == 55 else 3.0),
+        ):
+            items.append({
+                "nemTime": (start + timedelta(minutes=5)).isoformat(),
+                "startTime": start.isoformat(),
+                "channelType": channel,
+                "perKwh": price,
+                "price_available": not (
+                    unavailable == "missing_price" and minute == 55 and channel == "general"
+                ),
+            })
+
+    hass = _FakeHass()
+    hass.data["power_sync"]["entry-1"]["localvolts_coordinator"] = SimpleNamespace(
+        last_update_success=unavailable != "failed",
+        data={
+            "current": current,
+            "forecast": forecast_rows,
+            "last_update": now - timedelta(minutes=20 if unavailable == "stale" else 1),
+        },
+    )
+    entry = _FakeConfigEntry()
+    entry.options = {"electricity_provider": "localvolts"}
+    prices = asyncio.run(ev_planner.PriceForecaster(hass, entry).get_price_forecast(1))
+
+    planner = ev_planner.ChargingPlanner(hass, entry)
+    plan = asyncio.run(planner._plan_cost_optimized(
+        vehicle_id=VIN,
+        current_soc=60,
+        target_soc=70,
+        target_time=now.replace(hour=22, minute=0),
+        energy_needed_kwh=5,
+        charger_power_kw=6,
+        surplus_forecast=[],
+        price_forecast=prices,
+        max_grid_price_cents=25,
+    ))
+    if unavailable in {"failed", "stale"}:
+        assert prices == []
+        assert plan.windows == []
+        return
+    assert [window.start_time for window in plan.windows] == ["2026-07-03T21:00:00"]
+    if unavailable is None:
+        this_hour, next_hour = prices
+        assert this_hour.hour == "2026-07-03T20:00:00"
+        assert this_hour.import_cents == 52.0
+        assert this_hour.export_cents == 8.0
+    else:
+        (next_hour,) = prices
+    assert next_hour.hour == "2026-07-03T21:00:00"
+    assert next_hour.import_cents == -1.0
+    assert next_hour.export_cents == -3.0
+
+
 def test_epex_price_forecast_uses_real_optimizer_slots_not_generic_tou(monkeypatch):
     """A high current EPEX price must not become a synthetic 15c off-peak."""
     now = datetime(2026, 9, 16, 21, 11, tzinfo=timezone.utc)

@@ -174,16 +174,18 @@
       },
       "localvolts": {
         "title": "Localvolts API credentials",
-        "description": "Connect your Localvolts account for real-time 5-minute NEM wholesale pricing.",
+        "description": "Connect your Localvolts account for real-time 5-minute NEM wholesale pricing and select your NEM region for AEMO dispatch-driven sync.",
         "data": {
           "localvolts_api_key": "API key",
           "localvolts_partner_id": "Partner ID",
-          "localvolts_nmi": "NMI"
+          "localvolts_nmi": "NMI",
+          "aemo_region": "NEM region"
         },
         "data_description": {
           "localvolts_api_key": "Contact Localvolts support to request your API key. Keep it secret -- treat it like a password.",
           "localvolts_partner_id": "Your Localvolts Partner ID, provided alongside the API key.",
-          "localvolts_nmi": "Your 10-digit National Meter Identifier (on your electricity bill). Enter * to authorize all NMIs on the account."
+          "localvolts_nmi": "Your 10-digit National Meter Identifier (on your electricity bill). Enter * to authorize all NMIs on the account.",
+          "aemo_region": "Choose the NEM region where your meter is located. PowerSync uses this region for AEMO dispatch-driven TOU sync when it cannot detect your region automatically."
         },
         "submit": "Connect"
       },
@@ -2543,11 +2545,12 @@
       },
       "localvolts_options": {
         "title": "Localvolts settings",
-        "description": "Update your Localvolts credentials and sync settings. Changes take effect immediately.",
+        "description": "Update your Localvolts credentials, NEM region, and sync settings. Changes take effect immediately.",
         "data": {
           "localvolts_api_key": "API key",
           "localvolts_partner_id": "Partner ID",
           "localvolts_nmi": "NMI",
+          "aemo_region": "NEM region",
           "auto_sync_enabled": "Enable automatic TOU sync",
           "battery_curtailment_enabled": "Stop export below threshold"
         },
@@ -2555,6 +2558,7 @@
           "localvolts_api_key": "Contact Localvolts support to request your API key. Keep it secret -- treat it like a password.",
           "localvolts_partner_id": "Your Localvolts Partner ID, provided alongside the API key.",
           "localvolts_nmi": "Your 10-digit National Meter Identifier (on your electricity bill). Enter * to authorize all NMIs on the account.",
+          "aemo_region": "Choose the NEM region where your meter is located. PowerSync uses this region for AEMO dispatch-driven TOU sync when it cannot detect your region automatically.",
           "auto_sync_enabled": "Automatically upload TOU tariff schedules to your battery based on current prices.",
           "battery_curtailment_enabled": "Stop battery from exporting when export earnings drop below the configured threshold."
         },
