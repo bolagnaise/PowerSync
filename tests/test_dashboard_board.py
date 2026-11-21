@@ -2036,6 +2036,82 @@ def test_advanced_controls_send_zero_and_soc_without_legacy_force_or_paperwork()
     assert 'Approval document' not in out['html'] and 'Approved installation' not in out['html']
 
 
+def test_advanced_battery_remembers_only_the_last_successful_target_for_the_user_and_entry():
+    out = _run_board(r"""
+      (async () => {
+        const Control = registry.get('power-sync-advanced-controls');
+        const posts = [];
+        let accept = true, site = 'entry-one', targetSupported = true;
+        function open(user = 'owner') {
+          const card = new Control();
+          card.hass = {user: {id: user}, callApi: async (method, path, body) => {
+            if (method === 'POST') {
+              posts.push(body);
+              return {success: accept};
+            }
+            if (!path.startsWith('power_sync/powerwall/battery_dispatch')) return {schema_version: 0};
+            return {schema_version: 1, entry_id: site, control_revision: 'rev',
+              capabilities: {battery_output: {supported: true, zero_hold_supported: true, target_soc_supported: targetSupported}}};
+          }};
+          return card;
+        }
+        const card = open();
+        await card._refresh();
+        Object.assign(card._draft, {mode: 'charge', power_w: '2300', minutes: '45', target_soc: '85', takeover: true});
+        await card._act('target');
+        const beforeConfirm = posts.length;
+        await card._act('target');
+        accept = false;
+        card._draft.minutes = '60';
+        await card._act('target');
+        await card._act('target');
+        card._draft.minutes = '90';
+        await card._act('refresh');
+        const refreshKeepsEdits = card._draft.minutes === '90';
+        const reopened = open();
+        await reopened._refresh();
+        const restored = {...reopened._draft};
+        targetSupported = false;
+        const limited = open();
+        await limited._refresh();
+        const unsupportedMode = limited._draft.mode;
+        targetSupported = true;
+        const postsBeforeReconfirm = posts.length;
+        await reopened._act('target');
+        const afterReopen = posts.length;
+        accept = true;
+        await reopened._act('target');
+        Object.assign(reopened._draft, {mode: 'power', power_w: '-1700', target_soc: ''});
+        await reopened._act('target');
+        await reopened._act('target');
+        const fixedPower = open();
+        await fixedPower._refresh();
+        const otherUser = open('guest');
+        await otherUser._refresh();
+        site = 'entry-two';
+        await reopened._refresh();
+        const otherSite = reopened._draft;
+        console.log(JSON.stringify({
+          beforeConfirm, postsBeforeReconfirm, afterReopen, posts, refreshKeepsEdits,
+          restored, fixedPower: fixedPower._draft.power_w,
+          otherUser: otherUser._draft.power_w, otherSite: otherSite.power_w,
+          unsupportedMode,
+        }));
+      })().catch(e => {console.error(e);process.exitCode=1});
+    """)
+    assert out['beforeConfirm'] == 0
+    assert out['postsBeforeReconfirm'] == out['afterReopen'] == 2
+    assert out['refreshKeepsEdits']
+    assert {k: out['restored'][k] for k in ('mode', 'power_w', 'minutes', 'target_soc', 'takeover')} == {
+        'mode': 'charge', 'power_w': '2300', 'minutes': '45', 'target_soc': '85', 'takeover': False,
+    }
+    assert [post['power_w'] for post in out['posts']] == [-2300, -2300, -2300, -1700]
+    assert [post['takeover'] for post in out['posts']] == [True, True, False, False]
+    assert out['fixedPower'] == '-1700'
+    assert out['unsupportedMode'] == 'power'
+    assert out['otherUser'] == out['otherSite'] == '1800'
+
+
 def test_advanced_stop_and_backup_recovery_survive_lost_acquisition_support():
     out = _run_board(r"""
       (async () => {

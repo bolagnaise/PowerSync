@@ -43,8 +43,11 @@ async def test_reads_refuse_ambiguous_entries_and_select_exact_site():
         assert (await view.get(Request())).status == 409
         assert (await view.get(Request(query={'entry_id': 'missing'}))).status == 409
         result = await view.get(Request(query={'entry_id': 'b'}))
-        assert json.loads(result.body) == {'success': True, 'site': 'b'}
+        assert json.loads(result.body) == {'success': True, 'site': 'b', 'entry_id': 'b'}
     controls['a'].read.assert_not_awaited()
+    hass.config_entries.async_entries = lambda _: [hass.config_entries.async_get_entry('a')]
+    result = await n['PowerwallBatteryOutputView'](hass).get(Request())
+    assert json.loads(result.body) == {'success': True, 'site': 'a', 'entry_id': 'a'}
 
 
 @pytest.mark.asyncio
