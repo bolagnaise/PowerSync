@@ -9,13 +9,13 @@
   },
   "source_state": {
     "components": {
-      "config_flow.py": "0fd73d78c9b4f2690b9ea0f2437df70ab9ec00973347d537a85c3f9940fae4e3",
-      "const.py": "486a4232b184da6f93bc47624e5aab1e3b5630a84f77bd15695ec89f2ee2cc9a",
+      "config_flow.py": "8851cbf8f28135c4df2b4c876e36a9eb45b0fa36fd2d609388992f58abc71c01",
+      "const.py": "6a06367d6e33cdae94a6b56cf8eb72445a765a6a12e5b03b9cc939149d4459e7",
       "battery_backend/profiles.py": "d308ecc78740d8dfc9cd895e4b9750a02859d46e5f0863dd5c098b8aaab2bcc2",
       "battery_backend/discovery.py": "3a8c88c00d6c57f6101d55056968524d7971d1ac3b8e16365923bca978f9489b",
       "settings_metadata.py": "913295806df38f52982803891aae03a9c5493545011d98c2d6ad0631eb24d0a8",
-      "strings.json": "04271ebef8b86ff1f96e3c40589ccd1e68f895ac1e69d5bad930329a164401c9",
-      "translations/en.json": "6999802f3fa257046ddfcf3d53aa569efeac7133319da0262270019e1d2a555c",
+      "strings.json": "af46992ac87901e5e082db02de4d37b0829a6b96f1dee2c9a9a99229471f501d",
+      "translations/en.json": "5b260fcd42ac7d36eed2b2e7a12d9f59ed630a2b22dc48952375f63a5c97f5d1",
       "services.yaml": "8422772a3401c215db31624f172d635f3c2de01a2b7f7208e8fef9d3621d95ed",
       "switch.py": "84ea8b75a073c97cabcb6b4ba33a301b81dc60d6b0b40f8174f53f39cb649d06",
       "select.py": "8d5d7dbd06e0919d3ba84b52660f342dde1583bf9d8d57c2bb5bcbd2ca655d99",
@@ -23,7 +23,7 @@
       "sensor.py": "d7489e0e34099d30870d8db008f6496fd284bf8b975e18aa0c511c3caba0a285",
       "binary_sensor.py": "08472fc1dd127d022062789c2d28f7410ff54cb422802b20f20404478ec6f741",
       "button.py": "69368d0dc0f8a1a9e336fed0da117103676670003db81d3360fc24bc0e6123b0",
-      "automations/actions.py": "47297af5531d517d875907fd4cc1b6c4de26f6d0a66af3284b0d966ee3e27c9a",
+      "automations/actions.py": "b98085f4d0f368638d60b11eb40e4a9ff03814508f3f2d5c9087f06df90b6fc7",
       "licensing/presentation.py": "1573955ea9bb520e3cdbc5428522cef705c05b9c928a19e42d14ff6cbbb77546",
       "amber_smartshift/__init__.py": "979f85cb66d8ca1e88394cb74ecc275645f2c7598aac3e65f43e4180293ee032",
       "amber_smartshift/client.py": "c713ecb9e1f3ea26ddea2d0b058dc69e779192cdd3a747ee8cf30277358620ec",
@@ -680,6 +680,7 @@
       "options.ev_charging.generic_charger_battery_capacity_kwh": "Usable EV battery capacity",
       "options.ev_charging.generic_charger_enabled": "Enable generic charger",
       "options.ev_charging.generic_charger_power_entity": "EV charging power sensor",
+      "options.ev_charging.generic_charger_prioritise_price_level_ev": "Prioritise switch-only charging in Price Level",
       "options.ev_charging.generic_charger_soc_entity": "EV battery SoC sensor",
       "options.ev_charging.generic_charger_soc_entity_2": "Fallback EV battery SoC sensor",
       "options.ev_charging.generic_charger_start_confirmation_timeout_seconds": "Generic charger start confirmation timeout",
@@ -6820,6 +6821,16 @@
     {
       "scope": "options",
       "form": "ev_charging",
+      "field": "generic_charger_prioritise_price_level_ev",
+      "label": "Prioritise switch-only charging in Price Level",
+      "page": "EV-Smart-Charging.md",
+      "source_line": 16430,
+      "group": null,
+      "rendering": "conditional effect; see page availability notes"
+    },
+    {
+      "scope": "options",
+      "form": "ev_charging",
       "field": "generic_charger_start_confirmation_timeout_seconds",
       "label": "Generic charger start confirmation timeout",
       "page": "EV-Smart-Charging.md",
@@ -11534,6 +11545,10 @@
       "status": "documented"
     },
     "options.ev_charging.generic_charger_power_entity": {
+      "page": "EV-Smart-Charging",
+      "status": "documented"
+    },
+    "options.ev_charging.generic_charger_prioritise_price_level_ev": {
       "page": "EV-Smart-Charging",
       "status": "documented"
     },
