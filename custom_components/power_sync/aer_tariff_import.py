@@ -10,8 +10,8 @@ inclusive minutes ("20:59"); schedules use exclusive half-hour boundaries.
 
 ``schedule_to_tariff_draft`` then maps that schedule onto the existing custom
 tariff editor: calendar seasons, non-overlapping periods with an import and an
-export price, the standard rates, the daily supply charge and a daily import
-allowance. The result is a starting point for owner review, never a saved
+export price, the standard rates, the daily supply charge and the daily
+free-import and premium-export allowances. The result is a starting point for owner review, never a saved
 tariff.
 """
 
@@ -570,54 +570,65 @@ def _minute_text(minute: int) -> str:
 def _import_allowance(
     schedule: dict[str, Any], rasters: dict[int, Any], timezone_token: str | None,
     warnings: list[str],
-) -> dict[str, Any] | None:
-    """Map the free-import allowance onto the custom tariff import quota."""
-    quota = None
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Map daily allowances onto the custom tariff import and export quotas.
+
+    A free or discounted import allowance becomes ``import_quota``: the
+    discount is measured from the lowest usual rate in its window. A premium
+    feed-in allowance becomes ``export_quota``: the premium is measured from
+    the highest usual rate in its window. Both choices keep the modelled
+    benefit at or below the real one.
+    """
+    quotas: dict[str, dict[str, Any] | None] = {"import": None, "export": None}
     for allowance in schedule.get("allowances", []):
         label = allowance.get("label") or "Allowance"
-        if allowance["direction"] == "export":
-            warnings.append(
-                f"{label}: PowerSync custom tariffs can't apply a premium export "
-                "allowance yet, so this window uses the rate after the allowance."
-            )
-            continue
+        direction = "export" if allowance["direction"] == "export" else "import"
         if allowance.get("period", "day") != "day":
             warnings.append(f"{label}: only daily allowances are supported; it was not applied.")
             continue
         if allowance.get("months"):
             warnings.append(f"{label}: a seasonal allowance can't be applied and was skipped.")
             continue
-        if quota is not None:
-            warnings.append(f"{label}: only one import allowance can apply; it was skipped.")
+        if quotas[direction] is not None:
+            warnings.append(f"{label}: only one {direction} allowance can apply; it was skipped.")
             continue
         start, end = allowance["startMinute"], allowance["endMinute"]
+        price_index = 0 if direction == "import" else 1
         window_prices = {
-            day[slot][0]
+            day[slot][price_index]
             for raster in rasters.values()
             for day in raster
             for slot in range(SLOTS_PER_DAY)
             if (start <= slot * 30 < end if start < end else slot * 30 >= start or slot * 30 < end)
         }
-        underlying = min(window_prices) if window_prices else schedule["baseImportC"]
+        if direction == "import":
+            underlying = min(window_prices) if window_prices else schedule["baseImportC"]
+            benefit = round(underlying - allowance["priceC"], 6)
+            varies = "the allowance discount uses the lowest rate"
+            skipped = "the allowance is not cheaper than the usual rate and was skipped"
+        else:
+            underlying = max(window_prices) if window_prices else schedule["baseExportC"]
+            benefit = round(allowance["priceC"] - underlying, 6)
+            varies = "the allowance premium uses the highest rate"
+            skipped = "the allowance pays no more than the usual feed-in rate and was skipped"
         if len(window_prices) > 1:
             warnings.append(
                 f"{label}: the usual rate varies inside the allowance window; "
-                f"the allowance discount uses the lowest rate, {_number_text(underlying)}c/kWh."
+                f"{varies}, {_number_text(underlying)}c/kWh."
             )
-        discount = round(underlying - allowance["priceC"], 6)
-        if discount <= 0:
-            warnings.append(f"{label}: the allowance is not cheaper than the usual rate and was skipped.")
+        if benefit <= 0:
+            warnings.append(f"{label}: {skipped}.")
             continue
-        quota = {
+        quotas[direction] = {
             "enabled": True,
             "name": label,
             "windows": [[_minute_text(start), _minute_text(end)]],
             "daily_cap_kwh": float(allowance["limitKwh"]),
             "base_price_c_per_kwh": round(underlying, 6),
-            "bonus_price_c_per_kwh": discount,
+            "bonus_price_c_per_kwh": benefit,
             **({"timezone_token": timezone_token} if timezone_token else {}),
         }
-    return quota
+    return quotas["import"], quotas["export"]
 
 
 def schedule_to_tariff_draft(
@@ -659,7 +670,7 @@ def schedule_to_tariff_draft(
             "This plan publishes its times in AEST. During daylight saving they "
             "fall one hour later on the local clock; check the periods."
         )
-    quota = _import_allowance(
+    quota, export_quota = _import_allowance(
         schedule, rasters, "Australia/Brisbane" if aest else None, warnings
     )
     return {
@@ -671,6 +682,7 @@ def schedule_to_tariff_draft(
         "seasons": seasons,
         "periods": periods,
         "import_quota": quota,
+        "export_quota": export_quota,
         "source": {
             "kind": "aer_prd",
             "plan_id": imported.get("sourcePlanId") or None,

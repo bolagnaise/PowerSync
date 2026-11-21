@@ -42,9 +42,11 @@ from .retail_plan_flow import (
     SOURCE_PRESET,
     SOURCE_PUBLISHED,
     apply_draft,
+    build_export_quota,
     build_import_quota,
     clear_draft,
     dedicated_provider_hint,
+    export_quota_effective_price,
     half_hour_options,
     network_options,
     preset_options,
@@ -68,6 +70,10 @@ CONF_ALLOWANCE_KWH = "allowance_kwh"
 CONF_ALLOWANCE_START = "allowance_start"
 CONF_ALLOWANCE_END = "allowance_end"
 CONF_ALLOWANCE_PRICE = "allowance_price"
+CONF_EXPORT_ALLOWANCE_KWH = "export_allowance_kwh"
+CONF_EXPORT_ALLOWANCE_START = "export_allowance_start"
+CONF_EXPORT_ALLOWANCE_END = "export_allowance_end"
+CONF_EXPORT_ALLOWANCE_PRICE = "export_allowance_price"
 MAX_PLAN_OPTIONS = 300
 
 
@@ -287,16 +293,35 @@ class _RetailPlanSteps:
         window = quota_window(quota) or ("11:00", "14:00")
         limit = float(quota.get("daily_cap_kwh", 0)) if isinstance(quota, dict) else 0.0
         price = quota_effective_price(quota) or 0.0
+        export_quota = getattr(self, "_tariff_export_quota", None)
+        export_window = quota_window(export_quota) or ("16:00", "21:00")
+        export_limit = (
+            float(export_quota.get("daily_cap_kwh", 0))
+            if isinstance(export_quota, dict)
+            else 0.0
+        )
+        export_price = export_quota_effective_price(export_quota) or 0.0
+
+        def _kwh() -> NumberSelector:
+            return NumberSelector(
+                NumberSelectorConfig(min=0, max=1000, step=0.1, unit_of_measurement="kWh", mode=NumberSelectorMode.BOX)
+            )
+
+        def _price() -> NumberSelector:
+            return NumberSelector(
+                NumberSelectorConfig(min=0, max=200, step=0.01, unit_of_measurement=self._rp_unit(), mode=NumberSelectorMode.BOX)
+            )
+
         return vol.Schema(
             {
-                vol.Optional(CONF_ALLOWANCE_KWH, default=limit): NumberSelector(
-                    NumberSelectorConfig(min=0, max=1000, step=0.1, unit_of_measurement="kWh", mode=NumberSelectorMode.BOX)
-                ),
+                vol.Optional(CONF_ALLOWANCE_KWH, default=limit): _kwh(),
                 vol.Optional(CONF_ALLOWANCE_START, default=window[0]): _select(half_hour_options()),
                 vol.Optional(CONF_ALLOWANCE_END, default=window[1]): _select(half_hour_options(end=True)),
-                vol.Optional(CONF_ALLOWANCE_PRICE, default=round(price, 4)): NumberSelector(
-                    NumberSelectorConfig(min=0, max=200, step=0.01, unit_of_measurement=self._rp_unit(), mode=NumberSelectorMode.BOX)
-                ),
+                vol.Optional(CONF_ALLOWANCE_PRICE, default=round(price, 4)): _price(),
+                vol.Optional(CONF_EXPORT_ALLOWANCE_KWH, default=export_limit): _kwh(),
+                vol.Optional(CONF_EXPORT_ALLOWANCE_START, default=export_window[0]): _select(half_hour_options()),
+                vol.Optional(CONF_EXPORT_ALLOWANCE_END, default=export_window[1]): _select(half_hour_options(end=True)),
+                vol.Optional(CONF_EXPORT_ALLOWANCE_PRICE, default=round(export_price, 4)): _price(),
             }
         )
 
@@ -314,6 +339,44 @@ class _RetailPlanSteps:
             timezone_token=existing.get("timezone_token"),
         )
 
+    def _rp_export_allowance_quota(self, user_input: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
+        existing = getattr(self, "_tariff_export_quota", None)
+        existing = existing if isinstance(existing, dict) else {}
+        return build_export_quota(
+            limit_kwh=user_input.get(CONF_EXPORT_ALLOWANCE_KWH, 0),
+            start=user_input.get(CONF_EXPORT_ALLOWANCE_START, "16:00"),
+            end=user_input.get(CONF_EXPORT_ALLOWANCE_END, "21:00"),
+            price_minor=user_input.get(CONF_EXPORT_ALLOWANCE_PRICE, 0),
+            periods=list(getattr(self, "_tariff_periods", None) or []),
+            standard_export=float(getattr(self, "_tariff_fit_rate", 0.0) or 0.0),
+            name=existing.get("name"),
+            # One ledger keeps one tariff clock: follow the import allowance.
+            timezone_token=existing.get("timezone_token")
+            or (getattr(self, "_tariff_import_quota", None) or {}).get("timezone_token"),
+        )
+
+    def _rp_apply_allowances(
+        self,
+        user_input: dict[str, Any],
+        tariff: Any,
+    ) -> str | None:
+        """Validate both allowances and store them on the flow and tariff."""
+        quota, error = self._rp_allowance_quota(user_input)
+        if error:
+            return error
+        export_quota, error = self._rp_export_allowance_quota(user_input)
+        if error:
+            return error
+        self._tariff_import_quota = quota
+        self._tariff_export_quota = export_quota
+        if isinstance(tariff, dict) and tariff:
+            for key, value in (("import_quota", quota), ("export_quota", export_quota)):
+                if value:
+                    tariff[key] = value
+                else:
+                    tariff.pop(key, None)
+        return None
+
     def _rp_allowance_placeholders(self) -> dict[str, str]:
         return {
             "period_info": render_period_overview(
@@ -323,6 +386,7 @@ class _RetailPlanSteps:
                 standard_export=float(getattr(self, "_tariff_fit_rate", 0.0) or 0.0),
                 unit=self._rp_unit(),
                 quota=getattr(self, "_tariff_import_quota", None),
+                export_quota=getattr(self, "_tariff_export_quota", None),
             ),
             "plan_info": warnings_text(getattr(self, "_tariff_draft", None)),
         }
@@ -355,20 +419,16 @@ class RetailPlanSetupMixin(_RetailPlanSteps):
         return await self._rp_preset(user_input)
 
     async def async_step_tariff_allowance(self, user_input: dict[str, Any] | None = None) -> Any:
-        """Confirm the daily free-import allowance, then continue setup."""
+        """Confirm the daily import and export allowances, then continue setup."""
         errors: dict[str, str] = {}
         if user_input is not None:
-            quota, error = self._rp_allowance_quota(user_input)
+            error = self._rp_apply_allowances(
+                user_input,
+                getattr(self, "_custom_tariff_data", None),
+            )
             if error:
                 errors["base"] = error
             else:
-                self._tariff_import_quota = quota
-                tariff = getattr(self, "_custom_tariff_data", None)
-                if isinstance(tariff, dict) and tariff:
-                    if quota:
-                        tariff["import_quota"] = quota
-                    else:
-                        tariff.pop("import_quota", None)
                 return await self.async_step_battery_system()
         return self.async_show_form(
             step_id="tariff_allowance",
@@ -429,20 +489,15 @@ class RetailPlanOptionsMixin(_RetailPlanSteps):
         return await self._rp_preset(user_input)
 
     async def async_step_tariff_allowance_options(self, user_input: dict[str, Any] | None = None) -> Any:
-        """Confirm the daily free-import allowance and save the tariff."""
+        """Confirm the daily import and export allowances and save the tariff."""
         errors: dict[str, str] = {}
         if user_input is not None:
-            quota, error = self._rp_allowance_quota(user_input)
+            tariff = getattr(self, "_pending_custom_tariff", None)
+            error = self._rp_apply_allowances(user_input, tariff)
             if error:
                 errors["base"] = error
             else:
-                self._tariff_import_quota = quota
-                tariff = getattr(self, "_pending_custom_tariff", None)
                 if isinstance(tariff, dict) and tariff:
-                    if quota:
-                        tariff["import_quota"] = quota
-                    else:
-                        tariff.pop("import_quota", None)
                     await self._save_custom_tariff(tariff)
                 return await self.async_step_demand_charge_options()
         return self.async_show_form(

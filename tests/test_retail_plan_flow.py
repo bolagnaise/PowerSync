@@ -227,6 +227,51 @@ def test_allowance_step_builds_and_removes_the_import_quota(modules):
     assert "import_quota" not in flow._custom_tariff_data
 
 
+def test_allowance_step_builds_and_removes_the_export_quota(modules):
+    flow = _setup_flow(modules)
+    flow._tariff_offpeak_rate = 0.30
+    flow._tariff_fit_rate = 0.02
+    flow._tariff_periods = [{"name": "PEAK", "start": 17, "end": 21, "days": "all_days", "import_rate": 0.5, "export_rate": 0.04}]
+    flow._custom_tariff_data = {"name": "Mine"}
+
+    form = asyncio.run(flow.async_step_tariff_allowance())
+    defaults = {str(field): field.default for field in form["data_schema"]}
+    assert defaults["export_allowance_kwh"] == 0.0
+    assert (defaults["export_allowance_start"], defaults["export_allowance_end"]) == ("16:00", "21:00")
+
+    form = asyncio.run(flow.async_step_tariff_allowance(
+        {"allowance_kwh": 0, "export_allowance_kwh": 10, "export_allowance_start": "17:00",
+         "export_allowance_end": "21:00", "export_allowance_price": 4}))
+    assert form["errors"] == {"base": "export_allowance_not_higher"}
+    form = asyncio.run(flow.async_step_tariff_allowance(
+        {"allowance_kwh": 0, "export_allowance_kwh": 10, "export_allowance_start": "17:00",
+         "export_allowance_end": "17:00", "export_allowance_price": 12}))
+    assert form["errors"] == {"base": "export_allowance_invalid"}
+    assert "export_quota" not in flow._custom_tariff_data, "a rejected form saves nothing"
+
+    result = asyncio.run(flow.async_step_tariff_allowance(
+        {"allowance_kwh": 24, "allowance_start": "11:00", "allowance_end": "14:00", "allowance_price": 0,
+         "export_allowance_kwh": 10, "export_allowance_start": "17:00", "export_allowance_end": "21:00",
+         "export_allowance_price": 12}))
+    assert result["step_id"] == "battery_system"
+    # The premium is measured from the highest feed-in rate in the window.
+    assert flow._custom_tariff_data["export_quota"] == {
+        "enabled": True, "name": "Premium export allowance", "windows": [["17:00", "21:00"]],
+        "daily_cap_kwh": 10.0, "base_price_c_per_kwh": 4.0, "bonus_price_c_per_kwh": 8.0,
+    }
+    assert flow._custom_tariff_data["import_quota"]["daily_cap_kwh"] == 24.0
+    overview = flow._rp_allowance_placeholders()["period_info"]
+    assert "Premium export allowance: first 10 kWh 17:00-21:00 earn 12.00c/kWh, resets daily." in overview
+
+    form = asyncio.run(flow.async_step_tariff_allowance())
+    defaults = {str(field): field.default for field in form["data_schema"]}
+    assert defaults["export_allowance_kwh"] == 10.0 and defaults["export_allowance_price"] == 12.0
+
+    asyncio.run(flow.async_step_tariff_allowance({"allowance_kwh": 24, "allowance_price": 0, "export_allowance_kwh": 0}))
+    assert "export_quota" not in flow._custom_tariff_data
+    assert "import_quota" in flow._custom_tariff_data
+
+
 def test_options_keep_current_rates_or_choose_a_plan(modules):
     class Flow(modules.retail_plan_steps.RetailPlanOptionsMixin):
         hass = object()
@@ -263,6 +308,14 @@ def test_options_keep_current_rates_or_choose_a_plan(modules):
     assert result["step_id"] == "demand_charge_options"
     assert flow.saved[-1] == {"name": "Mine"}
 
+    flow._tariff_fit_rate = 0.05
+    result = asyncio.run(flow.async_step_tariff_allowance_options(
+        {"allowance_kwh": 0, "export_allowance_kwh": 6, "export_allowance_start": "16:00",
+         "export_allowance_end": "20:00", "export_allowance_price": 15}))
+    assert result["step_id"] == "demand_charge_options"
+    assert flow.saved[-1]["export_quota"]["bonus_price_c_per_kwh"] == 10.0
+    assert "import_quota" not in flow.saved[-1]
+
 
 def _built_tariff(modules, draft):
     flow_class = retail_plan_support.config_flow_class(modules)
@@ -289,6 +342,8 @@ def test_imported_plan_builds_a_tariff_that_prices_like_the_cloud(modules):
     assert set(tariff["seasons"]) == {"Apr–May", "Jun–Aug", "Sep–Oct", "Nov–Mar"}
     assert tariff["daily_supply_charge"] == 1.65
     assert tariff["import_quota"]["windows"] == [["11:00", "14:00"]]
+    assert tariff["export_quota"]["windows"] == [["17:00", "21:00"]]
+    assert tariff["export_quota"]["bonus_price_c_per_kwh"] == 8.0
     assert tariff["power_sync_plan_source"]["plan_id"] == "SYN0000001MRE1@EME"
     assert tariff["utility"] == "Synthetic"
     # Wednesday 13 January, Saturday 10 April, Monday 12 April 2027, local time.
@@ -325,6 +380,7 @@ def test_builder_supports_half_hours_day_lists_and_standard_rate_blanks(modules)
     assert {"fromDayOfWeek": 1, "toDayOfWeek": 3, "fromHour": 20, "toHour": 22, "fromMinute": 30, "toMinute": 0} in generated
     assert {"fromDayOfWeek": 4, "toDayOfWeek": 6, "fromHour": 6, "toHour": 22, "fromMinute": 30, "toMinute": 0} in generated
     assert "daily_supply_charge" not in tariff and "import_quota" not in tariff
+    assert "export_quota" not in tariff
     assert _runtime_prices(modules, tariff, datetime(2026, 11, 2, 15, 45)) == (0.5, 0.05)  # Monday
     assert _runtime_prices(modules, tariff, datetime(2026, 11, 2, 15, 15)) == (0.3, 0.05)
     assert _runtime_prices(modules, tariff, datetime(2026, 11, 5, 15, 45)) == (0.3, 0.05)  # Thursday

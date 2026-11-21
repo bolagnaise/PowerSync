@@ -196,19 +196,30 @@ tariff editor for review and nothing is saved until you finish:
   without a published feed-in rate use the lowest published feed-in rate.
 - Seasonal date ranges become calendar seasons, and overlapping import and
   export windows are split so each period has one import and one export price.
-- A daily first-kWh block becomes the free import allowance.
+- A daily first-kWh import block becomes the free import allowance. Its
+  discount is measured from the lowest usual rate in its window.
+- A daily first-kWh feed-in block becomes the premium export allowance. Its
+  premium is measured from the highest usual feed-in rate in its window, so
+  PowerSync never assumes more than the plan pays.
 
 Closed government premium feed-in schemes, controlled load, demand charges,
-incentives, non-daily blocks, seasonal allowances and premium export allowances
-are not loaded; the editor lists them so you can check your contract. A premium
-export window uses the rate that applies after its allowance.
+incentives, non-daily blocks and seasonal allowances are not loaded; the editor
+lists them so you can check your contract.
 
 The editor shows the periods as a table with today's 24-hour import price strip.
 Each period has a name, half-hour start and end times, days, and an import and an
-export price; a blank price uses the standard rate. The daily supply charge and a
-daily free import allowance (first N kWh in a window at a lower price) are set in
-the same flow. Existing custom tariffs keep working unchanged, and reopening them
-keeps their periods, supply charge and allowance.
+export price; a blank price uses the standard rate. The daily supply charge, a
+daily free import allowance (first N kWh imported in a window at a lower price)
+and a daily premium export allowance (first N kWh exported in a window at a
+higher rate) are set in the same flow. Existing custom tariffs keep working
+unchanged, and reopening them keeps their periods, supply charge and allowances.
+
+Both allowances reset at the start of each tariff day and settle from the
+measured daily grid import and export totals, or from grid power when a total is
+unavailable. Planned energy never consumes an allowance. The optimizer values
+only the unused part of each allowance: once it is spent, the normal rate for
+that time applies. After a telemetry gap or a mid-day meter reset, PowerSync
+stops valuing the allowances until the next tariff day.
 
 See the wiki's
 [Tariffs and time periods](https://github.com/bolagnaise/PowerSync/wiki/Tariffs-and-Time-Periods)

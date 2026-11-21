@@ -9,13 +9,13 @@
   },
   "source_state": {
     "components": {
-      "config_flow.py": "e5fa9e7d6a6b3c59e37d10cbcf31df56e6caf8fc4d155912db296ff1768b670f",
+      "config_flow.py": "6d7c4ea63f9f9b45393548c53fcd6674aa6e28702da5a51cbe829f7df6fe84b2",
       "const.py": "7f5ebf1f0c8ab629adab80cfcc3429c4eae667d7c222721935c66c0e884e0b53",
       "battery_backend/profiles.py": "d308ecc78740d8dfc9cd895e4b9750a02859d46e5f0863dd5c098b8aaab2bcc2",
       "battery_backend/discovery.py": "3a8c88c00d6c57f6101d55056968524d7971d1ac3b8e16365923bca978f9489b",
       "settings_metadata.py": "913295806df38f52982803891aae03a9c5493545011d98c2d6ad0631eb24d0a8",
-      "strings.json": "413f94c03a3067cacfe882ea6d1f5cda805095827735f771db28dff30cef03c0",
-      "translations/en.json": "81f73f3a3b20b5aededf066d7a5c5902610ad15b8641a1151eb95b06dab7977c",
+      "strings.json": "b69d5ab2a231ea51b09453f86c53ed2650de6d977002ed5dd786fd9bd7f75cbc",
+      "translations/en.json": "468633459ddf72e584cae2e8af5770c2204a6a1c177ca6af254a24966f3bbf3f",
       "services.yaml": "8422772a3401c215db31624f172d635f3c2de01a2b7f7208e8fef9d3621d95ed",
       "switch.py": "84ea8b75a073c97cabcb6b4ba33a301b81dc60d6b0b40f8174f53f39cb649d06",
       "select.py": "8d5d7dbd06e0919d3ba84b52660f342dde1583bf9d8d57c2bb5bcbd2ca655d99",
@@ -31,8 +31,8 @@
       "amber_smartshift/controls.py": "5d6f9cb7876cc5f2d138ab67d9f5106de02e44ccc7e18b880f16eb300b71f68f",
       "amber_smartshift/flow.py": "e88b4b6c79f6f5483adda57840bdad52f339de109048ee3087a6a357809aa71e",
       "amber_smartshift/entities.py": "a2502634cf192a529d1d2e82fd38ec8983527e9841851bf8f4d77d77b9ad9406",
-      "retail_plan_steps.py": "81947867457c2348f66ef7e6318f59677c01756f50dd5f6562c029c780779752",
-      "retail_plan_flow.py": "e2b60d5ee46ab1b032822825cac68c04294880c5b254ac0d844db8126e73e112"
+      "retail_plan_steps.py": "23cb16ba4ef38e1c503066604fe001f079758cdcff31411f009d0a4c2bb2ce46",
+      "retail_plan_flow.py": "4fb32be25561beb0e6c6805c4910f7276844fe47bd806a43c780a11994314296"
     },
     "step_methods": [
       "PowerSyncConfigFlow.async_step_aemo_config",
@@ -518,10 +518,14 @@
       "config.sungrow.sungrow_ihomemanager_port": "iHomeManager plaintext control port",
       "config.sungrow.sungrow_port": "Modbus port",
       "config.sungrow.sungrow_slave_id": "Modbus slave ID",
-      "config.tariff_allowance.allowance_end": "Window ends",
-      "config.tariff_allowance.allowance_kwh": "Daily allowance",
-      "config.tariff_allowance.allowance_price": "Price for allowance energy",
-      "config.tariff_allowance.allowance_start": "Window starts",
+      "config.tariff_allowance.allowance_end": "Import window ends",
+      "config.tariff_allowance.allowance_kwh": "Daily import allowance",
+      "config.tariff_allowance.allowance_price": "Price for import allowance energy",
+      "config.tariff_allowance.allowance_start": "Import window starts",
+      "config.tariff_allowance.export_allowance_end": "Export window ends",
+      "config.tariff_allowance.export_allowance_kwh": "Daily export allowance",
+      "config.tariff_allowance.export_allowance_price": "Premium export rate",
+      "config.tariff_allowance.export_allowance_start": "Export window starts",
       "config.tariff_period.edit_period": "Edit a period",
       "config.tariff_period.export_rate": "Export price",
       "config.tariff_period.import_rate": "Import price",
@@ -1017,10 +1021,14 @@
       "options.sungrow_connection.sungrow_ihomemanager_port": "iHomeManager plaintext control port",
       "options.sungrow_connection.sungrow_port": "Modbus port",
       "options.sungrow_connection.sungrow_slave_id": "Modbus slave ID",
-      "options.tariff_allowance_options.allowance_end": "Window ends",
-      "options.tariff_allowance_options.allowance_kwh": "Daily allowance",
-      "options.tariff_allowance_options.allowance_price": "Price for allowance energy",
-      "options.tariff_allowance_options.allowance_start": "Window starts",
+      "options.tariff_allowance_options.allowance_end": "Import window ends",
+      "options.tariff_allowance_options.allowance_kwh": "Daily import allowance",
+      "options.tariff_allowance_options.allowance_price": "Price for import allowance energy",
+      "options.tariff_allowance_options.allowance_start": "Import window starts",
+      "options.tariff_allowance_options.export_allowance_end": "Export window ends",
+      "options.tariff_allowance_options.export_allowance_kwh": "Daily export allowance",
+      "options.tariff_allowance_options.export_allowance_price": "Premium export rate",
+      "options.tariff_allowance_options.export_allowance_start": "Export window starts",
       "options.tariff_period_options.edit_period": "Edit a period",
       "options.tariff_period_options.export_rate": "Export price",
       "options.tariff_period_options.import_rate": "Import price",
@@ -8857,7 +8865,7 @@
       "scope": "config",
       "form": "tariff_allowance",
       "field": "allowance_kwh",
-      "label": "Daily allowance",
+      "label": "Daily import allowance",
       "page": "Tariffs-and-Time-Periods.md",
       "source_line": null,
       "group": null,
@@ -8867,7 +8875,7 @@
       "scope": "config",
       "form": "tariff_allowance",
       "field": "allowance_start",
-      "label": "Window starts",
+      "label": "Import window starts",
       "page": "Tariffs-and-Time-Periods.md",
       "source_line": null,
       "group": null,
@@ -8877,7 +8885,7 @@
       "scope": "config",
       "form": "tariff_allowance",
       "field": "allowance_end",
-      "label": "Window ends",
+      "label": "Import window ends",
       "page": "Tariffs-and-Time-Periods.md",
       "source_line": null,
       "group": null,
@@ -8887,7 +8895,47 @@
       "scope": "config",
       "form": "tariff_allowance",
       "field": "allowance_price",
-      "label": "Price for allowance energy",
+      "label": "Price for import allowance energy",
+      "page": "Tariffs-and-Time-Periods.md",
+      "source_line": null,
+      "group": null,
+      "rendering": "Retail plan selector and period table; see Tariffs-and-Time-Periods."
+    },
+    {
+      "scope": "config",
+      "form": "tariff_allowance",
+      "field": "export_allowance_kwh",
+      "label": "Daily export allowance",
+      "page": "Tariffs-and-Time-Periods.md",
+      "source_line": null,
+      "group": null,
+      "rendering": "Retail plan selector and period table; see Tariffs-and-Time-Periods."
+    },
+    {
+      "scope": "config",
+      "form": "tariff_allowance",
+      "field": "export_allowance_start",
+      "label": "Export window starts",
+      "page": "Tariffs-and-Time-Periods.md",
+      "source_line": null,
+      "group": null,
+      "rendering": "Retail plan selector and period table; see Tariffs-and-Time-Periods."
+    },
+    {
+      "scope": "config",
+      "form": "tariff_allowance",
+      "field": "export_allowance_end",
+      "label": "Export window ends",
+      "page": "Tariffs-and-Time-Periods.md",
+      "source_line": null,
+      "group": null,
+      "rendering": "Retail plan selector and period table; see Tariffs-and-Time-Periods."
+    },
+    {
+      "scope": "config",
+      "form": "tariff_allowance",
+      "field": "export_allowance_price",
+      "label": "Premium export rate",
       "page": "Tariffs-and-Time-Periods.md",
       "source_line": null,
       "group": null,
@@ -8987,7 +9035,7 @@
       "scope": "options",
       "form": "tariff_allowance_options",
       "field": "allowance_kwh",
-      "label": "Daily allowance",
+      "label": "Daily import allowance",
       "page": "Tariffs-and-Time-Periods.md",
       "source_line": null,
       "group": null,
@@ -8997,7 +9045,7 @@
       "scope": "options",
       "form": "tariff_allowance_options",
       "field": "allowance_start",
-      "label": "Window starts",
+      "label": "Import window starts",
       "page": "Tariffs-and-Time-Periods.md",
       "source_line": null,
       "group": null,
@@ -9007,7 +9055,7 @@
       "scope": "options",
       "form": "tariff_allowance_options",
       "field": "allowance_end",
-      "label": "Window ends",
+      "label": "Import window ends",
       "page": "Tariffs-and-Time-Periods.md",
       "source_line": null,
       "group": null,
@@ -9017,7 +9065,47 @@
       "scope": "options",
       "form": "tariff_allowance_options",
       "field": "allowance_price",
-      "label": "Price for allowance energy",
+      "label": "Price for import allowance energy",
+      "page": "Tariffs-and-Time-Periods.md",
+      "source_line": null,
+      "group": null,
+      "rendering": "Retail plan selector and period table; see Tariffs-and-Time-Periods."
+    },
+    {
+      "scope": "options",
+      "form": "tariff_allowance_options",
+      "field": "export_allowance_kwh",
+      "label": "Daily export allowance",
+      "page": "Tariffs-and-Time-Periods.md",
+      "source_line": null,
+      "group": null,
+      "rendering": "Retail plan selector and period table; see Tariffs-and-Time-Periods."
+    },
+    {
+      "scope": "options",
+      "form": "tariff_allowance_options",
+      "field": "export_allowance_start",
+      "label": "Export window starts",
+      "page": "Tariffs-and-Time-Periods.md",
+      "source_line": null,
+      "group": null,
+      "rendering": "Retail plan selector and period table; see Tariffs-and-Time-Periods."
+    },
+    {
+      "scope": "options",
+      "form": "tariff_allowance_options",
+      "field": "export_allowance_end",
+      "label": "Export window ends",
+      "page": "Tariffs-and-Time-Periods.md",
+      "source_line": null,
+      "group": null,
+      "rendering": "Retail plan selector and period table; see Tariffs-and-Time-Periods."
+    },
+    {
+      "scope": "options",
+      "form": "tariff_allowance_options",
+      "field": "export_allowance_price",
+      "label": "Premium export rate",
       "page": "Tariffs-and-Time-Periods.md",
       "source_line": null,
       "group": null,
@@ -11189,6 +11277,22 @@
       "page": "Tariffs-and-Time-Periods",
       "status": "documented"
     },
+    "config.tariff_allowance.export_allowance_end": {
+      "page": "Tariffs-and-Time-Periods",
+      "status": "documented"
+    },
+    "config.tariff_allowance.export_allowance_kwh": {
+      "page": "Tariffs-and-Time-Periods",
+      "status": "documented"
+    },
+    "config.tariff_allowance.export_allowance_price": {
+      "page": "Tariffs-and-Time-Periods",
+      "status": "documented"
+    },
+    "config.tariff_allowance.export_allowance_start": {
+      "page": "Tariffs-and-Time-Periods",
+      "status": "documented"
+    },
     "config.tariff_period.edit_period": {
       "page": "Tariffs-and-Time-Periods",
       "status": "documented"
@@ -13182,6 +13286,22 @@
       "status": "documented"
     },
     "options.tariff_allowance_options.allowance_start": {
+      "page": "Tariffs-and-Time-Periods",
+      "status": "documented"
+    },
+    "options.tariff_allowance_options.export_allowance_end": {
+      "page": "Tariffs-and-Time-Periods",
+      "status": "documented"
+    },
+    "options.tariff_allowance_options.export_allowance_kwh": {
+      "page": "Tariffs-and-Time-Periods",
+      "status": "documented"
+    },
+    "options.tariff_allowance_options.export_allowance_price": {
+      "page": "Tariffs-and-Time-Periods",
+      "status": "documented"
+    },
+    "options.tariff_allowance_options.export_allowance_start": {
       "page": "Tariffs-and-Time-Periods",
       "status": "documented"
     },

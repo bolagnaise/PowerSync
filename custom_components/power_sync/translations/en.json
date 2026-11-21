@@ -398,19 +398,27 @@
         "submit": "Next"
       },
       "tariff_allowance": {
-        "title": "Free import allowance",
-        "description": "{plan_info}\n\n{period_info}\n\nSome plans make the first kWh you import in a window each day free or cheaper. Set the allowance to 0 kWh if your plan has none. Allowances reset every day. Premium export allowances can't be modelled in a custom tariff yet; the rate after the allowance applies instead.",
+        "title": "Daily allowances",
+        "description": "{plan_info}\n\n{period_info}\n\nSome plans make the first kWh you import in a window each day free or cheaper, or pay a premium for the first kWh you export in a window. Set an allowance to 0 kWh if your plan has none. Allowances reset every day.",
         "data": {
-          "allowance_kwh": "Daily allowance",
-          "allowance_start": "Window starts",
-          "allowance_end": "Window ends",
-          "allowance_price": "Price for allowance energy"
+          "allowance_kwh": "Daily import allowance",
+          "allowance_start": "Import window starts",
+          "allowance_end": "Import window ends",
+          "allowance_price": "Price for import allowance energy",
+          "export_allowance_kwh": "Daily export allowance",
+          "export_allowance_start": "Export window starts",
+          "export_allowance_end": "Export window ends",
+          "export_allowance_price": "Premium export rate"
         },
         "data_description": {
-          "allowance_kwh": "Energy per day charged at the allowance price. 0 removes the allowance.",
+          "allowance_kwh": "Energy imported per day at the allowance price. 0 removes the import allowance.",
           "allowance_start": "Start of the window the allowance applies in.",
           "allowance_end": "End of the window. 24:00 is midnight.",
-          "allowance_price": "Price per kWh for allowance energy, usually 0. After the allowance is used, the normal rate for that time applies."
+          "allowance_price": "Price per kWh for allowance energy, usually 0. After the allowance is used, the normal rate for that time applies.",
+          "export_allowance_kwh": "Energy exported per day at the premium rate. 0 removes the export allowance.",
+          "export_allowance_start": "Start of the window the premium applies in.",
+          "export_allowance_end": "End of the window. 24:00 is midnight.",
+          "export_allowance_price": "Rate per kWh for the first exported energy in the window. After the allowance is used, the normal feed-in rate for that time applies."
         },
         "submit": "Next"
       },
@@ -1248,6 +1256,8 @@
       "period_days_required": "Choose at least one day.",
       "allowance_invalid": "Enter a non-negative allowance, a price and different start and end times.",
       "allowance_not_cheaper": "The allowance price must be lower than the normal import rate in that window.",
+      "export_allowance_invalid": "Enter a non-negative export allowance, a premium rate above 0 and different start and end times.",
+      "export_allowance_not_higher": "The premium export rate must be higher than the normal feed-in rate in that window.",
       "tesla_force_discharge_prices_invalid": "Enter finite Tesla force-discharge prices from $0 to $99/kWh, with the sell price higher than the buy price.",
       "invalid_flow_power_plan": "Choose a Flow Power plan and a region supported by that plan.",
       "invalid_display_currency": "Select Automatic, AUD, EUR, GBP, NZD, or SEK.",
@@ -1364,6 +1374,8 @@
       "period_days_required": "Choose at least one day.",
       "allowance_invalid": "Enter a non-negative allowance, a price and different start and end times.",
       "allowance_not_cheaper": "The allowance price must be lower than the normal import rate in that window.",
+      "export_allowance_invalid": "Enter a non-negative export allowance, a premium rate above 0 and different start and end times.",
+      "export_allowance_not_higher": "The premium export rate must be higher than the normal feed-in rate in that window.",
       "invalid_tesla_site": "Select a Tesla energy site from the list.",
       "no_energy_sites": "No Tesla energy sites found for this account.",
       "invalid_auth": "The Tesla API connection could not be authenticated. Check your selected provider and sign in again.",
@@ -2693,19 +2705,27 @@
         "submit": "Save"
       },
       "tariff_allowance_options": {
-        "title": "Free import allowance",
-        "description": "{plan_info}\n\n{period_info}\n\nSome plans make the first kWh you import in a window each day free or cheaper. Set the allowance to 0 kWh if your plan has none. Allowances reset every day. Premium export allowances can't be modelled in a custom tariff yet; the rate after the allowance applies instead.",
+        "title": "Daily allowances",
+        "description": "{plan_info}\n\n{period_info}\n\nSome plans make the first kWh you import in a window each day free or cheaper, or pay a premium for the first kWh you export in a window. Set an allowance to 0 kWh if your plan has none. Allowances reset every day.",
         "data": {
-          "allowance_kwh": "Daily allowance",
-          "allowance_start": "Window starts",
-          "allowance_end": "Window ends",
-          "allowance_price": "Price for allowance energy"
+          "allowance_kwh": "Daily import allowance",
+          "allowance_start": "Import window starts",
+          "allowance_end": "Import window ends",
+          "allowance_price": "Price for import allowance energy",
+          "export_allowance_kwh": "Daily export allowance",
+          "export_allowance_start": "Export window starts",
+          "export_allowance_end": "Export window ends",
+          "export_allowance_price": "Premium export rate"
         },
         "data_description": {
-          "allowance_kwh": "Energy per day charged at the allowance price. 0 removes the allowance.",
+          "allowance_kwh": "Energy imported per day at the allowance price. 0 removes the import allowance.",
           "allowance_start": "Start of the window the allowance applies in.",
           "allowance_end": "End of the window. 24:00 is midnight.",
-          "allowance_price": "Price per kWh for allowance energy, usually 0. After the allowance is used, the normal rate for that time applies."
+          "allowance_price": "Price per kWh for allowance energy, usually 0. After the allowance is used, the normal rate for that time applies.",
+          "export_allowance_kwh": "Energy exported per day at the premium rate. 0 removes the export allowance.",
+          "export_allowance_start": "Start of the window the premium applies in.",
+          "export_allowance_end": "End of the window. 24:00 is midnight.",
+          "export_allowance_price": "Rate per kWh for the first exported energy in the window. After the allowance is used, the normal feed-in rate for that time applies."
         },
         "submit": "Save"
       },
