@@ -57,6 +57,7 @@ from ..const import (
     CONF_EV_PROVIDER,
     CONF_MONITORING_MODE,
     CONF_GENERIC_CHARGER_START_CONFIRMATION_TIMEOUT,
+    CONF_GENERIC_CHARGER_PRIORITISE_PRICE_LEVEL_EV,
     DEFAULT_GENERIC_CHARGER_START_CONFIRMATION_TIMEOUT,
     EV_PROVIDER_FLEET_API,
     EV_PROVIDER_TESLA_BLE,
@@ -18117,6 +18118,8 @@ async def _dynamic_ev_update(
     Battery power convention: Positive = discharging, Negative = charging
     Grid power convention: Positive = importing, Negative = exporting
     """
+    from .ev_ownership import owner_family
+
     vehicles = _dynamic_ev_state.get(entry_id, {})
     state = vehicles.get(vehicle_id)
     if not state or not state.get("active"):
@@ -18283,13 +18286,25 @@ async def _dynamic_ev_update(
         return
     params = state.get("params") or {}
 
-    # target_battery_charge_kw: How much we want the battery to charge (positive = charging into battery)
-    # e.g., 5.0 means we want 5kW going INTO the battery. The optimizer's plan
-    # for this interval outranks the session's start-time value, which is the
-    # battery's hardware maximum and is 0 outside a grid-window start.
+    no_grid_import = params.get("no_grid_import", False)
+    prioritise_ev = (
+        params.get("charger_type") == "generic"
+        and params.get("charger_switch_entity")
+        and not params.get("charger_amps_entity")
+        and owner_family(params.get("owner_mode")) == "price_level"
+        and not no_grid_import
+        and config_entry.options.get(
+            CONF_GENERIC_CHARGER_PRIORITISE_PRICE_LEVEL_EV,
+            config_entry.data.get(CONF_GENERIC_CHARGER_PRIORITISE_PRICE_LEVEL_EV),
+        ) is True
+        and not _phase_load_management_enabled(hass, config_entry)
+    )
+    # The current optimizer interval outranks the battery target at session start.
     target_battery_charge_kw = _resolve_battery_reservation_kw(
         session_target_kw=params.get("target_battery_charge_kw", 5.0),
-        reserve_battery_charge=params.get("reserve_battery_charge", True),
+        reserve_battery_charge=(
+            not prioritise_ev and params.get("reserve_battery_charge", True)
+        ),
         planned_charge_kw=_optimizer_planned_battery_charge_kw(hass, config_entry),
         max_battery_charge_rate_kw=params.get("max_battery_charge_rate_kw"),
     )
@@ -18297,8 +18312,6 @@ async def _dynamic_ev_update(
     if max_grid_import_kw is None:
         max_grid_import_kw = 12.5
 
-    # No grid import mode: prevent ALL grid imports by dynamically adjusting EV charge rate
-    no_grid_import = params.get("no_grid_import", False)
     grid_import_tolerance_kw = params.get("grid_import_tolerance_kw", 0.1)  # 100W buffer
     max_inverter_kw = params.get("max_inverter_kw", 10.0)  # PW3=10kW, PW2=5kW per unit
 
@@ -18422,6 +18435,16 @@ async def _dynamic_ev_update(
         _LOGGER.debug("Dynamic EV: Could not get live status, keeping current amps")
         return
 
+    if prioritise_ev:
+        grid_power = live_status.get("grid_power")
+        if (
+            isinstance(grid_power, bool)
+            or not isinstance(grid_power, (int, float))
+            or not math.isfinite(grid_power)
+        ):
+            _LOGGER.debug("Dynamic EV: No valid grid power for switch-only Price Level adjustment")
+            return
+
     # Convert to kW for cleaner math (matching HA automation)
     # battery_power: Positive = discharging, Negative = charging
     battery_power_kw = (live_status.get("battery_power", 0) or 0) / 1000
@@ -18471,7 +18494,10 @@ async def _dynamic_ev_update(
     battery_depleted = False  # Track whether we bypassed no_grid_import due to battery depletion
     battery_charging_kw = max(0.0, -battery_power_kw)  # positive when battery is charging
     ev_relevant_grid_kw = grid_power_kw - battery_charging_kw
-    if effective_battery_target_kw > 0:
+    if prioritise_ev:
+        # Leave battery taper to the inverter and budget only measured grid headroom.
+        available_power_kw = grid_headroom_kw
+    elif effective_battery_target_kw > 0:
         available_power_kw = _battery_target_available_kw(
             grid_headroom_kw,
             effective_battery_target_kw,
@@ -18612,7 +18638,11 @@ async def _dynamic_ev_update(
     if params.get("charger_type") == "generic" and not params.get("charger_amps_entity"):
         # A switch cannot enforce a reduced positive current. Pause when the
         # available budget cannot accommodate the configured full charge rate.
-        new_amps = max_amps if new_amps >= max_amps else 0
+        full_rate_fits = new_amps >= max_amps
+        if prioritise_ev:
+            # A rounded current must not allow a full-rate switch command above the limit.
+            full_rate_fits = full_rate_fits and raw_new_amps + 1e-9 >= max_amps
+        new_amps = max_amps if full_rate_fits else 0
 
     # In no_grid_import mode, respond immediately to grid imports (don't wait for 1A threshold)
     # Use ev_relevant_grid_kw (excludes battery charging) to avoid throttling due to
@@ -18646,6 +18676,7 @@ async def _dynamic_ev_update(
         f"{', battery_depleted=True' if battery_depleted else ''}"
         f"{', battery_full=True' if battery_full else ''}"
         f"{', battery_acceptance_learned=True' if acceptance_learned else ''}"
+        f"{', prioritise_switch_only_ev=True' if prioritise_ev else ''}"
     )
 
     # Only update if change is >= 1 amp (avoid constant micro-adjustments)

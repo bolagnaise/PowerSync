@@ -185,6 +185,7 @@ DEFAULT_OCPP_PORT = 9000
 CONF_GENERIC_CHARGER_ENABLED = "generic_charger_enabled"
 CONF_GENERIC_CHARGER_SWITCH_ENTITY = "generic_charger_switch_entity"
 CONF_GENERIC_CHARGER_AMPS_ENTITY = "generic_charger_amps_entity"
+CONF_GENERIC_CHARGER_PRIORITISE_PRICE_LEVEL_EV = "generic_charger_prioritise_price_level_ev"
 CONF_GENERIC_CHARGER_STATUS_ENTITY = "generic_charger_status_entity"
 CONF_GENERIC_CHARGER_POWER_ENTITY = "generic_charger_power_entity"
 CONF_GENERIC_CHARGER_START_CONFIRMATION_TIMEOUT = "generic_charger_start_confirmation_timeout_seconds"
