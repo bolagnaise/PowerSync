@@ -14,6 +14,7 @@ import logging
 import math
 import statistics
 import time
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, time as dt_time, timezone
 from typing import Optional, List, Dict, Any, Tuple, Iterator, Mapping, Sequence
@@ -2176,7 +2177,7 @@ class PriceForecaster:
         """
         Get hourly price forecast (provider-aware).
 
-        For Amber/Flow Power: uses Amber API forecast
+        For Amber, Flow Power, and Localvolts: uses provider forecast data
         For Globird: uses Tesla tariff TOU schedule
         Falls back to generic TOU estimation.
 
@@ -2199,6 +2200,9 @@ class PriceForecaster:
             amber_forecast = await self._get_amber_forecast(hours)
             if amber_forecast:
                 return amber_forecast
+
+        elif electricity_provider == "localvolts":
+            return self._get_localvolts_forecast(hours)
 
         # EPEX is a dynamic retail-price provider. A generic Australian TOU
         # estimate is not a safe substitute: it can authorise a grid window
@@ -2320,6 +2324,85 @@ class PriceForecaster:
                 )
             )
         return forecasts or None
+
+    def _get_localvolts_forecast(self, hours: int) -> List[PriceForecast]:
+        """Build hourly windows only where Localvolts covers every usable interval."""
+        entry_data = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id, {})
+        coordinator = entry_data.get("localvolts_coordinator")
+        data = getattr(coordinator, "data", None)
+        if not data or not getattr(coordinator, "last_update_success", False):
+            return []
+
+        now = dt_util.now()
+        interval = timedelta(minutes=5)
+        updated_at = data.get("last_update")
+        if (
+            not isinstance(updated_at, datetime)
+            or updated_at.tzinfo is None
+            or not timedelta(0) <= now - updated_at <= 3 * interval
+        ):
+            return []
+
+        # Keep timestamps absolute while collecting slots, and invert the
+        # coordinator's Amber feed-in sign to get the value of exporting.
+        prices: dict[tuple[datetime, str], float] = {}
+        for row in (*data["current"], *data["forecast"]):
+            channel = row.get("channelType")
+            if channel not in ("general", "feedIn") or not row.get("price_available", True):
+                continue
+            try:
+                start = datetime.fromisoformat(row["startTime"])
+                price = float(row["perKwh"])
+            except (KeyError, TypeError, ValueError, OverflowError):
+                continue
+            if start.tzinfo is None or not math.isfinite(price):
+                continue
+            key = (start.astimezone(timezone.utc), channel)
+            value = price if channel == "general" else -price
+            prices[key] = max(prices.get(key, value), value)
+
+        now_utc = now.astimezone(timezone.utc)
+        horizon = now_utc + timedelta(hours=hours)
+        hour = timedelta(hours=1)
+        hour_start = now.replace(
+            minute=0, second=0, microsecond=0
+        ).astimezone(timezone.utc)
+        hourly_prices: list[tuple[datetime, float, float]] = []
+
+        while hour_start < horizon:
+            # Charge at an hourly cadence. Use the highest rate in the
+            # available part of the hour so one cheap slot cannot authorize
+            # the rest of the hour under the max-price or free-grid rules.
+            first_slot = max(0, (now_utc - hour_start) // interval)
+            starts = [
+                hour_start + slot * interval for slot in range(first_slot, hour // interval)
+            ]
+            try:
+                import_cents = max(prices[start, "general"] for start in starts)
+                export_cents = max(prices[start, "feedIn"] for start in starts)
+            except KeyError:
+                pass
+            else:
+                hourly_prices.append(
+                    (hour_start.astimezone(now.tzinfo), import_cents, export_cents)
+                )
+            hour_start += hour
+
+        local_hours = Counter(start.replace(tzinfo=None) for start, _, _ in hourly_prices)
+        forecasts = []
+        for start, import_cents, export_cents in hourly_prices:
+            local_start = start.replace(tzinfo=None)
+            display_start = start if local_hours[local_start] > 1 else local_start
+            if import_cents < 15:
+                period = "offpeak"
+            elif import_cents > 35:
+                period = "peak"
+            else:
+                period = "shoulder"
+            forecasts.append(
+                PriceForecast(display_start.isoformat(), import_cents, export_cents, period)
+            )
+        return forecasts
 
     async def _get_amber_forecast(self, hours: int) -> Optional[List[PriceForecast]]:
         """Get forecast from Amber coordinator data."""

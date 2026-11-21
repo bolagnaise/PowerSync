@@ -3595,6 +3595,15 @@ class PowerSyncConfigFlow(AmberSetupMixin, config_entries.ConfigFlow, domain=DOM
                 ),
                 vol.Required(CONF_LOCALVOLTS_PARTNER_ID): TextSelector(),
                 vol.Required(CONF_LOCALVOLTS_NMI): TextSelector(),
+                vol.Required(CONF_AEMO_REGION): SelectSelector(
+                    SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(value=key, label=label)
+                            for key, label in AEMO_REGIONS.items()
+                        ],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
+                ),
             }
         )
 
@@ -17565,6 +17574,7 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
     ) -> FlowResult:
         """Step 2e: Localvolts specific options."""
         errors: dict[str, str] = {}
+        current_region = self._get_option(CONF_AEMO_REGION)
 
         if user_input is not None:
             api_key = user_input.get(CONF_LOCALVOLTS_API_KEY, "")
@@ -17585,6 +17595,9 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
                     CONF_LOCALVOLTS_API_KEY: api_key,
                     CONF_LOCALVOLTS_PARTNER_ID: partner_id,
                     CONF_LOCALVOLTS_NMI: nmi,
+                    CONF_AEMO_REGION: user_input.get(
+                        CONF_AEMO_REGION, current_region
+                    ),
                     CONF_AUTO_SYNC_ENABLED: user_input.get(
                         CONF_AUTO_SYNC_ENABLED, True
                     ),
@@ -17613,6 +17626,20 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
                     vol.Required(
                         CONF_LOCALVOLTS_NMI, default=current_nmi
                     ): TextSelector(),
+                    vol.Required(
+                        CONF_AEMO_REGION,
+                        default=(
+                            current_region if current_region in AEMO_REGIONS else vol.UNDEFINED
+                        ),
+                    ): SelectSelector(
+                        SelectSelectorConfig(
+                            options=[
+                                SelectOptionDict(value=key, label=label)
+                                for key, label in AEMO_REGIONS.items()
+                            ],
+                            mode=SelectSelectorMode.DROPDOWN,
+                        )
+                    ),
                     vol.Optional(
                         CONF_AUTO_SYNC_ENABLED, default=current_auto_sync
                     ): BooleanSelector(),

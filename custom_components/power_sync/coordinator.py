@@ -2301,17 +2301,15 @@ class AmberPriceCoordinator(DataUpdateCoordinator):
 # Localvolts Price Coordinator
 # ============================================================
 
-def _parse_localvolts_price(value) -> float:
-    """Parse a Localvolts price value, handling 'N/A' and non-numeric values.
-
-    Returns price in c/kWh (same unit as Amber perKwh).
-    """
-    if value is None or value == "N/A" or value == "n/a":
-        return 0.0
+def _parse_localvolts_price(value) -> float | None:
+    """Return a finite Localvolts price in c/kWh when available."""
+    if isinstance(value, bool):
+        return None
     try:
-        return float(value)
-    except (ValueError, TypeError):
-        return 0.0
+        price = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return price if math.isfinite(price) else None
 
 
 def _localvolts_interval_start(interval_end: str, duration_minutes: int = 5) -> str:
@@ -2381,13 +2379,14 @@ class LocalvoltsPriceCoordinator(DataUpdateCoordinator):
                 # Export price: earningsFlexUp (c/kWh)
                 # Negate to match Amber convention: Amber feedIn.perKwh is negative
                 # when earning; Localvolts earningsFlexUp is positive when earning
-                export_ckwh = -_parse_localvolts_price(interval.get("earningsFlexUp"))
+                export_ckwh = _parse_localvolts_price(interval.get("earningsFlexUp"))
 
                 start_time = _localvolts_interval_start(nem_time, 5)
 
                 general_entry = {
                     "nemTime": nem_time,
-                    "perKwh": import_ckwh,
+                    "perKwh": import_ckwh if import_ckwh is not None else 0.0,
+                    "price_available": import_ckwh is not None,
                     "channelType": "general",
                     "type": "CurrentInterval" if quality in ("Act", "Exp") else "ForecastInterval",
                     "duration": 5,
@@ -2395,7 +2394,8 @@ class LocalvoltsPriceCoordinator(DataUpdateCoordinator):
                 }
                 feedin_entry = {
                     "nemTime": nem_time,
-                    "perKwh": export_ckwh,
+                    "perKwh": -export_ckwh if export_ckwh is not None else 0.0,
+                    "price_available": export_ckwh is not None,
                     "channelType": "feedIn",
                     "type": general_entry["type"],
                     "duration": 5,
