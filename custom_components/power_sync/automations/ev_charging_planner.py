@@ -5738,9 +5738,11 @@ class AutoScheduleExecutor:
         """
         from ..const import (
             DOMAIN,
+            CONF_EV_PROVIDER,
             CONF_GENERIC_CHARGER_ENABLED,
             CONF_TESLA_BLE_ENTITY_PREFIX,
             DEFAULT_TESLA_BLE_ENTITY_PREFIX,
+            EV_PROVIDER_BOTH,
         )
         from .generic_charger_soc import resolve_generic_charger_soc
         from homeassistant.helpers import entity_registry as er, device_registry as dr
@@ -5856,7 +5858,30 @@ class AutoScheduleExecutor:
                                 except (ValueError, TypeError):
                                     continue
 
-        # Method 3: Check cached Tesla vehicles from PowerSync
+        # The exact VIN can also have a local bridge in Both mode. Keep native
+        # VIN-scoped readings first and require fresh data from the paired BLE
+        # producer before adopting it as this vehicle's current SoC.
+        if (
+            live_soc is None
+            and vehicle_vin
+            and re.fullmatch(r"[A-HJ-NPR-Z0-9]{17}", vehicle_vin.upper())
+            and opts.get(CONF_EV_PROVIDER) == EV_PROVIDER_BOTH
+        ):
+            for prefix in _configured_ble_prefixes(entry, vehicle_vin, hass=self.hass):
+                state = get_tesla_ble_battery_state(self.hass, prefix)
+                if not is_current_ev_power_observation(
+                    get_tesla_ble_observed_at(self.hass, state)
+                ):
+                    continue
+                try:
+                    level = float(state.state)
+                except (TypeError, ValueError):
+                    continue
+                if 0 <= level <= 100:
+                    live_soc = int(level)
+                    break
+
+        # Check cached Tesla vehicles from PowerSync
         if live_soc is None:
             entry_data = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id, {})
             tesla_vehicles = entry_data.get("tesla_vehicles", [])
@@ -6688,6 +6713,32 @@ class AutoScheduleExecutor:
             is_time_critical=is_time_critical,
             priority=effective_priority,
         )
+
+        if (
+            should_charge
+            and source == "solar_surplus"
+            and effective_priority == ChargingPriority.SOLAR_PREFERRED
+            and current_price_cents is not None
+            and current_price_cents <= FREE_GRID_PRICE_EPSILON_CENTS
+            and not effective_limit_grid
+            and not self.planner._is_grid_charging_blocked_at(ha_now)
+        ):
+            from .actions import _calculate_solar_surplus
+
+            solar_config = await self._get_solar_surplus_config()
+            solar_config["min_battery_soc"] = effective_home_min
+            available_surplus_kw = _calculate_solar_surplus(
+                live_status,
+                (live_status.get("ev_power") or 0) / 1000,
+                solar_config,
+                self.hass,
+            )
+            if available_surplus_kw < settings.get_min_surplus_kw():
+                source = "grid_free"
+                reason = (
+                    f"Free grid power ({current_price_cents:.1f}c/kWh); "
+                    f"usable solar surplus is {available_surplus_kw:.1f} kW"
+                )
 
         # Apply additional constraints based on priority mode
         if should_charge and source.startswith("grid"):
