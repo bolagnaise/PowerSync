@@ -8,7 +8,7 @@ import math
 from collections.abc import Mapping
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 
@@ -1795,8 +1795,9 @@ def record_ev_command(
     success: bool,
     reason: str | None = None,
     source: str = "powersync",
+    record_type: Literal["command", "ownership"] = "command",
 ) -> dict[str, Any]:
-    """Remember an EV command attempt without changing ownership."""
+    """Publish the result and remember it only if it reached the command path."""
     vid = _ownership_loadpoint_id(hass, config_entry, vehicle_id)
     now = _now_iso()
     last_command = {
@@ -1806,16 +1807,17 @@ def record_ev_command(
         "success": bool(success),
         "reason": reason,
     }
-    get_ev_last_commands(hass, config_entry)[vid] = last_command
+    if record_type == "command":
+        get_ev_last_commands(hass, config_entry)[vid] = last_command
 
-    lease_id, lease = get_ev_ownership(hass, config_entry, vid)
-    if lease_id is not None and lease is not None:
-        lease["last_command"] = last_command
-        lease["updated_at"] = now
+        lease_id, lease = get_ev_ownership(hass, config_entry, vid)
+        if lease_id is not None and lease is not None:
+            lease["last_command"] = last_command
+            lease["updated_at"] = now
 
-    _schedule_runtime_save(hass, config_entry)
+        _schedule_runtime_save(hass, config_entry)
     from ..action_events import publish_ev_command
-    publish_ev_command(hass, config_entry, vid, last_command)
+    publish_ev_command(hass, config_entry, vid, last_command, record_type=record_type)
     return last_command
 
 

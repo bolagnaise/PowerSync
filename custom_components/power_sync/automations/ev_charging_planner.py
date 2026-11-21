@@ -9042,6 +9042,7 @@ def _can_stop_loadpoint_for_mode(
             command=command,
             success=False,
             reason=reason,
+            record_type="ownership",
         )
         _LOGGER.info(
             "EV stop blocked for %s: expected %s, found %s",

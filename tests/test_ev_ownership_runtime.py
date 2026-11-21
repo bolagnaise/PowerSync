@@ -13,7 +13,8 @@ import types
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from typing import Optional
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -613,6 +614,49 @@ def test_manual_command_can_take_over_external_ownership():
     assert can_claim is True
     assert lease_id == vehicle_id
     assert reason is None
+
+
+def test_stop_refused_by_ownership_does_not_count_as_charger_failure(monkeypatch):
+    from power_sync import action_events
+
+    hass, entry = _Hass(), _Entry()
+    vehicle = "synthetic-loadpoint"
+    events = []
+    hass.bus = SimpleNamespace(async_fire=lambda name, data: events.append((name, data)))
+    notification = Mock()
+    monkeypatch.setattr(action_events, "_notification", notification)
+    lease = ev_ownership.claim_ev_ownership(
+        hass, entry, vehicle, owner_mode="solar_surplus",
+    )
+    last_command = ev_ownership.record_ev_command(
+        hass, entry, vehicle, command="start_solar_surplus", success=True,
+    )
+    events.clear()
+
+    path = ROOT / "automations" / "ev_charging_planner.py"
+    tree = ast.parse(path.read_text())
+    guard = next(node for node in tree.body if getattr(node, "name", "") == "_can_stop_loadpoint_for_mode")
+    namespace = {
+        "__package__": "power_sync.automations",
+        "Optional": Optional,
+        "_LOGGER": logging.getLogger(__name__),
+        "_get_active_dynamic_ev_mode": ev_ownership.get_active_ev_owner_mode,
+        "_dynamic_ev_owner_suspended_control": lambda *_: False,
+    }
+    exec(compile(ast.Module(body=[guard], type_ignores=[]), str(path), "exec"), namespace)
+    assert namespace[guard.name](
+        hass, entry, vehicle, expected_owner_mode="smart_schedule",
+        command="stop_smart_schedule", allow_no_owner=True,
+    ) is False
+
+    assert [name for name, _ in events] == [action_events.EVENT_EV_COMMAND]
+    event = events[0][1]
+    assert event["record_type"] == "ownership"
+    assert event["success"] is False
+    assert event["physical_confirmation"] is False
+    assert ev_ownership.get_ev_last_commands(hass, entry)[vehicle] is last_command
+    assert lease["last_command"] is last_command
+    notification.assert_not_called()
 
 
 def test_recent_powersync_command_blocks_stale_external_observation():
