@@ -52,6 +52,8 @@ The global sensor pair is not assigned automatically when multiple OCPP chargers
 
 When Price Level takes over from Solar Surplus, PowerSync can keep your Tesla charging while it changes modes. It needs a fresh Tessie report for that car and checks that both the measured and requested current fit the incoming plan. If the plan prohibits grid imports, the vehicle report is unavailable, or transport recovery is pending, the normal start checks apply.
 
+If the Tessie report becomes unavailable or no longer fits the Price Level plan during the handoff, Solar Surplus keeps control and Price Level can try again at a later evaluation.
+
 ## Zaptec Price Level charging
 
 With Price Level enabled and **PowerSync controls charging** selected, PowerSync applies your price limit even when charging begins after authentication in Zaptec. **Allow hands-off external charging** leaves that session under external control until a fresh charger reading confirms it was unplugged. Manual and Boost ownership remain separate.
