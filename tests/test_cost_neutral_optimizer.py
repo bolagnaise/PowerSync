@@ -8,6 +8,7 @@ import json
 import math
 import sys
 import types
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -1161,6 +1162,102 @@ def test_cost_neutral_ev_attribution_bounds_schedule_rounding(
         assert sources["car"]["grid"] == [0.0]
     else:
         assert sources is None
+@pytest.mark.parametrize("use_highs", [True, False], ids=["lp-then-greedy", "greedy"])
+def test_unreconciled_cost_neutral_ev_plan_cannot_force_grid_charge(
+    optimizer_module, monkeypatch, use_highs,
+):
+    """An invalid joint plan must not authorize a paid battery dispatch."""
+    module = optimizer_module
+    monkeypatch.setattr(module, "HIGHS_AVAILABLE", use_highs)
+    optimizer = module.BatteryOptimizer(
+        capacity_wh=27_000, max_charge_w=10_000, max_discharge_w=10_000,
+        max_grid_import_w=18_000, efficiency=0.95, backup_reserve=0.2,
+        hardware_reserve=0.0, interval_minutes=5, horizon_hours=1,
+        terminal_weight=0.0,
+    )
+    ev = module.EVChargePlan(
+        vehicle_id="car",
+        max_power_kw=(3.45, 1.38, 1.38, 1.38, 0.0, 7.2, 7.2, 0.0),
+        energy_needed_kwh=2.2, charge_efficiency=0.95, min_power_kw=1.0,
+        allow_grid=(True, False, True, True, True, False, False, True),
+        allow_solar=(True,) * 8,
+        allow_battery=(True, True, True, False, True, False, True, True),
+        initially_charging=True,
+    )
+    import_prices = [0.31, 0.65, 1.02, 0.8, 0.0, 0.45, 0.31, 0.8]
+    export_prices = [0.0, 0.01, 1.0, 1.0, 0.01, 0.0, 0.01, 0.8]
+    solar = [0.0, 0.0, 4.5, 4.5, 4.5, 0.0, 8.2, 8.2]
+    load = [1.1, 2.9, 4.8, 4.8, 4.8, 0.4, 0.4, 8.1]
+    result = optimizer.optimize(
+        import_prices=import_prices, export_prices=export_prices,
+        solar_forecast=solar, load_forecast=load, current_soc=0.98,
+        allow_battery_export=True, allow_grid_charge=True,
+        cost_neutral_earnings_cap=1.81, cost_neutral_slots=[True] * 8,
+        ev_plan=ev, schedule_timestamps=[
+            _timestamps(1)[0] + timedelta(minutes=5 * slot) for slot in range(8)
+        ],
+    )
+
+    assert result.lp_stats["ev_sources_reconciled_to_schedule"] is False
+    if use_highs:
+        assert result.lp_stats["message"] == (
+            "final schedule cannot physically source the planned EV draw"
+        )
+    assert result.schedule.actions[0].action == "self_consumption"
+    assert result.solver_used == "self_consumption_hold"
+    assert result.feasible is False
+    assert result.reserve_recommendation == {}
+    assert result.ev_charge_by_vehicle_w == {}
+    assert result.ev_source_by_vehicle_w == {}
+    assert all(action.action == "self_consumption" for action in result.schedule.actions)
+    assert result.grid_import_w[0] == pytest.approx(0.0)
+    assert result.schedule.actions[0].battery_discharge_w == pytest.approx(1_100)
+
+    # The final coordinator projection repeats settlement before publication.
+    # A later projection must not resurrect dispatch or mark this plan valid.
+    overlay = replace(result.schedule, actions=[
+        replace(result.schedule.actions[0], action="charge", battery_charge_w=5_000),
+        *result.schedule.actions[1:],
+    ])
+    projected = optimizer.reconcile_result_with_schedule(
+        result, overlay, import_prices=import_prices,
+        export_prices=export_prices, solar=solar, load=load, initial_soc=0.98,
+        cost_neutral_earnings_cap=1.81, cost_neutral_slots=[True] * 8,
+    )
+    assert projected.lp_stats["ev_sources_reconciled_to_schedule"] is False
+    assert projected.feasible is False
+    assert all(action.action == "self_consumption" for action in projected.schedule.actions)
+
+
+def test_cost_neutral_greedy_checks_ev_sources_without_small_exports(
+    optimizer_module, monkeypatch,
+):
+    """The EV consistency check must run even with no export post-processing."""
+    module = optimizer_module
+    monkeypatch.setattr(module, "HIGHS_AVAILABLE", False)
+    optimizer = module.BatteryOptimizer(
+        capacity_wh=27_000, max_charge_w=10_000, max_discharge_w=10_000,
+        max_grid_import_w=18_000, efficiency=0.95, backup_reserve=0.2,
+        hardware_reserve=0.0, interval_minutes=5, horizon_hours=1,
+        terminal_weight=0.0,
+    )
+    ev = module.EVChargePlan(
+        vehicle_id="car", max_power_kw=(7.2,) * 3, energy_needed_kwh=1.05,
+        charge_efficiency=0.95, min_power_kw=1.0,
+        allow_grid=(False, True, True), allow_solar=(True,) * 3,
+        allow_battery=(True,) * 3, initially_charging=True,
+    )
+    result = optimizer.optimize(
+        import_prices=[0.31, 0.45, 0.0], export_prices=[0.0] * 3,
+        solar_forecast=[3.1, 0.0, 3.1], load_forecast=[8.1, 8.1, 4.8],
+        current_soc=0.99, allow_battery_export=True, allow_grid_charge=True,
+        cost_neutral_earnings_cap=0.5, cost_neutral_slots=[True] * 3,
+        ev_plan=ev,
+    )
+
+    assert result.lp_stats["ev_sources_reconciled_to_schedule"] is False
+    assert not result.feasible
+    assert all(action.action == "self_consumption" for action in result.schedule.actions)
 
 
 def test_cost_neutral_caps_discretionary_battery_export_at_exact_earnings(

@@ -1,7 +1,7 @@
-<!-- release: v2.12.1779 -->
+<!-- release: v2.12.1780 -->
 
-## Tesla BLE Stop recovery
+## Cost Neutral battery charging
 
-PowerSync can now retry Stop history recovery when it verifies that a previously pending Stop was never sent. Recovery still checks the affected vehicles and waits for fresh confirmation that they are stopped.
+When the optimizer cannot verify how planned EV charging will be supplied, it discards that plan and returns the battery to normal self-consumption. This prevents unexpected force charging and exporting until a fresh plan is available.
 
 Update through HACS and restart Home Assistant.
