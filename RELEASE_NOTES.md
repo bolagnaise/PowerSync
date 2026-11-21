@@ -1,5 +1,7 @@
-<!-- release: v2.12.1785 -->
+<!-- release: v2.12.1786 -->
 
 ## Tesla BLE Scheduled Charging
 
-Scheduled Charging can retry a missed start on BLE-only Tesla setups once fresh readings from the car's bridge show it has stopped and is drawing no power. Update through HACS and restart Home Assistant.
+Scheduled Charging can retry a missed start when fresh readings from the configured Tesla BLE bridge show the car is stopped and drawing no power. This covers BLE-only setups and VIN-linked cars with a paired bridge when the native charging status is unavailable or stale. Fresh native readings that indicate charging or positive draw keep the current session in place.
+
+Update through HACS and restart Home Assistant.
