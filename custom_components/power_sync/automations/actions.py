@@ -7427,6 +7427,8 @@ def _tessie_handoff_observation(hass, vehicle_id, command_entity, max_amps):
         or _tesla_observed_command_state(observation) != "charging"
         or observation.charger_actual_current is None
         or not 0 < observation.charger_actual_current <= max_amps
+        or observation.requested_current is None
+        or not 0 < observation.requested_current <= max_amps
     ):
         return None
     return observation

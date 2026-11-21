@@ -14793,19 +14793,21 @@ def _patch_handover_start(monkeypatch, *, start_calls, stop_calls, wait_result):
 
 
 @pytest.mark.parametrize(
-    ("vehicle_state", "measured_amps", "route_kind", "no_grid_import", "keep_charging"),
+    ("vehicle_state", "measured_amps", "requested_amps", "route_kind", "solar_only", "keep_charging"),
     [
-        ("Charging", 8, "ha", False, True),
-        (None, None, "ha", False, False),
-        ("Stopped", 0, "ha", False, False),
-        ("Charging", 33, "ha", False, False),
-        ("Charging", 8, "blocked", False, False),
-        ("Charging", 8, "ha", True, False),
+        ("Charging", 8, 8, "ha", False, True),
+        (None, None, None, "ha", False, False),
+        ("Stopped", 0, 8, "ha", False, False),
+        ("Charging", 33, 33, "ha", False, False),
+        ("Charging", 8, 33, "ha", False, False),
+        ("Charging", 8, None, "ha", False, False),
+        ("Charging", 8, 8, "blocked", False, False),
+        ("Charging", 8, 8, "ha", True, False),
     ],
 )
 def test_price_level_handover_keeps_confirmed_tessie_charging(
-    monkeypatch, vehicle_state, measured_amps, route_kind, no_grid_import,
-    keep_charging,
+    monkeypatch, vehicle_state, measured_amps, requested_amps, route_kind,
+    solar_only, keep_charging,
 ):
     """An eligible Price Level plan can take over a charging Solar loadpoint."""
     from power_sync import tesla_ev_observation, tesla_ev_recovery
@@ -14840,6 +14842,7 @@ def test_price_level_handover_keeps_confirmed_tessie_charging(
         return SimpleNamespace(
             domain="tessie", charge_state=vehicle_state,
             charger_actual_current=measured_amps, charger_power=None,
+            requested_current=requested_amps,
             producer_identity=("tessie", "test-entry", "test-device"),
         )
 
@@ -14850,7 +14853,7 @@ def test_price_level_handover_keeps_confirmed_tessie_charging(
         {
             **_handover_start_params(vin),
             "owner_mode": "price_level_recovery",
-            "no_grid_import": no_grid_import,
+            "no_grid_import": solar_only,
         },
     ))
 

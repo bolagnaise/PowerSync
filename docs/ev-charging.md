@@ -1,6 +1,7 @@
 # EV charging and shared chargers
 
 - [EV charging actions in Home Assistant](#ev-charging-actions)
+- [Tessie Price Level handoff](#tessie-price-level-handoff)
 - [Zaptec Price Level charging](#zaptec-price-level-charging)
 - [EV SoC sensors with OCPP](#ev-soc-sensors-with-ocpp)
 - [Multiple vehicles on one generic charger](#shared-charger-vehicles)
@@ -46,6 +47,10 @@ In the integration's **EV Charging** options, set **EV battery SoC sensor** and,
 PowerSync prefers a valid SoC reported by that OCPP connector, then tries your primary sensor and finally the fallback. The resolved value feeds the EV display, Smart Schedule and target-SoC checks. Invalid or unavailable readings remain unknown; Smart Schedule waits for a usable SoC and requests a stop if its charging session loses that reading.
 
 The global sensor pair is not assigned automatically when multiple OCPP chargers or a separate generic charger are configured. Native per-connector SoC still works. For multiple cars sharing a generic charger, use the selected vehicle profiles below. See [EV SoC sources](ev-soc-sources.md) for source precedence and limitations.
+
+## Tessie Price Level handoff
+
+When Price Level takes over from Solar Surplus, PowerSync can keep your Tesla charging while it changes modes. It needs a fresh Tessie report for that car and checks that both the measured and requested current fit the incoming plan. If the plan prohibits grid imports, the vehicle report is unavailable, or transport recovery is pending, the normal start checks apply.
 
 ## Zaptec Price Level charging
 
