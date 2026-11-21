@@ -13,7 +13,7 @@
           "electricity_provider": "Electricity provider"
         },
         "data_description": {
-          "electricity_provider": "If your retailer is not listed, choose Other / Custom TOU to enter rates manually."
+          "electricity_provider": "For any other retailer, choose Other retailer / fixed TOU to load a published Australian plan, start from a preset or enter your rates."
         },
         "submit": "Next"
       },
@@ -363,18 +363,20 @@
           "plan_name": "Plan name (optional)",
           "tariff_type": "Tariff type",
           "flat_rate": "Flat rate",
-          "offpeak_rate": "Off-peak rate",
-          "fit_rate": "Default feed-in tariff",
-          "seasonal_rates": "Rates change by season"
+          "offpeak_rate": "Standard import rate",
+          "fit_rate": "Standard export rate",
+          "seasonal_rates": "Rates change by season",
+          "daily_supply_charge": "Daily supply charge"
         },
         "data_description": {
           "skip_tariff": "Check to use default estimation instead of configuring custom rates.",
           "plan_name": "Optional label for this tariff plan. Shown in the integration card.",
           "tariff_type": "Flat rate uses a single price all day. Time of Use lets you add multiple periods with different rates.",
           "flat_rate": "Only used for flat rate tariff type.",
-          "offpeak_rate": "Rate for hours not covered by any period you define.",
-          "fit_rate": "Default export earnings for off-peak hours. Use a negative value when you pay to export.",
-          "seasonal_rates": "Enable this when month ranges use different time periods or prices."
+          "offpeak_rate": "Import price for every time not covered by a period you define.",
+          "fit_rate": "Default export earnings for every time not covered by a period. Use a negative value when you pay to export.",
+          "seasonal_rates": "Enable this when month ranges use different time periods or prices.",
+          "daily_supply_charge": "Fixed daily charge from your bill, including GST. Used for cost reporting."
         },
         "submit": "Next"
       },
@@ -397,31 +399,101 @@
         "submit": "Next"
       },
       "tariff_period": {
-        "title": "Add tariff period",
+        "title": "Tariff periods",
         "description": "{period_info}",
         "data": {
+          "edit_period": "Edit a period",
+          "remove_period": "Remove a period",
           "season": "Season",
+          "period_label": "Name (optional)",
           "period_type": "Period type",
           "period_start": "Start time",
           "period_end": "End time",
-          "period_days": "Applies to",
-          "import_rate": "Import rate",
-          "export_rate": "Export/feed-in rate",
-          "remove_period": "Remove a period",
-          "add_another": "Add another period"
+          "period_days": "Days",
+          "import_rate": "Import price",
+          "export_rate": "Export price",
+          "next_action": "Next"
         },
         "data_description": {
-          "season": "Calendar season this time period and rate belongs to.",
-          "period_type": "e.g. Peak, Shoulder, Off-Peak, Super Off-Peak.",
-          "period_start": "Start time in 24-hour format (e.g. 07:00).",
-          "period_end": "End time in 24-hour format (e.g. 22:00).",
-          "period_days": "Which days this period applies to (weekdays, weekends, or all).",
-          "import_rate": "What you pay per kWh to import during this period.",
-          "export_rate": "What you earn per kWh for exporting during this period. Use a negative value when you pay to export.",
+          "edit_period": "Choose a period to load it into the fields below, change it, then save it.",
           "remove_period": "Choose a period and continue to remove it. Leave this as Keep all added periods when adding a new period.",
-          "add_another": "Uncheck when done. Remaining hours become off-peak."
+          "season": "Calendar season this time period and rate belongs to.",
+          "period_label": "Shown in the period table, for example Peak or Free hours.",
+          "period_type": "Category used when the tariff is sent to your battery: Peak, Shoulder, Off-Peak or Super Off-Peak.",
+          "period_start": "Start time on a half-hour boundary.",
+          "period_end": "End time on a half-hour boundary. 24:00 is midnight; an end earlier than the start runs overnight.",
+          "period_days": "Days this period applies to.",
+          "import_rate": "What you pay per kWh to import during this period. Leave blank to use the standard import rate.",
+          "export_rate": "What you earn per kWh for exporting during this period. Leave blank to use the standard export rate. Use a negative value when you pay to export.",
+          "next_action": "Save the period in the fields below, or continue with the table as shown."
         },
         "submit": "Next"
+      },
+      "tariff_allowance": {
+        "title": "Free import allowance",
+        "description": "{plan_info}\n\n{period_info}\n\nSome plans make the first kWh you import in a window each day free or cheaper. Set the allowance to 0 kWh if your plan has none. Allowances reset every day. Premium export allowances can't be modelled in a custom tariff yet; the rate after the allowance applies instead.",
+        "data": {
+          "allowance_kwh": "Daily allowance",
+          "allowance_start": "Window starts",
+          "allowance_end": "Window ends",
+          "allowance_price": "Price for allowance energy"
+        },
+        "data_description": {
+          "allowance_kwh": "Energy per day charged at the allowance price. 0 removes the allowance.",
+          "allowance_start": "Start of the window the allowance applies in.",
+          "allowance_end": "End of the window. 24:00 is midnight.",
+          "allowance_price": "Price per kWh for allowance energy, usually 0. After the allowance is used, the normal rate for that time applies."
+        },
+        "submit": "Next"
+      },
+      "retail_plan_retailer": {
+        "title": "Electricity retailer",
+        "description": "Choose your retailer. PowerSync can load one of its published plans, start from a preset, or let you enter your rates.",
+        "data": {
+          "retail_plan_retailer": "Retailer"
+        },
+        "data_description": {
+          "retail_plan_retailer": "Choose Another retailer / outside Australia to enter your rates manually."
+        },
+        "submit": "Next"
+      },
+      "retail_plan_network": {
+        "title": "State and network",
+        "description": "Choose your state and the electricity network (distributor) named on your bill. Published plans are filtered to this network.",
+        "data": {
+          "retail_plan_network": "State and network"
+        },
+        "submit": "Next"
+      },
+      "retail_plan_source": {
+        "title": "Plan source",
+        "description": "{retailer} on the {network} network.\n\n{provider_hint}",
+        "data": {
+          "retail_plan_source": "Start from"
+        },
+        "data_description": {
+          "retail_plan_source": "Published plans are the generally available offers the retailer reports to the Australian Energy Regulator (Energy Made Easy). They are not read from your account, so check each rate against your bill."
+        },
+        "submit": "Next"
+      },
+      "retail_plan_published": {
+        "title": "Published plan",
+        "description": "{count} residential plans from {retailer} on the {network} network, from the Australian Energy Regulator's Energy Made Easy data. The plan you choose is loaded into the editor for review; nothing is saved until you finish.",
+        "data": {
+          "retail_plan_id": "Plan"
+        },
+        "data_description": {
+          "retail_plan_id": "Plans with the same name are listed newest first. Choose the version on your bill, or enter rates manually."
+        },
+        "submit": "Load plan"
+      },
+      "retail_plan_preset": {
+        "title": "PowerSync preset",
+        "description": "Choose a preset to load into the editor. Replace its rates with the ones on your bill before saving.",
+        "data": {
+          "retail_plan_preset": "Preset"
+        },
+        "submit": "Load preset"
       },
       "nz_retailer": {
         "title": "NZ electricity retailer",
@@ -1198,6 +1270,16 @@
       }
     },
     "error": {
+      "network_required": "Choose your state and network.",
+      "prd_unavailable": "Energy Made Easy could not be reached. Try again shortly, or enter your rates manually.",
+      "prd_no_plans": "No residential plans from this retailer were found for this network. Choose another network, or enter your rates manually.",
+      "prd_plan_unknown": "Choose a plan from the list.",
+      "prd_import_failed": "This plan has no usable electricity rates. Choose another plan, or enter your rates manually.",
+      "period_time_invalid": "Choose different start and end times on half-hour boundaries.",
+      "period_time_whole_hours": "AGL Battery Rewards periods must start and end on the hour.",
+      "period_days_required": "Choose at least one day.",
+      "allowance_invalid": "Enter a non-negative allowance, a price and different start and end times.",
+      "allowance_not_cheaper": "The allowance price must be lower than the normal import rate in that window.",
       "tesla_force_discharge_prices_invalid": "Enter finite Tesla force-discharge prices from $0 to $99/kWh, with the sell price higher than the buy price.",
       "invalid_flow_power_plan": "Choose a Flow Power plan and a region supported by that plan.",
       "invalid_display_currency": "Select Automatic, AUD, EUR, GBP, NZD, or SEK.",
@@ -1304,6 +1386,16 @@
   },
   "options": {
     "error": {
+      "network_required": "Choose your state and network.",
+      "prd_unavailable": "Energy Made Easy could not be reached. Try again shortly, or enter your rates manually.",
+      "prd_no_plans": "No residential plans from this retailer were found for this network. Choose another network, or enter your rates manually.",
+      "prd_plan_unknown": "Choose a plan from the list.",
+      "prd_import_failed": "This plan has no usable electricity rates. Choose another plan, or enter your rates manually.",
+      "period_time_invalid": "Choose different start and end times on half-hour boundaries.",
+      "period_time_whole_hours": "AGL Battery Rewards periods must start and end on the hour.",
+      "period_days_required": "Choose at least one day.",
+      "allowance_invalid": "Enter a non-negative allowance, a price and different start and end times.",
+      "allowance_not_cheaper": "The allowance price must be lower than the normal import rate in that window.",
       "invalid_tesla_site": "Select a Tesla energy site from the list.",
       "no_energy_sites": "No Tesla energy sites found for this account.",
       "invalid_auth": "The Tesla API connection could not be authenticated. Check your selected provider and sign in again.",
@@ -1587,7 +1679,7 @@
           "electricity_provider": "Electricity provider"
         },
         "data_description": {
-          "electricity_provider": "If your retailer is not listed, choose Other / Custom TOU to enter rates manually."
+          "electricity_provider": "For any other retailer, choose Other retailer / fixed TOU to load a published Australian plan, start from a preset or enter your rates."
         },
         "submit": "Next"
       },
@@ -2573,17 +2665,19 @@
           "plan_name": "Plan name (optional)",
           "tariff_type": "Tariff type",
           "flat_rate": "Flat rate",
-          "offpeak_rate": "Off-peak rate",
-          "fit_rate": "Default feed-in tariff",
-          "seasonal_rates": "Rates change by season"
+          "offpeak_rate": "Standard import rate",
+          "fit_rate": "Standard export rate",
+          "seasonal_rates": "Rates change by season",
+          "daily_supply_charge": "Daily supply charge"
         },
         "data_description": {
           "plan_name": "Optional label for this tariff plan. Shown in the integration card.",
           "tariff_type": "Flat rate uses a single price all day. Time of Use lets you add multiple periods with different rates.",
           "flat_rate": "Only used for flat rate tariff type.",
-          "offpeak_rate": "Rate for hours not covered by any period you define.",
-          "fit_rate": "Default export earnings for off-peak hours. Use a negative value when you pay to export.",
-          "seasonal_rates": "Enable this when month ranges use different time periods or prices."
+          "offpeak_rate": "Import price for every time not covered by a period you define.",
+          "fit_rate": "Default export earnings for every time not covered by a period. Use a negative value when you pay to export.",
+          "seasonal_rates": "Enable this when month ranges use different time periods or prices.",
+          "daily_supply_charge": "Fixed daily charge from your bill, including GST. Used for cost reporting."
         },
         "submit": "Save"
       },
@@ -2606,30 +2700,109 @@
         "submit": "Next"
       },
       "tariff_period_options": {
-        "title": "Add tariff period",
+        "title": "Tariff periods",
         "description": "{period_info}",
         "data": {
+          "edit_period": "Edit a period",
+          "remove_period": "Remove a period",
           "season": "Season",
+          "period_label": "Name (optional)",
           "period_type": "Period type",
           "period_start": "Start time",
           "period_end": "End time",
-          "period_days": "Applies to",
-          "import_rate": "Import rate",
-          "export_rate": "Export/feed-in rate",
-          "remove_period": "Remove a period",
-          "add_another": "Add another period"
+          "period_days": "Days",
+          "import_rate": "Import price",
+          "export_rate": "Export price",
+          "next_action": "Next"
         },
         "data_description": {
-          "season": "Calendar season this time period and rate belongs to.",
-          "period_type": "e.g. Peak, Shoulder, Off-Peak, Super Off-Peak.",
-          "period_start": "Start time in 24-hour format (e.g. 07:00).",
-          "period_end": "End time in 24-hour format (e.g. 22:00).",
-          "import_rate": "What you pay per kWh to import during this period.",
-          "export_rate": "What you earn per kWh for exporting during this period. Use a negative value when you pay to export.",
+          "edit_period": "Choose a period to load it into the fields below, change it, then save it.",
           "remove_period": "Choose a period and continue to remove it. Leave this as Keep all added periods when adding a new period.",
-          "add_another": "Uncheck when done. Remaining hours become off-peak."
+          "season": "Calendar season this time period and rate belongs to.",
+          "period_label": "Shown in the period table, for example Peak or Free hours.",
+          "period_type": "Category used when the tariff is sent to your battery: Peak, Shoulder, Off-Peak or Super Off-Peak.",
+          "period_start": "Start time on a half-hour boundary.",
+          "period_end": "End time on a half-hour boundary. 24:00 is midnight; an end earlier than the start runs overnight.",
+          "period_days": "Days this period applies to.",
+          "import_rate": "What you pay per kWh to import during this period. Leave blank to use the standard import rate.",
+          "export_rate": "What you earn per kWh for exporting during this period. Leave blank to use the standard export rate. Use a negative value when you pay to export.",
+          "next_action": "Save the period in the fields below, or continue with the table as shown."
         },
         "submit": "Save"
+      },
+      "tariff_allowance_options": {
+        "title": "Free import allowance",
+        "description": "{plan_info}\n\n{period_info}\n\nSome plans make the first kWh you import in a window each day free or cheaper. Set the allowance to 0 kWh if your plan has none. Allowances reset every day. Premium export allowances can't be modelled in a custom tariff yet; the rate after the allowance applies instead.",
+        "data": {
+          "allowance_kwh": "Daily allowance",
+          "allowance_start": "Window starts",
+          "allowance_end": "Window ends",
+          "allowance_price": "Price for allowance energy"
+        },
+        "data_description": {
+          "allowance_kwh": "Energy per day charged at the allowance price. 0 removes the allowance.",
+          "allowance_start": "Start of the window the allowance applies in.",
+          "allowance_end": "End of the window. 24:00 is midnight.",
+          "allowance_price": "Price per kWh for allowance energy, usually 0. After the allowance is used, the normal rate for that time applies."
+        },
+        "submit": "Save"
+      },
+      "retail_plan_options": {
+        "title": "Electricity plan",
+        "description": "Edit your current rates, or choose your retailer to load a published plan or preset. A new plan replaces the saved periods when you finish.",
+        "data": {
+          "retail_plan_source": "Rates"
+        },
+        "submit": "Next"
+      },
+      "retail_plan_retailer_options": {
+        "title": "Electricity retailer",
+        "description": "Choose your retailer. PowerSync can load one of its published plans, start from a preset, or let you enter your rates.",
+        "data": {
+          "retail_plan_retailer": "Retailer"
+        },
+        "data_description": {
+          "retail_plan_retailer": "Choose Another retailer / outside Australia to enter your rates manually."
+        },
+        "submit": "Next"
+      },
+      "retail_plan_network_options": {
+        "title": "State and network",
+        "description": "Choose your state and the electricity network (distributor) named on your bill. Published plans are filtered to this network.",
+        "data": {
+          "retail_plan_network": "State and network"
+        },
+        "submit": "Next"
+      },
+      "retail_plan_source_options": {
+        "title": "Plan source",
+        "description": "{retailer} on the {network} network.\n\n{provider_hint}",
+        "data": {
+          "retail_plan_source": "Start from"
+        },
+        "data_description": {
+          "retail_plan_source": "Published plans are the generally available offers the retailer reports to the Australian Energy Regulator (Energy Made Easy). They are not read from your account, so check each rate against your bill."
+        },
+        "submit": "Next"
+      },
+      "retail_plan_published_options": {
+        "title": "Published plan",
+        "description": "{count} residential plans from {retailer} on the {network} network, from the Australian Energy Regulator's Energy Made Easy data. The plan you choose is loaded into the editor for review; nothing is saved until you finish.",
+        "data": {
+          "retail_plan_id": "Plan"
+        },
+        "data_description": {
+          "retail_plan_id": "Plans with the same name are listed newest first. Choose the version on your bill, or enter rates manually."
+        },
+        "submit": "Load plan"
+      },
+      "retail_plan_preset_options": {
+        "title": "PowerSync preset",
+        "description": "Choose a preset to load into the editor. Replace its rates with the ones on your bill before saving.",
+        "data": {
+          "retail_plan_preset": "Preset"
+        },
+        "submit": "Load preset"
       },
       "curtailment_options": {
         "title": "Curtailment settings",

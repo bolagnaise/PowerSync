@@ -9,13 +9,13 @@
   },
   "source_state": {
     "components": {
-      "config_flow.py": "6ebd728b3e1bce9464d47aecad893406e23a2f0642dc58653e6157d8489079b8",
-      "const.py": "b21bfec1a3471128a68504f07af80f8fe5bd2645d0b8efd3a12f0ca0fda4d93b",
+      "config_flow.py": "7845846b56b3cad9ab35825c5aabc018016ff6fcc67c068980140dccc41db40a",
+      "const.py": "7f5ebf1f0c8ab629adab80cfcc3429c4eae667d7c222721935c66c0e884e0b53",
       "battery_backend/profiles.py": "d308ecc78740d8dfc9cd895e4b9750a02859d46e5f0863dd5c098b8aaab2bcc2",
       "battery_backend/discovery.py": "3a8c88c00d6c57f6101d55056968524d7971d1ac3b8e16365923bca978f9489b",
       "settings_metadata.py": "913295806df38f52982803891aae03a9c5493545011d98c2d6ad0631eb24d0a8",
-      "strings.json": "faa61780b16d7d5395857716adbc7b3b6f15165ebeb3452fb6f528664f88d6a5",
-      "translations/en.json": "d7b8ab1e64d8069c2fb62fd87ed5b9ee2ce01a57c5d8ba69aa63fadc58a4790d",
+      "strings.json": "f51ea2b567aadf1093280cfa748103259137b04f2bf6090bbee779a3f66e4caa",
+      "translations/en.json": "916259d5047362466826dd04a1c4c208c5938ec0f5df6b6cf2a14457cf62b9ee",
       "services.yaml": "8422772a3401c215db31624f172d635f3c2de01a2b7f7208e8fef9d3621d95ed",
       "switch.py": "84ea8b75a073c97cabcb6b4ba33a301b81dc60d6b0b40f8174f53f39cb649d06",
       "select.py": "8d5d7dbd06e0919d3ba84b52660f342dde1583bf9d8d57c2bb5bcbd2ca655d99",
@@ -30,7 +30,9 @@
       "amber_smartshift/runtime.py": "250d0a6c04bea921e297f8a60abce039d99e5cfee91838f90e0c847e0c434466",
       "amber_smartshift/controls.py": "5d6f9cb7876cc5f2d138ab67d9f5106de02e44ccc7e18b880f16eb300b71f68f",
       "amber_smartshift/flow.py": "e88b4b6c79f6f5483adda57840bdad52f339de109048ee3087a6a357809aa71e",
-      "amber_smartshift/entities.py": "a2502634cf192a529d1d2e82fd38ec8983527e9841851bf8f4d77d77b9ad9406"
+      "amber_smartshift/entities.py": "a2502634cf192a529d1d2e82fd38ec8983527e9841851bf8f4d77d77b9ad9406",
+      "retail_plan_steps.py": "81947867457c2348f66ef7e6318f59677c01756f50dd5f6562c029c780779752",
+      "retail_plan_flow.py": "e2b60d5ee46ab1b032822825cac68c04294880c5b254ac0d844db8126e73e112"
     },
     "step_methods": [
       "PowerSyncConfigFlow.async_step_aemo_config",
@@ -309,9 +311,10 @@
       "config.custom_battery.optimization_max_discharge_w": "Maximum discharge power",
       "config.custom_battery.optimization_max_grid_export_w": "Maximum grid export",
       "config.custom_battery.optimization_max_grid_import_w": "Maximum grid import",
-      "config.custom_tariff.fit_rate": "Default feed-in tariff",
+      "config.custom_tariff.daily_supply_charge": "Daily supply charge",
+      "config.custom_tariff.fit_rate": "Standard export rate",
       "config.custom_tariff.flat_rate": "Flat rate",
-      "config.custom_tariff.offpeak_rate": "Off-peak rate",
+      "config.custom_tariff.offpeak_rate": "Standard import rate",
       "config.custom_tariff.plan_name": "Plan name (optional)",
       "config.custom_tariff.seasonal_rates": "Rates change by season",
       "config.custom_tariff.skip_tariff": "Skip tariff configuration",
@@ -467,6 +470,11 @@
       "config.powersync.teslemetry_api_token": "PowerSync token",
       "config.powersync_reauth.teslemetry_api_token": "PowerSync token",
       "config.provider_selection.electricity_provider": "Electricity provider",
+      "config.retail_plan_network.retail_plan_network": "State and network",
+      "config.retail_plan_preset.retail_plan_preset": "Preset",
+      "config.retail_plan_published.retail_plan_id": "Plan",
+      "config.retail_plan_retailer.retail_plan_retailer": "Retailer",
+      "config.retail_plan_source.retail_plan_source": "Start from",
       "config.saj_h2_battery.saj_battery_capacity_kwh": "Battery capacity",
       "config.saj_h2_battery.saj_config_entry_id": "SAJ H2 integration",
       "config.saj_h2_battery.saj_inverter_rated_kw": "Inverter rated AC power",
@@ -511,11 +519,17 @@
       "config.sungrow.sungrow_ihomemanager_port": "iHomeManager plaintext control port",
       "config.sungrow.sungrow_port": "Modbus port",
       "config.sungrow.sungrow_slave_id": "Modbus slave ID",
-      "config.tariff_period.add_another": "Add another period",
-      "config.tariff_period.export_rate": "Export/feed-in rate",
-      "config.tariff_period.import_rate": "Import rate",
-      "config.tariff_period.period_days": "Applies to",
+      "config.tariff_allowance.allowance_end": "Window ends",
+      "config.tariff_allowance.allowance_kwh": "Daily allowance",
+      "config.tariff_allowance.allowance_price": "Price for allowance energy",
+      "config.tariff_allowance.allowance_start": "Window starts",
+      "config.tariff_period.edit_period": "Edit a period",
+      "config.tariff_period.export_rate": "Export price",
+      "config.tariff_period.import_rate": "Import price",
+      "config.tariff_period.next_action": "Next",
+      "config.tariff_period.period_days": "Days",
       "config.tariff_period.period_end": "End time",
+      "config.tariff_period.period_label": "Name (optional)",
       "config.tariff_period.period_start": "Start time",
       "config.tariff_period.period_type": "Period type",
       "config.tariff_period.remove_period": "Remove a period",
@@ -649,9 +663,10 @@
       "options.custom_battery.optimization_max_discharge_w": "Maximum discharge power",
       "options.custom_battery.optimization_max_grid_export_w": "Maximum grid export",
       "options.custom_battery.optimization_max_grid_import_w": "Maximum grid import",
-      "options.custom_tariff_options.fit_rate": "Default feed-in tariff",
+      "options.custom_tariff_options.daily_supply_charge": "Daily supply charge",
+      "options.custom_tariff_options.fit_rate": "Standard export rate",
       "options.custom_tariff_options.flat_rate": "Flat rate",
-      "options.custom_tariff_options.offpeak_rate": "Off-peak rate",
+      "options.custom_tariff_options.offpeak_rate": "Standard import rate",
       "options.custom_tariff_options.plan_name": "Plan name (optional)",
       "options.custom_tariff_options.seasonal_rates": "Rates change by season",
       "options.custom_tariff_options.tariff_type": "Tariff type",
@@ -969,6 +984,12 @@
       "options.options_tesla_ev_token.tesla_ev_teslemetry_token": "Teslemetry API token",
       "options.powersync_token.teslemetry_api_token": "PowerSync token",
       "options.pricing.electricity_provider": "Electricity provider",
+      "options.retail_plan_network_options.retail_plan_network": "State and network",
+      "options.retail_plan_options.retail_plan_source": "Rates",
+      "options.retail_plan_preset_options.retail_plan_preset": "Preset",
+      "options.retail_plan_published_options.retail_plan_id": "Plan",
+      "options.retail_plan_retailer_options.retail_plan_retailer": "Retailer",
+      "options.retail_plan_source_options.retail_plan_source": "Start from",
       "options.saj_h2_connection.saj_battery_capacity_kwh": "Battery capacity",
       "options.saj_h2_connection.saj_config_entry_id": "SAJ H2 integration",
       "options.saj_h2_connection.saj_inverter_rated_kw": "Inverter rated AC power",
@@ -998,11 +1019,17 @@
       "options.sungrow_connection.sungrow_ihomemanager_port": "iHomeManager plaintext control port",
       "options.sungrow_connection.sungrow_port": "Modbus port",
       "options.sungrow_connection.sungrow_slave_id": "Modbus slave ID",
-      "options.tariff_period_options.add_another": "Add another period",
-      "options.tariff_period_options.export_rate": "Export/feed-in rate",
-      "options.tariff_period_options.import_rate": "Import rate",
-      "options.tariff_period_options.period_days": "Applies to",
+      "options.tariff_allowance_options.allowance_end": "Window ends",
+      "options.tariff_allowance_options.allowance_kwh": "Daily allowance",
+      "options.tariff_allowance_options.allowance_price": "Price for allowance energy",
+      "options.tariff_allowance_options.allowance_start": "Window starts",
+      "options.tariff_period_options.edit_period": "Edit a period",
+      "options.tariff_period_options.export_rate": "Export price",
+      "options.tariff_period_options.import_rate": "Import price",
+      "options.tariff_period_options.next_action": "Next",
+      "options.tariff_period_options.period_days": "Days",
       "options.tariff_period_options.period_end": "End time",
+      "options.tariff_period_options.period_label": "Name (optional)",
       "options.tariff_period_options.period_start": "Start time",
       "options.tariff_period_options.period_type": "Period type",
       "options.tariff_period_options.remove_period": "Remove a period",
@@ -4134,7 +4161,7 @@
       "scope": "config",
       "form": "custom_tariff",
       "field": "offpeak_rate",
-      "label": "Off-peak rate",
+      "label": "Standard import rate",
       "page": "Tariffs-and-Time-Periods.md",
       "source_line": 7085,
       "group": null,
@@ -4164,7 +4191,7 @@
       "scope": "config",
       "form": "custom_tariff",
       "field": "fit_rate",
-      "label": "Default feed-in tariff",
+      "label": "Standard export rate",
       "page": "Tariffs-and-Time-Periods.md",
       "source_line": 7102,
       "group": null,
@@ -4264,7 +4291,7 @@
       "scope": "config",
       "form": "tariff_period",
       "field": "period_days",
-      "label": "Applies to",
+      "label": "Days",
       "page": "Tariffs-and-Time-Periods.md",
       "source_line": 7469,
       "group": null,
@@ -4274,7 +4301,7 @@
       "scope": "config",
       "form": "tariff_period",
       "field": "import_rate",
-      "label": "Import rate",
+      "label": "Import price",
       "page": "Tariffs-and-Time-Periods.md",
       "source_line": 7478,
       "group": null,
@@ -4283,18 +4310,8 @@
     {
       "scope": "config",
       "form": "tariff_period",
-      "field": "add_another",
-      "label": "Add another period",
-      "page": "Tariffs-and-Time-Periods.md",
-      "source_line": 7487,
-      "group": null,
-      "rendering": "conditional union; see page availability notes"
-    },
-    {
-      "scope": "config",
-      "form": "tariff_period",
       "field": "export_rate",
-      "label": "Export/feed-in rate",
+      "label": "Export price",
       "page": "Tariffs-and-Time-Periods.md",
       "source_line": 7519,
       "group": null,
@@ -8114,7 +8131,7 @@
       "scope": "options",
       "form": "custom_tariff_options",
       "field": "offpeak_rate",
-      "label": "Off-peak rate",
+      "label": "Standard import rate",
       "page": "Tariffs-and-Time-Periods.md",
       "source_line": 17851,
       "group": null,
@@ -8134,7 +8151,7 @@
       "scope": "options",
       "form": "custom_tariff_options",
       "field": "fit_rate",
-      "label": "Default feed-in tariff",
+      "label": "Standard export rate",
       "page": "Tariffs-and-Time-Periods.md",
       "source_line": 17873,
       "group": null,
@@ -8234,7 +8251,7 @@
       "scope": "options",
       "form": "tariff_period_options",
       "field": "period_days",
-      "label": "Applies to",
+      "label": "Days",
       "page": "Tariffs-and-Time-Periods.md",
       "source_line": 18397,
       "group": null,
@@ -8244,7 +8261,7 @@
       "scope": "options",
       "form": "tariff_period_options",
       "field": "import_rate",
-      "label": "Import rate",
+      "label": "Import price",
       "page": "Tariffs-and-Time-Periods.md",
       "source_line": 18406,
       "group": null,
@@ -8253,18 +8270,8 @@
     {
       "scope": "options",
       "form": "tariff_period_options",
-      "field": "add_another",
-      "label": "Add another period",
-      "page": "Tariffs-and-Time-Periods.md",
-      "source_line": 18415,
-      "group": null,
-      "rendering": "conditional union; see page availability notes"
-    },
-    {
-      "scope": "options",
-      "form": "tariff_period_options",
       "field": "export_rate",
-      "label": "Export/feed-in rate",
+      "label": "Export price",
       "page": "Tariffs-and-Time-Periods.md",
       "source_line": 18447,
       "group": null,
@@ -8827,6 +8834,276 @@
       "page": "Optimization-Settings.md",
       "group": "Battery & forecast inputs",
       "rendering": "optional, off by default; requires comparable weekday SOC and home-presence observations"
+    },
+    {
+      "scope": "config",
+      "form": "custom_tariff",
+      "field": "daily_supply_charge",
+      "label": "Daily supply charge",
+      "page": "Tariffs-and-Time-Periods.md",
+      "source_line": null,
+      "group": null,
+      "rendering": "Retail plan selector and period table; see Tariffs-and-Time-Periods."
+    },
+    {
+      "scope": "config",
+      "form": "tariff_period",
+      "field": "edit_period",
+      "label": "Edit a period",
+      "page": "Tariffs-and-Time-Periods.md",
+      "source_line": null,
+      "group": null,
+      "rendering": "Retail plan selector and period table; see Tariffs-and-Time-Periods."
+    },
+    {
+      "scope": "config",
+      "form": "tariff_period",
+      "field": "period_label",
+      "label": "Name (optional)",
+      "page": "Tariffs-and-Time-Periods.md",
+      "source_line": null,
+      "group": null,
+      "rendering": "Retail plan selector and period table; see Tariffs-and-Time-Periods."
+    },
+    {
+      "scope": "config",
+      "form": "tariff_period",
+      "field": "next_action",
+      "label": "Next",
+      "page": "Tariffs-and-Time-Periods.md",
+      "source_line": null,
+      "group": null,
+      "rendering": "Retail plan selector and period table; see Tariffs-and-Time-Periods."
+    },
+    {
+      "scope": "config",
+      "form": "tariff_allowance",
+      "field": "allowance_kwh",
+      "label": "Daily allowance",
+      "page": "Tariffs-and-Time-Periods.md",
+      "source_line": null,
+      "group": null,
+      "rendering": "Retail plan selector and period table; see Tariffs-and-Time-Periods."
+    },
+    {
+      "scope": "config",
+      "form": "tariff_allowance",
+      "field": "allowance_start",
+      "label": "Window starts",
+      "page": "Tariffs-and-Time-Periods.md",
+      "source_line": null,
+      "group": null,
+      "rendering": "Retail plan selector and period table; see Tariffs-and-Time-Periods."
+    },
+    {
+      "scope": "config",
+      "form": "tariff_allowance",
+      "field": "allowance_end",
+      "label": "Window ends",
+      "page": "Tariffs-and-Time-Periods.md",
+      "source_line": null,
+      "group": null,
+      "rendering": "Retail plan selector and period table; see Tariffs-and-Time-Periods."
+    },
+    {
+      "scope": "config",
+      "form": "tariff_allowance",
+      "field": "allowance_price",
+      "label": "Price for allowance energy",
+      "page": "Tariffs-and-Time-Periods.md",
+      "source_line": null,
+      "group": null,
+      "rendering": "Retail plan selector and period table; see Tariffs-and-Time-Periods."
+    },
+    {
+      "scope": "config",
+      "form": "retail_plan_retailer",
+      "field": "retail_plan_retailer",
+      "label": "Retailer",
+      "page": "Tariffs-and-Time-Periods.md",
+      "source_line": null,
+      "group": null,
+      "rendering": "Retail plan selector and period table; see Tariffs-and-Time-Periods."
+    },
+    {
+      "scope": "config",
+      "form": "retail_plan_network",
+      "field": "retail_plan_network",
+      "label": "State and network",
+      "page": "Tariffs-and-Time-Periods.md",
+      "source_line": null,
+      "group": null,
+      "rendering": "Retail plan selector and period table; see Tariffs-and-Time-Periods."
+    },
+    {
+      "scope": "config",
+      "form": "retail_plan_source",
+      "field": "retail_plan_source",
+      "label": "Start from",
+      "page": "Tariffs-and-Time-Periods.md",
+      "source_line": null,
+      "group": null,
+      "rendering": "Retail plan selector and period table; see Tariffs-and-Time-Periods."
+    },
+    {
+      "scope": "config",
+      "form": "retail_plan_published",
+      "field": "retail_plan_id",
+      "label": "Plan",
+      "page": "Tariffs-and-Time-Periods.md",
+      "source_line": null,
+      "group": null,
+      "rendering": "Retail plan selector and period table; see Tariffs-and-Time-Periods."
+    },
+    {
+      "scope": "config",
+      "form": "retail_plan_preset",
+      "field": "retail_plan_preset",
+      "label": "Preset",
+      "page": "Tariffs-and-Time-Periods.md",
+      "source_line": null,
+      "group": null,
+      "rendering": "Retail plan selector and period table; see Tariffs-and-Time-Periods."
+    },
+    {
+      "scope": "options",
+      "form": "custom_tariff_options",
+      "field": "daily_supply_charge",
+      "label": "Daily supply charge",
+      "page": "Tariffs-and-Time-Periods.md",
+      "source_line": null,
+      "group": null,
+      "rendering": "Retail plan selector and period table; see Tariffs-and-Time-Periods."
+    },
+    {
+      "scope": "options",
+      "form": "tariff_period_options",
+      "field": "edit_period",
+      "label": "Edit a period",
+      "page": "Tariffs-and-Time-Periods.md",
+      "source_line": null,
+      "group": null,
+      "rendering": "Retail plan selector and period table; see Tariffs-and-Time-Periods."
+    },
+    {
+      "scope": "options",
+      "form": "tariff_period_options",
+      "field": "period_label",
+      "label": "Name (optional)",
+      "page": "Tariffs-and-Time-Periods.md",
+      "source_line": null,
+      "group": null,
+      "rendering": "Retail plan selector and period table; see Tariffs-and-Time-Periods."
+    },
+    {
+      "scope": "options",
+      "form": "tariff_period_options",
+      "field": "next_action",
+      "label": "Next",
+      "page": "Tariffs-and-Time-Periods.md",
+      "source_line": null,
+      "group": null,
+      "rendering": "Retail plan selector and period table; see Tariffs-and-Time-Periods."
+    },
+    {
+      "scope": "options",
+      "form": "tariff_allowance_options",
+      "field": "allowance_kwh",
+      "label": "Daily allowance",
+      "page": "Tariffs-and-Time-Periods.md",
+      "source_line": null,
+      "group": null,
+      "rendering": "Retail plan selector and period table; see Tariffs-and-Time-Periods."
+    },
+    {
+      "scope": "options",
+      "form": "tariff_allowance_options",
+      "field": "allowance_start",
+      "label": "Window starts",
+      "page": "Tariffs-and-Time-Periods.md",
+      "source_line": null,
+      "group": null,
+      "rendering": "Retail plan selector and period table; see Tariffs-and-Time-Periods."
+    },
+    {
+      "scope": "options",
+      "form": "tariff_allowance_options",
+      "field": "allowance_end",
+      "label": "Window ends",
+      "page": "Tariffs-and-Time-Periods.md",
+      "source_line": null,
+      "group": null,
+      "rendering": "Retail plan selector and period table; see Tariffs-and-Time-Periods."
+    },
+    {
+      "scope": "options",
+      "form": "tariff_allowance_options",
+      "field": "allowance_price",
+      "label": "Price for allowance energy",
+      "page": "Tariffs-and-Time-Periods.md",
+      "source_line": null,
+      "group": null,
+      "rendering": "Retail plan selector and period table; see Tariffs-and-Time-Periods."
+    },
+    {
+      "scope": "options",
+      "form": "retail_plan_options",
+      "field": "retail_plan_source",
+      "label": "Rates",
+      "page": "Tariffs-and-Time-Periods.md",
+      "source_line": null,
+      "group": null,
+      "rendering": "Retail plan selector and period table; see Tariffs-and-Time-Periods."
+    },
+    {
+      "scope": "options",
+      "form": "retail_plan_retailer_options",
+      "field": "retail_plan_retailer",
+      "label": "Retailer",
+      "page": "Tariffs-and-Time-Periods.md",
+      "source_line": null,
+      "group": null,
+      "rendering": "Retail plan selector and period table; see Tariffs-and-Time-Periods."
+    },
+    {
+      "scope": "options",
+      "form": "retail_plan_network_options",
+      "field": "retail_plan_network",
+      "label": "State and network",
+      "page": "Tariffs-and-Time-Periods.md",
+      "source_line": null,
+      "group": null,
+      "rendering": "Retail plan selector and period table; see Tariffs-and-Time-Periods."
+    },
+    {
+      "scope": "options",
+      "form": "retail_plan_source_options",
+      "field": "retail_plan_source",
+      "label": "Start from",
+      "page": "Tariffs-and-Time-Periods.md",
+      "source_line": null,
+      "group": null,
+      "rendering": "Retail plan selector and period table; see Tariffs-and-Time-Periods."
+    },
+    {
+      "scope": "options",
+      "form": "retail_plan_published_options",
+      "field": "retail_plan_id",
+      "label": "Plan",
+      "page": "Tariffs-and-Time-Periods.md",
+      "source_line": null,
+      "group": null,
+      "rendering": "Retail plan selector and period table; see Tariffs-and-Time-Periods."
+    },
+    {
+      "scope": "options",
+      "form": "retail_plan_preset_options",
+      "field": "retail_plan_preset",
+      "label": "Preset",
+      "page": "Tariffs-and-Time-Periods.md",
+      "source_line": null,
+      "group": null,
+      "rendering": "Retail plan selector and period table; see Tariffs-and-Time-Periods."
     }
   ],
   "profiles": [
@@ -10090,6 +10367,10 @@
       "page": "Battery-Custom-Controller",
       "status": "documented"
     },
+    "config.custom_tariff.daily_supply_charge": {
+      "page": "Tariffs-and-Time-Periods",
+      "status": "documented"
+    },
     "config.custom_tariff.fit_rate": {
       "page": "Tariffs-and-Time-Periods",
       "status": "documented"
@@ -10598,6 +10879,10 @@
       "page": "Optimization-Settings",
       "status": "documented"
     },
+    "config.ml_options.optimization_use_historical_ev_data": {
+      "page": "Optimization-Settings",
+      "status": "documented"
+    },
     "config.ml_options.profit_max_enabled": {
       "page": "Optimization-Settings",
       "status": "documented"
@@ -10716,6 +11001,26 @@
     },
     "config.provider_selection.electricity_provider": {
       "page": "Installation",
+      "status": "documented"
+    },
+    "config.retail_plan_network.retail_plan_network": {
+      "page": "Tariffs-and-Time-Periods",
+      "status": "documented"
+    },
+    "config.retail_plan_preset.retail_plan_preset": {
+      "page": "Tariffs-and-Time-Periods",
+      "status": "documented"
+    },
+    "config.retail_plan_published.retail_plan_id": {
+      "page": "Tariffs-and-Time-Periods",
+      "status": "documented"
+    },
+    "config.retail_plan_retailer.retail_plan_retailer": {
+      "page": "Tariffs-and-Time-Periods",
+      "status": "documented"
+    },
+    "config.retail_plan_source.retail_plan_source": {
+      "page": "Tariffs-and-Time-Periods",
       "status": "documented"
     },
     "config.saj_h2_battery.saj_battery_capacity_kwh": {
@@ -10894,7 +11199,23 @@
       "page": "Battery-Sungrow",
       "status": "documented"
     },
-    "config.tariff_period.add_another": {
+    "config.tariff_allowance.allowance_end": {
+      "page": "Tariffs-and-Time-Periods",
+      "status": "documented"
+    },
+    "config.tariff_allowance.allowance_kwh": {
+      "page": "Tariffs-and-Time-Periods",
+      "status": "documented"
+    },
+    "config.tariff_allowance.allowance_price": {
+      "page": "Tariffs-and-Time-Periods",
+      "status": "documented"
+    },
+    "config.tariff_allowance.allowance_start": {
+      "page": "Tariffs-and-Time-Periods",
+      "status": "documented"
+    },
+    "config.tariff_period.edit_period": {
       "page": "Tariffs-and-Time-Periods",
       "status": "documented"
     },
@@ -10906,11 +11227,19 @@
       "page": "Tariffs-and-Time-Periods",
       "status": "documented"
     },
+    "config.tariff_period.next_action": {
+      "page": "Tariffs-and-Time-Periods",
+      "status": "documented"
+    },
     "config.tariff_period.period_days": {
       "page": "Tariffs-and-Time-Periods",
       "status": "documented"
     },
     "config.tariff_period.period_end": {
+      "page": "Tariffs-and-Time-Periods",
+      "status": "documented"
+    },
+    "config.tariff_period.period_label": {
       "page": "Tariffs-and-Time-Periods",
       "status": "documented"
     },
@@ -11446,6 +11775,10 @@
       "page": "Battery-Custom-Controller",
       "status": "documented"
     },
+    "options.custom_tariff_options.daily_supply_charge": {
+      "page": "Tariffs-and-Time-Periods",
+      "status": "documented"
+    },
     "options.custom_tariff_options.fit_rate": {
       "page": "Tariffs-and-Time-Periods",
       "status": "documented"
@@ -11713,6 +12046,10 @@
     "options.ev_charging_setup.optimization_planned_ev_load_entity": {
       "status": "source_text_only",
       "reason": "Not in the active source-schema field reference; legacy/helper/conditional text is not proof of a visible control. Review this exclusion on source change."
+    },
+    "options.ev_charging_setup.optimization_use_historical_ev_data": {
+      "status": "source_text_only",
+      "reason": "The optimiser control is documented under Optimization. This legacy EV setup text is not an active schema control."
     },
     "options.ev_charging_setup.sigenergy_charger_charge_power_limit_entity": {
       "status": "source_text_only",
@@ -12690,7 +13027,19 @@
       "page": "Optimization-Settings",
       "status": "documented"
     },
+    "options.optimization.optimization_use_historical_ev_data": {
+      "page": "Optimization-Settings",
+      "status": "documented"
+    },
     "options.optimization.profit_max_enabled": {
+      "page": "Optimization-Settings",
+      "status": "documented"
+    },
+    "options.optimization.tesla_force_discharge_buy_price": {
+      "page": "Optimization-Settings",
+      "status": "documented"
+    },
+    "options.optimization.tesla_force_discharge_sell_price": {
       "page": "Optimization-Settings",
       "status": "documented"
     },
@@ -12708,6 +13057,30 @@
     },
     "options.pricing.electricity_provider": {
       "page": "Electricity-Providers",
+      "status": "documented"
+    },
+    "options.retail_plan_network_options.retail_plan_network": {
+      "page": "Tariffs-and-Time-Periods",
+      "status": "documented"
+    },
+    "options.retail_plan_options.retail_plan_source": {
+      "page": "Tariffs-and-Time-Periods",
+      "status": "documented"
+    },
+    "options.retail_plan_preset_options.retail_plan_preset": {
+      "page": "Tariffs-and-Time-Periods",
+      "status": "documented"
+    },
+    "options.retail_plan_published_options.retail_plan_id": {
+      "page": "Tariffs-and-Time-Periods",
+      "status": "documented"
+    },
+    "options.retail_plan_retailer_options.retail_plan_retailer": {
+      "page": "Tariffs-and-Time-Periods",
+      "status": "documented"
+    },
+    "options.retail_plan_source_options.retail_plan_source": {
+      "page": "Tariffs-and-Time-Periods",
       "status": "documented"
     },
     "options.saj_h2_connection.saj_battery_capacity_kwh": {
@@ -12766,6 +13139,18 @@
       "page": "Battery-Sigenergy",
       "status": "documented"
     },
+    "options.solar_accounting.additional_solar_enabled": {
+      "page": "Additional-Solar-Accounting",
+      "status": "documented"
+    },
+    "options.solar_accounting.additional_solar_load_basis": {
+      "page": "Additional-Solar-Accounting",
+      "status": "documented"
+    },
+    "options.solar_accounting.additional_solar_power_entity": {
+      "page": "Additional-Solar-Accounting",
+      "status": "documented"
+    },
     "options.solax_battery_options.solax_battery_capacity_kwh": {
       "page": "Battery-Solax",
       "status": "documented"
@@ -12814,7 +13199,23 @@
       "page": "Battery-Sungrow",
       "status": "documented"
     },
-    "options.tariff_period_options.add_another": {
+    "options.tariff_allowance_options.allowance_end": {
+      "page": "Tariffs-and-Time-Periods",
+      "status": "documented"
+    },
+    "options.tariff_allowance_options.allowance_kwh": {
+      "page": "Tariffs-and-Time-Periods",
+      "status": "documented"
+    },
+    "options.tariff_allowance_options.allowance_price": {
+      "page": "Tariffs-and-Time-Periods",
+      "status": "documented"
+    },
+    "options.tariff_allowance_options.allowance_start": {
+      "page": "Tariffs-and-Time-Periods",
+      "status": "documented"
+    },
+    "options.tariff_period_options.edit_period": {
       "page": "Tariffs-and-Time-Periods",
       "status": "documented"
     },
@@ -12826,11 +13227,19 @@
       "page": "Tariffs-and-Time-Periods",
       "status": "documented"
     },
+    "options.tariff_period_options.next_action": {
+      "page": "Tariffs-and-Time-Periods",
+      "status": "documented"
+    },
     "options.tariff_period_options.period_days": {
       "page": "Tariffs-and-Time-Periods",
       "status": "documented"
     },
     "options.tariff_period_options.period_end": {
+      "page": "Tariffs-and-Time-Periods",
+      "status": "documented"
+    },
+    "options.tariff_period_options.period_label": {
       "page": "Tariffs-and-Time-Periods",
       "status": "documented"
     },
@@ -12952,38 +13361,6 @@
     },
     "options.zaptec_cloud_options.zaptec_username": {
       "page": "EV-Smart-Charging",
-      "status": "documented"
-    },
-    "options.optimization.tesla_force_discharge_buy_price": {
-      "page": "Optimization-Settings",
-      "status": "documented"
-    },
-    "options.optimization.tesla_force_discharge_sell_price": {
-      "page": "Optimization-Settings",
-      "status": "documented"
-    },
-    "options.solar_accounting.additional_solar_enabled": {
-      "page": "Additional-Solar-Accounting",
-      "status": "documented"
-    },
-    "options.solar_accounting.additional_solar_load_basis": {
-      "page": "Additional-Solar-Accounting",
-      "status": "documented"
-    },
-    "options.solar_accounting.additional_solar_power_entity": {
-      "page": "Additional-Solar-Accounting",
-      "status": "documented"
-    },
-    "options.ev_charging_setup.optimization_use_historical_ev_data": {
-      "status": "source_text_only",
-      "reason": "The optimiser control is documented under Optimization. This legacy EV setup text is not an active schema control."
-    },
-    "options.optimization.optimization_use_historical_ev_data": {
-      "page": "Optimization-Settings",
-      "status": "documented"
-    },
-    "config.ml_options.optimization_use_historical_ev_data": {
-      "page": "Optimization-Settings",
       "status": "documented"
     }
   }

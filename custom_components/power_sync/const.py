@@ -728,7 +728,7 @@ ELECTRICITY_PROVIDERS = {
     "octopus": "Octopus Energy — dynamic Agile/Go/Flux pricing (UK)",
     "epex": "EPEX Day-Ahead — European day-ahead market pricing (EU)",
     "nz": "New Zealand TOU — Octopus NZ, Electric Kiwi, Contact, etc.",
-    "other": "Other / Custom TOU — enter your own rates manually",
+    "other": "Other retailer / fixed TOU — published AU plan, preset or manual rates",
 }
 
 # AGL Battery Rewards configuration. Rates are total feed-in tariffs in c/kWh,
