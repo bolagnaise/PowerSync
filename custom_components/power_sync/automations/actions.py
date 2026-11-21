@@ -19773,29 +19773,41 @@ async def _action_start_ev_charging_dynamic_locked(
             hass, config_entry, teardown_params,
         )
     else:
+        def revalidate_handoff():
+            nonlocal handoff_observation
+            current_observation = _tessie_handoff_observation(
+                hass, vehicle_id, command_entity, start_amps,
+            )
+            headroom = hass.data.get(DOMAIN, {}).get(entry_id, {}).get("solar_ev_headroom")
+            if (
+                not solar_state.get("active")
+                or (headroom is not None and headroom.lease)
+                or get_ev_quick_control_obligation(hass, config_entry, vehicle_id) is not None
+                or manual_stop_hold_reason(hass, config_entry, vehicle_id)
+                or get_vehicle_route(hass, config_entry, vehicle_id) != route
+                or current_observation is None
+                or current_observation.producer_identity != handoff_observation.producer_identity
+            ):
+                return False
+            handoff_observation = current_observation
+            return True
+
         teardown_params.update(
             stop_charging=False, _expected_state=solar_state, _expected_lease=_lease,
+            _revalidate_handoff=revalidate_handoff,
         )
-        # Let the old controller finish releasing its lease before a queued
-        # Solar Surplus tick can check that it still owns this loadpoint.
+        # Keep the Solar timer and lease until the handoff is revalidated
+        # after session history is saved.
         async with solar_update_lock:
             teardown_success = await _action_stop_ev_charging_dynamic(
                 hass, config_entry, teardown_params,
             )
-        current_observation = _tessie_handoff_observation(
-            hass, vehicle_id, command_entity, start_amps,
-        )
         if (
             not teardown_success
             or solar_state.get("active")
             or get_ev_ownership(hass, config_entry, vehicle_id)[1] is not None
-            or manual_stop_hold_reason(hass, config_entry, vehicle_id)
-            or get_vehicle_route(hass, config_entry, vehicle_id) != route
-            or current_observation is None
-            or current_observation.producer_identity != handoff_observation.producer_identity
         ):
             return False
-        handoff_observation = current_observation
 
     quick_control_obligation = None
     if params.get("quick_control") and params.get("expires_at"):
@@ -20961,6 +20973,7 @@ async def _action_stop_ev_charging_dynamic(
     from .ev_ownership import get_ev_ownerships, owner_family
 
     expected_lease = params.get("_expected_lease")
+    revalidate_handoff = params.get("_revalidate_handoff")
 
     def session_matches(vid, state):
         return vehicles.get(vid) is state and (
@@ -21013,16 +21026,18 @@ async def _action_stop_ev_charging_dynamic(
             continue
 
         if state:
+            def cancel_session_timers():
+                cancel_timer = state.get("cancel_timer")
+                if cancel_timer:
+                    cancel_timer()
+                    _LOGGER.debug(f"Dynamic EV: Cancelled periodic timer for {vid}")
+                quick_stop_timer = state.get("quick_stop_timer")
+                if quick_stop_timer:
+                    quick_stop_timer()
+                    _LOGGER.debug(f"Dynamic EV: Cancelled quick-stop timer for {vid}")
 
-            # Cancel the timer
-            cancel_timer = state.get("cancel_timer")
-            if cancel_timer:
-                cancel_timer()
-                _LOGGER.debug(f"Dynamic EV: Cancelled periodic timer for {vid}")
-            quick_stop_timer = state.get("quick_stop_timer")
-            if quick_stop_timer:
-                quick_stop_timer()
-                _LOGGER.debug(f"Dynamic EV: Cancelled quick-stop timer for {vid}")
+            if revalidate_handoff is None:
+                cancel_session_timers()
 
             # End charging session tracking
             try:
@@ -21060,6 +21075,11 @@ async def _action_stop_ev_charging_dynamic(
                     vid,
                 )
                 continue
+
+            if revalidate_handoff is not None:
+                if not revalidate_handoff():
+                    return False
+                cancel_session_timers()
 
             state["active"] = False
             from .ev_ownership import release_ev_ownership
