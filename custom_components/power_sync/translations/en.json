@@ -1222,6 +1222,7 @@
       "invalid_api_key": "Flow Power rejected that API key. Copy the current value from More > Web Data Access and try again.",
       "invalid_site": "Select a Flow Power site from the list.",
       "zaptec_auth_failed": "Zaptec Cloud login failed. Check that your email and password are correct.",
+      "zaptec_installation_unavailable": "Zaptec Cloud did not report an installation for the selected charger. Check the charger and its installation in the Zaptec Portal.",
       "zaptec_missing_credentials": "Both email and password are required for Zaptec Cloud authentication.",
       "no_prices": "No prices found for this tariff and region combination. Verify your Octopus product and GSP region match your account.",
       "optimizer_not_installed": "Smart Optimization requires the HiGHS solver (highspy), which is not installed. Check Home Assistant logs for installation errors.",

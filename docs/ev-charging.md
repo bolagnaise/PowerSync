@@ -51,9 +51,13 @@ The global sensor pair is not assigned automatically when multiple OCPP chargers
 
 With Price Level enabled and **PowerSync controls charging** selected, PowerSync applies your price limit even when charging begins after authentication in Zaptec. **Allow hands-off external charging** leaves that session under external control until a fresh charger reading confirms it was unplugged. Manual and Boost ownership remain separate.
 
-An accepted start or stop command is not proof of charging or stopping. PowerSync waits for fresh charger readings and keeps the existing home-battery protection while its command is unresolved. Invalid power readings do not confirm a stop. A completed session releases that session's battery protection without repeatedly restarting the car at cheap prices.
+An accepted current setting or resume request leaves the session waiting until a charger poll detects power or phase current. A Zaptec session can report charging while the car is still drawing 0 W. PowerSync keeps the Price Level home-battery protection while its command is unresolved. Invalid readings do not confirm a stop. A completed session releases its battery protection without repeatedly restarting the car at cheap prices.
 
 The same pending-command handling applies when Zaptec uses an associated Tesla vehicle for its charging decision. Ambiguous vehicle associations cannot independently start the same charger. Unchanged current allocations can be reused only after a fresh installation readback confirms them; requests for a different allocation still respect Zaptec's update interval.
+
+PowerSync applies current limits to the installation linked to the selected charger in Zaptec. If current control is refused after updating, reconnect Zaptec in PowerSync's Home Assistant integration options to refresh the charger and installation pairing.
+
+An active battery force-charge or force-discharge timer pauses automatic EV evaluations. Quick EV Charge is a manual session and does not inherit Price Level's **Preserve Home Battery** setting.
 
 <a id="shared-charger-vehicles"></a>
 

@@ -3239,15 +3239,18 @@ def test_zaptec_external_alias_lease_follows_current_policy(monkeypatch, policy,
     assert stop.await_count == int(expected_stop)
 
 
-@pytest.mark.parametrize("poll_started,confirmed", [(199, False), (201, True), (float("nan"), False)])
-def test_zaptec_pending_start_requires_post_command_charging_poll(monkeypatch, poll_started, confirmed):
+@pytest.mark.parametrize("poll_started,power,confirmed", [
+    (199, 10000, False), (201, 10000, True), (201, 0, False),
+    (float("nan"), 10000, False),
+])
+def test_zaptec_pending_start_requires_post_command_charging_poll(monkeypatch, poll_started, power, confirmed):
     entry = SimpleNamespace(entry_id="entry-1", data={}, options={
         "zaptec_standalone_enabled": True, "zaptec_username": "user@example.com",
         "zaptec_charger_id": "charger-1",
     })
     hass = _FakeHass(price_settings={"preserve_home_battery": True})
     runtime = hass.data["power_sync"]["entry-1"]
-    runtime["zaptec_cached_state"] = {"charger_operation_mode": "charging", "total_charge_power_w": 10000}
+    runtime["zaptec_cached_state"] = {"charger_operation_mode": "charging", "total_charge_power_w": power}
     runtime["zaptec_state_poll"] = {"started_at": poll_started, "completed_at": 202}
     monkeypatch.setattr(ev_planner.time, "monotonic", lambda: 203)
     monkeypatch.setattr(ev_planner, "discover_all_tesla_vehicles", _no_vehicles)

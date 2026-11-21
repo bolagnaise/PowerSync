@@ -12,8 +12,17 @@ import importlib.util
 import pytest
 
 
+def _zaptec_power_draw():
+    spec = importlib.util.spec_from_file_location(
+        "zaptec_state_test", ROOT / "custom_components/power_sync/zaptec_state.py",
+    )
+    state = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(state)
+    return state.zaptec_power_draw
+
+
 def _zaptec_display_projection(byd_vehicles, other_observations=(), stored_data=None,
-                               mode="charging"):
+                               mode="charging", power=None):
     """Execute the shipped display enrichment without HA or device commands."""
     method = _get_method()
     body = method.body[1].body
@@ -35,7 +44,8 @@ def _zaptec_display_projection(byd_vehicles, other_observations=(), stored_data=
 
     stored_data = stored_data or {}
     namespace = {
-        'zaptec_cached': {'charger_operation_mode': mode, 'total_charge_power_w': 10700 if mode == 'charging' else 0},
+        'zaptec_cached': {'charger_operation_mode': mode, 'total_charge_power_w': power if power is not None else (10700 if mode == 'charging' else 0)},
+        'zaptec_power_draw': _zaptec_power_draw(),
         'observed_vehicles': list(other_observations),
         'stored_data': stored_data,
         'vehicle_configs': stored_data.get('vehicle_charging_configs', []),
@@ -49,6 +59,13 @@ def _zaptec_display_projection(byd_vehicles, other_observations=(), stored_data=
     ast.fix_missing_locations(module)
     exec(compile(module, str(INIT_PATH), 'exec'), namespace)
     return next(row for row in namespace['observed_vehicles'] if row.get('charger_type') == 'zaptec')
+
+
+def test_zaptec_mode_three_at_zero_watts_is_connected_and_waiting():
+    row = _zaptec_display_projection([], mode="charging", power=0)
+    assert row["is_connected"] is True
+    assert row["is_charging"] is False
+    assert row["blocking_reason"] == "connected_waiting"
 
 
 def test_zaptec_energy_flow_receives_available_byd_percentage():
@@ -334,6 +351,7 @@ def test_zaptec_finished_mode_is_kept_as_a_connected_loadpoint():
             }
         },
         "observed_vehicles": [],
+        "zaptec_power_draw": _zaptec_power_draw(),
     }
     exec(compile(module, str(INIT_PATH), "exec"), namespace)
 

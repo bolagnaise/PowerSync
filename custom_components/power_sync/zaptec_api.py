@@ -25,6 +25,7 @@ ZAPTEC_TOKEN_URL = f"{ZAPTEC_API_BASE_URL}/oauth/token"
 # Rate limits
 _MIN_REQUEST_INTERVAL = 1.0  # 10 req/sec general, but be conservative
 _MIN_CURRENT_UPDATE_INTERVAL = 900.0  # 15 minutes for installation current updates
+_CHARGER_INSTALLATION_RETRY_SECONDS = 60.0
 
 # Zaptec charger commands
 ZAPTEC_CMD_RESUME_CHARGING = 507
@@ -52,9 +53,13 @@ class ZaptecCloudClient:
         self.password = password
         self._session = session
         self._own_session = False
+        self._closed = False
         self._last_request_time = 0.0
         self._last_current_update_time = 0.0
         self._last_current_update_target: tuple | None = None
+        self._charger_installations: dict[str, str] = {}
+        self._charger_lookup_retry_after: dict[str, float] = {}
+        self._charger_installation_lock = asyncio.Lock()
 
         # Token state
         self._access_token: str | None = None
@@ -62,13 +67,16 @@ class ZaptecCloudClient:
 
     async def _get_session(self) -> aiohttp.ClientSession:
         """Get or create an aiohttp session."""
+        if self._closed:
+            raise RuntimeError("Zaptec Cloud client is closed")
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession()
             self._own_session = True
         return self._session
 
     async def close(self):
-        """Close the session if we own it."""
+        """Retire this client and close the session if we own it."""
+        self._closed = True
         if self._own_session and self._session and not self._session.closed:
             await self._session.close()
 
@@ -226,13 +234,45 @@ class ZaptecCloudClient:
         """
         result = await self._request("GET", "/api/chargers")
         if isinstance(result, dict):
-            data = result.get("Data", result.get("Pages", []))
+            data = result.get("Data", result.get("data", result.get("Pages", [])))
             if isinstance(data, list):
                 _LOGGER.info("Zaptec Cloud: found %d charger(s)", len(data))
                 return data
         if isinstance(result, list):
             return result
         return []
+
+    async def validate_charger_installation(self, charger_id: str, installation_id: str) -> bool:
+        """Verify and cache which installation contains this exact charger."""
+        charger_key = charger_id.casefold()
+        installation_key = installation_id.casefold()
+        async with self._charger_installation_lock:
+            known_installation = self._charger_installations.get(charger_key)
+            if known_installation is not None:
+                return known_installation == installation_key
+
+            now = time.monotonic()
+            if now < self._charger_lookup_retry_after.get(charger_key, 0):
+                return False
+
+            self._charger_lookup_retry_after[charger_key] = now + _CHARGER_INSTALLATION_RETRY_SECONDS
+            details = await self._request("GET", f"/api/chargers/{charger_id}")
+            if not isinstance(details, dict):
+                return False
+            returned_id = details.get("Id", details.get("id"))
+            returned_installation = details.get("InstallationId", details.get("installationId"))
+            if (
+                not isinstance(returned_id, str)
+                or returned_id.casefold() != charger_key
+                or not isinstance(returned_installation, str)
+                or not returned_installation
+            ):
+                return False
+
+            actual_installation = returned_installation.casefold()
+            self._charger_installations[charger_key] = actual_installation
+            self._charger_lookup_retry_after.pop(charger_key, None)
+            return actual_installation == installation_key
 
     async def get_charger_state(self, charger_id: str) -> dict:
         """Get current state of a specific charger.
@@ -246,25 +286,24 @@ class ZaptecCloudClient:
         result = await self._request(
             "GET", f"/api/chargers/{charger_id}/state"
         )
-        # Parse state observations into a flat dict
+        observations = result
+        if isinstance(result, dict):
+            observations = result.get("Data", result.get("data", result.get("StateValues", result)))
+        if isinstance(observations, dict):
+            return observations
+
         state = {}
-        if isinstance(result, list):
-            for obs in result:
-                state_id = obs.get("StateId")
-                value = obs.get("ValueAsString", "")
-                if state_id is not None:
-                    state[state_id] = value
-        elif isinstance(result, dict):
-            # Could be wrapped in Data
-            observations = result.get("Data", result.get("StateValues", []))
-            if isinstance(observations, list):
-                for obs in observations:
-                    state_id = obs.get("StateId")
-                    value = obs.get("ValueAsString", "")
-                    if state_id is not None:
-                        state[state_id] = value
-            else:
-                state = result
+        if not isinstance(observations, list):
+            return state
+        for observation in observations:
+            if not isinstance(observation, dict):
+                continue
+            observed_id = observation.get("ChargerId", observation.get("chargerId"))
+            if observed_id is not None and str(observed_id).casefold() != charger_id.casefold():
+                continue
+            state_id = observation.get("StateId", observation.get("stateId"))
+            if isinstance(state_id, (int, str)):
+                state[state_id] = observation.get("ValueAsString", observation.get("valueAsString"))
         return state
 
     async def resume_charging(self, charger_id: str) -> dict:
@@ -438,6 +477,8 @@ class ZaptecCloudClient:
           513 = TotalChargePower (W)
           553 = TotalChargePowerSession (kWh)
           710 = ChargerOperationMode (1=Disconnected, 2=Connected/Waiting, 3=Charging, 5=Finished)
+          718 = FinalStopActive
+          763 = NextScheduleEvent
           911 = ChargerFirmwareVersion
           723 = CompletedSession (JSON)
 
@@ -461,6 +502,13 @@ class ZaptecCloudClient:
         parsed["charger_operation_mode"] = op_modes.get(
             str(op_mode_raw), f"unknown_{op_mode_raw}"
         )
+        final_stop = state.get(718, state.get("718"))
+        if str(op_mode_raw) == "5" and str(final_stop).strip().lower() in ("1", "true"):
+            parsed["charger_operation_mode"] = "charging_paused"
+        schedule_event = state.get(763, state.get("763"))
+        parsed["schedule_active"] = str(schedule_event).strip().lower() not in (
+            "", "0", "none", "null", "false",
+        )
 
         # Existing callers use cable_locked as a connected/plugged-in hint.
         # Zaptec exposes connection primarily through ChargerOperationMode.
@@ -474,6 +522,7 @@ class ZaptecCloudClient:
             "connected_waiting",
             "charging",
             "connected_finished",
+            "charging_paused",
         )
 
         # Power

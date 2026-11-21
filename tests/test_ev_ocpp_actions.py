@@ -3055,6 +3055,9 @@ class _ZaptecClient:
     def __init__(self) -> None:
         self.calls: list[tuple] = []
 
+    async def validate_charger_installation(self, charger_id: str, installation_id: str) -> bool:
+        return (charger_id, installation_id) == ("charger-1", "installation-1")
+
     async def set_installation_current(self, installation_id: str, amps: int):
         self.calls.append(("set_installation_current", installation_id, amps))
 
@@ -3138,6 +3141,21 @@ def _zaptec_hass(cached_state: dict):
         "zaptec_cached_state": cached_state,
     })
     return hass, client
+
+
+def test_zaptec_current_refuses_saved_installation_for_another_charger():
+    zaptec_api = importlib.import_module("power_sync.zaptec_api")
+    client = zaptec_api.ZaptecCloudClient("user@example.invalid", "unused")
+    client._request = AsyncMock(return_value={"id": "charger-1", "installationId": "installation-1"})
+    hass, _ = _zaptec_hass({})
+    hass.data["power_sync"]["entry-1"]["zaptec_client"] = client
+
+    result = asyncio.run(actions._set_zaptec_charging_amps(
+        hass, _zaptec_entry("installation-2"), 16,
+    ))
+
+    assert result is False
+    client._request.assert_awaited_once_with("GET", "/api/chargers/charger-1")
 
 
 def _install_solar_surplus_runtime_stubs(
@@ -13170,14 +13188,57 @@ def test_zaptec_waiting_start_records_pending_authorization():
     assert params["_zaptec_pending_start"] is True
 
 
+def test_zaptec_charging_mode_at_zero_watts_arms_instead_of_reporting_started():
+    hass, client = _zaptec_hass({
+        "charger_operation_mode": "charging", "total_charge_power_w": 0,
+        "phase_a_current": 0, "phase_b_current": 0, "phase_c_current": 0,
+    })
+    params = {"charger_type": "zaptec"}
+
+    assert asyncio.run(actions._action_start_ev_charging(
+        hass, _zaptec_entry("installation-1"), params,
+    ))
+    assert client.calls == [("set_installation_current", "installation-1", 16)]
+    assert params["_zaptec_pending_start"] is True
+
+
+@pytest.mark.parametrize("mode,scheduled", [("connected_finished", False), ("charging_paused", True)])
+def test_zaptec_resume_avoids_finished_and_scheduled_sessions(mode, scheduled):
+    hass, client = _zaptec_hass({
+        "charger_operation_mode": mode, "total_charge_power_w": 0,
+        "cable_locked": True, "schedule_active": scheduled,
+    })
+
+    assert not asyncio.run(actions._action_start_ev_charging(
+        hass, _zaptec_entry("installation-1"), {"charger_type": "zaptec", "amps": 16},
+    ))
+    assert client.calls == []
+
+
+def test_zaptec_waiting_stop_does_not_ignore_phase_current():
+    hass, client = _zaptec_hass({
+        "charger_operation_mode": "connected_waiting", "total_charge_power_w": 0,
+        "phase_a_current": 12,
+    })
+
+    assert asyncio.run(actions._action_stop_ev_charging(
+        hass, _zaptec_entry("installation-1"), {"charger_type": "zaptec"},
+    ))
+    assert client.calls == [("deauthorize_and_stop", "charger-1")]
+
+
 def test_zaptec_resume_reuses_only_freshly_verified_unchanged_allocation(monkeypatch):
     zaptec_api = importlib.import_module("power_sync.zaptec_api")
     clock = [10000.0]
-    monkeypatch.setattr(zaptec_api, "time", SimpleNamespace(time=lambda: clock[0]))
+    monkeypatch.setattr(
+        zaptec_api, "time", SimpleNamespace(time=lambda: clock[0], monotonic=lambda: clock[0]),
+    )
     client = zaptec_api.ZaptecCloudClient("user@example.com", "password")
-    client._request = AsyncMock(side_effect=[{}, {
-        "availableCurrentPhase1": 16, "availableCurrentPhase2": 16, "availableCurrentPhase3": 16,
-    }, {}])
+    client._request = AsyncMock(side_effect=[
+        {}, {"id": "charger-1", "installationId": "installation-1"},
+        {"availableCurrentPhase1": 16, "availableCurrentPhase2": 16, "availableCurrentPhase3": 16},
+        {},
+    ])
     hass, _ = _zaptec_hass({"charger_operation_mode": "charging_paused", "cable_locked": True})
     hass.data["power_sync"]["entry-1"]["zaptec_client"] = client
 
@@ -13189,6 +13250,7 @@ def test_zaptec_resume_reuses_only_freshly_verified_unchanged_allocation(monkeyp
     asyncio.run(replay())
     assert [(call.args[0], call.args[1]) for call in client._request.await_args_list] == [
         ("POST", "/api/installation/installation-1/update"),
+        ("GET", "/api/chargers/charger-1"),
         ("GET", "/api/installation/installation-1"),
         ("POST", "/api/chargers/charger-1/SendCommand/507"),
     ]
@@ -13250,7 +13312,9 @@ def test_zaptec_dynamic_rate_rejection_keeps_acknowledged_current_and_retries(mo
     """A three-phase rate drop must recover after the installation cooldown."""
     zaptec_api = importlib.import_module("power_sync.zaptec_api")
     clock = [10000.0]
-    monkeypatch.setattr(zaptec_api, "time", SimpleNamespace(time=lambda: clock[0]))
+    monkeypatch.setattr(
+        zaptec_api, "time", SimpleNamespace(time=lambda: clock[0], monotonic=lambda: clock[0]),
+    )
     client = zaptec_api.ZaptecCloudClient("user@example.com", "password")
     client._request = AsyncMock(return_value={})
     hass, _ = _zaptec_hass({"charger_operation_mode": "charging"})
@@ -13283,7 +13347,9 @@ def test_zaptec_dynamic_rate_rejection_keeps_acknowledged_current_and_retries(mo
     actions._dynamic_ev_state["entry-1"] = {"zaptec_standalone": state}
 
     async def replay():
-        await client.set_installation_current("installation-1", 11)
+        client._request.return_value = {"Id": "charger-1", "InstallationId": "installation-1"}
+        assert await actions._set_zaptec_charging_amps(hass, entry, 11)
+        client._request.return_value = {}
         client._request.reset_mock()
         for grid_w in (14100, 14300, 6100):
             clock[0] += 30
@@ -13310,7 +13376,10 @@ def test_zaptec_dynamic_rate_rejection_keeps_acknowledged_current_and_retries(mo
 
 
 def test_zaptec_idle_stop_is_passive_success():
-    hass, client = _zaptec_hass({"charger_operation_mode": "connected_waiting"})
+    hass, client = _zaptec_hass({
+        "charger_operation_mode": "connected_waiting",
+        "total_charge_power_w": 0,
+    })
 
     result = asyncio.run(
         actions._action_stop_ev_charging(

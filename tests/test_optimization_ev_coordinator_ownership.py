@@ -296,7 +296,10 @@ def test_optimizer_zaptec_uses_existing_client_without_password():
     hass.data["power_sync"]["entry-1"].update(
         {
             "zaptec_client": client,
-            "zaptec_cached_state": {"cable_locked": True},
+            "zaptec_cached_state": {
+                "charger_operation_mode": "charging_paused",
+                "total_charge_power_w": 0,
+            },
         }
     )
     config = ev_coordinator.EVConfig(entity_id="switch.garage_ev", name="Garage EV")
@@ -359,6 +362,7 @@ def test_optimizer_zaptec_waiting_sets_current_and_claims():
     )
     hass = _Hass(entries=[entry])
     client = SimpleNamespace(
+        validate_charger_installation=AsyncMock(return_value=True),
         resume_charging=AsyncMock(return_value=True),
         set_installation_current=AsyncMock(return_value=True),
     )
@@ -393,6 +397,7 @@ def test_optimizer_zaptec_already_charging_updates_current_without_resume():
     )
     hass = _Hass(entries=[entry])
     client = SimpleNamespace(
+        validate_charger_installation=AsyncMock(return_value=True),
         resume_charging=AsyncMock(return_value=True),
         set_installation_current=AsyncMock(return_value=True),
     )
@@ -427,7 +432,10 @@ def test_optimizer_zaptec_idle_stop_releases_without_stop_command():
     hass.data["power_sync"]["entry-1"].update(
         {
             "zaptec_client": client,
-            "zaptec_cached_state": {"charger_operation_mode": "connected_waiting"},
+            "zaptec_cached_state": {
+                "charger_operation_mode": "connected_waiting",
+                "total_charge_power_w": 0,
+            },
         }
     )
     config = ev_coordinator.EVConfig(entity_id="switch.garage_ev", name="Garage EV")

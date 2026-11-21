@@ -9999,6 +9999,11 @@ async def _set_zaptec_charging_amps(
 
     target_amps = max(0, min(80, int(amps)))
     try:
+        if not await zaptec["client"].validate_charger_installation(
+            zaptec["charger_id"], installation_id,
+        ):
+            _LOGGER.warning("Zaptec set amps: configured installation could not be verified for this charger")
+            return False
         await zaptec["client"].set_installation_current(installation_id, target_amps)
         _LOGGER.info("Zaptec charger set to %dA", target_amps)
         return True
@@ -10014,6 +10019,8 @@ async def _start_zaptec_charging(
     params: Dict[str, Any] | None = None,
 ) -> bool:
     """Start Zaptec standalone charging with state-aware command selection."""
+    from ..zaptec_state import zaptec_power_draw
+
     zaptec = _get_zaptec_standalone(hass, config_entry)
     if not zaptec:
         _LOGGER.error("Zaptec start: standalone charger is not configured")
@@ -10021,19 +10028,17 @@ async def _start_zaptec_charging(
 
     cached_state = zaptec.get("cached_state") or {}
     charger_mode = str(_zaptec_state_value(cached_state, "charger_operation_mode", "")).lower()
-    try:
-        power_w = float(_zaptec_state_value(cached_state, "total_charge_power_w", 0) or 0)
-    except (TypeError, ValueError):
-        power_w = 0
-    cable_locked = bool(_zaptec_state_value(cached_state, "cable_locked", False))
-
-    if charger_mode not in ("connected_waiting", "charging") and power_w <= 50 and not cable_locked:
-        _LOGGER.warning("Zaptec start: vehicle is not plugged in")
+    drawing_power = zaptec_power_draw(cached_state) is True
+    waiting = charger_mode in ("connected_waiting", "charging")
+    if not drawing_power and (
+        cached_state.get("schedule_active") or not (waiting or charger_mode == "charging_paused")
+    ):
+        _LOGGER.info("Zaptec start deferred: charger mode %s is not startable", charger_mode or "unknown")
         return False
 
     target_amps = int(amps) if amps is not None else None
 
-    if charger_mode == "charging":
+    if drawing_power:
         if target_amps is not None:
             return await _set_zaptec_charging_amps(hass, config_entry, target_amps)
         _LOGGER.info("Zaptec charger is already charging")
@@ -10042,29 +10047,25 @@ async def _start_zaptec_charging(
     if params is not None and not await _run_pre_charge_wake_sequence(hass, params, "zaptec"):
         return False
 
-    if charger_mode == "connected_waiting":
+    if waiting:
         if not await _set_zaptec_charging_amps(hass, config_entry, target_amps or 16):
             _LOGGER.warning("Zaptec start: waiting charger could not be assigned current")
             return False
-        if params is not None:
-            # Setting installation current arms a waiting charger but does not
-            # prove that the vehicle has started drawing power.  Keep this
-            # attribution so a later price/SOC rejection can cancel the
-            # pending authorization instead of treating it as external.
-            params["_zaptec_pending_start"] = True
         _LOGGER.info("Zaptec charger waiting: set installation current instead of resume")
-        return True
+    else:
+        try:
+            if target_amps is not None and zaptec.get("installation_id"):
+                if not await _set_zaptec_charging_amps(hass, config_entry, target_amps):
+                    return False
+            await zaptec["client"].resume_charging(zaptec["charger_id"])
+            _LOGGER.info("Zaptec resume accepted; waiting for charger power")
+        except Exception as e:
+            _LOGGER.error("Zaptec start charging failed: %s", e)
+            return False
 
-    try:
-        if target_amps is not None and zaptec.get("installation_id"):
-            if not await _set_zaptec_charging_amps(hass, config_entry, target_amps):
-                return False
-        await zaptec["client"].resume_charging(zaptec["charger_id"])
-        _LOGGER.info("Zaptec charger resumed via Cloud API")
-        return True
-    except Exception as e:
-        _LOGGER.error("Zaptec start charging failed: %s", e)
-        return False
+    if params is not None:
+        params["_zaptec_pending_start"] = True
+    return True
 
 
 async def _stop_zaptec_charging(
@@ -10074,6 +10075,8 @@ async def _stop_zaptec_charging(
     pending_start: bool = False,
 ) -> bool:
     """Stop Zaptec standalone charging, treating already-idle states as success."""
+    from ..zaptec_state import zaptec_charge_state
+
     zaptec = _get_zaptec_standalone(hass, config_entry)
     if not zaptec:
         _LOGGER.error("Zaptec stop: standalone charger is not configured")
@@ -10081,40 +10084,22 @@ async def _stop_zaptec_charging(
 
     cached_state = zaptec.get("cached_state") or {}
     charger_mode = str(_zaptec_state_value(cached_state, "charger_operation_mode", "")).lower()
-    try:
-        power_w = float(_zaptec_state_value(cached_state, "total_charge_power_w", 0) or 0)
-    except (TypeError, ValueError):
-        power_w = 0
+    charge_state = zaptec_charge_state(cached_state)
+    if charge_state is False and (
+        not pending_start or charger_mode == "disconnected"
+    ):
+        _LOGGER.info("Zaptec charger already in %s mode, skipping stop command", charger_mode)
+        return True
+    if charge_state is None and not pending_start:
+        _LOGGER.warning("Zaptec stop could not verify charger state")
+        return False
 
-    if charger_mode == "connected_waiting" and power_w <= 50:
-        if not pending_start:
-            _LOGGER.info(
-                "Zaptec charger already in %s mode, skipping stop command",
-                charger_mode,
-            )
-            return True
-        try:
+    try:
+        if pending_start or charger_mode != "charging":
             await zaptec["client"].deauthorize_and_stop(zaptec["charger_id"])
-            _LOGGER.info("Zaptec pending session deauthorized and stopped via Cloud API")
-            return True
-        except Exception as e:
-            _LOGGER.error("Zaptec pending session cancellation failed: %s", e)
-            return False
-
-    if charger_mode == "disconnected" and power_w <= 50:
-        _LOGGER.info(
-            "Zaptec charger already in %s mode, skipping stop command",
-            charger_mode or "unknown",
-        )
-        return True
-
-    if charger_mode == "" and power_w <= 50 and not pending_start:
-        _LOGGER.info("Zaptec charger state is unknown, skipping stop command")
-        return True
-
-    try:
-        await zaptec["client"].stop_charging(zaptec["charger_id"])
-        _LOGGER.info("Zaptec charger stopped via Cloud API")
+        else:
+            await zaptec["client"].stop_charging(zaptec["charger_id"])
+        _LOGGER.info("Zaptec stop accepted by Cloud API")
         return True
     except Exception as e:
         _LOGGER.error("Zaptec stop charging failed: %s", e)
@@ -20589,13 +20574,18 @@ async def _action_start_ev_charging_dynamic_locked(
         hass.data[DOMAIN][entry_id]["dynamic_ev_state"] = _dynamic_ev_state[entry_id]
 
     mode_label = "solar surplus" if dynamic_mode == "solar_surplus" else "battery target"
-    _LOGGER.info(f"⚡ Dynamic EV charging started ({mode_label} mode, vehicle={vehicle_id})")
+    zaptec_start_pending = full_params["zaptec_pending_start"]
+    _LOGGER.info(
+        "Dynamic EV charging %s (%s mode, vehicle=%s)",
+        "armed; waiting for charger power" if zaptec_start_pending else "started",
+        mode_label, vehicle_id,
+    )
 
     # Send push notification if enabled
     # For solar_surplus mode, skip the immediate notification — a notification will be
     # sent when charging actually starts (after conditions are met) in _dynamic_ev_update
     notify_on_start = params.get("notify_on_start", True)
-    if notify_on_start and dynamic_mode != "solar_surplus" and not transport_pending:
+    if notify_on_start and dynamic_mode != "solar_surplus" and not (transport_pending or zaptec_start_pending):
         try:
             # Look up vehicle name from VIN, fallback to param or truncated VIN
             vehicle_name = params.get("vehicle_name")

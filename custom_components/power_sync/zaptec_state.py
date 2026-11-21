@@ -16,14 +16,8 @@ def _nonnegative_number(value):
     return number if math.isfinite(number) and number >= 0 else None
 
 
-def zaptec_charge_state(state: Mapping) -> bool | None:
-    """Distinguish positive charging, measured inactivity and unknown evidence.
-
-    Display defaults must never become proof of a stopped charger. Positive
-    mode, power or phase-current evidence also prevents a contradictory idle
-    mode from retiring a stop or battery-preservation obligation.
-    """
-    mode = str(state.get("charger_operation_mode") or "").lower()
+def zaptec_power_draw(state: Mapping) -> bool | None:
+    """Return measured draw independently of the charger's session mode."""
     power = _nonnegative_number(state.get("total_charge_power_w"))
     if state.get("total_charge_power_w_valid") is False:
         power = None
@@ -38,20 +32,29 @@ def zaptec_charge_state(state: Mapping) -> bool | None:
             invalid_phase = True
         else:
             phases.append(current)
-    if mode == "charging" or (power is not None and power > 50) or any(
+    if (power is not None and power > 50) or any(
         current > 0.5 for current in phases
     ):
         return True
-    if (
-        mode in ("connected_waiting", "disconnected", "connected_finished", "charging_paused")
-        and power is not None
-        and not invalid_phase
-    ):
+    if power is not None and not invalid_phase:
         return False
     return None
 
 
-def cached_zaptec_charge_state(entry_data: Mapping, *, now: float, after: float = 0) -> bool | None:
+def zaptec_charge_state(state: Mapping) -> bool | None:
+    """Keep stop and preservation obligations while a session may be active."""
+    mode = str(state.get("charger_operation_mode") or "").lower()
+    draw = zaptec_power_draw(state)
+    if mode == "charging" or draw is True:
+        return True
+    if mode in ("connected_waiting", "disconnected", "connected_finished", "charging_paused"):
+        return draw
+    return None
+
+
+def cached_zaptec_charge_state(
+    entry_data: Mapping, *, now: float, after: float = 0, require_power_draw: bool = False,
+) -> bool | None:
     """Use a completed recent poll, and a post-command poll when required."""
     poll = entry_data.get("zaptec_state_poll") or {}
     completed = _nonnegative_number(poll.get("completed_at"))
@@ -62,4 +65,5 @@ def cached_zaptec_charge_state(entry_data: Mapping, *, now: float, after: float 
         return None
     if after and (_nonnegative_number(after) is None or started is None or started < after):
         return None
-    return zaptec_charge_state(entry_data.get("zaptec_cached_state") or {})
+    state = entry_data.get("zaptec_cached_state") or {}
+    return zaptec_power_draw(state) if require_power_draw else zaptec_charge_state(state)

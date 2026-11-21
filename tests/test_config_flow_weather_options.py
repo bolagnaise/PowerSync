@@ -9,6 +9,7 @@ import json
 import textwrap
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -615,6 +616,56 @@ def test_ev_charging_save_preserves_fallback_generic_soc_sensor():
     assert method_source is not None
     assert "CONF_GENERIC_CHARGER_SOC_ENTITY_2" in method_source
     assert "final_data[CONF_GENERIC_CHARGER_SOC_ENTITY_2]" in method_source
+
+
+@pytest.mark.parametrize("associated_installation", ["installation-b", None])
+def test_zaptec_options_bind_the_selected_chargers_installation(monkeypatch, associated_installation):
+    """Installation list ordering cannot determine the selected charger's site."""
+    constants = load_real_power_sync_const()
+    zaptec_api = load_power_sync_submodule("zaptec_api")
+    client = SimpleNamespace(
+        test_connection=AsyncMock(return_value=(True, "Connected")),
+        get_chargers=AsyncMock(return_value=[
+            {"Id": "charger-b", "InstallationId": associated_installation},
+            {"Id": "charger-a", "InstallationId": "installation-a"},
+        ]),
+        get_installations=AsyncMock(return_value=[
+            {"Id": "installation-a"}, {"Id": "installation-b"},
+        ]),
+        close=AsyncMock(),
+    )
+    monkeypatch.setattr(zaptec_api, "ZaptecCloudClient", lambda *_: client)
+    namespace = {
+        **{name: value for name, value in vars(constants).items() if name.isupper()},
+        "__package__": zaptec_api.__package__,
+        "Any": object,
+        "FlowResult": dict,
+        "_LOGGER": SimpleNamespace(error=lambda *_: None),
+        "vol": SimpleNamespace(Required=lambda key, **_: key, Schema=dict),
+        "TextSelector": lambda config: config,
+        "TextSelectorConfig": dict,
+        "TextSelectorType": SimpleNamespace(TEXT="text", PASSWORD="password"),
+    }
+    module = ast.Module(body=[_options_flow_method("async_step_zaptec_cloud_options")], type_ignores=[])
+    exec(compile(module, str(CONFIG_FLOW_PATH), "exec"), namespace)
+    flow = SimpleNamespace(
+        _get_option=lambda key, default: default,
+        _save_ev_options=lambda data: {"saved": data},
+        async_show_form=lambda **kwargs: kwargs,
+    )
+    result = asyncio.run(namespace["async_step_zaptec_cloud_options"](
+        flow, {"zaptec_username": "user@example.invalid", "zaptec_password": "unused"},
+    ))
+
+    if associated_installation:
+        assert result["saved"]["zaptec_charger_id"] == "charger-b"
+        assert result["saved"]["zaptec_installation_id_cloud"] == associated_installation
+    else:
+        assert "saved" not in result
+        assert result["errors"] == {"base": "zaptec_installation_unavailable"}
+    client.get_chargers.assert_awaited_once()
+    client.get_installations.assert_not_awaited()
+    client.close.assert_awaited_once()
 
 
 def test_ev_charging_generic_capacity_round_trip_and_clear():

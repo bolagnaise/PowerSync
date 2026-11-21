@@ -22207,6 +22207,7 @@ class EVLoadpointStatusView(HomeAssistantView):
             from .automations.actions import _dynamic_ev_state, _calculate_solar_surplus
             from .automations.generic_charger_soc import resolve_ocpp_charger_soc
             from .ev_display import resolve_zaptec_display_soc
+            from .zaptec_state import zaptec_power_draw
             from .automations.ev_loadpoint_profiles import (
                 effective_profile,
                 profiles_for_loadpoint,
@@ -22335,8 +22336,10 @@ class EVLoadpointStatusView(HomeAssistantView):
                 zaptec_mode = (zaptec_cached.get("charger_operation_mode") or "").lower()
                 power_w = zaptec_cached.get("total_charge_power_w", 0) or 0
                 power_kw = power_w / 1000
+                drawing_power = zaptec_power_draw(zaptec_cached) is True
                 zaptec_connected = zaptec_mode in (
                     "charging",
+                    "charging_paused",
                     "connected_waiting",
                     "connected_finished",
                     "connected_finishing",
@@ -22346,9 +22349,12 @@ class EVLoadpointStatusView(HomeAssistantView):
                     "vehicle_name": "Zaptec Charger",
                     "charger_type": "zaptec",
                     "ev_power_kw": power_kw,
-                    "is_connected": zaptec_connected or power_kw > 0.05,
-                    "is_charging": zaptec_mode == "charging" or power_kw > 0.05,
-                    "blocking_reason": zaptec_mode or None,
+                    "is_connected": zaptec_connected or drawing_power,
+                    "is_charging": drawing_power,
+                    "blocking_reason": (
+                        "connected_waiting" if zaptec_mode == "charging" and not drawing_power
+                        else zaptec_mode or None
+                    ),
                 })
 
             opts = {**self._config_entry.data, **self._config_entry.options}
@@ -48242,7 +48248,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 # Reconcile the shared stop guard as well as the executors'
                 # local state. Use poll start time so an in-flight old response
                 # cannot confirm a later stop. Missing/malformed power is not 0 W.
-                from .zaptec_state import zaptec_charge_state
+                from .zaptec_state import zaptec_charge_state, zaptec_power_draw
 
                 charge_evidence = zaptec_charge_state(parsed)
                 if charge_evidence is False:
@@ -48253,7 +48259,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     )
                 # Timestamped charging telemetry can expose an accepted stop
                 # that did not take effect, without issuing another command.
-                if charge_evidence is True:
+                if zaptec_power_draw(parsed) is True:
                     from .automations.ev_ownership import observe_recorded_ev_stop
                     observe_recorded_ev_stop(
                         hass, entry, "zaptec_standalone",

@@ -16781,26 +16781,20 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
 
                 client = ZaptecCloudClient(username, password)
                 try:
-                    success, message = await client.test_connection()
-                    if success:
-                        chargers = await client.get_chargers()
-                        installations = await client.get_installations()
-
+                    chargers = await client.get_chargers()
+                    charger = chargers[0] if chargers else {}
+                    charger_id = charger.get("Id", charger.get("id"))
+                    installation_id = charger.get(
+                        "InstallationId", charger.get("installationId")
+                    )
+                    if charger_id and installation_id:
                         ev_data = getattr(self, "_ev_options_data", {})
                         ev_data[CONF_ZAPTEC_USERNAME] = username
                         ev_data[CONF_ZAPTEC_PASSWORD] = password
-
-                        if chargers:
-                            ev_data[CONF_ZAPTEC_CHARGER_ID] = chargers[0].get("Id", "")
-                        if installations:
-                            ev_data[CONF_ZAPTEC_INSTALLATION_ID_CLOUD] = installations[
-                                0
-                            ].get("Id", "")
-
+                        ev_data[CONF_ZAPTEC_CHARGER_ID] = charger_id
+                        ev_data[CONF_ZAPTEC_INSTALLATION_ID_CLOUD] = installation_id
                         return self._save_ev_options(ev_data)
-                    else:
-                        errors["base"] = "zaptec_auth_failed"
-                        _LOGGER.error("Zaptec Cloud auth failed: %s", message)
+                    errors["base"] = "zaptec_installation_unavailable"
                 except Exception as e:
                     errors["base"] = "zaptec_auth_failed"
                     _LOGGER.error("Zaptec Cloud connection error: %s", e)
