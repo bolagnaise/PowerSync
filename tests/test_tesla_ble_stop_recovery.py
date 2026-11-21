@@ -661,8 +661,18 @@ async def test_restart_between_release_and_bridge_commit_keeps_positive_admissio
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("proof_state", ["valid", "reloaded", "missing", "rebound", "unconfirmed"])
-async def test_retry_after_captured_pending_stop_finishes_not_sent(inventory, proof_state):
+@pytest.mark.parametrize("outcome, proof_state", [
+    ("not_sent", "valid"),
+    ("not_sent", "reloaded"),
+    ("not_sent", "missing"),
+    ("not_sent", "rebound"),
+    ("not_sent", "unconfirmed"),
+    ("confirmed", "valid"),
+    ("confirmed", "reloaded"),
+    ("confirmed", "rebound"),
+    ("confirmed", "stale_readback"),
+])
+async def test_retry_after_captured_pending_stop_finishes(inventory, outcome, proof_state):
     c = inventory
     # Both bridges are configured, but only bridge A has new unresolved history.
     assert (await recover(c))["success"]
@@ -677,15 +687,18 @@ async def test_retry_after_captured_pending_stop_finishes_not_sent(inventory, pr
     pending = await recovery.async_begin_attempt(
         c.hass, c.entry, c.aliases[prefix], route, "stop", route["entity_id"])
     assert pending
-    unknown = await recovery.async_begin_attempt(
-        c.hass, c.entry, c.aliases[prefix], route, "stop", route["entity_id"])
-    assert unknown and await recovery.async_finish_attempt(unknown, "sent_unknown")
+    unknown_ids = set()
+    for _ in range(6):
+        unknown = await recovery.async_begin_attempt(
+            c.hass, c.entry, c.aliases[prefix], route, "stop", route["entity_id"])
+        assert unknown and await recovery.async_finish_attempt(unknown, "sent_unknown")
+        unknown_ids.add(unknown.attempt_id)
     finished = False
 
     async def finish_before_release(prefix, action):
         nonlocal finished
         if action == "prepare" and not finished:
-            assert await recovery.async_finish_attempt(pending, "not_sent")
+            assert await recovery.async_finish_attempt(pending, outcome)
             finished = True
 
     c.hook["call"] = finish_before_release
@@ -696,7 +709,7 @@ async def test_retry_after_captured_pending_stop_finishes_not_sent(inventory, pr
     assert stop._live_refs(c.runtime)
     c.hook["call"] = None
     proof = c.runtime[recovery._SIDECAR_STATE_KEY]["recovery"]["terminal_removals"][pending.vehicle_id]
-    assert proof[pending.attempt_id]["outcome"] == "not_sent"
+    assert proof[pending.attempt_id]["outcome"] == outcome
     if proof_state == "reloaded":
         c.runtime.pop(recovery.RECOVERY_KEY)
         c.runtime.pop(recovery._SIDECAR_LOADED_KEY)
@@ -714,10 +727,20 @@ async def test_retry_after_captured_pending_stop_finishes_not_sent(inventory, pr
         assert c.calls == calls_before
         assert stop._live_refs(c.runtime)
         return
+    if proof_state == "stale_readback":
+        c.frozen.add(prefix)
+        c.calls.clear()
+        with pytest.raises(stop.StopRecoveryRefused, match="proof_unavailable"):
+            await recover_affected()
+        assert not any(action == "commit" for _, action, _ in c.calls)
+        assert {ref["attempt_id"] for ref in stop._live_refs(c.runtime)} == unknown_ids
+        return
+
     result = await recover_affected()
     assert result["success"]
     assert not stop._live_refs(c.runtime)
     assert {bridge for bridge, _, _ in c.calls} == {prefix}
-    refs = c.store.value["recovery"]["vehicles"][unknown.vehicle_id]["attempts"]
-    assert refs[unknown.attempt_id]["outcome"] == "sent_unknown"
-    assert refs[unknown.attempt_id]["recovery_retired"]["incident_id"] == result["incident_id"]
+    refs = c.store.value["recovery"]["vehicles"][pending.vehicle_id]["attempts"]
+    for attempt_id in unknown_ids:
+        assert refs[attempt_id]["outcome"] == "sent_unknown"
+        assert refs[attempt_id]["recovery_retired"]["incident_id"] == result["incident_id"]

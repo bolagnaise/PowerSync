@@ -409,7 +409,7 @@ async def _refresh_held_scope(hass, entry, runtime, incident_id, inventory, brid
         terminal_removals = recovery.get(manager._TERMINAL_REMOVALS_KEY) or {}
         retained_root = _retained_root(runtime)
 
-        def proven_unsent_stop(ref):
+        def proven_terminal_stop(ref):
             route = ref.get("route")
             if (ref.get("outcome") != "pending" or ref.get("operation") != "stop"
                     or not isinstance(route, Mapping)):
@@ -419,7 +419,7 @@ async def _refresh_held_scope(hass, entry, runtime, incident_id, inventory, brid
                 return False
             proof = terminal_removals.get(vehicle_id, {}).get(attempt_id)
             return (
-                isinstance(proof, Mapping) and proof.get("outcome") == "not_sent"
+                isinstance(proof, Mapping) and proof.get("outcome") in {"not_sent", "confirmed"}
                 and proof.get("vehicle_id") == vehicle_id and proof.get("attempt_id") == attempt_id
                 and proof.get("operation") == "stop" and proof.get("route") == route
                 and proof.get("entity_id") == route.get("entity_id")
@@ -431,10 +431,11 @@ async def _refresh_held_scope(hass, entry, runtime, incident_id, inventory, brid
             exact = current.get(identity(ref))
             if exact is not None:
                 return binding(ref) == binding(exact)
-            # A captured in-flight Stop can finish with durable proof that it
-            # never went out. Only the exact attempt can leave the retry scope.
+            # A captured pending Stop can finish without a send or with
+            # confirmed readback. Require its exact durable finish proof.
+            # The remaining history still needs fresh producer proof.
             if ref.get("hazard_id") is None:
-                return proven_unsent_stop(ref)
+                return proven_terminal_stop(ref)
             # Containment reuses ble:<prefix>. The durable union moves its
             # previous quarantine to a history key. Require the exact original
             # attempt and complete binding, never adopt the new stable-key row.
