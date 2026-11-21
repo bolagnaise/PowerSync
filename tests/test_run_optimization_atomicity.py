@@ -50,52 +50,46 @@ def _run_optimization_source() -> str:
     raise AssertionError("_run_optimization not found")
 
 
-def _chain_blocks(method_source: str) -> list[str]:
-    """Split the method source into the two override-chain blocks.
-
-    Each chain starts from the solve-local ``schedule = result.schedule``.
-    Both remain local until the final external-energy stage has completed.
-    There are two structurally identical chains: the initial solve and the
-    optional Auto-Apply reserve rerun.
-    """
-    start_marker = "schedule = result.schedule"
-    starts = [
-        m.start()
-        for m in re.finditer(
-            rf"(?m)^\s*{re.escape(start_marker)}\s*$",
-            method_source,
-        )
+def _schedule_preparation_source(method_source: str) -> str:
+    """Find the local overlay helper shared by the initial solve and rerun."""
+    source = textwrap.dedent(method_source)
+    tree = ast.parse(source)
+    [helper] = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "_prepare_schedule"
     ]
-    assert len(starts) == 2, (
-        f"expected exactly 2 solve-local schedule chains (initial + Auto-Apply "
-        f"rerun), found {len(starts)} — _run_optimization's structure changed, "
-        f"update this test's chain boundaries"
-    )
-    final_stage = method_source.index("result = await self._apply_external_energy_plan(")
-    return [method_source[starts[0]:starts[1]], method_source[starts[1]:final_stage]]
+    segment = ast.get_source_segment(source, helper)
+    assert segment is not None
+    return segment
 
 
 def test_override_chain_blocks_are_present_and_ordered():
-    """Sanity check the extraction found both remaining overlay chains
-    overlays present, in the documented order, before asserting atomicity."""
+    """Both solves must use the shared overlays before external planning."""
     method_source = _run_optimization_source()
-    chains = _chain_blocks(method_source)
-    assert len(chains) == 2
-
-    for chain in chains:
-        positions = [chain.index(marker) for marker in _OVERLAY_CALL_MARKERS]
-        assert positions == sorted(positions), (
-            "override calls are not in the expected spread-import -> "
-            "spread-export -> bridge -> offgrid order"
-        )
+    helper = _schedule_preparation_source(method_source)
+    solution = ast.parse(textwrap.dedent(method_source))
+    calls = [
+        node for node in ast.walk(solution)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        and node.func.id == "_prepare_schedule"
+    ]
+    assert [ast.unparse(call) for call in sorted(calls, key=lambda call: call.lineno)] == [
+        "_prepare_schedule(result, reference_reserve_floor)",
+        "_prepare_schedule(result, applied_reserve_floor)",
+    ]
+    assert method_source.index(
+        "result, _ = _prepare_schedule(result, applied_reserve_floor)"
+    ) < method_source.index("result = await self._apply_external_energy_plan(")
+    positions = [helper.index(marker) for marker in _OVERLAY_CALL_MARKERS]
+    assert positions == sorted(positions)
 
 
 def test_current_schedule_committed_once_after_every_planning_stage():
     method_source = _run_optimization_source()
-    chains = _chain_blocks(method_source)
-    for chain in chains:
-        assert re.search(r"self\._current_schedule\s*=", chain) is None
-        assert re.search(r"self\._last_optimizer_result\s*=", chain) is None
+    helper = _schedule_preparation_source(method_source)
+    assert re.search(r"self\._current_schedule\s*=", helper) is None
+    assert re.search(r"self\._last_optimizer_result\s*=", helper) is None
 
     for field in ("_current_schedule", "_last_optimizer_result", "_last_update_time",
                   "_octopus_schedule_revision", "_last_published_optimizer_parameters"):
@@ -108,15 +102,12 @@ def test_current_schedule_committed_once_after_every_planning_stage():
 
 def test_result_schedule_reconciled_exactly_once_per_chain():
     """The canonical finalizer is the only result/schedule mutation surface."""
-    method_source = _run_optimization_source()
-    chains = _chain_blocks(method_source)
-
-    for i, chain in enumerate(chains, start=1):
-        assert chain.count("self._optimizer.reconcile_result_with_schedule(") == 1
-        assert re.search(r"result\.schedule\s*=", chain) is None
-        last_overlay_call = max(chain.index(marker) for marker in _OVERLAY_CALL_MARKERS)
-        reconcile = chain.index("self._optimizer.reconcile_result_with_schedule(")
-        assert reconcile > last_overlay_call
+    helper = _schedule_preparation_source(_run_optimization_source())
+    assert helper.count("self._optimizer.reconcile_result_with_schedule(") == 1
+    assert re.search(r"result\.schedule\s*=", helper) is None
+    last_overlay_call = max(helper.index(marker) for marker in _OVERLAY_CALL_MARKERS)
+    reconcile = helper.index("self._optimizer.reconcile_result_with_schedule(")
+    assert reconcile > last_overlay_call
 
 
 def test_overlay_calls_thread_a_local_variable_not_self_current_schedule():
@@ -125,62 +116,42 @@ def test_overlay_calls_thread_a_local_variable_not_self_current_schedule():
     self._current_schedule is visible (and mutated) mid-chain to any
     concurrent reader even though the final assignment is deduplicated.
     """
-    method_source = _run_optimization_source()
-    chains = _chain_blocks(method_source)
-
-    for i, chain in enumerate(chains, start=1):
-        for marker in _OVERLAY_CALL_MARKERS:
-            call_start = chain.index(marker)
-            # The statement's left-hand side is on the same line as the call
-            # (``schedule = self._spread_import_schedule(``); walk backward
-            # to the start of that line.
-            line_start = chain.rfind("\n", 0, call_start) + 1
-            lhs = chain[line_start:call_start]
-            assert re.search(r"\bschedule\s*=\s*$", lhs), (
-                f"chain {i}: overlay call {marker!r} does not assign into a "
-                f"local 'schedule' variable (found lhs={lhs!r}) — this reads "
-                f"as self._current_schedule being threaded directly through "
-                f"the chain again"
-            )
-            assert "self._current_schedule" not in lhs and "result.schedule" not in lhs
+    helper = _schedule_preparation_source(_run_optimization_source())
+    for marker in _OVERLAY_CALL_MARKERS:
+        call_start = helper.index(marker)
+        line_start = helper.rfind("\n", 0, call_start) + 1
+        lhs = helper[line_start:call_start]
+        assert lhs.strip() == "schedule =", f"{marker} assignment target: {lhs!r}"
 
 
 def test_auto_apply_bridge_uses_one_frozen_reference_across_both_solves():
     """Ticket #286: the applied solve must not redefine the manual bridge."""
     method_source = _run_optimization_source()
-    chains = _chain_blocks(method_source)
-
-    first_chain, second_chain = chains
-    capture = first_chain.index("self._reference_export_bridge_windows(")
-    spread = first_chain.index("self._spread_export_schedule(")
+    helper = _schedule_preparation_source(method_source)
+    capture = helper.index("self._reference_export_bridge_windows(")
+    spread = helper.index("self._spread_export_schedule(")
     assert capture < spread
-    assert (
-        "self._merge_export_protection_floors(\n                reference_reserve_floor"
-        in first_chain
-    )
-    assert "export_reserve_floor=post_solve_export_floor" in first_chain
-    assert "authoritative_reserve_floor=post_solve_export_floor" in first_chain
-    assert (
-        "self._merge_export_protection_floors(\n                    applied_reserve_floor"
-        in second_chain
-    )
-    assert "export_reserve_floor=post_solve_export_floor" in second_chain
-    assert "authoritative_reserve_floor=post_solve_export_floor" in second_chain
+    assert re.search(r"self\._merge_export_protection_floors\(\s*reserve_floor,", helper)
+    assert "export_reserve_floor=post_solve_export_floor" in helper
+    assert "authoritative_reserve_floor=post_solve_export_floor" in helper
+    first_solve = method_source.index("result, reference_export_windows = _prepare_schedule(")
+    capture_recommendation = method_source.index("self._set_forecast_bridge_reserve_recommendation(")
+    applied_solve = method_source.index("result, _ = _prepare_schedule(")
+    restore_recommendation = method_source.index("final_recommendation.update(reference_reserve_semantics)")
+    assert first_solve < capture_recommendation < applied_solve < restore_recommendation
     assert method_source.count("self._set_forecast_bridge_reserve_recommendation(") == 1
-    assert "final_recommendation.update(reference_reserve_semantics)" in second_chain
 
 
 def test_spread_export_uses_effective_bonus_prices_in_both_solve_chains():
     """Ticket #319: post-solve spreading must retain provider bonus boundaries."""
     method_source = _run_optimization_source()
-    chains = _chain_blocks(method_source)
+    helper = _schedule_preparation_source(method_source)
 
     derivation = method_source.index(
         "spread_export_prices = self._spread_export_prices_for_run("
     )
     assert derivation < method_source.index("schedule = result.schedule")
-    for chain in chains:
-        assert chain.count("export_prices=spread_export_prices") == 1
+    assert helper.count("export_prices=spread_export_prices") == 1
 
 
 def _publication_pipeline(*, rerun=True):
