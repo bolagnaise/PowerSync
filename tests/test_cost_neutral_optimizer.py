@@ -1091,6 +1091,77 @@ def test_cost_neutral_ev_sources_match_settled_battery_export(
     assert result.lp_stats["ev_sources_reconciled_to_schedule"] is True
 
 
+def test_cost_neutral_two_evs_drop_inactive_solver_residual(optimizer_module):
+    """Trace power on an inactive vehicle must not invalidate the LP schedule."""
+    plans = [
+        optimizer_module.EVChargePlan(
+            vehicle_id=vehicle_id,
+            max_power_kw=(4.0, 4.0, 0.0, 0.0),
+            energy_needed_kwh=4.0,
+            charge_efficiency=1.0,
+            min_power_kw=1.0,
+            allow_grid=(allow_non_solar,) * 4,
+            allow_solar=(True,) * 4,
+            allow_battery=(allow_non_solar,) * 4,
+            initially_charging=True,
+        )
+        for vehicle_id, allow_non_solar in (("flexible", True), ("solar_only", False))
+    ]
+    result = _optimizer(optimizer_module).optimize(
+        import_prices=[0.60, 0.31, 0.20, 0.0],
+        export_prices=[0.50, 0.03, 0.50, 0.50],
+        solar_forecast=[5.0, 3.0, 3.0, 3.0],
+        load_forecast=[1.0, 5.0, 1.0, 5.0],
+        current_soc=0.30,
+        allow_battery_export=True,
+        allow_grid_charge=False,
+        schedule_timestamps=_timestamps(4),
+        cost_neutral_earnings_cap=0.50,
+        cost_neutral_slots=[True] * 4,
+        ev_plan=plans,
+    )
+
+    assert result.solver_used == "highs"
+    assert result.lp_stats["ev_sources_reconciled_to_schedule"] is True
+    flexible = result.ev_charge_by_vehicle_w["flexible"]
+    solar_only = result.ev_charge_by_vehicle_w["solar_only"]
+    assert flexible == pytest.approx([0.0, 4000.0, 0.0, 0.0], abs=0.01)
+    assert solar_only == pytest.approx([4000.0, 0.0, 0.0, 0.0])
+    assert flexible[0] == 0.0
+    assert result.schedule.actions[0].ev_charge_w == pytest.approx(4000.0)
+    sources = result.ev_source_by_vehicle_w
+    assert sources["solar_only"]["grid"] == [0.0] * 4
+    assert sources["solar_only"]["battery"] == [0.0] * 4
+    assert sources["solar_only"]["solar"] == pytest.approx(solar_only)
+    for vehicle_id, draw in result.ev_charge_by_vehicle_w.items():
+        assert [sum(parts) for parts in zip(*sources[vehicle_id].values())] == pytest.approx(draw)
+
+
+@pytest.mark.parametrize("residual_w,accepted", [(0.05, True), (0.20, False)])
+def test_cost_neutral_ev_attribution_bounds_schedule_rounding(
+    optimizer_module, residual_w, accepted,
+):
+    module = optimizer_module
+    schedule = module.OptimizationSchedule(
+        actions=[module.ScheduleAction(
+            timestamp=_timestamps(1)[0], action="self_consumption", power_w=0.0,
+            soc=0.5, battery_discharge_w=3500.0 - residual_w,
+            ev_charge_w=4000.0,
+        )],
+        predicted_cost=0.0,
+        predicted_savings=0.0,
+    )
+    sources = module._reconcile_ev_sources_to_schedule(
+        {"car": [4.0]}, {"car": {"solar": [0.5], "battery": [3.5]}},
+        schedule, [1.5], [1.0], [residual_w / 1000.0],
+    )
+    if accepted:
+        assert sources is not None
+        assert sources["car"]["solar"] == pytest.approx([0.5])
+        assert sources["car"]["battery"] == pytest.approx([3.5 - residual_w / 1000.0])
+        assert sources["car"]["grid"] == [0.0]
+    else:
+        assert sources is None
 @pytest.mark.parametrize("use_highs", [True, False], ids=["lp-then-greedy", "greedy"])
 def test_unreconciled_cost_neutral_ev_plan_cannot_force_grid_charge(
     optimizer_module, monkeypatch, use_highs,

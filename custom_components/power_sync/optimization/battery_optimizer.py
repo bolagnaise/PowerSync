@@ -72,6 +72,8 @@ MODE_PROJECTION_SELF_USE_ABS_TOL_KWH = 0.02
 # schedule matches Smart Schedule's start-of-window behavior. This is
 # deliberately tiny and is not applied to paid or non-grid source decisions.
 EV_EARLY_CHARGE_TIE_BREAK_PER_KWH_HOUR = 1e-6
+# Bound the total unattributed power per slot to 0.1 W after settlement.
+EV_SOURCE_ROUNDING_TOLERANCE_KW = 1e-4
 
 
 def _fallback_ev_slot_policy(
@@ -267,9 +269,8 @@ def _reconcile_ev_sources_to_schedule(
     schedule's house/solar/battery/grid balance.  Battery export is deliberately
     removed before battery-to-EV capacity is computed.
 
-    ``None`` means the final action cannot physically supply the planned EV
-    draw with the source support retained by the LP; callers must not silently
-    trim delivery or invent a source in that case.
+    Leave sub-watt settlement rounding unattributed. Return ``None`` if the
+    combined deficit exceeds that tolerance so callers can reject the plan.
     """
     vehicle_ids = list(ev_charge_by_vehicle_kw)
     n = max(
@@ -420,7 +421,7 @@ def _reconcile_ev_sources_to_schedule(
                 remaining[vehicle_id] -= allocated
                 budgets[source] -= allocated
 
-        if any(value > 1e-6 for value in remaining.values()):
+        if math.fsum(remaining.values()) > EV_SOURCE_ROUNDING_TOLERANCE_KW:
             return None
 
     return sources
@@ -6513,7 +6514,14 @@ class BatteryOptimizer:
         ev_source_kw_by_vehicle: dict[str, dict[str, list[float]]] = {}
         if ev_charge_active:
             for vehicle in range(n_ev_vehicles):
-                period_values = [x[ev_charge_var(vehicle, t)] for t in range(p_n)]
+                # HiGHS can leave trace power in an inactive period within
+                # its mixed-integer tolerance. The Cost Neutral source ledger
+                # must reconcile the draw of the emitted charging schedule.
+                period_values = [
+                    0.0 if cost_neutral_active and x[ev_on_var(vehicle, t)] < 0.5
+                    else x[ev_charge_var(vehicle, t)]
+                    for t in range(p_n)
+                ]
                 expanded = self._expand_period_values(periods, period_values, n)
                 vehicle_id = str(ev_plans_lp[vehicle].vehicle_id)
                 if vehicle_id in ev_charge_kw_by_vehicle:
