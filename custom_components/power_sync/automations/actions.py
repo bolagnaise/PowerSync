@@ -7414,6 +7414,26 @@ def _tesla_observed_command_state(observation):
     return None
 
 
+def _tessie_handoff_observation(hass, vehicle_id, command_entity, max_amps):
+    """Read an already charging Tessie vehicle within the incoming plan limit."""
+    from ..tesla_ev_observation import get_tesla_vehicle_observation
+
+    observation = get_tesla_vehicle_observation(
+        hass, vehicle_id, preferred_entity_id=command_entity,
+    )
+    if (
+        observation is None
+        or observation.domain != "tessie"
+        or _tesla_observed_command_state(observation) != "charging"
+        or observation.charger_actual_current is None
+        or not 0 < observation.charger_actual_current <= max_amps
+        or observation.requested_current is None
+        or not 0 < observation.requested_current <= max_amps
+    ):
+        return None
+    return observation
+
+
 async def _run_modern_teslemetry_bluetooth(hass, entry, params, operation, value=None):
     """Use the separate command-only integration with native readback."""
     from ..teslemetry_bluetooth_commands import native_command_entity, resolve_command
@@ -19682,24 +19702,101 @@ async def _action_start_ev_charging_dynamic_locked(
             return False
         start_amps = phase_safe_start_amps
 
+    # A Price Level takeover can keep an already charging Tessie loadpoint
+    # running when its measured draw fits the new plan's initial limit. Use
+    # the current vehicle report, not Solar Surplus's requested current or
+    # a switch state that can lag the physical charger.
+    handoff_observation = None
+    solar_state = entry_vehicles.get(vehicle_id)
+    solar_update_lock = _dynamic_ev_solar_update_locks.setdefault(
+        f"{entry_id}:{vehicle_id}", asyncio.Lock()
+    ) if solar_state and solar_state.get("active") and (
+        solar_state.get("params", {}).get("dynamic_mode") == "solar_surplus"
+    ) else None
+    if (
+        charger_type == "tesla"
+        and dynamic_mode == "battery_target"
+        and owner_family(owner_mode) == "price_level"
+        and allow_takeover
+        and params.get("require_physical_start_confirmation")
+        and not mode_params["no_grid_import"]
+        and not params.get("quick_control")
+        and solar_update_lock is not None
+        and not solar_update_lock.locked()
+        and _lease_id == vehicle_id
+        and _lease.get("owner_mode") == "solar_surplus"
+    ):
+        from ..tesla_ev_recovery import get_vehicle_route
+        from .ev_ownership import get_ev_quick_control_obligation
+
+        headroom = hass.data.get(DOMAIN, {}).get(entry_id, {}).get("solar_ev_headroom")
+        route = get_vehicle_route(hass, config_entry, vehicle_id)
+        if (
+            (headroom is None or not headroom.lease)
+            and get_ev_quick_control_obligation(hass, config_entry, vehicle_id) is None
+            and (
+                route is None
+                or (
+                    route.get("kind") == "ha"
+                    and route.get("entity_id")
+                    and (route.get("entity_identity") or {}).get("platform") == "tessie"
+                    and not route.get("session_scope")
+                    and not route.get("cleanup_only")
+                )
+            )
+            and _tesla_transport_authority(
+                hass, config_entry, {**params, "vehicle_vin": vehicle_id},
+                operation="start",
+            )()
+            and not manual_stop_hold_reason(hass, config_entry, vehicle_id)
+        ):
+            command_entity = route["entity_id"] if route else None
+            handoff_observation = _tessie_handoff_observation(
+                hass, vehicle_id, command_entity, start_amps,
+            )
+
     # Stop any existing dynamic charging for this vehicle.  Record whether that
     # teardown actually commanded the charger off: cloud EV telemetry lags the
     # command by a poll interval, so the not-yet-settled aftermath of our own
     # stop must never read back as evidence that the car is already charging.
     teardown_report: Dict[str, Any] = {}
-    teardown_success = await _action_stop_ev_charging_dynamic(
-        hass,
-        config_entry,
-        {
-            "vehicle_id": vehicle_id,
-            "_physical_stop_report": teardown_report,
-            "_user_initiated": bool(params.get("_user_initiated")),
-            # Preserve an existing finite obligation while the old session is
-            # torn down.  A replacement obligation is persisted only after
-            # this matching stop has returned successfully.
-            "_preserve_quick_control_obligation": True,
-        },
-    )
+    teardown_params = {
+        "vehicle_id": vehicle_id,
+        "_physical_stop_report": teardown_report,
+        "_user_initiated": bool(params.get("_user_initiated")),
+        # A replacement finite obligation is persisted only after this
+        # matching teardown succeeds.
+        "_preserve_quick_control_obligation": True,
+    }
+    if handoff_observation is None:
+        teardown_success = await _action_stop_ev_charging_dynamic(
+            hass, config_entry, teardown_params,
+        )
+    else:
+        teardown_params.update(
+            stop_charging=False, _expected_state=solar_state, _expected_lease=_lease,
+        )
+        # Let the old controller finish releasing its lease before a queued
+        # Solar Surplus tick can check that it still owns this loadpoint.
+        async with solar_update_lock:
+            teardown_success = await _action_stop_ev_charging_dynamic(
+                hass, config_entry, teardown_params,
+            )
+        current_observation = _tessie_handoff_observation(
+            hass, vehicle_id, command_entity, start_amps,
+        )
+        if (
+            not teardown_success
+            or solar_state.get("active")
+            or get_ev_ownership(hass, config_entry, vehicle_id)[1] is not None
+            or manual_stop_hold_reason(hass, config_entry, vehicle_id)
+            or get_vehicle_route(hass, config_entry, vehicle_id) != route
+            or current_observation is None
+            or current_observation.producer_identity != handoff_observation.producer_identity
+        ):
+            return False
+        handoff_observation = current_observation
+
     quick_control_obligation = None
     if params.get("quick_control") and params.get("expires_at"):
         # Keep an already accepted finite obligation and its timer intact while
@@ -20059,7 +20156,7 @@ async def _action_start_ev_charging_dynamic_locked(
             confirmation_baseline = None
             already_physically_charging = False
             command_started_at = None
-            if require_physical_confirmation:
+            if require_physical_confirmation and handoff_observation is None:
                 confirmation_baseline = _tesla_physical_charging_snapshot(
                     hass,
                     config_entry,
@@ -20083,7 +20180,7 @@ async def _action_start_ev_charging_dynamic_locked(
 
             start_params = dict(params)
             start_params["amps"] = start_amps
-            if already_physically_charging:
+            if handoff_observation is not None or already_physically_charging:
                 start_success = True
                 _LOGGER.info(
                     "Dynamic EV: %s was already physically charging; "
@@ -20128,7 +20225,8 @@ async def _action_start_ev_charging_dynamic_locked(
             # register a new session after that late completion; contain the
             # exact vehicle first and leave any unknown outcome fail-closed.
             if not registration_authority():
-                await _compensate_late_positive_start()
+                if handoff_observation is None:
+                    await _compensate_late_positive_start()
                 record_ev_command(
                     hass,
                     config_entry,
@@ -20160,12 +20258,17 @@ async def _action_start_ev_charging_dynamic_locked(
                 )
                 if amps_success or applied_start_amps != start_amps:
                     start_amps = applied_start_amps
+                elif handoff_observation is not None:
+                    start_amps = max(1, round(handoff_observation.charger_actual_current))
                 if not amps_success:
                     # This is expected - Tesla reports lower max amps until charging actually starts
                     _LOGGER.debug(f"Dynamic EV: Could not set initial amps to {start_amps}A (will adjust once charging starts)")
 
             if (require_physical_confirmation or start_params.get("_tesla_start_live_read_required")) and not transport_pending:
-                if already_physically_charging:
+                if handoff_observation is not None:
+                    confirmed = True
+                    evidence = f"Tessie reported {handoff_observation.charger_actual_current:g}A"
+                elif already_physically_charging:
                     confirmed = True
                     evidence = ", ".join(
                         sorted(confirmation_baseline["measurements"])

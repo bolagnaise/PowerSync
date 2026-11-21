@@ -14792,6 +14792,80 @@ def _patch_handover_start(monkeypatch, *, start_calls, stop_calls, wait_result):
     monkeypatch.setattr(actions, "_wait_for_tesla_physical_start", wait_for_start)
 
 
+@pytest.mark.parametrize(
+    ("vehicle_state", "measured_amps", "requested_amps", "route_kind", "solar_only", "keep_charging"),
+    [
+        ("Charging", 8, 8, "ha", False, True),
+        (None, None, None, "ha", False, False),
+        ("Stopped", 0, 8, "ha", False, False),
+        ("Charging", 33, 33, "ha", False, False),
+        ("Charging", 8, 33, "ha", False, False),
+        ("Charging", 8, None, "ha", False, False),
+        ("Charging", 8, 8, "blocked", False, False),
+        ("Charging", 8, 8, "ha", True, False),
+    ],
+)
+def test_price_level_handover_keeps_confirmed_tessie_charging(
+    monkeypatch, vehicle_state, measured_amps, requested_amps, route_kind,
+    solar_only, keep_charging,
+):
+    """An eligible Price Level plan can take over a charging Solar loadpoint."""
+    from power_sync import tesla_ev_observation, tesla_ev_recovery
+    from power_sync.automations import ev_ownership
+
+    vin = "5YJTEST0000000001"
+    hass = _Hass([])
+    entry = _Entry()
+    start_calls = []
+    stop_calls = []
+    solar = _solar_surplus_state(current_amps=0)
+    monkeypatch.setattr(actions, "_dynamic_ev_state", {"entry-1": {vin: solar}})
+    ev_ownership.claim_ev_ownership(
+        hass, entry, vin, owner_mode="solar_surplus", session_id="solar-session"
+    )
+    _patch_handover_start(
+        monkeypatch, start_calls=start_calls, stop_calls=stop_calls,
+        wait_result=(True, "Tessie confirmed charging after Start"),
+    )
+    monkeypatch.setattr(actions, "async_track_time_interval", lambda *args: None)
+    command_entity = "switch.test_tessie_charge"
+    monkeypatch.setattr(tesla_ev_recovery, "get_vehicle_route", lambda *args: {
+        "kind": route_kind, "entity_id": command_entity,
+        "entity_identity": {"platform": "tessie"},
+    })
+
+    def current_observation(_hass, vehicle, *, preferred_entity_id):
+        assert vehicle == vin
+        assert preferred_entity_id == command_entity
+        if vehicle_state is None:
+            return None
+        return SimpleNamespace(
+            domain="tessie", charge_state=vehicle_state,
+            charger_actual_current=measured_amps, charger_power=None,
+            requested_current=requested_amps,
+            producer_identity=("tessie", "test-entry", "test-device"),
+        )
+
+    monkeypatch.setattr(tesla_ev_observation, "get_tesla_vehicle_observation", current_observation)
+    result = asyncio.run(actions._action_start_ev_charging_dynamic(
+        hass,
+        entry,
+        {
+            **_handover_start_params(vin),
+            "owner_mode": "price_level_recovery",
+            "no_grid_import": solar_only,
+        },
+    ))
+
+    assert len(stop_calls) == (0 if keep_charging else 1)
+    assert len(start_calls) == (0 if keep_charging else 1)
+    assert result is True
+    assert solar["active"] is False
+    managed = actions._dynamic_ev_state["entry-1"][vin]
+    assert managed["charging_started"] is True
+    assert managed["params"]["owner_mode"] == "price_level_recovery"
+
+
 def test_handover_after_self_stop_still_issues_a_physical_start(monkeypatch):
     """PowerSync's own stop must not read back as 'already charging'.
 
