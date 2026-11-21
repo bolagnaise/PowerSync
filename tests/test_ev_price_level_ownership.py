@@ -2552,11 +2552,12 @@ def test_explicit_fleet_schedule_does_not_borrow_multi_ble_soc():
 
 
 @pytest.mark.parametrize(
-    ("paired", "elapsed_seconds", "expected_soc"),
-    ((True, 30, 65), (True, 120, 50), (False, 30, 50)),
+    ("paired", "elapsed_seconds", "has_other_entry", "expected_soc"),
+    ((True, 30, False, 65), (True, 120, False, 50), (False, 30, False, 50),
+     (True, 30, True, 65)),
 )
 def test_smart_schedule_uses_only_fresh_soc_from_its_paired_ble_bridge(
-    paired, elapsed_seconds, expected_soc,
+    paired, elapsed_seconds, has_other_entry, expected_soc,
 ):
     vin = "5YJTEST0000000002"
     mapping = f"{vin}=tesla_flinn,{VIN}=tesla_yf88" if paired else ""
@@ -2569,15 +2570,27 @@ def test_smart_schedule_uses_only_fresh_soc_from_its_paired_ble_bridge(
             "tesla_ble_vehicle_mapping": mapping,
         },
     )
+    entries = [entry]
+    if has_other_entry:
+        entries.append(SimpleNamespace(
+            entry_id="entry-2",
+            data={},
+            options={
+                "ev_provider": "both",
+                "tesla_ble_entity_prefix": "tesla_yf88,tesla_flinn",
+                "tesla_ble_vehicle_mapping": f"{vin}=tesla_yf88,{VIN}=tesla_flinn",
+            },
+        ))
     hass = _FakeHass(
         states={
             "sensor.tesla_yf88_charge_level": "77",
             "sensor.tesla_flinn_charge_level": "65",
         },
-        entries=[entry],
+        entries=entries,
     )
-    state = hass.states.get("sensor.tesla_flinn_charge_level")
-    state.last_reported = datetime.now(timezone.utc) - timedelta(seconds=elapsed_seconds)
+    observed_at = datetime.now(timezone.utc) - timedelta(seconds=elapsed_seconds)
+    for prefix in ("tesla_yf88", "tesla_flinn"):
+        hass.states.get(f"sensor.{prefix}_charge_level").last_reported = observed_at
     executor = ev_planner.AutoScheduleExecutor(hass, entry, planner=SimpleNamespace())
 
     assert asyncio.run(executor._get_vehicle_soc(vin)) == expected_soc

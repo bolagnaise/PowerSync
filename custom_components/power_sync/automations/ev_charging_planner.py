@@ -5759,13 +5759,13 @@ class AutoScheduleExecutor:
         live_soc = None
         entries = self.hass.config_entries.async_entries(DOMAIN)
 
-        for entry in entries:
-            opts = {**entry.data, **entry.options}
-            if not opts.get(CONF_GENERIC_CHARGER_ENABLED):
+        for charger_entry in entries:
+            charger_opts = {**charger_entry.data, **charger_entry.options}
+            if not charger_opts.get(CONF_GENERIC_CHARGER_ENABLED):
                 continue
             if vehicle_id not in ("_default", "generic_ev", "ev"):
                 continue
-            generic_soc = resolve_generic_charger_soc(self.hass, opts)
+            generic_soc = resolve_generic_charger_soc(self.hass, charger_opts)
             if generic_soc is not None:
                 live_soc = int(generic_soc)
                 _LOGGER.debug("Found generic charger SoC: %s%%", live_soc)
@@ -5791,9 +5791,8 @@ class AutoScheduleExecutor:
                 and len(vehicle_vin) == 17
                 and vehicle_vin.isalnum()
             ):
-                # BLE prefixes are user-defined and have no authoritative
-                # relationship to a Fleet VIN. Borrowing one here can build
-                # and execute a different car's Smart Schedule.
+                # Resolve an exact VIN only through its paired BLE fallback
+                # after checking the vehicle's native integration sensors.
                 ble_prefixes = []
             else:
                 raw_prefix = config.get(CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX)
