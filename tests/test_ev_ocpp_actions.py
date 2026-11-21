@@ -5264,6 +5264,59 @@ def test_dynamic_switch_only_charger_cannot_claim_reduced_current(monkeypatch, a
     assert state["current_amps"] == expected
 
 
+@pytest.mark.parametrize(
+    ("prefer_ev", "phase_aware", "grid_w", "current_amps", "planned_ev_kw", "overrides", "expected"),
+    [
+        (False, False, 11300, 32, None, {}, 0),
+        (True, False, 11300, 32, None, {}, None),
+        (True, False, 14450, 32, None, {}, 0),
+        (True, False, 11300, 32, 0, {}, 0),
+        (True, False, 6700, 0, None, {}, 32),
+        (True, False, 6770, 0, None, {}, None),
+        (True, False, None, 0, None, {}, None),
+        (True, True, 11300, 32, None, {}, 0),
+        (True, False, 11300, 32, None, {"no_grid_import": True}, 0),
+        (True, False, 11300, 32, None, {"owner_mode": "scheduled"}, 0),
+        (True, False, 11300, 32, None, {"charger_amps_entity": "number.ev_current"}, 22),
+    ],
+)
+def test_price_level_switch_only_ev_can_leave_battery_taper_to_inverter(
+    monkeypatch, prefer_ev, phase_aware, grid_w, current_amps, planned_ev_kw, overrides, expected
+):
+    entry = _Entry()
+    entry.options = {"generic_charger_prioritise_price_level_ev": prefer_ev}
+    live_status = {
+        "battery_power": -4400, "grid_power": grid_w, "solar_power": 1700,
+        "load_power": 1200, "ev_power": 7680 if current_amps else 0, "battery_soc": 64,
+    }
+    state = {
+        "active": True, "current_amps": current_amps, "target_amps": current_amps,
+        "params": {
+            "dynamic_mode": "battery_target", "owner_mode": "price_level_opportunity",
+            "charger_type": "generic", "charger_switch_entity": "switch.ev",
+            "target_battery_charge_kw": 10, "max_grid_import_kw": 14.4,
+            "min_charge_amps": 5, "max_charge_amps": 32, "voltage": 240, "phases": 1,
+            **overrides,
+        },
+    }
+    set_amps = AsyncMock(return_value=True)
+    monkeypatch.setattr(actions, "_clear_ble_dynamic_session_if_unplugged", AsyncMock(return_value=False))
+    monkeypatch.setattr(actions, "_get_tesla_live_status", AsyncMock(return_value=live_status))
+    monkeypatch.setattr(actions, "_set_vehicle_amps", set_amps)
+    monkeypatch.setattr(actions, "_phase_load_management_enabled", lambda *_: phase_aware)
+    monkeypatch.setattr(actions, "_optimizer_planned_ev_charge_kw", lambda *_: planned_ev_kw)
+    monkeypatch.setattr(actions, "_dynamic_ev_state", {"entry-1": {"generic_ev": state}})
+
+    asyncio.run(actions._dynamic_ev_update(_Hass([]), entry, "entry-1", "generic_ev"))
+
+    if expected is None:
+        set_amps.assert_not_awaited()
+        assert state["current_amps"] == current_amps
+    else:
+        assert set_amps.await_args.args[3] == expected
+        assert state["current_amps"] == expected
+
+
 def test_dynamic_battery_target_uses_solar_and_home_load_to_preserve_grid_charge(monkeypatch):
     set_amps_calls: list[int] = []
 
