@@ -12837,6 +12837,47 @@ def test_scheduled_tesla_only_releases_fresh_stopped_zero_draw_session(
     physical_stop.assert_not_awaited()
 
 
+@pytest.mark.parametrize(
+    ("observed_amps", "receipt_age", "configured_prefix", "released"),
+    [(0, 2, "car", True), (7, 2, "car", False),
+     (0, 900, "car", False), (0, 2, "other", False)],
+)
+def test_scheduled_ble_only_reconciles_from_exact_bridge_receipts(
+    monkeypatch, observed_amps, receipt_age, configured_prefix, released,
+):
+    from power_sync.automations.ev_ownership import claim_ev_ownership, get_ev_ownership
+
+    now = datetime.now(timezone.utc)
+    receipt = (now - timedelta(seconds=receipt_age)).isoformat()
+    hass = _Hass([
+        _State("sensor.car_charging_state", "Stopped", last_reported=now),
+        _State("sensor.car_charging_state_received", receipt),
+        _State("sensor.car_charge_current", str(observed_amps),
+               {"unit_of_measurement": "A"}, last_reported=now),
+        _State("sensor.car_charge_current_received", receipt),
+    ])
+    monkeypatch.setattr(actions.dt_util, "utcnow", lambda: now)
+    stop = AsyncMock()
+    monkeypatch.setattr(actions, "_action_stop_ev_charging", stop)
+    entry = _Entry()
+    entry.options = {
+        "ev_provider": actions.EV_PROVIDER_TESLA_BLE,
+        "tesla_ble_entity_prefix": configured_prefix,
+    }
+    vehicle = "ble_car"
+    lease = claim_ev_ownership(hass, entry, vehicle, owner_mode="scheduled")
+    actions._dynamic_ev_state[entry.entry_id] = {vehicle: {
+        "active": True,
+        "current_amps": 32,
+        "last_start_command_at": now - timedelta(minutes=10),
+        "params": {"owner_mode": "scheduled", "charger_type": "tesla"},
+    }}
+
+    assert asyncio.run(actions._release_stopped_scheduled_tesla(hass, entry, vehicle)) is released
+    assert get_ev_ownership(hass, entry, vehicle)[1] is (None if released else lease)
+    stop.assert_not_awaited()
+
+
 @pytest.mark.parametrize("recovered", [False, True])
 def test_solar_recovery_retries_with_possible_load_and_unavailable_telemetry(
     monkeypatch, caplog, recovered,

@@ -1613,6 +1613,45 @@ async def _reconcile_stopped_smart_schedule_tesla(
     return True
 
 
+def _has_fresh_scheduled_ble_stop(
+    hass: HomeAssistant, config_entry: ConfigEntry, vehicle_id: str, started_at: datetime | None,
+) -> bool:
+    """Check the configured BLE loadpoint without falling through to Fleet telemetry."""
+    from ..tesla_ble import (
+        get_tesla_ble_charge_current_state,
+        get_tesla_ble_charge_power_state,
+        get_tesla_ble_charging_state,
+        get_tesla_ble_observed_at,
+    )
+
+    config = {**config_entry.data, **config_entry.options}
+    prefix = vehicle_id[4:]
+    if config.get(CONF_EV_PROVIDER) != EV_PROVIDER_TESLA_BLE or prefix not in resolve_ble_prefixes(hass, config):
+        return False
+
+    def fresh(sample):
+        observed_at = get_tesla_ble_observed_at(hass, sample)
+        return is_current_ev_power_observation(observed_at) and (
+            started_at is None or _datetime_is_after(observed_at, started_at)
+        )
+
+    charging = get_tesla_ble_charging_state(hass, prefix)
+    if str(getattr(charging, "state", "")).strip().lower() != "stopped" or not fresh(charging):
+        return False
+
+    current = get_tesla_ble_charge_current_state(hass, prefix)
+    amps, _, _ = _phase_current_state_amps(current) if fresh(current) else (None, None, None)
+    if amps is not None and amps > 0.5:
+        return False
+
+    power = get_tesla_ble_charge_power_state(hass, prefix)
+    if fresh(power) and float(power.state) >= 0:
+        power_kw, available = _power_state_kw_reading(power)
+        if available:
+            return power_kw <= _ACTIVE_EV_POWER_EPSILON_KW
+    return amps is not None
+
+
 async def _release_stopped_scheduled_tesla(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
@@ -1635,42 +1674,46 @@ async def _release_stopped_scheduled_tesla(
     ):
         return False
 
-    entity_id = await _get_tesla_ev_entity(
-        hass, r"sensor\..*_(charging_state|charging|charge_state)(?:_\d+)?$",
-        vehicle_id, warn_on_missing=False, config_entry=config_entry,
-    )
-    charging = hass.states.get(entity_id) if entity_id else None
-    observed_at = getattr(charging, "last_reported", None) or getattr(charging, "last_updated", None)
     started_at = state.get("last_start_command_at")
-    if (
-        str(getattr(charging, "state", "")).strip().lower() != "stopped"
-        or not is_current_ev_power_observation(observed_at)
-        or (started_at is not None and not _datetime_is_after(observed_at, started_at))
-    ):
-        return False
+    ble_only = vehicle_id.startswith("ble_")
+    if not ble_only:
+        entity_id = await _get_tesla_ev_entity(
+            hass, r"sensor\..*_(charging_state|charging|charge_state)(?:_\d+)?$",
+            vehicle_id, warn_on_missing=False, config_entry=config_entry,
+        )
+        charging = hass.states.get(entity_id) if entity_id else None
+        observed_at = getattr(charging, "last_reported", None) or getattr(charging, "last_updated", None)
+        if (
+            str(getattr(charging, "state", "")).strip().lower() != "stopped"
+            or not is_current_ev_power_observation(observed_at)
+            or (started_at is not None and not _datetime_is_after(observed_at, started_at))
+        ):
+            return False
 
-    current_entity = await _get_tesla_ev_entity(
-        hass,
-        r"sensor\..*_(charge_current|charging_current|charger_current|charger_actual_current)(?:_\d+)?$",
-        vehicle_id,
-        warn_on_missing=False,
-        config_entry=config_entry,
-    )
-    power_kw, power_available = await _get_observed_ev_power_reading_kw(hass, vehicle_id, {})
-    current = hass.states.get(current_entity) if current_entity else None
-    amps, _error, _age = _phase_current_state_amps(current)
-    if (
-        hass.states.get(entity_id) is not charging
-        or (amps is None and not power_available)
-        or (amps is not None and amps > 0.5)
-        or (power_available and power_kw > _ACTIVE_EV_POWER_EPSILON_KW)
-    ):
-        return False
+        current_entity = await _get_tesla_ev_entity(
+            hass,
+            r"sensor\..*_(charge_current|charging_current|charger_current|charger_actual_current)(?:_\d+)?$",
+            vehicle_id,
+            warn_on_missing=False,
+            config_entry=config_entry,
+        )
+        power_kw, power_available = await _get_observed_ev_power_reading_kw(hass, vehicle_id, {})
+        current = hass.states.get(current_entity) if current_entity else None
+        amps, _error, _age = _phase_current_state_amps(current)
+        if (
+            hass.states.get(entity_id) is not charging
+            or (amps is None and not power_available)
+            or (amps is not None and amps > 0.5)
+            or (power_available and power_kw > _ACTIVE_EV_POWER_EPSILON_KW)
+        ):
+            return False
 
     # A concurrent Start can transfer the dynamic controller in place.
     if _start_dynamic_lock.locked():
         return False
     async with _start_dynamic_lock:
+        if ble_only and not _has_fresh_scheduled_ble_stop(hass, config_entry, vehicle_id, started_at):
+            return False
         await _action_stop_ev_charging_dynamic(hass, config_entry, {
             "vehicle_id": vehicle_id,
             "stop_charging": False,
