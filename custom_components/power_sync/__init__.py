@@ -48098,6 +48098,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
 
         from homeassistant.helpers.event import async_track_time_interval as _track_solar_strings_interval
+        from .powerwall_local.coordinator import POWERWALL_LOCAL_STRING_MAX_AGE
 
         solar_strings_in_progress = False
 
@@ -48109,12 +48110,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if not entry.data.get(CONF_POWERWALL_LOCAL_PAIRED):
                 return
 
+            entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+            if entry_data is None:
+                return
+            local_scan = entry_data.get("powerwall_local_solar_scan")
+            if local_scan is not None and time.monotonic() - local_scan < POWERWALL_LOCAL_STRING_MAX_AGE:
+                return
+
             solar_strings_in_progress = True
             try:
                 payload = await battery_health_view._try_fleet_api_solar_strings_fetch(entry)
-                if not payload:
+                if (
+                    not payload
+                    or hass.data.get(DOMAIN, {}).get(entry.entry_id) is not entry_data
+                    or entry_data.get("powerwall_local_solar_scan") != local_scan
+                    or not entry.data.get(CONF_POWERWALL_LOCAL_PAIRED)
+                ):
                     return
-                entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
                 entry_data["solar_string_diagnostics"] = payload
                 async_dispatcher_send(
                     hass,
@@ -48134,7 +48146,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 timedelta(seconds=30),
             )
         )
-        _LOGGER.info("☀️ Powerwall solar string voltage polling armed (30 seconds; no-op until paired)")
+        _LOGGER.info("☀️ Powerwall solar string fallback polling armed (30 seconds)")
 
     # Register HTTP endpoint for Inverter status (for mobile app Solar controls)
     hass.http.register_view(InverterStatusView(hass))

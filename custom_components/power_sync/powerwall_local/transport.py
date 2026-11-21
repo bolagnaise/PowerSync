@@ -354,7 +354,8 @@ class TEDAPIv1rTransport:
         )
 
     async def post_v1r(self, envelope_bytes: bytes, din: str, *, before_send: Callable[[], None] | None = None,
-                       before_submit: Callable[[int], Awaitable[None]] | None = None) -> TEDAPIResponse:
+                       before_submit: Callable[[int], Awaitable[None]] | None = None,
+                       offload_signing: bool = False) -> TEDAPIResponse:
         """Wrap an envelope in a signed ``RoutableMessage`` and POST it."""
         routable = signed_message_pb2.RoutableMessage()
         routable.to_destination.domain = signed_message_pb2.DOMAIN_ENERGY_DEVICE
@@ -366,7 +367,10 @@ class TEDAPIv1rTransport:
             din, expires_at, routable.protobuf_message_as_bytes
         )
         with measure_renewal_step("signing"):
-            signature = self._sign(tlv)
+            if offload_signing:
+                signature = await asyncio.to_thread(self._sign, tlv)
+            else:
+                signature = self._sign(tlv)
 
         routable.signature_data.signer_identity.public_key = self._public_key_der
         routable.signature_data.rsa_data.expires_at = expires_at

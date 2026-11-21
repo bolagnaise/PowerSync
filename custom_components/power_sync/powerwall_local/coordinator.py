@@ -16,6 +16,7 @@ from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from ..const import (
@@ -32,7 +33,7 @@ from ..tesla_calibration import (
     powerwall_calibration_alert_active,
     set_calibration_source,
 )
-from .client import PowerwallLocalClient, PowerwallSnapshot
+from .client import PowerwallLocalClient, PowerwallSnapshot, PowerwallVersion
 from .exceptions import (
     PowerwallLocalError,
     PowerwallSignatureError,
@@ -51,6 +52,9 @@ _LOGGER = logging.getLogger(__name__)
 POWERWALL_LOCAL_SNAPSHOT_TIMEOUT = 15.0
 POWERWALL_LOCAL_DIAGNOSTICS_INTERVAL = 300.0
 POWERWALL_LOCAL_DIAGNOSTICS_TIMEOUT = 15.0
+POWERWALL_COMPONENTS_TIMEOUT = 1.5
+POWERWALL_COMPONENTS_RETRY_INTERVAL = 30
+POWERWALL_LOCAL_STRING_MAX_AGE = 3 * POWERWALL_LOCAL_POLL_INTERVAL
 POWERWALL_CALIBRATION_CLEAR_POLLS = 3
 _BACKUP_RESERVE_WRITE_LOCAL_KEY = "powerwall_local_backup_reserve_write_local_pct"
 _BACKUP_RESERVE_WRITE_USER_KEY = "powerwall_local_backup_reserve_write_user_pct"
@@ -108,6 +112,9 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
         }
         self._v1r_diagnostics_last_attempt_monotonic: float | None = None
         self._v1r_diagnostics_task: asyncio.Task[None] | None = None
+        self._v1r_components_task: asyncio.Task[None] | None = None
+        self._v1r_components_retry_at = 0.0
+        self._v1r_components: dict[str, Any] | None = None
         self._calibration_notification_tasks: set[asyncio.Task[None]] = set()
 
         # DataUpdateCoordinator pauses its periodic schedule when it has zero
@@ -154,11 +161,17 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
 
     def replace_client(self, client: PowerwallLocalClient) -> None:
         """Swap in a new client (eg after re-pair) without resetting the coordinator."""
+        task = getattr(self, "_v1r_components_task", None)
+        if task is not None:
+            task.cancel()
+        self._v1r_components_retry_at = 0.0
+        self._v1r_components = None
         self._client = client
         self._consecutive_failures = 0
 
     async def _async_update_data(self) -> PowerwallSnapshot | None:
-        if not self._client.local_access_enabled:
+        client = self._client
+        if not client.local_access_enabled:
             return None
 
         # Common API diagnostics must keep retrying on their own cadence even
@@ -166,7 +179,7 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
         self._schedule_v1r_diagnostics_if_due()
         try:
             snap = await asyncio.wait_for(
-                self._client.get_snapshot(),
+                client.get_snapshot(),
                 timeout=POWERWALL_LOCAL_SNAPSHOT_TIMEOUT,
             )
         except (asyncio.TimeoutError, TimeoutError) as err:
@@ -235,7 +248,107 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
                 setattr(snap, attribute, None)
             else:
                 records.pop(attribute, None)
+        if self._client is client:
+            self._update_v1r_components(snap)
+            snap.v1r_components = getattr(self, "_v1r_components", None)
+            snap.solar_strings = entry_data.get("solar_string_diagnostics")
         return snap
+
+    def _update_v1r_components(self, snap: PowerwallSnapshot) -> None:
+        """Collect read-only component telemetry alongside successful meter polls."""
+        if getattr(self, "_v1r_components_stopped", False):
+            return
+        version = getattr(self._client, "version", None)
+        if version not in (PowerwallVersion.PW2, PowerwallVersion.PW3):
+            return
+        dcq = snap.raw.get("dcq")
+        scanned_at = datetime.now(timezone.utc).isoformat()
+        task = getattr(self, "_v1r_components_task", None)
+        if task is not None and not task.done():
+            return
+        now = time.monotonic()
+        if (
+            version == PowerwallVersion.PW2
+            or now < getattr(self, "_v1r_components_retry_at", 0.0)
+            or (snap.observed_monotonic is not None
+                and now - snap.observed_monotonic >= POWERWALL_LOCAL_POLL_INTERVAL)
+        ):
+            self._publish_legacy_solar_strings(dcq, scanned_at)
+            return
+        self._v1r_components_task = self.hass.async_create_task(
+            self._async_refresh_v1r_components(self._client, dcq, scanned_at),
+            f"powerwall_v1r_components_{self._entry_id}",
+        )
+
+    async def _async_refresh_v1r_components(
+        self, client: PowerwallLocalClient, dcq: dict[str, Any] | None, dcq_scanned_at: str,
+    ) -> None:
+        """Publish the latest component response without gating meter freshness."""
+        try:
+            payload = await asyncio.wait_for(
+                client.get_pw3_components(), timeout=POWERWALL_COMPONENTS_TIMEOUT,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:
+            _LOGGER.debug("Powerwall V1R components unavailable: %s", err)
+            payload = None
+        if self._client is not client or getattr(self, "_v1r_components_stopped", False):
+            return
+        if not isinstance(payload, dict):
+            payload = {}
+        components = payload.get("components")
+        components = {
+            key: components[key]
+            for key in ("pch", "pws", "bms", "hvp", "baggr")
+            if isinstance(components, dict) and isinstance(components.get(key), list)
+        }
+        has_components = any(components.values())
+        if not has_components:
+            self._v1r_components_retry_at = time.monotonic() + POWERWALL_COMPONENTS_RETRY_INTERVAL
+        pw3_can = payload.get("pw3Can")
+        scanned_at = datetime.now(timezone.utc).isoformat()
+        self._v1r_components = {
+            "last_scan": scanned_at,
+            "components": components,
+            "pw3_can": pw3_can,
+        } if has_components or pw3_can else None
+        from .fleet_api_bms import normalize_pw3_components_strings
+
+        readings = normalize_pw3_components_strings({"components": components})
+        if readings is None:
+            self._publish_legacy_solar_strings(dcq, dcq_scanned_at)
+        else:
+            self._publish_solar_strings(readings, scanned_at)
+
+    def _publish_legacy_solar_strings(
+        self, dcq: dict[str, Any] | None, scanned_at: str,
+    ) -> None:
+        from .fleet_api_bms import normalize_legacy_pvac_strings
+
+        if not isinstance(dcq, dict):
+            return
+        readings = normalize_legacy_pvac_strings(dcq)
+        if readings is not None:
+            self._publish_solar_strings(readings, scanned_at)
+
+    def _publish_solar_strings(self, readings: dict[str, Any], scanned_at: str) -> None:
+        entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry_id)
+        if entry_data is None or (entry_data.get("powerwall_local") or {}).get("coordinator") is not self:
+            return
+        diagnostics = {
+            **readings,
+            "success": True,
+            "available": True,
+            "brand": "tesla",
+            "transport_source": "ha_local_tedapi",
+            "last_scan": scanned_at,
+        }
+        entry_data["powerwall_local_solar_scan"] = time.monotonic()
+        entry_data["solar_string_diagnostics"] = diagnostics
+        async_dispatcher_send(
+            self.hass, f"{DOMAIN}_solar_strings_update_{self._entry_id}", diagnostics,
+        )
 
     async def _sync_calibration_alert(self, snap: PowerwallSnapshot) -> None:
         """Make Tesla's explicit local calibration alert authoritative."""
@@ -451,6 +564,7 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
 
     async def async_shutdown(self) -> None:
         """Cancel any in-flight background diagnostics during entry unload."""
+        self._v1r_components_stopped = True
         keepalive_unsub = getattr(self, "_keepalive_unsub", None)
         self._keepalive_unsub = None
         if callable(keepalive_unsub):
@@ -468,14 +582,16 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
         if notification_tasks:
             await asyncio.gather(*notification_tasks, return_exceptions=True)
         self._calibration_notification_tasks = set()
-        task = getattr(self, "_v1r_diagnostics_task", None)
-        if task is None or task.done():
-            return
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+        tasks = [
+            task for task in (
+                getattr(self, "_v1r_diagnostics_task", None),
+                getattr(self, "_v1r_components_task", None),
+            ) if task is not None and not task.done()
+        ]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     def _discard_unverified_backup_reserve(self, snap: PowerwallSnapshot) -> None:
         """Retire inferred offsets and pending targets from older versions.
@@ -583,6 +699,8 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
             "gateway_din": self._client.din,
             "version": self._client.version.value,
             "v1r_diagnostics": getattr(self, "_v1r_diagnostics", None),
+            "v1r_components": getattr(snap, "v1r_components", None),
+            "solar_strings": getattr(snap, "solar_strings", None),
         }
 
     def _observed_ev_power_w(self) -> tuple[float, bool]:

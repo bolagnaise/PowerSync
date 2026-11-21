@@ -2643,6 +2643,8 @@ async def async_setup_entry(
                 PowerwallV1rNetworkSensor(local_coord, entry),
                 PowerwallV1rInternetSensor(local_coord, entry),
             ])
+            if local_coord.client.version.value == "pw3":
+                entities.append(PowerwallV1rComponentsSensor(local_coord, entry))
     # Pack-level sensors come from the richer BMS health scan because
     # batteryBlocks only contains shallow block identity/count data on PW3 sites.
     if battery_system == "tesla":
@@ -3664,6 +3666,31 @@ class PowerwallV1rInternetSensor(_PowerwallV1rSensorBase):
         if isinstance(interfaces, dict):
             attrs["interfaces"] = interfaces
         return attrs
+
+
+class PowerwallV1rComponentsSensor(_PowerwallLocalSensorBase):
+    """Latest local component scan, including the gateway's signal timestamps."""
+
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+    _attr_icon = "mdi:developer-board"
+    _unrecorded_attributes = frozenset({"components", "pw3_can"})
+
+    def __init__(self, coordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator, entry, "pw_v1r_components", "V1R Components")
+
+    @property
+    def available(self) -> bool:
+        return super().available and bool(getattr(self._snap, "v1r_components", None))
+
+    @property
+    def native_value(self) -> datetime | None:
+        telemetry = getattr(self._snap, "v1r_components", None)
+        return datetime.fromisoformat(telemetry["last_scan"]) if telemetry else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        telemetry = getattr(self._snap, "v1r_components", None) or {}
+        return {key: telemetry[key] for key in ("components", "pw3_can") if telemetry.get(key)}
 
 
 class PowerwallSystemIslandStateSensor(_PowerwallLocalSensorBase):

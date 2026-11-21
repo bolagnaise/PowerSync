@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -21,6 +22,10 @@ class _CoordinatorEntity:
     def capability_attributes(self):
         return getattr(self.coordinator, "sensor_capabilities", None)
 
+    @property
+    def available(self):
+        return self.coordinator.last_update_success
+
 
 def _sensor_classes():
     """Execute the real sensor classes without importing the integration."""
@@ -28,7 +33,7 @@ def _sensor_classes():
     names = {
         "_PowerwallLocalSensorBase", "_PowerwallV1rSensorBase",
         "PowerwallV1rDeviceSensor", "PowerwallV1rFirmwareSensor",
-        "PowerwallV1rNetworkSensor", "PowerwallV1rInternetSensor",
+        "PowerwallV1rNetworkSensor", "PowerwallV1rInternetSensor", "PowerwallV1rComponentsSensor",
     }
     nodes = [n for n in tree.body if isinstance(n, ast.ClassDef) and n.name in names]
     namespace = {
@@ -36,6 +41,8 @@ def _sensor_classes():
         "SensorEntity": type("SensorEntity", (), {}),
         "ConfigEntry": object,
         "Any": Any,
+        "datetime": datetime,
+        "SensorDeviceClass": SimpleNamespace(TIMESTAMP="timestamp"),
     }
     exec(compile(ast.Module(body=nodes, type_ignores=[]), str(ROOT / "sensor.py"), "exec"), namespace)
     return namespace
@@ -53,6 +60,23 @@ def _ha_state(sensor):
         return "unavailable", attrs
     attrs.update(sensor.extra_state_attributes or {})
     return sensor.native_value, attrs
+
+
+def test_v1r_components_sensor_exposes_snapshot_timestamp_and_component_groups():
+    telemetry = {
+        "last_scan": "2026-11-21T01:02:03+00:00",
+        "components": {"pch": [{"signals": [{"name": "PCH_PvCurrentA", "value": 0}]}]},
+        "pw3_can": {"firmwareUpdate": {"isUpdating": False}},
+    }
+    coordinator = SimpleNamespace(
+        data=SimpleNamespace(v1r_components=telemetry), last_update_success=True,
+    )
+    sensor = SENSORS["PowerwallV1rComponentsSensor"](coordinator, SimpleNamespace(entry_id="entry"))
+    state, attrs = _ha_state(sensor)
+    assert state == datetime(2026, 11, 21, 1, 2, 3, tzinfo=timezone.utc)
+    assert attrs == {key: telemetry[key] for key in ("components", "pw3_can")}
+    coordinator.last_update_success = False
+    assert _ha_state(sensor) == ("unavailable", {})
 
 
 @pytest.mark.parametrize("sensor_name,key", [

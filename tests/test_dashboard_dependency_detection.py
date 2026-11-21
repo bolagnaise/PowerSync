@@ -927,8 +927,41 @@ def test_dashboard_strategy_resource_uses_incremented_cache_buster():
 
     version = re.search(r'DASHBOARD_JS_VERSION = "(\d+)"', const_source)
     assert version is not None
-    assert version.group(1) == "63"
+    assert version.group(1) == "64"
     assert "url = f\"{base_path}?v={POWER_SYNC_VERSION}.{DASHBOARD_JS_VERSION}\"" in source
+
+
+def test_powerwall_telemetry_displays_component_and_string_rows_for_the_selected_gateway():
+    source = STRATEGY_PATH.read_text()
+    section = source[source.index("function _powerwallHealth("):source.index("function _aemoSpike(")]
+    runtime = r'''
+      const assert = require('node:assert/strict');
+      const paired = 'binary_sensor.power_sync_powerwall_local_paired';
+      const components = 'sensor.power_sync_pw_v1r_components';
+      const voltage = 'sensor.renamed_voltage';
+      const current = 'sensor.renamed_current';
+      const other = 'sensor.other_site_string';
+      const states = {
+        [components]: { state: '2026-11-21T00:00:00+00:00' },
+        [voltage]: { state: '300', attributes: { string_label: 'A' } },
+        [current]: { state: '0' },
+        [other]: { state: '400' },
+      };
+      const registry = [
+        { entity_id: paired, config_entry_id: 'site' },
+        { entity_id: components, config_entry_id: 'site', platform: 'power_sync', unique_id: 'site_pw_v1r_components' },
+        { entity_id: voltage, config_entry_id: 'site', platform: 'power_sync', unique_id: 'site_solar_string_a_voltage' },
+        { entity_id: current, config_entry_id: 'site', platform: 'power_sync', unique_id: 'site_solar_string_a_current' },
+        { entity_id: other, config_entry_id: 'other', platform: 'power_sync', unique_id: 'other_solar_string_a_voltage' },
+      ];
+      const find = (_domain, suffix) => ({ pw_v1r_components: components, powerwall_local_paired: paired }[suffix]);
+      const [card] = _powerwallHealth({ states }, find, registry).cards;
+      assert.equal(card.title, 'Powerwall Telemetry');
+      assert.deepEqual(card.entities.map(row => row.entity), [components, voltage, voltage, current]);
+      assert.equal(card.entities[2].attribute, 'power_w');
+      assert.equal(card.entities[2].name, 'Solar String A Power');
+    '''
+    subprocess.run(["node", "-e", section + runtime], check=True)
 
 
 def test_dashboard_ev_modes_start_collapsed_and_toggle_per_card_with_summary():

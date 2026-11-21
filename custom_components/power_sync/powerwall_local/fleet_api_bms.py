@@ -316,6 +316,8 @@ def normalize_pw3_components_strings(data: dict[str, Any]) -> dict[str, Any] | N
         if not isinstance(component, dict):
             continue
         signals = component.get("signals") or []
+        if not isinstance(signals, list):
+            continue
         by_name = {
             signal.get("name"): signal
             for signal in signals

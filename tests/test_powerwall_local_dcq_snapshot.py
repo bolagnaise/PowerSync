@@ -151,8 +151,10 @@ async def test_shutdown_completes_after_entry_listener_removal(listener_removed,
     coord._keepalive_unsub = unsubscribe
     notification = asyncio.create_task(asyncio.Event().wait())
     diagnostic = asyncio.create_task(asyncio.Event().wait())
+    components = asyncio.create_task(asyncio.Event().wait())
     coord._calibration_notification_tasks = {notification}
     coord._v1r_diagnostics_task = diagnostic
+    coord._v1r_components_task = components
     await asyncio.sleep(0)
     try:
         if concurrent:
@@ -165,11 +167,12 @@ async def test_shutdown_completes_after_entry_listener_removal(listener_removed,
         assert coord._keepalive_unsub is None
         assert notification.cancelled()
         assert diagnostic.cancelled()
+        assert components.cancelled()
         assert not coord._calibration_notification_tasks
     finally:
-        for task in (notification, diagnostic):
+        for task in (notification, diagnostic, components):
             task.cancel()
-        await asyncio.gather(notification, diagnostic, return_exceptions=True)
+        await asyncio.gather(notification, diagnostic, components, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -1100,7 +1103,9 @@ async def test_fresh_components_read_keeps_paired_leader_recipient_and_signature
     monkeypatch.setattr(client_mod, 'parse_device_controller_response', lambda raw: expected if raw == b'reply' else None)
     assert await client.get_pw3_components() is expected
     assert requested == [client._din]
-    client._transport.post_v1r.assert_awaited_once_with(b'components-envelope', client._din)
+    client._transport.post_v1r.assert_awaited_once_with(
+        b'components-envelope', client._din, offload_signing=True,
+    )
 
 
 @pytest.mark.asyncio
@@ -1141,3 +1146,129 @@ async def test_components_read_never_connects_when_local_access_is_disabled(enab
     with pytest.raises(_PowerwallUnreachableError):
         await client.get_pw3_components()
     client._transport.post_v1r.assert_not_awaited()
+
+
+def _local_telemetry_coordinator(monkeypatch, client):
+    decoder = _load_module("real_local_string_decoder", ROOT / "powerwall_local" / "fleet_api_bms.py")
+    for name in ("normalize_pw3_components_strings", "normalize_legacy_pvac_strings"):
+        monkeypatch.setattr(fleet_stub, name, getattr(decoder, name), raising=False)
+    entry_data = {}
+    hass = SimpleNamespace(
+        data={"power_sync": {"entry": entry_data}},
+        async_create_task=lambda coro, name: asyncio.create_task(coro, name=name),
+    )
+    coord = coordinator_mod.PowerwallLocalCoordinator(
+        hass, client, entry=SimpleNamespace(entry_id="entry"),
+    )
+    entry_data["powerwall_local"] = {"coordinator": coord}
+    return coord, entry_data
+
+
+@pytest.mark.asyncio
+async def test_pw3_meter_snapshot_publishes_while_components_wait_then_carries_every_group(monkeypatch):
+    from unittest.mock import AsyncMock, Mock
+
+    pending = asyncio.get_running_loop().create_future()
+    fetch_started = asyncio.Event()
+
+    async def read_components():
+        fetch_started.set()
+        return await pending
+
+    client = SimpleNamespace(
+        version=client_mod.PowerwallVersion.PW3, host="192.168.1.42", din="leader",
+        local_access_enabled=True,
+        get_snapshot=AsyncMock(side_effect=lambda: client_mod._snapshot_from_dcq(_sample_dcq(), None)),
+        get_pw3_components=AsyncMock(side_effect=read_components),
+    )
+    dispatch = Mock()
+    monkeypatch.setattr(coordinator_mod, "async_dispatcher_send", dispatch)
+    coord, entry_data = _local_telemetry_coordinator(monkeypatch, client)
+    try:
+        first = await coord._async_update_data()
+        await fetch_started.wait()
+        assert first.v1r_components is None
+        assert first.solar_w is not None
+        assert (await coord._async_update_data()).solar_w == first.solar_w
+        client.get_pw3_components.assert_awaited_once()
+        dispatch.assert_not_called()
+
+        signals = [
+            {"name": "PCH_PvState_A", "textValue": "PV_Active", "timestamp": 42},
+            {"name": "PCH_PvVoltageA", "value": 300, "timestamp": 42},
+            {"name": "PCH_PvCurrentA", "value": 4, "timestamp": 42},
+        ]
+        components = {
+            "pch": [{"signals": signals}],
+            **{group: [{"signals": [{"name": group, "value": 0}]}]
+               for group in ("bms", "hvp", "pws", "baggr")},
+        }
+        firmware = {"firmwareUpdate": {"isUpdating": False}}
+        pending.set_result({"components": components, "pw3Can": firmware})
+        await coord._v1r_components_task
+        published = entry_data["solar_string_diagnostics"]
+        assert published["transport_source"] == "ha_local_tedapi"
+        assert published["strings"][0]["power_w"] == 1200
+        dispatch.assert_called_once_with(coord.hass, "power_sync_solar_strings_update_entry", published)
+
+        coord.data = await coord._async_update_data()
+        assert coord.data.v1r_components == {
+            "last_scan": published["last_scan"], "components": components, "pw3_can": firmware,
+        }
+        api = coord.snapshot_as_api()
+        assert api["v1r_components"] == coord.data.v1r_components
+        assert api["solar_strings"]["strings"][0]["current_a"] == 4
+        await coord._v1r_components_task
+        assert client.get_pw3_components.await_count == 2
+    finally:
+        await coord.async_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_slow_meter_scan_does_not_start_an_extra_request(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    snapshot = client_mod._snapshot_from_dcq(_sample_dcq(), None)
+    snapshot.observed_monotonic = coordinator_mod.time.monotonic() - 15
+    client = SimpleNamespace(
+        version=client_mod.PowerwallVersion.PW3, local_access_enabled=True,
+        get_snapshot=AsyncMock(return_value=snapshot), get_pw3_components=AsyncMock(),
+    )
+    coord, _ = _local_telemetry_coordinator(monkeypatch, client)
+    try:
+        assert await coord._async_update_data() is snapshot
+        assert coord._v1r_components_task is None
+        client.get_pw3_components.assert_not_awaited()
+    finally:
+        await coord.async_shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("powerwall_version", ["pw2", "pw3"])
+async def test_legacy_dcq_is_reused_when_pw3_components_are_unavailable(monkeypatch, powerwall_version):
+    from unittest.mock import AsyncMock
+
+    dcq = _sample_dcq()
+    dcq["esCan"] = {"bus": {"PVAC": [{"PVAC_Logging": {
+        "PVAC_PVMeasuredVoltage_A": 320,
+        "PVAC_PVCurrent_A": 2.5,
+    }}]}}
+    client = SimpleNamespace(
+        version=client_mod.PowerwallVersion(powerwall_version), local_access_enabled=True,
+        get_snapshot=AsyncMock(side_effect=lambda: client_mod._snapshot_from_dcq(dcq, None)),
+        get_pw3_components=AsyncMock(side_effect=RuntimeError("gateway busy")),
+    )
+    coord, _ = _local_telemetry_coordinator(monkeypatch, client)
+    try:
+        await coord._async_update_data()
+        if powerwall_version == "pw3":
+            await coord._v1r_components_task
+            client.get_pw3_components.assert_awaited_once()
+        snap = await coord._async_update_data()
+        assert snap.v1r_components is None
+        assert snap.solar_strings["source"] == "legacy_pvac"
+        assert snap.solar_strings["strings"][0]["power_w"] == 800
+        # During backoff, the legacy data continues to use the latest DCQ.
+        assert client.get_pw3_components.await_count == (powerwall_version == "pw3")
+    finally:
+        await coord.async_shutdown()

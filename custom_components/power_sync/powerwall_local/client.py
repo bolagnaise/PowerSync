@@ -141,6 +141,8 @@ class PowerwallSnapshot:
     # Only an actual signed config read earns this provenance; DCQ-only
     # refreshes with supplied config leave it unknown.
     config_observed_monotonic: float | None = None
+    v1r_components: dict[str, Any] | None = None
+    solar_strings: dict[str, Any] | None = None
 
 
 class PowerwallLocalClient:
@@ -260,7 +262,7 @@ class PowerwallLocalClient:
         from .fleet_api_bms import build_pw3_components_query_envelope
 
         envelope = build_pw3_components_query_envelope(self._din)
-        response = await self._transport.post_v1r(envelope, self._din)
+        response = await self._transport.post_v1r(envelope, self._din, offload_signing=True)
         if not response.ok or not response.inner_bytes:
             return None
         return parse_device_controller_response(response.inner_bytes)

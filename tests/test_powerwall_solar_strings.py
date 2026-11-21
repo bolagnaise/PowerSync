@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parent.parent / "custom_components" / "power_sync"
@@ -36,6 +41,55 @@ def test_solar_string_v1r_path_uses_local_ttl_and_skips_loopback():
     assert "not is_loopback_host(local_ip)" in method_source
     assert "_sign_in_thread, 300" in method_source
     assert "_b64.b64encode(signed_cloud)" in method_source
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("local_scan", [None, 75.0, 98.0])
+@pytest.mark.parametrize("local_arrives_during_fallback", [False, True])
+async def test_slow_string_poll_yields_to_fresh_local_scan(local_scan, local_arrives_during_fallback):
+    tree = ast.parse(INIT_PATH.read_text())
+    poll = next(node for node in ast.walk(tree)
+                if isinstance(node, ast.AsyncFunctionDef) and node.name == "_poll_powerwall_solar_strings")
+    factory = ast.parse("def make_poll():\n    solar_strings_in_progress = False\n    return _poll_powerwall_solar_strings").body[0]
+    factory.body.insert(1, poll)
+    entry_data = {"powerwall_local_solar_scan": local_scan}
+    local_payload = {"source": "pw3_components"}
+    fallback_payload = {"source": "legacy_pvac"}
+
+    async def fetch(_entry):
+        if local_arrives_during_fallback:
+            entry_data["powerwall_local_solar_scan"] = 100.1
+            entry_data["solar_string_diagnostics"] = local_payload
+        return fallback_payload
+
+    poll_fetch = AsyncMock(side_effect=fetch)
+    publish = Mock()
+    namespace = {
+        "DOMAIN": "power_sync",
+        "CONF_POWERWALL_LOCAL_PAIRED": "paired",
+        "POWERWALL_LOCAL_STRING_MAX_AGE": 6,
+        "hass": SimpleNamespace(data={"power_sync": {"entry": entry_data}}),
+        "entry": SimpleNamespace(entry_id="entry", data={"paired": True}),
+        "time": SimpleNamespace(monotonic=lambda: 100.0),
+        "battery_health_view": SimpleNamespace(_try_fleet_api_solar_strings_fetch=poll_fetch),
+        "async_dispatcher_send": publish,
+        "_LOGGER": Mock(),
+    }
+    exec(compile(ast.Module(body=[factory], type_ignores=[]), str(INIT_PATH), "exec"), namespace)
+
+    await namespace["make_poll"]()()
+
+    if local_scan == 98.0:
+        poll_fetch.assert_not_awaited()
+        publish.assert_not_called()
+    elif local_arrives_during_fallback:
+        poll_fetch.assert_awaited_once()
+        assert entry_data["solar_string_diagnostics"] is local_payload
+        publish.assert_not_called()
+    else:
+        poll_fetch.assert_awaited_once()
+        assert entry_data["solar_string_diagnostics"] is fallback_payload
+        publish.assert_called_once()
 
 
 def test_pw3_components_strings_include_active_voltages_and_groups():

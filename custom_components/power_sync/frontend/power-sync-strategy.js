@@ -8385,7 +8385,7 @@ class PowerSyncStrategy {
     const powerwallLocalPaired = findEntity('binary_sensor', 'powerwall_local_paired');
     if (powerwallLocalPaired && hass.states[powerwallLocalPaired]?.state === 'on') {
       left.push(_powerwallLocalControl(e, hasE, findEntity));
-      const health = _powerwallHealth(hass);
+      const health = _powerwallHealth(hass, findEntity, registryRows);
       if (health) left.push(health);
     }
 
@@ -8748,7 +8748,7 @@ function _boardCards(ctx) {
   const paired = findEntity('binary_sensor', 'powerwall_local_paired');
   if (paired && states[paired]?.state === 'on') {
     add({ key: 'local', title: 'Powerwall local control', card: _powerwallLocalControl(e, hasE, findEntity) });
-    add(_boardEntry('packs', 'Powerwalls', _powerwallHealth(hass)));
+    add(_boardEntry('packs', 'Powerwalls', _powerwallHealth(hass, findEntity, registryRows)));
   }
 
   const hasDC = hasE('solar_curtailment');
@@ -10691,7 +10691,7 @@ function _powerwallLocalControl(e, hasE, findEntity) {
   };
 }
 
-function _powerwallHealth(hass) {
+function _powerwallHealth(hass, findEntity, registryRows) {
   // Scan hass.states for per-PW sensors created by the lazy-add task.
   // The deferred-add pattern means these only exist on PW2 / supported sites,
   // so we render the section only when at least one block is discovered.
@@ -10702,9 +10702,43 @@ function _powerwallHealth(hass) {
     const m = blockRe.exec(key);
     if (m) blockIndices.add(parseInt(m[1], 10));
   }
-  if (blockIndices.size === 0) return null;
-
   const cards = [];
+  const pairedEntity = findEntity('binary_sensor', 'powerwall_local_paired');
+  const entryId = registryRows.find(row => row.entity_id === pairedEntity)?.config_entry_id;
+  const siteEntities = entryId
+    ? registryRows.filter(row => row.platform === 'power_sync'
+      && row.config_entry_id === entryId && states[row.entity_id])
+    : [];
+  const telemetryRows = [
+    ['pw_v1r_components', 'Component readings'],
+    ['pw_v1r_device', 'Gateway'],
+    ['pw_v1r_firmware', 'Firmware'],
+    ['pw_v1r_network', 'Network'],
+    ['pw_v1r_internet', 'Internet'],
+    ['pw_count', 'Powerwalls'],
+    ['pw_active_alerts', 'Active alerts'],
+  ].map(([suffix, name]) => {
+    const row = siteEntities.find(row => row.unique_id === `${entryId}_${suffix}`);
+    return { entity: entryId ? row?.entity_id : findEntity('sensor', suffix), name };
+  })
+    .filter(row => states[row.entity]);
+  if (entryId) {
+    const rows = siteEntities.filter(row => row.entity_id?.startsWith('sensor.')
+      && row.unique_id?.startsWith(`${entryId}_solar_string_`));
+    for (const row of rows) {
+      telemetryRows.push({ entity: row.entity_id });
+      if (row.unique_id.endsWith('_voltage')) {
+        const label = states[row.entity_id].attributes?.string_label;
+        telemetryRows.push({
+          type: 'attribute', entity: row.entity_id, attribute: 'power_w',
+          name: label ? `Solar String ${label} Power` : 'Solar String Power', suffix: ' W',
+        });
+      }
+    }
+  }
+  if (telemetryRows.length) {
+    cards.push({ type: 'entities', title: 'Powerwall Telemetry', show_header_toggle: false, entities: telemetryRows });
+  }
   const sortedIndices = Array.from(blockIndices).sort((a, b) => a - b);
   for (const i of sortedIndices) {
     const entities = [];

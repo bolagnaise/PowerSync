@@ -1540,7 +1540,7 @@ async def test_coordinator_reconciles_setting_after_its_final_await():
     coordinator = SimpleNamespace(hass=ns["hass"], _entry_id="entry",
         _client=SimpleNamespace(local_access_enabled=True, get_snapshot=AsyncMock(return_value=snap)),
         _schedule_v1r_diagnostics_if_due=lambda: None, _discard_unverified_backup_reserve=lambda s: None,
-        _sync_calibration_alert=alert, _consecutive_failures=0)
+        _sync_calibration_alert=alert, _update_v1r_components=lambda s: None, _consecutive_failures=0)
     ns.update(POWERWALL_LOCAL_SNAPSHOT_TIMEOUT=1, _CLOUD_FALLBACK_PENDING_KEY="pending_cloud",
               TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS=30)
     fn = load_function(ROOT / "powerwall_local/coordinator.py", "_async_update_data", ns)
@@ -1921,7 +1921,7 @@ async def test_new_dcq_with_missing_config_cannot_discard_recent_setting_readbac
     coordinator = SimpleNamespace(hass=ns["hass"], _entry_id="entry",
         _client=SimpleNamespace(local_access_enabled=True, get_snapshot=AsyncMock(return_value=snap)),
         _schedule_v1r_diagnostics_if_due=lambda: None, _discard_unverified_backup_reserve=lambda s: None,
-        _sync_calibration_alert=AsyncMock(), _consecutive_failures=0)
+        _sync_calibration_alert=AsyncMock(), _update_v1r_components=lambda s: None, _consecutive_failures=0)
     ns.update(POWERWALL_LOCAL_SNAPSHOT_TIMEOUT=1, _CLOUD_FALLBACK_PENDING_KEY="pending_cloud",
               TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS=30)
     fn = load_function(ROOT / "powerwall_local/coordinator.py", "_async_update_data", ns)
@@ -2232,7 +2232,7 @@ async def test_actual_getters_cannot_recover_expired_settings_from_newer_dcq(
     coordinator = ProbeCoordinator(hass=ns["hass"], _entry_id="entry", data=snap,
         _client=SimpleNamespace(local_access_enabled=True, get_snapshot=AsyncMock(return_value=snap)),
         _schedule_v1r_diagnostics_if_due=lambda: None, _discard_unverified_backup_reserve=lambda s: None,
-        _sync_calibration_alert=AsyncMock(), _consecutive_failures=0)
+        _sync_calibration_alert=AsyncMock(), _update_v1r_components=lambda s: None, _consecutive_failures=0)
     runtime["powerwall_local"] = {"coordinator": coordinator}
     ns.update(POWERWALL_LOCAL_SNAPSHOT_TIMEOUT=1, _CLOUD_FALLBACK_PENDING_KEY="cloud_pending",
               TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS=30, CONF_BATTERY_CURTAILMENT_ENABLED="curtail")
