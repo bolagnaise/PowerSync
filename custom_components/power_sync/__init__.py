@@ -15311,6 +15311,47 @@ class CustomTariffView(HomeAssistantView):
                         status=400,
                     )
 
+            raw_export_quota = data.get("export_quota")
+            if (
+                isinstance(raw_export_quota, dict)
+                and raw_export_quota.get("enabled", True) is not False
+            ):
+                from .tariff_quota import (
+                    custom_tariff_export_quota_rule,
+                    custom_tariff_quota_rules,
+                )
+
+                quota_timezone = getattr(
+                    getattr(self._hass, "config", None),
+                    "time_zone",
+                    "LOCAL",
+                )
+                export_rule = custom_tariff_export_quota_rule(
+                    data,
+                    default_timezone=quota_timezone,
+                )
+                quota_rules = custom_tariff_quota_rules(
+                    data,
+                    default_timezone=quota_timezone,
+                )
+                if (
+                    export_rule is None
+                    or quota_rules is None
+                    or quota_rules.export_rule is None
+                ):
+                    return web.json_response(
+                        {
+                            "success": False,
+                            "error": (
+                                "Export allowance requires a valid HH:MM window, "
+                                "positive daily kWh cap, a non-negative rate after "
+                                "the allowance, a positive premium, and the same "
+                                "timezone as the import allowance"
+                            ),
+                        },
+                        status=400,
+                    )
+
             entry_data = self._get_entry_data()
             entry = entry_data.get("entry") if entry_data else None
             tariff_currency = normalize_currency(

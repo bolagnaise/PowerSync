@@ -203,7 +203,18 @@ def test_draft_maps_months_to_seasons_and_keeps_cloud_prices():
     }
     rule = tariff_quota.custom_tariff_import_quota_rule(draft, default_timezone="Australia/Sydney")
     assert rule is not None and rule.effective_price_c_per_kwh(True) == 0.0
-    assert any("premium export allowance" in text for text in draft["warnings"]), "unsupported export allowance is disclosed"
+    # 12c for the first 10 kWh exported 17:00-21:00, then the 4c window rate.
+    assert draft["export_quota"] == {
+        "enabled": True,
+        "name": "First 10 kWh evening",
+        "windows": [["17:00", "21:00"]],
+        "daily_cap_kwh": 10.0,
+        "base_price_c_per_kwh": 4.0,
+        "bonus_price_c_per_kwh": 8.0,
+    }
+    export_rule = tariff_quota.custom_tariff_export_quota_rule(draft, default_timezone="Australia/Sydney")
+    assert export_rule is not None and export_rule.effective_price_c_per_kwh(True) == 12.0
+    assert not any("premium export allowance" in text for text in draft["warnings"]), "export allowance is applied, not warned about"
     assert draft["source"] == {
         "kind": "aer_prd", "plan_id": "SYN0000001MRE1@EME", "effective_from": "2026-10-01",
         "retailer": "other", "region": "NSW1", "network": "Ausgrid",
@@ -273,6 +284,35 @@ def test_allowance_not_cheaper_or_with_varying_rate_is_handled_conservatively():
         utility="x",
     )
     assert seasonal["import_quota"] is None and any("seasonal allowance" in text for text in seasonal["warnings"])
+
+
+def test_export_allowance_premium_is_measured_from_the_highest_window_rate():
+    base = {"baseImportC": 30, "baseExportC": 5, "dailySupplyC": 0}
+    varying = importer.schedule_to_tariff_draft(
+        {"schedule": {**base,
+                      "rates": [{"direction": "export", "startMinute": 1080, "endMinute": 1140, "priceC": 9, "label": "Evening"}],
+                      "allowances": [{"direction": "export", "startMinute": 1020, "endMinute": 1260, "limitKwh": 8, "priceC": 15, "period": "day", "label": "Premium"}]}},
+        utility="x",
+    )
+    assert varying["import_quota"] is None
+    assert varying["export_quota"]["base_price_c_per_kwh"] == 9
+    assert varying["export_quota"]["bonus_price_c_per_kwh"] == 6, "premium never exceeds the real one"
+    assert any("premium uses the highest rate" in text for text in varying["warnings"])
+
+    lower = importer.schedule_to_tariff_draft(
+        {"schedule": {**base, "rates": [],
+                      "allowances": [{"direction": "export", "startMinute": 1020, "endMinute": 1260, "limitKwh": 8, "priceC": 5, "period": "day", "label": "Flat"}]}},
+        utility="x",
+    )
+    assert lower["export_quota"] is None
+    assert any("pays no more than the usual feed-in rate" in text for text in lower["warnings"])
+
+    seasonal = importer.schedule_to_tariff_draft(
+        {"schedule": {**base, "rates": [],
+                      "allowances": [{"direction": "export", "startMinute": 1020, "endMinute": 1260, "limitKwh": 8, "priceC": 15, "period": "day", "months": [12]}]}},
+        utility="x",
+    )
+    assert seasonal["export_quota"] is None and any("seasonal allowance" in text for text in seasonal["warnings"])
 
 
 def test_provider_directory_and_network_matching():

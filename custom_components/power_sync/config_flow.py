@@ -8098,6 +8098,9 @@ class PowerSyncConfigFlow(
         import_quota = getattr(self, "_tariff_import_quota", None)
         if isinstance(import_quota, dict) and import_quota:
             tariff["import_quota"] = dict(import_quota)
+        export_quota = getattr(self, "_tariff_export_quota", None)
+        if isinstance(export_quota, dict) and export_quota:
+            tariff["export_quota"] = dict(export_quota)
         plan_source = getattr(self, "_tariff_source", None)
         if isinstance(plan_source, dict) and plan_source:
             tariff["power_sync_plan_source"] = dict(plan_source)
@@ -18609,6 +18612,9 @@ class PowerSyncOptionsFlow(
             self._tariff_import_quota = current_tariff.get(
                 "import_quota", base_tariff.get("import_quota")
             )
+            self._tariff_export_quota = current_tariff.get(
+                "export_quota", base_tariff.get("export_quota")
+            )
             self._tariff_daily_supply_charge = current_tariff.get(
                 "daily_supply_charge", base_tariff.get("daily_supply_charge")
             )
@@ -19322,6 +19328,7 @@ class PowerSyncOptionsFlow(
         for name in (
             "_tariff_daily_supply_charge",
             "_tariff_import_quota",
+            "_tariff_export_quota",
             "_tariff_source",
             "_tariff_utility",
         ):

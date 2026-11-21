@@ -122,10 +122,14 @@ from ..quota import (
     tariff_datetime,
 )
 from ..tariff_quota import (
+    CUSTOM_TARIFF_EXPORT_RULE_ID,
     CUSTOM_TARIFF_IMPORT_RULE_ID,
-    custom_tariff_import_quota_rule,
+    CustomTariffQuotaRules,
+    custom_tariff_export_earnings,
+    custom_tariff_quota_bonus_series,
     custom_tariff_quota_contract,
     custom_tariff_quota_hash,
+    custom_tariff_quota_rules,
 )
 from ..tariff_time import (
     find_matching_tou_period,
@@ -790,7 +794,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "import": 0.0,
             "export": 0.0,
         }
-        self._pending_custom_tariff_quota_settlement = 0.0
+        self._pending_custom_tariff_quota_settlement: dict[str, float] = {
+            "import": 0.0,
+            "export": 0.0,
+        }
         self._solar_nowcast_derate: float = 1.0
         self._last_solar_nowcast_ratio: float | None = None
         self._last_logged_solar_nowcast_derate: float | None = None
@@ -3985,12 +3992,17 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         state: QuotaLedgerState | None = None,
         *,
         now: datetime | None = None,
-    ) -> tuple[dict[str, Any], Any, QuotaLedger, str] | None:
-        """Return the current custom-tariff quota contract and ledger."""
+    ) -> tuple[dict[str, Any], CustomTariffQuotaRules, QuotaLedger, str] | None:
+        """Return the current custom-tariff allowance rules and their ledger.
+
+        Import and premium-export allowances share one ledger. An import-only
+        tariff keeps its original single-rule ledger and content hash, so
+        settlement saved by earlier releases still restores.
+        """
         tariff = self._custom_tariff()
         if tariff is None:
             return None
-        rule = custom_tariff_import_quota_rule(
+        rules = custom_tariff_quota_rules(
             tariff,
             default_timezone=getattr(
                 getattr(self.hass, "config", None),
@@ -3998,19 +4010,23 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "LOCAL",
             ),
         )
-        if rule is None:
+        if rules is None:
             return None
-        content_hash = custom_tariff_quota_hash(tariff, rule)
+        content_hash = custom_tariff_quota_hash(
+            tariff,
+            rules.import_rule,
+            rules.export_rule,
+        )
         cached_hash = getattr(self, "_custom_tariff_quota_hash", None)
         if cached_hash is not None and cached_hash != content_hash:
             self._custom_tariff_quota_ledger = None
         ledger = getattr(self, "_custom_tariff_quota_ledger", None)
         if ledger is None or state is not None:
-            ledger = QuotaLedger((rule,), state)
+            ledger = QuotaLedger(rules.rules, state)
             self._custom_tariff_quota_ledger = ledger
         self._custom_tariff_quota_hash = content_hash
         ledger.advance_to(now or dt_util.now())
-        return tariff, rule, ledger, content_hash
+        return tariff, rules, ledger, content_hash
 
     @staticmethod
     def _energy_summary_total_kwh(
@@ -4067,24 +4083,55 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self,
         now: datetime,
         grid_import_kw: float,
-    ) -> float:
-        """Settle the custom import allowance from measured site energy."""
+        grid_export_kw: float = 0.0,
+    ) -> dict[str, float]:
+        """Settle the custom allowances from measured site energy.
+
+        Each direction settles from the energy summary's daily total
+        (``grid_<direction>_today_kwh``) and falls back to integrated grid
+        power. Only directions with an allowance are observed, so an
+        import-only ledger never records export samples.
+        """
+        settled = {"import": 0.0, "export": 0.0}
         runtime = self._ensure_custom_tariff_quota_ledger(now=now)
         if runtime is None:
-            return 0.0
-        _tariff, _rule, ledger, _content_hash = runtime
+            return settled
+        _tariff, rules, ledger, _content_hash = runtime
         data = self._get_energy_data() or {}
-        total_kwh = self._energy_summary_total_kwh(data, "import")
-        if total_kwh is not None:
-            settled = ledger.observe_cumulative("import", total_kwh, now)
-        else:
-            settled = ledger.observe_power(
-                "import",
-                max(0.0, grid_import_kw) * 1000.0,
-                now,
-            )
+        for direction, power_kw in (
+            ("import", grid_import_kw),
+            ("export", grid_export_kw),
+        ):
+            if rules.rule(direction) is None:
+                continue
+            total_kwh = self._energy_summary_total_kwh(data, direction)
+            if total_kwh is not None:
+                settled[direction] = ledger.observe_cumulative(
+                    direction,
+                    total_kwh,
+                    now,
+                )
+            else:
+                settled[direction] = ledger.observe_power(
+                    direction,
+                    max(0.0, power_kw) * 1000.0,
+                    now,
+                )
         self._schedule_cost_save()
         return settled
+
+    def _take_pending_custom_tariff_quota_settlement(self) -> dict[str, float]:
+        """Return and clear allowance energy settled before the last solve."""
+        pending = getattr(self, "_pending_custom_tariff_quota_settlement", None)
+        result = {
+            direction: max(0.0, float((pending or {}).get(direction, 0.0) or 0.0))
+            for direction in ("import", "export")
+        } if isinstance(pending, dict) else {"import": 0.0, "export": 0.0}
+        self._pending_custom_tariff_quota_settlement = {
+            "import": 0.0,
+            "export": 0.0,
+        }
+        return result
 
     def _flow_power_snapshot(self) -> "FlowPowerPlanSnapshot | None":
         """Resolve the selected Flow Power contract and preserved legacy fallback."""
@@ -4342,11 +4389,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         settled = self._settle_custom_tariff_quota_measurements(
             dt_util.now(),
             max(0.0, grid_power_kw),
+            max(0.0, -grid_power_kw),
         )
-        self._pending_custom_tariff_quota_settlement = (
-            getattr(self, "_pending_custom_tariff_quota_settlement", 0.0)
-            + settled
-        )
+        pending = self._take_pending_custom_tariff_quota_settlement()
+        self._pending_custom_tariff_quota_settlement = {
+            direction: pending[direction] + settled[direction]
+            for direction in ("import", "export")
+        }
 
     def _covau_price_forecast(self) -> tuple[list[float], list[float]] | None:
         """Build local-time CovaU base prices and marginal quota bonuses."""
@@ -4458,7 +4507,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         import_prices: list[float],
         export_prices: list[float],
     ) -> None:
-        """Apply a custom tariff's capped import allowance to the solve."""
+        """Apply a custom tariff's capped import and export allowances."""
         n = min(len(import_prices), len(export_prices))
         self._last_zerocharge_bonus_prices = [0.0] * n
         self._last_zerocharge_bonus_cap_kwh = 0.0
@@ -4471,51 +4520,58 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         runtime = self._ensure_custom_tariff_quota_ledger(now=dt_util.now())
         if runtime is None or n <= 0:
             return
-        _tariff, rule, ledger, _content_hash = runtime
+        _tariff, rules, ledger, _content_hash = runtime
         if ledger.state.confidence == "unknown":
             return
 
         timestamps = self._price_timestamps(n)
-        current_day = ledger.state.tariff_day
-        bonuses = [0.0] * n
-        groups: list[str | None] = []
-        caps: dict[str, float] = {}
-        bonus_price = rule.bonus_price_c_per_kwh / 100.0
-        for idx, timestamp in enumerate(timestamps):
-            if not rule.contains(timestamp):
-                groups.append(None)
-                continue
-            day = tariff_datetime(timestamp, rule.timezone_token).date().isoformat()
-            remaining_kwh = (
-                ledger.remaining_kwh(CUSTOM_TARIFF_IMPORT_RULE_ID)
-                if day == current_day
-                else rule.daily_cap_kwh
+        import_rule = rules.import_rule
+        if import_rule is not None:
+            bonuses, groups, caps = custom_tariff_quota_bonus_series(
+                import_rule,
+                ledger,
+                timestamps,
             )
-            if remaining_kwh <= 1e-9:
-                groups.append(None)
-                continue
-            groups.append(day)
-            bonuses[idx] = bonus_price
-            caps[day] = remaining_kwh
-            if idx < len(self._last_display_import_prices or []):
-                self._last_display_import_prices[idx] = max(
-                    0.0,
-                    import_prices[idx] - bonus_price,
+            display = self._last_display_import_prices or []
+            for idx, bonus in enumerate(bonuses):
+                if bonus > 0 and idx < len(display):
+                    display[idx] = max(0.0, import_prices[idx] - bonus)
+            self._last_zerocharge_bonus_prices = bonuses
+            self._last_import_bonus_group_ids = groups
+            self._last_import_bonus_caps_by_group = caps
+            self._last_zerocharge_bonus_cap_kwh = sum(caps.values())
+            if self._last_display_import_prices:
+                self._last_grid_charge_cap_import_prices = list(
+                    self._last_display_import_prices
+                )
+            if caps and any(bonuses):
+                _LOGGER.info(
+                    "Custom tariff optimizer: %.2fkWh import allowance remaining today",
+                    ledger.remaining_kwh(CUSTOM_TARIFF_IMPORT_RULE_ID),
                 )
 
-        self._last_zerocharge_bonus_prices = bonuses
-        self._last_import_bonus_group_ids = groups
-        self._last_import_bonus_caps_by_group = caps
-        self._last_zerocharge_bonus_cap_kwh = sum(caps.values())
-        if self._last_display_import_prices:
-            self._last_grid_charge_cap_import_prices = list(
-                self._last_display_import_prices
+        export_rule = rules.export_rule
+        if export_rule is not None:
+            bonuses, groups, caps = custom_tariff_quota_bonus_series(
+                export_rule,
+                ledger,
+                timestamps,
             )
-        if caps and any(bonuses):
-            _LOGGER.info(
-                "Custom tariff optimizer: %.2fkWh import allowance remaining today",
-                ledger.remaining_kwh(CUSTOM_TARIFF_IMPORT_RULE_ID),
-            )
+            # The LP takes the window rate plus a capped bonus variable; the
+            # displayed price is the premium rate while allowance remains.
+            display = self._last_display_export_prices or []
+            for idx, bonus in enumerate(bonuses):
+                if bonus > 0 and idx < len(display):
+                    display[idx] = export_prices[idx] + bonus
+            self._last_zerohero_bonus_prices = bonuses
+            self._last_export_bonus_group_ids = groups
+            self._last_export_bonus_caps_by_group = caps
+            self._last_zerohero_bonus_cap_kwh = sum(caps.values())
+            if caps and any(bonuses):
+                _LOGGER.info(
+                    "Custom tariff optimizer: %.2fkWh premium export allowance remaining today",
+                    ledger.remaining_kwh(CUSTOM_TARIFF_EXPORT_RULE_ID),
+                )
 
     def _set_covau_bonus_groups(
         self,
@@ -4579,7 +4635,22 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         runtime = self._ensure_covau_ledger(now=dt_util.now())
         if runtime is None or n <= 0:
             return [False] * max(0, n)
-        snapshot, ledger = runtime
+        _snapshot, ledger = runtime
+        return self._export_bonus_group_slots(n, ledger)
+
+    def _custom_tariff_export_window_slots(self, n: int) -> list[bool]:
+        """Return slots where a custom premium export allowance remains."""
+        runtime = self._ensure_custom_tariff_quota_ledger(now=dt_util.now())
+        if runtime is None or runtime[1].export_rule is None or n <= 0:
+            return [False] * max(0, n)
+        return self._export_bonus_group_slots(n, runtime[2])
+
+    def _export_bonus_group_slots(
+        self,
+        n: int,
+        ledger: QuotaLedger,
+    ) -> list[bool]:
+        """Return staged export-bonus slots while settlement is trusted."""
         if ledger.state.confidence == "unknown":
             return [False] * n
         groups = self._last_export_bonus_group_ids or []
@@ -4673,8 +4744,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         if custom_runtime is None:
             return None
-        tariff, rule, ledger, _content_hash = custom_runtime
-        return custom_tariff_quota_contract(tariff, rule, ledger)
+        tariff, rules, ledger, _content_hash = custom_runtime
+        return custom_tariff_quota_contract(tariff, rules, ledger)
 
     def _zerohero_config(self) -> ZeroHeroConfig | None:
         """Return resolved GloBird ZeroHero settings for this entry."""
@@ -14082,6 +14153,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             slot_sources.append(self._zerohero_bonus_window_slots(n))
         if self._provider_key() == "covau":
             slot_sources.append(self._covau_export_window_slots(n))
+        elif self._provider_key() != "flow_power":
+            slot_sources.append(self._custom_tariff_export_window_slots(n))
 
         for slots in slot_sources:
             for idx, value in enumerate(slots[:n]):
@@ -19706,14 +19779,18 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 now=dt_util.now(),
             )
             if custom_runtime is not None:
-                _tariff, _rule, ledger, _content_hash = custom_runtime
+                _tariff, _rules, ledger, _content_hash = custom_runtime
                 _LOGGER.info(
-                    "Restored custom tariff import quota: tariff_day=%s "
-                    "confidence=%s import=%.3fkWh",
+                    "Restored custom tariff quota: tariff_day=%s "
+                    "confidence=%s import=%.3fkWh export=%.3fkWh",
                     ledger.state.tariff_day,
                     ledger.state.confidence,
                     ledger.state.settled_kwh.get(
                         CUSTOM_TARIFF_IMPORT_RULE_ID,
+                        0.0,
+                    ),
+                    ledger.state.settled_kwh.get(
+                        CUSTOM_TARIFF_EXPORT_RULE_ID,
                         0.0,
                     ),
                 )
@@ -20002,7 +20079,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             now=dt_util.now()
         )
         if custom_runtime is not None:
-            tariff, _rule, ledger, content_hash = custom_runtime
+            tariff, _rules, ledger, content_hash = custom_runtime
             payload = ledger.state.to_dict()
             payload.update(
                 {
@@ -20472,25 +20549,39 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         else:
             custom_runtime = self._ensure_custom_tariff_quota_ledger(now=now)
             if custom_runtime is not None:
-                _tariff, rule, _ledger, _content_hash = custom_runtime
-                eligible_import = getattr(
-                    self,
-                    "_pending_custom_tariff_quota_settlement",
-                    0.0,
-                )
-                eligible_import += self._settle_custom_tariff_quota_measurements(
+                _tariff, rules, _ledger, _content_hash = custom_runtime
+                quota_delta = self._take_pending_custom_tariff_quota_settlement()
+                latest_delta = self._settle_custom_tariff_quota_measurements(
                     now,
                     grid_import_kw,
+                    grid_export_kw,
                 )
-                self._pending_custom_tariff_quota_settlement = 0.0
-                base_import_price = rule.base_price_c_per_kwh / 100.0
-                actual_import_cost = (
-                    grid_import_kwh * base_import_price
-                    - max(0.0, eligible_import)
-                    * (rule.bonus_price_c_per_kwh / 100.0)
-                )
-                if grid_import_kwh > 1e-9:
-                    import_price = actual_import_cost / grid_import_kwh
+                eligible_import = quota_delta["import"] + latest_delta["import"]
+                eligible_export = quota_delta["export"] + latest_delta["export"]
+                import_rule = rules.import_rule
+                if import_rule is not None:
+                    base_import_price = import_rule.base_price_c_per_kwh / 100.0
+                    actual_import_cost = (
+                        grid_import_kwh * base_import_price
+                        - max(0.0, eligible_import)
+                        * (import_rule.bonus_price_c_per_kwh / 100.0)
+                    )
+                    if grid_import_kwh > 1e-9:
+                        import_price = actual_import_cost / grid_import_kwh
+                export_rule = rules.export_rule
+                if export_rule is not None:
+                    # The displayed rate already includes the premium inside
+                    # the window; settle from the ledger instead so energy
+                    # beyond the cap earns only the window rate.
+                    actual_export_earnings = custom_tariff_export_earnings(
+                        export_rule,
+                        observed_at=now,
+                        export_kwh=grid_export_kwh,
+                        eligible_kwh=eligible_export,
+                        tariff_export_price=export_price,
+                    )
+                    if grid_export_kwh > 1e-9:
+                        export_price = actual_export_earnings / grid_export_kwh
 
         zerohero_config = self._zerohero_config()
         if zerohero_config is not None:
@@ -21590,10 +21681,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         runtime = self._ensure_custom_tariff_quota_ledger(now=dt_util.now())
         if runtime is None:
             return self._apply_grid_charge_blackout_limit(allowed)
-        tariff, rule, ledger, _content_hash = runtime
+        tariff, rules, ledger, _content_hash = runtime
+        rule = rules.import_rule
         raw_quota = tariff.get("import_quota")
         if (
-            not isinstance(raw_quota, dict)
+            rule is None
+            or not isinstance(raw_quota, dict)
             or raw_quota.get("stop_grid_charging_at_quota", False) is not True
         ):
             return self._apply_grid_charge_blackout_limit(allowed)

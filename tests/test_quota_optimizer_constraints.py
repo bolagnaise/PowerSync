@@ -269,3 +269,73 @@ def test_flow_plan_limits_optimizer_to_measured_remaining_bonus(optimizer_module
     exported = sum(result.grid_export_w) / 1000 * optimizer.interval_minutes / 60
     assert 0 < exported <= 0.5 + 1e-6
     assert ledger.state.settled_kwh == {rule_id: 14.5}
+
+
+@pytest.mark.parametrize("use_highs", [False, True])
+def test_custom_tariff_export_allowance_limits_optimizer_to_remaining_premium(
+    optimizer_module,
+    use_highs,
+):
+    """A custom premium export allowance prices only its unsettled kWh."""
+    if use_highs and not optimizer_module.HIGHS_AVAILABLE:
+        pytest.skip("highspy unavailable")
+    quota = importlib.import_module("power_sync.quota")
+    tariff_quota = importlib.import_module("power_sync.tariff_quota")
+    tariff = {
+        "name": "Synthetic premium",
+        "export_quota": {
+            "timezone_token": "Australia/Brisbane",
+            "windows": [["17:00", "21:00"]],
+            "daily_cap_kwh": 10.0,
+            "base_price_c_per_kwh": 4.0,
+            "bonus_price_c_per_kwh": 56.0,
+        },
+    }
+    rules = tariff_quota.custom_tariff_quota_rules(tariff, default_timezone="UTC")
+    rule = rules.export_rule
+    ledger = quota.QuotaLedger(
+        rules.rules,
+        quota.QuotaLedgerState(
+            tariff_day="2026-09-06",
+            timezone_token="Australia/Brisbane",
+            confidence="authoritative",
+            settled_kwh={rule.rule_id: 9.5},
+        ),
+    )
+    start = datetime.fromisoformat("2026-09-06T17:30:00+10:00")
+    timestamps = [start + timedelta(minutes=5 * i) for i in range(12)]
+    bonuses, groups, caps = tariff_quota.custom_tariff_quota_bonus_series(
+        rule, ledger, timestamps
+    )
+    assert bonuses == pytest.approx([0.56] * 12)
+    assert caps == {"2026-09-06": pytest.approx(0.5)}
+
+    def exported_kwh(bonus_prices, export_caps):
+        optimizer = _optimizer(optimizer_module)
+        optimizer.set_quota_bonus_groups(
+            import_group_ids=None,
+            import_caps_by_group=None,
+            export_group_ids=groups,
+            export_caps_by_group=export_caps,
+        )
+        kwargs = _kwargs()
+        kwargs.update(
+            export_prices=[0.04] * 12,
+            export_bonus_prices=bonus_prices,
+            export_bonus_cap_kwh=sum(export_caps.values()),
+            # The coordinator opens premium-window slots for battery export.
+            priority_export_slots=[bonus > 0 for bonus in bonuses],
+            schedule_timestamps=timestamps,
+        )
+        old = optimizer_module.HIGHS_AVAILABLE
+        optimizer_module.HIGHS_AVAILABLE = use_highs
+        try:
+            result = optimizer.optimize(**kwargs)
+        finally:
+            optimizer_module.HIGHS_AVAILABLE = old
+        return sum(result.grid_export_w) / 1000 * optimizer.interval_minutes / 60
+
+    exported = exported_kwh(bonuses, caps)
+    assert 0 < exported <= 0.5 + 1e-6, "exports only the remaining premium kWh"
+    assert exported_kwh([0.0] * 12, {}) <= 1e-6, "the 4c window rate alone is not worth exporting"
+    assert ledger.state.settled_kwh == {rule.rule_id: 9.5}, "planning never settles"

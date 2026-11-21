@@ -377,6 +377,7 @@ def template_to_draft(template: dict[str, Any], *, utility: str | None = None) -
                     period["season"] = str(season_name)
                 periods.append(period)
     quota = template.get("import_quota")
+    export_quota = template.get("export_quota")
     supply = template.get("daily_supply_charge")
     return {
         "plan_name": str(template.get("name") or "Preset"),
@@ -387,6 +388,7 @@ def template_to_draft(template: dict[str, Any], *, utility: str | None = None) -
         "seasons": seasons or [{"name": "All Year", "from_month": 1, "to_month": 12}],
         "periods": periods,
         "import_quota": dict(quota) if isinstance(quota, dict) else None,
+        "export_quota": dict(export_quota) if isinstance(export_quota, dict) else None,
         "source": {"kind": "preset", "template_id": template.get("id") or template.get("template_id")},
         "warnings": [
             "Preset prices are a starting point. Replace them with the rates on your bill."
@@ -404,6 +406,7 @@ def apply_draft(flow: Any, draft: dict[str, Any]) -> None:
     flow._tariff_fit_rate = float(draft.get("standard_export_rate") or 0.0)
     flow._tariff_daily_supply_charge = draft.get("daily_supply_charge")
     flow._tariff_import_quota = draft.get("import_quota")
+    flow._tariff_export_quota = draft.get("export_quota")
     flow._tariff_source = draft.get("source")
     flow._tariff_utility = draft.get("utility")
     flow._tariff_seasons = [dict(season) for season in draft.get("seasons") or []] or [
@@ -422,6 +425,7 @@ def clear_draft(flow: Any) -> None:
         "_tariff_draft",
         "_tariff_daily_supply_charge",
         "_tariff_import_quota",
+        "_tariff_export_quota",
         "_tariff_source",
         "_tariff_utility",
     ):
@@ -463,18 +467,19 @@ def quota_effective_price(quota: Any) -> float | None:
     return max(0.0, base - min(base, bonus))
 
 
-def slot_import_rate(
+def slot_rate(
     periods: list[dict[str, Any]],
     *,
-    standard_import: float,
+    key: str,
+    standard: float,
     weekday: int,
     slot: int,
     season: str | None = None,
 ) -> float:
-    """Import rate for one half hour on one Tesla weekday (shortest period wins).
+    """``key`` rate for one half hour on one Tesla weekday (shortest period wins).
 
     Matches the runtime: an overnight period belongs to its start day, and a
-    blank import price is the standard rate.
+    blank price is the standard rate.
     """
     minute = slot * 30
     yesterday = (weekday - 1) % 7
@@ -492,10 +497,56 @@ def slot_import_rate(
         if not active:
             continue
         duration = (end - start) % 1440 or 1440
-        rate = standard_import if period.get("import_rate") is None else float(period["import_rate"])
+        rate = standard if period.get(key) is None else float(period[key])
         if best is None or duration < best[0]:
             best = (duration, rate)
-    return standard_import if best is None else best[1]
+    return standard if best is None else best[1]
+
+
+def slot_import_rate(
+    periods: list[dict[str, Any]],
+    *,
+    standard_import: float,
+    weekday: int,
+    slot: int,
+    season: str | None = None,
+) -> float:
+    """Import rate for one half hour on one Tesla weekday (shortest period wins)."""
+    return slot_rate(
+        periods, key="import_rate", standard=standard_import,
+        weekday=weekday, slot=slot, season=season,
+    )
+
+
+def window_slot_rates(
+    periods: list[dict[str, Any]],
+    *,
+    key: str,
+    standard: float,
+    start_minute: int,
+    end_minute: int,
+    seasons: list[dict[str, Any]] | None = None,
+) -> set[float]:
+    """Every ``key`` rate (minor units) that applies somewhere in the window."""
+    season_names = [str(season["name"]) for season in seasons or [] if season.get("name")] or [None]
+    rates: set[float] = set()
+    for season in season_names:
+        for weekday in range(7):
+            for slot in range(48):
+                minute = slot * 30
+                inside = (
+                    start_minute <= minute < end_minute
+                    if start_minute < end_minute
+                    else minute >= start_minute or minute < end_minute
+                )
+                if inside:
+                    rates.add(
+                        slot_rate(
+                            periods, key=key, standard=standard,
+                            weekday=weekday, slot=slot, season=season,
+                        ) * 100
+                    )
+    return rates
 
 
 def quota_clock_text(hours: Any) -> str:
@@ -510,6 +561,18 @@ _QUOTA_FORM_FIELDS = frozenset(
     {"enabled", "windows", "start_time", "end_time", "daily_cap_kwh",
      "base_price_c_per_kwh", "bonus_price_c_per_kwh"}
 )
+
+
+def export_quota_effective_price(quota: Any) -> float | None:
+    """Price (minor units) earned for premium export allowance energy."""
+    if not isinstance(quota, dict):
+        return None
+    try:
+        base = float(quota.get("base_price_c_per_kwh"))
+        bonus = float(quota.get("bonus_price_c_per_kwh"))
+    except (TypeError, ValueError):
+        return None
+    return base + max(0.0, bonus)
 
 
 def build_import_quota(
@@ -542,24 +605,10 @@ def build_import_quota(
     # The allowance discounts whichever rate actually applies inside the
     # window. Resolve every season, day and half hour there and use the lowest
     # so the discount never exceeds the real benefit.
-    season_names = [str(season["name"]) for season in seasons or [] if season.get("name")] or [None]
-    underlying: set[float] = set()
-    for season in season_names:
-        for weekday in range(7):
-            for slot in range(48):
-                minute = slot * 30
-                inside = (
-                    start_minute <= minute < end_minute
-                    if start_minute < end_minute
-                    else minute >= start_minute or minute < end_minute
-                )
-                if inside:
-                    underlying.add(
-                        slot_import_rate(
-                            periods, standard_import=standard_import,
-                            weekday=weekday, slot=slot, season=season,
-                        ) * 100
-                    )
+    underlying = window_slot_rates(
+        periods, key="import_rate", standard=standard_import,
+        start_minute=start_minute, end_minute=end_minute, seasons=seasons,
+    )
     base = min(underlying) if underlying else standard_import * 100
     discount = round(base - price, 6)
     if discount <= 0:
@@ -577,6 +626,65 @@ def build_import_quota(
         "daily_cap_kwh": limit,
         "base_price_c_per_kwh": round(base, 6),
         "bonus_price_c_per_kwh": discount,
+    }
+    return quota, None
+
+
+def build_export_quota(
+    *,
+    limit_kwh: Any,
+    start: Any,
+    end: Any,
+    price_minor: Any,
+    periods: list[dict[str, Any]],
+    standard_export: float,
+    seasons: list[dict[str, Any]] | None = None,
+    existing: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Build the custom tariff premium export quota from the allowance form.
+
+    The first ``limit_kwh`` exported in the window each day earn
+    ``price_minor``; the normal feed-in rate for that time applies after that.
+    """
+    try:
+        limit = float(limit_kwh or 0)
+        price = float(price_minor or 0)
+    except (TypeError, ValueError):
+        return None, "export_allowance_invalid"
+    if limit <= 0:
+        return None, None
+    start_hours = parse_clock(start)
+    end_hours = parse_clock(end, end=True)
+    if end_hours == 0:
+        end_hours = 24
+    if start_hours is None or end_hours is None or start_hours == end_hours or price <= 0:
+        return None, "export_allowance_invalid"
+    start_minute, end_minute = int(start_hours * 60), int(end_hours * 60)
+
+    # The premium is paid on top of whichever feed-in rate actually applies in
+    # the window. Use the highest so the modelled premium never exceeds the
+    # real one.
+    underlying = window_slot_rates(
+        periods, key="export_rate", standard=standard_export,
+        start_minute=start_minute, end_minute=end_minute, seasons=seasons,
+    )
+    base = max(underlying) if underlying else standard_export * 100
+    premium = round(price - base, 6)
+    if premium <= 0:
+        return None, "export_allowance_not_higher"
+    preserved = {
+        key: value
+        for key, value in (existing or {}).items()
+        if key not in _QUOTA_FORM_FIELDS
+    }
+    quota = {
+        **preserved,
+        "enabled": True,
+        "name": preserved.get("name") or "Premium export allowance",
+        "windows": [[quota_clock_text(start_hours), quota_clock_text(end_hours)]],
+        "daily_cap_kwh": limit,
+        "base_price_c_per_kwh": round(base, 6),
+        "bonus_price_c_per_kwh": premium,
     }
     return quota, None
 
@@ -602,8 +710,9 @@ def render_period_table(
     daily_supply: float | None = None,
     supply_unit: str = "",
     quota: dict[str, Any] | None = None,
+    export_quota: dict[str, Any] | None = None,
 ) -> str:
-    """Markdown table of the periods plus the standard rates and allowance."""
+    """Markdown table of the periods plus the standard rates and allowances."""
     lines = [
         f"Standard import {standard_import * 100:.2f}{unit}"
         + (f", standard export {standard_export * 100:.2f}{unit}" if show_export else "")
@@ -639,6 +748,14 @@ def render_period_table(
             "",
             f"Free import allowance: first {float(quota.get('daily_cap_kwh', 0)):g} kWh "
             f"{window[0]}-{window[1]} at {(price or 0):.2f}{unit}, resets daily.",
+        ]
+    export_window = quota_window(export_quota)
+    if export_window and isinstance(export_quota, dict):
+        price = export_quota_effective_price(export_quota)
+        lines += [
+            "",
+            f"Premium export allowance: first {float(export_quota.get('daily_cap_kwh', 0)):g} kWh "
+            f"{export_window[0]}-{export_window[1]} earn {(price or 0):.2f}{unit}, resets daily.",
         ]
     return "\n".join(lines)
 
@@ -678,6 +795,7 @@ def render_period_overview(
     daily_supply: float | None = None,
     supply_unit: str = "",
     quota: dict[str, Any] | None = None,
+    export_quota: dict[str, Any] | None = None,
     when: datetime | None = None,
 ) -> str:
     """Table plus today's 24-hour import price strip."""
@@ -693,6 +811,7 @@ def render_period_overview(
         daily_supply=daily_supply,
         supply_unit=supply_unit,
         quota=quota,
+        export_quota=export_quota,
     )
     if when is not None and periods:
         season_name = None
