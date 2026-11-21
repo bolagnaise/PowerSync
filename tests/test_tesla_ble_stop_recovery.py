@@ -658,3 +658,66 @@ async def test_restart_between_release_and_bridge_commit_keeps_positive_admissio
     assert (await stop.async_recover_ble_history(c.hass, c.entry, c.declared, confirm_complete_history=True))["success"]
     assert all(i["activation_pending"] is False for i in c.store.value["incidents"].values())
     assert len([x for x in c.calls if x[1] == "prepare"]) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("proof_state", ["valid", "reloaded", "missing", "rebound", "unconfirmed"])
+async def test_retry_after_captured_pending_stop_finishes_not_sent(inventory, proof_state):
+    c = inventory
+    # Both bridges are configured, but only bridge A has new unresolved history.
+    assert (await recover(c))["success"]
+    c.calls.clear()
+    prefix = "bridge_a"
+
+    async def recover_affected():
+        return await stop.async_recover_ble_stops(
+            c.hass, c.entry, c.declared[:1], confirm_complete_history=True)
+
+    route = {"kind": "ble", "prefix": prefix, "entity_id": f"switch.{prefix}_charger"}
+    pending = await recovery.async_begin_attempt(
+        c.hass, c.entry, c.aliases[prefix], route, "stop", route["entity_id"])
+    assert pending
+    unknown = await recovery.async_begin_attempt(
+        c.hass, c.entry, c.aliases[prefix], route, "stop", route["entity_id"])
+    assert unknown and await recovery.async_finish_attempt(unknown, "sent_unknown")
+    finished = False
+
+    async def finish_before_release(prefix, action):
+        nonlocal finished
+        if action == "prepare" and not finished:
+            assert await recovery.async_finish_attempt(pending, "not_sent")
+            finished = True
+
+    c.hook["call"] = finish_before_release
+    with pytest.raises(stop.StopRecoveryRefused, match="recovery_scope_changed"):
+        await recover_affected()
+    assert finished
+    assert not any(action == "commit" for _, action, _ in c.calls)
+    assert stop._live_refs(c.runtime)
+    c.hook["call"] = None
+    proof = c.runtime[recovery._SIDECAR_STATE_KEY]["recovery"]["terminal_removals"][pending.vehicle_id]
+    assert proof[pending.attempt_id]["outcome"] == "not_sent"
+    if proof_state == "reloaded":
+        c.runtime.pop(recovery.RECOVERY_KEY)
+        c.runtime.pop(recovery._SIDECAR_LOADED_KEY)
+        assert await recovery.async_load_recovery_state(c.hass, c.entry)
+    elif proof_state in {"missing", "rebound", "unconfirmed"}:
+        if proof_state == "missing":
+            proof.pop(pending.attempt_id)
+        elif proof_state == "rebound":
+            proof[pending.attempt_id]["route"]["entity_identity"]["device_id"] = "different-device"
+        else:
+            proof[pending.attempt_id]["outcome"] = "accepted_unconfirmed"
+        calls_before = list(c.calls)
+        with pytest.raises(stop.StopRecoveryRefused, match="retained_recovery_scope_changed"):
+            await recover_affected()
+        assert c.calls == calls_before
+        assert stop._live_refs(c.runtime)
+        return
+    result = await recover_affected()
+    assert result["success"]
+    assert not stop._live_refs(c.runtime)
+    assert {bridge for bridge, _, _ in c.calls} == {prefix}
+    refs = c.store.value["recovery"]["vehicles"][unknown.vehicle_id]["attempts"]
+    assert refs[unknown.attempt_id]["outcome"] == "sent_unknown"
+    assert refs[unknown.attempt_id]["recovery_retired"]["incident_id"] == result["incident_id"]

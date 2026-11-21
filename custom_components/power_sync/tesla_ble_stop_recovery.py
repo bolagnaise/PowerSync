@@ -371,7 +371,7 @@ async def async_recover_ble_stops(hass, entry, inventory, *, confirm_complete_hi
 
 
 async def _refresh_held_scope(hass, entry, runtime, incident_id, inventory, bridges, refs, affected, *, allow_positive=False):
-    """Reconfirm added Stops on an explicit retry, never alter a running scope."""
+    """Reconfirm changed Stop history on an explicit retry of the same scope."""
     from . import tesla_ev_recovery as manager
 
     async with manager._journal_lock(runtime):
@@ -405,12 +405,36 @@ async def _refresh_held_scope(hass, entry, runtime, incident_id, inventory, brid
         def binding(ref):
             return {key: value for key, value in ref.items() if key not in {"outcome", "state"}}
 
+        recovery = state["recovery"]
+        terminal_removals = recovery.get(manager._TERMINAL_REMOVALS_KEY) or {}
+        retained_root = _retained_root(runtime)
+
+        def proven_unsent_stop(ref):
+            route = ref.get("route")
+            if (ref.get("outcome") != "pending" or ref.get("operation") != "stop"
+                    or not isinstance(route, Mapping)):
+                return False
+            vehicle_id, attempt_id, _ = identity(ref)
+            if attempt_id in retained_root["vehicles"].get(vehicle_id, {}).get("attempts", {}):
+                return False
+            proof = terminal_removals.get(vehicle_id, {}).get(attempt_id)
+            return (
+                isinstance(proof, Mapping) and proof.get("outcome") == "not_sent"
+                and proof.get("vehicle_id") == vehicle_id and proof.get("attempt_id") == attempt_id
+                and proof.get("operation") == "stop" and proof.get("route") == route
+                and proof.get("entity_id") == route.get("entity_id")
+            )
+
         def retained(ref):
             if not isinstance(ref, Mapping):
                 return False
             exact = current.get(identity(ref))
             if exact is not None:
                 return binding(ref) == binding(exact)
+            # A captured in-flight Stop can finish with durable proof that it
+            # never went out. Only the exact attempt can leave the retry scope.
+            if ref.get("hazard_id") is None:
+                return proven_unsent_stop(ref)
             # Containment reuses ble:<prefix>. The durable union moves its
             # previous quarantine to a history key. Require the exact original
             # attempt and complete binding, never adopt the new stable-key row.
