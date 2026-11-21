@@ -59,6 +59,30 @@ def test_failed_stop_alert_dedupes_per_entry_and_vehicle(env):
     assert len({c.kwargs["notification_id"] for c in notice.async_create.call_args_list}) == 3
 
 
+def test_smart_schedule_ownership_refusals_do_not_report_failed_stops(env):
+    hass, entry, notice = env
+    for name in ("stop_smart_schedule", "stop_smart_schedule_external"):
+        events.publish_ev_command(
+            hass, entry, "car", {
+                **command(name=name, success=False),
+                "reason": "manual owns this loadpoint",
+            },
+        )
+
+    records = fired(hass, events.EVENT_EV_COMMAND)
+    assert [record["record_type"] for record in records] == ["ownership", "ownership"]
+    assert all(
+        record["success"] is False and record["physical_confirmation"] is False
+        for record in records
+    )
+    assert fired(hass, events.EVENT_EV_STOP_FAILED) == []
+    notice.async_create.assert_not_called()
+
+    events.publish_ev_command(hass, entry, "car", command(success=False))
+    assert len(fired(hass, events.EVENT_EV_STOP_FAILED)) == 1
+    notice.async_create.assert_called_once()
+
+
 def test_newer_stopped_sample_clears_warning_and_rearms_next_failure(env):
     hass, entry, notice = env
     last = command(success=False)

@@ -9,6 +9,10 @@ _LOGGER = logging.getLogger(__name__)
 EVENT_OPTIMIZER_ACTION = "power_sync_optimizer_action"
 EVENT_EV_COMMAND = "power_sync_ev_command"
 EVENT_EV_STOP_FAILED = "power_sync_ev_stop_failed"
+_SMART_SCHEDULE_STOP_REFUSALS = frozenset({
+    "stop_smart_schedule",
+    "stop_smart_schedule_external",
+})
 
 
 def fire_action_event(hass: Any, event_type: str, payload: dict[str, Any]) -> None:
@@ -63,6 +67,11 @@ def publish_ev_command(hass: Any, config_entry: Any, vehicle_id: str,
                        command: dict[str, Any], *, physical_confirmation: bool = False,
                        record_type: str = "command") -> None:
     """Publish a recorded result; latch one safety warning per unresolved loadpoint."""
+    name = str(command["command"])
+    # These labels are emitted by the Smart Schedule ownership guard before
+    # dispatch. A result from the downstream stop uses the "stop" label.
+    if name in _SMART_SCHEDULE_STOP_REFUSALS and record_type == "command":
+        record_type = "ownership"
     payload = {
         "entry_id": config_entry.entry_id,
         "vehicle_id": vehicle_id,
@@ -78,7 +87,6 @@ def publish_ev_command(hass: Any, config_entry: Any, vehicle_id: str,
     fire_action_event(hass, EVENT_EV_COMMAND, payload)
     if command["source"] != "powersync":
         return
-    name = str(command["command"])
     is_stop = name == "stop" or name.startswith("stop_")
     is_start = name == "start" or name.startswith("start_")
     if not is_stop and not is_start:
