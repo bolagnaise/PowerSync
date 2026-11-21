@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from conftest import load_power_sync_submodule, load_real_power_sync_const
+import retail_plan_support
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -195,6 +196,14 @@ def test_custom_pricing_switch_persists_provider_with_tariff(
         TextSelectorType=SimpleNamespace(TEXT="text"),
         SelectSelectorMode=SimpleNamespace(DROPDOWN="dropdown"),
     )
+    plan_modules = retail_plan_support.load_modules()
+    plan_names = retail_plan_support.config_flow_namespace(plan_modules)
+    namespace["PowerSyncConfigFlow"] = retail_plan_support.config_flow_class(
+        plan_modules, dict(plan_names)
+    )
+    for name in ("render_tariff_period_overview", "tariff_draft_warnings_text"):
+        namespace[name] = plan_names[name]
+    namespace["dt_util"] = SimpleNamespace(now=lambda: datetime(2026, 11, 4, 12, 0))
 
     class _Imports(ast.NodeTransformer):
         def visit_ImportFrom(self, node):
@@ -232,7 +241,7 @@ def test_custom_pricing_switch_persists_provider_with_tariff(
 
     store = _Store()
 
-    class _Flow:
+    class _Flow(plan_modules.retail_plan_steps.RetailPlanOptionsMixin):
         def __init__(self):
             data, options = {}, {"unrelated_option": "preserved"}
             (data if old_provider_location == "data" else options).update(
@@ -278,6 +287,9 @@ def test_custom_pricing_switch_persists_provider_with_tariff(
     async def run():
         flow = _Flow()
         form = await flow.async_step_pricing({"electricity_provider": provider})
+        # Custom TOU first offers to keep the current rates or choose a plan.
+        assert form["step_id"] == "retail_plan_options"
+        form = await flow.async_step_retail_plan_options({"retail_plan_source": "edit"})
         assert form["step_id"] == "custom_tariff_options"
         result = await flow.async_step_custom_tariff_options({
             "tariff_type": tariff_type, "flat_rate": 26.79,
@@ -290,6 +302,8 @@ def test_custom_pricing_switch_persists_provider_with_tariff(
                 "period_days": "all_days", "import_rate": 26.79,
                 "export_rate": 5.0,
             })
+        assert result["step_id"] == "tariff_allowance_options"
+        result = await flow.async_step_tariff_allowance_options({"allowance_kwh": 0})
         # Older code fell through to the unrelated demand-charge form and
         # finishing it retained Octopus despite having saved the custom tariff.
         if result["type"] == "form":
@@ -936,8 +950,15 @@ def test_other_custom_tou_options_route_directly_to_custom_tariff():
 
     assert route_helper is not None
     assert 'provider in ("other", "tou_only")' in route_helper
-    assert "return await self.async_step_custom_tariff_options()" in route_helper
+    # Custom TOU first asks whether to keep the current rates or choose a
+    # retailer plan; keeping them opens the custom tariff editor directly.
+    assert "return await self.async_step_retail_plan_options()" in route_helper
     assert "return await self.async_step_globird_options()" in route_helper
+    steps_source = (ROOT / "custom_components" / "power_sync" / "retail_plan_steps.py").read_text()
+    keep_branch = steps_source[steps_source.index("async def async_step_retail_plan_options"):]
+    keep_branch = keep_branch[: keep_branch.index("async def async_step_retail_plan_retailer_options")]
+    assert "SOURCE_EDIT" in keep_branch
+    assert "return await self.async_step_custom_tariff_options()" in keep_branch
 
     assert pricing_step is not None
     assert "return await self._async_route_custom_tou_options(provider)" in pricing_step
@@ -967,10 +988,16 @@ def test_other_custom_tou_initial_setup_routes_directly_to_custom_tariff():
 
     assert provider_step is not None
     assert 'provider == "other"' in provider_step
-    assert "return await self.async_step_custom_tariff()" in provider_step
+    # Retailer, network and plan source come first; manual entry and loaded
+    # plans then continue into the custom tariff editor.
+    assert "return await self.async_step_retail_plan_retailer()" in provider_step
     assert "return await self.async_step_aemo_config()" not in provider_step[
         provider_step.index('provider == "other"') :
     ]
+    steps_source = (ROOT / "custom_components" / "power_sync" / "retail_plan_steps.py").read_text()
+    setup_mixin = steps_source[steps_source.index("class RetailPlanSetupMixin"):]
+    setup_mixin = setup_mixin[: setup_mixin.index("class RetailPlanOptionsMixin")]
+    assert "return await self.async_step_custom_tariff()" in setup_mixin
 
     assert custom_step is not None
     assert 'step_id="custom_tariff"' in custom_step
@@ -981,6 +1008,7 @@ def test_other_custom_tou_initial_setup_routes_directly_to_custom_tariff():
     assert period_step is not None
     assert 'step_id="tariff_period"' in period_step
     assert "self._custom_tariff_data = self._build_tariff_from_periods" in period_step
+    assert "return await self.async_step_tariff_allowance()" in period_step
 
     assert create_entry is not None
     assert 'data["initial_custom_tariff"] = self._custom_tariff_data' in create_entry
@@ -1005,8 +1033,14 @@ def test_custom_tou_tariff_periods_support_weekend_only_ranges():
     assert initial_period_step is not None
     assert options_period_step is not None
     assert builder_source is not None
-    assert '"weekends": "Weekends only (Sat-Sun)"' in initial_period_step
-    assert '"weekends": "Weekends only (Sat-Sun)"' in options_period_step
+    # Both editors share one schema with a Monday-Sunday multi-select.
+    assert "self._tariff_period_schema(" in initial_period_step
+    assert "PowerSyncConfigFlow._tariff_period_schema(" in options_period_step
+    schema_source = ast.get_source_segment(
+        source, _config_flow_method("_tariff_period_schema")
+    )
+    assert '"period_days", default=[str(day) for day in days]' in schema_source
+    assert "multiple=True" in schema_source
 
     namespace = {
         "normalize_currency": lambda value, fallback: value or fallback,
@@ -2897,14 +2931,19 @@ def test_custom_tariff_export_rates_allow_negative_values():
 
     assert 'vol.Required("fit_rate", default=default_fit)' in custom_source
     assert "min=-100, max=100" in custom_source
-    assert 'vol.Required("export_rate", default=5)' in period_source
-    assert "min=-100, max=200" in period_source
+    schema_source = ast.get_source_segment(
+        source, _config_flow_method("_tariff_period_schema")
+    )
+    # A blank period export price means the standard export rate applies.
+    assert 'fields[_rate_key("export_rate")] = NumberSelector(' in schema_source
+    assert "min=-100,\n                    max=200," in schema_source
+    assert "PowerSyncConfigFlow._tariff_period_schema(" in period_source
     assert "Default export earnings" in STRINGS_PATH.read_text()
     assert "Use a negative value when you pay to export" in TRANSLATIONS_PATH.read_text()
 
 
 def test_custom_tariff_period_summaries_show_exactly_two_rate_decimals():
-    """Initial and options summaries format import/export rates consistently."""
+    """Initial and options period tables format import/export rates consistently."""
     source = CONFIG_FLOW_PATH.read_text()
     initial_source = ast.get_source_segment(
         source,
@@ -2917,19 +2956,51 @@ def test_custom_tariff_period_summaries_show_exactly_two_rate_decimals():
 
     assert initial_source is not None
     assert options_source is not None
-    assert "rate_precision = 2" in initial_source
-    assert "rate_precision = 2" in options_source
-    assert "period['export_rate'] * 100:.2f" in initial_source
-    assert "p['export_rate'] * 100:.2f" in options_source
-    assert ".1f" not in initial_source[initial_source.index("added_desc") :]
-    assert ".0f" not in options_source[options_source.index("added_desc") :]
-
-    # Display precision must not alter the selector's provider-specific input
-    # step or the existing major-unit conversion/storage paths.
     for method_source in (initial_source, options_source):
+        assert "render_tariff_period_overview(" in method_source
+        # Display precision must not alter the selector's provider-specific
+        # input step or the major-unit conversion/storage paths.
         assert "rate_step = 0.01 if is_agl else 0.1" in method_source
-        assert 'user_input.get("import_rate", 45) / 100' in method_source
-        assert 'user_input.get("export_rate", 5) / 100' in method_source
+        assert "_tariff_period_from_input(" in method_source
+
+    modules = retail_plan_support.load_modules()
+    table = modules.retail_plan_flow.render_period_table(
+        [
+            {"name": "PEAK", "start": 16, "end": 20.5, "days": "weekdays", "import_rate": 0.42416, "export_rate": 0.1},
+            {"name": "OFF_PEAK", "label": "Overnight", "start": 22, "end": 6, "days": [6, 3], "import_rate": 0.08, "export_rate": None},
+        ],
+        standard_import=0.3,
+        standard_export=0.05,
+        unit="c/kWh",
+    )
+    assert "| 1 | Peak | Mon-Fri | 16:00-20:30 | 42.42c/kWh | 10.00c/kWh |" in table
+    assert "| 2 | Overnight | Wed, Sat | 22:00-06:00 | 8.00c/kWh | standard |" in table
+    assert "Standard import 30.00c/kWh, standard export 5.00c/kWh" in table
+    assert ".1f" not in (ROOT / "custom_components" / "power_sync" / "retail_plan_flow.py").read_text()
+
+    flow_class = retail_plan_support.config_flow_class(modules)
+    period, error = flow_class._tariff_period_from_input(
+        {"period_start": "15:30", "period_end": "24:00", "period_days": ["1", "2"],
+         "import_rate": 45, "period_label": "Peak"},
+        default_season="All Year",
+    )
+    assert error is None
+    assert period == {"name": "PEAK", "season": "All Year", "start": 15.5, "end": 24,
+                      "days": [1, 2], "import_rate": 0.45, "export_rate": None, "label": "Peak"}
+    agl, error = flow_class._tariff_period_from_input(
+        {"period_start": "15:00", "period_end": "21:00", "period_days": "all_days", "export_rate": 9},
+        default_season="All Year", fixed_export_rate=0.03, whole_hours=True,
+    )
+    assert error is None and agl["export_rate"] == 0.03 and agl["import_rate"] is None
+    assert flow_class._tariff_period_from_input(
+        {"period_start": "15:30", "period_end": "21:00"}, default_season="All Year", whole_hours=True,
+    ) == (None, "period_time_whole_hours")
+    assert flow_class._tariff_period_from_input(
+        {"period_start": "15:00", "period_end": "15:00"}, default_season="All Year",
+    ) == (None, "period_time_invalid")
+    assert flow_class._tariff_period_from_input(
+        {"period_start": "15:00", "period_end": "16:00", "period_days": []}, default_season="All Year",
+    ) == (None, "period_days_required")
 
 
 def test_custom_tariff_options_preserve_saved_explicit_periods_on_reopen():
@@ -2942,7 +3013,8 @@ def test_custom_tariff_options_preserve_saved_explicit_periods_on_reopen():
     assert options_source is not None
     assert helper_source is not None
     assert "self._tariff_periods = self._custom_tariff_periods(" in options_source
-    assert "self._tariff_periods = []" not in options_source
+    tou_branch = options_source[options_source.index("# TOU — retain existing explicit periods."):]
+    assert "self._tariff_periods = []" not in tou_branch
 
     namespace: dict[str, object] = {}
     exec(textwrap.dedent(helper_source).replace("@staticmethod\n", ""), namespace)
@@ -3215,8 +3287,8 @@ def test_agl_custom_tariff_rates_preserve_hundredths_of_a_cent():
             return default
 
         @staticmethod
-        def _selector_unit() -> str:
-            return "c/kWh"
+        def _selector_unit(kind: str = "minor_rate") -> str:
+            return "$/day" if kind == "daily" else "c/kWh"
 
         @staticmethod
         def async_show_form(**kwargs: object) -> dict:
@@ -3359,13 +3431,18 @@ def test_custom_tariff_periods_can_remove_one_selected_saved_period():
         {"name": "PEAK", "start": 17, "end": 21},
     ]
 
-    assert 'vol.Optional("remove_period", default="none")' in initial_source
+    schema_source = ast.get_source_segment(
+        source, _config_flow_method("_tariff_period_schema")
+    )
+    assert 'vol.Optional("remove_period", default="none")' in schema_source
+    assert 'vol.Optional("edit_period", default="none")' in schema_source
+    assert "self._tariff_period_schema(" in initial_source
     assert "self._pop_tariff_period(" in initial_source
-    assert 'vol.Optional("remove_period", default="none")' in options_source
+    assert "PowerSyncConfigFlow._tariff_period_schema(" in options_source
     assert "PowerSyncConfigFlow._pop_tariff_period(" in options_source
     removal_start = options_source.index('if remove_period != "none":')
     removal_branch = options_source[
-        removal_start : options_source.index("try:", removal_start)
+        removal_start : options_source.index("editing = getattr(", removal_start)
     ]
     assert "await self._save_custom_tariff(custom_tariff)" in removal_branch
 

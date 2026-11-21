@@ -73,6 +73,17 @@ from .flow_power import (
 from .optimization.ai_summary import AISummaryError, apply_ai_summary_settings, configured_openai_model, configured_local_timeout, configured_auto_refresh_interval
 from .optimization.chatgpt_auth import get_chatgpt_auth
 from .amber_smartshift.flow import AmberSetupMixin, AmberOptionsMixin
+from .retail_plan_flow import (
+    clock_text as tariff_clock_text,
+    day_selector_options as tariff_day_selector_options,
+    half_hour_options as tariff_half_hour_options,
+    normalize_days as normalize_tariff_days,
+    optional_rate as optional_tariff_rate,
+    parse_clock as parse_tariff_clock,
+    render_period_overview as render_tariff_period_overview,
+    warnings_text as tariff_draft_warnings_text,
+)
+from .retail_plan_steps import RetailPlanOptionsMixin, RetailPlanSetupMixin
 from .const import (
     DOMAIN,
     CONF_DISPLAY_CURRENCY,
@@ -2103,7 +2114,9 @@ def _octopus_source_fields(hass, current):
     return fields
 
 
-class PowerSyncConfigFlow(AmberSetupMixin, config_entries.ConfigFlow, domain=DOMAIN):
+class PowerSyncConfigFlow(
+    AmberSetupMixin, RetailPlanSetupMixin, config_entries.ConfigFlow, domain=DOMAIN
+):
     """Handle a config flow for PowerSync."""
 
     async def async_step_amber_smartshift(self, user_input=None):
@@ -2365,11 +2378,12 @@ class PowerSyncConfigFlow(AmberSetupMixin, config_entries.ConfigFlow, domain=DOM
                 self._amber_data = {}
                 return await self.async_step_nz_retailer()
             elif provider == "other":
-                # Other/Custom TOU: collect custom rates directly.
+                # Other/Custom TOU: retailer, network and plan source first,
+                # then the custom tariff editor.
                 self._aemo_only_mode = False
                 self._amber_data = {}
                 self._aemo_data = {CONF_AEMO_SPIKE_ENABLED: False}
-                return await self.async_step_custom_tariff()
+                return await self.async_step_retail_plan_retailer()
             else:
                 # Default to Amber
                 self._aemo_only_mode = False
@@ -3183,6 +3197,15 @@ class PowerSyncConfigFlow(AmberSetupMixin, config_entries.ConfigFlow, domain=DOM
         data[CONF_OPTIMIZATION_PROVIDER] = self._optimization_provider
         if self._ml_options:
             data.update(self._ml_options)
+        tariff_supply = getattr(self, "_tariff_daily_supply_charge", None)
+        if (
+            self._custom_tariff_data
+            and isinstance(tariff_supply, (int, float))
+            and CONF_DAILY_SUPPLY_CHARGE not in data
+        ):
+            # Billing reads the entry setting; keep the custom tariff's
+            # supply charge when the optimization step did not ask for one.
+            data[CONF_DAILY_SUPPLY_CHARGE] = max(0.0, float(tariff_supply))
         if data.get(
             CONF_SUNGROW_CONNECTION_TYPE,
             SUNGROW_CONNECTION_DIRECT,
@@ -4302,7 +4325,9 @@ class PowerSyncConfigFlow(AmberSetupMixin, config_entries.ConfigFlow, domain=DOM
             ): BooleanSelector(),
             vol.Required(
                 CONF_DAILY_SUPPLY_CHARGE,
-                default=0.0,
+                # A published plan or the custom tariff step can already
+                # know the supply charge; billing uses this setting.
+                default=float(getattr(self, "_tariff_daily_supply_charge", None) or 0.0),
             ): NumberSelector(
                 NumberSelectorConfig(
                     min=0.0,
@@ -7076,7 +7101,12 @@ class PowerSyncConfigFlow(AmberSetupMixin, config_entries.ConfigFlow, domain=DOM
     async def async_step_custom_tariff(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Configure a custom tariff during initial setup."""
+        """Configure a custom tariff during initial setup.
+
+        A published AER plan or preset chosen in the retail plan steps arrives
+        as ``_tariff_draft``; its rates prefill this form and its periods
+        prefill the period table.
+        """
         errors: dict[str, str] = {}
         is_agl = self._selected_electricity_provider == "agl"
         is_four4free_custom = (
@@ -7084,6 +7114,7 @@ class PowerSyncConfigFlow(AmberSetupMixin, config_entries.ConfigFlow, domain=DOM
             == GLOBIRD_PLAN_FOUR4FREE_CUSTOM
         )
         rate_step = 0.01 if is_agl else 0.1
+        draft = getattr(self, "_tariff_draft", None)
 
         if user_input is not None:
             if (
@@ -7092,6 +7123,7 @@ class PowerSyncConfigFlow(AmberSetupMixin, config_entries.ConfigFlow, domain=DOM
                 and not is_four4free_custom
             ):
                 self._custom_tariff_data = {}
+                self._tariff_draft = None
                 return await self.async_step_battery_system()
 
             tariff_type = user_input.get("tariff_type", "tou")
@@ -7107,12 +7139,17 @@ class PowerSyncConfigFlow(AmberSetupMixin, config_entries.ConfigFlow, domain=DOM
                 if is_agl
                 else user_input.get("fit_rate", 5) / 100
             )
+            supply = user_input.get(CONF_DAILY_SUPPLY_CHARGE)
+            self._tariff_daily_supply_charge = (
+                max(0.0, float(supply)) if supply not in (None, "") else None
+            )
 
             if tariff_type == "flat":
                 flat_rate = user_input.get("flat_rate", 30) / 100
                 self._tariff_seasons = [
                     {"name": "All Year", "from_month": 1, "to_month": 12}
                 ]
+                self._tariff_periods = []
                 self._custom_tariff_data = self._build_tariff_from_periods(
                     [
                         {
@@ -7125,12 +7162,24 @@ class PowerSyncConfigFlow(AmberSetupMixin, config_entries.ConfigFlow, domain=DOM
                         }
                     ],
                 )
-                return await self.async_step_battery_system()
+                return await self.async_step_tariff_allowance()
 
+            seasonal = bool(user_input.get("seasonal_rates", False))
+            if draft:
+                # Keep the loaded plan's periods. Without seasons every period
+                # applies all year, as when reopening the options editor.
+                if not seasonal:
+                    self._tariff_seasons = [
+                        {"name": "All Year", "from_month": 1, "to_month": 12}
+                    ]
+                    for period in self._tariff_periods:
+                        period.pop("season", None)
+                    return await self.async_step_tariff_period()
+                return await self.async_step_tariff_season()
             self._tariff_periods = []
             self._tariff_seasons = (
                 []
-                if user_input.get("seasonal_rates", False)
+                if seasonal
                 else [
                     {
                         "name": "All Year",
@@ -7139,7 +7188,7 @@ class PowerSyncConfigFlow(AmberSetupMixin, config_entries.ConfigFlow, domain=DOM
                     }
                 ]
             )
-            if user_input.get("seasonal_rates", False):
+            if seasonal:
                 return await self.async_step_tariff_season()
             return await self.async_step_tariff_period()
 
@@ -7147,17 +7196,26 @@ class PowerSyncConfigFlow(AmberSetupMixin, config_entries.ConfigFlow, domain=DOM
             "flat": "Flat Rate (single rate all day)",
             "tou": "Time of Use (multiple periods)",
         }
+        draft_seasons = (draft or {}).get("seasons") or []
+        default_plan_name = (
+            "AGL Battery Rewards"
+            if is_agl
+            else "FOUR4FREE"
+            if is_four4free_custom
+            else (draft or {}).get("plan_name", "")
+        )
+        default_offpeak = (
+            round(float(draft["standard_import_rate"]) * 100, 3) if draft else 15
+        )
+        default_fit = (
+            round(float(draft["standard_export_rate"]) * 100, 3) if draft else 5
+        )
+        default_supply = (draft or {}).get("daily_supply_charge") or 0.0
 
         schema_fields: dict[Any, Any] = {
             vol.Optional(
                 "plan_name",
-                default=(
-                    "AGL Battery Rewards"
-                    if is_agl
-                    else "FOUR4FREE"
-                    if is_four4free_custom
-                    else ""
-                ),
+                default=default_plan_name,
             ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
             vol.Required("tariff_type", default="tou"): SelectSelector(
                 SelectSelectorConfig(
@@ -7177,7 +7235,7 @@ class PowerSyncConfigFlow(AmberSetupMixin, config_entries.ConfigFlow, domain=DOM
                     mode=NumberSelectorMode.BOX,
                 )
             ),
-            vol.Required("offpeak_rate", default=15): NumberSelector(
+            vol.Required("offpeak_rate", default=default_offpeak): NumberSelector(
                 NumberSelectorConfig(
                     min=0,
                     max=200,
@@ -7186,7 +7244,9 @@ class PowerSyncConfigFlow(AmberSetupMixin, config_entries.ConfigFlow, domain=DOM
                     mode=NumberSelectorMode.BOX,
                 )
             ),
-            vol.Optional("seasonal_rates", default=False): BooleanSelector(),
+            vol.Optional(
+                "seasonal_rates", default=len(draft_seasons) > 1
+            ): BooleanSelector(),
         }
         if not is_agl and not is_four4free_custom:
             schema_fields[
@@ -7194,7 +7254,7 @@ class PowerSyncConfigFlow(AmberSetupMixin, config_entries.ConfigFlow, domain=DOM
             ] = BooleanSelector()
         if not is_agl:
             schema_fields[
-                vol.Required("fit_rate", default=5)
+                vol.Required("fit_rate", default=default_fit)
             ] = NumberSelector(
                 NumberSelectorConfig(
                     min=-100,
@@ -7204,16 +7264,29 @@ class PowerSyncConfigFlow(AmberSetupMixin, config_entries.ConfigFlow, domain=DOM
                     mode=NumberSelectorMode.BOX,
                 )
             )
+        schema_fields[
+            vol.Optional(CONF_DAILY_SUPPLY_CHARGE, default=default_supply)
+        ] = NumberSelector(
+            NumberSelectorConfig(
+                min=0.0,
+                max=500.0,
+                step=0.00001,
+                unit_of_measurement=self._selector_unit("daily"),
+                mode=NumberSelectorMode.BOX,
+            )
+        )
 
+        plan_info = tariff_draft_warnings_text(draft)
         return self.async_show_form(
             step_id="custom_tariff",
             data_schema=vol.Schema(schema_fields),
             errors=errors,
             description_placeholders={
                 "info": (
-                    f"Configure your electricity tariff. All rates in "
-                    f"{self._selector_unit()}. For TOU, you'll add time periods "
-                    "in the next step."
+                    (plan_info + "\n\n" if plan_info else "")
+                    + f"Configure your electricity tariff. All rates in "
+                    f"{self._selector_unit()}. The standard rates apply "
+                    "outside the time periods you add in the next step."
                     + (
                         " AGL's 17:00-21:00 and off-peak export rates are "
                         "applied automatically."
@@ -7407,40 +7480,260 @@ class PowerSyncConfigFlow(AmberSetupMixin, config_entries.ConfigFlow, domain=DOM
     @staticmethod
     def _tariff_period_remove_options(
         periods: list[dict],
+        *,
+        action: str = "Remove",
+        keep_label: str = "Keep all added periods",
     ) -> list[SelectOptionDict]:
-        """Build unambiguous selector options for removing a tariff period."""
+        """Build unambiguous selector options for choosing one tariff period."""
+        type_labels = {
+            "PEAK": "Peak",
+            "SHOULDER": "Shoulder",
+            "OFF_PEAK": "Off-Peak",
+            "SUPER_OFF_PEAK": "Super Off-Peak",
+        }
         day_labels = {
             "weekdays": "Mon-Fri",
             "weekends": "Sat-Sun",
             "all_days": "Mon-Sun",
         }
-        options = [
-            SelectOptionDict(value="none", label="Keep all added periods")
-        ]
+        day_names = ("Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat")
+        options = [SelectOptionDict(value="none", label=keep_label)]
         for index, period in enumerate(periods):
-            label = {
-                "PEAK": "Peak",
-                "SHOULDER": "Shoulder",
-                "OFF_PEAK": "Off-Peak",
-                "SUPER_OFF_PEAK": "Super Off-Peak",
-            }.get(period.get("name"), str(period.get("name", "Period")))
+            label = period.get("label") or type_labels.get(
+                period.get("name"), str(period.get("name", "Period"))
+            )
+            days = period.get("days")
+            if isinstance(days, list):
+                day_text = ", ".join(
+                    day_names[int(day) % 7]
+                    for day in sorted(days, key=lambda day: (int(day) + 6) % 7)
+                )
+            else:
+                day_text = day_labels.get(days, "Mon-Sun")
+            season = f"{period['season']}: " if period.get("season") else ""
+
+            def _clock(value: object) -> str:
+                minutes = int(round(float(value or 0) * 60))
+                return f"{minutes // 60:02d}:{minutes % 60:02d}"
+
             options.append(
                 SelectOptionDict(
                     value=str(index),
                     label=(
-                        f"Remove {index + 1}. {label} "
-                        f"{int(period.get('start', 0)):02d}:00-"
-                        f"{int(period.get('end', 24)):02d}:00 "
-                        f"{day_labels.get(period.get('days'), 'Mon-Sun')}"
+                        f"{action} {index + 1}. {season}{label} "
+                        f"{_clock(period.get('start', 0))}-"
+                        f"{_clock(period.get('end', 24))} {day_text}"
                     ),
                 )
             )
         return options
 
+    @staticmethod
+    def _tariff_period_from_input(
+        user_input: dict[str, Any],
+        *,
+        default_season: str,
+        fixed_export_rate: float | None = None,
+        whole_hours: bool = False,
+    ) -> tuple[dict | None, str | None]:
+        """Validate one submitted period row.
+
+        Blank import or export prices mean the standard rate applies. Legacy
+        single-hour values and day presets are still accepted.
+        """
+        start = parse_tariff_clock(user_input.get("period_start", "15:00"))
+        end = parse_tariff_clock(user_input.get("period_end", "21:00"), end=True)
+        if start is None or end is None or start == end or (start == 0 and end == 0):
+            return None, "period_time_invalid"
+        if whole_hours and (start != int(start) or end != int(end)):
+            # The AGL Battery Rewards overlay splits whole-hour ranges.
+            return None, "period_time_whole_hours"
+        days = normalize_tariff_days(user_input.get("period_days", "weekdays"))
+        if days is None:
+            return None, "period_days_required"
+        name = user_input.get("period_type", "PEAK")
+        if name not in ("PEAK", "SHOULDER", "OFF_PEAK", "SUPER_OFF_PEAK"):
+            name = "PEAK"
+        period: dict[str, Any] = {
+            "name": name,
+            "season": user_input.get("season", default_season),
+            "start": start,
+            "end": end,
+            "days": days,
+            "import_rate": optional_tariff_rate(user_input.get("import_rate")),
+            "export_rate": (
+                fixed_export_rate
+                if fixed_export_rate is not None
+                else optional_tariff_rate(user_input.get("export_rate"))
+            ),
+        }
+        label = str(user_input.get("period_label") or "").strip()
+        if label:
+            period["label"] = label[:60]
+        return period, None
+
+    @staticmethod
+    def _tariff_period_schema(
+        *,
+        periods: list[dict],
+        seasons: list[dict],
+        editing: dict | None,
+        unit: str,
+        rate_step: float,
+        show_export: bool,
+    ) -> dict[Any, Any]:
+        """Period table form: choose a row to edit/remove, or add a row."""
+        current = editing or {}
+        days = current.get("days", "all_days")
+        if isinstance(days, str):
+            days = {
+                "weekdays": [1, 2, 3, 4, 5],
+                "weekends": [0, 6],
+            }.get(days, [0, 1, 2, 3, 4, 5, 6])
+        period_types = {
+            "PEAK": "Peak",
+            "SHOULDER": "Shoulder",
+            "OFF_PEAK": "Off-Peak",
+            "SUPER_OFF_PEAK": "Super Off-Peak",
+        }
+
+        def _rate_key(key: str) -> vol.Optional:
+            value = current.get(key)
+            if value is None:
+                return vol.Optional(key)
+            return vol.Optional(
+                key, description={"suggested_value": round(float(value) * 100, 4)}
+            )
+
+        fields: dict[Any, Any] = {}
+        if periods:
+            fields[vol.Optional("edit_period", default="none")] = SelectSelector(
+                SelectSelectorConfig(
+                    options=PowerSyncConfigFlow._tariff_period_remove_options(
+                        periods, action="Edit", keep_label="Add a new period"
+                    ),
+                    mode=SelectSelectorMode.DROPDOWN,
+                )
+            )
+            fields[vol.Optional("remove_period", default="none")] = SelectSelector(
+                SelectSelectorConfig(
+                    options=PowerSyncConfigFlow._tariff_period_remove_options(
+                        periods
+                    ),
+                    mode=SelectSelectorMode.DROPDOWN,
+                )
+            )
+        if len(seasons) > 1 or (seasons and seasons[0].get("name") != "All Year"):
+            fields[
+                vol.Required(
+                    "season",
+                    default=str(current.get("season") or seasons[0]["name"]),
+                )
+            ] = SelectSelector(
+                SelectSelectorConfig(
+                    options=PowerSyncConfigFlow._tariff_season_options(seasons),
+                    mode=SelectSelectorMode.DROPDOWN,
+                )
+            )
+        fields.update(
+            {
+                vol.Optional(
+                    "period_label", default=str(current.get("label", ""))
+                ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+                vol.Required(
+                    "period_type", default=current.get("name", "PEAK")
+                ): SelectSelector(
+                    SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(value=k, label=v)
+                            for k, v in period_types.items()
+                        ],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                vol.Required(
+                    "period_start",
+                    default=tariff_clock_text(current.get("start", 15)),
+                ): SelectSelector(
+                    SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(value=value, label=label)
+                            for value, label in tariff_half_hour_options()
+                        ],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                vol.Required(
+                    "period_end",
+                    default=tariff_clock_text(current.get("end", 21) or 24),
+                ): SelectSelector(
+                    SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(value=value, label=label)
+                            for value, label in tariff_half_hour_options(end=True)
+                        ],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                vol.Required(
+                    "period_days", default=[str(day) for day in days]
+                ): SelectSelector(
+                    SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(value=value, label=label)
+                            for value, label in tariff_day_selector_options()
+                        ],
+                        multiple=True,
+                        mode=SelectSelectorMode.LIST,
+                    )
+                ),
+                _rate_key("import_rate"): NumberSelector(
+                    NumberSelectorConfig(
+                        min=0,
+                        max=200,
+                        step=rate_step,
+                        unit_of_measurement=unit,
+                        mode=NumberSelectorMode.BOX,
+                    )
+                ),
+            }
+        )
+        if show_export:
+            fields[_rate_key("export_rate")] = NumberSelector(
+                NumberSelectorConfig(
+                    min=-100,
+                    max=200,
+                    step=0.1,
+                    unit_of_measurement=unit,
+                    mode=NumberSelectorMode.BOX,
+                )
+            )
+        next_actions = {
+            "add_finish": "Save this period and continue",
+            "add_another": "Save this period and add another",
+        }
+        if periods:
+            next_actions = {"finish": "Continue without adding a period", **next_actions}
+        fields[
+            vol.Required(
+                "next_action",
+                default="add_finish" if editing or not periods else "finish",
+            )
+        ] = SelectSelector(
+            SelectSelectorConfig(
+                options=[
+                    SelectOptionDict(value=k, label=v)
+                    for k, v in next_actions.items()
+                ],
+                mode=SelectSelectorMode.LIST,
+            )
+        )
+        return fields
+
     async def async_step_tariff_period(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Add a custom tariff period during initial setup."""
+        """Edit the custom tariff period table during initial setup."""
         errors: dict[str, str] = {}
         is_agl = self._selected_electricity_provider == "agl"
         rate_step = 0.01 if is_agl else 0.1
@@ -7451,27 +7744,26 @@ class PowerSyncConfigFlow(AmberSetupMixin, config_entries.ConfigFlow, domain=DOM
                 self._pop_tariff_period(self._tariff_periods, remove_period)
                 return await self.async_step_tariff_period()
 
-            try:
-                start_hour = int(user_input.get("period_start", "15:00").split(":")[0])
-                end_hour = int(user_input.get("period_end", "21:00").split(":")[0])
-            except (ValueError, IndexError):
-                start_hour = 15
-                end_hour = 21
+            editing = getattr(self, "_tariff_period_editing", None)
+            edit_period = user_input.get("edit_period", "none")
+            if edit_period not in (None, "none"):
+                selected = self._pop_tariff_period(self._tariff_periods, edit_period)
+                if editing:
+                    self._tariff_periods.append(editing)
+                self._tariff_period_editing = selected
+                return await self.async_step_tariff_period()
 
-            self._tariff_periods.append(
-                {
-                    "name": user_input.get("period_type", "PEAK"),
-                    "season": user_input.get(
-                        "season",
-                        getattr(self, "_tariff_seasons", [{"name": "All Year"}])[0][
-                            "name"
-                        ],
-                    ),
-                    "start": start_hour,
-                    "end": end_hour,
-                    "days": user_input.get("period_days", "weekdays"),
-                    "import_rate": user_input.get("import_rate", 45) / 100,
-                    "export_rate": (
+            next_action = user_input.get("next_action")
+            if next_action == "finish":
+                if editing:
+                    self._tariff_periods.append(editing)
+            else:
+                period, error = self._tariff_period_from_input(
+                    user_input,
+                    default_season=getattr(
+                        self, "_tariff_seasons", [{"name": "All Year"}]
+                    )[0]["name"],
+                    fixed_export_rate=(
                         getattr(
                             self,
                             "_agl_offpeak_export_rate",
@@ -7479,157 +7771,63 @@ class PowerSyncConfigFlow(AmberSetupMixin, config_entries.ConfigFlow, domain=DOM
                         )
                         / 100
                         if is_agl
-                        else user_input.get("export_rate", 5) / 100
+                        else None
                     ),
-                }
-            )
+                    whole_hours=is_agl,
+                )
+                if error:
+                    errors["base"] = error
+                else:
+                    self._tariff_periods.append(period)
+                    if next_action == "add_another" or (
+                        next_action is None and user_input.get("add_another", False)
+                    ):
+                        self._tariff_period_editing = None
+                        return await self.async_step_tariff_period()
 
-            if user_input.get("add_another", False):
-                return await self.async_step_tariff_period()
+            if not errors:
+                self._tariff_period_editing = None
+                self._custom_tariff_data = self._build_tariff_from_periods(
+                    self._tariff_periods,
+                )
+                return await self.async_step_tariff_allowance()
 
-            self._custom_tariff_data = self._build_tariff_from_periods(
-                self._tariff_periods,
-            )
-            return await self.async_step_battery_system()
-
-        tariff_hour_options = [
-            SelectOptionDict(value=f"{h:02d}:00", label=f"{h:02d}:00")
-            for h in range(24)
-        ]
-        day_options = {
-            "weekdays": "Weekdays only (Mon-Fri)",
-            "weekends": "Weekends only (Sat-Sun)",
-            "all_days": "All days (Mon-Sun)",
-        }
-        period_types = {
-            "PEAK": "Peak",
-            "SHOULDER": "Shoulder",
-            "OFF_PEAK": "Off-Peak",
-            "SUPER_OFF_PEAK": "Super Off-Peak",
-        }
-
-        count = len(getattr(self, "_tariff_periods", []))
-        added_desc = ""
-        if count > 0:
-            lines = []
-            minor_unit = self._selector_unit()
-            rate_precision = 2
-            day_labels = {
-                "weekdays": "Mon-Fri",
-                "weekends": "Sat-Sun",
-                "all_days": "Mon-Sun",
-            }
-            for idx, period in enumerate(self._tariff_periods, 1):
-                season_prefix = (
-                    f"{period.get('season')}: "
-                    if len(getattr(self, "_tariff_seasons", [])) > 1
-                    else ""
-                )
-                line = (
-                    f"{idx}. {season_prefix}{period['name']} "
-                    f"{period['start']:02d}:00-"
-                    f"{period['end']:02d}:00 "
-                    f"{day_labels.get(period.get('days'), 'Mon-Sun')}, import "
-                    f"{period['import_rate'] * 100:.{rate_precision}f}{minor_unit}"
-                )
-                if not is_agl:
-                    line += (
-                        f", export {period['export_rate'] * 100:.2f}{minor_unit}"
-                    )
-                lines.append(line)
-            added_desc = "Added periods:\n" + "\n".join(lines) + "\n\n"
-
-        schema_fields: dict[Any, Any] = {
-            vol.Required("period_type", default="PEAK"): SelectSelector(
-                SelectSelectorConfig(
-                    options=[
-                        SelectOptionDict(value=k, label=v)
-                        for k, v in period_types.items()
-                    ],
-                    mode=SelectSelectorMode.DROPDOWN,
-                )
-            ),
-            vol.Required("period_start", default="15:00"): SelectSelector(
-                SelectSelectorConfig(
-                    options=tariff_hour_options,
-                    mode=SelectSelectorMode.DROPDOWN,
-                )
-            ),
-            vol.Required("period_end", default="21:00"): SelectSelector(
-                SelectSelectorConfig(
-                    options=tariff_hour_options,
-                    mode=SelectSelectorMode.DROPDOWN,
-                )
-            ),
-            vol.Required("period_days", default="weekdays"): SelectSelector(
-                SelectSelectorConfig(
-                    options=[
-                        SelectOptionDict(value=k, label=v)
-                        for k, v in day_options.items()
-                    ],
-                    mode=SelectSelectorMode.DROPDOWN,
-                )
-            ),
-            vol.Required("import_rate", default=45): NumberSelector(
-                NumberSelectorConfig(
-                    min=0,
-                    max=200,
-                    step=rate_step,
-                    unit_of_measurement=self._selector_unit(),
-                    mode=NumberSelectorMode.BOX,
-                )
-            ),
-            vol.Optional("add_another", default=False): BooleanSelector(),
-        }
         seasons = getattr(
             self,
             "_tariff_seasons",
             [{"name": "All Year", "from_month": 1, "to_month": 12}],
         )
-        if len(seasons) > 1 or seasons[0].get("name") != "All Year":
-            schema_fields = {
-                vol.Required("season", default=str(seasons[0]["name"])): SelectSelector(
-                    SelectSelectorConfig(
-                        options=self._tariff_season_options(seasons),
-                        mode=SelectSelectorMode.DROPDOWN,
-                    )
-                ),
-                **schema_fields,
-            }
-        if count > 0:
-            remove_field = vol.Optional("remove_period", default="none")
-            schema_fields = {
-                remove_field: SelectSelector(
-                    SelectSelectorConfig(
-                        options=self._tariff_period_remove_options(
-                            self._tariff_periods
-                        ),
-                        mode=SelectSelectorMode.DROPDOWN,
-                    )
-                ),
-                **schema_fields,
-            }
-        if not is_agl:
-            schema_fields[
-                vol.Required("export_rate", default=5)
-            ] = NumberSelector(
-                NumberSelectorConfig(
-                    min=-100,
-                    max=200,
-                    step=0.1,
-                    unit_of_measurement=self._selector_unit(),
-                    mode=NumberSelectorMode.BOX,
-                )
-            )
-
+        periods = getattr(self, "_tariff_periods", [])
+        added_desc = render_tariff_period_overview(
+            periods,
+            seasons,
+            standard_import=float(getattr(self, "_tariff_offpeak_rate", 0.15)),
+            standard_export=float(getattr(self, "_tariff_fit_rate", 0.05)),
+            unit=self._selector_unit(),
+            show_export=not is_agl,
+            daily_supply=getattr(self, "_tariff_daily_supply_charge", None),
+            supply_unit=self._selector_unit("daily"),
+            when=dt_util.now(),
+        )
+        editing = getattr(self, "_tariff_period_editing", None)
         return self.async_show_form(
             step_id="tariff_period",
-            data_schema=vol.Schema(schema_fields),
+            data_schema=vol.Schema(
+                self._tariff_period_schema(
+                    periods=periods,
+                    seasons=seasons,
+                    editing=editing,
+                    unit=self._selector_unit(),
+                    rate_step=rate_step,
+                    show_export=not is_agl,
+                )
+            ),
             errors=errors,
             description_placeholders={
-                "period_info": added_desc
-                if added_desc
-                else "Add your first tariff period. Remaining hours will be off-peak.",
+                "period_info": (
+                    ("Editing the selected period below.\n\n" if editing else "")
+                    + added_desc
+                ),
             },
         )
 
@@ -7638,15 +7836,48 @@ class PowerSyncConfigFlow(AmberSetupMixin, config_entries.ConfigFlow, domain=DOM
 
         Each period with different rates gets a unique internal name (e.g. PEAK_1,
         PEAK_2) so the optimizer sees distinct prices for each time block.
-        Remaining hours not covered by any period become OFF_PEAK. When calendar
-        seasons are configured, each season is built independently.
+        Remaining time not covered by any period uses the standard rates
+        (OFF_PEAK). When calendar seasons are configured, each season is built
+        independently. Period times may fall on half hours, ``days`` may be a
+        preset name or a list of Tesla day numbers (0=Sunday), and a ``None``
+        import or export rate means the standard rate applies.
         """
-        def _day_ranges(scope: str) -> list[tuple[int, int]]:
+        standard_import = getattr(self, "_tariff_offpeak_rate", 0.15)
+        standard_export = getattr(self, "_tariff_fit_rate", 0.05)
+
+        def _day_ranges(scope: object) -> list[tuple[int, int]]:
             if scope == "weekdays":
                 return [(1, 5)]
             if scope == "weekends":
                 return [(0, 0), (6, 6)]
+            if isinstance(scope, (list, tuple)):
+                ranges: list[tuple[int, int]] = []
+                for day in sorted({int(day) % 7 for day in scope}):
+                    if ranges and ranges[-1][1] == day - 1:
+                        ranges[-1] = (ranges[-1][0], day)
+                    else:
+                        ranges.append((day, day))
+                if ranges:
+                    return ranges
             return [(0, 6)]
+
+        def _clock(value: object) -> tuple[int, int]:
+            minutes = int(round(float(value) * 60))
+            return minutes // 60, minutes % 60
+
+        def _range(from_day: int, to_day: int, start: object, end: object) -> dict:
+            from_hour, from_minute = _clock(start)
+            to_hour, to_minute = _clock(end)
+            item = {
+                "fromDayOfWeek": from_day,
+                "toDayOfWeek": to_day,
+                "fromHour": from_hour,
+                "toHour": to_hour,
+            }
+            if from_minute or to_minute:
+                item["fromMinute"] = from_minute
+                item["toMinute"] = to_minute
+            return item
 
         def _build_season(
             season_periods: list[dict],
@@ -7659,12 +7890,22 @@ class PowerSyncConfigFlow(AmberSetupMixin, config_entries.ConfigFlow, domain=DOM
             name_counters: dict[str, int] = {}
             for period in season_periods:
                 base_name = period["name"]
+                import_rate = (
+                    standard_import
+                    if period.get("import_rate") is None
+                    else period["import_rate"]
+                )
+                export_rate = (
+                    standard_export
+                    if period.get("export_rate") is None
+                    else period["export_rate"]
+                )
                 existing_key = None
                 for key in tou_periods:
                     if key == base_name or key.startswith(base_name + "_"):
                         if (
-                            energy_charges.get(key) == period["import_rate"]
-                            and sell_charges.get(key) == period["export_rate"]
+                            energy_charges.get(key) == import_rate
+                            and sell_charges.get(key) == export_rate
                         ):
                             existing_key = key
                             break
@@ -7695,17 +7936,13 @@ class PowerSyncConfigFlow(AmberSetupMixin, config_entries.ConfigFlow, domain=DOM
                     period.get("days", "weekdays")
                 ):
                     tou_periods[unique_name].append(
-                        {
-                            "fromDayOfWeek": from_day,
-                            "toDayOfWeek": to_day,
-                            "fromHour": period["start"],
-                            "toHour": period["end"],
-                        }
+                        _range(from_day, to_day, period["start"], period["end"])
                     )
-                energy_charges[unique_name] = period["import_rate"]
-                sell_charges[unique_name] = period["export_rate"]
+                energy_charges[unique_name] = import_rate
+                sell_charges[unique_name] = export_rate
 
-            defined_hours_by_day = {day: set() for day in range(7)}
+            # Half-hour slots (0-47) covered by a period, per Tesla weekday.
+            defined_slots_by_day = {day: set() for day in range(7)}
 
             def _days_between(start: int, end: int) -> list[int]:
                 start %= 7
@@ -7714,37 +7951,41 @@ class PowerSyncConfigFlow(AmberSetupMixin, config_entries.ConfigFlow, domain=DOM
                     return list(range(start, end + 1))
                 return list(range(start, 7)) + list(range(0, end + 1))
 
-            def _mark_hours(day: int, start: int, end: int) -> None:
-                defined_hours_by_day[day % 7].update(range(start, end))
+            def _mark_slots(day: int, start: int, end: int) -> None:
+                defined_slots_by_day[day % 7].update(range(start, end))
 
             for period_list in tou_periods.values():
                 for item in period_list:
-                    start_hour = int(item["fromHour"])
-                    end_hour = int(item["toHour"])
+                    start_slot = (
+                        int(item["fromHour"]) * 60 + int(item.get("fromMinute", 0))
+                    ) // 30
+                    end_slot = (
+                        int(item["toHour"]) * 60 + int(item.get("toMinute", 0))
+                    ) // 30
                     for day in _days_between(
                         item["fromDayOfWeek"], item["toDayOfWeek"]
                     ):
-                        if start_hour == end_hour:
-                            _mark_hours(day, 0, 24)
-                        elif start_hour < end_hour:
-                            _mark_hours(day, start_hour, end_hour)
+                        if start_slot == end_slot:
+                            _mark_slots(day, 0, 48)
+                        elif start_slot < end_slot:
+                            _mark_slots(day, start_slot, end_slot)
                         else:
-                            _mark_hours(day, start_hour, 24)
-                            _mark_hours(day + 1, 0, end_hour)
+                            _mark_slots(day, start_slot, 48)
+                            _mark_slots(day + 1, 0, end_slot)
 
             offpeak_periods = []
             offpeak_gaps: dict[tuple[int, int], list[int]] = {}
-            for day, defined_hours in defined_hours_by_day.items():
+            for day, defined_slots in defined_slots_by_day.items():
                 gap_start = None
-                for hour in range(25):
-                    if hour < 24 and hour not in defined_hours:
+                for slot in range(49):
+                    if slot < 48 and slot not in defined_slots:
                         if gap_start is None:
-                            gap_start = hour
+                            gap_start = slot
                     elif gap_start is not None:
-                        offpeak_gaps.setdefault((gap_start, hour), []).append(day)
+                        offpeak_gaps.setdefault((gap_start, slot), []).append(day)
                         gap_start = None
 
-            for (from_hour, to_hour), days in offpeak_gaps.items():
+            for (from_slot, to_slot), days in offpeak_gaps.items():
                 sorted_days = sorted(days)
                 range_start = sorted_days[0]
                 previous_day = range_start
@@ -7753,12 +7994,7 @@ class PowerSyncConfigFlow(AmberSetupMixin, config_entries.ConfigFlow, domain=DOM
                         previous_day = day
                         continue
                     offpeak_periods.append(
-                        {
-                            "fromDayOfWeek": range_start,
-                            "toDayOfWeek": previous_day,
-                            "fromHour": from_hour,
-                            "toHour": to_hour,
-                        }
+                        _range(range_start, previous_day, from_slot / 2, to_slot / 2)
                     )
                     if day is not None:
                         range_start = previous_day = day
@@ -7776,14 +8012,12 @@ class PowerSyncConfigFlow(AmberSetupMixin, config_entries.ConfigFlow, domain=DOM
             if offpeak_periods:
                 op_name = "OFF_PEAK_AUTO" if "OFF_PEAK" in tou_periods else "OFF_PEAK"
                 tou_periods[op_name] = offpeak_periods
-                energy_charges[op_name] = getattr(
-                    self, "_tariff_offpeak_rate", 0.15
-                )
-                sell_charges[op_name] = getattr(self, "_tariff_fit_rate", 0.05)
+                energy_charges[op_name] = standard_import
+                sell_charges[op_name] = standard_export
 
             return tou_periods, energy_charges, sell_charges
 
-        provider_name = {
+        provider_name = getattr(self, "_tariff_utility", None) or {
             "agl": "AGL",
             "globird": "Globird Energy",
             "aemo_vpp": "VPP Provider",
@@ -7840,6 +8074,15 @@ class PowerSyncConfigFlow(AmberSetupMixin, config_entries.ConfigFlow, domain=DOM
             # options reopen cannot replace them with generated off-peak gaps.
             "power_sync_explicit_periods": [dict(period) for period in periods],
         }
+        daily_supply_charge = getattr(self, "_tariff_daily_supply_charge", None)
+        if isinstance(daily_supply_charge, (int, float)) and daily_supply_charge >= 0:
+            tariff["daily_supply_charge"] = float(daily_supply_charge)
+        import_quota = getattr(self, "_tariff_import_quota", None)
+        if isinstance(import_quota, dict) and import_quota:
+            tariff["import_quota"] = dict(import_quota)
+        plan_source = getattr(self, "_tariff_source", None)
+        if isinstance(plan_source, dict) and plan_source:
+            tariff["power_sync_plan_source"] = dict(plan_source)
         if getattr(self, "_selected_electricity_provider", "other") == "agl":
             from .agl import apply_battery_rewards_export_rates
 
@@ -8117,7 +8360,9 @@ class PowerSyncConfigFlow(AmberSetupMixin, config_entries.ConfigFlow, domain=DOM
         return PowerSyncOptionsFlow()
 
 
-class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
+class PowerSyncOptionsFlow(
+    AmberOptionsMixin, RetailPlanOptionsMixin, config_entries.OptionsFlow
+):
     """Handle options flow for PowerSync."""
 
     async def async_step_amber_smartshift(self, user_input=None):
@@ -14846,7 +15091,7 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
             # Carry the selected provider through the shared pricing finish
             # step so reload stops polling the former dynamic provider.
             self._amber_options = {CONF_ELECTRICITY_PROVIDER: provider}
-            return await self.async_step_custom_tariff_options()
+            return await self.async_step_retail_plan_options()
         return await self.async_step_globird_options()
 
     async def _async_route_to_provider_options(self) -> FlowResult:
@@ -18192,7 +18437,10 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
     ) -> FlowResult:
         """Configure custom tariff — step 1: basic setup (options flow).
 
-        Same multi-step period builder as the initial config flow.
+        Same multi-step period builder as the initial config flow. A plan
+        chosen in the retail plan steps arrives as ``_tariff_draft`` and
+        replaces the saved periods; otherwise the saved tariff is edited and
+        its supply charge and import allowance are kept.
         """
         from .const import DOMAIN
 
@@ -18208,6 +18456,7 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
             == GLOBIRD_PLAN_FOUR4FREE_CUSTOM
         )
         rate_step = 0.01 if is_agl else 0.1
+        draft = getattr(self, "_tariff_draft", None)
 
         if user_input is not None:
             tariff_type = user_input.get("tariff_type", "tou")
@@ -18228,6 +18477,15 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
                 if is_agl
                 else user_input.get("fit_rate", 5) / 100
             )
+            supply = user_input.get(CONF_DAILY_SUPPLY_CHARGE)
+            if supply not in (None, ""):
+                self._tariff_daily_supply_charge = max(0.0, float(supply))
+                pricing_options = getattr(self, "_amber_options", None)
+                if isinstance(pricing_options, dict):
+                    # Billing reads the entry setting.
+                    pricing_options[CONF_DAILY_SUPPLY_CHARGE] = (
+                        self._tariff_daily_supply_charge
+                    )
 
             if tariff_type == "flat":
                 flat_rate = user_input.get("flat_rate", 30) / 100
@@ -18247,7 +18505,20 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
                     ],
                 )
                 await self._save_custom_tariff(custom_tariff)
-                return await self.async_step_demand_charge_options()
+                self._tariff_periods = []
+                self._pending_custom_tariff = custom_tariff
+                return await self.async_step_tariff_allowance_options()
+
+            if draft:
+                # A newly chosen plan: its periods were loaded by apply_draft.
+                if not user_input.get("seasonal_rates", False):
+                    self._tariff_seasons = [
+                        {"name": "All Year", "from_month": 1, "to_month": 12}
+                    ]
+                    for period in self._tariff_periods:
+                        period["season"] = "All Year"
+                    return await self.async_step_tariff_period_options()
+                return await self.async_step_tariff_season_options()
 
             # TOU — retain existing explicit periods.  Starting from an empty
             # list here meant reopening the editor and saving another period
@@ -18284,6 +18555,20 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
                     store = entry_data["automation_store"]
                     current_tariff = store.get_custom_tariff()
                     break
+        if not draft and isinstance(current_tariff, dict):
+            # Editing keeps the parts of the saved tariff this form does not
+            # show, so saving periods no longer drops them.
+            base_tariff = current_tariff.get("agl_base_tariff")
+            base_tariff = base_tariff if isinstance(base_tariff, dict) else {}
+            self._tariff_import_quota = current_tariff.get(
+                "import_quota", base_tariff.get("import_quota")
+            )
+            self._tariff_daily_supply_charge = current_tariff.get(
+                "daily_supply_charge", base_tariff.get("daily_supply_charge")
+            )
+            self._tariff_source = current_tariff.get("power_sync_plan_source")
+            if self._tariff_source:
+                self._tariff_utility = current_tariff.get("utility")
         if is_agl and isinstance(current_tariff, dict):
             current_tariff = current_tariff.get(
                 "agl_base_tariff",
@@ -18325,6 +18610,13 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
                         default_fit = round(v * 100, 1)
                         break
         self._custom_tariff_for_options = current_tariff
+        draft_seasons = (draft or {}).get("seasons") or []
+        if draft:
+            default_offpeak = round(float(draft["standard_import_rate"]) * 100, 3)
+            default_fit = round(float(draft["standard_export_rate"]) * 100, 3)
+        default_supply = getattr(self, "_tariff_daily_supply_charge", None)
+        if not isinstance(default_supply, (int, float)):
+            default_supply = self._get_option(CONF_DAILY_SUPPLY_CHARGE, 0.0) or 0.0
 
         tariff_type_options = {
             "flat": "Flat Rate (single rate all day)",
@@ -18334,15 +18626,19 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
         schema_fields: dict[Any, Any] = {
             vol.Optional(
                 "plan_name",
-                default=(current_tariff or {}).get(
-                    "name",
-                    (
-                        "AGL Battery Rewards"
-                        if is_agl
-                        else "FOUR4FREE"
-                        if is_four4free_custom
-                        else ""
-                    ),
+                default=(
+                    draft.get("plan_name", "")
+                    if draft
+                    else (current_tariff or {}).get(
+                        "name",
+                        (
+                            "AGL Battery Rewards"
+                            if is_agl
+                            else "FOUR4FREE"
+                            if is_four4free_custom
+                            else ""
+                        ),
+                    )
                 ),
             ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
             vol.Required("tariff_type", default="tou"): SelectSelector(
@@ -18376,7 +18672,9 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
             ),
             vol.Optional(
                 "seasonal_rates",
-                default=len((current_tariff or {}).get("seasons", {})) > 1
+                default=len(draft_seasons) > 1
+                if draft
+                else len((current_tariff or {}).get("seasons", {})) > 1
                 or (
                     bool((current_tariff or {}).get("seasons"))
                     and "All Year" not in (current_tariff or {}).get("seasons", {})
@@ -18393,16 +18691,31 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
                     mode=NumberSelectorMode.BOX,
                 )
             )
+        schema_fields[
+            vol.Optional(CONF_DAILY_SUPPLY_CHARGE, default=float(default_supply))
+        ] = NumberSelector(
+            NumberSelectorConfig(
+                min=0.0,
+                max=500.0,
+                step=0.00001,
+                unit_of_measurement=self._selector_unit("daily"),
+                mode=NumberSelectorMode.BOX,
+            )
+        )
 
+        plan_info = (
+            tariff_draft_warnings_text(draft) + "\n\n" if draft else ""
+        )
         return self.async_show_form(
             step_id="custom_tariff_options",
             data_schema=vol.Schema(schema_fields),
             errors=errors,
             description_placeholders={
                 "info": (
-                    f"Configure your electricity tariff. All rates in "
-                    f"{self._selector_unit()}.\nFor TOU, you'll add time periods "
-                    "in the next step."
+                    plan_info
+                    + f"Configure your electricity tariff. All rates in "
+                    f"{self._selector_unit()}.\nThe standard rates apply outside "
+                    "the time periods you add in the next step."
                     + (
                         " AGL's 17:00-21:00 and off-peak export rates are "
                         "applied automatically."
@@ -18461,11 +18774,28 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
                     break
                 try:
                     name = str(period["name"])
-                    start = int(period["start"])
-                    end = int(period["end"])
-                    days = str(period["days"])
-                    import_rate = float(period["import_rate"])
-                    export_rate = float(period["export_rate"])
+                    # Whole hours stay ints; newer rows may use half hours.
+                    start = float(period["start"])
+                    end = float(period["end"])
+                    start = int(start) if start.is_integer() else start
+                    end = int(end) if end.is_integer() else end
+                    raw_days = period["days"]
+                    days = (
+                        sorted({int(day) for day in raw_days})
+                        if isinstance(raw_days, list)
+                        else str(raw_days)
+                    )
+                    # A blank (None) rate means the standard rate applies.
+                    import_rate = (
+                        None
+                        if period["import_rate"] is None
+                        else float(period["import_rate"])
+                    )
+                    export_rate = (
+                        None
+                        if period["export_rate"] is None
+                        else float(period["export_rate"])
+                    )
                 except (KeyError, TypeError, ValueError):
                     recovered = []
                     break
@@ -18473,10 +18803,17 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
                     name not in {"PEAK", "SHOULDER", "OFF_PEAK", "SUPER_OFF_PEAK"}
                     or not 0 <= start <= 24
                     or not 0 <= end <= 24
-                    or days not in {"weekdays", "weekends", "all_days"}
+                    or start * 2 != int(start * 2)
+                    or end * 2 != int(end * 2)
+                    or (
+                        days not in {"weekdays", "weekends", "all_days"}
+                        if isinstance(days, str)
+                        else not days or not all(0 <= day <= 6 for day in days)
+                    )
                 ):
                     recovered = []
                     break
+                label = period.get("label")
                 recovered.append(
                     {
                         "name": name,
@@ -18485,6 +18822,11 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
                         "days": days,
                         "import_rate": import_rate,
                         "export_rate": export_rate,
+                        **(
+                            {"label": label.strip()[:60]}
+                            if isinstance(label, str) and label.strip()
+                            else {}
+                        ),
                         **(
                             {"season": str(period["season"])}
                             if "season" in period
@@ -18762,7 +19104,7 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
     async def async_step_tariff_period_options(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Add a tariff time period (options flow). Same as config flow version."""
+        """Edit the tariff period table (options flow). Same as config flow version."""
         from .const import DOMAIN
 
         errors: dict[str, str] = {}
@@ -18785,26 +19127,23 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
                     await self._save_custom_tariff(custom_tariff)
                 return await self.async_step_tariff_period_options()
 
-            try:
-                start_hour = int(user_input.get("period_start", "15:00").split(":")[0])
-                end_hour = int(user_input.get("period_end", "21:00").split(":")[0])
-            except (ValueError, IndexError):
-                start_hour = 15
-                end_hour = 21
+            editing = getattr(self, "_tariff_period_editing", None)
+            edit_period = user_input.get("edit_period", "none")
+            if edit_period not in (None, "none"):
+                selected = PowerSyncConfigFlow._pop_tariff_period(
+                    self._tariff_periods, edit_period
+                )
+                if editing:
+                    self._tariff_periods.append(editing)
+                self._tariff_period_editing = selected
+                return await self.async_step_tariff_period_options()
 
-            period = {
-                "name": user_input.get("period_type", "PEAK"),
-                "season": user_input.get(
-                    "season",
-                    getattr(self, "_tariff_seasons", [{"name": "All Year"}])[0][
-                        "name"
-                    ],
-                ),
-                "start": start_hour,
-                "end": end_hour,
-                "days": user_input.get("period_days", "weekdays"),
-                "import_rate": user_input.get("import_rate", 45) / 100,
-                "export_rate": (
+            next_action = user_input.get("next_action")
+            if next_action == "finish":
+                if editing:
+                    self._tariff_periods.append(editing)
+            else:
+                agl_export_rate = (
                     float(
                         getattr(
                             self,
@@ -18817,165 +19156,71 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
                     )
                     / 100
                     if is_agl
-                    else user_input.get("export_rate", 5) / 100
-                ),
-            }
-            self._tariff_periods.append(period)
+                    else None
+                )
+                period, error = PowerSyncConfigFlow._tariff_period_from_input(
+                    user_input,
+                    default_season=getattr(
+                        self, "_tariff_seasons", [{"name": "All Year"}]
+                    )[0]["name"],
+                    fixed_export_rate=agl_export_rate,
+                    whole_hours=is_agl,
+                )
+                if error:
+                    errors["base"] = error
+                else:
+                    self._tariff_periods.append(period)
+                    if next_action == "add_another" or (
+                        next_action is None and user_input.get("add_another", False)
+                    ):
+                        self._tariff_period_editing = None
+                        return await self.async_step_tariff_period_options()
 
-            if user_input.get("add_another", False):
-                return await self.async_step_tariff_period_options()
+            if not errors:
+                # Done — build and save tariff, then confirm the allowance.
+                self._tariff_period_editing = None
+                custom_tariff = self._build_tariff_from_periods_compat(
+                    self._tariff_periods,
+                )
+                await self._save_custom_tariff(custom_tariff)
+                self._pending_custom_tariff = custom_tariff
+                return await self.async_step_tariff_allowance_options()
 
-            # Done — build and save tariff
-            custom_tariff = self._build_tariff_from_periods_compat(
-                self._tariff_periods,
-            )
-            await self._save_custom_tariff(custom_tariff)
-            return await self.async_step_demand_charge_options()
-
-        tariff_hour_options = [
-            SelectOptionDict(value=f"{h:02d}:00", label=f"{h:02d}:00")
-            for h in range(24)
-        ]
-        day_options = {
-            "weekdays": "Weekdays only (Mon-Fri)",
-            "weekends": "Weekends only (Sat-Sun)",
-            "all_days": "All days (Mon-Sun)",
-        }
-        period_types = {
-            "PEAK": "Peak",
-            "SHOULDER": "Shoulder",
-            "OFF_PEAK": "Off-Peak",
-            "SUPER_OFF_PEAK": "Super Off-Peak",
-        }
-
-        count = len(self._tariff_periods)
-        added_desc = ""
-        if count > 0:
-            lines = []
-            minor_unit = self._selector_unit()
-            rate_precision = 2
-            day_labels = {
-                "weekdays": "Mon-Fri",
-                "weekends": "Sat-Sun",
-                "all_days": "Mon-Sun",
-            }
-            for i, p in enumerate(self._tariff_periods, 1):
-                label = {
-                    "PEAK": "Peak",
-                    "SHOULDER": "Shoulder",
-                    "OFF_PEAK": "Off-Peak",
-                    "SUPER_OFF_PEAK": "Super Off-Peak",
-                }.get(p["name"], p["name"])
-                rate_summary = (
-                    f"{p['import_rate'] * 100:.{rate_precision}f}"
-                    f"{minor_unit} import"
-                )
-                if not is_agl:
-                    rate_summary += (
-                        f", {p['export_rate'] * 100:.2f}{minor_unit} export"
-                    )
-                lines.append(
-                    f"{i}. "
-                    + (
-                        f"{p.get('season')}: "
-                        if len(getattr(self, "_tariff_seasons", [])) > 1
-                        else ""
-                    )
-                    + f"{label} {p['start']:02d}:00-{p['end']:02d}:00 "
-                    f"{day_labels.get(p.get('days'), 'Mon-Sun')} "
-                    f"({rate_summary})"
-                )
-            added_desc = "Periods added:\n" + "\n".join(lines)
-
-        schema_fields: dict[Any, Any] = {
-            vol.Required("period_type", default="PEAK"): SelectSelector(
-                SelectSelectorConfig(
-                    options=[
-                        SelectOptionDict(value=k, label=v)
-                        for k, v in period_types.items()
-                    ],
-                    mode=SelectSelectorMode.DROPDOWN,
-                )
-            ),
-            vol.Required("period_start", default="15:00"): SelectSelector(
-                SelectSelectorConfig(
-                    options=tariff_hour_options,
-                    mode=SelectSelectorMode.DROPDOWN,
-                )
-            ),
-            vol.Required("period_end", default="21:00"): SelectSelector(
-                SelectSelectorConfig(
-                    options=tariff_hour_options,
-                    mode=SelectSelectorMode.DROPDOWN,
-                )
-            ),
-            vol.Optional("period_days", default="all_days"): SelectSelector(
-                SelectSelectorConfig(
-                    options=[
-                        SelectOptionDict(value=k, label=v)
-                        for k, v in day_options.items()
-                    ],
-                    mode=SelectSelectorMode.DROPDOWN,
-                )
-            ),
-            vol.Required("import_rate", default=45): NumberSelector(
-                NumberSelectorConfig(
-                    min=0,
-                    max=200,
-                    step=rate_step,
-                    unit_of_measurement=self._selector_unit(),
-                    mode=NumberSelectorMode.BOX,
-                )
-            ),
-            vol.Optional("add_another", default=False): BooleanSelector(),
-        }
         seasons = getattr(
             self,
             "_tariff_seasons",
             [{"name": "All Year", "from_month": 1, "to_month": 12}],
         )
-        if len(seasons) > 1 or seasons[0].get("name") != "All Year":
-            schema_fields = {
-                vol.Required("season", default=str(seasons[0]["name"])): SelectSelector(
-                    SelectSelectorConfig(
-                        options=PowerSyncConfigFlow._tariff_season_options(seasons),
-                        mode=SelectSelectorMode.DROPDOWN,
-                    )
-                ),
-                **schema_fields,
-            }
-        if count > 0:
-            remove_field = vol.Optional("remove_period", default="none")
-            schema_fields = {
-                remove_field: SelectSelector(
-                    SelectSelectorConfig(
-                        options=PowerSyncConfigFlow._tariff_period_remove_options(
-                            self._tariff_periods
-                        ),
-                        mode=SelectSelectorMode.DROPDOWN,
-                    )
-                ),
-                **schema_fields,
-            }
-        if not is_agl:
-            schema_fields[
-                vol.Required("export_rate", default=5)
-            ] = NumberSelector(
-                NumberSelectorConfig(
-                    min=-100, max=200, step=0.1,
-                    unit_of_measurement=self._selector_unit(),
-                    mode=NumberSelectorMode.BOX,
-                )
-            )
-
+        editing = getattr(self, "_tariff_period_editing", None)
+        added_desc = render_tariff_period_overview(
+            self._tariff_periods,
+            seasons,
+            standard_import=float(getattr(self, "_tariff_offpeak_rate", 0.15)),
+            standard_export=float(getattr(self, "_tariff_fit_rate", 0.05)),
+            unit=self._selector_unit(),
+            show_export=not is_agl,
+            daily_supply=getattr(self, "_tariff_daily_supply_charge", None),
+            supply_unit=self._selector_unit("daily"),
+            when=dt_util.now(),
+        )
         return self.async_show_form(
             step_id="tariff_period_options",
-            data_schema=vol.Schema(schema_fields),
+            data_schema=vol.Schema(
+                PowerSyncConfigFlow._tariff_period_schema(
+                    periods=self._tariff_periods,
+                    seasons=seasons,
+                    editing=editing,
+                    unit=self._selector_unit(),
+                    rate_step=rate_step,
+                    show_export=not is_agl,
+                )
+            ),
             errors=errors,
             description_placeholders={
-                "period_info": added_desc
-                if added_desc
-                else "Add your first tariff period. Remaining hours will be off-peak.",
+                "period_info": (
+                    ("Editing the selected period below.\n\n" if editing else "")
+                    + added_desc
+                ),
             },
         )
 
@@ -19012,6 +19257,13 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
             ),
         )
         ctx._tariff_currency = self._currency()
+        for name in (
+            "_tariff_daily_supply_charge",
+            "_tariff_import_quota",
+            "_tariff_source",
+            "_tariff_utility",
+        ):
+            setattr(ctx, name, getattr(self, name, None))
         ctx._tariff_seasons = getattr(
             self,
             "_tariff_seasons",

@@ -660,3 +660,37 @@ def test_static_display_schedule_is_not_replaced_by_summer_only_payload():
     assert 'static_tou_schedule.get("buy_rates")' in sync_source
     assert 'static_tou_schedule.get("sell_rates")' in sync_source
     assert 'if use_static_tou:\n            buy_prices' in sync_source
+
+
+def test_imported_aer_plan_builds_a_valid_tesla_static_payload(tariff_converter_module):
+    """A published-plan import must survive the Tesla static tariff validator."""
+    import json
+
+    import retail_plan_support
+
+    modules = retail_plan_support.load_modules()
+    record = json.loads((ROOT / "tests" / "fixtures" / "electricity_prd_seasonal_tou.json").read_text())
+    imported = modules.aer_tariff_import.import_prd_electricity_plan(record)
+    # A half-hour boundary must be carried through as minutes.
+    imported["schedule"]["rates"].append(
+        {"direction": "import", "startMinute": 390, "endMinute": 450, "priceC": 30, "label": "Morning"}
+    )
+    draft = modules.aer_tariff_import.schedule_to_tariff_draft(imported, utility="Synthetic")
+    flow_class = retail_plan_support.config_flow_class(modules)
+    context = SimpleNamespace(_selected_electricity_provider="other", _tariff_currency="AUD", hass=None)
+    modules.retail_plan_flow.apply_draft(context, draft)
+    tariff = flow_class._build_tariff_from_periods(context, context._tariff_periods)
+
+    payload = tariff_converter_module.convert_custom_tariff_to_tesla_tariff(tariff)
+
+    assert payload is not None
+    assert payload["daily_charges"] == [{"name": "Charge", "amount": 1.65}]
+    assert set(payload["seasons"]) == {"Apr–May", "Jun–Aug", "Sep–Oct", "Nov–Mar"}
+    ranges = [
+        period
+        for season in payload["seasons"].values()
+        for named in season["tou_periods"].values()
+        for period in named["periods"]
+    ]
+    assert {"fromDayOfWeek": 0, "toDayOfWeek": 6, "fromHour": 6, "fromMinute": 30, "toHour": 7, "toMinute": 30} in ranges
+    assert all(period["fromMinute"] in (0, 30) and period["toMinute"] in (0, 30) for period in ranges)

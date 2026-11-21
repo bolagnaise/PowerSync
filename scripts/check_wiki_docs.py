@@ -27,6 +27,7 @@ COMPONENTS = (
     'amber_smartshift/__init__.py', 'amber_smartshift/client.py',
     'amber_smartshift/runtime.py', 'amber_smartshift/controls.py',
     'amber_smartshift/flow.py', 'amber_smartshift/entities.py',
+    'retail_plan_steps.py', 'retail_plan_flow.py',
 )
 
 def digest(data: str) -> str:

@@ -1,0 +1,54 @@
+{
+  "planId": "SYN0000001MRE1@EME",
+  "displayName": "Synthetic Seasonal Free Hours",
+  "effectiveFrom": "2026-10-01T00:00:00Z",
+  "electricityContract": {
+    "timeZone": "LOCAL",
+    "pricingModel": "TIME_OF_USE_CONT_LOAD",
+    "incentives": [{ "category": "OTHER", "displayName": "Three free hours" }],
+    "controlledLoad": [{ "displayName": "Controlled Load", "rateBlockUType": "singleRate", "singleRate": { "rates": [{ "unitPrice": "0.20" }] } }],
+    "tariffPeriod": [
+      {
+        "startDate": "11-01", "endDate": "03-31", "rateBlockUType": "timeOfUseRates", "dailySupplyCharge": "1.50",
+        "timeOfUseRates": [
+          { "displayName": "Peak", "period": "P1D", "rates": [{ "unitPrice": "0.50" }], "timeOfUse": [{ "days": ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"], "startTime": "15:00", "endTime": "20:59" }] },
+          { "displayName": "Off Peak", "period": "P1D", "rates": [{ "unitPrice": "0.25" }], "timeOfUse": [{ "days": ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"], "startTime": "21:00", "endTime": "10:59" }, { "days": ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"], "startTime": "14:00", "endTime": "14:59" }] },
+          { "displayName": "Free Hours", "period": "P1D", "rates": [{ "volume": 24, "unitPrice": "0.00" }, { "unitPrice": "0.25" }], "timeOfUse": [{ "days": ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"], "startTime": "11:00", "endTime": "13:59" }] }
+        ]
+      },
+      {
+        "startDate": "06-01", "endDate": "08-31", "rateBlockUType": "timeOfUseRates", "dailySupplyCharge": "1.50",
+        "timeOfUseRates": [
+          { "displayName": "Peak", "period": "P1D", "rates": [{ "unitPrice": "0.50" }], "timeOfUse": [{ "days": ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"], "startTime": "15:00", "endTime": "20:59" }] },
+          { "displayName": "Off Peak", "period": "P1D", "rates": [{ "unitPrice": "0.25" }], "timeOfUse": [{ "days": ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"], "startTime": "21:00", "endTime": "10:59" }, { "days": ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"], "startTime": "14:00", "endTime": "14:59" }] },
+          { "displayName": "Free Hours", "period": "P1D", "rates": [{ "volume": 24, "unitPrice": "0.00" }, { "unitPrice": "0.25" }], "timeOfUse": [{ "days": ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"], "startTime": "11:00", "endTime": "13:59" }] }
+        ]
+      },
+      {
+        "startDate": "04-01", "endDate": "05-31", "rateBlockUType": "timeOfUseRates", "dailySupplyCharge": "1.50",
+        "timeOfUseRates": [
+          { "displayName": "Off Peak", "period": "P1D", "rates": [{ "unitPrice": "0.25" }], "timeOfUse": [{ "days": ["MON", "TUE", "WED", "THU", "FRI"], "startTime": "14:00", "endTime": "10:59" }] },
+          { "displayName": "Weekend", "period": "P1D", "rates": [{ "unitPrice": "0.22" }], "timeOfUse": [{ "days": ["SAT", "SUN"], "startTime": "14:00", "endTime": "10:59" }] },
+          { "displayName": "Free Hours", "period": "P1D", "rates": [{ "volume": 24, "unitPrice": "0.00" }, { "unitPrice": "0.25" }], "timeOfUse": [{ "days": ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"], "startTime": "11:00", "endTime": "13:59" }] }
+        ]
+      },
+      {
+        "startDate": "09-01", "endDate": "10-31", "rateBlockUType": "timeOfUseRates", "dailySupplyCharge": "1.50",
+        "timeOfUseRates": [
+          { "displayName": "Off Peak", "period": "P1D", "rates": [{ "unitPrice": "0.25" }], "timeOfUse": [{ "days": ["MON", "TUE", "WED", "THU", "FRI"], "startTime": "14:00", "endTime": "10:59" }] },
+          { "displayName": "Weekend", "period": "P1D", "rates": [{ "unitPrice": "0.22" }], "timeOfUse": [{ "days": ["SAT", "SUN"], "startTime": "14:00", "endTime": "10:59" }] },
+          { "displayName": "Free Hours", "period": "P1D", "rates": [{ "volume": 24, "unitPrice": "0.00" }, { "unitPrice": "0.25" }], "timeOfUse": [{ "days": ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"], "startTime": "11:00", "endTime": "13:59" }] }
+        ]
+      }
+    ],
+    "solarFeedInTariff": [
+      { "scheme": "OTHER", "payerType": "RETAILER", "displayName": "First 10 kWh evening", "tariffUType": "timeVaryingTariffs",
+        "timeVaryingTariffs": [{ "rates": [{ "volume": 10, "unitPrice": "0.12" }], "timeVariations": [{ "days": ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"], "startTime": "17:00", "endTime": "20:59" }] }] },
+      { "scheme": "OTHER", "payerType": "RETAILER", "displayName": "Evening balance", "tariffUType": "timeVaryingTariffs",
+        "timeVaryingTariffs": [{ "rates": [{ "unitPrice": "0.04" }], "timeVariations": [{ "startTime": "17:00", "endTime": "20:59" }] }] },
+      { "scheme": "OTHER", "payerType": "RETAILER", "displayName": "Other times", "tariffUType": "timeVaryingTariffs",
+        "timeVaryingTariffs": [{ "rates": [{ "unitPrice": "0.01" }], "timeVariations": [{ "startTime": "21:00", "endTime": "16:59" }] }] },
+      { "scheme": "PREMIUM", "payerType": "GOVERNMENT", "displayName": "Legacy premium scheme", "tariffUType": "singleTariff", "singleTariff": { "rates": [{ "unitPrice": "0.44" }] } }
+    ]
+  }
+}

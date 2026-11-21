@@ -4,6 +4,7 @@
 - [Flow Power Happy Hour Plus](#flow-power-happy-hour-plus)
 - [AGL Battery Rewards](#agl-battery-rewards)
 - [Octopus Energy and BottlecapDave](#octopus-energy)
+- [Other retailers: published plans, presets and manual rates](#other-retailers)
 
 <a id="agl-battery-rewards"></a>
 
@@ -166,3 +167,49 @@ supplies published tariff rates, not personal Intelligent dispatch adjustments.
 Update through HACS and restart Home Assistant. Inspect the source-status sensor
 and selected meter after updating. Source/test/publication validation does not
 establish installation or physical charging on an individual system.
+
+<a id="other-retailers"></a>
+
+## Other retailers: published plans, presets and manual rates
+
+Choose **Other retailer / fixed TOU** as the electricity provider for a fixed
+flat or time-of-use tariff. Setup then asks for:
+
+1. **Retailer.** Choose **Another retailer / outside Australia** to enter rates
+   manually.
+2. **State and network.** The distribution network named on your bill, such as
+   Ausgrid or CitiPower. Evoenergy (ACT) is listed under New South Wales / ACT.
+3. **Start from.** A published plan, a PowerSync preset or manual entry.
+
+Published plans come from the Australian Energy Regulator's Product Reference
+Data (Energy Made Easy and Victorian Energy Compare). They are the retailer's
+generally available residential offers for that network, not your own account.
+Home Assistant requests them from `cdr.energymadeeasy.gov.au`; the requests
+carry only the retailer and plan identifiers. The chosen plan is loaded into the
+tariff editor for review and nothing is saved until you finish:
+
+- Usage and supply charges are published excluding GST, so 10% is added.
+  Feed-in rates are GST-free and used as published.
+- Inclusive end times such as 20:59 become 21:00; other off-boundary times are
+  rounded to the nearest half hour with a warning.
+- The rate covering most of the week becomes the standard import rate. Hours
+  without a published feed-in rate use the lowest published feed-in rate.
+- Seasonal date ranges become calendar seasons, and overlapping import and
+  export windows are split so each period has one import and one export price.
+- A daily first-kWh block becomes the free import allowance.
+
+Closed government premium feed-in schemes, controlled load, demand charges,
+incentives, non-daily blocks, seasonal allowances and premium export allowances
+are not loaded; the editor lists them so you can check your contract. A premium
+export window uses the rate that applies after its allowance.
+
+The editor shows the periods as a table with today's 24-hour import price strip.
+Each period has a name, half-hour start and end times, days, and an import and an
+export price; a blank price uses the standard rate. The daily supply charge and a
+daily free import allowance (first N kWh in a window at a lower price) are set in
+the same flow. Existing custom tariffs keep working unchanged, and reopening them
+keeps their periods, supply charge and allowance.
+
+See the wiki's
+[Tariffs and time periods](https://github.com/bolagnaise/PowerSync/wiki/Tariffs-and-Time-Periods)
+page for every field.
