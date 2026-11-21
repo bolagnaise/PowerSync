@@ -1626,7 +1626,14 @@ def _has_fresh_scheduled_ble_stop(
 
     config = {**config_entry.data, **config_entry.options}
     prefix = vehicle_id[4:]
-    if config.get(CONF_EV_PROVIDER) != EV_PROVIDER_TESLA_BLE or prefix not in resolve_ble_prefixes(hass, config):
+    if vehicle_id.startswith("ble_"):
+        if config.get(CONF_EV_PROVIDER) != EV_PROVIDER_TESLA_BLE or prefix not in resolve_ble_prefixes(hass, config):
+            return False
+    elif config.get(CONF_EV_PROVIDER) == EV_PROVIDER_BOTH and _is_explicit_tesla_vin(vehicle_id):
+        prefix = _resolve_ble_prefix_for_vehicle(hass, config_entry, vehicle_id)
+        if not prefix:
+            return False
+    else:
         return False
 
     def fresh(sample):
@@ -1675,19 +1682,19 @@ async def _release_stopped_scheduled_tesla(
         return False
 
     started_at = state.get("last_start_command_at")
-    ble_only = vehicle_id.startswith("ble_")
-    if not ble_only:
+    native_confirmed = False
+    if not vehicle_id.startswith("ble_"):
         entity_id = await _get_tesla_ev_entity(
             hass, r"sensor\..*_(charging_state|charging|charge_state)(?:_\d+)?$",
             vehicle_id, warn_on_missing=False, config_entry=config_entry,
         )
         charging = hass.states.get(entity_id) if entity_id else None
         observed_at = getattr(charging, "last_reported", None) or getattr(charging, "last_updated", None)
-        if (
-            str(getattr(charging, "state", "")).strip().lower() != "stopped"
-            or not is_current_ev_power_observation(observed_at)
-            or (started_at is not None and not _datetime_is_after(observed_at, started_at))
-        ):
+        native_status = str(getattr(charging, "state", "")).strip().lower()
+        native_status_fresh = is_current_ev_power_observation(observed_at) and (
+            started_at is None or _datetime_is_after(observed_at, started_at)
+        )
+        if native_status_fresh and native_status not in {"stopped", "", "unknown", "unavailable", "none"}:
             return False
 
         current_entity = await _get_tesla_ev_entity(
@@ -1701,18 +1708,22 @@ async def _release_stopped_scheduled_tesla(
         current = hass.states.get(current_entity) if current_entity else None
         amps, _error, _age = _phase_current_state_amps(current)
         if (
-            hass.states.get(entity_id) is not charging
-            or (amps is None and not power_available)
+            (entity_id is not None and hass.states.get(entity_id) is not charging)
             or (amps is not None and amps > 0.5)
             or (power_available and power_kw > _ACTIVE_EV_POWER_EPSILON_KW)
         ):
             return False
 
+        native_confirmed = (
+            native_status_fresh and native_status == "stopped"
+            and (amps is not None or power_available)
+        )
+
     # A concurrent Start can transfer the dynamic controller in place.
     if _start_dynamic_lock.locked():
         return False
     async with _start_dynamic_lock:
-        if ble_only and not _has_fresh_scheduled_ble_stop(hass, config_entry, vehicle_id, started_at):
+        if not native_confirmed and not _has_fresh_scheduled_ble_stop(hass, config_entry, vehicle_id, started_at):
             return False
         await _action_stop_ev_charging_dynamic(hass, config_entry, {
             "vehicle_id": vehicle_id,
