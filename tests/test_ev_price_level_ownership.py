@@ -9701,6 +9701,65 @@ def test_price_forecast_uses_the_configured_tariff_for_custom_tou(monkeypatch):
     assert by_hour[9] < by_hour[6]
 
 
+def test_localvolts_price_forecast_uses_live_provider_forecast(monkeypatch):
+    brisbane_tz = timezone(timedelta(hours=10))
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "now",
+        lambda: datetime(2026, 7, 3, 20, 20, tzinfo=brisbane_tz),
+    )
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "as_local",
+        lambda value: value.astimezone(brisbane_tz),
+        raising=False,
+    )
+    hass = _FakeHass()
+    hass.data["power_sync"]["entry-1"]["localvolts_coordinator"] = SimpleNamespace(
+        data={
+            "forecast": [
+                {
+                    "nemTime": "2026-07-03T10:05:00Z",
+                    "startTime": "2026-07-03T10:00:00Z",
+                    "channelType": "general",
+                    "perKwh": 18.0,
+                },
+                {
+                    "nemTime": "2026-07-03T11:00:00Z",
+                    "startTime": "2026-07-03T10:55:00Z",
+                    "channelType": "general",
+                    "perKwh": 22.0,
+                },
+                {
+                    "nemTime": "2026-07-03T11:05:00Z",
+                    "startTime": "2026-07-03T11:00:00Z",
+                    "channelType": "general",
+                    "perKwh": 30.0,
+                },
+                {
+                    "nemTime": "2026-07-03T10:05:00Z",
+                    "startTime": "2026-07-03T10:00:00Z",
+                    "channelType": "feedIn",
+                    "perKwh": -5.0,
+                },
+            ]
+        }
+    )
+    entry = _FakeConfigEntry()
+    entry.options = {"electricity_provider": "localvolts"}
+
+    forecast = asyncio.run(
+        ev_planner.PriceForecaster(hass, entry).get_price_forecast(hours=2)
+    )
+
+    assert [row.hour for row in forecast] == [
+        "2026-07-03T20:00:00",
+        "2026-07-03T21:00:00",
+    ]
+    assert [row.import_cents for row in forecast] == [18.0, 30.0]
+    assert forecast[0].export_cents == -5.0
+
+
 def test_epex_price_forecast_uses_real_optimizer_slots_not_generic_tou(monkeypatch):
     """A high current EPEX price must not become a synthetic 15c off-peak."""
     now = datetime(2026, 9, 16, 21, 11, tzinfo=timezone.utc)

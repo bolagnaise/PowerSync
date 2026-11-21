@@ -2176,7 +2176,7 @@ class PriceForecaster:
         """
         Get hourly price forecast (provider-aware).
 
-        For Amber/Flow Power: uses Amber API forecast
+        For Amber, Localvolts, and Flow Power: uses provider forecast data
         For Globird: uses Tesla tariff TOU schedule
         Falls back to generic TOU estimation.
 
@@ -2199,6 +2199,10 @@ class PriceForecaster:
             amber_forecast = await self._get_amber_forecast(hours)
             if amber_forecast:
                 return amber_forecast
+        elif electricity_provider == "localvolts":
+            localvolts_forecast = await self._get_localvolts_forecast(hours)
+            if localvolts_forecast:
+                return localvolts_forecast
 
         # EPEX is a dynamic retail-price provider. A generic Australian TOU
         # estimate is not a safe substitute: it can authorise a grid window
@@ -2323,36 +2327,62 @@ class PriceForecaster:
 
     async def _get_amber_forecast(self, hours: int) -> Optional[List[PriceForecast]]:
         """Get forecast from Amber coordinator data."""
+        from ..const import CONF_AMBER_API_TOKEN
+
+        if not self.config_entry.data.get(CONF_AMBER_API_TOKEN):
+            return None
+        return await self._get_live_provider_forecast(
+            hours,
+            coordinator_key="amber_coordinator",
+            provider_name="Amber",
+        )
+
+    async def _get_localvolts_forecast(
+        self, hours: int
+    ) -> Optional[List[PriceForecast]]:
+        """Get forecast from the Localvolts coordinator data."""
+        return await self._get_live_provider_forecast(
+            hours,
+            coordinator_key="localvolts_coordinator",
+            provider_name="Localvolts",
+            prefer_start_time=True,
+        )
+
+    async def _get_live_provider_forecast(
+        self,
+        hours: int,
+        *,
+        coordinator_key: str,
+        provider_name: str,
+        prefer_start_time: bool = False,
+    ) -> Optional[List[PriceForecast]]:
+        """Convert Amber-compatible dynamic provider forecast data to hourly prices."""
         try:
-            from ..const import DOMAIN, CONF_AMBER_API_TOKEN
+            from ..const import DOMAIN
 
-            # Check if Amber is configured
-            amber_token = self.config_entry.data.get(CONF_AMBER_API_TOKEN)
-            if not amber_token:
-                return None
-
-            # Get forecast from amber_coordinator
             entry_data = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id, {})
-            amber_coordinator = entry_data.get("amber_coordinator")
+            price_coordinator = entry_data.get(coordinator_key)
 
-            if not amber_coordinator or not amber_coordinator.data:
-                _LOGGER.debug("No Amber coordinator data available")
+            if not price_coordinator or not price_coordinator.data:
+                _LOGGER.debug("No %s coordinator data available", provider_name)
                 return None
 
-            # Get forecast data from coordinator (Amber API format)
-            forecast_data = amber_coordinator.data.get("forecast", [])
+            forecast_data = price_coordinator.data.get("forecast", [])
             if not forecast_data:
-                _LOGGER.debug("No forecast data in Amber coordinator")
+                _LOGGER.debug("No forecast data in %s coordinator", provider_name)
                 return None
 
-            # Parse Amber forecast into our format
-            # Group by hour and separate import/export prices
+            # Group the dynamic provider's forecast by hour and separate import/export.
             hourly_prices = {}
             now = _ha_local_now_naive()
 
             for price_item in forecast_data:
                 # Parse the NEM time
-                nem_time = price_item.get("nemTime") or price_item.get("startTime")
+                nem_time = (
+                    price_item.get("startTime") or price_item.get("nemTime")
+                    if prefer_start_time
+                    else price_item.get("nemTime") or price_item.get("startTime")
+                )
                 if not nem_time:
                     continue
 
@@ -2468,18 +2498,25 @@ class PriceForecaster:
                 ))
 
             if forecasts:
-                _LOGGER.info(f"Got {len(forecasts)} hours of Amber price forecast")
+                _LOGGER.info(
+                    "Got %d hours of %s price forecast",
+                    len(forecasts),
+                    provider_name,
+                )
                 # Log a few sample prices for debugging
                 if len(forecasts) >= 3:
                     _LOGGER.debug(
-                        f"Sample prices: now={forecasts[0].import_cents:.1f}c, "
-                        f"+1h={forecasts[1].import_cents:.1f}c, +2h={forecasts[2].import_cents:.1f}c"
+                        "%s sample prices: now=%.1fc, +1h=%.1fc, +2h=%.1fc",
+                        provider_name,
+                        forecasts[0].import_cents,
+                        forecasts[1].import_cents,
+                        forecasts[2].import_cents,
                     )
 
             return forecasts if forecasts else None
 
         except Exception as e:
-            _LOGGER.debug(f"Could not get Amber forecast: {e}")
+            _LOGGER.debug("Could not get %s forecast: %s", provider_name, e)
             return None
 
     async def _get_tariff_forecast(self, hours: int) -> Optional[List[PriceForecast]]:
