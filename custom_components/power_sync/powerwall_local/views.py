@@ -1557,17 +1557,20 @@ class PowerwallBatteryOutputView(HomeAssistantView):
     def __init__(self, hass):
         self._hass = hass
 
-    def _control(self, entry_id):
-        entry = _advanced_control_entry(self._hass, entry_id)
+    def _entry_control(self, entry):
         control = self._hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get("battery_output_control")
         if control is None:
             raise ValueError("Battery output control is unavailable")
         return control
 
+    def _control(self, entry_id):
+        return self._entry_control(_advanced_control_entry(self._hass, entry_id))
+
     async def get(self, request):
         try:
-            result = await self._control(request.query.get("entry_id")).read()
-            return web.json_response({"success": True, **result})
+            entry = _advanced_control_entry(self._hass, request.query.get("entry_id"))
+            result = await self._entry_control(entry).read()
+            return web.json_response({"success": True, **result, "entry_id": entry.entry_id})
         except (ValueError, HomeAssistantError) as error:
             return web.json_response({"success": False, "error": str(error)}, status=409)
 
@@ -1609,8 +1612,7 @@ class PowerwallNativeSiteLimitsView(PowerwallBatteryOutputView):
     url = "/api/power_sync/powerwall/native_site_limits"
     name = "api:power_sync:powerwall:native_site_limits"
 
-    def _control(self, entry_id):
-        entry = _advanced_control_entry(self._hass, entry_id)
+    def _entry_control(self, entry):
         control = self._hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get("native_site_limits_control")
         if control is None:
             raise ValueError("Native site limits are unavailable")
@@ -1635,8 +1637,7 @@ class PowerwallBackupPreparationView(PowerwallBatteryOutputView):
     url = "/api/power_sync/powerwall/backup_preparation"
     name = "api:power_sync:powerwall:backup_preparation"
 
-    def _control(self, entry_id):
-        entry = _advanced_control_entry(self._hass, entry_id)
+    def _entry_control(self, entry):
         control = self._hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get("backup_preparation_control")
         if control is None:
             raise ValueError("Backup preparation is unavailable")

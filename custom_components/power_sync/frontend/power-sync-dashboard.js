@@ -13,6 +13,7 @@
 
 const PS_LAYOUT_KEY = 'power-sync-board-layout-v1';
 const PS_HIDDEN_KEY = 'power-sync-board-hidden-v1';
+const PS_BATTERY_TARGET_KEY = 'power-sync-battery-target-v1';
 const PS_API_TTL_MS = 60_000;
 const PS_HISTORY_TTL_MS = 5 * 60_000;
 const PS_CONFIRM_MS = 4000;
@@ -2329,9 +2330,39 @@ class PsAdvancedBatteryControls extends HTMLElement {
     if (this.isConnected && this._initialRead === this._contextGeneration) void this._refresh();
   }
   _newDraft() { return { power_w: '1800', minutes: '30', import_limit_w: '', export_limit_w: '', mode: 'power', target_soc: '', backup_minutes: '120', takeover: false }; }
+  _restoreTargetDraft(output, entryId) {
+    const userId = this._hass?.user?.id;
+    const siteId = output.entry_id ?? entryId;
+    const capability = output.capabilities?.battery_output;
+    if (!userId || !siteId || !capability?.supported) return;
+    const key = `${PS_BATTERY_TARGET_KEY}:${JSON.stringify([userId, siteId])}`;
+    if (this._targetStorageKey === key) return;
+    this._targetStorageKey = key;
+    if (this._confirm === 'target') this._confirm = null;
+
+    const { mode, power_w, minutes, target_soc, takeover } = this._newDraft();
+    Object.assign(this._draft, { mode, power_w, minutes, target_soc, takeover });
+    const saved = psStore(key, null);
+    if (!saved || !['power', 'idle', 'charge', 'discharge'].includes(saved.mode)) return;
+    if (!Number.isInteger(saved.minutes) || saved.minutes < 1 || saved.minutes > 1440) return;
+    if (!Number.isInteger(saved.power_w) || Math.abs(saved.power_w) > 10000) return;
+    if (saved.power_w === 0 && !capability.zero_hold_supported) return;
+    if (saved.target_soc !== undefined && (!capability.target_soc_supported || saved.power_w === 0 ||
+        !Number.isInteger(saved.target_soc) || saved.target_soc < 1 || saved.target_soc > 100)) return;
+    if ((saved.mode === 'idle' && saved.power_w !== 0) ||
+        (saved.mode === 'charge' && (saved.power_w >= 0 || saved.target_soc === undefined)) ||
+        (saved.mode === 'discharge' && (saved.power_w <= 0 || saved.target_soc === undefined))) return;
+    Object.assign(this._draft, {
+      mode: saved.mode,
+      power_w: saved.mode === 'idle' ? power_w : String(saved.mode === 'power' ? saved.power_w : Math.abs(saved.power_w)),
+      minutes: String(saved.minutes),
+      target_soc: saved.target_soc === undefined ? '' : String(saved.target_soc),
+    });
+  }
   set entryId(value) {
     if (value === this._entryId) return;
     this._entryId = value; ++this._contextGeneration;
+    this._targetStorageKey = null;
     this._draft = this._newDraft(); this._output = null; this._limits = null; this._backup = null;
     this._confirm = null; this._busy = false; this._message = ''; this._errors = {}; this._loading = new Set(); this._render(); this._loadInitial();
   }
@@ -2346,6 +2377,7 @@ class PsAdvancedBatteryControls extends HTMLElement {
         const value = await this._hass.callApi('GET', this._path(path, entryId));
         if (!current()) return;
         if (value?.success === false || value?.schema_version !== 1) throw Error(value?.error || 'Unsupported control status. Update the backend.');
+        if (path === 'battery_dispatch') this._restoreTargetDraft(value, entryId);
         this[field] = value; delete this._errors[path];
       } catch (error) {
         if (current()) this._errors[path] = error.message || 'Status unavailable';
@@ -2411,11 +2443,23 @@ class PsAdvancedBatteryControls extends HTMLElement {
         this._confirm = action; this._confirmPayload = confirmation; this._render(); return;
       }
       this._confirm = null; this._busy = true; this._message = ''; this._render();
+      const targetStorageKey = this._targetStorageKey;
+      const targetMode = d.mode;
       body.request_id = globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
       if (this._entryId) body.entry_id = this._entryId;
       const result = await this._hass.callApi('POST', `power_sync/powerwall/${resource}`, body);
       if (result?.success === false) throw Error(result.error || 'Request unconfirmed');
-      if (isCurrent()) this._message = 'Control updated.';
+      if (isCurrent()) {
+        if (action === 'target' && result?.success === true && targetStorageKey && targetStorageKey === this._targetStorageKey) {
+          psStoreSet(targetStorageKey, {
+            mode: targetMode,
+            power_w: body.power_w,
+            minutes: body.duration_seconds / 60,
+            target_soc: body.target_soc,
+          });
+        }
+        this._message = 'Control updated.';
+      }
     } catch (error) { if (isCurrent()) this._message = `${error.message || 'Request unconfirmed'}. Refresh state before another request.`; }
     finally {
       if (isCurrent() && this._busy) await this._refresh(generation);
