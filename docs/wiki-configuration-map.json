@@ -2502,6 +2502,16 @@
     },
     {
       "scope": "config",
+      "form": "localvolts",
+      "field": "aemo_region",
+      "label": "NEM region",
+      "page": "Provider-Localvolts.md",
+      "source_line": 3598,
+      "group": null,
+      "rendering": "conditional union; see page availability notes"
+    },
+    {
+      "scope": "config",
       "form": "battery_system",
       "field": "battery_system",
       "label": "Battery system",
@@ -7773,6 +7783,16 @@
     {
       "scope": "options",
       "form": "localvolts_options",
+      "field": "aemo_region",
+      "label": "NEM region",
+      "page": "Provider-Localvolts.md",
+      "source_line": 17630,
+      "group": null,
+      "rendering": "conditional union; see page availability notes"
+    },
+    {
+      "scope": "options",
+      "form": "localvolts_options",
       "field": "auto_sync_enabled",
       "label": "Enable automatic TOU sync",
       "page": "Provider-Localvolts.md",
@@ -10430,6 +10450,10 @@
       "page": "SolarEdge-AC-Telemetry",
       "status": "documented"
     },
+    "config.localvolts.aemo_region": {
+      "page": "Provider-Localvolts",
+      "status": "documented"
+    },
     "config.localvolts.localvolts_api_key": {
       "page": "Provider-Localvolts",
       "status": "documented"
@@ -10571,6 +10595,10 @@
       "status": "documented"
     },
     "config.ml_options.optimization_spread_import_enabled": {
+      "page": "Optimization-Settings",
+      "status": "documented"
+    },
+    "config.ml_options.optimization_use_historical_ev_data": {
       "page": "Optimization-Settings",
       "status": "documented"
     },
@@ -11690,6 +11718,10 @@
       "status": "source_text_only",
       "reason": "Not in the active source-schema field reference; legacy/helper/conditional text is not proof of a visible control. Review this exclusion on source change."
     },
+    "options.ev_charging_setup.optimization_use_historical_ev_data": {
+      "status": "source_text_only",
+      "reason": "The optimiser control is documented under Optimization. This legacy EV setup text is not an active schema control."
+    },
     "options.ev_charging_setup.sigenergy_charger_charge_power_limit_entity": {
       "status": "source_text_only",
       "reason": "Not in the active source-schema field reference; legacy/helper/conditional text is not proof of a visible control. Review this exclusion on source change."
@@ -12314,6 +12346,10 @@
       "page": "SolarEdge-AC-Telemetry",
       "status": "documented"
     },
+    "options.localvolts_options.aemo_region": {
+      "page": "Provider-Localvolts",
+      "status": "documented"
+    },
     "options.localvolts_options.auto_sync_enabled": {
       "page": "Provider-Localvolts",
       "status": "documented"
@@ -12662,7 +12698,19 @@
       "page": "Optimization-Settings",
       "status": "documented"
     },
+    "options.optimization.optimization_use_historical_ev_data": {
+      "page": "Optimization-Settings",
+      "status": "documented"
+    },
     "options.optimization.profit_max_enabled": {
+      "page": "Optimization-Settings",
+      "status": "documented"
+    },
+    "options.optimization.tesla_force_discharge_buy_price": {
+      "page": "Optimization-Settings",
+      "status": "documented"
+    },
+    "options.optimization.tesla_force_discharge_sell_price": {
       "page": "Optimization-Settings",
       "status": "documented"
     },
@@ -12736,6 +12784,18 @@
     },
     "options.sigenergy_connection.sigenergy_username": {
       "page": "Battery-Sigenergy",
+      "status": "documented"
+    },
+    "options.solar_accounting.additional_solar_enabled": {
+      "page": "Additional-Solar-Accounting",
+      "status": "documented"
+    },
+    "options.solar_accounting.additional_solar_load_basis": {
+      "page": "Additional-Solar-Accounting",
+      "status": "documented"
+    },
+    "options.solar_accounting.additional_solar_power_entity": {
+      "page": "Additional-Solar-Accounting",
       "status": "documented"
     },
     "options.solax_battery_options.solax_battery_capacity_kwh": {
@@ -12924,38 +12984,6 @@
     },
     "options.zaptec_cloud_options.zaptec_username": {
       "page": "EV-Smart-Charging",
-      "status": "documented"
-    },
-    "options.optimization.tesla_force_discharge_buy_price": {
-      "page": "Optimization-Settings",
-      "status": "documented"
-    },
-    "options.optimization.tesla_force_discharge_sell_price": {
-      "page": "Optimization-Settings",
-      "status": "documented"
-    },
-    "options.solar_accounting.additional_solar_enabled": {
-      "page": "Additional-Solar-Accounting",
-      "status": "documented"
-    },
-    "options.solar_accounting.additional_solar_load_basis": {
-      "page": "Additional-Solar-Accounting",
-      "status": "documented"
-    },
-    "options.solar_accounting.additional_solar_power_entity": {
-      "page": "Additional-Solar-Accounting",
-      "status": "documented"
-    },
-    "options.ev_charging_setup.optimization_use_historical_ev_data": {
-      "status": "source_text_only",
-      "reason": "The optimiser control is documented under Optimization. This legacy EV setup text is not an active schema control."
-    },
-    "options.optimization.optimization_use_historical_ev_data": {
-      "page": "Optimization-Settings",
-      "status": "documented"
-    },
-    "config.ml_options.optimization_use_historical_ev_data": {
-      "page": "Optimization-Settings",
       "status": "documented"
     }
   }
