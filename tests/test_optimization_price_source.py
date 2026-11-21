@@ -2561,11 +2561,16 @@ def test_optional_second_pass_failure_keeps_previous_completed_schedule_price_pa
     planning = next(node.body for node in method.body if isinstance(node, ast.Try))
     boundaries = []
     for node in planning:
-        if isinstance(node, ast.If) and ast.unparse(node.test) == (
-            "reserve_changed or used_reference_override"
+        if isinstance(node, ast.If) and any(
+            isinstance(child, ast.BoolOp)
+            and isinstance(child.op, ast.Or)
+            and {value.id for value in child.values if isinstance(value, ast.Name)}
+            == {"reserve_changed", "used_reference_override"}
+            for child in ast.walk(node.test)
         ):
-            # Keep the real awaited solve; it fails before its overlays run.
-            boundaries.append(node.body[0])
+            # Keep the production guard and awaited solve. The injected
+            # failure happens before overlays or plan publication can run.
+            boundaries.append(ast.If(test=node.test, body=[node.body[0]], orelse=[]))
         elif isinstance(node, ast.Assign) and any(
             isinstance(target, ast.Attribute) and target.attr in {
                 "_current_schedule", "_last_optimizer_result"
@@ -2577,12 +2582,16 @@ def test_optional_second_pass_failure_keeps_previous_completed_schedule_price_pa
             and node.value.func.attr == "_commit_price_forecast_cache"
         ):
             boundaries.append(node)
-    assert sum(isinstance(node, ast.Assign) and isinstance(node.value, ast.Await)
-               for node in boundaries) == 1
+    assert sum(
+        isinstance(node, ast.Assign) and isinstance(node.value, ast.Await)
+        for boundary in boundaries for node in ast.walk(boundary)
+    ) == 1
     function = ast.parse(
-        "async def publish(self, result, _run_optimizer_once, import_prices, export_prices): pass"
+        "async def publish(self, result, _run_optimizer_once, import_prices, export_prices):\n"
+        "    reserve_changed = True\n"
+        "    used_reference_override = False\n"
     ).body[0]
-    function.body = boundaries
+    function.body.extend(boundaries)
     namespace = {}
     exec(compile(ast.fix_missing_locations(ast.Module(
         body=[function], type_ignores=[]

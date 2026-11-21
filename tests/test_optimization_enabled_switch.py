@@ -328,7 +328,10 @@ def test_auto_apply_reserve_recommendation_uses_manual_reference_floor():
         "                solve_reserve_override"
     ) in coordinator_source
     assert "used_reference_override = solve_reserve_override is not None" in coordinator_source
-    assert "if reserve_changed or used_reference_override:" in coordinator_source
+    assert (
+        '(reserve_changed or used_reference_override)\n'
+        '                and not getattr(result, "degraded", False)'
+    ) in coordinator_source
     assert "result = await _run_optimizer_once()" in coordinator_source
     assert "result = self._optimizer.reconcile_result_with_schedule(" in coordinator_source
     assert "self._set_active_export_reserve_floor_slots(None, None)" in coordinator_source
