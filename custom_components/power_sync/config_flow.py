@@ -3595,6 +3595,15 @@ class PowerSyncConfigFlow(AmberSetupMixin, config_entries.ConfigFlow, domain=DOM
                 ),
                 vol.Required(CONF_LOCALVOLTS_PARTNER_ID): TextSelector(),
                 vol.Required(CONF_LOCALVOLTS_NMI): TextSelector(),
+                vol.Required(CONF_AEMO_REGION): SelectSelector(
+                    SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(value=key, label=label)
+                            for key, label in AEMO_REGIONS.items()
+                        ],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
+                ),
             }
         )
 
@@ -17585,6 +17594,7 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
                     CONF_LOCALVOLTS_API_KEY: api_key,
                     CONF_LOCALVOLTS_PARTNER_ID: partner_id,
                     CONF_LOCALVOLTS_NMI: nmi,
+                    CONF_AEMO_REGION: user_input.get(CONF_AEMO_REGION),
                     CONF_AUTO_SYNC_ENABLED: user_input.get(
                         CONF_AUTO_SYNC_ENABLED, True
                     ),
@@ -17613,6 +17623,21 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
                     vol.Required(
                         CONF_LOCALVOLTS_NMI, default=current_nmi
                     ): TextSelector(),
+                    vol.Required(
+                        CONF_AEMO_REGION,
+                        default=self._get_option(
+                            CONF_AEMO_REGION,
+                            self.config_entry.data.get(CONF_AEMO_REGION, ""),
+                        ),
+                    ): SelectSelector(
+                        SelectSelectorConfig(
+                            options=[
+                                SelectOptionDict(value=key, label=label)
+                                for key, label in AEMO_REGIONS.items()
+                            ],
+                            mode=SelectSelectorMode.DROPDOWN,
+                        )
+                    ),
                     vol.Optional(
                         CONF_AUTO_SYNC_ENABLED, default=current_auto_sync
                     ): BooleanSelector(),
