@@ -371,7 +371,7 @@ async def async_recover_ble_stops(hass, entry, inventory, *, confirm_complete_hi
 
 
 async def _refresh_held_scope(hass, entry, runtime, incident_id, inventory, bridges, refs, affected, *, allow_positive=False):
-    """Reconfirm changed Stop history on an explicit retry of the same scope."""
+    """Reconfirm changed BLE history on an explicit retry of the same scope."""
     from . import tesla_ev_recovery as manager
 
     async with manager._journal_lock(runtime):
@@ -409,19 +409,27 @@ async def _refresh_held_scope(hass, entry, runtime, incident_id, inventory, brid
         terminal_removals = recovery.get(manager._TERMINAL_REMOVALS_KEY) or {}
         retained_root = _retained_root(runtime)
 
-        def proven_terminal_stop(ref):
+        def proven_terminal_attempt(ref):
             route = ref.get("route")
-            if (ref.get("outcome") != "pending" or ref.get("operation") != "stop"
-                    or not isinstance(route, Mapping)):
+            operation = ref.get("operation")
+            if (ref.get("outcome") != "pending" or not isinstance(route, Mapping)
+                    or route.get("kind") != "ble"):
+                return False
+            if operation != "stop" and (
+                basis.get("kind") != "ble_command_inventory_v2"
+                or operation not in {"start", "rate", "limit"}
+            ):
                 return False
             vehicle_id, attempt_id, _ = identity(ref)
             if attempt_id in retained_root["vehicles"].get(vehicle_id, {}).get("attempts", {}):
                 return False
             proof = terminal_removals.get(vehicle_id, {}).get(attempt_id)
             return (
-                isinstance(proof, Mapping) and proof.get("outcome") in {"not_sent", "confirmed"}
+                isinstance(proof, Mapping)
+                and (proof.get("outcome") == "not_sent"
+                     or (operation == "stop" and proof.get("outcome") == "confirmed"))
                 and proof.get("vehicle_id") == vehicle_id and proof.get("attempt_id") == attempt_id
-                and proof.get("operation") == "stop" and proof.get("route") == route
+                and proof.get("operation") == operation and proof.get("route") == route
                 and proof.get("entity_id") == route.get("entity_id")
             )
 
@@ -431,11 +439,11 @@ async def _refresh_held_scope(hass, entry, runtime, incident_id, inventory, brid
             exact = current.get(identity(ref))
             if exact is not None:
                 return binding(ref) == binding(exact)
-            # A captured pending Stop can finish without a send or with
-            # confirmed readback. Require its exact durable finish proof.
-            # The remaining history still needs fresh producer proof.
+            # An exactly matched unsent command cannot affect the vehicle.
+            # Confirmed readback can settle a Stop. Remaining history still
+            # needs fresh producer proof before recovery can release it.
             if ref.get("hazard_id") is None:
-                return proven_terminal_stop(ref)
+                return proven_terminal_attempt(ref)
             # Containment reuses ble:<prefix>. The durable union moves its
             # previous quarantine to a history key. Require the exact original
             # attempt and complete binding, never adopt the new stable-key row.
