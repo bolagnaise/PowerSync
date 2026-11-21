@@ -739,6 +739,7 @@ def build_ev_charge_plan():
     probe = types.ModuleType("power_sync.optimization._ev_plan_probe")
     probe.__package__ = "power_sync.optimization"
     probe.dt_util = dt
+    probe.timedelta = timedelta
     probe.Any = object
     probe._LOGGER = types.SimpleNamespace(
         debug=lambda *args, **kwargs: None,
@@ -842,6 +843,44 @@ def test_a_deadline_already_past_is_still_skipped(build_ev_charge_plan):
         method(types.SimpleNamespace(config_entry=_ENTRY, _ev_integration_enabled=True), _solve_timestamps())
         == []
     )
+
+
+@pytest.mark.parametrize(
+    ("window_start", "first_slot_kw"),
+    [
+        (_NOW - timedelta(seconds=9), 3.45),
+        (_NOW + timedelta(seconds=9), 0.0),
+    ],
+    ids=["already-open", "still-future"],
+)
+def test_rolling_solve_uses_live_time_for_in_progress_ev_slot(
+    build_ev_charge_plan, window_start, first_slot_kw,
+):
+    method, holder, warnings = build_ev_charge_plan
+    executor = _ev_executor(None)
+    state = executor._state["veh-1"]
+    state.is_charging = True
+    state.current_plan.windows = [
+        types.SimpleNamespace(
+            start_time=window_start.isoformat(),
+            end_time=(_NOW + timedelta(minutes=9)).isoformat(),
+            source="grid_offpeak",
+            price_cents_kwh=0.0,
+            estimated_power_kw=3.45,
+        ),
+    ]
+    executor._settings["veh-1"].max_charge_amps = 15
+    executor._settings["veh-1"].voltage = 230
+    holder["executor"] = executor
+    coordinator = types.SimpleNamespace(config_entry=_ENTRY, _ev_integration_enabled=True)
+    slot_start = _NOW - timedelta(seconds=12)
+    timestamps = [slot_start + timedelta(minutes=5 * index) for index in range(3)]
+
+    plan = method(coordinator, timestamps)[0]
+
+    assert warnings == []
+    assert plan.max_power_kw == (first_slot_kw, 3.45, 0.0)
+    assert plan.allow_grid == (bool(first_slot_kw), True, False)
 
 
 def test_optimizer_plan_uses_smart_schedule_windows_and_policy(

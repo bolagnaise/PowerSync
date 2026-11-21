@@ -9478,6 +9478,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             solar_surplus_config = get_stored_solar_surplus_config(entry_data)
 
             now = dt_util.now()
+            now_utc = now.astimezone(dt_util.UTC)
+            slot_duration = timedelta(
+                minutes=max(1, int(getattr(getattr(self, "_config", None), "interval_minutes", 5) or 5))
+            )
             plans = []
             policy_diagnostics: dict[str, dict[str, Any]] = {}
             for vehicle_id, state in (getattr(executor, "_state", {}) or {}).items():
@@ -9585,6 +9589,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             comparison = comparison.replace(
                                 tzinfo=dt_util.DEFAULT_TIME_ZONE
                             )
+                        # A rolling Smart Schedule can clip an open window to
+                        # the current time, after the LP slot's aligned start.
+                        # Use live eligibility for the slot still in progress.
+                        slot_start_utc = comparison.astimezone(dt_util.UTC)
+                        if slot_start_utc <= now_utc < slot_start_utc + slot_duration:
+                            comparison = now.astimezone(comparison.tzinfo)
                         active_window = next(
                             (
                                 window
