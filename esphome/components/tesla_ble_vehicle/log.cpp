@@ -1,5 +1,6 @@
 #include <inttypes.h>
 #include <string.h>
+#include "hex_format.h"
 
 #include <esphome/core/helpers.h>
 #include <esphome/core/log.h>

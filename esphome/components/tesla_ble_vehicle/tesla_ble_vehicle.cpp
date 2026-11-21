@@ -1,4 +1,5 @@
 #include <esp_random.h>
+#include "hex_format.h"
 #include <esphome/core/application.h>
 #include <esphome/components/json/json_util.h>
 #include <esphome/core/helpers.h>
