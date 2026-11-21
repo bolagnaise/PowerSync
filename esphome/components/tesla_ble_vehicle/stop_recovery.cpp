@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 #include "tesla_ble_vehicle.h"
+#include "hex_format.h"
 #include <esphome/core/application.h>
 #include <esphome/components/json/json_util.h>
 #include <esp_random.h>

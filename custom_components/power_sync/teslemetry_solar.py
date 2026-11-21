@@ -325,14 +325,22 @@ def register_services(hass):
                         "upperChargeLimit": call.data["upper_charge_limit"]})
                 if time.time() - gate.requests.get(vin, 0) < 15:
                     raise SolarError("Wait 15 seconds before another native solar request")
+                previously_blocked = gate.blocked(vin)
                 gate.requests[vin] = time.time()
                 await gate.hold(vin, {"status": "unconfirmed"})
-                if provider == "powersync":
-                    observed = await request_settings(async_get_clientsession(hass), token, vin, settings, provider=provider)
-                else:
-                    if settings is not None:
-                        await request_settings(async_get_clientsession(hass), token, vin, settings)
-                    observed = await request_settings(async_get_clientsession(hass), token, vin)
+                try:
+                    if provider == "powersync":
+                        observed = await request_settings(async_get_clientsession(hass), token, vin, settings, provider=provider)
+                    else:
+                        if settings is not None:
+                            await request_settings(async_get_clientsession(hass), token, vin, settings)
+                        observed = await request_settings(async_get_clientsession(hass), token, vin)
+                except (SolarError, asyncio.CancelledError):
+                    # A read can discover native ownership but cannot enable it.
+                    # Preserve an existing hold and every uncertain write.
+                    if settings is None and not previously_blocked:
+                        await gate.release(vin)
+                    raise
                 if observed["enabled"]:
                     await gate.hold(vin, observed)
                 else:

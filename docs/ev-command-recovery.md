@@ -58,9 +58,10 @@ the HA integration does not change bridge firmware or release a hold.
    BLE address, credentials, board settings and keys. Pin the four PedroKTFC
    packages and add the recovery package as shown below. Replace the existing
    package block rather than importing a second copy of those four packages.
-3. Compile and install using ESPHome. The ESP32-S3 configuration was compile
-   checked with ESPHome **2026.10.2**; this is not a hardware recovery test.
-   Retain the existing pairing. Do not press Pair or Regenerate key.
+3. Compile and install using ESPHome. If ESPHome 2026.11.0 reports that
+   `format_hex` is undeclared, update both PowerSync references below to
+   `v2.12.1776` and rebuild. Retain the existing pairing. Do not press Pair or
+   Regenerate key.
 4. Wait for HA's ESPHome connection to return. Verify both new entities belong
    to the same ESPHome device as its Charger switch:
    `sensor.<prefix>_powersync_recovery_proof` and
@@ -72,7 +73,7 @@ Merge these substitutions with your existing ones:
 
 ```yaml
 substitutions:
-  tesla_ble_component: github://bolagnaise/PowerSync@v2.12.1681
+  tesla_ble_component: github://bolagnaise/PowerSync@v2.12.1776
   BLE_library: https://github.com/PedroKTFC/tesla-ble.git#969f05f9dfdd5bfb9f3da5ad6b9f5c2265be133b
 
 packages:
@@ -86,7 +87,7 @@ packages:
       - packages/client.yml
   powersync_stop_recovery:
     url: https://github.com/bolagnaise/PowerSync/
-    ref: v2.12.1681
+    ref: v2.12.1776
     files:
       - esphome/stop-recovery.yaml
 ```

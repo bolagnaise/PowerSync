@@ -348,9 +348,22 @@ async def test_service_provider_monitoring_handover_and_readback(monkeypatch):
     assert not calls
     hass.data.pop('power_sync_native_rate_budget')
     hass.data['power_sync'].pop('two')
+    responses.append(m.SolarError('readback failed'))
+    with pytest.raises(m.SolarError, match='readback failed'):
+        await call(get)
+    assert not gate.blocked(VIN)
+    assert VIN not in gate.store.value['vehicles']
+    assert VIN in gate.store.value['requests']
+    gate.requests.clear()
     responses.extend([None, m.SolarError('readback failed')])
     with pytest.raises(m.SolarError): await call(put)
     assert gate.blocked(VIN)
+    gate.requests.clear()
+    responses.append(m.SolarError('readback still unavailable'))
+    with pytest.raises(m.SolarError, match='still unavailable'):
+        await call(get)
+    assert gate.blocked(VIN)
+    assert VIN in gate.store.value['vehicles']
     gate.requests.clear()
     responses.append({**SETTINGS, 'enabled': False})
     result = await call(get)
