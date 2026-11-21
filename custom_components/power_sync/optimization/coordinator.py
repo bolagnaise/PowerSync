@@ -879,6 +879,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             hass,
             BATTERY_EFFICIENCY_LEARNING_STORE_VERSION,
             f"power_sync.battery_efficiency_learning.{entry_id}",
+            atomic_writes=True,
         )
         self._solar_export_hold = SolarExportHoldController(
             Store(
@@ -19307,7 +19308,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             _LOGGER.debug("Solar forecast learning state: %s", diagnostics)
 
     async def _restore_battery_efficiency_learning(self) -> None:
-        """Restore provider-neutral closed-cycle battery efficiency evidence."""
+        """Restore accepted cycles and the last unfinished cycle checkpoint."""
         try:
             data = await self._battery_efficiency_learning_store.async_load()
         except Exception as exc:
@@ -19335,7 +19336,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             _LOGGER.debug("Battery efficiency learning state: %s", diagnostics)
 
     def _schedule_battery_efficiency_learning_save(self) -> None:
-        """Schedule a coalesced write of accepted/rejected learner state."""
+        """Schedule a bounded write of the latest battery efficiency measurements."""
         store = getattr(self, "_battery_efficiency_learning_store", None)
         learner = getattr(self, "_battery_efficiency_learner", None)
         if store is None or learner is None:
@@ -19344,6 +19345,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             learner.to_dict,
             BATTERY_EFFICIENCY_LEARNING_STORE_SAVE_DELAY,
         )
+
+    async def async_close_battery_efficiency_learning(self) -> None:
+        """Flush the checkpoint and retire this store before config-entry reload."""
+        store = self._battery_efficiency_learning_store
+        if store is not None:
+            # A solve from this entry may still finish during unload.
+            self._battery_efficiency_learning_store = None
+            await store.async_save(self._battery_efficiency_learner.to_dict())
 
     def _battery_efficiency_topology_fingerprint(self, capacity_wh: float) -> str:
         """Return a stable aggregate AC measurement-boundary identifier."""
