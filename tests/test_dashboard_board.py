@@ -2269,3 +2269,56 @@ def test_plan_history_selects_charge_level_and_prices_at_the_requested_time():
     prices:[0,300000,600000,900000].map(t=>model.imp(at(t)))}));
 """)
     assert out == {"soc": [65, 0, None, 40], "prices": [25, 0, -5, 35]}
+
+
+def test_ev_panel_poll_does_not_skip_a_tick_after_a_slow_response():
+    script = (
+        "const fs = require('fs'); const vm = require('vm');"
+        + BROWSER_STUBS
+        + f"const strategy = {json.dumps(str(STRATEGY_PATH))};"
+        + r"""
+    (async () => {
+      let now = 1000;
+      let tick;
+      context.Date = class extends Date { static now() { return now; } };
+      let delay;
+      context.window.setInterval = context.window.setTimeout = (callback, ms) => {
+        tick = callback;
+        delay = ms;
+        return 1;
+      };
+      vm.createContext(context);
+      vm.runInContext(fs.readFileSync(strategy, 'utf8'), context);
+      const Panel = vm.runInContext('PowerSyncEVPanel', context);
+      const panel = new Panel();
+      panel._hass = {callApi() {}};
+      panel._scheduleRender = () => {};
+      panel._syncSelectedLoadpoint = () => {};
+      const starts = [];
+      let finish;
+      panel._fetchBundle = () => {
+        starts.push(now);
+        return new Promise(resolve => { finish = resolve; });
+      };
+
+      panel.connectedCallback();
+      now = 1250;
+      finish({status: {loadpoints: []}});
+      await new Promise(resolve => setImmediate(resolve));
+      const firstCompletedAt = panel._lastFetch;
+      now = 30999;
+      tick();
+      const earlyRetryDelay = delay;
+      now = 31000;
+      tick();
+      tick();
+      console.log(JSON.stringify({starts, firstCompletedAt, earlyRetryDelay}));
+    })().catch(error => { console.error(error); process.exit(1); });
+"""
+    )
+
+    assert _run(script) == {
+        "starts": [1000, 31000],
+        "firstCompletedAt": 1250,
+        "earlyRetryDelay": 1,
+    }

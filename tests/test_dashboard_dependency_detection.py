@@ -902,7 +902,8 @@ def test_dashboard_ev_panel_is_registered_and_api_cached():
     assert "cards.push(_evPanel());" in source
     assert "EV_PANEL_FETCH_INTERVAL_MS = 30000" in source
     assert "window.__powerSyncEVPanelCache" in source
-    assert "window.setInterval(() => this._maybeLoadData(false), EV_PANEL_FETCH_INTERVAL_MS)" in source
+    assert "this._schedulePoll();" in source
+    assert "window.clearTimeout(this._pollTimer)" in source
     assert "this._hass.callApi('GET', 'power_sync/ev/loadpoints/status')" in source
     assert "power_sync/ev/solar_surplus_config" in source
     assert "power_sync/ev/price_level_charging/settings" in source

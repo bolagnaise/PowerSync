@@ -5229,6 +5229,7 @@ class PowerSyncEVPanel extends HTMLElement {
     this._loading = false;
     this._savingKey = null;
     this._lastFetch = 0;
+    this._lastRequestStartedAt = 0;
     this._renderQueued = false;
     this._lastRenderSignature = '';
     this._resizeObserver = null;
@@ -5259,10 +5260,8 @@ class PowerSyncEVPanel extends HTMLElement {
       this._resizeObserver = new ResizeObserver(() => this._scheduleRenderIfChanged());
       this._resizeObserver.observe(this);
     }
-    if (!this._pollTimer) {
-      this._pollTimer = window.setInterval(() => this._maybeLoadData(false), EV_PANEL_FETCH_INTERVAL_MS);
-    }
     this._maybeLoadData(true);
+    this._schedulePoll();
     this._scheduleRender();
   }
 
@@ -5272,13 +5271,24 @@ class PowerSyncEVPanel extends HTMLElement {
       this._resizeObserver = null;
     }
     if (this._pollTimer) {
-      window.clearInterval(this._pollTimer);
+      window.clearTimeout(this._pollTimer);
       this._pollTimer = null;
     }
     if (this._delayTimerTick) {
       window.clearInterval(this._delayTimerTick);
       this._delayTimerTick = null;
     }
+  }
+
+  _schedulePoll() {
+    if (this._pollTimer !== null) return;
+    const remaining = this._lastRequestStartedAt + EV_PANEL_FETCH_INTERVAL_MS - Date.now();
+    const delay = remaining > 0 ? remaining : EV_PANEL_FETCH_INTERVAL_MS;
+    this._pollTimer = window.setTimeout(() => {
+      this._pollTimer = null;
+      this._maybeLoadData(false);
+      this._schedulePoll();
+    }, delay);
   }
 
   getCardSize() {
@@ -5293,10 +5303,12 @@ class PowerSyncEVPanel extends HTMLElement {
     const cached = EV_PANEL_CACHE.get(this._cacheKey());
     if (!cached?.data) return false;
     const fetchedAt = cached.fetchedAt || 0;
-    if (Date.now() - fetchedAt >= EV_PANEL_FETCH_INTERVAL_MS) return false;
+    const startedAt = cached.startedAt ?? fetchedAt;
+    if (Date.now() - startedAt >= EV_PANEL_FETCH_INTERVAL_MS) return false;
     this._data = cached.data;
     this._error = null;
     this._lastFetch = fetchedAt;
+    this._lastRequestStartedAt = startedAt;
     this._syncSelectedLoadpoint();
     return true;
   }
@@ -5305,7 +5317,7 @@ class PowerSyncEVPanel extends HTMLElement {
     if (!this._hass || typeof this._hass.callApi !== 'function') return;
     const now = Date.now();
     if (this._loading) return;
-    if (!force && this._data && now - this._lastFetch < EV_PANEL_FETCH_INTERVAL_MS) return;
+    if (!force && this._data && now - this._lastRequestStartedAt < EV_PANEL_FETCH_INTERVAL_MS) return;
     if (!force && this._restoreCachedData()) {
       this._scheduleRender();
       return;
@@ -5330,6 +5342,7 @@ class PowerSyncEVPanel extends HTMLElement {
         this._data = data;
         this._error = null;
         this._lastFetch = cached?.fetchedAt || Date.now();
+        this._lastRequestStartedAt = cached?.startedAt ?? this._lastFetch;
         this._syncSelectedLoadpoint();
       })
       .catch((err) => {
@@ -5344,6 +5357,9 @@ class PowerSyncEVPanel extends HTMLElement {
 
   async _loadData(cacheKey = this._cacheKey()) {
     this._loading = true;
+    // The timer and request cadence both start before the API round trip.
+    // Completion time remains available for the displayed update timestamp.
+    const startedAt = Date.now();
     const request = this._fetchBundle();
     const previous = EV_PANEL_CACHE.get(cacheKey);
     EV_PANEL_CACHE.set(cacheKey, { ...(previous || {}), promise: request });
@@ -5352,10 +5368,12 @@ class PowerSyncEVPanel extends HTMLElement {
       this._data = data;
       this._error = null;
       this._lastFetch = Date.now();
+      this._lastRequestStartedAt = startedAt;
       this._syncSelectedLoadpoint();
       EV_PANEL_CACHE.set(cacheKey, {
         data: this._data,
         fetchedAt: this._lastFetch,
+        startedAt,
       });
     } catch (err) {
       this._error = err?.message || 'EV API unavailable';
@@ -6658,6 +6676,7 @@ class PowerSyncEVPanel extends HTMLElement {
   _refresh() {
     this._notice = null;
     this._lastFetch = 0;
+    this._lastRequestStartedAt = 0;
     this._maybeLoadData(true);
   }
 
@@ -6797,6 +6816,7 @@ class PowerSyncEVPanel extends HTMLElement {
       }
       this._notice = { type: '', message: response?.data?.message || response?.message || successMessage };
       this._lastFetch = 0;
+      this._lastRequestStartedAt = 0;
       EV_PANEL_CACHE.delete(this._cacheKey());
       await this._loadData(this._cacheKey());
     } catch (err) {
