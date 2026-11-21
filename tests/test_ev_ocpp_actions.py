@@ -14024,9 +14024,11 @@ def test_sigenergy_evdc_solar_surplus_uses_dynamic_rate_when_entity_detected(mon
 def test_dynamic_stop_notification_requires_physical_confirmation(
     monkeypatch, stop_result
 ):
-    """Controller teardown must not announce a stop before its actuator result."""
+    """Stop notifications wait for the actuator result at a schedule boundary."""
     vehicle_id = "5YJTEST00000000A1"
     events: list[object] = []
+    hass = _Hass([])
+    hass.bus = SimpleNamespace(async_fire=lambda name, data: events.append((name, data)))
 
     async def physical_stop(*_args, **_kwargs):
         events.append("physical_stop")
@@ -14043,7 +14045,7 @@ def test_dynamic_stop_notification_requires_physical_confirmation(
             "active": True,
             "cancel_timer": lambda: events.append("cancel_timer"),
             "params": {
-                "owner_mode": "manual",
+                "owner_mode": "scheduled",
                 "dynamic_mode": "battery_target",
                 "charger_type": "tesla",
                 "vehicle_vin": vehicle_id,
@@ -14055,22 +14057,29 @@ def test_dynamic_stop_notification_requires_physical_confirmation(
 
     result = asyncio.run(
         actions._action_stop_ev_charging_dynamic(
-            _Hass([]),
+            hass,
             _Entry(),
             {
                 "vehicle_id": vehicle_id,
                 "stop_charging": True,
-                "stop_reason": "stopped",
+                "stop_reason": "Outside schedule (00:00-01:00)",
             },
         )
     )
 
     assert result is (True if stop_result else False)
     assert events.index("physical_stop") > events.index("cancel_timer")
-    pushes = [event for event in events if isinstance(event, tuple)]
+    pushes = [event for event in events if isinstance(event, tuple) and event[0] == "push"]
     assert bool(pushes) is bool(stop_result)
     if pushes:
         assert events.index(pushes[0]) > events.index("physical_stop")
+    alerts = [event for event in events if isinstance(event, tuple)
+              and event[0] == "power_sync_ev_stop_failed"]
+    assert len(alerts) == int(not stop_result)
+    if alerts:
+        assert events.index(alerts[0]) > events.index("physical_stop")
+        assert alerts[0][1]["record_type"] == "command"
+        assert alerts[0][1]["physical_confirmation"] is False
 
 
 def test_dynamic_time_window_stop_failure_does_not_announce_success(monkeypatch):
