@@ -18710,8 +18710,8 @@ async def _dynamic_ev_update(
     # site import past the meter limit. The battery-surplus branch spends the
     # battery's own grid-charging draw, which is not spare capacity. The
     # scheduled minimum-rate floor below still overrides this at amp level.
+    available_power_kw = min(available_power_kw, grid_headroom_kw)
     site_headroom_kw = grid_headroom_kw
-    available_power_kw = min(available_power_kw, site_headroom_kw)
 
     # When the optimizer has co-planned the car against prices and the import
     # limit, its figure for this interval is a ceiling. Deliberately a ceiling
