@@ -8598,6 +8598,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if getattr(result, "degraded", False):
                     return result, []
                 schedule = result.schedule
+                preserve_ev_sources = (
+                    result.lp_stats.get("ev_sources_reconciled_to_schedule") is True
+                )
                 if self._should_spread_import_schedule():
                     schedule = self._spread_import_schedule(
                         schedule,
@@ -8625,12 +8628,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         export_reserve_floor=post_solve_export_floor,
                         export_prices=spread_export_prices,
                         manual_control_projection=manual_control_projection,
+                        preserve_ev_sources=preserve_ev_sources,
                     )
                 schedule = self._bridge_short_export_gaps(
                     schedule,
                     cost_neutral_export_prices,
                     authoritative_reserve_floor=post_solve_export_floor,
                     manual_control_projection=manual_control_projection,
+                    preserve_ev_sources=preserve_ev_sources,
                 )
                 # Apply off-grid curtailment overlay if enabled — converts
                 # eligible SELF_CONSUMPTION/IDLE slots to OFF_GRID during
@@ -10216,6 +10221,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         *,
         authoritative_reserve_floor: float | list[float] | None = None,
         manual_control_projection: ManualControlProjection | None = None,
+        preserve_ev_sources: bool = False,
     ) -> OptimizationSchedule:
         """Keep export mode through one-slot self-use islands between exports."""
         if (
@@ -10253,6 +10259,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             gap_slots = gap_end - gap_start
 
             if any(pos in fixed_manual_positions for pos in range(gap_start, gap_end)):
+                continue
+            if preserve_ev_sources and any(
+                actions[pos].ev_charge_w > 1e-9 for pos in range(gap_start, gap_end)
+            ):
                 continue
 
             previous_action = actions[gap_start - 1]
@@ -14351,6 +14361,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         *,
         export_prices: list[float] | None = None,
         manual_control_projection: ManualControlProjection | None = None,
+        preserve_ev_sources: bool = False,
     ) -> OptimizationSchedule:
         """Spread planned export energy across each same-price allowed window."""
         actions = list(schedule.actions or [])
@@ -14364,6 +14375,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             allowed = [bool(v) for v in allowed_slots[:n]]
             if len(allowed) < n:
                 allowed.extend([False] * (n - len(allowed)))
+        if preserve_ev_sources:
+            # Changing battery discharge changes the source of the car's
+            # planned draw. Leave those slots outside the export windows.
+            allowed = [
+                can_export and action.ev_charge_w <= 1e-9
+                for can_export, action in zip(allowed, actions)
+            ]
 
         prices: list[float] | None = None
         if export_prices is not None:

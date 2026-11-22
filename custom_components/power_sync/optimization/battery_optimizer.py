@@ -260,6 +260,7 @@ def _reconcile_ev_sources_to_schedule(
     grid_import_kw: list[float],
     *,
     grid_reallocation_allowed: dict[str, list[bool]] | None = None,
+    solar_reallocation_allowed: dict[str, list[bool]] | None = None,
     max_grid_import_kw: float | None = None,
 ) -> dict[str, dict[str, list[float]]] | None:
     """Reattribute EV draw to sources available in the emitted schedule.
@@ -272,7 +273,7 @@ def _reconcile_ev_sources_to_schedule(
     schedule's house/solar/battery/grid balance.  Battery export is deliberately
     removed before battery-to-EV capacity is computed.
 
-    A grid-enabled window can also use import already in the final schedule.
+    A permitted window can also use solar or import already in the final schedule.
     Leave sub-watt settlement rounding unattributed. Return ``None`` when
     the remaining deficit exceeds that tolerance.
     """
@@ -423,23 +424,33 @@ def _reconcile_ev_sources_to_schedule(
                 remaining[vehicle_id] -= allocated
                 budgets[source] -= allocated
 
-        # Projection can give solar to the battery and leave grid power for
-        # an EV even when the LP attributed all of that EV's draw to solar.
-        # Reuse that import only for windows with explicit grid permission.
+        # Reuse unassigned solar or import already in the final schedule.
+        # Reserve the remaining supply for cars with fewer permitted sources
+        # before allocating to cars that can use either source.
         within_import_limit = (
             max_grid_import_kw is None
             or grid_import <= max_grid_import_kw + EV_SOURCE_ROUNDING_TOLERANCE_KW
         )
-        if budgets["grid"] > 1e-9 and within_import_limit:
-            for vehicle_id, allowed in (grid_reallocation_allowed or {}).items():
-                if slot >= len(allowed) or not allowed[slot]:
-                    continue
-                allocated = min(remaining.get(vehicle_id, 0.0), budgets["grid"])
-                if allocated <= 1e-9:
-                    continue
-                sources[vehicle_id]["grid"][slot] += allocated
+        reallocation: dict[str, list[str]] = {}
+        for source, permissions in (
+            ("solar", solar_reallocation_allowed),
+            ("grid", grid_reallocation_allowed if within_import_limit else None),
+        ):
+            if budgets[source] <= 1e-9:
+                continue
+            for vehicle_id, allowed in (permissions or {}).items():
+                if (
+                    remaining.get(vehicle_id, 0.0) > 1e-9
+                    and slot < len(allowed)
+                    and allowed[slot]
+                ):
+                    reallocation.setdefault(vehicle_id, []).append(source)
+        for vehicle_id, available in sorted(reallocation.items(), key=lambda item: len(item[1])):
+            for source in available:
+                allocated = min(remaining[vehicle_id], budgets[source])
+                sources[vehicle_id][source][slot] += allocated
                 remaining[vehicle_id] -= allocated
-                budgets["grid"] -= allocated
+                budgets[source] -= allocated
 
         if math.fsum(remaining.values()) > EV_SOURCE_ROUNDING_TOLERANCE_KW:
             return None
@@ -962,6 +973,7 @@ class OptimizerResult:
     degraded: bool = False
     # Keep solver-resolved eligibility for the final schedule reconciliation.
     ev_grid_reallocation_allowed: dict[str, list[bool]] = field(default_factory=dict)
+    ev_solar_reallocation_allowed: dict[str, list[bool]] = field(default_factory=dict)
 
 
 class BatteryOptimizer:
@@ -6570,6 +6582,7 @@ class BatteryOptimizer:
         ev_charge_kw_by_vehicle: dict[str, list[float]] = {}
         ev_source_kw_by_vehicle: dict[str, dict[str, list[float]]] = {}
         ev_grid_reallocation_allowed: dict[str, list[bool]] = {}
+        ev_solar_reallocation_allowed: dict[str, list[bool]] = {}
         if ev_charge_active:
             for vehicle in range(n_ev_vehicles):
                 # HiGHS can leave trace power in an inactive period within
@@ -6622,6 +6635,7 @@ class BatteryOptimizer:
                     # A grid-limited session keeps its original source split.
                     # A below-minimum-SOC start granted by the solver must use solar.
                     grid_allowed = [False] * n
+                    solar_allowed = [False] * n
                     for t, period in enumerate(periods):
                         allowed = (
                             p_ev_allow_grid[vehicle][t]
@@ -6629,14 +6643,19 @@ class BatteryOptimizer:
                             and x[ev_solar_exception_var(vehicle, t)] < 0.5
                         )
                         grid_allowed[period.start:period.end] = [allowed] * period.slot_count
-                    if vehicle_id in ev_grid_reallocation_allowed:
-                        grid_allowed = [
-                            prior and allowed
-                            for prior, allowed in zip(
-                                ev_grid_reallocation_allowed[vehicle_id], grid_allowed
-                            )
-                        ]
-                    ev_grid_reallocation_allowed[vehicle_id] = grid_allowed
+                        solar_allowed[period.start:period.end] = [
+                            p_ev_allow_solar[vehicle][t]
+                        ] * period.slot_count
+                    for permissions, allowed_slots in (
+                        (ev_grid_reallocation_allowed, grid_allowed),
+                        (ev_solar_reallocation_allowed, solar_allowed),
+                    ):
+                        prior = permissions.get(vehicle_id)
+                        permissions[vehicle_id] = (
+                            [a and b for a, b in zip(prior, allowed_slots)]
+                            if prior is not None
+                            else allowed_slots
+                        )
         ev_charge_kw = (
             [
                 sum(series[t] for series in ev_charge_kw_by_vehicle.values())
@@ -6740,6 +6759,7 @@ class BatteryOptimizer:
                 load,
                 grid_import,
                 grid_reallocation_allowed=ev_grid_reallocation_allowed,
+                solar_reallocation_allowed=ev_solar_reallocation_allowed,
                 max_grid_import_kw=self.max_grid_import_kw,
             )
             if reconciled_sources is None:
@@ -6879,6 +6899,7 @@ class BatteryOptimizer:
                 for vehicle_id, sources in ev_source_kw_by_vehicle.items()
             },
             ev_grid_reallocation_allowed=ev_grid_reallocation_allowed,
+            ev_solar_reallocation_allowed=ev_solar_reallocation_allowed,
         )
 
     def _build_reserve_recommendation(
@@ -10969,6 +10990,9 @@ class BatteryOptimizer:
                 list(grid_import[:n]),
                 grid_reallocation_allowed=getattr(
                     result, "ev_grid_reallocation_allowed", None
+                ),
+                solar_reallocation_allowed=getattr(
+                    result, "ev_solar_reallocation_allowed", None
                 ),
                 max_grid_import_kw=self.max_grid_import_kw,
             )

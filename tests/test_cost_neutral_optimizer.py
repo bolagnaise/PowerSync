@@ -1229,6 +1229,36 @@ def test_cost_neutral_keeps_grid_enabled_ev_plan_during_free_battery_charge(
     assert result.grid_import_w[0] == pytest.approx(5_600)
 
 
+@pytest.mark.parametrize("allow_solar", [True, False], ids=["solar-allowed", "solar-blocked"])
+def test_cost_neutral_reserves_remaining_solar_for_the_grid_blocked_ev(
+    optimizer_module, allow_solar,
+):
+    module = optimizer_module
+    schedule = module.OptimizationSchedule(
+        actions=[module.ScheduleAction(
+            timestamp=_timestamps(1)[0], action="charge", power_w=1000.0,
+            soc=0.5, battery_charge_w=1000.0, ev_charge_w=6000.0,
+        )],
+        predicted_cost=0.0,
+        predicted_savings=0.0,
+    )
+    sources = module._reconcile_ev_sources_to_schedule(
+        {"flexible": [4.0], "grid_blocked": [2.0]},
+        {"flexible": {"battery": [4.0]}, "grid_blocked": {"battery": [2.0]}},
+        schedule, [4.0], [1.0], [4.0],
+        grid_reallocation_allowed={"flexible": [True], "grid_blocked": [False]},
+        solar_reallocation_allowed={"flexible": [True], "grid_blocked": [allow_solar]},
+        max_grid_import_kw=4.0,
+    )
+    if allow_solar:
+        assert sources == {
+            "flexible": {"grid": [4.0], "solar": [0.0], "battery": [0.0]},
+            "grid_blocked": {"grid": [0.0], "solar": [2.0], "battery": [0.0]},
+        }
+    else:
+        assert sources is None
+
+
 @pytest.mark.parametrize("use_highs", [True, False], ids=["lp-then-greedy", "greedy"])
 def test_unreconciled_cost_neutral_ev_plan_cannot_force_grid_charge(
     optimizer_module, monkeypatch, use_highs,
