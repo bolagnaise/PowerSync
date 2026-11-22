@@ -5217,6 +5217,35 @@ const EV_PANEL_PATHS = {
   boost: 'power_sync/ev/boost',
 };
 
+const EV_MANUAL_SOURCE_HELP = {
+  solar_only: 'Solar Only: charges from spare solar. It pauses when solar drops instead of using the grid.',
+  limited_grid_solar: 'Limited Grid + Solar: adds grid power up to the site import limit, leaving room for the home battery to keep charging.',
+  full_grid_solar: 'Full Grid + Solar: charges now at the charger rate, using the grid as needed.',
+};
+
+// Weekday keys follow the HA contract: "0" is Monday through "6" Sunday.
+const EV_WEEKDAYS = [['0', 'Mon', 'Monday'], ['1', 'Tue', 'Tuesday'], ['2', 'Wed', 'Wednesday'],
+  ['3', 'Thu', 'Thursday'], ['4', 'Fri', 'Friday'], ['5', 'Sat', 'Saturday'], ['6', 'Sun', 'Sunday']];
+
+const EV_SMART_STRATEGIES = [
+  ['solar_only', 'Solar Only', 'mdi:solar-power', 'Charges from spare solar. Grid energy is only used when it is free.'],
+  ['solar_preferred', 'Prefer Solar', 'mdi:weather-sunny', 'Starts on spare solar and tops up in grid periods at or below the price limit.'],
+  ['cost_optimized', 'Cheapest', 'mdi:cash-multiple', 'Compares planned solar and grid costs, buying grid energy only at or below the price limit.'],
+  ['time_critical', 'Meet Deadline', 'mdi:clock-alert-outline', 'Reaches the target by departure from any source. May buy grid energy above the price limit.'],
+];
+
+// Policy fields edited by the Smart Schedule policy form. Scalars are the
+// vehicle default; each departure_* map overrides one weekday when present.
+const EV_SMART_POLICY_FIELDS = {
+  priority: { map: 'departure_priorities', type: 'strategy', label: 'Strategy' },
+  max_grid_price_cents: { map: 'departure_max_grid_price_cents', type: 'price', label: 'Maximum grid price' },
+  min_battery_to_start: { map: 'departure_min_battery_to_start', type: 'percent', label: 'Start only above home battery' },
+  preserve_home_battery: { map: 'departure_preserve_home_battery', type: 'bool', label: 'Keep home battery for the house' },
+  consume_battery_level: { map: 'departure_consume_battery_level', type: 'percent', label: 'Car may use home battery down to' },
+  stop_at_battery_floor: { map: 'departure_stop_at_battery_floor', type: 'bool', label: 'Stop the car at that level' },
+  limit_grid_import: { map: 'departure_limit_grid_import', type: 'bool', label: 'Limit grid import' },
+};
+
 class PowerSyncEVPanel extends HTMLElement {
   constructor() {
     super();
@@ -5348,6 +5377,7 @@ class PowerSyncEVPanel extends HTMLElement {
         this._lastFetch = cached?.fetchedAt || Date.now();
         this._lastRequestStartedAt = cached?.startedAt ?? this._lastFetch;
         this._syncSelectedLoadpoint();
+        this._pruneStaleProfileDrafts();
       })
       .catch((err) => {
         if (cacheKey !== this._cacheKey() || generation !== this._loadGeneration) return;
@@ -5377,6 +5407,7 @@ class PowerSyncEVPanel extends HTMLElement {
       this._lastFetch = Date.now();
       this._lastRequestStartedAt = startedAt;
       this._syncSelectedLoadpoint();
+      this._pruneStaleProfileDrafts();
       EV_PANEL_CACHE.set(cacheKey, {
         data: this._data,
         fetchedAt: this._lastFetch,
@@ -6081,6 +6112,158 @@ class PowerSyncEVPanel extends HTMLElement {
           padding: 5px 8px;
           font-size: 11px;
         }
+        .mode-card.wide {
+          grid-column: 1 / -1;
+        }
+        .field-help,
+        .source-help,
+        .policy-help {
+          margin-top: 4px;
+          color: var(--secondary-text-color);
+          font-size: 11px;
+          font-weight: 600;
+          line-height: 1.35;
+          text-transform: none;
+        }
+        .source-help {
+          margin-top: 0;
+        }
+        .unit-input {
+          display: flex;
+          align-items: center;
+          gap: 6px;
+        }
+        .unit-input input {
+          flex: 1 1 auto;
+          min-width: 0;
+        }
+        .unit {
+          flex: 0 0 auto;
+          color: var(--secondary-text-color);
+          font-size: 12px;
+          font-weight: 700;
+          white-space: nowrap;
+        }
+        .smart-toggle[aria-pressed="true"] {
+          color: var(--success-color, #2e7d32);
+          border-color: rgba(76, 175, 80, 0.45);
+        }
+        .policy {
+          grid-column: 1 / -1;
+          display: grid;
+          gap: 10px;
+          padding-top: 8px;
+          border-top: 1px solid var(--divider-color);
+        }
+        .policy fieldset {
+          margin: 0;
+          padding: 8px;
+          min-width: 0;
+          border: 1px solid var(--divider-color);
+          border-radius: 8px;
+        }
+        .policy legend {
+          padding: 0 4px;
+          color: var(--primary-text-color);
+          font-size: 12px;
+          font-weight: 800;
+        }
+        .policy-grid {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+          gap: 8px;
+        }
+        .policy-now {
+          padding: 7px 9px;
+          border-radius: 6px;
+          background: rgba(3, 169, 244, 0.08);
+          border-left: 3px solid var(--primary-color, #03a9f4);
+          color: var(--primary-text-color);
+          font-size: 12px;
+          font-weight: 700;
+          line-height: 1.4;
+        }
+        .day-table {
+          display: grid;
+          gap: 6px;
+        }
+        .day-row {
+          display: grid;
+          grid-template-columns: 52px repeat(2, minmax(0, 1fr));
+          gap: 6px;
+          align-items: start;
+        }
+        .day-name {
+          padding-top: 9px;
+          color: var(--primary-text-color);
+          font-size: 12px;
+          font-weight: 800;
+        }
+        .day-row.head {
+          color: var(--secondary-text-color);
+          font-size: 10px;
+          font-weight: 800;
+          text-transform: uppercase;
+        }
+        .day-row details {
+          grid-column: 2 / -1;
+        }
+        .day-row summary {
+          cursor: pointer;
+          color: var(--secondary-text-color);
+          font-size: 11px;
+          font-weight: 700;
+        }
+        .day-row summary:focus-visible,
+        .command:focus-visible,
+        .segment button:focus-visible,
+        select:focus-visible,
+        input:focus-visible {
+          outline: 2px solid var(--primary-color, #03a9f4);
+          outline-offset: 1px;
+        }
+        .override {
+          border-color: var(--primary-color, #03a9f4);
+        }
+        .policy-actions {
+          display: flex;
+          flex-wrap: wrap;
+          align-items: center;
+          gap: 8px;
+        }
+        @media (max-width: 560px) {
+          .day-row,
+          .day-row.head {
+            grid-template-columns: 1fr;
+          }
+          .day-row.head {
+            display: none;
+          }
+          .day-row {
+            padding: 6px;
+            border: 1px solid var(--divider-color);
+            border-radius: 8px;
+          }
+          .day-row details {
+            grid-column: 1;
+          }
+          .day-name {
+            padding-top: 0;
+          }
+          .day-row .sr-mobile {
+            position: static;
+            width: auto;
+            height: auto;
+            clip: auto;
+          }
+        }
+        .sr-mobile {
+          position: absolute;
+          width: 1px;
+          height: 1px;
+          overflow: hidden;
+          clip: rect(0 0 0 0);
+        }
         @media (max-width: 560px) {
           .status,
           .control-row,
@@ -6404,34 +6587,52 @@ class PowerSyncEVPanel extends HTMLElement {
             </select>
           </div>
         </div>
-        <div class="segment" role="group" aria-label="EV charging source policy">
+        <div class="segment" role="group" aria-label="Power source for a manual Start" aria-describedby="ev-source-help">
           ${this._policyButton('solar_only', 'Solar Only')}
           ${this._policyButton('limited_grid_solar', 'Limited Grid + Solar')}
           ${this._policyButton('full_grid_solar', 'Full Grid + Solar')}
         </div>
+        <div class="source-help" id="ev-source-help">${this._escHtml(EV_MANUAL_SOURCE_HELP[this._policy] || '')}</div>
         <div class="commands">
-          <button class="command primary" data-action="start" ${canStart ? '' : 'disabled'}>
+          <button class="command primary" data-action="start" ${canStart ? '' : 'disabled'} aria-describedby="ev-source-help">
             <ha-icon icon="mdi:play"></ha-icon><span>Start</span>
           </button>
           <button class="command danger" data-action="stop" ${canStop ? '' : 'disabled'}>
             <ha-icon icon="mdi:stop"></ha-icon><span>Stop</span>
           </button>
-          <button class="command" data-action="boost" ${canStart ? '' : 'disabled'}>
+          <button class="command" data-action="boost" ${canStart ? '' : 'disabled'} aria-describedby="ev-boost-help">
             <ha-icon icon="mdi:flash"></ha-icon><span>Boost</span>
           </button>
         </div>
+        <div class="source-help" id="ev-boost-help">Start charges ${this._escHtml(this._durationText())} using the selected source and takes over from automatic modes. Boost charges at full rate from any source for ${this._escHtml(this._durationText())}. Stop ends the charge PowerSync controls. Site import limits and charger safety checks still apply.</div>
       </div>
     `;
   }
 
   _policyButton(policy, label) {
     const active = this._policy === policy ? 'active' : '';
-    return `<button class="${active}" data-policy="${policy}" ${this._savingKey ? 'disabled' : ''}>${this._escHtml(label)}</button>`;
+    return `<button class="${active}" data-policy="${policy}" aria-pressed="${this._policy === policy ? 'true' : 'false'}" ${this._savingKey ? 'disabled' : ''}>${this._escHtml(label)}</button>`;
+  }
+
+  _durationText() {
+    const minutes = this._durationMinutes;
+    return minutes < 60 ? `${minutes} minutes` : `${minutes / 60} hour${minutes === 60 ? '' : 's'}`;
+  }
+
+  _priceUnit() {
+    return _priceMeta(this._hass, this._config?.importPriceEntity).minorPriceUnit;
+  }
+
+  _priceText(value) {
+    const number = Number(value);
+    if (value === null || value === undefined || value === '' || !Number.isFinite(number)) return '--';
+    return `${number.toLocaleString(undefined, { maximumFractionDigits: 3 })} ${this._priceUnit()}`;
   }
 
   _modeSectionsHtml() {
     if (!this._data) return '';
     const expanded = this._modesExpanded;
+    const unit = this._priceUnit();
     return `
       <button class="modes-toggle" data-action="toggle-modes" aria-expanded="${expanded ? 'true' : 'false'}" aria-controls="ev-mode-grid" title="${expanded ? 'Collapse' : 'Expand'} EV charging modes">
         <span class="modes-toggle-label">Modes</span>
@@ -6445,13 +6646,14 @@ class PowerSyncEVPanel extends HTMLElement {
           'mdi:solar-power',
           this._data.solarConfig,
           [
-            { key: 'enabled', label: 'Enabled', type: 'checkbox' },
-            { key: 'household_buffer_kw', min: 0, max: 5, label: 'Buffer kW', type: 'number', step: 'any' },
-            { key: 'max_export_price_cents', min: 0, max: 200, label: 'Max Export c/kWh', type: 'number', step: 'any' },
-            { key: 'home_battery_minimum', min: 0, max: 100, label: 'Home SOC %', type: 'number', step: '1' },
-            { key: 'sustained_surplus_minutes', min: 1, max: 30, label: 'Start Delay', type: 'number', step: '1' },
-            { key: 'stop_delay_minutes', min: 1, max: 30, label: 'Stop Delay', type: 'number', step: '1' },
+            { key: 'enabled', label: 'Charge automatically from spare solar', type: 'checkbox' },
+            { key: 'household_buffer_kw', min: 0, max: 5, label: 'Household buffer', unit: 'kW', type: 'number', step: 'any', help: 'Solar kept for the home before the car gets the rest.' },
+            { key: 'max_export_price_cents', min: 0, max: 200, label: 'Skip when export credit is above', unit: unit, type: 'number', step: 'any', help: 'Feed-in (export) credit, not the grid import price. When exporting earns more, solar is exported instead.' },
+            { key: 'home_battery_minimum', min: 0, max: 100, label: 'Home battery at least', unit: '%', type: 'number', step: '1' },
+            { key: 'sustained_surplus_minutes', min: 1, max: 30, label: 'Start after surplus lasts', unit: 'min', type: 'number', step: '1' },
+            { key: 'stop_delay_minutes', min: 1, max: 30, label: 'Stop after surplus ends for', unit: 'min', type: 'number', step: '1' },
           ],
+          'Uses solar that would otherwise be exported. These thresholds apply to every car using Solar Surplus.',
         )}
         ${this._modeCard(
           'price',
@@ -6459,12 +6661,15 @@ class PowerSyncEVPanel extends HTMLElement {
           'mdi:cash-clock',
           this._data.priceSettings,
           [
-            { key: 'enabled', label: 'Enabled', type: 'checkbox' },
-            { key: 'recovery_soc', min: 0, max: 100, label: 'Recovery SOC %', type: 'number', step: '1' },
-            { key: 'recovery_price_cents', label: 'Recovery c/kWh', type: 'number', step: 'any' },
-            { key: 'opportunity_price_cents', label: 'Opportunity c/kWh', type: 'number', step: 'any' },
+            { key: 'enabled', label: 'Charge when the grid price is low', type: 'checkbox' },
+            { key: 'recovery_soc', min: 0, max: 100, label: 'Recovery: car below', unit: '%', type: 'number', step: '1', help: 'Below this car charge level, charge when the price is at or below the recovery price.' },
+            { key: 'recovery_price_cents', label: 'Recovery grid price at or below', unit: unit, type: 'number', step: 'any' },
+            { key: 'opportunity_price_cents', label: 'Opportunity grid price at or below', unit: unit, type: 'number', step: 'any', help: 'At any charge level, charge when the import price is this low. Zero or negative values are allowed.' },
+            { key: 'home_battery_minimum', min: 0, max: 100, label: 'Home battery at least', unit: '%', type: 'number', step: '1' },
+            { key: 'preserve_home_battery', label: 'Keep home battery for the house', type: 'checkbox' },
+            { key: 'no_grid_import', label: 'Limit grid import (car runs on solar and home battery)', type: 'checkbox' },
           ],
-          'Upcoming eligible windows appear in the 24-hour optimiser plan. They are projections only; the live controller rechecks price, SOC, location, plug state, ownership, and safety before charging.',
+          'Price triggers compare the current grid import price. Upcoming eligible windows appear in the 24-hour optimiser plan. They are projections only; the live controller rechecks price, SOC, location, plug state, ownership, and safety before charging.',
         )}
         ${this._modeCard(
           'scheduled',
@@ -6472,10 +6677,12 @@ class PowerSyncEVPanel extends HTMLElement {
           'mdi:calendar-clock',
           this._data.scheduledSettings,
           [
-            { key: 'enabled', label: 'Enabled', type: 'checkbox' },
-            { key: 'start_time', label: 'Start', type: 'time' },
-            { key: 'end_time', label: 'End', type: 'time' },
-            { key: 'max_price_cents', label: 'Max c/kWh', type: 'number', step: 'any' },
+            { key: 'enabled', label: 'Charge in a fixed daily window', type: 'checkbox' },
+            { key: 'start_time', label: 'Window start (HA local time)', type: 'time' },
+            { key: 'end_time', label: 'Window end (HA local time)', type: 'time' },
+            { key: 'max_price_cents', label: 'Maximum grid price', unit: unit, type: 'number', step: 'any', help: 'Charging inside the window pauses while the import price is above this.' },
+            { key: 'preserve_home_battery', label: 'Keep home battery for the house', type: 'checkbox' },
+            { key: 'no_grid_import', label: 'Limit grid import (car runs on solar and home battery)', type: 'checkbox' },
           ],
         )}
         ${this._smartScheduleCard()}
@@ -6539,23 +6746,31 @@ class PowerSyncEVPanel extends HTMLElement {
   }
 
   _fieldHtml(kind, settings, field) {
+    // Render an option only when this HA version returns it.
+    if (!Object.hasOwn(settings, field.key) && field.key !== 'enabled') return '';
     const value = settings[field.key];
     const dataKey = `${kind}:${field.key}`;
+    const helpId = field.help ? `${dataKey}:help` : '';
+    const described = helpId ? ` aria-describedby="${this._escAttr(helpId)}"` : '';
+    const help = helpId ? `<div class="field-help" id="${this._escAttr(helpId)}">${this._escHtml(field.help)}</div>` : '';
     if (field.type === 'checkbox') {
       return `
         <div class="field check">
-          <input id="${this._escAttr(dataKey)}" type="checkbox" data-setting="${this._escAttr(dataKey)}" ${value ? 'checked' : ''}>
+          <input id="${this._escAttr(dataKey)}" type="checkbox" data-setting="${this._escAttr(dataKey)}" data-label="${this._escAttr(field.label)}" ${value ? 'checked' : ''}${described}>
           <label for="${this._escAttr(dataKey)}">${this._escHtml(field.label)}</label>
         </div>
+        ${help}
       `;
     }
     const inputType = field.type || 'text';
     const bounds = (field.min == null ? '' : ` min="${this._escAttr(field.min)}"`) + (field.max == null ? '' : ` max="${this._escAttr(field.max)}"`);
     const step = field.step ? ` step="${this._escAttr(field.step)}"` : '';
+    const input = `<input id="${this._escAttr(dataKey)}" type="${inputType}" data-setting="${this._escAttr(dataKey)}" data-label="${this._escAttr(field.label)}" value="${this._escAttr(value ?? '')}"${bounds}${step}${described}>`;
     return `
       <div class="field">
-        <label for="${this._escAttr(dataKey)}">${this._escHtml(field.label)}</label>
-        <input id="${this._escAttr(dataKey)}" type="${inputType}" data-setting="${this._escAttr(dataKey)}" value="${this._escAttr(value ?? '')}"${bounds}${step}>
+        <label for="${this._escAttr(dataKey)}">${this._escHtml(field.label)}${field.unit ? ` (${this._escHtml(field.unit)})` : ''}</label>
+        ${field.unit ? `<div class="unit-input">${input}<span class="unit" aria-hidden="true">${this._escHtml(field.unit)}</span></div>` : input}
+        ${help}
       </div>
     `;
   }
@@ -6584,7 +6799,7 @@ class PowerSyncEVPanel extends HTMLElement {
         <div class="smart-row">
           <div class="smart-details">
             <div class="smart-name">${this._escHtml(name)}</div>
-            <div class="smart-meta">Target ${this._escHtml(vehicle.target_soc ?? '--')}% | Departure ${this._escHtml(departure)}</div>
+            <div class="smart-meta">Target ${this._escHtml(vehicle.target_soc ?? '--')}% | Departure ${this._escHtml(departure)}${vehicle.priority ? ` | ${this._escHtml(this._strategyLabel(vehicle.priority))}` : ''}${Object.hasOwn(vehicle, 'max_grid_price_cents') ? ` | Grid up to ${this._escHtml(this._priceText(vehicle.max_grid_price_cents))}` : ''}</div>
             <div class="smart-meta">Usable capacity ${this._escHtml(effectiveCapacity ?? 60)} kWh | ${this._escHtml(sharedVehicle ? 'Selected vehicle' : sourceLabel)}</div>
             <div class="capacity-editor">
               <label>Target SOC (%)<input type="number" min="1" max="100" step="1" data-target-input="${this._escAttr(vehicleId)}" value="${this._escAttr(vehicle.target_soc ?? 80)}"></label>
@@ -6598,11 +6813,11 @@ class PowerSyncEVPanel extends HTMLElement {
               <button class="command" data-capacity-clear="${this._escAttr(vehicleId)}" ${this._savingKey || manualCapacity === '' ? 'disabled' : ''}>Clear</button>
             </div>`}
           </div>
-          <button class="command" data-smart-toggle="${this._escAttr(vehicleId)}" data-enabled="${enabled ? 'false' : 'true'}" ${this._savingKey ? 'disabled' : ''}>
-            <ha-icon icon="${enabled ? 'mdi:toggle-switch' : 'mdi:toggle-switch-off-outline'}"></ha-icon><span>${enabled ? 'On' : 'Off'}</span>
+          <button class="command smart-toggle" data-smart-toggle="${this._escAttr(vehicleId)}" data-enabled="${enabled ? 'false' : 'true'}" aria-pressed="${enabled ? 'true' : 'false'}" aria-label="Smart Schedule for ${this._escAttr(name)}: ${enabled ? 'on. Turn off' : 'off. Turn on'}" ${this._savingKey ? 'disabled' : ''}>
+            <ha-icon icon="${enabled ? 'mdi:toggle-switch' : 'mdi:toggle-switch-off-outline'}"></ha-icon><span>Smart Schedule ${enabled ? 'On' : 'Off'}</span>
           </button>
           <div class="departure-editor">
-            <div class="departure-title">Departure times</div>
+            <div class="departure-title">Departure times (HA local time)</div>
             <div class="departure-grid">
               ${dayLabels.map((day, dayIndex) => `
                 <label>${day}
@@ -6615,13 +6830,14 @@ class PowerSyncEVPanel extends HTMLElement {
               <button class="command" data-departure-clear="${this._escAttr(vehicleId)}" ${this._savingKey || !Object.keys(departureTimes).length ? 'disabled' : ''}>Clear all</button>
             </div>
           </div>
+          ${this._smartPolicyHtml(vehicleId, vehicle, name)}
         </div>
       `;
     }).join('') : '<div class="notice">No smart schedule vehicles configured.</div>';
 
     const anyEnabled = entries.some(([, vehicle]) => !!vehicle.enabled);
     return `
-      <div class="mode-card">
+      <div class="mode-card wide">
         <div class="mode-head">
           <ha-icon icon="mdi:calendar-star"></ha-icon>
           <div class="mode-title">Smart Schedule</div>
@@ -6630,6 +6846,246 @@ class PowerSyncEVPanel extends HTMLElement {
         <div class="smart-list">${rows}</div>
       </div>
     `;
+  }
+
+  _strategyLabel(value) {
+    return EV_SMART_STRATEGIES.find(([key]) => key === value)?.[1] || this._title(value);
+  }
+
+  _haClock() {
+    const options = { weekday: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' };
+    let parts;
+    try {
+      parts = new Intl.DateTimeFormat('en-US', { ...options, timeZone: this._hass?.config?.time_zone || undefined }).formatToParts(new Date());
+    } catch (_err) {
+      parts = new Intl.DateTimeFormat('en-US', options).formatToParts(new Date());
+    }
+    const part = type => parts.find(item => item.type === type)?.value;
+    const day = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].indexOf(part('weekday'));
+    return { day: Math.max(0, day), minutes: (Number(part('hour')) % 24) * 60 + Number(part('minute')) };
+  }
+
+  // Price and strategy follow the upcoming departure's HA-local weekday,
+  // including an overnight charge before midnight. Without a departure the
+  // current HA-local weekday applies.
+  _policyDay(vehicle) {
+    const clock = this._haClock();
+    const times = vehicle?.departure_times || {};
+    for (let offset = 0; offset <= 7; offset += 1) {
+      const day = (clock.day + offset) % 7;
+      const time = times[String(day)];
+      if (!/^\d{2}:\d{2}$/.test(time || '')) continue;
+      const [hour, minute] = time.split(':').map(Number);
+      if (offset === 0 && hour * 60 + minute <= clock.minutes) continue;
+      return { day: String(day), time };
+    }
+    return { day: String(clock.day), time: null };
+  }
+
+  _policyNowHtml(vehicle) {
+    const { day, time } = this._policyDay(vehicle);
+    const dayName = EV_WEEKDAYS[Number(day)][2];
+    const priority = vehicle.departure_priorities?.[day] ?? vehicle.priority;
+    const hasPrice = Object.hasOwn(vehicle, 'max_grid_price_cents');
+    const price = vehicle.departure_max_grid_price_cents?.[day] ?? vehicle.max_grid_price_cents;
+    const lead = time
+      ? `Next departure ${dayName} ${time}: planning uses ${dayName}'s settings`
+      : `No departure set: planning uses today's (${dayName}) settings`;
+    const rules = [priority ? this._strategyLabel(priority) : '', hasPrice ? `grid up to ${this._priceText(price)}` : ''].filter(Boolean).join(', ');
+    const bypass = priority === 'time_critical' ? ' Meet Deadline may buy grid energy above this limit.' : '';
+    return `<div class="policy-now" role="status">${this._escHtml(`${lead}${rules ? ` (${rules})` : ''}.${bypass}`)}</div>`;
+  }
+
+  _policyInput(vehicleId, field, value, { day = null, inherited, label } = {}) {
+    const meta = EV_SMART_POLICY_FIELDS[field];
+    const id = `smart-${vehicleId}-${field}${day == null ? '' : '-' + day}`.replace(/[^A-Za-z0-9_-]/g, '_');
+    const attrs = `id="${this._escAttr(id)}" data-smart-policy="${this._escAttr(vehicleId)}" data-policy-field="${field}"${day == null ? '' : ` data-policy-day="${day}"`} data-label="${this._escAttr(label)}"`;
+    const set = value !== undefined && value !== null && value !== '';
+    const cls = day != null && set ? ' class="override"' : '';
+    const labelHtml = day == null
+      ? `<label for="${this._escAttr(id)}">${this._escHtml(label)}${meta.type === 'price' ? ` (${this._escHtml(this._priceUnit())})` : meta.type === 'percent' ? ' (%)' : ''}</label>`
+      : `<label for="${this._escAttr(id)}" class="sr-mobile">${this._escHtml(label)}</label>`;
+    if (meta.type === 'strategy') {
+      const options = EV_SMART_STRATEGIES.map(([key, text]) => `<option value="${key}" ${value === key ? 'selected' : ''}>${this._escHtml(text)}</option>`).join('');
+      const inherit = day == null ? '' : `<option value="" ${set ? '' : 'selected'}>Default (${this._escHtml(this._strategyLabel(inherited))})</option>`;
+      return `<div class="field">${labelHtml}<select ${attrs}${cls}>${inherit}${options}</select></div>`;
+    }
+    if (meta.type === 'bool' && day == null) {
+      return `<div class="field check"><input type="checkbox" ${attrs} ${value ? 'checked' : ''}><label for="${this._escAttr(id)}">${this._escHtml(label)}</label></div>`;
+    }
+    if (meta.type === 'bool') {
+      return `<div class="field">${labelHtml}<select ${attrs}${cls}>
+        <option value="" ${set ? '' : 'selected'}>Default (${inherited ? 'On' : 'Off'})</option>
+        <option value="true" ${value === true ? 'selected' : ''}>On</option>
+        <option value="false" ${value === false ? 'selected' : ''}>Off</option></select></div>`;
+    }
+    const unit = meta.type === 'price' ? this._priceUnit() : '%';
+    const bounds = meta.type === 'percent' ? ' min="0" max="100" step="1"' : ' step="any"';
+    const placeholder = day == null ? '' : ` placeholder="Default ${this._escAttr(inherited ?? '--')}"`;
+    return `<div class="field">${labelHtml}<div class="unit-input"><input type="number"${bounds} ${attrs}${cls} value="${this._escAttr(set ? value : '')}"${placeholder}><span class="unit" aria-hidden="true">${this._escHtml(unit)}</span></div></div>`;
+  }
+
+  _smartPolicyHtml(vehicleId, vehicle, name) {
+    const supported = field => Object.hasOwn(vehicle, field);
+    const scalars = Object.keys(EV_SMART_POLICY_FIELDS).filter(supported);
+    const maps = Object.keys(EV_SMART_POLICY_FIELDS).filter(field => supported(EV_SMART_POLICY_FIELDS[field].map));
+    if (!scalars.length && !maps.length) return '';
+    const unit = this._priceUnit();
+    const labelOf = field => EV_SMART_POLICY_FIELDS[field].label;
+    const scalar = field => supported(field) ? this._policyInput(vehicleId, field, vehicle[field], { label: labelOf(field) }) : '';
+    const strategyHelp = EV_SMART_STRATEGIES.map(([, label, , help]) => `${label}: ${help}`).join(' ');
+    const batteryFields = ['min_battery_to_start', 'preserve_home_battery', 'consume_battery_level', 'stop_at_battery_floor', 'limit_grid_import'];
+    const dayBattery = batteryFields.filter(field => maps.includes(field));
+    const dayRows = EV_WEEKDAYS.map(([day, short, long]) => {
+      const cell = field => maps.includes(field)
+        ? this._policyInput(vehicleId, field, vehicle[EV_SMART_POLICY_FIELDS[field].map]?.[day], { day, inherited: vehicle[field], label: `${long} ${labelOf(field).toLowerCase()}` })
+        : '<div></div>';
+      const overridden = dayBattery.filter(field => Object.hasOwn(vehicle[EV_SMART_POLICY_FIELDS[field].map] || {}, day)).length;
+      return `
+        <div class="day-row" role="group" aria-label="${this._escAttr(long)} overrides">
+          <div class="day-name">${short}</div>
+          ${cell('priority')}
+          ${cell('max_grid_price_cents')}
+          ${dayBattery.length ? `<details><summary>Home battery and grid on ${long}${overridden ? ` (${overridden} custom)` : ' (default)'}</summary>
+            <div class="policy-grid">${dayBattery.map(field => this._policyInput(vehicleId, field, vehicle[EV_SMART_POLICY_FIELDS[field].map]?.[day], { day, inherited: vehicle[field], label: `${long}: ${labelOf(field)}` }).replace('class="sr-mobile"', '')).join('')}</div>
+          </details>` : ''}
+        </div>`;
+    }).join('');
+    const showPriceColumn = maps.includes('max_grid_price_cents');
+    return `
+      <div class="policy" data-smart-policy-form="${this._escAttr(vehicleId)}">
+        ${this._policyNowHtml(vehicle)}
+        <fieldset>
+          <legend>Default strategy</legend>
+          <div class="policy-grid">${scalar('priority')}${scalar('max_grid_price_cents')}</div>
+          <div class="policy-help">${this._escHtml(strategyHelp)}</div>
+          ${supported('max_grid_price_cents') ? `<div class="policy-help">Maximum grid price is the highest grid import price (${this._escHtml(unit)}) Smart Schedule will pay. The exact limit qualifies. 0 allows only free or negative prices; a negative limit requires being paid at least that much. It is separate from export credit and from Price Level triggers.</div>` : ''}
+        </fieldset>
+        ${batteryFields.some(supported) ? `<fieldset>
+          <legend>Home battery and grid import</legend>
+          <div class="policy-grid">${batteryFields.map(scalar).join('')}</div>
+          <div class="policy-help">Car may use home battery: 0% means the car does not draw on the home battery. Keeping the home battery for the house turns that off. Limit grid import keeps the car within what solar and the home battery can supply.</div>
+        </fieldset>` : ''}
+        ${maps.length ? `<fieldset>
+          <legend>Weekday overrides</legend>
+          <div class="policy-help">Leave a day on Default to use the settings above. Strategy and price follow the departure day, so an overnight charge for Tuesday morning uses Tuesday even before midnight. Home battery and grid rules follow the day each charging period actually runs.${showPriceColumn ? '' : ' Per-day price limits need a newer PowerSync version.'}</div>
+          <div class="day-table">
+            <div class="day-row head" aria-hidden="true"><div>Day</div><div>${maps.includes('priority') ? 'Strategy' : ''}</div><div>${showPriceColumn ? `Max grid price (${this._escHtml(unit)})` : ''}</div></div>
+            ${dayRows}
+          </div>
+        </fieldset>` : ''}
+        <div class="policy-actions">
+          <button class="command primary" data-policy-save="${this._escAttr(vehicleId)}" data-vehicle-name="${this._escAttr(name)}" ${this._savingKey ? 'disabled' : ''}><ha-icon icon="mdi:content-save"></ha-icon><span>Save charging rules for ${this._escHtml(name)}</span></button>
+        </div>
+      </div>`;
+  }
+
+  _parsePolicyValue(input, field, day) {
+    const meta = EV_SMART_POLICY_FIELDS[field];
+    const label = input.dataset.label || meta.label;
+    if (meta.type === 'strategy') {
+      if (day != null && input.value === '') return undefined;
+      if (!EV_SMART_STRATEGIES.some(([key]) => key === input.value)) throw new Error(`Choose a strategy for ${label}.`);
+      return input.value;
+    }
+    if (meta.type === 'bool') {
+      if (day == null) return input.checked;
+      return input.value === '' ? undefined : input.value === 'true';
+    }
+    const raw = input.value.trim();
+    if (input.validity?.badInput) throw new Error(`Enter a valid number for ${label}.`);
+    if (!raw) {
+      if (day != null) return undefined;
+      throw new Error(`Enter a value for ${label}.`);
+    }
+    const value = Number(raw);
+    if (!Number.isFinite(value)) throw new Error(`Enter a valid number for ${label}.`);
+    if (meta.type === 'percent' && (!Number.isInteger(value) || value < 0 || value > 100)) {
+      throw new Error(`${label} must be a whole percentage from 0 to 100.`);
+    }
+    return value;
+  }
+
+  async _saveSmartPolicy(vehicleId, source = this._smartSettings(vehicleId), name = vehicleId) {
+    const inputs = [...this.shadowRoot.querySelectorAll(`[data-smart-policy="${CSS.escape(vehicleId)}"]`)];
+    const entries = inputs.map(input => [input, this._settingDrafts.get(input._evFieldKey)]).filter(([, draft]) => draft);
+    if (!entries.length) {
+      this._notice = { type: '', message: `No unsaved charging rule changes for ${name}.` };
+      this._scheduleRender();
+      return false;
+    }
+    if (!source) return this._settingError('The vehicle schedule is unavailable. Refresh and try again.');
+    const opened = { ...source };
+    const parsed = [];
+    try {
+      for (const [input, draft] of entries) {
+        const field = input.dataset.policyField;
+        const day = input.dataset.policyDay ?? null;
+        const key = day == null ? field : EV_SMART_POLICY_FIELDS[field].map;
+        if (day == null) {
+          opened[key] = draft.opened?.[key];
+        } else {
+          if (opened[key] === source[key]) opened[key] = { ...(source[key] || {}) };
+          if (Object.hasOwn(draft.opened?.[key] || {}, day)) opened[key][day] = draft.opened[key][day];
+          else delete opened[key][day];
+        }
+        parsed.push({ field, day, key, value: this._parsePolicyValue(input, field, day) });
+      }
+    } catch (err) {
+      return this._settingError(err.message);
+    }
+    const changes = {};
+    const changed = new Map();
+    for (const { field, day, key, value } of parsed) {
+      if (day == null) changes[key] = value;
+      else {
+        changes[key] = changes[key] || { ...(opened[key] || {}) };
+        if (value === undefined) delete changes[key][day];
+        else changes[key][day] = value;
+      }
+      const days = changed.get(field) || [];
+      if (day != null) days.push(EV_WEEKDAYS[Number(day)][1]);
+      changed.set(field, days);
+    }
+    const effective = (field, day) => {
+      const map = EV_SMART_POLICY_FIELDS[field].map;
+      if (day != null) return (changes[map] ?? opened[map] ?? {})[day];
+      return Object.hasOwn(changes, field) ? changes[field] : opened[field];
+    };
+    for (const day of [null, ...EV_WEEKDAYS.map(([key]) => key)]) {
+      if (effective('preserve_home_battery', day) === true && Number(effective('consume_battery_level', day)) > 0) {
+        return this._settingError(`Choose either keeping the home battery for the house or letting the car use it${day == null ? '' : ` on ${EV_WEEKDAYS[Number(day)][2]}`}, not both.`);
+      }
+    }
+    const summary = [...changed].map(([field, days]) => {
+      const label = EV_SMART_POLICY_FIELDS[field].label;
+      return days.length ? `${label} (${days.join(', ')})` : `default ${label.toLowerCase()}`;
+    }).join(', ');
+    const strategies = [changes.priority ?? opened.priority, ...Object.values(changes.departure_priorities ?? opened.departure_priorities ?? {})];
+    const bypass = strategies.includes('time_critical') ? ' Meet Deadline days may buy grid energy above the price limit.' : '';
+    return this._writeSmartSettings(vehicleId, opened, changes, {
+      message: `Saved for ${name} and confirmed by Home Assistant: ${summary}. Applies from the next charging decision.${bypass}`,
+      drafts: entries.map(([input, draft]) => [input._evFieldKey, draft]),
+    });
+  }
+
+  _pruneStaleProfileDrafts() {
+    let pruned = false;
+    for (const [key, draft] of [...this._settingDrafts]) {
+      let scope;
+      try { scope = JSON.parse(draft.scope); } catch (_err) { continue; }
+      if (!Array.isArray(scope) || scope[0] !== 'smart') continue;
+      const current = this._smartSettings(scope[1]);
+      if (!current) continue;
+      if ((current.shared_charger_profile_id ?? null) !== scope[2]) {
+        this._settingDrafts.delete(key);
+        pruned = true;
+      }
+    }
+    if (pruned && !this._savingKey) {
+      this._notice = { type: 'warn', message: 'A different car was selected on the shared charger. Unsaved Smart Schedule edits for the previous car were discarded so they cannot apply to the wrong car. Review the selected car.' };
+    }
+    return pruned;
   }
 
   _attachEvents() {
@@ -6701,6 +7157,12 @@ class PowerSyncEVPanel extends HTMLElement {
     this.shadowRoot.querySelectorAll('[data-departure-save]').forEach((button) => {
       const opened = this._smartSettings(button.dataset.departureSave);
       button.addEventListener('click', () => this._saveDepartureTimes(button.dataset.departureSave, false, opened));
+    });
+    this.shadowRoot.querySelectorAll('[data-policy-save]').forEach((button) => {
+      const vehicleId = button.dataset.policySave;
+      const opened = this._smartSettings(vehicleId);
+      const name = button.dataset.vehicleName || vehicleId;
+      button.addEventListener('click', () => this._saveSmartPolicy(vehicleId, opened, name));
     });
     this.shadowRoot.querySelectorAll('[data-departure-clear]').forEach((button) => {
       const opened = this._smartSettings(button.dataset.departureClear);
@@ -6790,6 +7252,12 @@ class PowerSyncEVPanel extends HTMLElement {
       return { scope: JSON.stringify(['smart', id, opened?.shared_charger_profile_id ?? null]),
         field: d.targetInput ? 'target_soc' : 'day:' + d.departureDay, opened };
     }
+    if (d.smartPolicy) {
+      const opened = this._smartSettings(d.smartPolicy);
+      const day = d.policyDay ?? null;
+      return { scope: JSON.stringify(['smart', d.smartPolicy, opened?.shared_charger_profile_id ?? null]),
+        field: day == null ? d.policyField : `${EV_SMART_POLICY_FIELDS[d.policyField].map}:${day}`, opened };
+    }
     if (d.capacityInput) {
       return { scope: 'capacity:' + d.capacityInput, field: 'battery_capacity_kwh',
         opened: this._data?.vehicleConfigs?.find(item => item.vehicle_id === d.capacityInput) };
@@ -6803,7 +7271,7 @@ class PowerSyncEVPanel extends HTMLElement {
   }
 
   _bindSettingDrafts(focus) {
-    const inputs = this.shadowRoot.querySelectorAll('[data-setting], [data-target-input], [data-departure-time], [data-capacity-input], [data-shared-name], [data-shared-soc], [data-shared-capacity]');
+    const inputs = this.shadowRoot.querySelectorAll('[data-setting], [data-target-input], [data-departure-time], [data-smart-policy], [data-capacity-input], [data-shared-name], [data-shared-soc], [data-shared-capacity]');
     for (const input of inputs) {
       const context = this._fieldContext(input);
       const key = JSON.stringify([context.scope, context.field]);
@@ -6873,8 +7341,23 @@ class PowerSyncEVPanel extends HTMLElement {
       await this._loadData(this._cacheKey());
       return true;
     } catch (err) {
+      if (err?.code === 'shared_profile_changed') {
+        // Never keep an edit that was opened for a different car on this
+        // shared charger: discard it, explain, then reload the selected car.
+        const scopes = new Set(drafts.map(([, draft]) => draft.scope));
+        for (const [key, draft] of [...this._settingDrafts]) {
+          if (scopes.has(draft.scope)) this._settingDrafts.delete(key);
+        }
+        this._notice = { type: 'warn', message: 'Not saved: a different car was selected on the shared charger before this change reached Home Assistant. The unsaved edit was discarded so it cannot apply to the wrong car, and settings were refreshed. Review the selected car and try again.' };
+        EV_PANEL_CACHE.delete(this._cacheKey());
+        await this._loadData(this._cacheKey());
+        return false;
+      }
+      const field = err?.field;
+      const matches = draft => draft.field === field || String(draft.field).startsWith(field + ':') ||
+        (field === 'departure_times' && String(draft.field).startsWith('day:'));
       return this._settingError(err?.message || err?.body?.message || 'Could not confirm the saved settings.',
-        err?.code === 'settings_conflict' ? drafts.filter(([, draft]) => draft.field === err.field) : undefined);
+        err?.code === 'settings_conflict' ? drafts.filter(([, draft]) => matches(draft)) : undefined);
     } finally {
       this._savingKey = null;
       this._scheduleRender();
@@ -6912,7 +7395,7 @@ class PowerSyncEVPanel extends HTMLElement {
       if (!raw || input.validity?.badInput || !Number.isFinite(value) || (whole && !Number.isSafeInteger(value)) ||
           (input.min !== '' && input.min != null && value < Number(input.min)) ||
           (input.max !== '' && input.max != null && value > Number(input.max))) {
-        throw new Error('Enter a valid ' + (whole ? 'whole number' : 'number') + ' for ' + key.replaceAll('_', ' ') + '.');
+        throw new Error('Enter a valid ' + (whole ? 'whole number' : 'number') + ' for ' + (input.dataset.label || key.replaceAll('_', ' ')) + (input.min !== '' && input.min != null && input.max !== '' && input.max != null ? ` (${input.min} to ${input.max})` : '') + '.');
       }
       return value;
     }
@@ -6936,9 +7419,16 @@ class PowerSyncEVPanel extends HTMLElement {
     const drafts = [...this._settingDrafts].filter(([, item]) => item.scope === kind);
     if (!drafts.length) return false;
     const member = kind === 'solar' ? 'config' : 'settings';
-    return this._settingsWrite('mode:' + kind, 'Settings saved', async request => {
+    const title = { solar: 'Solar Surplus', price: 'Price Level', scheduled: 'Scheduled Charging' }[kind];
+    const labels = drafts.map(([, item]) => this.shadowRoot.querySelector(`[data-setting="${CSS.escape(kind + ':' + item.field)}"]`)?.dataset.label || item.field);
+    const message = `${title} saved and confirmed by Home Assistant: ${labels.join(', ')}.`;
+    return this._settingsWrite('mode:' + kind, message, async request => {
       const patch = this._collectModePayload(kind);
       const latest = (await request('GET', path))[member];
+      const effective = { ...latest, ...patch };
+      if (effective.preserve_home_battery === true && effective.no_grid_import === true) {
+        throw new Error('Choose either Keep home battery for the house or Limit grid import, not both.');
+      }
       for (const [, draft] of drafts) {
         if (!Object.hasOwn(latest || {}, draft.field) || !Object.hasOwn(draft.opened || {}, draft.field)) {
           throw new Error('These settings are unavailable. Refresh before editing.');
@@ -6975,7 +7465,9 @@ class PowerSyncEVPanel extends HTMLElement {
         const current = (await request('GET', path)).settings?.[vehicleId];
         if (!opened || !current || (opened.vehicle_id != null && opened.vehicle_id !== vehicleId) || (current.vehicle_id != null && current.vehicle_id !== vehicleId) ||
             (current.shared_charger_profile_id ?? null) !== (profile ?? null) || (shared && !profile)) {
-          throw new Error('The selected vehicle profile changed or is unavailable. Reopen its settings.');
+          const error = new Error('The selected vehicle profile changed or is unavailable. Reopen its settings.');
+          error.code = 'shared_profile_changed';
+          throw error;
         }
         return current;
       };

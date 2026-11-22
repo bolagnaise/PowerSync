@@ -1569,7 +1569,7 @@ def test_solar_configuration_stays_in_existing_ev_mode_without_changing_session_
   const Panel = vm.runInContext('PowerSyncEVPanel', context);
   const panel = new Panel();
   panel.getRootNode = () => ({ host: { localName: 'power-sync-board' } });
-  panel._data = { solarConfig: { enabled: false }, priceSettings: {}, scheduledSettings: {}, autoStatus: { settings: {} } };
+  panel._data = { solarConfig: { enabled: false, household_buffer_kw: 0.5 }, priceSettings: {}, scheduledSettings: {}, autoStatus: { settings: {} } };
   const dashboard = panel._modeSectionsHtml();
   let event;
   panel.dispatchEvent = value => { event = value; };
@@ -2447,7 +2447,7 @@ def test_ev_panel_setting_forms_patch_and_confirm_selected_vehicle():
             if (scenario === 'ok') {
               assert.equal(p.price.opportunity_price_cents,8);
               assert.equal(p.panel._settingDrafts.size,0);
-              assert.match(p.panel._notice.message,/Settings saved/);
+              assert.match(p.panel._notice.message,/Price Level saved and confirmed by Home Assistant: recovery_price_cents/);
             } else {
               assert.equal(p.panel._notice.type,'error');
               assert.equal(p.panel._settingDrafts.size,1);
@@ -2494,7 +2494,8 @@ def test_ev_panel_setting_forms_patch_and_confirm_selected_vehicle():
           race.panel._data.autoSettings.generic_ev=copy(race.car);
           staleButton.click(); await tick();
           assert.deepEqual(race.writes,[]);
-          assert.equal(race.panel._notice.type,'error');
+          assert.equal(race.panel._notice.type,'warn');
+          assert.match(race.panel._notice.message,/different car was selected/);
           const guarded = makePanel();
           guarded.car.settings_precondition_supported=true;
           guarded.car.departure_max_grid_price_cents['2']=0;
@@ -2559,3 +2560,200 @@ def test_ev_panel_setting_forms_patch_and_confirm_selected_vehicle():
         """
     )
     assert result == {"ok": True}
+
+
+def test_ev_smart_policy_editor_prices_strategies_weekdays_and_shared_profile_changes():
+    """The Smart Schedule policy editor writes only edited defaults/weekdays.
+
+    Monday 22:00 in Brisbane with a Tuesday 07:00 departure plans on Tuesday's
+    rules. A different shared-charger car selected mid-edit discards the stale
+    draft instead of writing it to the newly selected car.
+    """
+    result = _run(
+        "const fs = require('node:fs'); const vm = require('node:vm');"
+        + BROWSER_STUBS
+        + f"const strategy = {json.dumps(str(STRATEGY_PATH))};"
+        + r"""
+        const RealDate = Date;
+        class FixedDate extends RealDate {
+          constructor(...args) { if (args.length) super(...args); else super('2026-11-23T12:00:00Z'); }
+          static now() { return RealDate.parse('2026-11-23T12:00:00Z'); }
+        }
+        context.Date = FixedDate;
+        context.CSS = {escape: x => x};
+        context.setImmediate = setImmediate;
+        vm.createContext(context);
+        vm.runInContext(fs.readFileSync(strategy, 'utf8'), context);
+        const Panel = vm.runInContext('PowerSyncEVPanel', context);
+        const api = vm.runInContext('EV_PANEL_PATHS', context);
+        const assert = require('node:assert/strict');
+        const copy = x => JSON.parse(JSON.stringify(x));
+        const tick = () => new Promise(resolve => setImmediate(resolve));
+        const baseCar = () => ({
+          vehicle_id: 'generic_ev', shared_charger_profile_id: 'car-a', settings_precondition_supported: true,
+          enabled: true, target_soc: 80, priority: 'cost_optimized', max_grid_price_cents: 25,
+          departure_times: {'1': '07:00', '5': '09:00'}, departure_priorities: {'5': 'solar_only'},
+          departure_max_grid_price_cents: {'0': -2, '5': 18.25},
+          min_battery_to_start: 20, preserve_home_battery: false, consume_battery_level: 0,
+          stop_at_battery_floor: true, limit_grid_import: false,
+          departure_min_battery_to_start: {}, departure_preserve_home_battery: {},
+          departure_consume_battery_level: {}, departure_stop_at_battery_floor: {}, departure_limit_grid_import: {},
+        });
+        function control(dataset, type, value) {
+          return {dataset, type, value, checked: value === true, validity: {}, listeners: {}, closest: () => null, focus() {},
+            addEventListener(name, fn) { this.listeners[name] = fn; },
+            edit(next) { if (type === 'checkbox') this.checked = next; else this.value = next; this.listeners.input({target: this}); },
+            click() { return this.listeners.click({currentTarget: this}); }};
+        }
+        function makePanel(car = baseCar()) {
+          const panel = new Panel();
+          const p = {panel, car, writes: [], loads: 0, conflict: null};
+          panel._data = {autoSettings: {generic_ev: copy(car)}, autoStatus: {settings: {generic_ev: copy(car)}},
+            sharedCharger: {available: true, enabled: true, selected_vehicle_id: 'car-a', profiles: []}};
+          panel._scheduleRender = () => {};
+          panel._loadData = async () => { p.loads += 1; };
+          panel._hass = {config: {currency: 'AUD', time_zone: 'Australia/Brisbane'}, callApi: async (verb, path, payload) => {
+            if (verb === 'GET') return {success: true, settings: {generic_ev: copy(p.car)}};
+            p.writes.push([path, copy(payload)]);
+            if (p.conflict) throw {status_code: 409, body: {success: false, ...p.conflict}};
+            const {expected_settings, ...update} = payload;
+            p.car = {...p.car, ...update};
+            return {success: true, settings: copy(p.car)};
+          }};
+          const controls = [];
+          p.controls = controls;
+          panel.shadowRoot.querySelectorAll = selector => {
+            if (selector.includes(', ')) return controls.filter(c => c.type !== 'button');
+            if (selector.startsWith('[data-smart-policy=')) return controls.filter(c => c.dataset.smartPolicy);
+            if (selector === '[data-policy-save]') return controls.filter(c => c.dataset.policySave);
+            return [];
+          };
+          panel.shadowRoot.querySelector = () => null;
+          p.field = (field, day, type, value) => {
+            const dataset = {smartPolicy: 'generic_ev', policyField: field, label: field};
+            if (day != null) dataset.policyDay = day;
+            const c = control(dataset, type, value); controls.push(c); return c;
+          };
+          p.save = control({policySave: 'generic_ev', vehicleName: 'Model Y'}, 'button');
+          controls.push(p.save);
+          p.bind = () => { panel._bindSettingDrafts(); panel._attachEvents(); };
+          return p;
+        }
+        (async () => {
+          const out = {};
+          // Rendering: labelled default, unit, inherited weekday cells, applicability.
+          const view = makePanel();
+          view.panel._hass = {config: {currency: 'AUD', time_zone: 'Australia/Brisbane'}};
+          out.html = view.panel._smartPolicyHtml('generic_ev', baseCar(), 'Model Y');
+          out.day = view.panel._policyDay(baseCar());
+          out.noDeparture = view.panel._policyDay({...baseCar(), departure_times: {}});
+          out.onlyPassedToday = view.panel._policyDay({...baseCar(), departure_times: {'0': '07:00'}});
+          const legacy = baseCar();
+          delete legacy.departure_max_grid_price_cents;
+          delete legacy.settings_precondition_supported;
+          out.legacyHtml = view.panel._smartPolicyHtml('generic_ev', legacy, 'Model Y');
+
+          // Save: default price, Tuesday price, Wednesday strategy and clearing Monday.
+          const p = makePanel();
+          const price = p.field('max_grid_price_cents', null, 'number', '25');
+          const tue = p.field('max_grid_price_cents', '1', 'number', '');
+          const mon = p.field('max_grid_price_cents', '0', 'number', '-2');
+          const wed = p.field('priority', '2', 'select-one', '');
+          p.bind();
+          price.edit('12.25'); tue.edit('-1.5'); mon.edit(''); wed.edit('time_critical');
+          p.save.click(); await tick(); await tick();
+          out.write = p.writes[0];
+          out.message = p.panel._notice.message;
+          out.draftsAfter = p.panel._settingDrafts.size;
+
+          // Zero is an explicit limit, not inheritance.
+          const zero = makePanel();
+          const sat = zero.field('max_grid_price_cents', '5', 'number', '18.25');
+          zero.bind(); sat.edit('0'); zero.save.click(); await tick(); await tick();
+          out.zero = zero.writes[0][1].departure_max_grid_price_cents;
+
+          // Mutually exclusive battery choices are rejected before any request.
+          const both = makePanel();
+          const keep = both.field('preserve_home_battery', null, 'checkbox', false);
+          const use = both.field('consume_battery_level', null, 'number', '0');
+          both.bind(); keep.edit(true); use.edit('30');
+          both.save.click(); await tick();
+          out.both = {writes: both.writes.length, type: both.panel._notice.type, message: both.panel._notice.message};
+
+          // A poll shows another car selected on the shared charger mid-edit.
+          const poll = makePanel();
+          const pollPrice = poll.field('max_grid_price_cents', null, 'number', '25');
+          poll.bind(); pollPrice.edit('5');
+          poll.panel._data.autoSettings.generic_ev.shared_charger_profile_id = 'car-b';
+          out.pruned = poll.panel._pruneStaleProfileDrafts();
+          out.pollDrafts = poll.panel._settingDrafts.size;
+          out.pollNotice = poll.panel._notice;
+
+          // The car changes between the preflight read and the POST: HA returns 409.
+          const server = makePanel();
+          server.conflict = {code: 'shared_profile_changed', error: 'Shared charger selection is changing.'};
+          const serverPrice = server.field('max_grid_price_cents', null, 'number', '25');
+          server.bind(); serverPrice.edit('7.5');
+          server.save.click(); await tick(); await tick();
+          out.server = {writes: server.writes.map(w => w[1]), drafts: server.panel._settingDrafts.size,
+            notice: server.panel._notice, loads: server.loads};
+
+          // An older integration without per-day prices never receives the map.
+          const old = makePanel(legacy);
+          const oldDefault = old.field('max_grid_price_cents', null, 'number', '25');
+          old.bind(); oldDefault.edit('30');
+          old.save.click(); await tick(); await tick();
+          out.old = old.writes.map(w => w[1]);
+          console.log(JSON.stringify(out));
+        })().catch(err => { console.error(err); process.exit(1); });
+        """
+    )
+    html = result["html"]
+    assert "Maximum grid price (c/kWh)" in html
+    assert 'value="25"' in html
+    assert "Default strategy" in html and "Weekday overrides" in html
+    for day in ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"):
+        assert f'<div class="day-name">{day}</div>' in html
+    assert 'placeholder="Default 25"' in html
+    assert "Default (Cheapest)" in html
+    assert "Meet Deadline" in html and "Prefer Solar" in html and "Solar Only" in html
+    assert "Next departure Tuesday 07:00: planning uses Tuesday&#39;s settings" in html or \
+        "Next departure Tuesday 07:00: planning uses Tuesday's settings" in html
+    assert "separate from export credit" in html
+    assert "Save charging rules for Model Y" in html
+    assert result["day"] == {"day": "1", "time": "07:00"}
+    assert result["noDeparture"] == {"day": "0", "time": None}
+    assert result["onlyPassedToday"] == {"day": "0", "time": "07:00"}
+    assert "Per-day price limits need a newer PowerSync version." in result["legacyHtml"]
+    assert "Max grid price (c/kWh)" not in result["legacyHtml"]
+
+    path, payload = result["write"]
+    assert path == "power_sync/ev/auto_schedule/settings"
+    assert payload["vehicle_id"] == "generic_ev"
+    assert payload["shared_charger_profile_id"] == "car-a"
+    assert payload["max_grid_price_cents"] == 12.25
+    assert payload["departure_max_grid_price_cents"] == {"1": -1.5, "5": 18.25}
+    assert payload["departure_priorities"] == {"2": "time_critical", "5": "solar_only"}
+    assert payload["expected_settings"] == {
+        "max_grid_price_cents": 25,
+        "departure_max_grid_price_cents": {"0": -2, "5": 18.25},
+        "departure_priorities": {"5": "solar_only"},
+    }
+    assert "target_soc" not in payload and "departure_times" not in payload
+    assert "confirmed by Home Assistant" in result["message"]
+    assert "Meet Deadline days may buy grid energy above the price limit" in result["message"]
+    assert result["draftsAfter"] == 0
+    assert result["zero"] == {"0": -2, "5": 0}
+
+    assert result["both"]["writes"] == 0 and result["both"]["type"] == "error"
+    assert result["pruned"] is True and result["pollDrafts"] == 0
+    assert result["pollNotice"]["type"] == "warn"
+    assert "different car was selected" in result["pollNotice"]["message"]
+
+    server = result["server"]
+    assert len(server["writes"]) == 1 and server["writes"][0]["shared_charger_profile_id"] == "car-a"
+    assert server["drafts"] == 0
+    assert server["notice"]["type"] == "warn" and "Not saved" in server["notice"]["message"]
+    assert server["loads"] == 1
+
+    assert result["old"] == [{"vehicle_id": "generic_ev", "max_grid_price_cents": 30, "shared_charger_profile_id": "car-a"}]
