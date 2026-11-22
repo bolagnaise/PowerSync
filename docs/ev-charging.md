@@ -42,6 +42,14 @@ Scheduled Charging and Price Level can use the current retail rate from EPEX, Oc
 
 When the battery optimizer includes Smart Schedule, it uses the vehicle's resolved charger limit and the price policy for its next departure. A five-minute cheap interval can supply five minutes of charging. If two cars request **Preserve Home Battery**, ending one mode keeps the other car's protection active until its request also ends.
 
+## Smart Schedule grid price
+
+In PowerSync Mobile, open **EV → Smart schedule**, select the vehicle and tap **Maximum grid price** under **Default Strategy**. The initial limit is 25 minor currency units per kWh, such as 25¢/kWh for an Australian site. Enter the most you want to pay for grid charging. The exact limit qualifies. Zero allows free or negative prices, and a negative limit requires the retailer to pay you at least that amount.
+
+Tap a weekday to set a different limit or use the vehicle default. An overnight plan uses the weekday of the next departure in your Home Assistant time zone. With no departure, it uses the current local day. A saved price change applies at the next charging decision, including when an older plan is still displayed.
+
+**Prefer Solar** can start on spare solar and can use eligible low-cost grid periods. **Cheapest** compares planned solar and grid costs. **Solar Only** can also use an eligible free-grid period. **Meet Deadline** can use grid power above the limit to meet a departure target. Vehicle readiness, battery protections and site import limits still apply.
+
 ## Site import limits during EV charging
 
 From v2.12.1766, Dynamic EV reads Smart Optimization’s **Maximum grid import** on each charging control cycle. Changing or clearing that setting takes effect during the active session. When adjusting the rate, PowerSync rounds down to a whole amp if rounding up would exceed the site import limit. Independent site and charger limits still apply. With no configured site limit, battery-target charging uses a 12.5 kW fallback.
