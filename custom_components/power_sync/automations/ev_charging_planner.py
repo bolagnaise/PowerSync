@@ -6877,17 +6877,19 @@ class AutoScheduleExecutor:
         if effective_consume_level > 0 and battery_soc <= effective_consume_level:
             if effective_stop_at_floor:
                 reason = (
-                    f"Battery {battery_soc:.0f}% at consume floor {effective_consume_level}% — "
-                    f"EV charging stopped (stop at floor enabled)"
+                    f"Battery {battery_soc:.0f}% at consume floor "
+                    f"{effective_consume_level}% (stop at floor enabled)"
                 )
                 if state.is_charging:
-                    await self._stop_charging(
+                    stopped = await self._stop_charging(
                         vehicle_id,
                         settings,
                         state,
                         reason=reason,
                     )
-                    state.last_decision = "stopped"
+                    state.last_decision = "stopped" if stopped else "stopping"
+                    if not stopped:
+                        reason = f"{reason}; stop unconfirmed"
                 elif await self._stop_external_charging_if_needed(
                     vehicle_id,
                     settings,

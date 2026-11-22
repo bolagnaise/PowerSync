@@ -6393,7 +6393,17 @@ def test_auto_schedule_external_stop_requires_specific_tesla_loadpoint(
     fake_actions._action_stop_ev_charging_dynamic.assert_not_awaited()
 
 
-def test_auto_schedule_battery_floor_reconciles_external_charging(monkeypatch):
+@pytest.mark.parametrize(
+    ("managed", "stop_result", "decision"),
+    [
+        (False, False, "waiting"),
+        (True, False, "stopping"),
+        (True, True, "stopped"),
+    ],
+)
+def test_auto_schedule_battery_floor_reports_stop_result(
+    monkeypatch, managed, stop_result, decision,
+):
     now = datetime(2026, 7, 31, 10, 0, tzinfo=timezone(timedelta(hours=10)))
 
     async def at_home(*args, **kwargs):
@@ -6415,26 +6425,29 @@ def test_auto_schedule_battery_floor_reconciles_external_charging(monkeypatch):
         _FakeConfigEntry(),
         planner=SimpleNamespace(),
     )
+    vehicle_id = "ble_donkey"
+    executor._stop_charging = AsyncMock(return_value=stop_result)
     executor._stop_external_charging_if_needed = AsyncMock(return_value=False)
     settings = ev_planner.AutoScheduleSettings(
         enabled=True,
-        vehicle_id=VIN,
+        vehicle_id=vehicle_id,
         target_soc=80,
-        consume_battery_level=25,
+        consume_battery_level=30,
         stop_at_battery_floor=True,
     )
-    state = ev_planner.AutoScheduleState(vehicle_id=VIN)
+    state = ev_planner.AutoScheduleState(vehicle_id=vehicle_id)
+    state.is_charging = managed
     state.current_plan = SimpleNamespace(windows=[])
     state.last_plan_update = ev_planner._ha_local_now_naive()
-    executor._settings[VIN] = settings
-    executor._state[VIN] = state
+    executor._settings[vehicle_id] = settings
+    executor._state[vehicle_id] = state
 
     asyncio.run(
         executor._evaluate_vehicle(
-            VIN,
+            vehicle_id,
             settings,
             {
-                "battery_soc": 24,
+                "battery_soc": 27,
                 "solar_power": 4000,
                 "load_power": 3000,
                 "grid_power": 16000,
@@ -6443,12 +6456,20 @@ def test_auto_schedule_battery_floor_reconciles_external_charging(monkeypatch):
         )
     )
 
-    executor._stop_external_charging_if_needed.assert_awaited_once()
-    assert state.last_decision == "waiting"
-    assert state.last_decision_reason == (
-        "Battery 24% at consume floor 25% — "
-        "EV charging stopped (stop at floor enabled)"
-    )
+    assert state.last_decision == decision
+    if managed:
+        executor._stop_charging.assert_awaited_once_with(
+            vehicle_id, settings, state,
+            reason="Battery 27% at consume floor 30% (stop at floor enabled)",
+        )
+        executor._stop_external_charging_if_needed.assert_not_awaited()
+    else:
+        executor._stop_charging.assert_not_awaited()
+        executor._stop_external_charging_if_needed.assert_awaited_once()
+    assert "Battery 27% at consume floor 30%" in state.last_decision_reason
+    if managed and not stop_result:
+        assert state.is_charging
+        assert "stop unconfirmed" in state.last_decision_reason
 
 
 def test_auto_schedule_owned_stop_suppression_is_per_vehicle(
