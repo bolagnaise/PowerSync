@@ -258,6 +258,9 @@ def _reconcile_ev_sources_to_schedule(
     solar_kw: list[float],
     house_load_kw: list[float],
     grid_import_kw: list[float],
+    *,
+    grid_reallocation_allowed: dict[str, list[bool]] | None = None,
+    max_grid_import_kw: float | None = None,
 ) -> dict[str, dict[str, list[float]]] | None:
     """Reattribute EV draw to sources available in the emitted schedule.
 
@@ -269,8 +272,9 @@ def _reconcile_ev_sources_to_schedule(
     schedule's house/solar/battery/grid balance.  Battery export is deliberately
     removed before battery-to-EV capacity is computed.
 
-    Leave sub-watt settlement rounding unattributed. Return ``None`` if the
-    combined deficit exceeds that tolerance so callers can reject the plan.
+    A grid-enabled window can also use import already in the final schedule.
+    Leave sub-watt settlement rounding unattributed. Return ``None`` when
+    the remaining deficit exceeds that tolerance.
     """
     vehicle_ids = list(ev_charge_by_vehicle_kw)
     n = max(
@@ -384,9 +388,7 @@ def _reconcile_ev_sources_to_schedule(
                 remaining[vehicle_id] -= allocated
                 budgets[source] -= allocated
 
-        # Fill only from source columns the LP actually used for that vehicle;
-        # this preserves source-policy decisions while correcting their final
-        # physical amount after settlement.
+        # Prefer the sources the LP used when redistributing the settled draw.
         for vehicle_id in vehicle_ids:
             if remaining[vehicle_id] <= 1e-9:
                 continue
@@ -420,6 +422,24 @@ def _reconcile_ev_sources_to_schedule(
                 sources[vehicle_id][source][slot] += allocated
                 remaining[vehicle_id] -= allocated
                 budgets[source] -= allocated
+
+        # Projection can give solar to the battery and leave grid power for
+        # an EV even when the LP attributed all of that EV's draw to solar.
+        # Reuse that import only for windows with explicit grid permission.
+        within_import_limit = (
+            max_grid_import_kw is None
+            or grid_import <= max_grid_import_kw + EV_SOURCE_ROUNDING_TOLERANCE_KW
+        )
+        if budgets["grid"] > 1e-9 and within_import_limit:
+            for vehicle_id, allowed in (grid_reallocation_allowed or {}).items():
+                if slot >= len(allowed) or not allowed[slot]:
+                    continue
+                allocated = min(remaining.get(vehicle_id, 0.0), budgets["grid"])
+                if allocated <= 1e-9:
+                    continue
+                sources[vehicle_id]["grid"][slot] += allocated
+                remaining[vehicle_id] -= allocated
+                budgets["grid"] -= allocated
 
         if math.fsum(remaining.values()) > EV_SOURCE_ROUNDING_TOLERANCE_KW:
             return None
@@ -940,6 +960,8 @@ class OptimizerResult:
     free_import_command_slots: list[bool] = field(default_factory=list)
     solar_curtailment_w: list[float] | None = None
     degraded: bool = False
+    # Keep solver-resolved eligibility for the final schedule reconciliation.
+    ev_grid_reallocation_allowed: dict[str, list[bool]] = field(default_factory=dict)
 
 
 class BatteryOptimizer:
@@ -6547,6 +6569,7 @@ class BatteryOptimizer:
         )
         ev_charge_kw_by_vehicle: dict[str, list[float]] = {}
         ev_source_kw_by_vehicle: dict[str, dict[str, list[float]]] = {}
+        ev_grid_reallocation_allowed: dict[str, list[bool]] = {}
         if ev_charge_active:
             for vehicle in range(n_ev_vehicles):
                 # HiGHS can leave trace power in an inactive period within
@@ -6595,6 +6618,25 @@ class BatteryOptimizer:
                         ]
                 else:
                     ev_source_kw_by_vehicle[vehicle_id] = source_series
+                if cost_neutral_active:
+                    # A grid-limited session keeps its original source split.
+                    # A below-minimum-SOC start granted by the solver must use solar.
+                    grid_allowed = [False] * n
+                    for t, period in enumerate(periods):
+                        allowed = (
+                            p_ev_allow_grid[vehicle][t]
+                            and not p_ev_limit_grid_import[vehicle][t]
+                            and x[ev_solar_exception_var(vehicle, t)] < 0.5
+                        )
+                        grid_allowed[period.start:period.end] = [allowed] * period.slot_count
+                    if vehicle_id in ev_grid_reallocation_allowed:
+                        grid_allowed = [
+                            prior and allowed
+                            for prior, allowed in zip(
+                                ev_grid_reallocation_allowed[vehicle_id], grid_allowed
+                            )
+                        ]
+                    ev_grid_reallocation_allowed[vehicle_id] = grid_allowed
         ev_charge_kw = (
             [
                 sum(series[t] for series in ev_charge_kw_by_vehicle.values())
@@ -6697,6 +6739,8 @@ class BatteryOptimizer:
                 solar,
                 load,
                 grid_import,
+                grid_reallocation_allowed=ev_grid_reallocation_allowed,
+                max_grid_import_kw=self.max_grid_import_kw,
             )
             if reconciled_sources is None:
                 raise ValueError(
@@ -6834,6 +6878,7 @@ class BatteryOptimizer:
                 }
                 for vehicle_id, sources in ev_source_kw_by_vehicle.items()
             },
+            ev_grid_reallocation_allowed=ev_grid_reallocation_allowed,
         )
 
     def _build_reserve_recommendation(
@@ -10922,6 +10967,10 @@ class BatteryOptimizer:
                 list(solar[:n]),
                 list(load[:n]),
                 list(grid_import[:n]),
+                grid_reallocation_allowed=getattr(
+                    result, "ev_grid_reallocation_allowed", None
+                ),
+                max_grid_import_kw=self.max_grid_import_kw,
             )
             if reconciled_sources is None:
                 _LOGGER.warning(
