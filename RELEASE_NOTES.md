@@ -18,4 +18,10 @@ Disabling Smart Optimization waits for active work before restoring the battery.
 
 New managed charging sessions record the selected car's battery percentage when available. Older sessions retain their recorded values.
 
+## Tesla Scheduled Charging
+
+If PowerSync holds a Scheduled start while checking an earlier Tesla command, it now shows the vehicle as waiting. Charging history begins when fresh readings confirm that the car is charging.
+
+A Scheduled retry can now set the safe charging current through the same Tesla control after the previous session has finished. An unresolved command or a change of vehicle or control still holds the retry.
+
 Update through HACS and restart Home Assistant.
