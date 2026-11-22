@@ -48,6 +48,8 @@ In PowerSync Mobile, open **EV → Smart schedule**, select the vehicle and tap 
 
 Tap a weekday to set a different limit or use the vehicle default. An overnight plan uses the weekday of the next departure in your Home Assistant time zone. With no departure, it uses the current local day. A saved price change applies at the next charging decision, including when an older plan is still displayed.
 
+On the Home Assistant EV panel, find the car under **Smart Schedule**. Enter its **Maximum grid price** under **Default strategy**. Use **Weekday overrides** to set a different price for a day, or clear that day’s price to use the vehicle default. Choose **Save charging rules** for that car.
+
 **Prefer Solar** can start on spare solar and can use eligible low-cost grid periods. **Cheapest** compares planned solar and grid costs. **Solar Only** can also use an eligible free-grid period. **Meet Deadline** can use grid power above the limit to meet a departure target. Vehicle readiness, battery protections and site import limits still apply.
 
 ## Site import limits during EV charging
