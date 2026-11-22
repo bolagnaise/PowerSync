@@ -6931,6 +6931,7 @@ class PowerSyncEVPanel extends HTMLElement {
     const maps = Object.keys(EV_SMART_POLICY_FIELDS).filter(field => supported(EV_SMART_POLICY_FIELDS[field].map));
     if (!scalars.length && !maps.length) return '';
     const unit = this._priceUnit();
+    const notice = this._notice?.policyVehicle === vehicleId ? this._notice : null;
     const labelOf = field => EV_SMART_POLICY_FIELDS[field].label;
     const scalar = field => supported(field) ? this._policyInput(vehicleId, field, vehicle[field], { label: labelOf(field) }) : '';
     const strategyHelp = EV_SMART_STRATEGIES.map(([, label, , help]) => `${label}: ${help}`).join(' ');
@@ -6974,7 +6975,9 @@ class PowerSyncEVPanel extends HTMLElement {
             ${dayRows}
           </div>
         </fieldset>` : ''}
+        ${notice ? `<div class="notice ${this._escAttr(notice.type)}" role="${notice.type === 'error' || notice.type === 'warn' ? 'alert' : 'status'}" aria-atomic="true" data-policy-feedback>${this._escHtml(notice.message)}</div>` : ''}
         <div class="policy-actions">
+          ${notice?.conflicts?.length ? '<button class="command" data-policy-discard>Discard conflicting edits and refresh</button>' : ''}
           <button class="command primary" data-policy-save="${this._escAttr(vehicleId)}" data-vehicle-name="${this._escAttr(name)}" ${this._savingKey ? 'disabled' : ''}><ha-icon icon="mdi:content-save"></ha-icon><span>Save charging rules for ${this._escHtml(name)}</span></button>
         </div>
       </div>`;
@@ -7010,11 +7013,11 @@ class PowerSyncEVPanel extends HTMLElement {
     const inputs = [...this.shadowRoot.querySelectorAll(`[data-smart-policy="${CSS.escape(vehicleId)}"]`)];
     const entries = inputs.map(input => [input, this._settingDrafts.get(input._evFieldKey)]).filter(([, draft]) => draft);
     if (!entries.length) {
-      this._notice = { type: '', message: `No unsaved charging rule changes for ${name}.` };
+      this._notice = { type: '', policyVehicle: vehicleId, message: `No unsaved charging rule changes for ${name}.` };
       this._scheduleRender();
       return false;
     }
-    if (!source) return this._settingError('The vehicle schedule is unavailable. Refresh and try again.');
+    if (!source) return this._settingError('The vehicle schedule is unavailable. Refresh and try again.', undefined, vehicleId);
     const opened = { ...source };
     const parsed = [];
     try {
@@ -7032,7 +7035,7 @@ class PowerSyncEVPanel extends HTMLElement {
         parsed.push({ field, day, key, value: this._parsePolicyValue(input, field, day) });
       }
     } catch (err) {
-      return this._settingError(err.message);
+      return this._settingError(err.message, undefined, vehicleId);
     }
     const changes = {};
     const changed = new Map();
@@ -7054,7 +7057,7 @@ class PowerSyncEVPanel extends HTMLElement {
     };
     for (const day of [null, ...EV_WEEKDAYS.map(([key]) => key)]) {
       if (effective('preserve_home_battery', day) === true && Number(effective('consume_battery_level', day)) > 0) {
-        return this._settingError(`Choose either keeping the home battery for the house or letting the car use it${day == null ? '' : ` on ${EV_WEEKDAYS[Number(day)][2]}`}, not both.`);
+        return this._settingError(`Choose either keeping the home battery for the house or letting the car use it${day == null ? '' : ` on ${EV_WEEKDAYS[Number(day)][2]}`}, not both.`, undefined, vehicleId);
       }
     }
     const summary = [...changed].map(([field, days]) => {
@@ -7065,6 +7068,7 @@ class PowerSyncEVPanel extends HTMLElement {
     const bypass = strategies.includes('time_critical') ? ' Meet Deadline days may buy grid energy above the price limit.' : '';
     return this._writeSmartSettings(vehicleId, opened, changes, {
       message: `Saved for ${name} and confirmed by Home Assistant: ${summary}. Applies from the next charging decision.${bypass}`,
+      policyVehicle: vehicleId,
       drafts: entries.map(([input, draft]) => [input._evFieldKey, draft]),
     });
   }
@@ -7090,12 +7094,14 @@ class PowerSyncEVPanel extends HTMLElement {
 
   _attachEvents() {
     const sharedAtRender = this._data?.sharedCharger;
-    this.shadowRoot.querySelector('[data-discard-conflict]')?.addEventListener('click', () => {
+    const discardConflicts = () => {
       for (const [key, failed] of this._notice?.conflicts || []) {
         if (this._settingDrafts.get(key) === failed) this._settingDrafts.delete(key);
       }
       this._refresh();
-    });
+    };
+    this.shadowRoot.querySelector('[data-discard-conflict]')?.addEventListener('click', discardConflicts);
+    this.shadowRoot.querySelector('[data-policy-discard]')?.addEventListener('click', discardConflicts);
     this.shadowRoot.querySelector('[data-connected-vehicle]')?.addEventListener('change', (event) => {
       this._runCommand('shared:select', EV_PANEL_PATHS.sharedCharger,
         { operation: 'select', vehicle_id: event.target.value || null }, 'Connected vehicle selected', sharedAtRender);
@@ -7300,17 +7306,17 @@ class PowerSyncEVPanel extends HTMLElement {
     }
   }
 
-  _settingError(message, conflicts) {
-    this._notice = { type: 'error', message, conflicts };
+  _settingError(message, conflicts, policyVehicle) {
+    this._notice = { type: 'error', message, conflicts, policyVehicle };
     this._scheduleRender();
     return false;
   }
 
-  async _settingsWrite(savingKey, message, write, drafts = []) {
+  async _settingsWrite(savingKey, message, write, drafts = [], policyVehicle) {
     if (this._savingKey) return false;
-    if (typeof this._hass?.callApi !== 'function') return this._settingError('Home Assistant is unavailable.');
+    if (typeof this._hass?.callApi !== 'function') return this._settingError('Home Assistant is unavailable.', undefined, policyVehicle);
     this._savingKey = savingKey;
-    this._notice = { type: '', message: 'Checking and saving settings…' };
+    this._notice = { type: '', message: 'Checking and saving settings…', policyVehicle };
     this._scheduleRender();
     const hass = this._hass;
     const request = async (method, path, payload) => {
@@ -7336,7 +7342,7 @@ class PowerSyncEVPanel extends HTMLElement {
         if (draft === sent) this._settingDrafts.delete(key);
         else if (draft && confirmed) this._settingDrafts.set(key, { ...draft, opened: confirmed });
       }
-      this._notice = { type: '', message };
+      this._notice = { type: '', message, policyVehicle };
       EV_PANEL_CACHE.delete(this._cacheKey());
       await this._loadData(this._cacheKey());
       return true;
@@ -7348,7 +7354,7 @@ class PowerSyncEVPanel extends HTMLElement {
         for (const [key, draft] of [...this._settingDrafts]) {
           if (scopes.has(draft.scope)) this._settingDrafts.delete(key);
         }
-        this._notice = { type: 'warn', message: 'Not saved: a different car was selected on the shared charger before this change reached Home Assistant. The unsaved edit was discarded so it cannot apply to the wrong car, and settings were refreshed. Review the selected car and try again.' };
+        this._notice = { type: 'warn', policyVehicle, message: 'Not saved: a different car was selected on the shared charger before this change reached Home Assistant. The unsaved edit was discarded so it cannot apply to the wrong car, and settings were refreshed. Review the selected car and try again.' };
         EV_PANEL_CACHE.delete(this._cacheKey());
         await this._loadData(this._cacheKey());
         return false;
@@ -7357,7 +7363,7 @@ class PowerSyncEVPanel extends HTMLElement {
       const matches = draft => draft.field === field || String(draft.field).startsWith(field + ':') ||
         (field === 'departure_times' && String(draft.field).startsWith('day:'));
       return this._settingError(err?.message || err?.body?.message || 'Could not confirm the saved settings.',
-        err?.code === 'settings_conflict' ? drafts.filter(([, draft]) => matches(draft)) : undefined);
+        err?.code === 'settings_conflict' ? drafts.filter(([, draft]) => matches(draft)) : undefined, policyVehicle);
     } finally {
       this._savingKey = null;
       this._scheduleRender();
@@ -7512,7 +7518,7 @@ class PowerSyncEVPanel extends HTMLElement {
       const confirmed = await read();
       this._requirePatch(confirmed, patch);
       return confirmed;
-    }, drafts);
+    }, drafts, options.policyVehicle);
   }
 
   async _toggleSmartSchedule(vehicleId, enabled, opened = this._smartSettings(vehicleId)) {

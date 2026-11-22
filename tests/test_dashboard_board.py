@@ -2664,6 +2664,8 @@ def test_ev_smart_policy_editor_prices_strategies_weekdays_and_shared_profile_ch
           p.save.click(); await tick(); await tick();
           out.write = p.writes[0];
           out.message = p.panel._notice.message;
+          out.savedRules = p.panel._smartPolicyHtml('generic_ev', p.car, 'Model Y');
+          out.otherRules = p.panel._smartPolicyHtml('second_ev', baseCar(), 'Second EV');
           out.draftsAfter = p.panel._settingDrafts.size;
 
           // Zero is an explicit limit, not inheritance.
@@ -2678,7 +2680,8 @@ def test_ev_smart_policy_editor_prices_strategies_weekdays_and_shared_profile_ch
           const use = both.field('consume_battery_level', null, 'number', '0');
           both.bind(); keep.edit(true); use.edit('30');
           both.save.click(); await tick();
-          out.both = {writes: both.writes.length, type: both.panel._notice.type, message: both.panel._notice.message};
+          out.both = {writes: both.writes.length, type: both.panel._notice.type, message: both.panel._notice.message,
+            rules: both.panel._smartPolicyHtml('generic_ev', both.car, 'Model Y')};
 
           // A poll shows another car selected on the shared charger mid-edit.
           const poll = makePanel();
@@ -2744,6 +2747,9 @@ def test_ev_smart_policy_editor_prices_strategies_weekdays_and_shared_profile_ch
     assert "Meet Deadline days may buy grid energy above the price limit" in result["message"]
     assert result["draftsAfter"] == 0
     assert result["zero"] == {"0": -2, "5": 0}
+    assert 'role="status" aria-atomic="true" data-policy-feedback' in result["savedRules"]
+    assert 'data-policy-feedback' not in result["otherRules"]
+    assert 'role="alert" aria-atomic="true" data-policy-feedback' in result["both"]["rules"]
 
     assert result["both"]["writes"] == 0 and result["both"]["type"] == "error"
     assert result["pruned"] is True and result["pollDrafts"] == 0
