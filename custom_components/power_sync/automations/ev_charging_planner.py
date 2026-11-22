@@ -12558,6 +12558,17 @@ class ScheduledChargingExecutor:
             groups.setdefault(self._physical_tesla_id(vid), []).append(mode)
         return groups
 
+    def _pending_tesla_starts(self) -> set[str]:
+        """Scheduled controllers holding a Tesla while its Start is unresolved."""
+        from .actions import _dynamic_ev_state
+
+        return {
+            self._physical_tesla_id(vid)
+            for vid, state in _dynamic_ev_state.get(self.config_entry.entry_id, {}).items()
+            if state.get("active") and state.get("transport_recovery_pending")
+            and (state.get("params") or {}).get("owner_mode") == "scheduled"
+        }
+
     def _has_scheduled_tesla_sessions(self) -> bool:
         from .ev_ownership import owner_family
         return any(owner_family(mode) == "scheduled" for mode in self._tesla_session_modes().values())
@@ -12596,8 +12607,15 @@ class ScheduledChargingExecutor:
             self._state.is_charging = bool(success)
             self._state.last_decision = "started" if success else "start_failed"
             self._state.last_decision_reason = reason if success else f"{reason}; start unsuccessful"
+            if (success and _configured_charger_type({**self.config_entry.data, **self.config_entry.options}) == "tesla"
+                    and self._pending_tesla_starts()):
+                self._state.is_charging = False
+                self._state.last_decision = "starting"
+                self._state.last_decision_reason = f"{reason}; waiting for Tesla command recovery"
+                success = False
         await self.apply_preserve_home_battery(
-            bool(success) or bool(self._pending_stops), self._state.last_decision_reason,
+            bool(success) or self._state.last_decision == "starting" or bool(self._pending_stops),
+            self._state.last_decision_reason,
         )
         return bool(success)
 
@@ -12683,9 +12701,15 @@ class ScheduledChargingExecutor:
 
         # Re-read after every awaited eligibility/start operation. A manual
         # takeover during those awaits must replace even an earlier success.
+        pending_starts = self._pending_tesla_starts()
         for vin, modes in self._tesla_owner_groups().items():
             if modes and all(owner_family(mode) == "scheduled" for mode in modes):
-                if not results.get(vin, {}).get("active"):
+                if vin in pending_starts:
+                    results[vin] = {
+                        "active": False, "start_pending": True,
+                        "reason": "Waiting for Tesla command recovery and charging confirmation",
+                    }
+                elif not results.get(vin, {}).get("active"):
                     results[vin] = {
                         "active": True,
                         "reason": "Scheduled ownership retained; eligibility unavailable",
@@ -12697,6 +12721,13 @@ class ScheduledChargingExecutor:
         self._state.is_charging = active > 0
         self._state.last_decision = "partial" if 0 < active < len(results) else "charging" if active else "start_failed"
         self._state.last_decision_reason = f"{reason}; Scheduled control active for {active}/{len(results)} vehicle(s)"
+        waiting = sum(bool(result.get("start_pending")) for result in results.values())
+        if waiting:
+            if not active:
+                self._state.last_decision = "starting"
+            self._state.last_decision_reason = (
+                f"{reason}; {active} charging, {waiting} waiting for Tesla command recovery"
+            )
         return active > 0
 
     async def _stop_charging(self, reason: str) -> bool:

@@ -34,6 +34,7 @@ import re
 import time
 from collections.abc import Iterable, Mapping
 from contextvars import ContextVar
+from uuid import uuid4
 from dataclasses import dataclass
 from typing import List, Dict, Any, Optional, Callable
 
@@ -1482,6 +1483,26 @@ def _tesla_plan_expired(params: Dict[str, Any]) -> bool:
         or not math.isfinite(deadline) or datetime.now(dt_timezone.utc).timestamp() >= deadline)
 
 
+async def _track_recovered_scheduled_start(hass, entry, vehicle_id, state, current):
+    """Open the reserved session after charging confirmation under the same lease."""
+    from .ev_charging_session import get_session_manager
+
+    def can_open():
+        return current() and not state.get("session_id")
+
+    manager = get_session_manager()
+    if manager is None or not can_open():
+        return
+    initial_soc = await _ev_session_soc(hass, entry, vehicle_id, state["params"])
+    if can_open():
+        session = await manager.start_session(
+            vehicle_id=vehicle_id, mode="scheduled", start_soc=initial_soc,
+            session_id=state["ownership"].get("session_id"), still_current=can_open,
+        )
+        if session and can_open():
+            state["session_id"] = session.id
+
+
 async def _restart_owned_tesla(hass, entry, vehicle_id, state, amps):
     """Retry a current plan without renewing its deadline or replaying saved intent."""
     params = dict(state.get("params") or {})
@@ -1491,21 +1512,42 @@ async def _restart_owned_tesla(hass, entry, vehicle_id, state, amps):
     started_at = datetime.now().astimezone()
     state["last_physical_restart_attempt_at"] = started_at
     ownership = state.get("ownership")
+    scheduled_recovery = (
+        params.get("owner_mode") == "scheduled" and params["_tesla_plan_recovery_attempt"]
+    )
+
     def current():
+        if scheduled_recovery:
+            from .ev_ownership import get_ev_ownership
+            if ownership is None or get_ev_ownership(hass, entry, vehicle_id)[1] is not ownership:
+                return False
         return (_dynamic_ev_state.get(entry.entry_id, {}).get(vehicle_id) is state
                 and state.get("active") and state.get("ownership") is ownership)
+
+    if not current():
+        return False
     success = await _action_start_ev_charging(hass, entry, params, context=None)
     if not current():
         return False
-    if success and params.get("_tesla_start_live_read_required"):
+    if success and (scheduled_recovery or params.get("_tesla_start_live_read_required")):
         success, _evidence = await _wait_for_tesla_physical_start(
             hass, entry, vehicle_id, params, baseline, started_at)
         if not current():
             return False
-    if not success and (success is None or params.get("_tesla_transport_recovery_pending")
+    if not success and (scheduled_recovery or success is None or params.get("_tesla_transport_recovery_pending")
                         or params.get("_tesla_allow_plan_recovery")):
         _mark_tesla_plan_pending(state, amps)
     if success:
+        if scheduled_recovery:
+            from .ev_ownership import record_ev_command
+            try:
+                await _track_recovered_scheduled_start(hass, entry, vehicle_id, state, current)
+            except Exception as err:
+                _LOGGER.debug("Could not track recovered Scheduled charging: %s", err)
+            if not current():
+                return False
+            record_ev_command(hass, entry, vehicle_id, command="start_scheduled",
+                              success=True, reason="Tesla charging confirmed after recovery")
         state.pop("transport_recovery_pending", None)
         state["reason"] = ""
     return bool(success)
@@ -6002,12 +6044,18 @@ async def _tesla_transport_route(hass, entry, params, operation):
             return {"kind": "ha"}
         return {"kind": "blocked", "reason": "ble_stop_recovery_active"}
     route = get_vehicle_route(hass, entry, vehicle)
-    if operation == "start" and route and route.get("reason") == "route_identity_changed":
+    rate_retry_current = params.get("_tesla_scheduled_rate_recovery_current")
+    resume_for_rate = operation == "rate" and callable(rate_retry_current) and rate_retry_current()
+    if (operation == "start" or resume_for_rate) and route and route.get("reason") == "route_identity_changed":
         from ..tesla_ev_recovery import async_resume_completed_native_route
 
         authority = _tesla_transport_authority(
-            hass, entry, params, operation="start", ignore_recovery_gate=True)
-        if await async_resume_completed_native_route(hass, entry, vehicle, authorize=authority):
+            hass, entry, params, operation=operation, ignore_recovery_gate=True)
+
+        def can_resume():
+            return authority() and (not resume_for_rate or rate_retry_current())
+
+        if await async_resume_completed_native_route(hass, entry, vehicle, authorize=can_resume):
             route = get_vehicle_route(hass, entry, vehicle)
     if (operation != "stop" and route and route.get("reason") == "native_recovery"):
         await _tesla_reconcile_native_history(hass, entry, params)
@@ -10481,8 +10529,9 @@ async def _action_start_ev_charging(
             return True
         route_blocked = bool(route and route.get("kind") == "blocked")
         if route_blocked or observed != "stopped":
-            reason = "route_blocked"
-            if not route_blocked:
+            if route_blocked:
+                reason = f"route_blocked ({route.get('reason') or 'unspecified'})"
+            else:
                 reason = "read_unavailable" if observation is None else "read_unconfirmed"
             _LOGGER.debug(
                 "Tesla Start withheld: %s (source_charge_timestamp=%s)",
@@ -13189,6 +13238,19 @@ async def _set_vehicle_amps_unchecked(
                 False,
             ),
         }
+        if params.get("owner_mode") == "scheduled":
+            from .ev_ownership import get_ev_ownership
+            state = _dynamic_ev_state.get(config_entry.entry_id, {}).get(vehicle_id)
+            if state and state.get("params") is params and state.get("transport_recovery_pending"):
+                owner = state.get("ownership")
+
+                def still_owns_scheduled_retry():
+                    return (owner is not None and owner.get("owner_mode") == "scheduled"
+                            and state.get("active") and state.get("transport_recovery_pending")
+                            and _dynamic_ev_state.get(config_entry.entry_id, {}).get(vehicle_id) is state
+                            and get_ev_ownership(hass, config_entry, vehicle_id)[1] is owner)
+
+                command_params["_tesla_scheduled_rate_recovery_current"] = still_owns_scheduled_retry
         success = await _action_set_ev_charging_amps(
             hass,
             config_entry,
@@ -14990,7 +15052,8 @@ async def _update_smart_schedule_battery_target_group(
             import_price, export_price = _get_current_ev_prices(hass, entry_id)
             for vehicle_id, state in sessions:
                 params = state.get("params") or {}
-                if _session_energy_tracked_by_charger_poll(params):
+                if (params.get("owner_mode") == "scheduled" and state.get("transport_recovery_pending")
+                        or _session_energy_tracked_by_charger_poll(params)):
                     continue
                 prior_amps = previous_amps[vehicle_id]
                 current_amps = int(state.get("current_amps", 0) or 0)
@@ -18893,7 +18956,8 @@ async def _dynamic_ev_update(
         from ..const import DOMAIN
         from .ev_charging_session import get_session_manager
         session_manager = get_session_manager()
-        if session_manager and not _session_energy_tracked_by_charger_poll(params):
+        if (session_manager and not _session_energy_tracked_by_charger_poll(params)
+                and not (params.get("owner_mode") == "scheduled" and state.get("transport_recovery_pending"))):
             if current_amps > 0 and new_amps > 0:
                 # Session update - still charging
                 is_solar = _is_ev_charging_from_solar(grid_power_kw, current_ev_power_kw)
@@ -20672,7 +20736,7 @@ async def _action_start_ev_charging_dynamic_locked(
     try:
         from .ev_charging_session import get_session_manager
         session_manager = get_session_manager()
-        if session_manager:
+        if session_manager and not (owner_mode == "scheduled" and transport_pending):
             initial_soc = await _ev_session_soc(hass, config_entry, vehicle_id, params)
             if not registration_is_current():
                 discard_registration()
@@ -20715,6 +20779,10 @@ async def _action_start_ev_charging_dynamic_locked(
         discard_registration()
         return False
     session_id = registered_state.get("session_id")
+    if transport_pending and owner_mode == "scheduled":
+        # A native route is bound to the whole lease, including its session ID.
+        # Reserve the ID now; open its history only when the vehicle confirms.
+        session_id = str(uuid4())
     ownership = claim_ev_ownership(
         hass,
         config_entry,
@@ -20833,9 +20901,14 @@ async def _action_start_ev_charging_dynamic_locked(
 
     mode_label = "solar surplus" if dynamic_mode == "solar_surplus" else "battery target"
     zaptec_start_pending = full_params["zaptec_pending_start"]
+    start_status = "started"
+    if transport_pending:
+        start_status = "waiting for Tesla command recovery"
+    elif zaptec_start_pending:
+        start_status = "armed; waiting for charger power"
     _LOGGER.info(
         "Dynamic EV charging %s (%s mode, vehicle=%s)",
-        "armed; waiting for charger power" if zaptec_start_pending else "started",
+        start_status,
         mode_label, vehicle_id,
     )
 

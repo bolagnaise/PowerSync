@@ -10378,6 +10378,32 @@ def test_scheduled_owner_with_fresh_stopped_telemetry_retries_start(
         assert f.ownership.get_active_ev_owner_mode(f.hass, f.entry, vin) == "scheduled"
 
 
+def test_scheduled_withheld_tesla_start_keeps_one_controller_without_reporting_charging(
+    stopped_scheduled_session,
+):
+    f = stopped_scheduled_session
+    state = f.original_state
+    state.update(charging_started=False, transport_recovery_pending=True)
+    for _ in range(2):
+        asyncio.run(f.coordinator.evaluate({}, 10))
+        view = f.scheduled.get_state()
+        assert view["is_charging"] is False
+        assert view["last_decision"] == "starting"
+        assert view["vehicle_results"][f.vin]["start_pending"] is True
+        assert f.coordinator.get_state()["is_charging"] is False
+        assert view["preserve_home_battery_active"] is True
+        assert f.ownership.get_active_ev_owner_mode(f.hass, f.entry, f.vin) == "scheduled"
+    f.actions._action_start_ev_charging_dynamic.assert_not_awaited()
+    f.actions._action_stop_ev_charging_dynamic.assert_not_awaited()
+
+    # The same controller can confirm a subsequent retry.
+    state.update(charging_started=True, transport_recovery_pending=False)
+    f.actions._release_stopped_scheduled_tesla = AsyncMock(return_value=False)
+    asyncio.run(f.coordinator.evaluate({}, 10))
+    assert f.scheduled.get_state()["is_charging"] is True
+    assert f.coordinator.get_state()["is_charging"] is True
+
+
 def test_scheduled_stopped_session_recovery_waits_for_force_charge_to_end(
     stopped_scheduled_session,
 ):

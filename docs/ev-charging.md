@@ -46,6 +46,8 @@ When the battery optimizer includes Smart Schedule, it uses the vehicle's resolv
 
 From v2.12.1766, Dynamic EV reads Smart Optimization’s **Maximum grid import** on each charging control cycle. Changing or clearing that setting takes effect during the active session. When adjusting the rate, PowerSync rounds down to a whole amp if rounding up would exceed the site import limit. Independent site and charger limits still apply. With no configured site limit, battery-target charging uses a 12.5 kW fallback.
 
+When Tesla command recovery holds a Scheduled start, PowerSync shows the vehicle as waiting and keeps control for the next eligible retry. Charging history begins once the car confirms charging. If the previous command has finished and the same vehicle and charging control are still available, PowerSync can set the permitted current before retrying Start.
+
 EV charging history records the car’s state of charge at the start and end of a managed session when that reading is available.
 
 ## EV SoC sensors with OCPP

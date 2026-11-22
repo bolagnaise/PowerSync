@@ -607,7 +607,7 @@ async def test_unknown_start_journal_blocks_repeated_commands_and_paid_reads(
         record.getMessage() for record in caplog.records
         if record.getMessage().startswith("Tesla Start withheld:")
     ]
-    assert refusals == ["Tesla Start withheld: route_blocked (source_charge_timestamp=None)"] * 3
+    assert refusals == ["Tesla Start withheld: route_blocked (transport_recovery) (source_charge_timestamp=None)"] * 3
 
 
 @pytest.mark.asyncio

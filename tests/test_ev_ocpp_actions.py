@@ -2090,7 +2090,8 @@ def test_manual_solar_policy_acceptance_can_wait_without_positive_commands(monke
     rate.assert_not_awaited()
 
 
-def test_uncertain_tesla_dynamic_start_keeps_owned_pending_plan(monkeypatch):
+@pytest.mark.parametrize("owner_mode", ["smart_schedule", "scheduled"])
+def test_uncertain_tesla_dynamic_start_keeps_owned_pending_plan(monkeypatch, owner_mode):
     """An unknown BLE start keeps one managed plan for a bounded retry."""
     vin = "5YJTEST00000000A1"
     deadline = datetime.now(timezone.utc).timestamp() + 300
@@ -2133,6 +2134,12 @@ def test_uncertain_tesla_dynamic_start_keeps_owned_pending_plan(monkeypatch):
         lambda *args, **kwargs: timer_calls.append((args, kwargs)),
     )
 
+    manager = SimpleNamespace(start_session=AsyncMock(
+        side_effect=lambda **kw: SimpleNamespace(id=kw.get("session_id") or "test-session")
+    ))
+    session_module = types.ModuleType("power_sync.automations.ev_charging_session")
+    session_module.get_session_manager = lambda: manager
+    monkeypatch.setitem(sys.modules, session_module.__name__, session_module)
     hass = _Hass([])
     result = asyncio.run(
         actions._action_start_ev_charging_dynamic(
@@ -2142,7 +2149,7 @@ def test_uncertain_tesla_dynamic_start_keeps_owned_pending_plan(monkeypatch):
                 "vehicle_id": vin,
                 "vehicle_vin": vin,
                 "dynamic_mode": "battery_target",
-                "owner_mode": "smart_schedule",
+                "owner_mode": owner_mode,
                 "charger_type": "tesla",
                 "min_charge_amps": 5,
                 "max_charge_amps": 15,
@@ -2163,7 +2170,7 @@ def test_uncertain_tesla_dynamic_start_keeps_owned_pending_plan(monkeypatch):
     assert state["physical_restart_required"] is True
     assert state["params"]["_boost_start_deadline"] == deadline
     ownership = hass.data["power_sync"]["entry-1"]["ev_ownership"][vin]
-    assert ownership["owner_mode"] == "smart_schedule"
+    assert ownership["owner_mode"] == owner_mode
     assert ownership["last_command"]["success"] is False
 
     # The recovery attempt reuses the same finite deadline and does not turn
@@ -2176,6 +2183,22 @@ def test_uncertain_tesla_dynamic_start_keeps_owned_pending_plan(monkeypatch):
     assert start_params[-1]["_boost_start_deadline"] == deadline
     assert state["charging_started"] is False
     assert state["transport_recovery_pending"] is True
+
+    if owner_mode == "scheduled":
+        manager.start_session.assert_not_awaited()
+        assert state["session_id"] is None
+        reserved_id = ownership["session_id"]
+        assert reserved_id
+        confirmed = AsyncMock(side_effect=[(False, "no draw"), (True, "fresh draw")])
+        monkeypatch.setattr(actions, "_wait_for_tesla_physical_start", confirmed)
+        monkeypatch.setattr(actions, "_action_start_ev_charging", AsyncMock(return_value=True))
+        assert not asyncio.run(actions._restart_owned_tesla(hass, _Entry(), vin, state, 15))
+        manager.start_session.assert_not_awaited()
+        assert state["transport_recovery_pending"] is True
+        assert asyncio.run(actions._restart_owned_tesla(hass, _Entry(), vin, state, 15))
+        assert state["session_id"] == ownership["session_id"] == reserved_id
+        manager.start_session.assert_awaited_once()
+        assert not state.get("transport_recovery_pending")
 
 
 def test_pending_tesla_restart_respects_backoff_then_retries(monkeypatch):
@@ -11515,6 +11538,28 @@ def test_manual_session_records_quick_control_metadata():
     assert ownership["duration_minutes"] == 90
     assert ownership["expires_at"] == "2026-05-01T01:30:00+00:00"
     assert ownership["quick_control"] is True
+
+
+def test_recovered_session_cannot_replace_new_owner_while_loading_history():
+    from power_sync.automations.ev_charging_session import ChargingSessionManager
+
+    manager = object.__new__(ChargingSessionManager)
+    manager._session_lock = asyncio.Lock()
+    replacement = SimpleNamespace(id="replacement")
+    manager.active_sessions = {"VIN-A": replacement}
+    owner = {"current": True}
+
+    async def load():
+        owner["current"] = False
+
+    manager._load_sessions = load
+    manager._end_session_unlocked = AsyncMock()
+    assert asyncio.run(manager.start_session(
+        "VIN-A", "scheduled", session_id="old-reservation",
+        still_current=lambda: owner["current"],
+    )) is None
+    assert manager.active_sessions["VIN-A"] is replacement
+    manager._end_session_unlocked.assert_not_awaited()
 
 
 def test_session_end_expected_id_preserves_replacement_session():

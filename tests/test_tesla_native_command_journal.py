@@ -1149,6 +1149,77 @@ async def test_native_unknown_survives_reload_and_stop_without_another_start(mon
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("variant", ["completed", "unresolved", "replaced_owner", "changed_during_save"])
+async def test_scheduled_rate_before_restart_reclaims_only_completed_native_route(monkeypatch, variant):
+    """A pending Scheduled start needs its accepted rate on the same Teslemetry producer."""
+    from power_sync import tesla_ev_recovery as recovery
+    from power_sync.automations import ev_ownership
+
+    hass = _native_hass(monkeypatch, "teslemetry")
+    entry = SimpleNamespace(entry_id="entry-1", data={}, options={
+        "ev_provider": actions.EV_PROVIDER_BOTH,
+        "tesla_ble_entity_prefix": "paired_ble",
+        "tesla_ble_vehicle_mapping": f"{VIN}=paired_ble",
+    })
+    runtime = hass.data["power_sync"][entry.entry_id]
+    anchor = hass.entity_registry.entities[ENTITY]
+    native_entry = SimpleNamespace(entry_id=anchor.config_entry_id, domain=anchor.platform)
+    hass.config_entries = SimpleNamespace(
+        async_entries=lambda domain: [native_entry] if domain == "teslemetry" else []
+    )
+    anchor.unique_id = f"{VIN}-charge_state_user_charge_enable_request"
+    hass.entity_registry.entities[AMPS_ENTITY] = SimpleNamespace(
+        entity_id=AMPS_ENTITY, platform=anchor.platform, config_entry_id=anchor.config_entry_id,
+        device_id=anchor.device_id, unique_id=f"{VIN}-charge_state_charge_current_request",
+        disabled_by=None,
+    )
+    hass.states._states[AMPS_ENTITY] = _State(AMPS_ENTITY, "16", {"min": 5, "max": 32})
+    assert await recovery.async_load_recovery_state(hass, entry)
+    ev_ownership.claim_ev_ownership(hass, entry, VIN, owner_mode="scheduled", session_id="old-session")
+    ticket = await recovery.async_begin_attempt(hass, entry, VIN, {"kind": "ha"}, "start", ENTITY)
+    assert ticket and await recovery.async_finish_attempt(ticket, "accepted_unconfirmed")
+    if variant == "unresolved":
+        ticket = await recovery.async_begin_attempt(hass, entry, VIN, {"kind": "ha"}, "rate", AMPS_ENTITY)
+        assert ticket and await recovery.async_finish_attempt(ticket, "sent_unknown")
+    owner = ev_ownership.claim_ev_ownership(hass, entry, VIN, owner_mode="scheduled", session_id="current-session")
+    params = {"vehicle_id": VIN, "vehicle_vin": VIN, "charger_type": "tesla", "owner_mode": "scheduled"}
+    state = {"active": True, "params": params, "ownership": owner, "transport_recovery_pending": True,
+             "physical_restart_required": True, "charging_started": False, "current_amps": 16}
+    monkeypatch.setitem(actions._dynamic_ev_state, entry.entry_id, {VIN: state})
+    runtime["dynamic_ev_state"] = actions._dynamic_ev_state[entry.entry_id]
+    assert recovery.get_vehicle_route(hass, entry, VIN)["kind"] == "blocked"
+    previous_attempts = deepcopy(runtime[recovery.RECOVERY_KEY]["vehicles"][VIN]["attempts"])
+    if variant == "replaced_owner":
+        ev_ownership.claim_ev_ownership(hass, entry, VIN, owner_mode="manual", session_id="manual-session")
+    elif variant == "changed_during_save":
+        store = recovery._sidecar_store(hass, entry, runtime)
+        save = store.async_save
+
+        async def takeover(value):
+            ev_ownership.claim_ev_ownership(hass, entry, VIN, owner_mode="manual", session_id="manual-session")
+            await save(value)
+
+        monkeypatch.setattr(store, "async_save", takeover)
+    monkeypatch.setattr(actions, "_tesla_vehicle_away_location", AsyncMock(return_value=None))
+    monkeypatch.setattr(actions, "_is_ble_available", lambda *_args: pytest.fail("Unexpected BLE fallback"))
+    monkeypatch.setattr(actions, "_is_api_credit_available", lambda *_args: True)
+    monkeypatch.setattr(actions, "_wake_tesla_ev_for_command", _async_true)
+    result = await actions._set_vehicle_amps(hass, entry, VIN, 9, params)
+    if variant == "completed":
+        assert result is True
+        assert hass.services.calls == [("number", "set_value", {"entity_id": AMPS_ENTITY, "value": 9})]
+        route = recovery.get_vehicle_route(hass, entry, VIN)
+        assert route["kind"] == "ha" and route["session_scope"]["session_id"] == "current-session"
+    else:
+        assert not result
+        assert not hass.services.calls
+        assert recovery.get_vehicle_route(hass, entry, VIN)["kind"] == "blocked"
+        assert runtime[recovery.RECOVERY_KEY]["vehicles"][VIN]["attempts"] == previous_attempts
+        if variant == "changed_during_save":
+            assert ev_ownership.get_ev_ownership(hass, entry, VIN)[1]["session_id"] == "manual-session"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("lease_transition", ["replaced", "released", "reload"])
 async def test_native_unknown_rate_allows_exact_stop_after_lease_transition(
     monkeypatch, lease_transition,

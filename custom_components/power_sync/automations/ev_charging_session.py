@@ -12,7 +12,7 @@ import json
 import statistics
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timedelta
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Callable
 
 from homeassistant.util import dt as dt_util
 from enum import Enum
@@ -384,7 +384,10 @@ class ChargingSessionManager:
         mode: str,
         start_soc: Optional[int] = None,
         target_soc: Optional[int] = None,
-    ) -> ChargingSession:
+        *,
+        session_id: Optional[str] = None,
+        still_current: Optional[Callable[[], bool]] = None,
+    ) -> Optional[ChargingSession]:
         """Start a new charging session.
 
         Args:
@@ -399,12 +402,17 @@ class ChargingSessionManager:
         async with self._session_lock:
             await self._load_sessions()
 
+            if still_current is not None and not still_current():
+                return None
+
             # End any existing session for this vehicle
             if vehicle_id in self.active_sessions:
                 await self._end_session_unlocked(vehicle_id, "new_session_started")
+                if still_current is not None and not still_current():
+                    return None
 
             session = ChargingSession(
-                id=str(uuid.uuid4()),
+                id=session_id or str(uuid.uuid4()),
                 vehicle_id=vehicle_id,
                 start_time=dt_util.now().isoformat(),
                 mode=mode,
