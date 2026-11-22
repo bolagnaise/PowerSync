@@ -2392,7 +2392,9 @@ def test_ev_panel_setting_forms_patch_and_confirm_selected_vehicle():
               return {success:true,settings:p.wrongAck ? {} : copy(p.price)};
             }
             if ([api.autoSettings,api.autoToggle].includes(path)) {
-              p.car={...p.car,...payload};
+              const {expected_settings,...update}=payload;
+              if (p.conflict) throw {status_code:409,body:{success:false,code:'settings_conflict',field:'departure_max_grid_price_cents',error:'Weekday prices changed. Reload and retry.'}};
+              p.car={...p.car,...update};
               return path === api.autoToggle ? {success:true,...copy(p.car)} : {success:true,settings:copy(p.car)};
             }
             if (path === api.sharedCharger) {
@@ -2493,6 +2495,22 @@ def test_ev_panel_setting_forms_patch_and_confirm_selected_vehicle():
           staleButton.click(); await tick();
           assert.deepEqual(race.writes,[]);
           assert.equal(race.panel._notice.type,'error');
+          const guarded = makePanel();
+          guarded.car.settings_precondition_supported=true;
+          guarded.car.departure_max_grid_price_cents['2']=0;
+          const opened=copy(guarded.car);
+          guarded.car.departure_max_grid_price_cents['1']=-1.5;
+          assert.equal(await guarded.panel._writeSmartSettings('generic_ev',opened,{departure_max_grid_price_cents:{...opened.departure_max_grid_price_cents,'3':0}}),true);
+          assert.deepEqual(guarded.writes[0][1].expected_settings,{departure_max_grid_price_cents:{'0':-2,'1':-1.5,'2':0}});
+          assert.deepEqual(guarded.writes[0][1].departure_max_grid_price_cents,{'0':-2,'1':-1.5,'2':0,'3':0});
+          guarded.conflict=true;
+          assert.equal(await guarded.panel._writeSmartSettings('generic_ev',copy(guarded.car),{departure_max_grid_price_cents:{'4':-2.25}}),false);
+          assert.equal(guarded.writes.length,2);
+          assert.match(guarded.panel._notice.message,/Weekday prices changed/);
+          assert.equal(guarded.panel._notice.type,'error');
+          guarded.conflict=false;
+          assert.equal(await guarded.panel._writeSmartSettings('generic_ev',copy(guarded.car),{enabled:true},{toggle:true}),true);
+          assert.deepEqual(guarded.writes[2][1].expected_settings,{enabled:false});
           const unshared = makePanel();
           unshared.panel._data.sharedCharger.enabled=false;
           unshared.car.shared_charger_profile_id=null;

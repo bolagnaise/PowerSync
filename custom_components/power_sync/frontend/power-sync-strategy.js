@@ -6846,8 +6846,19 @@ class PowerSyncEVPanel extends HTMLElement {
     this._scheduleRender();
     const hass = this._hass;
     const request = async (method, path, payload) => {
-      const result = await hass.callApi(method, path, payload);
-      if (result?.success !== true) throw new Error(result?.error || 'Home Assistant did not confirm the request.');
+      let result;
+      try {
+        result = await hass.callApi(method, path, payload);
+      } catch (err) {
+        if (!err?.body?.error) throw err;
+        result = err.body;
+      }
+      if (result?.success !== true) {
+        const error = new Error(result?.error || 'Home Assistant did not confirm the request.');
+        error.code = result?.code;
+        error.field = result?.field;
+        throw error;
+      }
       return result;
     };
     try {
@@ -7000,7 +7011,10 @@ class PowerSyncEVPanel extends HTMLElement {
       if (!Object.keys(patch).length) return current;
       const payload = { vehicle_id: vehicleId, ...patch };
       if (Object.hasOwn(opened, 'shared_charger_profile_id')) payload.shared_charger_profile_id = profile ?? null;
-      const written = await request('POST', toggle ? EV_PANEL_PATHS.autoToggle : path, payload);
+      const expected = Object.fromEntries(Object.keys(patch).map(key => [key, current[key]]));
+      // Weekday maps are replaced by HA. Guard the complete map used for this merge.
+      const guarded = current.settings_precondition_supported === true ? { ...payload, expected_settings: expected } : payload;
+      const written = await request('POST', toggle ? EV_PANEL_PATHS.autoToggle : path, guarded);
       const ack = toggle ? written : written.settings;
       this._requirePatch(ack, payload);
       const confirmed = await read();
