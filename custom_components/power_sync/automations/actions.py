@@ -2185,6 +2185,14 @@ async def _get_dynamic_ev_battery_level(
         return None
 
 
+async def _ev_session_soc(hass, config_entry, vehicle_id: str, params: dict) -> int | None:
+    """Record the identified vehicle's percentage in EV charging history."""
+    if _dynamic_ev_soc_vehicle_vin(vehicle_id, params) in (None, DEFAULT_VEHICLE_ID):
+        return None
+    level = await _get_dynamic_ev_battery_level(hass, config_entry, vehicle_id, params)
+    return int(level) if level is not None and 0 <= level <= 100 else None
+
+
 async def _dynamic_ev_full_soc_reason(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
@@ -14036,6 +14044,12 @@ def _optimizer_planned_ev_charge_kw(
         if action is None or not vehicle_id:
             return None
 
+        executor = entry_data.get("auto_schedule_executor")
+        if executor is not None:
+            settings = executor._settings.get(str(vehicle_id))
+            if settings is None or not settings.enabled:
+                return None  # The car can already be under a different EV mode.
+
         schedule = getattr(coordinator, "_current_schedule", None)
         actions = getattr(schedule, "actions", None) or []
         schedule_updated = getattr(schedule, "last_updated", None)
@@ -14981,11 +14995,11 @@ async def _update_smart_schedule_battery_target_group(
                 prior_amps = previous_amps[vehicle_id]
                 current_amps = int(state.get("current_amps", 0) or 0)
                 if prior_amps > 0 and current_amps <= 0:
-                    live_soc = live_status.get("battery_soc")
                     await session_manager.end_session(
                         vehicle_id=vehicle_id,
                         reason="battery_target_stop",
-                        end_soc=int(live_soc) if live_soc else None,
+                        end_soc=await _ev_session_soc(hass, config_entry, vehicle_id, params),
+                        expected_session_id=state.get("session_id"),
                     )
                 elif current_amps > 0:
                     power_kw = _dynamic_ev_commanded_power_kw(state)
@@ -16623,7 +16637,8 @@ async def _dynamic_ev_update_surplus(
                         await session_manager.end_session(
                             vehicle_id=vehicle_id,
                             reason=reason,
-                            end_soc=int(battery_soc) if battery_soc else None,
+                            end_soc=await _ev_session_soc(hass, config_entry, vehicle_id, params),
+                            expected_session_id=state.get("session_id"),
                         )
                         _LOGGER.debug(f"Solar surplus EV: Ended session for {vehicle_id} ({reason})")
                 except Exception as e:
@@ -18695,7 +18710,8 @@ async def _dynamic_ev_update(
     # site import past the meter limit. The battery-surplus branch spends the
     # battery's own grid-charging draw, which is not spare capacity. The
     # scheduled minimum-rate floor below still overrides this at amp level.
-    available_power_kw = min(available_power_kw, grid_headroom_kw)
+    site_headroom_kw = grid_headroom_kw
+    available_power_kw = min(available_power_kw, site_headroom_kw)
 
     # When the optimizer has co-planned the car against prices and the import
     # limit, its figure for this interval is a ceiling. Deliberately a ceiling
@@ -18722,8 +18738,9 @@ async def _dynamic_ev_update(
         if params.get("charger_type", "tesla") == "tesla" and not no_grid_import:
             lendable_kw = managed_borrowable_w(hass, config_entry, vehicle_id, params)/1000
             if lendable_kw > 0:
+                site_headroom_kw += lendable_kw
                 available_power_kw = max(available_power_kw, min(
-                    planned_ev_charge_kw-current_ev_power_kw, grid_headroom_kw+lendable_kw))
+                    planned_ev_charge_kw - current_ev_power_kw, site_headroom_kw))
         available_power_kw = min(
             available_power_kw,
             planned_ev_charge_kw - current_ev_power_kw,
@@ -18740,6 +18757,11 @@ async def _dynamic_ev_update(
         new_amps = 0
     else:
         new_amps = int(round(max(min_amps, min(max_amps, raw_new_amps))))
+        # Round a control target to the nearest amp only within the site limit.
+        site_ceiling_amps = math.floor(
+            current_amps + site_headroom_kw * 1000 / (voltage * phases) + 1e-9
+        )
+        new_amps = min(new_amps, max(0, site_ceiling_amps))
     optimizer_ceiling_amps = _optimizer_ev_ceiling_amps(
         planned_ev_charge_kw,
         voltage=voltage,
@@ -18885,14 +18907,13 @@ async def _dynamic_ev_update(
                     import_price_cents=import_price,
                     export_price_cents=export_price,
                 )
-            elif current_amps > 0 and new_amps == 0:
-                # Session end - charging stopped
-                live_soc = live_status.get("battery_soc")
-                end_soc = int(live_soc) if live_soc else None
+            elif current_amps > 0 and new_amps == 0 and state.get("current_amps") == 0:
+                end_soc = await _ev_session_soc(hass, config_entry, vehicle_id, params)
                 await session_manager.end_session(
                     vehicle_id=vehicle_id,
                     reason="battery_target_stop",
                     end_soc=end_soc,
+                    expected_session_id=state.get("session_id"),
                 )
                 _LOGGER.debug(f"Dynamic EV: Ended session for {vehicle_id}")
     except Exception as e:
@@ -20652,19 +20673,15 @@ async def _action_start_ev_charging_dynamic_locked(
         from .ev_charging_session import get_session_manager
         session_manager = get_session_manager()
         if session_manager:
-            # Get initial SoC if available
-            initial_soc = None
-            live_status = await _get_tesla_live_status(hass, config_entry)
+            initial_soc = await _ev_session_soc(hass, config_entry, vehicle_id, params)
             if not registration_is_current():
                 discard_registration()
                 return False
-            if live_status:
-                initial_soc = live_status.get("battery_soc")
 
             session = await session_manager.start_session(
                 vehicle_id=vehicle_id,
                 mode=owner_mode,
-                start_soc=int(initial_soc) if initial_soc else None,
+                start_soc=initial_soc,
             )
             if not registration_is_current():
                 discard_registration()
@@ -21085,19 +21102,11 @@ async def _action_stop_ev_charging_dynamic(
                 from .ev_charging_session import get_session_manager
                 session_manager = get_session_manager()
                 if session_manager and state.get("session_id"):
-                    # Try to get current SoC for end_soc
-                    end_soc = None
-                    try:
-                        live_status = hass.data.get(DOMAIN, {}).get(entry_id, {}).get("live_status", {})
-                        if live_status.get("battery_soc"):
-                            end_soc = int(live_status["battery_soc"])
-                    except Exception:
-                        pass
-
                     await session_manager.end_session(
                         vehicle_id=vid,
                         reason="manual" if params.get("manual_stop") else "stopped",
-                        end_soc=end_soc,
+                        end_soc=await _ev_session_soc(hass, config_entry, vid, state.get("params") or {}),
+                        expected_session_id=state["session_id"],
                     )
                     _LOGGER.debug(f"Dynamic EV: Ended charging session for {vid}")
             except Exception as e:

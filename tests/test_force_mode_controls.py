@@ -390,7 +390,7 @@ def test_monitoring_mode_optimizer_shutdown_skips_hardware_restore():
         coordinator_source,
         monitoring_helper,
     )
-    disable = _find_class_method(coordinator_tree, "OptimizationCoordinator", "disable")
+    disable = _find_class_method(coordinator_tree, "OptimizationCoordinator", "_finish_optimizer_shutdown")
     disable_source = ast.get_source_segment(coordinator_source, disable)
 
     executor_source = OPTIMIZATION_EXECUTOR_PATH.read_text()
@@ -414,12 +414,17 @@ def test_monitoring_mode_optimizer_shutdown_skips_hardware_restore():
         wrapper_restore,
     )
 
-    assert "monitoring_mode = self._monitoring_mode_active()" in disable_source
-    assert 'if not monitoring_mode and self._last_executed_action == "idle":' in disable_source
+    restore_guard = _find_class_method(
+        coordinator_tree, "OptimizationCoordinator", "_battery_restore_blocked"
+    )
+    restore_guard_source = ast.get_source_segment(coordinator_source, restore_guard)
+    assert "self._monitoring_mode_active()" in restore_guard_source
+    assert "restore_blocked = self._battery_restore_blocked()" in disable_source
+    assert 'if not restore_blocked and self._last_executed_action == "idle":' in disable_source
     assert "skipping IDLE cleanup writes" in disable_source
     assert "skipping scheduled EV no-discharge release" in disable_source
     assert "skipping executor restore writes" in disable_source
-    assert "await self._executor.stop(restore_normal=not monitoring_mode)" in disable_source
+    assert "await self._executor.stop(restore_normal=not restore_blocked)" in disable_source
     assert "restore_normal: bool = True" in stop_source
     assert "if restore_normal:" in stop_source
     assert "await self._restore_normal_operation()" in stop_source

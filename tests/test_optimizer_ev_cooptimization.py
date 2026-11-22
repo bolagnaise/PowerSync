@@ -883,6 +883,35 @@ def test_rolling_solve_uses_live_time_for_in_progress_ev_slot(
     assert plan.allow_grid == (bool(first_slot_kw), True, False)
 
 
+def test_joint_plan_uses_departure_strategy_and_live_electrical_limits(build_ev_charge_plan):
+    method, holder, warnings = build_ev_charge_plan
+    executor = _ev_executor("2026-08-21T07:00:00+08:00")
+    holder["executor"] = executor
+    plan = executor._state["veh-1"].current_plan
+    start = _NOW.replace(hour=23, minute=30)
+    plan.windows = [types.SimpleNamespace(
+        start_time=start.isoformat(), end_time=(start + timedelta(minutes=30)).isoformat(),
+        source="grid_peak", estimated_power_kw=1.9, price_cents_kwh=30,
+    )]
+    plan.charger_power_kw = 2.3  # Verified 10 A single-phase EVSE
+    plan.charging_power_step_kw = 0.23
+    cfg = executor._settings["veh-1"]
+    cfg.max_charge_amps = 32
+    cfg.phases = 3
+    cfg.min_charge_amps = 5
+    cfg.get_effective_priority = lambda day: "time_critical" if day == 4 else "cost_optimized"
+    cfg.get_effective_max_grid_price = lambda _day: 25.0
+    cfg.get_effective_preserve_home_battery = lambda day: day == 3
+    coordinator = types.SimpleNamespace(config_entry=_ENTRY, _ev_integration_enabled=True)
+    jobs = method(coordinator, [start])
+
+    assert warnings == []
+    assert len(jobs) == 1
+    assert jobs[0].max_power_kw == pytest.approx((2.3,))
+    assert jobs[0].min_power_kw == pytest.approx(1.15)
+    assert jobs[0].preserve_home_battery == (True,)
+
+
 def test_optimizer_plan_uses_smart_schedule_windows_and_policy(
     build_ev_charge_plan,
 ):

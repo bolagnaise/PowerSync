@@ -47,7 +47,8 @@ def _method_source(class_name: str, method_name: str) -> str:
                 if isinstance(item, ast.AsyncFunctionDef) and item.name == method_name:
                     segment = ast.get_source_segment(source, item)
                     assert segment is not None
-                    return segment
+                    finite = next(n for n in module.body if isinstance(n, ast.FunctionDef) and n.name == "_finite_float")
+                    return ast.unparse(finite) + "\n" + segment
     raise AssertionError(f"{class_name}.{method_name} not found")
 
 
@@ -343,3 +344,44 @@ def test_epex_explicit_interval_end_takes_precedence_over_inference():
 
     assert current_import["duration"] == 20
     assert current_import["endTime"] == "2026-07-08T10:50:00+00:00"
+
+
+def test_native_retail_coverage_excludes_missing_total_and_missing_quarter_hour():
+    warnings = []
+    coordinator = _make_self(export_rate=0, prices=[
+        {"startsAt": "2026-07-08T10:30:00+00:00"},
+        {"startsAt": "2026-07-08T11:00:00+00:00", "total": 0},
+    ], warnings=warnings)
+    coordinator.region = "BE"
+    result = _run_update_data(coordinator, warnings)
+    assert all(row["channelType"] != "general" for row in result["current"])
+    current_export = next(row for row in result["current"] if row["channelType"] == "feedIn")
+    future = next(row for row in result["forecast"] if row["channelType"] == "general")
+    assert current_export["endTime"] == "2026-07-08T10:45:00+00:00"
+    assert future["perKwh"] == 0
+    assert all(row["price_available"] is False for row in result["current"] if row["channelType"] == "feedIn")
+
+
+def test_epex_first_future_rate_is_never_published_as_current():
+    warnings = []
+    coordinator = _make_self(export_rate=8, prices=[
+        {"startsAt": "2026-07-08T11:00:00+00:00", "total": 0},
+    ], warnings=warnings)
+    result = _run_update_data(coordinator, warnings)
+    assert result["current"] == []
+    assert any(row["perKwh"] == 0 for row in result["forecast"] if row["channelType"] == "general")
+
+
+def test_epex_raw_wholesale_requires_one_unambiguous_finite_value_per_start():
+    for values, expected in [
+        ([True], None), ([float("nan")], None), ([3.5, -4, 3.5], None),
+        ([-4, 3.5], None), ([False, 0], None), ([0, 0], 0), ([-4, -4.0], 4),
+    ]:
+        raw = [{"startsAt": CURRENT_INTERVAL_ENTRY["startsAt"], "total": value} for value in values]
+        warnings = []
+        coordinator = _make_self(export_rate=0, prices=[CURRENT_INTERVAL_ENTRY], warnings=warnings,
+                                 export_source="raw_wholesale", raw_prices=raw)
+        result = _run_update_data(coordinator, warnings)
+        export = next(row for row in result["current"] if row["channelType"] == "feedIn")
+        assert export["price_available"] is (expected is not None)
+        assert export["perKwh"] == (expected if expected is not None else 0)

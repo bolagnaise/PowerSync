@@ -1186,6 +1186,27 @@ def test_set_settings_reset_battery_specs_re_detects_without_zeroing_model(
     ]
 
 
+def test_battery_only_solve_skips_disabled_price_level_observations(opt_module, monkeypatch):
+    coordinator = _coordinator(opt_module, "amber")
+    reads = []
+    async def observe_vehicles():
+        reads.append(True)
+        return []
+
+    executor = SimpleNamespace(
+        _get_settings=lambda: {"enabled": False},
+        collect_projection_snapshots=observe_vehicles,
+        is_grid_charging_blocked_at=lambda _time: False,
+    )
+    planner = types.ModuleType("power_sync.automations.ev_charging_planner")
+    planner.get_price_level_executor = lambda: executor
+    monkeypatch.setitem(sys.modules, planner.__name__, planner)
+
+    projection = asyncio.run(coordinator._build_price_level_projection(3))
+    assert reads == []
+    assert projection == opt_module.PriceLevelProjection.empty(3)
+
+
 def test_set_settings_ev_participation_allows_options_reload(opt_module):
     coordinator = _coordinator(
         opt_module,
@@ -1207,11 +1228,17 @@ def test_set_settings_ev_participation_allows_options_reload(opt_module):
         config_entries=_ConfigEntries(),
     )
 
+    coordinator._last_ev_charge_by_vehicle_w = {"car": [0.0]}
+    coordinator._last_ev_charge_schedule_updated = datetime.now(timezone.utc)
+    previous_generation = getattr(coordinator, "_historical_ev_generation", 0)
     result = asyncio.run(coordinator.set_settings({"ev_integration": True}))
 
     assert result["success"] is True
     assert coordinator._ev_integration_enabled is True
     assert coordinator._entry.options["optimization_ev_integration"] is True
+    assert coordinator._last_ev_charge_by_vehicle_w is None
+    assert coordinator._last_ev_charge_schedule_updated is None
+    assert coordinator._historical_ev_generation != previous_generation
     assert "_skip_reload" not in entry_data
 
 
@@ -11268,7 +11295,8 @@ def test_sigenergy_stale_no_idle_hold_retries_failed_restore(opt_module):
     assert coordinator._last_executed_action == "self_consumption"
 
 
-def test_sigenergy_failed_disable_cleanup_retries_before_enable(opt_module):
+@pytest.mark.parametrize("new_manual_owner", [False, True])
+def test_sigenergy_failed_disable_cleanup_retries_before_enable(opt_module, new_manual_owner):
     """A failed disable cleanup must be retried before a new optimizer run."""
 
     async def _run():
@@ -11326,9 +11354,11 @@ def test_sigenergy_failed_disable_cleanup_retries_before_enable(opt_module):
         assert energy_coordinator.restore_no_discharge_calls == 1
 
         energy_coordinator.restore_no_discharge_result = True
+        if new_manual_owner:
+            coordinator._get_active_force_state = lambda: {"active": True, "source": "user"}
         assert await coordinator.enable() is True
-        assert coordinator._idle_no_discharge_active is False
-        assert energy_coordinator.restore_no_discharge_calls == 2
+        assert coordinator._idle_no_discharge_active is new_manual_owner
+        assert energy_coordinator.restore_no_discharge_calls == (1 if new_manual_owner else 2)
         assert background_tasks == [
             "powersync_enable_restore",
             "powersync_initial_optimization",

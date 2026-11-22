@@ -39,7 +39,7 @@ def _valid_soc(value: Any) -> float | None:
     return None
 
 
-def _soc_from_state(state: Any) -> float | None:
+def ev_soc_from_state(state: Any) -> float | None:
     """Accept percentage states, preserving legacy sensors without units."""
     unit = (getattr(state, "attributes", {}) or {}).get("unit_of_measurement")
     if unit is not None and str(unit).strip().lower() not in ("", "%", "percent"):
@@ -58,7 +58,7 @@ def resolve_generic_charger_soc(hass: Any, opts: Mapping[str, Any]) -> float | N
         state = hass.states.get(entity_id)
         if state is None:
             continue
-        soc = _soc_from_state(state)
+        soc = ev_soc_from_state(state)
         if soc is not None:
             return soc
     return None
@@ -108,7 +108,7 @@ def resolve_ocpp_charger_soc(
         for entity in entities
     ):
         state = hass.states.get(native_entity)
-        native_soc = _soc_from_state(state)
+        native_soc = ev_soc_from_state(state)
         if native_soc is not None:
             return native_soc
 

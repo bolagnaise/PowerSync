@@ -5272,6 +5272,10 @@ def test_dynamic_switch_only_charger_cannot_claim_reduced_current(monkeypatch, a
         (True, False, 14450, 32, None, {}, 0),
         (True, False, 11300, 32, 0, {}, 0),
         (True, False, 6700, 0, None, {}, 32),
+        # 4.07 kW of remaining import capacity allows 5 A at 240 V on three phases.
+        (False, False, 10330, 0, None,
+         {"charger_amps_entity": "number.ev_current", "phases": 3,
+          "reserve_battery_charge": False}, 5),
         (True, False, 6770, 0, None, {}, None),
         (True, False, None, 0, None, {}, None),
         (True, True, 11300, 32, None, {}, 0),
@@ -9050,6 +9054,35 @@ def test_dynamic_deadline_start_never_overrides_unknown_tesla_charger_cap(monkey
     assert state["params"]["max_charge_amps"] == 5
     assert state["params"]["allow_stale_entity_max_override"] is False
     assert set_amps_calls == [5]
+
+
+def test_dynamic_session_history_records_vehicle_soc_at_start_and_stop(monkeypatch):
+    vin = "5YJTEST00000000C3"
+    hass = _Hass([])
+    entry = _Entry()
+    runtime = hass.data["power_sync"]["entry-1"]
+    runtime["live_status"] = {"battery_soc": 83}
+    manager = SimpleNamespace(start_session=AsyncMock(return_value=SimpleNamespace(id="session")),
+                              end_session=AsyncMock())
+    module = types.ModuleType("power_sync.automations.ev_charging_session")
+    module.get_session_manager = lambda: manager
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    monkeypatch.setattr(actions, "_dynamic_ev_state", {})
+    monkeypatch.setattr(actions, "_get_tesla_live_status", AsyncMock(return_value=runtime["live_status"]))
+    monkeypatch.setattr(actions, "_get_dynamic_ev_battery_level", AsyncMock(return_value=0))
+    monkeypatch.setattr(actions, "_action_start_ev_charging", AsyncMock(return_value=True))
+    monkeypatch.setattr(actions, "_set_vehicle_amps", AsyncMock(return_value=True))
+
+    assert asyncio.run(actions._action_start_ev_charging_dynamic(
+        hass, entry, {"vehicle_vin": vin, "dynamic_mode": "battery_target",
+                      "charger_type": "tesla", "fixed_charge_amps": 10},
+    ))
+    assert manager.start_session.await_args.kwargs["start_soc"] == 0
+    monkeypatch.setattr(actions, "_get_dynamic_ev_battery_level", AsyncMock(return_value=65.0))
+    assert asyncio.run(actions._action_stop_ev_charging_dynamic(
+        hass, entry, {"vehicle_vin": vin, "stop_charging": False},
+    ))
+    assert manager.end_session.await_args.kwargs["end_soc"] == 65
 
 
 def test_dynamic_deadline_start_uses_live_active_charger_cap(monkeypatch):

@@ -5787,21 +5787,22 @@ class EPEXPriceCoordinator(DataUpdateCoordinator):
                 parsed_prices.append((entry, starts_at, explicit_end))
 
             parsed_prices.sort(key=lambda item: item[1])
-            raw_by_start: dict[datetime, float] = {}
+            raw_by_start: dict[datetime, float | None] = {}
             for raw_entry in raw_prices:
                 try:
                     raw_start = datetime.fromisoformat(raw_entry.get("startsAt", ""))
-                    if raw_start.tzinfo is None:
-                        raw_start = raw_start.replace(tzinfo=dt_util.UTC)
-                    raw_total = float(raw_entry.get("total"))
                 except (TypeError, ValueError):
                     continue
-                if math.isfinite(raw_total):
-                    raw_by_start[raw_start] = raw_total
+                if raw_start.tzinfo is None:
+                    raw_start = raw_start.replace(tzinfo=dt_util.UTC)
+                raw_total = _finite_float(raw_entry.get("total"))
+                if raw_start in raw_by_start and raw_by_start[raw_start] != raw_total:
+                    raw_total = None
+                raw_by_start[raw_start] = raw_total
             default_duration = 15 if self.region.upper() == "BE" else 60
 
             for index, (entry, starts_at, explicit_end) in enumerate(parsed_prices):
-                total_ct = entry.get("total", 0)
+                total_ct = _finite_float(entry.get("total"))
                 next_start = (
                     parsed_prices[index + 1][1]
                     if index + 1 < len(parsed_prices)
@@ -5809,7 +5810,7 @@ class EPEXPriceCoordinator(DataUpdateCoordinator):
                 )
                 ends_at = explicit_end
                 if ends_at is None and next_start is not None and next_start > starts_at:
-                    ends_at = next_start
+                    ends_at = min(next_start, starts_at + timedelta(minutes=default_duration))
                 if ends_at is None or ends_at <= starts_at:
                     ends_at = starts_at + timedelta(minutes=default_duration)
                 duration_minutes = max(
@@ -5880,19 +5881,20 @@ class EPEXPriceCoordinator(DataUpdateCoordinator):
                     "endTime": ends_at.isoformat(),
                     "nemTime": ends_at.isoformat(),
                     "perKwh": export_ct,
+                    "price_available": (
+                        raw_by_start.get(starts_at) is not None if export_source == "raw_wholesale"
+                        else export_source != "custom_entity" and self._export_rate > 0
+                    ),
                     "channelType": "feedIn",
                     "type": interval_type,
                     "duration": duration_minutes,
                 }
 
-                if interval_type == "CurrentInterval":
-                    current_prices.extend([import_entry, export_entry])
-                elif interval_type == "ForecastInterval":
-                    forecast_prices.extend([import_entry, export_entry])
-
-            if not current_prices and forecast_prices:
-                # No current interval yet — use first forecast as current
-                current_prices = forecast_prices[:2]
+                target = current_prices if interval_type == "CurrentInterval" else forecast_prices
+                if interval_type != "ActualInterval":
+                    if total_ct is not None:
+                        target.append(import_entry)
+                    target.append(export_entry)
 
             _LOGGER.info(
                 "EPEX API data for %s: %d current, %d forecast entries "
@@ -13490,6 +13492,10 @@ class OctopusPriceCoordinator(DataUpdateCoordinator):
         expanded: list[dict[str, Any]] = []
 
         for rate in rates:
+            price = _finite_float(rate.get("value_inc_vat"))
+            if price is None:
+                continue
+            rate = {**rate, "value_inc_vat": price}
             valid_from_str = rate.get("valid_from", "")
             valid_to_str = rate.get("valid_to", "")
 

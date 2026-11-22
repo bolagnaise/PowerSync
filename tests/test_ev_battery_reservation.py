@@ -404,6 +404,23 @@ def test_per_vehicle_plan_never_falls_back_to_the_fleet_total(monkeypatch):
     ) == pytest.approx(0.230)
 
 
+def test_disabled_vehicle_schedule_releases_only_its_own_ceiling(monkeypatch):
+    now = datetime(2026, 8, 21, 10, 5, tzinfo=timezone.utc)
+    monkeypatch.setattr(actions.dt_util, "now", lambda: now)
+    coordinator = _ev_coordinator(now=now, vehicle_id="car-a", ev_charge_w=0)
+    coordinator._last_ev_charge_by_vehicle_w["car-b"] = [2300.0]
+    hass = _hass(coordinator)
+    hass.data["power_sync"]["entry-1"]["auto_schedule_executor"] = SimpleNamespace(
+        _settings={
+            "car-a": SimpleNamespace(enabled=False),
+            "car-b": SimpleNamespace(enabled=True),
+        }
+    )
+
+    assert actions._optimizer_planned_ev_charge_kw(hass, _Entry(), "car-a") is None
+    assert actions._optimizer_planned_ev_charge_kw(hass, _Entry(), "car-b") == 2.3
+
+
 def test_historical_visit_cannot_reuse_a_live_vehicle_ceiling(monkeypatch):
     now = datetime(2026, 8, 21, 10, 5, tzinfo=timezone.utc)
     monkeypatch.setattr(actions.dt_util, "now", lambda: now)
