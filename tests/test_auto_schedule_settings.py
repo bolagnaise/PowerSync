@@ -511,6 +511,60 @@ def test_auto_schedule_departure_preserve_and_consume_settings_are_mutually_excl
     assert settings.departure_preserve_home_battery == {0: False}
 
 
+@pytest.mark.asyncio
+async def test_battery_rule_inheritance_cannot_enable_preserve_and_consume_together(smart_schedule_routes):
+    executor, _, saved, storage, route, _, _, request = smart_schedule_routes
+    # Either single-setting edit remains supported. The positive weekday floor
+    # deliberately overrides the vehicle's preserve setting on Monday.
+    await route.post(request({"preserve_home_battery": True}))
+    code, reply = await route.post(request({"departure_consume_battery_level": {"0": 30}}))
+    assert code == 200
+    assert reply["settings"]["departure_preserve_home_battery"] == {"0": False}
+    before = executor.get_settings("car").to_dict()
+    writes = storage.await_count
+
+    # Removing only the synthesized Off would reinstate default Preserve On
+    # while the car still has an explicit Monday consume floor.
+    patch = {"departure_preserve_home_battery": {}, "max_grid_price_cents": -2}
+    code, reply = await route.post(request(patch))
+    assert code == 400 and "Monday" in reply["error"]
+    assert storage.await_count == writes
+    assert executor.get_settings("car").to_dict() == before
+    assert saved["auto_schedule_settings"]["car"] == before
+    with pytest.raises(ValueError, match="Monday"):
+        executor.update_settings("car", patch)
+    assert executor.get_settings("car").to_dict() == before
+
+    # Clearing both overrides restores the vehicle defaults.
+    code, _ = await route.post(request({**patch, "departure_consume_battery_level": {}}))
+    assert code == 200
+    assert executor.get_settings("car").get_effective_consume_battery_level(0) == 0
+
+    # A client editing Tuesday sends a whole replacement map. Monday's
+    # unchanged positive floor must not manufacture a new Preserve Off there.
+    assert (await route.post(request({"preserve_home_battery": False})))[0] == 200
+    assert (await route.post(request({"departure_consume_battery_level": {"0": 30}})))[0] == 200
+    assert (await route.post(request({"departure_preserve_home_battery": {}})))[0] == 200
+    code, reply = await route.post(request({"departure_consume_battery_level": {"0": 30, "1": 25}}))
+    assert code == 200 and reply["settings"]["departure_preserve_home_battery"] == {"1": False}
+    # The vehicle default also cannot introduce a mixed Monday policy.
+    assert (await route.post(request({"preserve_home_battery": True})))[0] == 400
+
+    # A pre-existing mixed record retains its raw settings for repair, but
+    # never permits battery use on a preserved day or blocks an unrelated price edit.
+    legacy = ev_planner.AutoScheduleSettings.from_dict({
+        "vehicle_id": "car", "preserve_home_battery": True,
+        "departure_consume_battery_level": {"0": 30, "1": 40},
+        "departure_preserve_home_battery": {"1": False},
+    })
+    executor._settings["car"] = legacy
+    assert legacy.get_effective_consume_battery_level(0) == 0
+    assert legacy.get_effective_consume_battery_level(1) == 40
+    code, _ = await route.post(request({"max_grid_price_cents": -1}))
+    assert code == 200
+    assert saved["auto_schedule_settings"]["car"]["departure_consume_battery_level"] == {"0": 30, "1": 40}
+
+
 def test_vehicle_charger_config_syncs_generic_status_entity():
     settings = ev_planner.AutoScheduleSettings()
 

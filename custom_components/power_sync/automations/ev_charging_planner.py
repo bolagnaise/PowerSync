@@ -16,6 +16,7 @@ import math
 import statistics
 import time
 from bisect import bisect_left, bisect_right
+from calendar import day_name
 from collections import Counter
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, time as dt_time, timezone
@@ -4575,9 +4576,20 @@ class AutoScheduleSettings:
 
     def get_effective_consume_battery_level(self, weekday: int) -> int:
         """Get the effective consume_battery_level for a given weekday."""
-        if weekday in self.departure_consume_battery_level:
-            return self.departure_consume_battery_level[weekday]
-        return self.consume_battery_level
+        if self.get_effective_preserve_home_battery(weekday):
+            # Older settings can inherit both preserve and a positive floor.
+            # Preserve already wins when both were stored at the same scope.
+            return 0
+        return self.departure_consume_battery_level.get(weekday, self.consume_battery_level)
+
+    def conflicting_battery_rules(self) -> dict[int, int]:
+        """Find stored floors that conflict with preserve after weekday inheritance."""
+        conflicts = {}
+        for weekday in range(7):
+            floor = _safe_int(self.departure_consume_battery_level.get(weekday, self.consume_battery_level))
+            if floor > 0 and self.get_effective_preserve_home_battery(weekday):
+                conflicts[weekday] = floor
+        return conflicts
 
     def get_effective_stop_at_battery_floor(self, weekday: int) -> bool:
         """Get the effective stop_at_battery_floor for a given weekday."""
@@ -5634,7 +5646,9 @@ class AutoScheduleExecutor:
         """Update settings for a vehicle."""
         vehicle_id = self._settings_vehicle_id(vehicle_id)
         settings = self.get_settings(vehicle_id)
-        return self._apply_settings_update(vehicle_id, settings, updates)
+        candidate = self._apply_settings_update(vehicle_id, copy.deepcopy(settings), updates)
+        vars(settings).update(vars(candidate))
+        return settings
 
     async def async_save_settings_update(
         self, store, vehicle_id: str, updates: dict, *, toggle: bool = False,
@@ -5708,6 +5722,12 @@ class AutoScheduleExecutor:
         updates.pop("vehicle_id", None)
         updates.pop("shared_charger_profile_id", None)
 
+        battery_policy_edit = bool(updates.keys() & {
+            "preserve_home_battery", "consume_battery_level",
+            "departure_preserve_home_battery", "departure_consume_battery_level",
+        })
+        previous_conflicts = settings.conflicting_battery_rules() if battery_policy_edit else {}
+
         for key, value in updates.items():
             if key in (
                 "battery_capacity_kwh",
@@ -5747,6 +5767,7 @@ class AutoScheduleExecutor:
                 key = "departure_min_battery_to_start"
                 value = {int(k): int(v) for k, v in value.items()}
             if key in AutoScheduleSettings.__dataclass_fields__:
+                previous_value = getattr(settings, key)
                 setattr(settings, key, value)
                 if key == "preserve_home_battery" and bool(value):
                     settings.consume_battery_level = 0
@@ -5754,12 +5775,20 @@ class AutoScheduleExecutor:
                     settings.preserve_home_battery = False
                 elif key == "departure_preserve_home_battery" and isinstance(value, dict):
                     for day, preserve in value.items():
-                        if preserve:
+                        if preserve and previous_value.get(day) != preserve:
                             settings.departure_consume_battery_level[day] = 0
                 elif key == "departure_consume_battery_level" and isinstance(value, dict):
                     for day, consume_level in value.items():
-                        if consume_level > 0:
+                        if consume_level > 0 and previous_value.get(day) != consume_level:
                             settings.departure_preserve_home_battery[day] = False
+
+        if battery_policy_edit:
+            for weekday, floor in settings.conflicting_battery_rules().items():
+                if previous_conflicts.get(weekday) != floor:
+                    raise ValueError(
+                        f"On {day_name[weekday]}, keep the home battery for the house "
+                        "or allow the car to use it. Change the conflicting weekday or vehicle default."
+                    )
 
         if "departure_times" not in updates and ("departure_time" in updates or "departure_days" in updates):
             # Legacy clients edit a single clock and a set of weekdays.
