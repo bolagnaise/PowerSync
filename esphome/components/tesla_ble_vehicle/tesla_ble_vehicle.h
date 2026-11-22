@@ -324,7 +324,8 @@ namespace esphome
             std::string recovery_vin_;
             text_sensor::TextSensor *recovery_proof_{nullptr};
             uint32_t recovery_last_query_{0};
-            bool recovery_radio_requested_{false};
+            uint32_t recovery_read_started_{0};
+            bool recovery_reads_parked_{false};
             void setup() override;
             void loop() override;
             void update() override;

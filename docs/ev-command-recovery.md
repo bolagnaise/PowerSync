@@ -4,6 +4,14 @@
 - [Recover native Tesla charging after a lost response](#tesla-native-recovery)
 - [Recover retained EV charging headroom](#ev-headroom-recovery)
 
+
+PowerSync leaves the Tesla bridge's Bluetooth connection under your control.
+An uncertain charge command can pause further charging commands while the
+bridge stays available for vehicle readings. A supported recovery checks the
+original vehicle and bridge, then requires fresh proof before charging can
+resume. If Bluetooth was previously switched off, check the recovery status
+before enabling it. A bridge can still have an unresolved command in its history.
+
 <a id="tesla-ble-stop-recovery"></a>
 
 ## Recovering held charging commands on a BLE-only Tesla bridge

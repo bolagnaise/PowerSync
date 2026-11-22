@@ -430,9 +430,33 @@ def _record_manual_generic_failure(
         manual_failure.setdefault("entity_id", str(entity_id).strip())
 
 
+def _targets_tesla_ble_connection(hass: HomeAssistant, target: Any) -> bool:
+    """Keep the operator's BLE connection switch out of charger service targets."""
+    entities = target if isinstance(target, (list, tuple)) else (target,)
+    for value in entities:
+        if not isinstance(value, str):
+            continue
+        for entity_id in value.split(","):
+            entity_id = entity_id.strip().lower()
+            if not entity_id.startswith("switch."):
+                continue
+            if entity_id.endswith("_ble_connection"):
+                return True
+            try:
+                registered = er.async_get(hass).async_get(entity_id)
+            except (AttributeError, KeyError):
+                continue
+            if (getattr(registered, "platform", None) == "esphome"
+                    and str(getattr(registered, "original_name", "") or "").lower().endswith("ble connection")):
+                return True
+    return False
+
+
 @generic_entity_command
 async def _stop_generic_charger_switch(hass: HomeAssistant, entity_id: str) -> bool:
     """Keep the physical profile fixed until a switch-off call completes."""
+    if _targets_tesla_ble_connection(hass, entity_id):
+        return False
     await hass.services.async_call(
         "switch", "turn_off", {"entity_id": str(entity_id).strip()}, blocking=True
     )
@@ -447,7 +471,7 @@ async def _start_generic_charger_switch(
 ) -> bool:
     """Start a generic charger switch without duplicating active transactions."""
     entity_id = str(entity_id or "").strip()
-    if not entity_id.startswith("switch."):
+    if not entity_id.startswith("switch.") or _targets_tesla_ble_connection(hass, entity_id):
         _LOGGER.error("Generic charger start: invalid switch entity %s", entity_id)
         _record_manual_generic_failure(
             manual_failure, "switch_validation", entity_id
@@ -4767,6 +4791,44 @@ async def _tesla_legacy_transport_authorized(
     return bool(result)
 
 
+def _tesla_ble_recovery_start_state(hass: HomeAssistant, ble_prefix: str) -> str | None:
+    """Use paired vehicle readings from the exact connected bridge for plan retry."""
+    from ..tesla_ble import (
+        get_tesla_ble_charge_current_state,
+        get_tesla_ble_charge_power_state,
+        get_tesla_ble_charging_state,
+        get_tesla_ble_connected_charge_sample_time,
+    )
+
+    if not _is_ble_available(hass, ble_prefix):
+        return None
+    charger = TESLA_BLE_SWITCH_CHARGER.format(prefix=ble_prefix)
+    if not _tesla_ble_radio_matches_target(hass, ble_prefix, charger):
+        return None
+    state = get_tesla_ble_charging_state(hass, ble_prefix)
+    power = get_tesla_ble_charge_power_state(hass, ble_prefix)
+    current = get_tesla_ble_charge_current_state(hass, ble_prefix)
+    stamps = (
+        get_tesla_ble_connected_charge_sample_time(hass, ble_prefix, state, power),
+        get_tesla_ble_connected_charge_sample_time(hass, ble_prefix, state, current),
+    )
+    if not all(is_current_ev_power_observation(stamp) for stamp in stamps):
+        return None
+    if abs(stamps[0] - stamps[1]) > timedelta(seconds=1):
+        return None
+    kw, available = _power_state_kw_reading(power)
+    # The paired native packet timestamps already prove freshness even
+    # when ESPHome suppresses an unchanged HA state.
+    amps = float(current.state)
+    if not available or not math.isfinite(amps) or amps < 0 or float(power.state) < 0:
+        return None
+    if state.state.strip().lower() == "stopped" and amps == 0 and kw == 0:
+        return "stopped"
+    if state.state.strip().lower() == "charging" and amps > 0 and kw > 0:
+        return "charging"
+    return None
+
+
 async def _start_ev_charging_ble(
     hass: HomeAssistant,
     ble_prefix: str,
@@ -5900,7 +5962,6 @@ def _tesla_transport_authority(
 async def _tesla_transport_route(hass, entry, params, operation):
     """Resolve inherited uncertainty before selecting another command writer."""
     from ..tesla_ev_recovery import (
-        async_isolate_ble,
         get_vehicle_route,
         pending_ble_attempt,
         recovery_sidecar_snapshot,
@@ -5914,7 +5975,7 @@ async def _tesla_transport_route(hass, entry, params, operation):
     # route selection cannot fall back to BLE during that handoff window.
     vehicle = params.get("vehicle_vin") or params.get("vehicle_id")
     # A producer-proof recovery owns a read-only bridge session. Do not let
-    # normal route discovery or automatic isolation interrupt that session.
+    # normal route discovery interrupt that session.
     from ..tesla_ble_stop_recovery import ACTIVE_KEY
     recovery_runtime = hass.data.get(DOMAIN, {}).get(entry.entry_id)
     active_recovery = recovery_runtime.get(ACTIVE_KEY) if isinstance(recovery_runtime, dict) else None
@@ -5953,12 +6014,6 @@ async def _tesla_transport_route(hass, entry, params, operation):
     pending = None
     if route and route.get("kind") == "blocked":
         pending = pending_ble_attempt(hass, entry, vehicle)
-        if pending is not None:
-            isolated = await async_isolate_ble(
-                pending, authorize=_tesla_transport_authority(hass, entry, params, cleanup=True))
-            if isolated:
-                route = get_vehicle_route(hass, entry, vehicle)
-                pending = None
         # Stops remain available while older starts are being contained.
         if operation == "stop":
             return {"kind": "ha"}
@@ -6008,7 +6063,7 @@ async def _tesla_transport_route(hass, entry, params, operation):
                         from ..tesla_ev_stock_recovery import async_recover_vehicle_transport
 
                         recovered = await async_recover_vehicle_transport(
-                            hass, entry, str(vehicle), incident_id=incident_id,
+                            hass, entry, str(vehicle), incident_id=incident_id, automatic=True,
                         )
                     except asyncio.CancelledError:
                         raise
@@ -6041,7 +6096,6 @@ async def _run_ble_transport_command(
     from ..tesla_ev_recovery import (
         async_begin_attempt,
         async_finish_attempt,
-        async_isolate_ble,
         async_track_submission,
         current_vehicle_generation,
     )
@@ -6302,7 +6356,7 @@ async def _run_ble_transport_command(
             # example, an unstructured range exception followed by a refused
             # retry).  The request is then ambiguous and cannot retire its
             # journal ticket as not_sent.  Continue through the ordinary
-            # unknown-result path so Both-mode isolation/fallback still runs.
+            # unknown-result path so its durable hold remains in effect.
             result = None
         no_write_satisfied = result is True and params.get(
             "_tesla_ble_native_satisfied"
@@ -6326,12 +6380,9 @@ async def _run_ble_transport_command(
     if result is not None:
         return result, False
     params["_tesla_transport_recovery_pending"] = True
-    config = {**entry.data, **entry.options}
-    if config.get(CONF_EV_PROVIDER) != EV_PROVIDER_BOTH:
-        return None, False
-    isolated = await async_isolate_ble(
-        ticket, authorize=_tesla_transport_authority(hass, entry, effective_params, cleanup=True))
-    return None, bool(isolated and authority())
+    # The durable attempt blocks new writes. Keep the bridge available for
+    # readback and let a later request enter the verified recovery flow.
+    return None, False
 
 
 async def _run_teslemetry_bt_transport_command(
@@ -9705,6 +9756,14 @@ async def _run_pre_charge_wake_sequence(
     try:
         on_data = {"entity_id": entity_id}
         on_data.update(_pre_charge_wake_service_data(params, "pre_charge_wake_on_service_data"))
+        off_data = {"entity_id": entity_id}
+        off_data.update(_pre_charge_wake_service_data(params, "pre_charge_wake_off_service_data"))
+        if (
+            _targets_tesla_ble_connection(hass, on_data.get("entity_id"))
+            or (off_service is not None and _targets_tesla_ble_connection(hass, off_data.get("entity_id")))
+        ):
+            _LOGGER.error("Pre-charge wake cannot control a Tesla Bluetooth connection switch")
+            return False
         await hass.services.async_call(
             on_service[0],
             on_service[1],
@@ -9723,8 +9782,9 @@ async def _run_pre_charge_wake_sequence(
             await asyncio.sleep(duration_seconds)
 
         if off_service is not None:
-            off_data = {"entity_id": entity_id}
-            off_data.update(_pre_charge_wake_service_data(params, "pre_charge_wake_off_service_data"))
+            if _targets_tesla_ble_connection(hass, off_data.get("entity_id")):
+                _LOGGER.error("Pre-charge wake cleanup targeted a Tesla Bluetooth connection switch")
+                return False
             await hass.services.async_call(
                 off_service[0],
                 off_service[1],
@@ -10365,9 +10425,22 @@ async def _action_start_ev_charging(
         return False
     recovering_route = route and route.get("kind") in {"blocked", "ha"}
     tessie_wake_anchor = None
-    if recovering_route or params.get("_tesla_plan_recovery_attempt"):
-        # A previous local command may already have taken effect. Reconcile
-        # physical state before issuing another Start, even after isolation.
+    if (
+        ev_provider == EV_PROVIDER_TESLA_BLE
+        and params.get("_tesla_plan_recovery_attempt")
+        and not recovering_route
+    ):
+        # The durable hold is gone. Require current vehicle evidence from the
+        # selected local bridge, then use the normal Start admission below.
+        observed = _tesla_ble_recovery_start_state(hass, ble_prefix)
+        if observed == "charging":
+            return True
+        if observed != "stopped":
+            params["_tesla_transport_recovery_pending"] = True
+            return None
+    elif recovering_route or params.get("_tesla_plan_recovery_attempt"):
+        # A previous command may already have taken effect. Reconcile its
+        # physical state before selecting another write.
         observation = await _fresh_tesla_command_observation(
             hass, config_entry, vehicle_vin, params,
             start_recovery_after=datetime.now(dt_timezone.utc).timestamp(),
@@ -10419,7 +10492,7 @@ async def _action_start_ev_charging(
         if _is_ble_available(hass, ble_prefix):
             hass.data.setdefault(DOMAIN, {}).setdefault("_ev_ble_start_dispatched_at", {}).pop(ble_prefix, None)
             command_started_at = datetime.now(dt_timezone.utc)
-            result, fallback_ready = await _run_ble_transport_command(
+            result, _ = await _run_ble_transport_command(
                 hass, config_entry, params, ble_prefix, "start",
                 lambda: _run_tesla_legacy_with_authority(
                     request_authority,
@@ -10447,40 +10520,6 @@ async def _action_start_ev_charging(
                 if observed == "charging":
                     params["_tesla_start_observation"] = observation
                     result = True
-                elif fallback_ready:
-                    # Isolation may have completed during this request. Re-pin
-                    # the exact HA fallback before attempting its read/wake
-                    # recovery; never continue with a stale pre-isolation
-                    # route or use Charge as a wake probe.
-                    route = await _tesla_transport_route(
-                        hass, config_entry, params, "start"
-                    )
-                    if not route or route.get("kind") != "ha":
-                        params["_tesla_transport_recovery_pending"] = True
-                        return None
-                    observation, observed, recovery_ok, tessie_wake_anchor = (
-                        await _tesla_recovery_wake_read_if_missing(
-                            hass, config_entry, vehicle_vin, params, route,
-                            request_authority, observation, observed,
-                        )
-                    )
-                    if not request_authority():
-                        return None
-                    if not recovery_ok:
-                        params["_tesla_transport_recovery_pending"] = True
-                        return None
-                    if observed == "charging":
-                        params["_tesla_start_observation"] = observation
-                        result = True
-                    elif observed == "stopped":
-                        # The failed producer is durably isolated. Preserve
-                        # the plan and continue through the configured HA
-                        # integration after exact-source recovery.
-                        ev_provider = EV_PROVIDER_FLEET_API
-                        result = False
-                    else:
-                        params["_tesla_transport_recovery_pending"] = True
-                        return None
                 else:
                     params["_tesla_transport_recovery_pending"] = True
                     return None
@@ -11064,7 +11103,7 @@ async def _action_set_ev_charge_limit(
     # Try ESPHome BLE if configured
     if ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
         if _is_ble_available(hass, ble_prefix):
-            result, fallback_ready = await _run_ble_transport_command(hass, config_entry, params,
+            result, _ = await _run_ble_transport_command(hass, config_entry, params,
                 ble_prefix, "limit", lambda: _run_tesla_legacy_with_authority(
                     request_authority,
                     lambda: _set_ev_charge_limit_ble(
@@ -11078,10 +11117,8 @@ async def _action_set_ev_charge_limit(
                 ),
                 effect_bound={"kind": "limit", "min_percent": percent, "max_percent": percent},
             )
-            if result is None and not fallback_ready:
+            if result is None:
                 return None
-            if result is None and fallback_ready:
-                ev_provider = EV_PROVIDER_FLEET_API
             if result or ev_provider == EV_PROVIDER_TESLA_BLE:
                 return result
 
@@ -11252,7 +11289,7 @@ async def _action_set_ev_charging_amps(
                 allow_stale_entity_max_override=allow_stale_entity_max_override,
                 configured_max_amps=configured_max_amps,
             )
-            result, fallback_ready = await _run_ble_transport_command(hass, config_entry, params,
+            result, _ = await _run_ble_transport_command(hass, config_entry, params,
                 ble_prefix, "rate", lambda: _run_tesla_legacy_with_authority(
                     request_authority,
                     lambda: _set_ev_charging_amps_ble(
@@ -11269,10 +11306,8 @@ async def _action_set_ev_charging_amps(
                 ),
                 effect_bound=ble_effect_bound,
             )
-            if result is None and not fallback_ready:
+            if result is None:
                 return None
-            if result is None and fallback_ready:
-                ev_provider = EV_PROVIDER_FLEET_API
             range_fallback_applied = (
                 params.get("_tesla_entity_range_fallback_amps") is not None
             )
@@ -11822,8 +11857,8 @@ async def _start_ha_native_charger(
     entity_id = _ha_native_charger_entity(params)
     domain = _ha_native_charger_domain(params, entity_id)
 
-    if not entity_id:
-        _LOGGER.error("HA-native charger start: no charger entity configured")
+    if not entity_id or _targets_tesla_ble_connection(hass, entity_id):
+        _LOGGER.error("HA-native charger start: no usable charger entity configured")
         return False
 
     try:
@@ -11858,8 +11893,8 @@ async def _stop_ha_native_charger(
     entity_id = _ha_native_charger_entity(params)
     domain = _ha_native_charger_domain(params, entity_id)
 
-    if not entity_id:
-        _LOGGER.error("HA-native charger stop: no charger entity configured")
+    if not entity_id or _targets_tesla_ble_connection(hass, entity_id):
+        _LOGGER.error("HA-native charger stop: no usable charger entity configured")
         return False
 
     try:

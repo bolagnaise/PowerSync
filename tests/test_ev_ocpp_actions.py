@@ -15703,7 +15703,7 @@ def test_failed_ble_wake_cooldown_is_bridge_scoped():
 
 
 @pytest.mark.parametrize("producer_fence", [False, True])
-def test_first_unknown_ble_command_requires_producer_fence_before_ha_fallback(monkeypatch, producer_fence):
+def test_unknown_ble_command_keeps_radio_available_and_blocks_other_writers(monkeypatch, producer_fence):
     from power_sync import tesla_ev_recovery as recovery
     vin = "5YJ3E1EA7NF0000A1"
     entry = SimpleNamespace(entry_id="entry-1", data={}, options={
@@ -15730,45 +15730,80 @@ def test_first_unknown_ble_command_requires_producer_fence_before_ha_fallback(mo
         id="native-car", identifiers={("tesla_fleet", vin)},
     )
     monkeypatch.setattr(actions, "_get_tesla_ev_entity", AsyncMock(return_value=native.entity_id))
-    calls = []
-    async def isolate(domain, service, data, **kwargs):
-        calls.append((domain, service, data))
-        assert data["entity_id"] in {"switch.car_ble_connection", "text.car_transport_isolation_request"}
-        # A real bridge receipt arrives after the request. Stamping it in the
-        # same microsecond tick as the product's request_started read makes
-        # the strict freshness check reject the proof until its 10 s timeout.
-        await asyncio.sleep(0.001)
-        now = datetime.now(timezone.utc)
-        for entity_id in ("switch.car_ble_connection", "binary_sensor.car_ble_status"):
-            hass.states._states[entity_id] = _State(entity_id, "off", last_reported=now)
-        if producer_fence:
-            stopped = {**fence, "generation": 2, "radio_enabled": False,
-                       "connected": False, "producer_stopped": True,
-                       "queued_commands": 0, "queued_writes": 0,
-                       "request_id": data.get("value", "")}
-            hass.states._states["sensor.car_transport_fence"] = _State(
-                "sensor.car_transport_fence", json.dumps(stopped), last_reported=now)
-    hass.services.async_call = isolate
-
     params = {"vehicle_vin": vin}
     result = asyncio.run(actions._run_ble_transport_command(
         hass, entry, params, "car", "start", AsyncMock(return_value=None)))
 
-    assert result == (None, producer_fence)
-    route = recovery.get_vehicle_route(hass, entry, vin)
-    if producer_fence:
-        assert route["kind"] == "ha" and route["entity_id"] == "switch.exact_car_charge"
-        assert route["entity_identity"]["device_id"] == "native-car"
-    else:
-        assert route["kind"] == "blocked"
-    assert calls[0] == ("switch", "turn_off", {"entity_id": "switch.car_ble_connection"})
-    assert len(calls) == (2 if producer_fence else 1)
-    if producer_fence:
-        assert calls[1][:2] == ("text", "set_value")
-        observation_target = params["_tesla_ble_native_observation_target"]
-        assert observation_target["attempt_id"]
-        assert observation_target["identity"]["device_id"] == "native-car"
+    assert result == (None, False)
+    assert recovery.get_vehicle_route(hass, entry, vin)["kind"] == "blocked"
+    assert hass.states.get("switch.car_ble_connection").state == "on"
+    assert hass.services.calls == []
     assert recovery.ble_quarantined(hass, "car")
+    # An inherited uncertainty also must not touch the connection switch.
+    assert asyncio.run(actions._tesla_transport_route(hass, entry, params, "start"))["kind"] == "blocked"
+    assert hass.services.calls == []
+
+
+
+@pytest.mark.parametrize("scenario, expected", [
+    ("stopped", "stopped"), ("charging", "charging"), ("stale", None),
+    ("contradictory", None), ("other_bridge", None), ("operator_off", None),
+])
+def test_ble_post_recovery_accepts_only_current_exact_vehicle_samples(monkeypatch, scenario, expected):
+    now = datetime.now(timezone.utc)
+    stamp = now - timedelta(minutes=10) if scenario == "stale" else now
+    charging = "Charging" if scenario == "charging" else "Stopped"
+    amps = 8 if scenario in {"charging", "contradictory"} else 0
+    power = 1.8 if scenario == "charging" else 0
+    readings = {
+        "sensor.car_charging_state": (charging, {}),
+        "sensor.car_charge_power": (power, {"unit_of_measurement": "kW"}),
+        "sensor.car_charge_current": (amps, {"unit_of_measurement": "A"}),
+    }
+    states = [
+        _State("switch.car_charger", "off"),
+        _State("binary_sensor.car_ble_status", "on", last_updated=stamp - timedelta(seconds=5)),
+        _State("switch.car_ble_connection", "off" if scenario == "operator_off" else "on"),
+    ]
+    for entity, (value, attrs) in readings.items():
+        states.append(_State(entity, str(value), attrs, last_updated=stamp))
+        states.append(_State(entity + "_sample", json.dumps(
+            {"v": 1, "t": stamp.isoformat(), "x": value}), last_updated=stamp))
+    hass = _Hass(states)
+    if scenario == "other_bridge":
+        hass.entity_registry.entities["sensor.car_charge_power_sample"].device_id = "other-bridge"
+    assert actions._tesla_ble_recovery_start_state(hass, "car") == expected
+    assert not hass.services.calls
+
+    vin = "5YJ3E1EA7NF0000A1"
+    entry = SimpleNamespace(entry_id="entry-1", data={}, options={
+        "ev_provider": "tesla_ble", "tesla_ble_entity_prefix": "car",
+        "tesla_ble_vehicle_mapping": f"{vin}=car",
+    })
+
+    async def submit(_hass, prefix, **_kwargs):
+        await _hass.services.async_call("switch", "turn_on", {"entity_id": f"switch.{prefix}_charger"})
+        return True
+
+    monkeypatch.setattr(actions, "_start_ev_charging_ble", submit)
+    cloud_read = AsyncMock(side_effect=AssertionError("BLE-only plan attempted a cloud read"))
+    monkeypatch.setattr(actions, "_fresh_tesla_command_observation", cloud_read)
+    params = {"vehicle_vin": vin, "_tesla_plan_recovery_attempt": True}
+    assert asyncio.run(actions._action_start_ev_charging(hass, entry, params)) is (
+        True if expected else None
+    )
+    assert hass.services.calls == (
+        [("switch", "turn_on", {"entity_id": "switch.car_charger"})] if expected == "stopped" else []
+    )
+    cloud_read.assert_not_awaited()
+
+
+def test_generic_charger_never_uses_renamed_tesla_connection_as_stop():
+    state = _State("switch.car_radio", "on")
+    hass = _Hass([state])
+    hass.entity_registry.entities[state.entity_id].original_name = "BLE Connection"
+    assert not asyncio.run(actions._stop_generic_charger_switch(hass, state.entity_id))
+    assert not hass.services.calls
 
 
 def test_solar_surplus_update_serializes_same_vehicle_callbacks(monkeypatch):
@@ -18213,7 +18248,6 @@ def test_ble_pre_dispatch_exception_classifies_admission_without_quarantine(
 
     hass = _Hass([_State("switch.car_charger", "off")])
     outcomes = []
-    isolated = AsyncMock(return_value=True)
 
     async def begin(*_args, **_kwargs):
         return object()
@@ -18229,7 +18263,6 @@ def test_ble_pre_dispatch_exception_classifies_admission_without_quarantine(
 
     monkeypatch.setattr(recovery, "async_begin_attempt", begin)
     monkeypatch.setattr(recovery, "async_finish_attempt", finish)
-    monkeypatch.setattr(recovery, "async_isolate_ble", isolated)
 
     with pytest.raises(RuntimeError, match="admission denied"):
         asyncio.run(actions._run_ble_transport_command(
@@ -18242,7 +18275,6 @@ def test_ble_pre_dispatch_exception_classifies_admission_without_quarantine(
         ))
 
     assert outcomes == [expected_outcome]
-    assert isolated.await_count == 0
     assert hass.services.calls == []
 
 

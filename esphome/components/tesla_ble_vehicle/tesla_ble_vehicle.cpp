@@ -921,9 +921,16 @@ namespace esphome
     {
       if (recovery_proof_ && stop_recovery_.locked()) {
         if (!stop_recovery_.reading()) return;
-        if (!recovery_radio_requested_) {
-          this->parent()->set_enabled(true);
-          recovery_radio_requested_ = true;
+        if (uint32_t(millis() - recovery_read_started_) >= 300000U) {
+          stop_recovery_.held();
+          recovery_reads_parked_ = true;
+          // Only read-only recovery work can be queued in this boot.
+          command_queue_ = {};
+          ble_write_queue_ = {};
+          ble_read_queue_ = {};
+          response_queue_ = {};
+          publish_stop_recovery();
+          return;
         }
         if (command_queue_.empty() && uint32_t(millis() - recovery_last_query_) >= 1500) {
           recovery_last_query_ = millis();

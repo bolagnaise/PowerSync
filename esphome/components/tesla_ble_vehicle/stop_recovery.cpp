@@ -17,6 +17,7 @@ void TeslaBLEVehicle::setup_stop_recovery() {
   if (error != ESP_ERR_NVS_NOT_FOUND && (error != ESP_OK || size != sizeof(stored)))
     stored.magic = 0; // a damaged record never becomes unlocked defaults
   stop_recovery_.load(stored, boot);
+  recovery_read_started_ = millis();
   if (stop_recovery_.locked() && recovery_vin_ != stop_recovery_.saved.vin)
     stop_recovery_.held();
   if (stop_recovery_.locked()) {
@@ -48,6 +49,7 @@ void TeslaBLEVehicle::publish_stop_recovery() {
     root["i"] = recovery_vin_;
     root["s"] = p.sequence;
     root["t"] = p.sample_ms;
+    if (recovery_reads_parked_) root["parked"] = true;
     if (p.zero_samples == 2 && (p.phase == 'v' || p.phase == 'r')) {
       root["a"] = 0;
       root["w"] = 0;
@@ -84,10 +86,20 @@ void TeslaBLEVehicle::request_stop_recovery(const std::string &request) {
     }
     stop_recovery_.released();
     publish_stop_recovery();
-  } else if (nonce == stop_recovery_.saved.nonce && action == "hold") {
+  } else if (nonce == stop_recovery_.saved.nonce && action == "read"
+             && stop_recovery_.locked() && recovery_reads_parked_) {
+    // Keep the same persisted generation and sequence; any new proof must
+    // contain two new vehicle replies since this read request.
+    recovery_reads_parked_ = false;
+    recovery_read_started_ = millis();
+    stop_recovery_.phase = 'q';
+    stop_recovery_.zero_samples = 0;
+    stop_recovery_.stopped_state = '?';
+    publish_stop_recovery();
+  } else if (nonce == stop_recovery_.saved.nonce && action == "hold"
+             && stop_recovery_.locked()) {
     stop_recovery_.held();
     persist_stop_recovery();
-    this->parent()->set_enabled(false);
     publish_stop_recovery();
   }
 }

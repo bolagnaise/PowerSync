@@ -1745,7 +1745,6 @@ async def test_stock_recovery_defers_old_positive_and_allows_fresh_route_retry(m
     monkeypatch.setattr(recovery, "pending_ble_attempt", lambda *_args: SimpleNamespace(
         attempt_id="attempt-1"
     ))
-    monkeypatch.setattr(recovery, "async_isolate_ble", AsyncMock(return_value=False))
     monkeypatch.setattr(recovery, "recovery_sidecar_snapshot", lambda *_args: {"incidents": {}})
     monkeypatch.setattr(actions, "_tesla_transport_authority", lambda *_args, **_kwargs: lambda: True)
     recover = AsyncMock(return_value=True)
@@ -1758,7 +1757,7 @@ async def test_stock_recovery_defers_old_positive_and_allows_fresh_route_retry(m
     assert first["reason"] == "ble_recovery"
     assert params["_tesla_transport_recovery_pending"] is True
     assert params["_tesla_stock_recovery_attempted"] is True
-    recover.assert_awaited_once_with(hass, entry, VIN, incident_id=None)
+    recover.assert_awaited_once_with(hass, entry, VIN, incident_id=None, automatic=True)
     assert hass.services.calls == []
 
     fresh_params = {"vehicle_vin": VIN}
@@ -1798,7 +1797,7 @@ async def test_stock_recovery_failure_keeps_sidecar_incident_blocked_without_led
     }
     assert params["_tesla_transport_recovery_pending"] is True
     assert params["_tesla_stock_recovery_attempted"] is True
-    recover.assert_awaited_once_with(hass, entry, VIN, incident_id="incident-1")
+    recover.assert_awaited_once_with(hass, entry, VIN, incident_id="incident-1", automatic=True)
     assert hass.services.calls == []
 
 
@@ -1816,7 +1815,6 @@ async def test_unenrolled_fixture_never_invokes_stock_recovery(monkeypatch):
     monkeypatch.setattr(recovery, "pending_ble_attempt", lambda *_args: SimpleNamespace(
         attempt_id="attempt-1"
     ))
-    monkeypatch.setattr(recovery, "async_isolate_ble", AsyncMock(return_value=False))
     monkeypatch.setattr(recovery, "recovery_sidecar_snapshot", lambda *_args: {"incidents": {}})
     monkeypatch.setattr(actions, "_tesla_transport_authority", lambda *_args, **_kwargs: lambda: True)
     recover = AsyncMock(return_value=True)

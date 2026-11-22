@@ -138,6 +138,8 @@ class _Hass:
                                                 unique_id=f"{prefix}_status_uid")
             now = datetime.now(timezone.utc)
             self.states_by_id[status_id] = _State(status_id, "on", now)
+            radio_id = f"switch.{prefix}_ble_connection"
+            self.states_by_id[radio_id] = _State(radio_id, "on", now)
             self.states_by_id[f"sensor.{prefix}_uptime"] = _State(
                 f"sensor.{prefix}_uptime", 100, now
             )
@@ -397,18 +399,26 @@ def test_generation_or_registry_rebind_invalidates_transaction(harness):
 
 
 @pytest.mark.asyncio
-async def test_containment_failure_does_not_claim_recovery(harness):
+async def test_stock_failure_leaves_operator_radio_and_held_incident(harness, monkeypatch):
     hass, entry = harness
     bridge = _bridge(hass, entry, VIN_A)
-    transaction = stock.StockBridgeTransaction(hass, entry, bridge)
+    runtime = hass.data["power_sync"][entry.entry_id]
+    incident = {"incident_id": "held", "phase": "held",
+                "current_candidate_vehicles": [VIN_A],
+                "current_candidate_producers": [bridge.identity]}
+    runtime["_tesla_ev_recovery_sidecar"]["incidents"]["held"] = incident
+    observation_module = importlib.import_module("power_sync.tesla_ev_observation")
+    monkeypatch.setattr(observation_module, "independent_tesla_source_binding", lambda *_: {
+        "vin": VIN_A, "domain": "teslemetry", "config_entry_id": "native-config",
+        "device_id": "native-device", "producer_identity": "native:producer"})
+    async def failed(*_args, **_kwargs):
+        return False
 
-    async def fail(*_args, **_kwargs):
-        raise RuntimeError("radio write failed")
-
-    hass.services.async_call = fail
-    with pytest.raises(RuntimeError, match="radio write failed"):
-        await transaction.contain()
-    assert hass.data["power_sync"][entry.entry_id]["_tesla_ev_recovery_sidecar"]["incidents"] == {}
+    monkeypatch.setattr(recovery, "async_recover_stock", failed)
+    assert not await stock.async_recover_vehicle_transport(hass, entry, VIN_A)
+    assert incident["phase"] == "held"
+    assert hass.states.get("switch.bridge_a_ble_connection").state == "on"
+    assert hass.services.calls == []
 
 
 @pytest.mark.asyncio
