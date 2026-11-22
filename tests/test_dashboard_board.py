@@ -1482,6 +1482,25 @@ def test_settings_editor_patch_preserves_other_values_and_encodes_one_percent():
     assert out["grid"]["patch"] == {"max_grid_export_w": None, "allow_grid_charge": False}
 
 
+def test_solar_editor_accepts_fractional_tariffs_and_saves_only_edited_fields():
+    out = _run_board(r"""
+  const dialog = new T.PsSettingsDialog();
+  const keys = ['surplus_calculation', 'max_export_price_cents', 'household_buffer_kw'];
+  dialog._fields = T.PS_SETTING_EDITORS.solar.fields.filter(key => keys.includes(key));
+  dialog._tariffUnit = 'p/kWh';
+  dialog._values = { surplus_calculation: 'grid_based', max_export_price_cents: 15, household_buffer_kw: 0.5 };
+  const inputs = { surplus_calculation: 'direct', max_export_price_cents: '14.25', household_buffer_kw: '0.5' };
+  dialog.querySelector = sel => ({ value: inputs[sel.match(/name="(.*?)"/)[1]] });
+  const fields = Object.fromEntries(dialog._fields.map(key => [key, dialog._fieldHtml(key)]));
+  console.log(JSON.stringify({ fields, patch: dialog._changes().patch }));
+""")
+    tariff = out["fields"]["max_export_price_cents"]
+    assert "p/kWh" in tariff
+    assert 'step="any"' in tariff
+    assert '<option value="direct"' in out["fields"]["surplus_calculation"]
+    assert out["patch"] == {"surplus_calculation": "direct", "max_export_price_cents": 14.25}
+
+
 def test_settings_save_requires_successful_write_and_matching_readback():
     out = _run_board(r"""
   (async () => {

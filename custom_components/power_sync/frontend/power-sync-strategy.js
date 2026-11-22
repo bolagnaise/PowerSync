@@ -6512,7 +6512,14 @@ class PowerSyncEVPanel extends HTMLElement {
   _openSolarSettings(opener) {
     this.dispatchEvent(new CustomEvent('ps-settings-open', {
       bubbles: true, composed: true,
-      detail: { row: { editor: 'solar', label: 'Automatic solar charging', help: 'Thresholds and delays for the Solar Surplus automatic mode. Solar Only in the session controls selects the source when you press Start.' }, opener },
+      detail: {
+        row: {
+          editor: 'solar', label: 'Automatic solar charging',
+          help: 'Choose when spare solar can start an automatic charge.',
+          tariffUnit: _priceMeta(this._hass, this._config?.exportPriceEntity).minorPriceUnit,
+        },
+        opener,
+      },
     }));
   }
 
