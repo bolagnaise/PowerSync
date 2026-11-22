@@ -8279,6 +8279,31 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
             limit_ok = await self._restore_captured_discharge_limit()
             return bool(normal_ok and charge_limit_ok and limit_ok)
 
+    async def get_configured_charge_limit_kw(self) -> float | None:
+        """Read the Sungrow charge setting independently of the telemetry cache."""
+        async with self._modbus_lock, self._controller:
+            return await self._controller.get_configured_charge_limit_kw()
+
+    async def clear_solar_export_charge_limit(self, baseline_kw: float | None) -> bool:
+        """Release our zero limit without overwriting a later inverter setting."""
+        async with self._modbus_lock, self._controller:
+            current_kw = await self._controller.get_configured_charge_limit_kw()
+            if current_kw is None:
+                _LOGGER.debug("Sungrow solar-export cleanup is waiting for charge-limit register readback")
+                return False
+            if current_kw > 0:
+                return True
+            if baseline_kw is None:
+                _LOGGER.debug("Sungrow charge limit is zero and the saved hold has no verified restore value")
+                return False
+            if self._monitoring_mode_active() or not self._native_control_allowed(
+                "Sungrow charge hold restore"
+            ):
+                return False
+            if not await self._controller.set_charge_rate_limit(baseline_kw):
+                return False
+            return await self._controller.get_configured_charge_limit_kw() == baseline_kw
+
     async def set_charge_rate_limit(self, kw: float) -> bool:
         """Set maximum charge rate in kW.
 

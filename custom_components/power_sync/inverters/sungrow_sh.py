@@ -1070,6 +1070,13 @@ class SungrowSHController(InverterController):
             _LOGGER.error(f"Error setting min SOC: {e}")
             return False
 
+    async def get_configured_charge_limit_kw(self) -> float | None:
+        """Read the writable setting directly, including a configured zero."""
+        registers = await self._read_register(self.REG_MAX_CHARGE_POWER, 1)
+        if not registers or not self._valid_u16(registers[0]):
+            return None
+        return registers[0] / 100.0
+
     async def set_charge_rate_limit(self, kw: float) -> bool:
         """Set maximum charge rate in kW.
 
@@ -1344,9 +1351,9 @@ class SungrowSHController(InverterController):
             # Read configured max charge/discharge power from mkaiser's SH/T
             # holding registers. Fall back to BMS current telemetry when these
             # power registers are not exposed by the inverter/firmware.
-            max_charge_power = await self._read_register(self.REG_MAX_CHARGE_POWER, 1)
-            if max_charge_power and self._valid_u16(max_charge_power[0]):
-                data["charge_rate_limit_kw"] = round(max_charge_power[0] * 10 / 1000, 2)
+            configured_charge_kw = await self.get_configured_charge_limit_kw()
+            if configured_charge_kw is not None:
+                data["charge_rate_limit_kw"] = configured_charge_kw
                 data["charge_rate_limit_source"] = "configured_power"
             else:
                 max_charge_current = await self._read_input_register(self.REG_BMS_MAX_CHARGE_CURRENT, 1)

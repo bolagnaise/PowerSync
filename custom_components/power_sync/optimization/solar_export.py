@@ -1,6 +1,7 @@
 """Provider-neutral Profit Max solar-export charge-hold lifecycle."""
 from __future__ import annotations
 
+import hashlib
 import logging
 import math
 from dataclasses import dataclass
@@ -270,7 +271,10 @@ class SolarExportChargeHoldAdapter:
             return (
                 data.get("charge_rate_limit_source") == "configured_power"
                 and data.get("rate_limit_writable") is not False
-                and _finite_positive(data.get("charge_rate_limit_kw")) is not None
+                and (
+                    _finite_positive(data.get("charge_rate_limit_kw")) is not None
+                    or (held and data.get("charge_rate_limit_kw") == 0)
+                )
             )
 
         if self.system == "sigenergy":
@@ -346,6 +350,8 @@ class SolarExportChargeHoldAdapter:
 
     async def verify_charge_hold(self, plan: dict[str, Any]) -> bool:
         """Verify all targets from current provider state."""
+        if not self._plan_matches(plan):
+            return False
         current = await self._read_targets()
         if len(current) != len(plan.get("targets", [])):
             return False
@@ -376,6 +382,10 @@ class SolarExportChargeHoldAdapter:
 
     async def restore_normal(self, plan: dict[str, Any] | None) -> bool:
         """Issue an idempotent provider-normal reconciliation."""
+        if self.system == "sungrow":
+            # This hold changes only the charge register. clear_charge_hold
+            # reconciles it once; preparation alone has no mode to restore.
+            return plan is None or self._plan_matches(plan)
         if plan and plan.get("legacy_sigenergy"):
             return bool(await self.coordinator.exit_solar_export_hold(plan.get("owner_id")))
         if not plan:
@@ -400,8 +410,14 @@ class SolarExportChargeHoldAdapter:
         """Verify the captured normal value after compensation."""
         if plan.get("legacy_sigenergy"):
             return True  # The v2.12.1058 exit method includes exact readback.
+        if not self._plan_matches(plan):
+            return False
         current = await self._read_targets()
         expected = plan.get("targets", [])
+        if self.system == "sungrow":
+            # A positive direct read proves the zero hold is gone. The operator
+            # may have selected a different normal limit while cleanup was pending.
+            return len(current) == len(expected) and all(target["value"] > 0 for target in current)
         if len(current) != len(expected):
             return False
         for actual, baseline in zip(current, expected):
@@ -431,7 +447,41 @@ class SolarExportChargeHoldAdapter:
         }
 
     def _plan_matches(self, plan: dict[str, Any]) -> bool:
-        return plan.get("adapter") == self.key and plan.get("schema_version") == 1
+        if plan.get("adapter") != self.key or plan.get("schema_version") != 1:
+            return False
+        if self.system != "sungrow":
+            return True
+        targets = plan.get("targets")
+        children = self._sungrow_children()
+        if not isinstance(targets, list) or len(targets) != len(children):
+            return False
+        for index, (target, child) in enumerate(zip(targets, children), start=1):
+            if not isinstance(target, dict) or target.get("id") != f"inverter_{index}":
+                return False
+            if "register_endpoint" in target:
+                if target["register_endpoint"] != self._sungrow_register_endpoint(child):
+                    return False
+                value = target.get("value")
+                # 0xffff is the unavailable sentinel. Persisted register values
+                # must round-trip through the driver's 10 W scaling.
+                if (
+                    type(value) not in (int, float)
+                    or not 0 < value <= 655.34
+                    or round(value, 2) != value
+                ):
+                    return False
+        return True
+
+    def _sungrow_children(self) -> tuple[Any, ...]:
+        if hasattr(self.coordinator, "_coord1"):
+            return (self.coordinator._coord1, self.coordinator._coord2)
+        return (self.coordinator,)
+
+    @staticmethod
+    def _sungrow_register_endpoint(child: Any) -> str:
+        """Bind a directly captured register value to its configured Modbus endpoint."""
+        address = f"{child.host.lower()}:{child.port}:{child.slave_id}:33046"
+        return hashlib.sha256(address.encode()).hexdigest()
 
     async def _read_targets(self) -> list[dict[str, Any]]:
         if self.system == "sigenergy":
@@ -440,18 +490,18 @@ class SolarExportChargeHoldAdapter:
             return [{"id": "ess", "value": value}] if value is not None else []
 
         if self.system == "sungrow":
-            children = (
-                [self.coordinator._coord1, self.coordinator._coord2]
-                if hasattr(self.coordinator, "_coord1")
-                else [self.coordinator]
-            )
             targets = []
-            for index, child in enumerate(children):
-                await child.async_request_refresh()
-                value = (child.data or {}).get("charge_rate_limit_kw")
+            for index, child in enumerate(self._sungrow_children()):
+                value = await child.get_configured_charge_limit_kw()
                 if value is None:
                     return []
-                targets.append({"id": f"inverter_{index + 1}", "value": float(value)})
+                targets.append(
+                    {
+                        "id": f"inverter_{index + 1}",
+                        "value": value,
+                        "register_endpoint": self._sungrow_register_endpoint(child),
+                    }
+                )
             return targets
 
         if self.system == "foxess":
@@ -504,11 +554,16 @@ class SolarExportChargeHoldAdapter:
             async with self.coordinator._controller:
                 return bool(await self.coordinator._controller.set_charge_rate_limit(float(value)))
         if self.system == "sungrow":
-            if hasattr(self.coordinator, "_coord1"):
-                index = int(str(target_id).rsplit("_", 1)[-1]) - 1
-                child = (self.coordinator._coord1, self.coordinator._coord2)[index]
-                return bool(await child.set_charge_rate_limit(float(value)))
-            return bool(await self.coordinator.set_charge_rate_limit(float(value)))
+            index = int(str(target_id).rsplit("_", 1)[-1]) - 1
+            child = self._sungrow_children()[index]
+            baseline_kw = (
+                _finite_positive(target.get("value")) if "register_endpoint" in target else None
+            )
+            if hold:
+                return baseline_kw is not None and bool(await child.set_charge_rate_limit(0.0))
+            # Old plans could contain a BMS estimate. Only positive live readback
+            # can retire them; they never authorize a write to this register.
+            return bool(await child.clear_solar_export_charge_limit(baseline_kw))
         if self.system == "foxess":
             return bool(await self.coordinator.set_charge_rate_limit(float(value)))
         if self.system == "solax":
@@ -583,10 +638,11 @@ class SolarExportHoldController:
 
     async def apply(self, owner_id: str, plan_generation: str) -> bool:
         """Apply a hold idempotently and persist ownership around hardware I/O."""
-        if (
-            self._state.get("phase") == "active"
-            and self._state.get("owner_id") == owner_id
-        ):
+        if self.active:
+            # A cached schedule can still reach apply while an earlier restore
+            # is pending. Keep the saved plan until clear verifies recovery.
+            if self._state.get("phase") != "active" or self._state.get("owner_id") != owner_id:
+                return False
             try:
                 verified = await self._adapter.verify_charge_hold(
                     self._state.get("plan") or {}
