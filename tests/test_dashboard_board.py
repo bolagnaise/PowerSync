@@ -2341,3 +2341,203 @@ def test_ev_panel_poll_does_not_skip_a_tick_after_a_slow_response():
         "firstCompletedAt": 1250,
         "earlyRetryDelay": 1,
     }
+
+
+def test_ev_panel_setting_forms_patch_and_confirm_selected_vehicle():
+    result = _run(
+        "const fs = require('node:fs'); const vm = require('node:vm');"
+        + BROWSER_STUBS
+        + f"const strategy = {json.dumps(str(STRATEGY_PATH))};"
+        + r"""
+        context.CSS = {escape: x => x};
+        vm.createContext(context);
+        vm.runInContext(fs.readFileSync(strategy, 'utf8'), context);
+        const Panel = vm.runInContext('PowerSyncEVPanel', context);
+        const assert = require('node:assert/strict');
+        const copy = x => JSON.parse(JSON.stringify(x));
+        const tick = () => new Promise(resolve => setImmediate(resolve));
+        const api = vm.runInContext('EV_PANEL_PATHS', context);
+        function input(dataset, type, value, step) {
+          return {dataset, type, value, step, validity: {}, listeners: {}, closest: () => null, focus() {},
+            addEventListener(name, fn) { this.listeners[name] = fn; },
+            edit(next) { this.value = next; this.listeners.input({target: this}); },
+            click() { return this.listeners.click({currentTarget: this}); }};
+        }
+        function makePanel() {
+          const panel = new Panel();
+          const car = {vehicle_id:'generic_ev', shared_charger_profile_id:'car-a', enabled:false, target_soc:80,
+            departure_times:{'0':'07:00'}, max_grid_price_cents:0, departure_max_grid_price_cents:{'0':-2}};
+          const price = {enabled:false, recovery_soc:30, recovery_price_cents:12.5, opportunity_price_cents:3};
+          const shared = {available:true, enabled:true, selection_allowed:true, selected_vehicle_id:'car-a',
+            profiles:[{id:'car-a',name:'A',soc_entity:'sensor.a',battery_capacity_kwh:50}]};
+          const data = {priceSettings:price, autoSettings:{generic_ev:car}, autoStatus:{settings:{generic_ev:car}},sharedCharger:shared};
+          panel._data = copy(data);
+          panel._scheduleRender = () => {};
+          panel._loadData = async () => {};
+          const writes = [], reads = [], controls = [];
+          const p = {panel, price, car, shared, writes, reads, controls, stale:false, wrongAck:false, offline:false, wrongRead:false};
+          panel._hass = {callApi: async (verb,path,payload) => {
+            if (verb === 'GET') {
+              reads.push(path);
+              if (writes.length && p.offline) throw new Error('offline');
+              if (path === api.price) return {success:true,settings:p.stale && writes.length ? data.priceSettings : copy(p.price)};
+              if (path === api.autoSettings) return {success:true,settings:{generic_ev:{...copy(p.car), ...(p.wrongRead && writes.length ? {shared_charger_profile_id:'car-b'} : {})}}};
+              if (path === api.sharedCharger) return {success:true,shared_charger:copy(p.shared)};
+            }
+            assert.equal(verb, 'POST');
+            writes.push([path,copy(payload)]);
+            if (p.hold) await p.hold;
+            if (path === api.price) {
+              p.price = {...p.price,...payload};
+              return {success:true,settings:p.wrongAck ? {} : copy(p.price)};
+            }
+            if ([api.autoSettings,api.autoToggle].includes(path)) {
+              p.car={...p.car,...payload};
+              return path === api.autoToggle ? {success:true,...copy(p.car)} : {success:true,settings:copy(p.car)};
+            }
+            if (path === api.sharedCharger) {
+              if (payload.operation === 'save') {
+                const id=payload.vehicle_id ?? 'new-id';
+                const profile={id,name:payload.name,soc_entity:payload.soc_entity,battery_capacity_kwh:payload.battery_capacity_kwh};
+                p.shared.profiles=[...p.shared.profiles.filter(x=>x.id!==id),profile];
+              } else if (payload.operation === 'select') p.shared.selected_vehicle_id=payload.vehicle_id;
+              else p.shared.profiles=p.shared.profiles.filter(x=>x.id!==payload.vehicle_id);
+              return {success:true,shared_charger:copy(p.shared)};
+            }
+            throw Error('Unexpected route ' + path);
+          }};
+          panel.shadowRoot.querySelectorAll = selector => {
+            if (selector.includes(', ')) return controls.filter(i => i.type !== 'button');
+            if (selector.startsWith('[data-setting^=')) return controls.filter(i => i.dataset.setting?.startsWith('price:'));
+            if (selector.startsWith('[data-departure-time=')) return controls.filter(i => i.dataset.departureTime === 'generic_ev');
+            const buttonFields = {'[data-save-mode]':'saveMode','[data-target-save]':'targetSave','[data-departure-save]':'departureSave','[data-smart-toggle]':'smartToggle'};
+            return controls.filter(i=>Object.hasOwn(i.dataset,buttonFields[selector]));
+          };
+          panel.shadowRoot.querySelector = selector => selector.includes('data-target-input') ? controls.find(i=>i.dataset.targetInput) : null;
+          p.bind = () => { panel._bindSettingDrafts(); panel._attachEvents(); };
+          return p;
+        }
+        (async () => {
+          for (const scenario of ['ok','blank','fractional-soc','stale','wrongAck','offline','conflict','new-edit']) {
+            const p=makePanel();
+            const price=input({setting:'price:recovery_price_cents'}, 'number', '12.5','0.1');
+            const soc=input({setting:'price:recovery_soc'}, 'number', '30','1');
+            const button=input({saveMode:'price'},'button');
+            p.controls.push(price,soc,button); p.bind();
+            if (scenario === 'fractional-soc') soc.edit('25.9');
+            else price.edit(scenario === 'blank' ? '' : '-2.125');
+            if (scenario === 'conflict') p.price.recovery_price_cents=11;
+            p.price.opportunity_price_cents=8;
+            if (['stale','wrongAck','offline'].includes(scenario)) p[scenario]=true;
+            let finish;
+            if (scenario === 'new-edit') p.hold=new Promise(done=>{finish=done;});
+            button.click(); await tick();
+            if (finish) {
+              assert.equal(p.panel._savingKey,'mode:price');
+              price.edit('-3'); finish(); await tick();
+              const draft=[...p.panel._settingDrafts.values()][0];
+              assert.equal(draft.value,'-3');
+              assert.equal(draft.opened.recovery_price_cents,-2.125);
+              continue;
+            }
+            if (['blank','fractional-soc','conflict'].includes(scenario)) assert.equal(p.writes.length,0);
+            else assert.deepEqual(p.writes[0], [api.price,{recovery_price_cents:-2.125}]);
+            if (scenario === 'ok') {
+              assert.equal(p.price.opportunity_price_cents,8);
+              assert.equal(p.panel._settingDrafts.size,0);
+              assert.match(p.panel._notice.message,/Settings saved/);
+            } else {
+              assert.equal(p.panel._notice.type,'error');
+              assert.equal(p.panel._settingDrafts.size,1);
+            }
+          }
+          for (const raw of ['0','0.0875']) {
+            const p=makePanel(), field=input({setting:'price:recovery_price_cents'},'number','12.5','any');
+            p.controls.push(field); p.bind(); field.edit(raw);
+            assert.equal(await p.panel._saveMode('price'),true);
+            assert.deepEqual(p.writes[0][1],{recovery_price_cents:Number(raw)});
+          }
+          const p=makePanel();
+          const target=input({targetInput:'generic_ev'},'number','80','1');
+          const targetButton=input({targetSave:'generic_ev'},'button');
+          const departure=input({departureTime:'generic_ev',departureDay:'0'},'time','07:00');
+          const departureButton=input({departureSave:'generic_ev'},'button');
+          const toggle=input({smartToggle:'generic_ev',enabled:'true'},'button');
+          p.controls.push(target,targetButton,departure,departureButton,toggle); p.bind();
+          target.edit('92'); targetButton.click(); await tick();
+          assert.deepEqual(p.writes[0],[api.autoSettings,{vehicle_id:'generic_ev',target_soc:92,shared_charger_profile_id:'car-a'}]);
+          departure.edit('06:30'); p.car.departure_times['1']='08:00'; departureButton.click(); await tick();
+          assert.deepEqual(p.writes[1][1].departure_times,{'0':'06:30','1':'08:00'});
+          toggle.click(); await tick();
+          assert.deepEqual(p.writes[2],[api.autoToggle,{vehicle_id:'generic_ev',enabled:true,shared_charger_profile_id:'car-a'}]);
+          const current=copy(p.car);
+          p.car.departure_max_grid_price_cents['1']=0;
+          assert.equal(await p.panel._writeSmartSettings('generic_ev',current,{departure_max_grid_price_cents:{'2':-2.111}}),true);
+          assert.deepEqual(p.writes[3][1].departure_max_grid_price_cents,{'1':0,'2':-2.111});
+          for (const mode of ['conflict','changed-before','changed-after','wrong-vehicle','not-finite']) {
+            const p=makePanel(), opened=copy(p.car);
+            if (mode==='conflict') p.car.target_soc=55;
+            if (mode==='changed-before') p.car.shared_charger_profile_id='new';
+            if (mode==='changed-after') p.wrongRead=true;
+            if (mode==='wrong-vehicle') opened.vehicle_id='another';
+            const change=mode==='not-finite' ? {max_grid_price_cents:NaN} : {target_soc:70};
+            assert.equal(await p.panel._writeSmartSettings('generic_ev',opened,change),false);
+            assert.equal(p.writes.length,mode==='changed-after'?1:0);
+          }
+          // The HA poll can finish between painting A's button and dispatching its click.
+          const race=makePanel();
+          const staleButton=input({smartToggle:'generic_ev',enabled:'true'},'button');
+          race.controls.push(staleButton); race.bind();
+          race.car.shared_charger_profile_id='car-b';
+          race.panel._data.autoSettings.generic_ev=copy(race.car);
+          staleButton.click(); await tick();
+          assert.deepEqual(race.writes,[]);
+          assert.equal(race.panel._notice.type,'error');
+          const unshared = makePanel();
+          unshared.panel._data.sharedCharger.enabled=false;
+          unshared.car.shared_charger_profile_id=null;
+          assert.equal(await unshared.panel._writeSmartSettings('generic_ev',copy(unshared.car),{target_soc:75}),true);
+          assert.deepEqual(unshared.writes[0][1],{vehicle_id:'generic_ev',target_soc:75,shared_charger_profile_id:null});
+          for (const setting of [{target_soc:0},{target_soc:44.5},{enabled:'false'},{departure_times:{'0':'25:00'}},
+               {departure_max_grid_price_cents:{'8':2}}, {departure_max_grid_price_cents:{'0':false}}]) {
+            const p=makePanel();
+            assert.equal(await p.panel._writeSmartSettings('generic_ev',copy(p.car),setting),false);
+            assert.deepEqual(p.writes,[]);
+          }
+          for (const scenario of ['clear','fraction','wrong-car','mismatch']) {
+            const p=makePanel();
+            const base={vehicle_id:'ocpp_1',battery_capacity_kwh:null,charger_fallback_battery_capacity_kwh:65,effective_battery_capacity_kwh:65};
+            p.panel._data.vehicleConfigs=[base];
+            const input={value:'60.125'};
+            p.panel.shadowRoot.querySelector=()=>input;
+            let saved;
+            p.panel._hass.callApi=async(method,path,payload)=>{
+              assert.equal(path, api.vehicleConfig);
+              if(method==='GET') return {success:true,configs:[scenario==='mismatch'?base:(saved??base)]};
+              saved={...base,charger_fallback_battery_capacity_kwh:payload.battery_capacity_kwh,effective_battery_capacity_kwh:payload.battery_capacity_kwh??80};
+              return {success:true,config:scenario==='wrong-car'?{...saved,vehicle_id:'wrong'}:saved};
+            };
+            assert.equal(await p.panel._saveVehicleCapacity('ocpp_1',scenario==='clear'),['clear','fraction'].includes(scenario));
+            assert.equal(saved.charger_fallback_battery_capacity_kwh,scenario==='clear'?null:60.125);
+          }
+          const d=makePanel();
+          const a=input({targetInput:'generic_ev'},'number','80');
+          d.controls.push(a); d.bind(); a.edit('91');
+          d.controls.length=0;
+          const again=input({targetInput:'generic_ev'},'number','80');
+          d.controls.push(again); d.bind(); assert.equal(again.value,'91');
+          d.panel._data.autoSettings.generic_ev.shared_charger_profile_id='car-b';
+          const other=input({targetInput:'generic_ev'},'number','65');
+          d.controls.splice(0,1,other); d.bind(); assert.equal(other.value,'65');
+          const s=makePanel();
+          const create={operation:'save',vehicle_id:null,name:'B',soc_entity:'sensor.b',battery_capacity_kwh:55.5};
+          s.offline=true;
+          assert.equal(await s.panel._runCommand('shared:save',api.sharedCharger,create,'Saved'),false);
+          s.offline=false;
+          assert.equal(await s.panel._runCommand('shared:save',api.sharedCharger,create,'Saved'),true);
+          assert.equal(s.writes.length,1);
+          console.log(JSON.stringify({ok:true}));
+        })().catch(err=>{console.error(err);process.exit(1);});
+        """
+    )
+    assert result == {"ok": True}

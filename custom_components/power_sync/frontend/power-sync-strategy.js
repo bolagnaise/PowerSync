@@ -5239,6 +5239,8 @@ class PowerSyncEVPanel extends HTMLElement {
     this._durationMinutes = 60;
     this._policy = 'solar_only';
     this._modesExpanded = false;
+    this._settingDrafts = new Map();
+    this._loadGeneration = 0;
   }
 
   setConfig(config) {
@@ -5316,7 +5318,7 @@ class PowerSyncEVPanel extends HTMLElement {
   _maybeLoadData(force) {
     if (!this._hass || typeof this._hass.callApi !== 'function') return;
     const now = Date.now();
-    if (this._loading) return;
+    if (this._loading || this._savingKey) return;
     if (!force && this._data && now - this._lastRequestStartedAt < EV_PANEL_FETCH_INTERVAL_MS) return;
     if (!force && this._restoreCachedData()) {
       this._scheduleRender();
@@ -5334,28 +5336,32 @@ class PowerSyncEVPanel extends HTMLElement {
   }
 
   _adoptLoadPromise(cacheKey, promise) {
+    const generation = ++this._loadGeneration;
     this._loading = true;
     promise
       .then((data) => {
-        if (cacheKey !== this._cacheKey()) return;
+        if (cacheKey !== this._cacheKey() || generation !== this._loadGeneration) return;
         const cached = EV_PANEL_CACHE.get(cacheKey);
-        this._data = data;
+        if (!cached || (cached.promise && cached.promise !== promise)) return;
+        this._data = cached.data && !cached.promise ? cached.data : data;
         this._error = null;
         this._lastFetch = cached?.fetchedAt || Date.now();
         this._lastRequestStartedAt = cached?.startedAt ?? this._lastFetch;
         this._syncSelectedLoadpoint();
       })
       .catch((err) => {
-        if (cacheKey !== this._cacheKey()) return;
+        if (cacheKey !== this._cacheKey() || generation !== this._loadGeneration) return;
         this._error = err?.message || 'EV API unavailable';
       })
       .finally(() => {
+        if (generation !== this._loadGeneration) return;
         this._loading = false;
         this._scheduleRender();
       });
   }
 
   async _loadData(cacheKey = this._cacheKey()) {
+    const generation = ++this._loadGeneration;
     this._loading = true;
     // The timer and request cadence both start before the API round trip.
     // Completion time remains available for the displayed update timestamp.
@@ -5365,6 +5371,7 @@ class PowerSyncEVPanel extends HTMLElement {
     EV_PANEL_CACHE.set(cacheKey, { ...(previous || {}), promise: request });
     try {
       const data = await request;
+      if (generation !== this._loadGeneration || cacheKey !== this._cacheKey() || EV_PANEL_CACHE.get(cacheKey)?.promise !== request) return;
       this._data = data;
       this._error = null;
       this._lastFetch = Date.now();
@@ -5376,6 +5383,7 @@ class PowerSyncEVPanel extends HTMLElement {
         startedAt,
       });
     } catch (err) {
+      if (generation !== this._loadGeneration) return;
       this._error = err?.message || 'EV API unavailable';
       const cached = EV_PANEL_CACHE.get(cacheKey);
       if (cached?.promise === request) {
@@ -5386,8 +5394,10 @@ class PowerSyncEVPanel extends HTMLElement {
         }
       }
     } finally {
-      this._loading = false;
-      this._scheduleRender();
+      if (generation === this._loadGeneration) {
+        this._loading = false;
+        this._scheduleRender();
+      }
     }
   }
 
@@ -5397,7 +5407,7 @@ class PowerSyncEVPanel extends HTMLElement {
       throw new Error(status.error || 'EV status API unavailable');
     }
 
-    const [solar, price, scheduled, autoStatus, vehicleConfig, vehicles, sharedCharger] = await Promise.allSettled([
+    const [solar, price, scheduled, autoStatus, vehicleConfig, vehicles, sharedCharger, autoSettings] = await Promise.allSettled([
       this._hass.callApi('GET', EV_PANEL_PATHS.solar),
       this._hass.callApi('GET', EV_PANEL_PATHS.price),
       this._hass.callApi('GET', EV_PANEL_PATHS.scheduled),
@@ -5405,6 +5415,7 @@ class PowerSyncEVPanel extends HTMLElement {
       this._hass.callApi('GET', EV_PANEL_PATHS.vehicleConfig),
       this._hass.callApi('GET', EV_PANEL_PATHS.vehicles),
       this._hass.callApi('GET', EV_PANEL_PATHS.sharedCharger),
+      this._hass.callApi('GET', EV_PANEL_PATHS.autoSettings),
     ]);
 
     const modeErrors = [];
@@ -5435,6 +5446,7 @@ class PowerSyncEVPanel extends HTMLElement {
       priceSettings: unwrap(price, 'settings', {}),
       scheduledSettings: unwrap(scheduled, 'settings', {}),
       autoStatus: autoScheduleStatus,
+      autoSettings: unwrap(autoSettings, 'settings', null),
       vehicleConfigs: unwrap(vehicleConfig, 'configs', []),
       vehicles: unwrap(vehicles, 'vehicles', []),
       sharedCharger: unwrap(sharedCharger, 'shared_charger', null),
@@ -5550,6 +5562,8 @@ class PowerSyncEVPanel extends HTMLElement {
     const canStart = this._canStart(selected);
     const canStop = this._canStop(selected);
 
+    const active = this.shadowRoot.activeElement;
+    const focus = active?._evFieldKey ? { key: active._evFieldKey, start: active.selectionStart, end: active.selectionEnd } : null;
     this.shadowRoot.innerHTML = `
       <style>
         ha-card {
@@ -6098,6 +6112,7 @@ class PowerSyncEVPanel extends HTMLElement {
         ${!hasApi ? this._noticeHtml('error', 'Home Assistant API access is unavailable for this dashboard card.') : ''}
         ${this._error ? this._noticeHtml('error', this._error) : ''}
         ${this._notice ? this._noticeHtml(this._notice.type, this._notice.message) : ''}
+        ${this._notice?.conflicts?.length ? '<button class="command" data-discard-conflict>Discard conflicting edits and refresh</button>' : ''}
         ${this._data?.modeErrors?.length ? this._noticeHtml('warn', this._data.modeErrors.join(' | ')) : ''}
         ${this._loading && !this._data ? this._noticeHtml('', 'Loading EV status...') : ''}
         ${loadpoints.length === 0 && this._data ? this._noticeHtml('warn', 'No EV loadpoints detected. Configure EV charging in PowerSync options or the mobile app.') : ''}
@@ -6111,6 +6126,7 @@ class PowerSyncEVPanel extends HTMLElement {
       </ha-card>
     `;
 
+    this._bindSettingDrafts(focus);
     this._attachEvents();
     this._syncDelayTimerTick();
   }
@@ -6224,7 +6240,7 @@ class PowerSyncEVPanel extends HTMLElement {
           <div class="departure-grid">
             <label>Vehicle name<input data-shared-name maxlength="80" value="${this._escAttr(selected?.name || '')}"></label>
             <label>SOC entity<input data-shared-soc placeholder="sensor.car_battery_level" value="${this._escAttr(selected?.soc_entity || '')}"></label>
-            <label>Usable capacity (kWh)<input data-shared-capacity type="number" min="1" max="250" step="0.1" value="${this._escAttr(selected?.battery_capacity_kwh || '')}"></label>
+            <label>Usable capacity (kWh)<input data-shared-capacity type="number" min="1" max="250" step="any" value="${this._escAttr(selected?.battery_capacity_kwh || '')}"></label>
           </div>
           <div class="departure-actions">
             ${selected ? `<button class="command" data-shared-save="edit" ${disabled ? 'disabled' : ''}>Save vehicle</button>` : ''}
@@ -6235,8 +6251,7 @@ class PowerSyncEVPanel extends HTMLElement {
       </div>`;
   }
 
-  async _saveSharedVehicle(create) {
-    const shared = this._data?.sharedCharger;
+  async _saveSharedVehicle(create, shared = this._data?.sharedCharger) {
     const name = this.shadowRoot.querySelector('[data-shared-name]')?.value.trim();
     const socEntity = this.shadowRoot.querySelector('[data-shared-soc]')?.value.trim();
     const capacity = Number(this.shadowRoot.querySelector('[data-shared-capacity]')?.value);
@@ -6248,7 +6263,7 @@ class PowerSyncEVPanel extends HTMLElement {
     await this._runCommand('shared:save', EV_PANEL_PATHS.sharedCharger, {
       operation: 'save', vehicle_id: create ? null : shared.selected_vehicle_id,
       name, soc_entity: socEntity, battery_capacity_kwh: capacity,
-    }, 'Vehicle saved. Select it before connecting, then set its Smart Schedule.');
+    }, 'Vehicle saved. Select it before connecting, then set its Smart Schedule.', shared);
   }
 
   _bydVehiclesHtml() {
@@ -6289,7 +6304,7 @@ class PowerSyncEVPanel extends HTMLElement {
         </div>
         <div class="capacity-editor">
           <label>Capacity override (kWh)
-            <input type="number" min="1" max="250" step="0.1" inputmode="decimal" data-capacity-input="${this._escAttr(vehicleId)}" value="${this._escAttr(manualCapacity)}" placeholder="Automatic">
+            <input type="number" min="1" max="250" step="any" inputmode="decimal" data-capacity-input="${this._escAttr(vehicleId)}" value="${this._escAttr(manualCapacity)}" placeholder="Automatic">
           </label>
           <button class="command" data-capacity-save="${this._escAttr(vehicleId)}" ${this._savingKey ? 'disabled' : ''}>Save</button>
           <button class="command" data-capacity-clear="${this._escAttr(vehicleId)}" ${this._savingKey || manualCapacity === '' ? 'disabled' : ''}>Clear</button>
@@ -6431,11 +6446,11 @@ class PowerSyncEVPanel extends HTMLElement {
           this._data.solarConfig,
           [
             { key: 'enabled', label: 'Enabled', type: 'checkbox' },
-            { key: 'household_buffer_kw', label: 'Buffer kW', type: 'number', step: '0.1' },
-            { key: 'max_export_price_cents', label: 'Max Export c/kWh', type: 'number', step: '0.1' },
-            { key: 'home_battery_minimum', label: 'Home SOC %', type: 'number', step: '1' },
-            { key: 'sustained_surplus_minutes', label: 'Start Delay', type: 'number', step: '1' },
-            { key: 'stop_delay_minutes', label: 'Stop Delay', type: 'number', step: '1' },
+            { key: 'household_buffer_kw', min: 0, max: 5, label: 'Buffer kW', type: 'number', step: 'any' },
+            { key: 'max_export_price_cents', min: 0, max: 200, label: 'Max Export c/kWh', type: 'number', step: 'any' },
+            { key: 'home_battery_minimum', min: 0, max: 100, label: 'Home SOC %', type: 'number', step: '1' },
+            { key: 'sustained_surplus_minutes', min: 1, max: 30, label: 'Start Delay', type: 'number', step: '1' },
+            { key: 'stop_delay_minutes', min: 1, max: 30, label: 'Stop Delay', type: 'number', step: '1' },
           ],
         )}
         ${this._modeCard(
@@ -6445,9 +6460,9 @@ class PowerSyncEVPanel extends HTMLElement {
           this._data.priceSettings,
           [
             { key: 'enabled', label: 'Enabled', type: 'checkbox' },
-            { key: 'recovery_soc', label: 'Recovery SOC %', type: 'number', step: '1' },
-            { key: 'recovery_price_cents', label: 'Recovery c/kWh', type: 'number', step: '0.1' },
-            { key: 'opportunity_price_cents', label: 'Opportunity c/kWh', type: 'number', step: '0.1' },
+            { key: 'recovery_soc', min: 0, max: 100, label: 'Recovery SOC %', type: 'number', step: '1' },
+            { key: 'recovery_price_cents', label: 'Recovery c/kWh', type: 'number', step: 'any' },
+            { key: 'opportunity_price_cents', label: 'Opportunity c/kWh', type: 'number', step: 'any' },
           ],
           'Upcoming eligible windows appear in the 24-hour optimiser plan. They are projections only; the live controller rechecks price, SOC, location, plug state, ownership, and safety before charging.',
         )}
@@ -6460,7 +6475,7 @@ class PowerSyncEVPanel extends HTMLElement {
             { key: 'enabled', label: 'Enabled', type: 'checkbox' },
             { key: 'start_time', label: 'Start', type: 'time' },
             { key: 'end_time', label: 'End', type: 'time' },
-            { key: 'max_price_cents', label: 'Max c/kWh', type: 'number', step: '0.1' },
+            { key: 'max_price_cents', label: 'Max c/kWh', type: 'number', step: 'any' },
           ],
         )}
         ${this._smartScheduleCard()}
@@ -6535,17 +6550,18 @@ class PowerSyncEVPanel extends HTMLElement {
       `;
     }
     const inputType = field.type || 'text';
+    const bounds = (field.min == null ? '' : ` min="${this._escAttr(field.min)}"`) + (field.max == null ? '' : ` max="${this._escAttr(field.max)}"`);
     const step = field.step ? ` step="${this._escAttr(field.step)}"` : '';
     return `
       <div class="field">
         <label for="${this._escAttr(dataKey)}">${this._escHtml(field.label)}</label>
-        <input id="${this._escAttr(dataKey)}" type="${inputType}" data-setting="${this._escAttr(dataKey)}" value="${this._escAttr(value ?? '')}"${step}>
+        <input id="${this._escAttr(dataKey)}" type="${inputType}" data-setting="${this._escAttr(dataKey)}" value="${this._escAttr(value ?? '')}"${bounds}${step}>
       </div>
     `;
   }
 
   _smartScheduleCard() {
-    const settings = this._data?.autoStatus?.settings || {};
+    const settings = this._data?.autoSettings ?? this._data?.autoStatus?.settings ?? {};
     const vehicleConfigs = this._data?.vehicleConfigs || [];
     const entries = Object.entries(settings);
     const dayLabels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
@@ -6562,8 +6578,7 @@ class PowerSyncEVPanel extends HTMLElement {
       const effectiveCapacity = sharedVehicle ? vehicle.effective_battery_capacity_kwh
         : (config.effective_battery_capacity_kwh ?? vehicle.effective_battery_capacity_kwh);
       const capacitySource = config.battery_capacity_source || vehicle.battery_capacity_source || 'default_estimate';
-      const manualCapacity = config.battery_capacity_kwh
-        ?? (capacitySource === 'charger_fallback' ? effectiveCapacity : '');
+      const manualCapacity = config.battery_capacity_kwh ?? config.charger_fallback_battery_capacity_kwh ?? '';
       const sourceLabel = capacitySource === 'manual' ? 'configured' : this._title(capacitySource);
       return `
         <div class="smart-row">
@@ -6577,7 +6592,7 @@ class PowerSyncEVPanel extends HTMLElement {
             </div>
             ${sharedVehicle ? '' : `<div class="capacity-editor">
               <label>Capacity override (kWh)
-                <input type="number" min="1" max="250" step="0.1" inputmode="decimal" data-capacity-input="${this._escAttr(vehicleId)}" value="${this._escAttr(manualCapacity)}" placeholder="Automatic">
+                <input type="number" min="1" max="250" step="any" inputmode="decimal" data-capacity-input="${this._escAttr(vehicleId)}" value="${this._escAttr(manualCapacity)}" placeholder="Automatic">
               </label>
               <button class="command" data-capacity-save="${this._escAttr(vehicleId)}" ${this._savingKey ? 'disabled' : ''}>Save</button>
               <button class="command" data-capacity-clear="${this._escAttr(vehicleId)}" ${this._savingKey || manualCapacity === '' ? 'disabled' : ''}>Clear</button>
@@ -6618,24 +6633,34 @@ class PowerSyncEVPanel extends HTMLElement {
   }
 
   _attachEvents() {
+    const sharedAtRender = this._data?.sharedCharger;
+    this.shadowRoot.querySelector('[data-discard-conflict]')?.addEventListener('click', () => {
+      for (const [key, failed] of this._notice?.conflicts || []) {
+        if (this._settingDrafts.get(key) === failed) this._settingDrafts.delete(key);
+      }
+      this._refresh();
+    });
     this.shadowRoot.querySelector('[data-connected-vehicle]')?.addEventListener('change', (event) => {
       this._runCommand('shared:select', EV_PANEL_PATHS.sharedCharger,
-        { operation: 'select', vehicle_id: event.target.value || null }, 'Connected vehicle selected');
+        { operation: 'select', vehicle_id: event.target.value || null }, 'Connected vehicle selected', sharedAtRender);
     });
     this.shadowRoot.querySelectorAll('[data-shared-save]').forEach((button) => {
-      button.addEventListener('click', () => this._saveSharedVehicle(button.dataset.sharedSave === 'new'));
+      button.addEventListener('click', () => this._saveSharedVehicle(button.dataset.sharedSave === 'new', sharedAtRender));
     });
     this.shadowRoot.querySelector('[data-shared-delete]')?.addEventListener('click', (event) => {
       this._runCommand('shared:delete', EV_PANEL_PATHS.sharedCharger,
-        { operation: 'delete', vehicle_id: event.currentTarget.dataset.sharedDelete }, 'Vehicle removed');
+        { operation: 'delete', vehicle_id: event.currentTarget.dataset.sharedDelete }, 'Vehicle removed', sharedAtRender);
     });
     this.shadowRoot.querySelectorAll('[data-target-save]').forEach((button) => {
+      const vehicleId = button.dataset.targetSave;
+      const opened = this._smartSettings(vehicleId);
       button.addEventListener('click', () => {
-        const vehicleId = button.dataset.targetSave;
-        const target = Number(this.shadowRoot.querySelector(`[data-target-input="${CSS.escape(vehicleId)}"]`)?.value);
-        if (!Number.isInteger(target) || target < 1 || target > 100) return;
-        this._runCommand(`target:${vehicleId}`, EV_PANEL_PATHS.autoSettings,
-          { vehicle_id: vehicleId, target_soc: target }, 'Charge target updated');
+        const input = this.shadowRoot.querySelector(`[data-target-input="${CSS.escape(vehicleId)}"]`);
+        const draft = this._settingDrafts.get(input?._evFieldKey);
+        const target = Number(input?.value || NaN);
+        if (!Number.isInteger(target) || target < 1 || target > 100) return this._settingError('Charge target must be a whole percentage between 1 and 100.');
+        this._writeSmartSettings(vehicleId, draft?.opened ?? opened, { target_soc: target },
+          { message: 'Charge target updated', drafts: draft ? [[input._evFieldKey, draft]] : [] });
       });
     });
     this.shadowRoot.querySelector('[data-action="refresh"]')?.addEventListener('click', () => this._refresh());
@@ -6662,25 +6687,31 @@ class PowerSyncEVPanel extends HTMLElement {
       button.addEventListener('click', () => this._saveMode(button.dataset.saveMode));
     });
     this.shadowRoot.querySelectorAll('[data-smart-toggle]').forEach((button) => {
-      button.addEventListener('click', () => this._toggleSmartSchedule(button.dataset.smartToggle, button.dataset.enabled === 'true'));
+      const opened = this._smartSettings(button.dataset.smartToggle);
+      button.addEventListener('click', () => this._toggleSmartSchedule(button.dataset.smartToggle, button.dataset.enabled === 'true', opened));
     });
     this.shadowRoot.querySelectorAll('[data-capacity-save]').forEach((button) => {
-      button.addEventListener('click', () => this._saveVehicleCapacity(button.dataset.capacitySave, false));
+      const opened = this._data?.vehicleConfigs?.find(item => item.vehicle_id === button.dataset.capacitySave);
+      button.addEventListener('click', () => this._saveVehicleCapacity(button.dataset.capacitySave, false, opened));
     });
     this.shadowRoot.querySelectorAll('[data-capacity-clear]').forEach((button) => {
-      button.addEventListener('click', () => this._saveVehicleCapacity(button.dataset.capacityClear, true));
+      const opened = this._data?.vehicleConfigs?.find(item => item.vehicle_id === button.dataset.capacityClear);
+      button.addEventListener('click', () => this._saveVehicleCapacity(button.dataset.capacityClear, true, opened));
     });
     this.shadowRoot.querySelectorAll('[data-departure-save]').forEach((button) => {
-      button.addEventListener('click', () => this._saveDepartureTimes(button.dataset.departureSave, false));
+      const opened = this._smartSettings(button.dataset.departureSave);
+      button.addEventListener('click', () => this._saveDepartureTimes(button.dataset.departureSave, false, opened));
     });
     this.shadowRoot.querySelectorAll('[data-departure-clear]').forEach((button) => {
-      button.addEventListener('click', () => this._saveDepartureTimes(button.dataset.departureClear, true));
+      const opened = this._smartSettings(button.dataset.departureClear);
+      button.addEventListener('click', () => this._saveDepartureTimes(button.dataset.departureClear, true, opened));
     });
   }
 
   refresh() { this._refresh(); }
 
   _refresh() {
+    if (this._savingKey) return;
     this._notice = null;
     this._lastFetch = 0;
     this._lastRequestStartedAt = 0;
@@ -6710,7 +6741,7 @@ class PowerSyncEVPanel extends HTMLElement {
         policy: this._policy,
         duration_minutes: this._durationMinutes,
       },
-      'Charging started',
+      'Start request accepted',
     );
   }
 
@@ -6721,7 +6752,7 @@ class PowerSyncEVPanel extends HTMLElement {
       'command:stop',
       this._commandPath(loadpoint.loadpoint_id),
       { command: 'stop_charging' },
-      'Charging stopped',
+      'Stop request accepted',
     );
   }
 
@@ -6735,93 +6766,375 @@ class PowerSyncEVPanel extends HTMLElement {
         vehicle_id: loadpoint.loadpoint_id,
         duration_minutes: this._durationMinutes,
       },
-      'Boost started',
+      'Boost request accepted',
     );
   }
 
-  async _saveMode(kind) {
-    const paths = {
-      solar: EV_PANEL_PATHS.solar,
-      price: EV_PANEL_PATHS.price,
-      scheduled: EV_PANEL_PATHS.scheduled,
+  _modeSettings(kind) {
+    return this._data?.[{ solar: 'solarConfig', price: 'priceSettings', scheduled: 'scheduledSettings' }[kind]];
+  }
+
+  _smartSettings(vehicleId) {
+    return (this._data?.autoSettings ?? this._data?.autoStatus?.settings)?.[vehicleId];
+  }
+
+  _fieldContext(input) {
+    const d = input.dataset;
+    if (d.setting) {
+      const [kind, field] = d.setting.split(':');
+      return { scope: kind, field, opened: this._modeSettings(kind) };
+    }
+    if (d.targetInput || d.departureTime) {
+      const id = d.targetInput || d.departureTime;
+      const opened = this._smartSettings(id);
+      return { scope: JSON.stringify(['smart', id, opened?.shared_charger_profile_id ?? null]),
+        field: d.targetInput ? 'target_soc' : 'day:' + d.departureDay, opened };
+    }
+    if (d.capacityInput) {
+      return { scope: 'capacity:' + d.capacityInput, field: 'battery_capacity_kwh',
+        opened: this._data?.vehicleConfigs?.find(item => item.vehicle_id === d.capacityInput) };
+    }
+    const sharedKey = ['sharedName', 'sharedSoc', 'sharedCapacity'].find(key => key in d);
+    if (sharedKey) {
+      const opened = this._data?.sharedCharger;
+      return { scope: 'shared:' + (opened?.selected_vehicle_id || ''), field: sharedKey, opened };
+    }
+    return null;
+  }
+
+  _bindSettingDrafts(focus) {
+    const inputs = this.shadowRoot.querySelectorAll('[data-setting], [data-target-input], [data-departure-time], [data-capacity-input], [data-shared-name], [data-shared-soc], [data-shared-capacity]');
+    for (const input of inputs) {
+      const context = this._fieldContext(input);
+      const key = JSON.stringify([context.scope, context.field]);
+      input._evFieldKey = key;
+      const read = () => input.type === 'checkbox' ? input.checked : input.value;
+      const initial = read();
+      const draft = this._settingDrafts.get(key);
+      if (draft) {
+        if (input.type === 'checkbox') input.checked = draft.value;
+        else input.value = draft.value;
+        const details = input.closest('details');
+        if (details) details.open = true;
+      }
+      const record = () => {
+        const old = this._settingDrafts.get(key);
+        const value = read();
+        if (value === initial && !input.validity?.badInput) this._settingDrafts.delete(key);
+        else this._settingDrafts.set(key, { ...context, opened: old?.opened ?? context.opened, value, invalid: !!input.validity?.badInput });
+      };
+      input.addEventListener('input', record);
+      input.addEventListener('change', record);
+      if (focus?.key === key) {
+        input.focus({ preventScroll: true });
+        if (focus.start != null) input.setSelectionRange?.(focus.start, focus.end);
+      }
+    }
+  }
+
+  _settingError(message, conflicts) {
+    this._notice = { type: 'error', message, conflicts };
+    this._scheduleRender();
+    return false;
+  }
+
+  async _settingsWrite(savingKey, message, write, drafts = []) {
+    if (this._savingKey) return false;
+    if (typeof this._hass?.callApi !== 'function') return this._settingError('Home Assistant is unavailable.');
+    this._savingKey = savingKey;
+    this._notice = { type: '', message: 'Checking and saving settings…' };
+    this._scheduleRender();
+    const hass = this._hass;
+    const request = async (method, path, payload) => {
+      const result = await hass.callApi(method, path, payload);
+      if (result?.success !== true) throw new Error(result?.error || 'Home Assistant did not confirm the request.');
+      return result;
     };
-    const path = paths[kind];
-    if (!path) return;
-    const payload = this._collectModePayload(kind);
-    await this._runCommand(`mode:${kind}`, path, payload, 'Settings saved');
-  }
-
-  async _toggleSmartSchedule(vehicleId, enabled) {
-    await this._runCommand(
-      `smart:${vehicleId}`,
-      EV_PANEL_PATHS.autoToggle,
-      { vehicle_id: vehicleId, enabled },
-      'Smart schedule updated',
-    );
-  }
-
-  async _saveVehicleCapacity(vehicleId, clear) {
-    const input = this.shadowRoot.querySelector(`[data-capacity-input="${CSS.escape(vehicleId)}"]`);
-    const value = clear ? null : Number(input?.value);
-    if (!clear && (!Number.isFinite(value) || value < 1 || value > 250)) {
-      this._notice = { type: 'error', message: 'Capacity must be between 1 and 250 kWh' };
+    try {
+      const confirmed = await write(request);
+      for (const [key, sent] of drafts) {
+        const draft = this._settingDrafts.get(key);
+        if (draft === sent) this._settingDrafts.delete(key);
+        else if (draft && confirmed) this._settingDrafts.set(key, { ...draft, opened: confirmed });
+      }
+      this._notice = { type: '', message };
+      EV_PANEL_CACHE.delete(this._cacheKey());
+      await this._loadData(this._cacheKey());
+      return true;
+    } catch (err) {
+      return this._settingError(err?.message || err?.body?.message || 'Could not confirm the saved settings.',
+        err?.code === 'settings_conflict' ? drafts.filter(([, draft]) => draft.field === err.field) : undefined);
+    } finally {
+      this._savingKey = null;
       this._scheduleRender();
-      return;
     }
-    await this._runCommand(
-      `capacity:${vehicleId}`,
-      EV_PANEL_PATHS.vehicleConfig,
-      { vehicle_id: vehicleId, battery_capacity_kwh: value },
-      clear ? 'Capacity override cleared' : 'Capacity updated',
-    );
   }
 
-  async _saveDepartureTimes(vehicleId, clear) {
-    const departureTimes = {};
-    if (!clear) {
-      this.shadowRoot.querySelectorAll(`[data-departure-time="${CSS.escape(vehicleId)}"]`).forEach((input) => {
-        if (input.value) {
-          departureTimes[input.dataset.departureDay] = input.value;
-        }
-      });
+  _requirePatch(record, patch) {
+    if (!record || !Object.entries(patch).every(([key, value]) => this._equalSetting(record[key], value))) {
+      throw new Error('Home Assistant did not return the requested settings. Refresh and check the saved values.');
     }
-    await this._runCommand(
-      `departure:${vehicleId}`,
-      EV_PANEL_PATHS.autoSettings,
-      { vehicle_id: vehicleId, departure_times: departureTimes },
-      clear ? 'Departure times cleared' : 'Departure times updated',
-    );
+  }
+
+  _equalSetting(a, b) {
+    if (a === b) return true;
+    if (!a || !b || typeof a !== 'object' || typeof b !== 'object') return false;
+    return Object.keys(a).length === Object.keys(b).length &&
+      Object.keys(a).every(key => Object.hasOwn(b, key) && this._equalSetting(a[key], b[key]));
+  }
+
+  _checkSetting(opened, current, desired, field) {
+    if (!this._equalSetting(current, opened) && !this._equalSetting(current, desired)) {
+      const error = new Error('This setting changed while you were editing. Review its saved value.');
+      error.code = 'settings_conflict';
+      error.field = field;
+      throw error;
+    }
+  }
+
+  _modeValue(input, key) {
+    if (input.type === 'checkbox') return input.checked;
+    if (input.type === 'number') {
+      const raw = input.value.trim();
+      const value = Number(raw);
+      const whole = input.step === '1';
+      if (!raw || input.validity?.badInput || !Number.isFinite(value) || (whole && !Number.isSafeInteger(value)) ||
+          (input.min !== '' && input.min != null && value < Number(input.min)) ||
+          (input.max !== '' && input.max != null && value > Number(input.max))) {
+        throw new Error('Enter a valid ' + (whole ? 'whole number' : 'number') + ' for ' + key.replaceAll('_', ' ') + '.');
+      }
+      return value;
+    }
+    if (input.type === 'time' && !/^([01]\d|2[0-3]):[0-5]\d$/.test(input.value)) throw new Error('Enter a valid local time.');
+    return input.value;
   }
 
   _collectModePayload(kind) {
-    const payload = {};
-    this.shadowRoot.querySelectorAll(`[data-setting^="${kind}:"]`).forEach((input) => {
+    const patch = {};
+    for (const input of this.shadowRoot.querySelectorAll(`[data-setting^="${kind}:"]`)) {
+      if (!this._settingDrafts.has(input._evFieldKey)) continue;
       const key = input.dataset.setting.split(':')[1];
-      if (!key) return;
-      if (input.type === 'checkbox') {
-        payload[key] = input.checked;
-      } else if (input.type === 'number') {
-        const value = Number(input.value);
-        if (Number.isFinite(value)) payload[key] = value;
-      } else {
-        payload[key] = input.value;
-      }
-    });
-    return payload;
+      patch[key] = this._modeValue(input, key);
+    }
+    return patch;
   }
 
-  async _runCommand(savingKey, path, payload, successMessage) {
-    if (!this._hass || typeof this._hass.callApi !== 'function') return;
+  async _saveMode(kind) {
+    const path = { solar: EV_PANEL_PATHS.solar, price: EV_PANEL_PATHS.price, scheduled: EV_PANEL_PATHS.scheduled }[kind];
+    if (!path) return false;
+    const drafts = [...this._settingDrafts].filter(([, item]) => item.scope === kind);
+    if (!drafts.length) return false;
+    const member = kind === 'solar' ? 'config' : 'settings';
+    return this._settingsWrite('mode:' + kind, 'Settings saved', async request => {
+      const patch = this._collectModePayload(kind);
+      const latest = (await request('GET', path))[member];
+      for (const [, draft] of drafts) {
+        if (!Object.hasOwn(latest || {}, draft.field) || !Object.hasOwn(draft.opened || {}, draft.field)) {
+          throw new Error('These settings are unavailable. Refresh before editing.');
+        }
+        this._checkSetting(draft.opened[draft.field], latest[draft.field], patch[draft.field], draft.field);
+      }
+      this._requirePatch((await request('POST', path, patch))[member], patch);
+      const confirmed = (await request('GET', path))[member];
+      this._requirePatch(confirmed, patch);
+      return confirmed;
+    }, drafts);
+  }
+
+  _validSmartValue(key, value) {
+    if (key === 'departure_times') return typeof value === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(value);
+    const field = key.replace(/^departure_/, '');
+    if (field === 'priority' || field === 'priorities') {
+      return ['solar_only', 'solar_preferred', 'cost_optimized', 'time_critical'].includes(value);
+    }
+    if (field === 'max_grid_price_cents') return Number.isFinite(value);
+    if (['target_soc', 'min_battery_to_start', 'consume_battery_level'].includes(field)) {
+      return Number.isInteger(value) && value >= (field === 'target_soc' ? 1 : 0) && value <= 100;
+    }
+    return ['enabled', 'stop_at_battery_floor', 'limit_grid_import', 'preserve_home_battery'].includes(field) && typeof value === 'boolean';
+  }
+
+  async _writeSmartSettings(vehicleId, opened, changes, options = {}) {
+    const { toggle = false, message = 'Smart Schedule settings saved', drafts = [] } = options;
+    return this._settingsWrite('smart:' + vehicleId, message, async request => {
+      const path = EV_PANEL_PATHS.autoSettings;
+      const profile = opened?.shared_charger_profile_id;
+      const shared = ['generic_ev', '_default', 'ev'].includes(vehicleId) && this._data?.sharedCharger?.enabled;
+      const read = async () => {
+        const current = (await request('GET', path)).settings?.[vehicleId];
+        if (!opened || !current || (opened.vehicle_id != null && opened.vehicle_id !== vehicleId) || (current.vehicle_id != null && current.vehicle_id !== vehicleId) ||
+            (current.shared_charger_profile_id ?? null) !== (profile ?? null) || (shared && !profile)) {
+          throw new Error('The selected vehicle profile changed or is unavailable. Reopen its settings.');
+        }
+        return current;
+      };
+      const current = await read();
+      if (toggle && (typeof changes.enabled !== 'boolean' || Object.keys(changes).length !== 1)) {
+        throw new Error('A schedule toggle requires a single enabled setting.');
+      }
+      const patch = {};
+      for (const [key, desired] of Object.entries(changes)) {
+        if (!Object.hasOwn(opened, key) || !Object.hasOwn(current, key) || key === 'vehicle_id' || key === 'shared_charger_profile_id') {
+          throw new Error('This setting is unavailable on the installed integration.');
+        }
+        if (key.startsWith('departure_')) {
+          if (!desired || typeof desired !== 'object' || Array.isArray(desired)) throw new Error('Enter weekday settings.');
+          const before = opened[key] || {};
+          const merged = { ...current[key] };
+          for (const day of new Set([...Object.keys(before), ...Object.keys(desired)])) {
+            if (this._equalSetting(before[day], desired[day])) continue;
+            if (!/^[0-6]$/.test(day) || (Object.hasOwn(desired, day) && !this._validSmartValue(key, desired[day]))) {
+              throw new Error('Enter a valid weekday setting.');
+            }
+            this._checkSetting(before[day], current[key]?.[day], desired[day], 'day:' + day);
+            if (Object.hasOwn(desired, day)) merged[day] = desired[day];
+            else delete merged[day];
+          }
+          if (!this._equalSetting(current[key], merged)) patch[key] = merged;
+        } else {
+          if (!this._validSmartValue(key, desired)) throw new Error('Enter a valid value for ' + key.replaceAll('_', ' ') + '.');
+          this._checkSetting(opened[key], current[key], desired, key);
+          if (!this._equalSetting(current[key], desired)) patch[key] = desired;
+        }
+      }
+      if (!Object.keys(patch).length) return current;
+      const payload = { vehicle_id: vehicleId, ...patch };
+      if (Object.hasOwn(opened, 'shared_charger_profile_id')) payload.shared_charger_profile_id = profile ?? null;
+      const written = await request('POST', toggle ? EV_PANEL_PATHS.autoToggle : path, payload);
+      const ack = toggle ? written : written.settings;
+      this._requirePatch(ack, payload);
+      const confirmed = await read();
+      this._requirePatch(confirmed, patch);
+      return confirmed;
+    }, drafts);
+  }
+
+  async _toggleSmartSchedule(vehicleId, enabled, opened = this._smartSettings(vehicleId)) {
+    return this._writeSmartSettings(vehicleId, opened, { enabled },
+      { toggle: true, message: 'Smart Schedule updated' });
+  }
+
+  async _saveVehicleCapacity(vehicleId, clear, openedAtRender) {
+    const input = this.shadowRoot.querySelector(`[data-capacity-input="${CSS.escape(vehicleId)}"]`);
+    const draft = this._settingDrafts.get(input?._evFieldKey);
+    const value = clear ? null : Number(input?.value || NaN);
+    if (!clear && (!Number.isFinite(value) || value < 1 || value > 250)) return this._settingError('Capacity must be between 1 and 250 kWh.');
+    const local = config => config?.battery_capacity_kwh ?? config?.charger_fallback_battery_capacity_kwh ?? null;
+    const opened = draft?.opened ?? openedAtRender ?? this._data?.vehicleConfigs?.find(item => item.vehicle_id === vehicleId);
+    const path = EV_PANEL_PATHS.vehicleConfig;
+    return this._settingsWrite('capacity:' + vehicleId, clear ? 'Capacity override cleared' : 'Capacity updated', async request => {
+      const read = async () => (await request('GET', path)).configs?.find(item => item.vehicle_id === vehicleId);
+      const latest = await read();
+      if (!opened || !latest) throw new Error('The vehicle capacity is unavailable.');
+      this._checkSetting(local(opened), local(latest), value, 'battery_capacity_kwh');
+      const ack = (await request('POST', path, { vehicle_id: vehicleId, battery_capacity_kwh: value })).config;
+      const confirmed = await read();
+      for (const record of [ack, confirmed]) {
+        if (record?.vehicle_id !== vehicleId || !Number.isFinite(record?.effective_battery_capacity_kwh) || local(record) !== value) {
+          throw new Error('The vehicle capacity update could not be confirmed.');
+        }
+      }
+      return confirmed;
+    }, draft ? [[input._evFieldKey, draft]] : []);
+  }
+
+  async _saveDepartureTimes(vehicleId, clear, source = this._smartSettings(vehicleId)) {
+    const inputs = [...this.shadowRoot.querySelectorAll(`[data-departure-time="${CSS.escape(vehicleId)}"]`)];
+    const drafts = inputs.map(input => [input._evFieldKey, this._settingDrafts.get(input._evFieldKey)]).filter(([, draft]) => draft);
+    if (!clear && !drafts.length) return false;
+    if (!source) return this._settingError('The vehicle schedule is unavailable.');
+    const opened = { ...source, departure_times: { ...source.departure_times } };
+    for (const [, draft] of drafts) {
+      const day = draft.field.slice(4);
+      if (Object.hasOwn(draft.opened?.departure_times || {}, day)) opened.departure_times[day] = draft.opened.departure_times[day];
+      else delete opened.departure_times[day];
+    }
+    const departureTimes = clear ? {} : { ...opened?.departure_times };
+    if (!clear) {
+      for (const [, draft] of drafts) {
+        const day = draft.field.slice(4);
+        if (draft.value && !/^([01]\d|2[0-3]):[0-5]\d$/.test(draft.value)) return this._settingError('Enter a valid local departure time.');
+        if (draft.value) departureTimes[day] = draft.value;
+        else delete departureTimes[day];
+      }
+    }
+    return this._writeSmartSettings(vehicleId, opened, { departure_times: departureTimes },
+      { message: clear ? 'Departure times cleared' : 'Departure times updated', drafts });
+  }
+
+  async _writeShared(savingKey, payload, message, shared = this._data?.sharedCharger) {
+    const scope = 'shared:' + (shared?.selected_vehicle_id || '');
+    const drafts = payload.operation === 'save'
+      ? [...this._settingDrafts].filter(([, draft]) => draft.scope === scope) : [];
+    const opened = drafts[0]?.[1].opened ?? shared;
+    return this._settingsWrite(savingKey, message, async request => {
+      const path = EV_PANEL_PATHS.sharedCharger;
+      const status = result => {
+        const state = result.shared_charger;
+        if (!state?.available || !Array.isArray(state.profiles)) throw new Error('Shared charger settings are unavailable.');
+        return state;
+      };
+      const current = status(await request('GET', path));
+      if (!opened || opened.selected_vehicle_id !== current.selected_vehicle_id) throw new Error('The connected vehicle changed. Reopen its settings.');
+      if (!current.selection_allowed) throw new Error(current.selection_block_reason || 'The shared charger is busy.');
+      const update = { ...payload };
+      let id = payload.vehicle_id;
+      const fields = ['name', 'soc_entity', 'battery_capacity_kwh'];
+      const find = (state, lookup) => state.profiles.find(profile => profile.id === lookup);
+      const match = profile => profile && fields.every(key => profile[key] === update[key]);
+      if (id && !find(current, id)) throw new Error('The selected vehicle no longer exists.');
+      if (payload.operation === 'save' && id) {
+        const before = find(opened, id);
+        if (!before) throw new Error('Reopen the selected vehicle.');
+        const latest = find(current, id);
+        for (const key of fields) {
+          if (update[key] === before[key]) update[key] = latest[key];
+          else this._checkSetting(before[key], latest[key], update[key], { name: 'sharedName', soc_entity: 'sharedSoc', battery_capacity_kwh: 'sharedCapacity' }[key]);
+        }
+      }
+      const create = payload.operation === 'save' && !id;
+      if (create) {
+        const pending = this._pendingSharedCreate;
+        if (pending && fields.every(key => pending.payload[key] === update[key])) {
+          const matches = current.profiles.filter(profile => !pending.ids.includes(profile.id) && match(profile));
+          if (matches.length === 1) { this._pendingSharedCreate = null; return current; }
+          if (matches.length > 1) throw new Error('Multiple matching vehicles were found. Review the saved vehicles.');
+        }
+        this._pendingSharedCreate = { payload: update, ids: current.profiles.map(profile => profile.id) };
+      }
+      const ack = status(await request('POST', path, update));
+      if (create) {
+        const matches = ack.profiles.filter(profile => !find(current, profile.id) && match(profile));
+        if (matches.length !== 1) throw new Error('Home Assistant did not confirm the new vehicle.');
+        id = matches[0].id;
+      }
+      const verify = state => {
+        const valid = payload.operation === 'save' ? match(find(state, id))
+          : payload.operation === 'delete' ? !find(state, id)
+          : state.selected_vehicle_id === id;
+        if (!valid) throw new Error('The shared charger update could not be confirmed.');
+      };
+      verify(ack);
+      const confirmed = status(await request('GET', path));
+      verify(confirmed);
+      if (create) this._pendingSharedCreate = null;
+      return confirmed;
+    }, drafts);
+  }
+
+  async _runCommand(savingKey, path, payload, successMessage, openedShared) {
+    if (path === EV_PANEL_PATHS.sharedCharger) return this._writeShared(savingKey, payload, successMessage, openedShared);
+    if (this._savingKey || !this._hass || typeof this._hass.callApi !== 'function') return;
     this._savingKey = savingKey;
     this._notice = null;
     this._error = null;
     this._scheduleRender();
     try {
       const response = await this._hass.callApi('POST', path, payload);
-      if (response?.success === false) {
-        throw new Error(response.error || 'Command failed');
+      if (response?.success !== true || response.data?.success === false) {
+        throw new Error(response?.error || response?.data?.message || response?.message || 'Home Assistant did not confirm the command.');
       }
-      this._notice = { type: '', message: response?.data?.message || response?.message || successMessage };
+      this._notice = { type: '', message: successMessage };
       this._lastFetch = 0;
       this._lastRequestStartedAt = 0;
       EV_PANEL_CACHE.delete(this._cacheKey());
