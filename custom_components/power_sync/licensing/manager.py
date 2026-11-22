@@ -238,9 +238,11 @@ class HALicenseManager(LicenseRuntime):
                 except Exception:
                     _LOGGER.warning("Licence storage is unavailable; admission is closed and owned recovery will still run")
                 try:
-                    async with self.control_lock(entry_id):
-                        with recovery_scope():
-                            await coordinator.disable(licensing=True)
+                    # The coordinator drains dispatch before taking the entry
+                    # control lock for recovery. A queued dispatch may need
+                    # that lock to observe the closed admission and exit.
+                    with recovery_scope():
+                        await coordinator.disable(licensing=True)
                     force = coordinator._get_active_force_state()
                     hold = getattr(coordinator, "_solar_export_hold", None)
                     pending = bool(force and force.get("active") and force.get("source") == "optimizer")

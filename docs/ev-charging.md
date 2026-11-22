@@ -36,9 +36,17 @@ Re-enable it with the same action and `enabled: true`. Check battery charge both
 
 These actions change the mode's saved eligibility, not the physical charger directly. Scheduled Charging, Price Level and Smart Schedule apply changes on the normal EV evaluation cycle. Solar Surplus also uses its existing disable cleanup. Enabling a mode does not force a charging start, and disabling one mode does not disable other eligible charging modes. A successful action confirms the setting was saved, not that the charger physically stopped. Monitoring Mode and existing ownership and provider safeguards still apply.
 
+## Using EV charging with or without Smart Optimization
+
+Scheduled Charging and Price Level can use the current retail rate from EPEX, Octopus or Localvolts with the battery optimizer switched off. A price-limited session waits when its provider has no valid rate covering the current time. Smart Schedule still needs live site power before increasing charging. Disabling Smart Schedule lets it clean up its own session if site telemetry goes offline.
+
+When the battery optimizer includes Smart Schedule, it uses the vehicle's resolved charger limit and the price policy for its next departure. A five-minute cheap interval can supply five minutes of charging. If two cars request **Preserve Home Battery**, ending one mode keeps the other car's protection active until its request also ends.
+
 ## Site import limits during EV charging
 
-From v2.12.1766, Dynamic EV reads Smart Optimization’s **Maximum grid import** on each charging control cycle. Changing or clearing that setting takes effect during the active session. Independent site and charger limits still apply. With no configured site limit, battery-target charging uses a 12.5 kW fallback.
+From v2.12.1766, Dynamic EV reads Smart Optimization’s **Maximum grid import** on each charging control cycle. Changing or clearing that setting takes effect during the active session. When adjusting the rate, PowerSync rounds down to a whole amp if rounding up would exceed the site import limit. Independent site and charger limits still apply. With no configured site limit, battery-target charging uses a 12.5 kW fallback.
+
+EV charging history records the car’s state of charge at the start and end of a managed session when that reading is available.
 
 ## EV SoC sensors with OCPP
 

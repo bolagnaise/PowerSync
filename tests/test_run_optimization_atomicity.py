@@ -194,7 +194,7 @@ def _publication_pipeline(*, rerun=True):
 
 @pytest.mark.parametrize(("rerun", "failure_stage"), [
     (True, None), (True, "reserve"), (True, "external"), (True, "cancel"),
-    (False, None), (False, "external"),
+    (False, None), (False, "external"), (True, "disabled"), (False, "disabled"),
 ])
 def test_slow_reserve_rerun_never_exposes_an_uncommitted_export(rerun, failure_stage):
     """A refresh during either await must keep the previously committed plan."""
@@ -213,6 +213,7 @@ def test_slow_reserve_rerun_never_exposes_an_uncommitted_export(rerun, failure_s
         adopted = []
         committed_prices = []
         subject = SimpleNamespace(
+            _enabled=True,
             _current_schedule=old_schedule, _last_optimizer_result=old_result,
             _last_published_optimizer_parameters=old_parameters,
             _last_update_time=old_time, _octopus_schedule_revision="old",
@@ -259,11 +260,16 @@ def test_slow_reserve_rerun_never_exposes_an_uncommitted_export(rerun, failure_s
             assert_previous_plan()
             if failure_stage == "external":
                 raise RuntimeError("external plan failed")
+            if failure_stage == "disabled":
+                subject._enabled = False
             return result
 
         subject._apply_external_energy_plan = external
         publish = _publication_pipeline(rerun=rerun)
-        if failure_stage:
+        if failure_stage == "disabled":
+            assert await publish(subject, reference, solve_again, resolved_parameters) is False
+            assert_previous_plan()
+        elif failure_stage:
             error = asyncio.CancelledError if failure_stage == "cancel" else RuntimeError
             with pytest.raises(error):
                 await publish(subject, reference, solve_again, resolved_parameters)

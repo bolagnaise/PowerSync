@@ -35,6 +35,21 @@ def _finite(value: object, default: float = 0.0) -> float:
     return number if math.isfinite(number) else default
 
 
+def smart_schedule_charger_limits_kw(settings, plan) -> tuple[float, float]:
+    """Return the physical maximum and minimum using the resolved EVSE phases."""
+    step_kw = getattr(plan, "charging_power_step_kw", None)
+    if step_kw is None:
+        step_kw = (
+            float(getattr(settings, "voltage", 240) or 240)
+            * int(getattr(settings, "phases", 1) or 1) / 1000.0
+        )
+    configured_kw = float(getattr(settings, "max_charge_amps", 0) or 0) * step_kw
+    physical_kw = getattr(plan, "charger_power_kw", None)
+    maximum_kw = min(configured_kw, physical_kw) if physical_kw is not None else configured_kw
+    minimum_kw = float(getattr(settings, "min_charge_amps", 0) or 0) * step_kw
+    return maximum_kw, minimum_kw
+
+
 @dataclass(frozen=True)
 class EVChargePlan:
     """One vehicle's charging demand over the optimization horizon.

@@ -139,7 +139,7 @@ def test_mobile_config_endpoint_registered_before_slow_refreshes():
 def test_initial_optimizer_pass_is_deferred_after_enable():
     source = OPTIMIZATION_COORDINATOR_PATH.read_text()
     tree = ast.parse(source)
-    enable = _find_class_method(tree, "OptimizationCoordinator", "enable")
+    enable = _find_class_method(tree, "OptimizationCoordinator", "_enable_optimizer")
     price_update = _find_class_method(tree, "OptimizationCoordinator", "_on_price_update")
     initial_run = _find_class_method(
         tree,

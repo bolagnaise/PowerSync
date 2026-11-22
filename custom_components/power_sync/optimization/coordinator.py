@@ -6,7 +6,7 @@ to produce a schedule, which the execution layer then applies.
 """
 from __future__ import annotations
 
-from ..licensing.guard import optimizer_work, optimizer_command, fenced_call, restoration_work, background_work, OptimizerAccessLost
+from ..licensing.guard import optimizer_work, optimizer_command, fenced_call, restoration_work, background_work, manager_for, OptimizerAccessLost
 from ..regression.temporal_capture import observe_reserve_restore, monitoring as _temporal_monitoring, boundary as _temporal_boundary, boundary_exception as _temporal_exception, command_argument as _temporal_argument
 
 import asyncio
@@ -16,8 +16,10 @@ import json
 import logging
 import math
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from functools import cached_property
 from typing import TYPE_CHECKING, Any, Callable
 
 if TYPE_CHECKING:
@@ -529,6 +531,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         # Configuration
         self._enabled = False
+        self._lifecycle_generation = 0
+        self._pending_shutdown_licensing: bool | None = None
+        self._executor_restore_pending = False
         self._config = OptimizationConfig()
         self._cost_function = CostFunction("cost")
         self._provider_config = ProviderPriceConfig()
@@ -5943,9 +5948,20 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._octopus_price_pending = False
             await self._run_optimization(force=True, execution_trigger="octopus_rate_update")
 
-    @optimizer_work
+    @cached_property
+    def _lifecycle_lock(self) -> asyncio.Lock:
+        return asyncio.Lock()
+
     async def enable(self) -> bool:
         """Enable optimization and start the built-in optimizer."""
+        async with self._lifecycle_lock:
+            pending = getattr(self, "_pending_shutdown_licensing", None)
+            if pending is not None:
+                await self._stop_optimizer(licensing=pending)
+            return await self._enable_optimizer()
+
+    @optimizer_work
+    async def _enable_optimizer(self) -> bool:
         if self._enabled:
             return True
 
@@ -5955,9 +5971,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # solve; otherwise the next optimizer session can inherit a stale
         # zero-discharge limit even though its first action is not IDLE.
         if getattr(self, "_idle_no_discharge_active", False):
-            if self._monitoring_mode_active():
+            if self._battery_restore_blocked():
                 _LOGGER.info(
-                    "Optimizer enable: monitoring mode active — retaining pending "
+                    "Optimizer enable: monitoring or external battery control active — retaining pending "
                     "IDLE no-discharge cleanup without hardware writes"
                 )
             elif not await self._restore_idle_no_discharge_mode(
@@ -6373,9 +6389,21 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return False
         return self._enabled
 
-    @restoration_work
     async def disable(self, *, licensing: bool = False) -> None:
         """Disable optimization."""
+        async with self._lifecycle_lock:
+            await self._stop_optimizer(licensing=licensing)
+
+    @restoration_work
+    async def _stop_optimizer(self, *, licensing: bool) -> None:
+        # Close admission before yielding. An ordinary HA refresh can be
+        # executing independently of all the tasks this coordinator created.
+        pending = getattr(self, "_pending_shutdown_licensing", None)
+        licensing = licensing or pending is True
+        if self._enabled or licensing:
+            self._pending_shutdown_licensing = licensing
+        self._enabled = False
+        self._lifecycle_generation = getattr(self, "_lifecycle_generation", 0) + 1
         self._stop_cost_tracking_listeners()
         # Drain this producer before restoration, so a queued EV transition
         # cannot race shutdown cleanup or reapply a hold after it completes.
@@ -6390,20 +6418,62 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 preserve_task.cancel()
             await asyncio.gather(preserve_task, return_exceptions=True)
         self._ev_preserve_refresh_task = None
-        monitoring_mode = self._monitoring_mode_active()
-        if licensing:
-            self._enabled = False  # Stop eligibility before any awaited cleanup.
-            force = self._get_active_force_state()
-            if force and force.get("active") and force.get("source") != "optimizer":
-                monitoring_mode = True  # A newer user/external force owns hardware.
+        # Drain in the same order as a solve, before taking the licence control
+        # lock. A running dispatch may itself be waiting for that control lock.
+        # New dispatch is already closed, so restoration need not hold either
+        # work lock during callbacks from the hardware service.
+        for lock in (
+            getattr(self, "_optimization_lock", None),
+            getattr(self, "_execute_lock", None),
+        ):
+            if lock is not None:
+                async with lock:
+                    pass
+
+        # In particular, join any deferred startup restore before shutdown
+        # restores hardware. A cancelled startup operation may do async cleanup.
+        pending_tasks = []
+        for attr in (
+            "_polling_task", "_initial_opt_task", "_deferred_restore_task",
+            "_settings_reoptimize_task", "_price_reoptimize_task",
+        ):
+            task = getattr(self, attr, None)
+            if task is not None and task is not asyncio.current_task() and not task.done():
+                task.cancel()
+                pending_tasks.append(task)
+            setattr(self, attr, None)
+        if pending_tasks:
+            await asyncio.gather(*pending_tasks, return_exceptions=True)
+
+        self._current_schedule = None
+        self._last_optimizer_result = None
+        self._last_update_time = None
+        self._last_ev_charge_by_vehicle_w = None
+        self._last_ev_charge_schedule_updated = None
+        manager = manager_for(self) if licensing else None
+        control_lock = manager.control_lock(self.entry_id) if manager else nullcontext()
+        async with control_lock:
+            await self._finish_optimizer_shutdown(licensing=licensing)
+        self._pending_shutdown_licensing = None
+
+    def _battery_restore_blocked(self) -> bool:
+        """A pending optimizer restore yields to monitoring and newer battery owners."""
+        if self._monitoring_mode_active():
+            return True
+        force = self._get_active_force_state()
+        return bool(force and force.get("active") and force.get("source") != "optimizer")
+
+    async def _finish_optimizer_shutdown(self, *, licensing: bool) -> None:
+        restore_blocked = self._battery_restore_blocked()
+        retry_executor_restore = getattr(self, "_executor_restore_pending", False)
         solar_export_hold = getattr(self, "_solar_export_hold", None)
         if solar_export_hold and solar_export_hold.active:
             # Recheck immediately before the write: a monitoring transition can
             # arrive after the initial lifecycle snapshot.
-            monitoring_mode = monitoring_mode or self._monitoring_mode_active()
-            if monitoring_mode:
+            restore_blocked = restore_blocked or self._battery_restore_blocked()
+            if restore_blocked:
                 _LOGGER.info(
-                    "Optimizer shutdown: monitoring mode active — deferring "
+                    "Optimizer shutdown: monitoring or external battery control active — deferring "
                     "solar-export hold cleanup"
                 )
             elif not await solar_export_hold.clear("optimizer_disable"):
@@ -6411,8 +6481,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     "Profit Max: solar-export hold restore failed during disable; "
                     "persisted cleanup will retry on startup"
                 )
-        if not self._enabled and not licensing:
+        if getattr(self, "_pending_shutdown_licensing", None) is None:
             return
+        restore_blocked = restore_blocked or self._battery_restore_blocked()
 
         # Safety: restore any pending pre-IDLE backup_reserve before shutting
         # down. Gated on the pending reserve itself, not on
@@ -6422,26 +6493,27 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # _last_executed_action = "no_discharge", not "idle". Runs BEFORE
         # the EV no-discharge release below, which only restores work mode
         # and must not be assumed to have already handled the reserve.
-        if not monitoring_mode and self._pre_idle_backup_reserve is not None:
+        if not restore_blocked and self._pre_idle_backup_reserve is not None:
             if self.battery_controller:
                 await self._restore_pre_idle_backup_reserve(
                     self.battery_controller,
                     "optimizer disable",
                 )
-        elif monitoring_mode and self._pre_idle_backup_reserve is not None:
+        elif restore_blocked and self._pre_idle_backup_reserve is not None:
             _LOGGER.info(
-                "Optimizer shutdown: monitoring mode active — skipping "
+                "Optimizer shutdown: monitoring or external battery control active — skipping "
                 "pre-IDLE backup reserve restore"
             )
 
         idle_work_mode_restore_failed = False
+        restore_blocked = restore_blocked or self._battery_restore_blocked()
 
         # FoxESS/Sungrow: restore from IDLE hold mode to normal operation.
         # Stays gated on _last_executed_action == "idle" only — the EV
         # no-discharge path restores its own work mode via
         # _release_scheduled_ev_no_discharge_mode below, and widening this
         # gate would double-fire restore_work_mode_from_idle.
-        if not monitoring_mode and self._last_executed_action == "idle":
+        if not restore_blocked and self._last_executed_action == "idle":
             if getattr(self, "_idle_no_discharge_active", False):
                 await self._restore_idle_no_discharge_mode("optimizer disable")
             elif (
@@ -6466,41 +6538,21 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     if self.battery_system == "solaredge":
                         idle_work_mode_restore_failed = True
                     _LOGGER.warning("Failed to restore work mode on disable: %s", e)
-        elif monitoring_mode and self._last_executed_action == "idle":
+        elif restore_blocked and self._last_executed_action == "idle":
             _LOGGER.info(
-                "Optimizer shutdown: monitoring mode active — skipping IDLE cleanup writes"
+                "Optimizer shutdown: monitoring or external battery control active — skipping IDLE cleanup writes"
             )
         if self._scheduled_ev_no_discharge_active:
-            if monitoring_mode:
+            restore_blocked = restore_blocked or self._battery_restore_blocked()
+            if restore_blocked:
                 _LOGGER.info(
-                    "Optimizer shutdown: monitoring mode active — skipping scheduled EV no-discharge release"
+                    "Optimizer shutdown: monitoring or external battery control active — skipping scheduled EV no-discharge release"
                 )
             else:
                 await self._release_scheduled_ev_no_discharge_mode("optimizer disabled")
         self._last_optimizer_self_consumption_reserve_target = None
         if not idle_work_mode_restore_failed:
             self._last_executed_action = None
-
-        # Cancel background tasks first so they can't run optimization
-        # after _enabled is set to False (e.g. polling loop waking from sleep)
-        self._enabled = False
-
-        if self._polling_task and not self._polling_task.done():
-            self._polling_task.cancel()
-            self._polling_task = None
-        if self._initial_opt_task and not self._initial_opt_task.done():
-            self._initial_opt_task.cancel()
-            self._initial_opt_task = None
-        if self._deferred_restore_task and not self._deferred_restore_task.done():
-            self._deferred_restore_task.cancel()
-            self._deferred_restore_task = None
-        if self._settings_reoptimize_task and not self._settings_reoptimize_task.done():
-            self._settings_reoptimize_task.cancel()
-            self._settings_reoptimize_task = None
-        price_reoptimize_task = getattr(self, "_price_reoptimize_task", None)
-        if price_reoptimize_task and not price_reoptimize_task.done():
-            price_reoptimize_task.cancel()
-            self._price_reoptimize_task = None
 
         history_unsub = getattr(self, "_historical_ev_listener_unsub", None)
         if history_unsub:
@@ -6517,27 +6569,39 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._octopus_gate_listener_unsub = None
 
         recovery_failed = False
+        executor_error = None
         try:
             if self._executor:
-                if monitoring_mode:
+                restore_blocked = restore_blocked or self._battery_restore_blocked()
+                if restore_blocked:
                     _LOGGER.info(
-                        "Optimizer shutdown: monitoring mode active — skipping executor restore writes"
+                        "Optimizer shutdown: monitoring or external battery control active — skipping executor restore writes"
                     )
-                if licensing:
-                    try:
-                        restored = await self._executor.stop(restore_normal=not monitoring_mode, retry_restore=True)
-                        recovery_failed = restored is False
-                    except Exception:
-                        recovery_failed = True
-                        _LOGGER.warning("Battery restoration failed; continuing independent EV recovery")
-                else:
-                    await self._executor.stop(restore_normal=not monitoring_mode)
+                # stop() disables the executor before awaiting the device. Keep
+                # track of that write until it returns so a later enable retries
+                # an interrupted restore, even though the executor is disabled.
+                self._executor_restore_pending = not restore_blocked
+                try:
+                    if licensing or retry_executor_restore:
+                        restored = await self._executor.stop(
+                            restore_normal=not restore_blocked, retry_restore=True,
+                        )
+                    else:
+                        restored = await self._executor.stop(restore_normal=not restore_blocked)
+                    self._executor_restore_pending = restored is False and not restore_blocked
+                    recovery_failed = self._executor_restore_pending
+                except Exception as err:
+                    executor_error = err
+                    recovery_failed = True
+                    _LOGGER.warning("Battery restoration failed; continuing independent EV recovery", exc_info=True)
 
             if self._ev_coordinator:
                 await self._ev_coordinator.stop()
                 if licensing and not await self._ev_coordinator.recover_license_sessions():
                     recovery_failed = True
 
+            if executor_error is not None and not licensing:
+                raise executor_error
             if recovery_failed:
                 raise RuntimeError("optimizer_restore_pending")
 
@@ -7431,6 +7495,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return result
 
         await self._async_load_external_energy_ledger()
+        if not getattr(self, "_enabled", True):
+            return result
         interval = timedelta(minutes=max(1, int(self._config.interval_minutes or 5)))
         horizon_end = timestamps[-1] + interval
         raw_sessions = expand_external_energy_sessions(
@@ -7563,6 +7629,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """
         if not self._optimizer or not self._enabled:
             return False
+        lifecycle_generation = getattr(self, "_lifecycle_generation", 0)
         if not self._energy_telemetry_ready():
             _LOGGER.info(
                 "Optimizer: battery telemetry is not ready — skipping this run"
@@ -7603,6 +7670,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         await self._optimization_lock.acquire()
         regression_recorder = getattr(self, "_regression_recorder", None)
         try:
+            if not self._enabled or lifecycle_generation != getattr(
+                self, "_lifecycle_generation", 0
+            ):
+                return False
             octopus_revision = (
                 (self.price_coordinator.data or {}).get("revision")
                 if type(getattr(self, "price_coordinator", None)).__name__ == "OctopusPriceCoordinator" else None
@@ -7716,9 +7787,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._last_planned_ev_load_forecast_w = None
             self._last_effective_ev_load_forecast_w = None
             self._fixed_ev_load_forecast_w = None
-            self._last_ev_charge_by_vehicle_w = None
-            self._last_ev_charge_schedule_updated = None
-            self._last_ev_source_by_vehicle_w = None
+            # Dynamic EV continues reading the committed per-vehicle ceilings
+            # until _adopt_solved_ev_series publishes the replacement schedule.
             self._last_ev_optimizer_policy = None
             self._last_tesla_schedule_forecast = None
             self._last_smart_schedule_ev_load_w = None
@@ -8328,6 +8398,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             result: OptimizerResult = await _run_optimizer_once(
                 solve_reserve_override
             )
+            if not self._enabled:
+                return False
             if (
                 not result.feasible
                 and any(profit_max_solar_export_slots)
@@ -8610,6 +8682,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
                 return result, reference_export_windows
 
+            if not self._enabled:
+                return False
             result, reference_export_windows = _prepare_schedule(
                 result, reference_reserve_floor
             )
@@ -8665,6 +8739,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         round(applied_reserve_floor * 100)
                     )
                     result.reserve_recommendation = final_recommendation
+            if not self._enabled:
+                return False
             result = await self._apply_external_energy_plan(
                 result,
                 timestamps=schedule_timestamps,
@@ -8675,6 +8751,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             # Commit once, without an await between the matching plan fields.
             # A failed/cancelled rerun leaves the previous committed plan intact.
+            if not self._enabled:
+                return False
             if historical_ev_generation != getattr(self, "_historical_ev_generation", 0):
                 # A return, SOC update or setting change during the solve must
                 # not publish a plan based on the previous expected visit.
@@ -9425,7 +9503,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             from ..const import DOMAIN
             from ..solar_surplus_config import get_stored_solar_surplus_config
-            from .ev_load_plan import ev_plan_from_demand
+            from .ev_load_plan import ev_plan_from_demand, smart_schedule_charger_limits_kw
 
             executor = get_auto_schedule_executor()
             if executor is None or getattr(
@@ -9475,11 +9553,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if deadline is not None and deadline <= now:
                     continue
 
-                charger_power_kw = (
-                    float(getattr(settings, "max_charge_amps", 0) or 0)
-                    * float(getattr(settings, "voltage", 240) or 240)
-                    * int(getattr(settings, "phases", 1) or 1)
-                    / 1000.0
+                charger_power_kw, min_power_kw = smart_schedule_charger_limits_kw(
+                    settings, charging_plan
+                )
+                departure_weekday = (
+                    deadline.astimezone(dt_util.DEFAULT_TIME_ZONE).weekday()
+                    if deadline is not None else None
                 )
 
                 # ChargingPlan.energy_needed_kwh is already AC-side energy:
@@ -9572,12 +9651,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             dt_util.DEFAULT_TIME_ZONE
                         ).weekday()
 
-                        def _effective(method_name: str, attr_name: str, default):
+                        def _effective(method_name: str, attr_name: str, default, policy_day=weekday):
                             method = getattr(settings, method_name, None)
                             if callable(method):
-                                return method(weekday)
+                                return method(policy_day)
                             return getattr(settings, attr_name, default)
 
+                        price_weekday = weekday if departure_weekday is None else departure_weekday
                         if active_window is not None and not (
                             is_smart_schedule_grid_price_allowed(
                                 source=source,
@@ -9592,11 +9672,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                         "max_grid_price_cents",
                                         None,
                                     ),
+                                    price_weekday,
                                 ),
                                 priority=_effective(
                                     "get_effective_priority",
                                     "priority",
                                     getattr(charging_plan, "priority", None),
+                                    price_weekday,
                                 ),
                             )
                         ):
@@ -9839,12 +9921,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         schedule_timestamps=schedule_timestamps,
                         deadline=deadline,
                         charge_efficiency=charge_efficiency,
-                        min_power_kw=(
-                            float(getattr(settings, "min_charge_amps", 0) or 0)
-                            * float(getattr(settings, "voltage", 240) or 240)
-                            * int(getattr(settings, "phases", 1) or 1)
-                            / 1000.0
-                        ),
+                        min_power_kw=min_power_kw,
                         max_power_by_slot_kw=power_by_slot,
                         allow_grid=allow_grid,
                         allow_solar=allow_solar,
@@ -12711,6 +12788,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 # Brief pause for contactor to close
                 import asyncio
                 await asyncio.sleep(3)
+                if not getattr(self, "_enabled", True):
+                    return
 
             # Skip charge/export actions during suspected calibration
             from ..const import DOMAIN as _CAL_DOMAIN
@@ -16889,6 +16968,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         amber_forecast_type: str = "predicted",
     ) -> float | None:
         """Resolve the retail import price for a dynamic pricing entry."""
+        if provider == "epex":
+            raw = entry.get("perKwh")
+            if entry.get("price_available") is False or isinstance(raw, bool):
+                return None
+            try:
+                price = float(raw)
+            except (TypeError, ValueError, OverflowError):
+                return None
+            return price / 100 if math.isfinite(price) else None
         if provider != "amber":
             return entry.get("perKwh", 0) / 100
 
@@ -17025,9 +17113,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     @staticmethod
     def _epex_sensor_value_to_major(value: Any, unit: str | None) -> float | None:
         """Convert an EPEX price sensor value to EUR/kWh."""
+        if isinstance(value, bool):
+            return None
         try:
             numeric = float(value)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return None
         if not math.isfinite(numeric):
             return None
@@ -17076,6 +17166,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         raw_values: dict[Any, Any],
         unit: str | None,
         n_steps: int,
+        *,
+        require_current: bool = False,
     ) -> tuple[list[float], int]:
         """Convert timestamped values and retain their source-valid boundary."""
         interval = max(1, self._config.interval_minutes)
@@ -17085,16 +17177,18 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             second=0,
             microsecond=0,
         )
-        entries: list[tuple[datetime, float]] = []
+        local_zone = current_window.tzinfo
+        if current_window.tzinfo is not None:
+            current_window = current_window.astimezone(timezone.utc)
+            now = now.astimezone(timezone.utc)
+        entries: list[tuple[datetime, float | None]] = []
         for key, raw_price in raw_values.items():
             start_dt = self._parse_price_timestamp(key)
             if start_dt is None:
                 continue
             price = self._epex_sensor_value_to_major(raw_price, unit)
-            if price is None:
-                continue
             if start_dt.tzinfo is None:
-                start_dt = start_dt.replace(tzinfo=current_window.tzinfo)
+                start_dt = start_dt.replace(tzinfo=local_zone)
             if current_window.tzinfo is not None:
                 start_dt = start_dt.astimezone(current_window.tzinfo)
             entries.append((start_dt, price))
@@ -17103,6 +17197,16 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return [], 0
 
         entries.sort(key=lambda item: item[0])
+        # Timestamp-only values have no explicit end. Bound gaps by the
+        # observed cadence and the native regional settlement period.
+        cadence = None
+        if require_current:
+            options = {**self._entry.data, **self._entry.options}
+            cadence = timedelta(minutes=15 if options.get("epex_region") == "BE" else 60)
+            for (left, _), (right, _) in zip(entries, entries[1:]):
+                if right > left:
+                    cadence = min(cadence, right - left)
+        current_rate = None
         slots: list[float | None] = [None] * n_steps
         source_steps = 0
         last_delta = timedelta(minutes=interval)
@@ -17116,6 +17220,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             else:
                 end_dt = start_dt + last_delta
 
+            if cadence is not None:
+                end_dt = min(end_dt, start_dt + cadence)
+                if start_dt <= now < end_dt:
+                    current_rate = price
+            if price is None:
+                continue
             slot_bounds = self._entry_slot_bounds(
                 {
                     "valid_from": start_dt.isoformat(),
@@ -17132,6 +17242,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 slots[pos] = price
             source_steps = max(source_steps, end_idx)
 
+        if require_current:
+            if current_rate is None or not slots:
+                return [], 0
+            # A sub-slot price change later in this cell cannot lower today's
+            # effective import cost before its actual start.
+            slots[0] = max(current_rate, slots[0]) if slots[0] is not None else current_rate
         return self._fill_price_gaps(slots), source_steps
 
     def _timestamp_attribute_price_values(
@@ -17192,6 +17308,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._epex_sensor_value_to_major(value, unit)
                 for value in raw_values
             ]
+            if price_kind == "import" and values[0] is None:
+                return [], 0
             display_prices = self._fill_price_gaps(values)
             source_steps = len(display_prices)
         elif isinstance(raw_values, dict) and raw_values:
@@ -17199,7 +17317,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 raw_values,
                 unit,
                 n_steps,
+                require_current=price_kind == "import",
             )
+            if price_kind == "import" and not display_prices:
+                return [], 0
         else:
             timestamp_values = self._timestamp_attribute_price_values(attrs)
             if timestamp_values:
@@ -17207,7 +17328,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     timestamp_values,
                     unit,
                     n_steps,
+                    require_current=price_kind == "import",
                 )
+                if price_kind == "import" and not display_prices:
+                    return [], 0
             else:
                 # A structured forecast is not a scalar fallback.  Template
                 # sensors often expose future values as {start, end, value}
@@ -17683,6 +17807,18 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             priced_mask[pos] = True
                         last_import_slot = max(last_import_slot, end_idx)
 
+                    epex_import_override = (
+                        self._read_epex_import_price_entity(n_steps) if _provider == "epex" else None
+                    )
+                    if epex_import_override is not None and not epex_import_override[0]:
+                        # The configured sensor supplied a series with no
+                        # current price. Neither its future prices nor a
+                        # different tariff establish the selected price now.
+                        return None
+                    if _provider == "epex" and epex_import_override is None and import_slots[0] is None:
+                        # A later known price cannot authorize dispatch while
+                        # the current native retail interval is missing.
+                        return None
                     import_prices = self._fill_price_gaps(import_slots)
 
                     export_slots: list[float | None] = [None] * n_steps
@@ -17740,6 +17876,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         for pos in range(start_idx, end_idx):
                             previous = export_slots[pos]
                             export_slots[pos] = min(previous, lp_price) if _provider == "octopus" and previous is not None else lp_price
+                            if _provider == "epex" and e.get("price_available") is False:
+                                continue
                             previous_display = display_export_slots[pos]
                             display_export_slots[pos] = min(previous_display, display_price) if _provider == "octopus" and previous_display is not None else display_price
 
@@ -17776,12 +17914,17 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     # Keep billable Amber prices intact. Spike Protection is a
                     # hard grid-charge eligibility gate, not a cheaper LP price.
 
-                    if import_prices:
+                    if import_prices or epex_import_override is not None:
                         display_import_steps = actual_price_intervals
                         display_export_steps = actual_price_intervals
-                        epex_import_override = self._read_epex_import_price_entity(
-                            n_steps
-                        )
+                        if _provider == "epex":
+                            # The display accepts a price prefix. Never publish
+                            # padded export prices or clip real ones to the
+                            # coverage of the independent import source.
+                            display_export_steps = next(
+                                (i for i, value in enumerate(display_export_slots) if value is None),
+                                len(display_export_slots),
+                            )
                         if epex_import_override is not None:
                             import_prices, display_import_steps = epex_import_override
                             # The entity supplies its own series and coverage,
@@ -18682,9 +18825,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             Mapping of loadpoint id to Watts per interval.
         """
         from ..automations.ev_charging_planner import (
+            _plan_policy_weekday,
             get_auto_schedule_executor,
             is_smart_schedule_grid_price_allowed,
         )
+        from .ev_load_plan import smart_schedule_charger_limits_kw
 
         executor = get_auto_schedule_executor()
         if not executor:
@@ -18701,7 +18846,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         ev_load_by_vehicle: dict[str, list[float]] = {}
 
         for vehicle_id, state in states.items():
-            configured_power_w = None
+            historical_plans = getattr(self, "_historical_ev_plans", {}) or {}
+            historical_plan = historical_plans.get(vehicle_id) if getattr(
+                self, "_use_historical_ev_data", False
+            ) else None
+            plan = historical_plan or getattr(state, "current_plan", None)
+            if not plan or not plan.windows:
+                continue
+
             try:
                 settings = getattr(executor, "_settings", {}).get(vehicle_id)
                 if settings is None or not bool(getattr(settings, "enabled", False)):
@@ -18710,21 +18862,16 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     vehicle_id,
                     settings,
                 )
-                configured_power_w = (
-                    float(settings.max_charge_amps)
-                    * float(settings.voltage)
-                    * float(settings.phases)
-                )
+                max_power_kw, _ = smart_schedule_charger_limits_kw(settings, plan)
+                configured_power_w = max_power_kw * 1000.0
+                if configured_power_w <= 0:
+                    continue
             except Exception:
                 # Fail closed: a plan with missing or invalid settings must not
                 # become household demand in the battery optimiser.
                 continue
 
-            plan = ((getattr(self, "_historical_ev_plans", {}) or {}).get(vehicle_id)
-                    if getattr(self, "_use_historical_ev_data", False) else None) or state.current_plan
-            if not plan or not plan.windows:
-                continue
-
+            departure_weekday = _plan_policy_weekday(plan, -1)
             vehicle_load = ev_load_by_vehicle.setdefault(
                 str(vehicle_id), [0.0] * n_intervals
             )
@@ -18747,16 +18894,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     continue
 
                 power_w = window.estimated_power_kw * 1000
-                if configured_power_w and configured_power_w > 0:
-                    if power_w > configured_power_w:
-                        _LOGGER.debug(
-                            "EV load overlay: clamping %s planned power %.1fkW "
-                            "to configured charger limit %.1fkW",
-                            vehicle_id,
-                            power_w / 1000,
-                            configured_power_w / 1000,
-                        )
-                    power_w = min(power_w, configured_power_w)
+                if power_w > configured_power_w:
+                    _LOGGER.debug(
+                        "EV load overlay: clamping %s planned power %.1fkW "
+                        "to charger limit %.1fkW",
+                        vehicle_id,
+                        power_w / 1000,
+                        configured_power_w / 1000,
+                    )
+                    power_w = configured_power_w
 
                 # Map against the optimizer's absolute slot boundaries. This
                 # preserves repeated/missing local DST hours and provider grids.
@@ -18775,8 +18921,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         "get_effective_priority",
                         None,
                     )
+                    price_weekday = local_weekday if departure_weekday < 0 else departure_weekday
                     slot_priority = (
-                        priority_getter(local_weekday)
+                        priority_getter(price_weekday)
                         if callable(priority_getter)
                         else getattr(
                             settings,
@@ -18790,7 +18937,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         None,
                     )
                     slot_max_grid_price_cents = (
-                        max_price_getter(local_weekday)
+                        max_price_getter(price_weekday)
                         if callable(max_price_getter)
                         else getattr(
                             settings,
@@ -18973,6 +19120,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if executor is None or n_intervals <= 0:
             return PriceLevelProjection.empty(max(0, n_intervals))
         settings = executor._get_settings()
+        if not settings.get("enabled", False):
+            return PriceLevelProjection.empty(n_intervals)
         display_prices = list(
             getattr(self, "_last_display_import_prices", None) or []
         )
@@ -23399,6 +23548,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Handle EV integration toggle
         if "ev_integration" in settings:
             ev_enabled = settings["ev_integration"]
+            if ev_enabled != getattr(self, "_ev_integration_enabled", False):
+                # Withdraw old allocations now. A solve already in progress must
+                # also discard its result if participation changed mid-solve.
+                self._historical_ev_generation = getattr(self, "_historical_ev_generation", 0) + 1
+                self._last_ev_charge_by_vehicle_w = None
+                self._last_ev_charge_schedule_updated = None
+                self._last_ev_source_by_vehicle_w = None
             self._ev_integration_enabled = ev_enabled
             if self._entry:
                 from ..const import CONF_OPTIMIZATION_EV_INTEGRATION

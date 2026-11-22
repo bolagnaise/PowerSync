@@ -50233,83 +50233,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 get_auto_schedule_executor,
                 get_ev_charging_coordinator,
             )
+            from .automations.actions import (
+                EV_LIVE_STATUS_COORDINATOR_KEYS,
+                _coordinator_has_normalized_ev_live_data,
+            )
+            from .automations.ev_pricing import get_ev_control_import_price
             from .automations.live_status import coordinator_data_to_ev_live_status
 
-            # Get live status from coordinator (more reliable than API calls)
             entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
-            tesla_coordinator = entry_data.get("tesla_coordinator")
-            sigenergy_coordinator = entry_data.get("sigenergy_coordinator")
-            sungrow_coordinator = entry_data.get("sungrow_coordinator")
-
             live_status = {}
-            if tesla_coordinator and tesla_coordinator.data:
-                live_status = coordinator_data_to_ev_live_status(tesla_coordinator.data)
-            else:
-                # Coordinators store power in kW; convert to watts so EV planner
-                # calculations use one unit convention.
-                _kw_coord = None
-                if sigenergy_coordinator and sigenergy_coordinator.data:
-                    _kw_coord = sigenergy_coordinator
-                elif sungrow_coordinator and sungrow_coordinator.data:
-                    _kw_coord = sungrow_coordinator
-                else:
-                    for _key in ("foxess_coordinator", "goodwe_coordinator",
-                                 "alphaess_coordinator", "solax_coordinator",
-                                 "saj_h2_coordinator", "fronius_reserva_coordinator",
-                                 "neovolt_coordinator", "solaredge_coordinator",
-                                 "anker_solix_coordinator"):
-                        _c = entry_data.get(_key)
-                        if _c and _c.data:
-                            _kw_coord = _c
-                            break
-                if _kw_coord:
-                    live_status = coordinator_data_to_ev_live_status(_kw_coord.data)
-
-            # Get current price from Amber coordinator if available
-            current_price = None
-            amber_coordinator = entry_data.get("amber_coordinator")
-            if amber_coordinator and amber_coordinator.data:
-                current_prices = amber_coordinator.data.get("current", [])
-                for price in current_prices:
-                    if price.get("channelType") == "general":
-                        current_price = price.get("perKwh")
-                        break
-
-            # Fallback to stored amber_prices
-            if current_price is None:
-                amber_prices = entry_data.get("amber_prices", {})
-                if amber_prices:
-                    current_price = amber_prices.get("import_cents")
-
-            # Fallback to Tesla tariff schedule (for Globird/AEMO VPP users)
-            if current_price is None:
-                tariff_schedule = entry_data.get("tariff_schedule", {})
-                if tariff_schedule:
-                    # Use real-time TOU calculation so price updates when periods change
-                    if tariff_schedule.get("tou_periods"):
-                        current_price, _, _ = get_current_price_from_tariff_schedule(tariff_schedule)
-                    else:
-                        current_price = tariff_schedule.get("buy_price")
-
-            # Fallback to Sigenergy tariff (for Sigenergy users with Amber)
-            if current_price is None:
-                sigenergy_tariff = entry_data.get("sigenergy_tariff", {})
-                if sigenergy_tariff:
-                    buy_prices = sigenergy_tariff.get("buy_prices", [])
-                    if buy_prices:
-                        # Find current time slot price
-                        # Format: [{"timeRange": "10:00-10:30", "price": 25.0}, ...]
-                        now = dt_util.now()  # HA tz; container UTC would pick wrong slot
-                        current_time = f"{now.hour:02d}:{30 if now.minute >= 30 else 0:02d}"
-                        for slot in buy_prices:
-                            time_range = slot.get("timeRange", "")
-                            if time_range.startswith(current_time):
-                                current_price = slot.get("price")
-                                break
-
-            # Evaluate auto-schedule executor (handles Smart Schedule mode with per-vehicle settings)
+            for key in EV_LIVE_STATUS_COORDINATOR_KEYS:
+                site = entry_data.get(key)
+                if _coordinator_has_normalized_ev_live_data(site):
+                    live_status = coordinator_data_to_ev_live_status(site.data)
+                    break
+            try:
+                current_price = get_ev_control_import_price(hass, entry)
+            except Exception as err:
+                _LOGGER.debug("EV retail price unavailable: %s", err)
+                current_price = None
+            # Disabled sessions still need their owned stop/restore even when
+            # the site meter is unavailable. Positive starts check telemetry.
             executor = get_auto_schedule_executor()
-            if executor and live_status:
+            if executor:
                 await executor.evaluate(live_status, current_price)
 
             # Evaluate coordinated charging modes (Price-Level + Scheduled combined with OR logic)

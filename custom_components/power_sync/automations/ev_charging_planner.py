@@ -14,8 +14,9 @@ import logging
 import math
 import statistics
 import time
+from bisect import bisect_left, bisect_right
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, time as dt_time, timezone
 from typing import Optional, List, Dict, Any, Tuple, Iterator, Mapping, Sequence
 from enum import Enum
@@ -123,6 +124,15 @@ def _publish_ev_preserve_state(
     """Wake guarded battery execution only when effective EV preservation changes."""
     state = entry_data.setdefault("scheduled_ev_preserve_state", {})
     was_active = bool(state.get("active"))
+    if not active and source != "smart_schedule":
+        smart = entry_data.get("auto_schedule_executor")
+        smart_reason = smart.active_preserve_reason if smart is not None else None
+        if smart_reason is not None:
+            # Smart Schedule yields the displayed reason while another EV mode
+            # holds the battery. Hand it back without releasing between modes.
+            active = True
+            source = "smart_schedule"
+            reason = smart_reason
     state.update({
         "active": active,
         "mode": "no_discharge_charge_allowed",
@@ -335,47 +345,25 @@ def _parse_forecast_hour_local_naive(value: str) -> Optional[datetime]:
     return _as_ha_local_naive(parsed)
 
 
+def _forecast_instant(value: str) -> datetime:
+    """Compare both native offset timestamps and legacy HA-local schedule times."""
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        local_zone = getattr(dt_util.now(), "tzinfo", None) or timezone.utc
+        parsed = parsed.replace(tzinfo=local_zone)
+    return parsed.astimezone(timezone.utc)
+
+
 def _forecast_hour_key(value: str) -> Optional[str]:
-    """Return a normalized hour key without collapsing repeated DST hours."""
+    """Join local hourly solar to prices while keeping repeated DST hours distinct."""
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value)
+        zone = getattr(dt_util.now(), "tzinfo", None) or parsed.tzinfo or timezone.utc
+        local = parsed.astimezone(zone) if parsed.tzinfo else parsed.replace(tzinfo=zone)
+        hour = local.replace(minute=0, second=0, microsecond=0)
+        return hour.astimezone(timezone.utc).isoformat()
     except (TypeError, ValueError):
         return None
-    if parsed.tzinfo is not None:
-        parsed = parsed.astimezone(timezone.utc)
-    return parsed.replace(minute=0, second=0, microsecond=0).isoformat()
-
-
-def _forecast_window_display_bounds(
-    value: str,
-    end_dt: datetime,
-    *,
-    start_dt: Optional[datetime] = None,
-    preserve_offset: bool = False,
-) -> tuple[str, str]:
-    """Return local display bounds while preserving repeated-hour offsets."""
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except (TypeError, ValueError):
-        fallback_start = start_dt or _parse_forecast_hour_local_naive(value)
-        if fallback_start is None:
-            return value, end_dt.isoformat()
-        return fallback_start.isoformat(), end_dt.isoformat()
-
-    local_start_naive = _as_ha_local_naive(parsed)
-    display_start_naive = start_dt or local_start_naive
-    if parsed.tzinfo is None or not preserve_offset:
-        return display_start_naive.isoformat(), end_dt.isoformat()
-
-    start_offset = max(timedelta(0), display_start_naive - local_start_naive)
-    end_offset = max(timedelta(0), end_dt - local_start_naive)
-    try:
-        local_start = dt_util.as_local(parsed + start_offset)
-        local_end = dt_util.as_local(parsed + end_offset)
-    except Exception:
-        local_start = (parsed + start_offset).astimezone()
-        local_end = (parsed + end_offset).astimezone()
-    return local_start.isoformat(), local_end.isoformat()
 
 
 def _repeated_forecast_local_hours(values: List[str]) -> set[str]:
@@ -399,49 +387,60 @@ def _repeated_forecast_local_hours(values: List[str]) -> set[str]:
     }
 
 
-def _usable_forecast_window(
-    hour_dt: datetime,
-    now: datetime,
-    target_time: Optional[datetime],
-) -> Optional[tuple[datetime, float]]:
-    """Return the bounded end and usable fraction for a forecast hour."""
-    if target_time is not None and hour_dt >= target_time:
-        return None
-    end_dt = hour_dt + timedelta(hours=1)
-    if target_time is not None and end_dt > target_time:
-        end_dt = target_time
-    usable_fraction = (
-        end_dt - max(hour_dt, now)
-    ).total_seconds() / 3600
-    usable_fraction = max(0.0, min(1.0, usable_fraction))
-    if usable_fraction < 0.1:
-        return None
-    return end_dt, usable_fraction
-
-
 def _forecast_interval_end(
     price_forecast: Sequence["PriceForecast"],
     index: int,
     start_dt: datetime,
 ) -> datetime:
-    """Return the end of a price interval without inflating EPEX slots."""
+    """Use the source duration, preserving elapsed time across a DST change."""
     price = price_forecast[index]
-    if price.period != "epex":
-        return start_dt + timedelta(hours=1)
-
-    for following in price_forecast[index + 1:]:
-        following_dt = _parse_forecast_hour_local_naive(following.hour)
-        if following_dt is not None and following_dt > start_dt:
-            return following_dt
-
-    return start_dt + EPEX_FORECAST_INTERVAL
+    explicit_end = getattr(price, "end_time", None)
+    if explicit_end:
+        start = datetime.fromisoformat(price.hour)
+        end = datetime.fromisoformat(explicit_end)
+        return start_dt + (end - start)
+    if price.period == "epex":
+        # Older optimizer rows only have a five-minute slot start.
+        return start_dt + EPEX_FORECAST_INTERVAL
+    return start_dt + timedelta(hours=1)
 
 
 def _forecast_interval_identity(price: "PriceForecast") -> str:
-    """Keep EPEX intervals distinct while preserving hourly de-duplication."""
-    if price.period == "epex":
-        return f"epex:{price.hour}"
+    """Keep native price intervals distinct inside an hourly solar forecast."""
+    if price.period == "epex" or getattr(price, "end_time", None):
+        return _forecast_instant(price.hour).isoformat()
     return _forecast_hour_key(price.hour) or price.hour
+
+
+def _bounded_price_interval(
+    prices: Sequence["PriceForecast"], index: int, now: datetime, departure: Optional[datetime],
+) -> Optional[tuple[datetime, datetime]]:
+    """Clip a price interval in elapsed time, including a repeated local hour."""
+    price = prices[index]
+    try:
+        start = datetime.fromisoformat(price.hour)
+        if start.tzinfo is not None:
+            local_zone = dt_util.now().tzinfo or start.tzinfo
+            now = now.replace(tzinfo=local_zone).astimezone(timezone.utc)
+            if departure is not None:
+                departure = departure.replace(tzinfo=local_zone).astimezone(timezone.utc)
+            start = start.astimezone(timezone.utc)
+        end = _forecast_interval_end(prices, index, start)
+    except (TypeError, ValueError):
+        return None
+    start = max(start, now)
+    end = min(end, departure) if departure is not None else end
+    return (start, end) if start < end else None
+
+
+def _price_window_times(start: datetime, end: datetime, keep_offset: bool) -> tuple[str, str]:
+    """Format a selected elapsed-time interval in the site's local clock."""
+    if start.tzinfo is None:
+        return start.isoformat(), end.isoformat()
+    if keep_offset:
+        local_zone = dt_util.now().tzinfo or timezone.utc
+        return start.astimezone(local_zone).isoformat(), end.astimezone(local_zone).isoformat()
+    return _as_ha_local_naive(start).isoformat(), _as_ha_local_naive(end).isoformat()
 
 
 def _configured_ble_prefixes(
@@ -729,9 +728,25 @@ class PriceForecast:
     """Hourly electricity price forecast."""
     hour: str  # ISO format
     import_cents: float
-    export_cents: float
-    period: str  # 'offpeak', 'shoulder', 'peak'
+    export_cents: float | None
+    period: str  # 'offpeak', 'shoulder', 'peak' or provider interval
+    end_time: str | None = None
 
+
+@dataclass(frozen=True)
+class _EVPowerReservations:
+    """Piecewise-constant simultaneous EV draw indexed by UTC instants."""
+    times: tuple[datetime, ...]
+    powers_kw: tuple[float, ...]
+
+    def __bool__(self) -> bool:
+        return bool(self.times)
+
+    def power_at(self, instant: datetime) -> float:
+        if instant.tzinfo is None:
+            instant = _forecast_instant(instant.isoformat())
+        index = bisect_right(self.times, instant) - 1
+        return self.powers_kw[index] if index >= 0 else 0.0
 
 @dataclass
 class PlannedChargingWindow:
@@ -771,6 +786,9 @@ class ChargingPlan:
     warning: Optional[str] = None
     priority: Optional[str] = None
     max_grid_price_cents: Optional[float] = None
+    # Resolved physical EVSE limits, before sharing supply with the battery.
+    charger_power_kw: Optional[float] = None
+    charging_power_step_kw: Optional[float] = None
 
     def to_dict(self) -> dict:
         """Convert to dictionary for API response."""
@@ -1618,7 +1636,7 @@ async def get_ev_battery_level(
         DEFAULT_TESLA_BLE_ENTITY_PREFIX,
         CONF_GENERIC_CHARGER_ENABLED,
     )
-    from .generic_charger_soc import resolve_generic_charger_soc
+    from .generic_charger_soc import ev_soc_from_state, resolve_generic_charger_soc
     from homeassistant.helpers import entity_registry as er, device_registry as dr
 
     if config_entry:
@@ -1648,12 +1666,7 @@ async def get_ev_battery_level(
         ble_prefix = vehicle_vin[4:]
         ble_battery_entity = f"sensor.{ble_prefix}_battery_level"
         ble_state = hass.states.get(ble_battery_entity)
-        if ble_state and ble_state.state not in ("unavailable", "unknown", "None", None):
-            try:
-                return float(ble_state.state)
-            except (ValueError, TypeError):
-                pass
-        return None  # BLE vehicle but no data — don't fall through to Fleet API
+        return ev_soc_from_state(ble_state)
 
     if vehicle_vin is None:
         config = dict(config_entry.options) if config_entry else {}
@@ -1665,11 +1678,9 @@ async def get_ev_battery_level(
         for prefix in (p.strip() for p in raw_prefix.split(",") if p.strip()):
             ble_battery_entity = f"sensor.{prefix}_battery_level"
             ble_state = hass.states.get(ble_battery_entity)
-            if ble_state and ble_state.state not in ("unavailable", "unknown", "None", None):
-                try:
-                    return float(ble_state.state)
-                except (ValueError, TypeError):
-                    continue
+            level = ev_soc_from_state(ble_state)
+            if level is not None:
+                return level
 
     # Method 2: Check Tesla Fleet/Teslemetry entities
     entity_registry = er.async_get(hass)
@@ -1695,13 +1706,10 @@ async def get_ev_battery_level(
                 "_soc" in entity_id_lower
             ):
                 state = hass.states.get(entity_id)
-                if state and state.state not in ("unavailable", "unknown", "None", None):
-                    try:
-                        battery_level = float(state.state)
-                        _LOGGER.debug(f"Found EV battery level from {entity_id} (VIN: {device_vin}): {battery_level}%")
-                        return battery_level
-                    except (ValueError, TypeError):
-                        continue
+                level = ev_soc_from_state(state)
+                if level is not None:
+                    _LOGGER.debug("Found EV battery level from %s (VIN: %s): %s%%", entity_id, device_vin, level)
+                    return level
 
     return None
 
@@ -1725,13 +1733,14 @@ class LoadProfileEstimator:
         1.5, 1.4, 1.0, 0.8, 0.6, 0.5,  # 18:00-23:59 (earlier evening decline)
     ]
 
-    def __init__(self, hass):
+    def __init__(self, hass, config_entry=None):
         """Initialize the estimator.
 
         Args:
             hass: Home Assistant instance
         """
         self.hass = hass
+        self.config_entry = config_entry
         self._load_history: Dict[str, List[float]] = {}
         self._last_history_update: Optional[datetime] = None
 
@@ -1767,14 +1776,24 @@ class LoadProfileEstimator:
                 if (datetime.now() - self._last_history_update).total_seconds() < 3600:
                     return  # Updated within last hour
 
-            # Find load power sensor
-            load_entity = None
-            for entity_id in self.hass.states.async_entity_ids("sensor"):
-                if "load_power" in entity_id.lower() or "home_power" in entity_id.lower():
-                    load_entity = entity_id
-                    break
+            sensor_ids = self.hass.states.async_entity_ids("sensor")
+            home_id = "sensor.power_sync_home_load"
+            if self.config_entry is not None:
+                from homeassistant.helpers import entity_registry as er
 
-            if not load_entity:
+                registry = er.async_get(self.hass)
+                lookup = getattr(registry, "async_get_entity_id", None)
+                if callable(lookup):
+                    home_id = lookup("sensor", DOMAIN, f"{self.config_entry.entry_id}_home_load")
+            candidates = [home_id] if home_id in sensor_ids else []
+            fallback = next(
+                (entity_id for entity_id in sensor_ids
+                 if "load_power" in entity_id.lower() or "home_power" in entity_id.lower()),
+                None,
+            )
+            if fallback and fallback not in candidates:
+                candidates.append(fallback)
+            if not candidates:
                 _LOGGER.debug("No load power entity found for profile estimation")
                 return
 
@@ -1795,10 +1814,18 @@ class LoadProfileEstimator:
                 self.hass,
                 start_time,
                 end_time,
-                [load_entity],
+                candidates,
             )
 
-            if not history or load_entity not in history:
+            # Prefer this entry's EV-exclusive Home Load, including renamed
+            # entities. Retain the legacy raw source if Recorder has no usable
+            # observations for the preferred sensor.
+            load_entity = next(
+                (entity_id for entity_id in candidates
+                 if any(_state_power_w(row) is not None for row in (history or {}).get(entity_id, ()))),
+                None,
+            )
+            if load_entity is None:
                 return
 
             # Group by hour and day type
@@ -2111,7 +2138,7 @@ class SurplusForecaster:
         self.hass = hass
         self.config_entry = config_entry
         self.solar_forecaster = SolarForecaster(hass, config_entry)
-        self.load_estimator = LoadProfileEstimator(hass)
+        self.load_estimator = LoadProfileEstimator(hass, config_entry)
 
     async def forecast_surplus(
         self,
@@ -2204,18 +2231,44 @@ class PriceForecaster:
         elif electricity_provider == "localvolts":
             return self._get_localvolts_forecast(hours)
 
-        # EPEX is a dynamic retail-price provider. A generic Australian TOU
-        # estimate is not a safe substitute: it can authorise a grid window
-        # precisely when the site's real EPEX price is at its peak.
-        elif electricity_provider == "epex":
-            epex_forecast = self._get_optimizer_price_forecast(hours)
-            if epex_forecast:
-                return epex_forecast
-            _LOGGER.warning(
-                "EV price forecast: EPEX optimizer price coverage is unavailable; "
-                "Smart Schedule will not create a grid-price plan"
-            )
-            return []
+        elif electricity_provider in ("epex", "octopus"):
+            from .ev_pricing import provider_retail_intervals
+
+            now = dt_util.now()
+            imports = provider_retail_intervals(self.hass, self.config_entry, electricity_provider, now)
+            if imports is not None:
+                if not imports:
+                    return []
+                exports = provider_retail_intervals(
+                    self.hass, self.config_entry, electricity_provider, now, "feedIn",
+                ) or []
+                horizon = now.astimezone(timezone.utc) + timedelta(hours=hours)
+                forecasts = []
+                export_index = 0
+                for rate in imports:
+                    if rate.end <= now or rate.start >= horizon:
+                        continue
+                    start = rate.start
+                    while start < rate.end:
+                        while export_index < len(exports) and exports[export_index].end <= start:
+                            export_index += 1
+                        end, export_cents = rate.end, None
+                        if export_index < len(exports):
+                            export = exports[export_index]
+                            if export.start <= start:
+                                end, export_cents = min(end, export.end), export.cents
+                            else:
+                                end = min(end, export.start)
+                        if end > now and start < horizon:
+                            forecasts.append(PriceForecast(
+                                hour=start.isoformat(), end_time=end.isoformat(),
+                                import_cents=rate.cents, export_cents=export_cents,
+                                period=electricity_provider,
+                            ))
+                        start = end
+                return forecasts
+            # Older runtimes can have just an active normalized retail schedule.
+            return self._get_optimizer_price_forecast(hours, electricity_provider) or []
 
         # Globird/AEMO VPP: use the user's tariff schedule for normal prices.
         # AEMO VPP adds spike detection on top; it is not an AEMO spot-price feed.
@@ -2251,7 +2304,7 @@ class PriceForecaster:
         return await self._estimate_tou_prices(hours)
 
     def _get_optimizer_price_forecast(
-        self, hours: int
+        self, hours: int, provider: str = "epex"
     ) -> Optional[List[PriceForecast]]:
         """Return real, timestamp-aligned optimizer import prices.
 
@@ -2263,7 +2316,8 @@ class PriceForecaster:
             self.config_entry.entry_id, {}
         )
         coordinator = entry_data.get("optimization_coordinator")
-        if getattr(coordinator, "last_update_success", None) is False:
+        if (getattr(coordinator, "enabled", None) is False
+                or getattr(coordinator, "last_update_success", None) is False):
             return None
         data = getattr(coordinator, "data", None)
         if not isinstance(data, dict) or data.get("optimization_status") == "stale":
@@ -2285,27 +2339,32 @@ class PriceForecaster:
 
         forecasts: List[PriceForecast] = []
         previous: Optional[datetime] = None
-        now = _ha_local_now_naive()
+        now = dt_util.now()
+        if not isinstance(now, datetime):
+            return None
+        zone = now.tzinfo or timezone.utc
+        now = now.replace(tzinfo=zone).astimezone(timezone.utc)
         horizon_end = now + timedelta(hours=hours)
         for index, raw_timestamp in enumerate(timestamps[: len(import_prices)]):
             try:
-                timestamp = _as_ha_local_naive(
-                    datetime.fromisoformat(str(raw_timestamp).replace("Z", "+00:00"))
-                )
+                source_timestamp = datetime.fromisoformat(str(raw_timestamp).replace("Z", "+00:00"))
+                if source_timestamp.tzinfo is None:
+                    source_timestamp = source_timestamp.replace(tzinfo=zone)
+                absolute = source_timestamp.astimezone(timezone.utc)
                 import_cents = float(import_prices[index]) * 100.0
             except (TypeError, ValueError, OverflowError):
                 return None
             if (
                 not math.isfinite(import_cents)
-                or previous is not None and timestamp <= previous
+                or previous is not None and absolute <= previous
             ):
                 return None
-            previous = timestamp
+            previous = absolute
             # Keep the active interval even when it began before ``now``: the
             # planner bounds it to the remaining fraction of the slot. Older
             # elapsed intervals are subsequently discarded by that same
             # bounded-window check.
-            if timestamp >= horizon_end:
+            if absolute >= horizon_end:
                 continue
             export_cents = 0.0
             if isinstance(export_prices, (list, tuple)) and index < len(export_prices):
@@ -2317,10 +2376,11 @@ class PriceForecaster:
                     return None
             forecasts.append(
                 PriceForecast(
-                    hour=timestamp.isoformat(),
+                    hour=source_timestamp.isoformat(),
+                    end_time=(source_timestamp + EPEX_FORECAST_INTERVAL).isoformat(),
                     import_cents=import_cents,
                     export_cents=export_cents,
-                    period="epex",
+                    period=provider,
                 )
             )
         return forecasts or None
@@ -2916,27 +2976,89 @@ class ChargingPlanner:
         )
         return get_stored_solar_surplus_config(entry_data)
 
-    def _is_grid_charging_blocked_at(self, when: datetime) -> bool:
-        """Return True if grid charging is blocked at `when` due to demand window.
+    def _grid_demand_coordinator(self):
+        """Return the active demand restriction shared by planning and execution."""
+        from ..const import CONF_DEMAND_ALLOW_GRID_CHARGING
 
-        Honors the user's CONF_DEMAND_ALLOW_GRID_CHARGING override. Solar surplus
-        is always allowed; this only filters grid-source charging options.
-        """
-        from ..const import DOMAIN, CONF_DEMAND_ALLOW_GRID_CHARGING
-        entry_data = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id, {})
-        dc_coord = entry_data.get("demand_charge_coordinator")
-        if not dc_coord or not dc_coord.enabled:
-            return False
-        allow_override = self.config_entry.options.get(
-            CONF_DEMAND_ALLOW_GRID_CHARGING,
-            self.config_entry.data.get(CONF_DEMAND_ALLOW_GRID_CHARGING, False),
-        )
-        if allow_override:
-            return False
+        entry = getattr(self, "config_entry", None)
+        if entry is None:
+            return None
+        if entry.options.get(
+            CONF_DEMAND_ALLOW_GRID_CHARGING, entry.data.get(CONF_DEMAND_ALLOW_GRID_CHARGING, False)
+        ):
+            return None
+        entry_data = self.hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+        coordinator = entry_data.get("demand_charge_coordinator")
+        return coordinator if coordinator and coordinator.enabled else None
+
+    def _is_grid_charging_blocked_at(self, when: datetime) -> bool:
+        """Check billable grid restriction at the site's local time."""
+        coordinator = self._grid_demand_coordinator()
         try:
-            return dc_coord._is_in_peak_period(when)
+            return coordinator is not None and coordinator._is_in_peak_period(_as_ha_local_naive(when))
         except Exception:
             return False
+
+    def _planning_price_intervals(self, prices, reservations):
+        """Split a rate wherever hourly supply, demand policy or another car changes."""
+        zone = getattr(dt_util.now(), "tzinfo", None) or timezone.utc
+        local_minutes = set(range(0, 1440, 60))
+        demand = self._grid_demand_coordinator()
+        if demand is not None:
+            for name in ("start_time", "end_time"):
+                try:
+                    hour, minute = map(int, getattr(demand, name).split(":")[:2])
+                    if 0 <= hour < 24 and 0 <= minute < 60:
+                        local_minutes.add(hour * 60 + minute)
+                except (AttributeError, TypeError, ValueError):
+                    continue
+
+        cuts = set(reservations.times if isinstance(reservations, _EVPowerReservations) else ())
+        days = set()
+        source_intervals = []
+        for index, price in enumerate(prices):
+            try:
+                start = _forecast_instant(price.hour)
+                end = _forecast_interval_end(prices, index, start)
+            except (TypeError, ValueError):
+                continue
+            if end <= start:
+                continue
+            source_intervals.append((price, start, end))
+            local_start = start.astimezone(zone)
+            local_end = (end - timedelta(microseconds=1)).astimezone(zone)
+            day = local_start.date()
+            while day <= local_end.date():
+                if day not in days:
+                    days.add(day)
+                    for minute in local_minutes:
+                        wall = datetime.combine(day, dt_time(minute // 60, minute % 60))
+                        for fold in (0, 1):
+                            instant = wall.replace(tzinfo=zone, fold=fold).astimezone(timezone.utc)
+                            if instant.astimezone(zone).replace(tzinfo=None) == wall:
+                                cuts.add(instant)
+                day += timedelta(days=1)
+            # Half-hour DST transitions can resume inside a local hour.
+            if local_start.utcoffset() != local_end.utcoffset():
+                instant = start.replace(second=0, microsecond=0) + timedelta(minutes=1)
+                while instant < end:
+                    if instant.astimezone(zone).utcoffset() != local_start.utcoffset():
+                        cuts.add(instant)
+                        break
+                    instant += timedelta(minutes=1)
+
+        boundaries = sorted(cuts)
+        result = []
+        for price, start, end in source_intervals:
+            first = bisect_right(boundaries, start)
+            last = bisect_left(boundaries, end)
+            if first == last:
+                result.append(price)
+                continue
+            points = (start, *boundaries[first:last], end)
+            for left, right in zip(points, points[1:]):
+                result.append(replace(price, hour=left.isoformat(), end_time=right.isoformat()))
+        return result
 
     async def _get_battery_power_schedule(self, hours: int = 24) -> Dict[str, float]:
         """Get battery power usage per hour from optimizer schedule.
@@ -3059,10 +3181,11 @@ class ChargingPlanner:
         charger_max_kw: float,
         battery_power_schedule: Dict[str, float],
         solar_surplus_kw: float = 0,
-        reserved_ev_power_schedule: Optional[Dict[str, float]] = None,
+        reserved_ev_power_schedule: Optional[Dict[str, float] | _EVPowerReservations] = None,
         minimum_charging_power_kw: float = MIN_CHARGING_POWER_KW,
         charging_power_step_kw: Optional[float] = None,
         allow_grid_import: bool = True,
+        interval_start: Optional[datetime] = None,
     ) -> float:
         """Calculate available power for EV charging at a given hour.
 
@@ -3081,7 +3204,12 @@ class ChargingPlanner:
             Available power for EV in kW
         """
         battery_power = battery_power_schedule.get(hour, 0)
-        reserved_ev_power = (reserved_ev_power_schedule or {}).get(hour, 0)
+        if isinstance(reserved_ev_power_schedule, _EVPowerReservations):
+            reserved_ev_power = reserved_ev_power_schedule.power_at(
+                interval_start if interval_start is not None else datetime.fromisoformat(hour)
+            )
+        else:
+            reserved_ev_power = (reserved_ev_power_schedule or {}).get(hour, 0)
         grid_capacity_kw = self._get_grid_capacity_kw()
 
         if not allow_grid_import:
@@ -3140,7 +3268,7 @@ class ChargingPlanner:
         minimum_charging_power_kw: float = MIN_CHARGING_POWER_KW,
         charging_power_step_kw: Optional[float] = None,
         available_from: Optional[datetime] = None,
-        reserved_ev_power_schedule: Optional[Dict[str, float]] = None,
+        reserved_ev_power_schedule: Optional[Dict[str, float] | _EVPowerReservations] = None,
     ) -> ChargingPlan:
         """
         Create optimal charging plan.
@@ -3284,7 +3412,7 @@ class ChargingPlanner:
         surplus_forecast: List[SurplusForecast],
         price_forecast: Optional[List[PriceForecast]] = None,
         battery_power_schedule: Dict[str, float] = None,
-        reserved_ev_power_schedule: Optional[Dict[str, float]] = None,
+        reserved_ev_power_schedule: Optional[Dict[str, float] | _EVPowerReservations] = None,
         minimum_charging_power_kw: float = MIN_CHARGING_POWER_KW,
         charging_power_step_kw: Optional[float] = None,
         available_from: Optional[datetime] = None,
@@ -3303,79 +3431,54 @@ class ChargingPlanner:
             else target_time
         )
         policy = await self._get_solar_surplus_config()
-        export_by_hour = {
-            key: price.export_cents
-            for price in (price_forecast or [])
-            if (key := _forecast_hour_key(price.hour)) is not None
-        }
-        for forecast in surplus_forecast:
+        surplus_by_hour = {_forecast_hour_key(row.hour): row for row in surplus_forecast}
+        prices = price_forecast
+        if prices is None:
+            # Direct callers without a price policy still supply hourly solar.
+            prices = [PriceForecast(row.hour, 0.0, 0.0, "solar") for row in surplus_forecast]
+        prices = self._planning_price_intervals(prices, reserved_ev_power_schedule)
+        repeated_hours = _repeated_forecast_local_hours([price.hour for price in prices])
+        for index, price in enumerate(prices):
             if energy_allocated >= energy_needed_kwh:
                 break
-
-            if forecast.surplus_kw >= 1.0:  # Minimum 1kW to charge
-                export_value = export_by_hour.get(_forecast_hour_key(forecast.hour))
-                if price_forecast is not None and not solar_surplus_price_allows_charging(
-                    export_value,
-                    policy,
-                ):
-                    continue
-                hour_dt = _parse_forecast_hour_local_naive(forecast.hour)
-                if hour_dt is None:
-                    continue
-                usable_window = _usable_forecast_window(
-                    hour_dt,
-                    now,
-                    target_time_local,
-                )
-                if usable_window is None:
-                    continue
-                end_dt, usable_fraction = usable_window
-                hour_key = hour_dt.replace(minute=0, second=0, microsecond=0).isoformat()
-
-                # Dynamic power sharing: calculate available power for EV
-                # Solar surplus can power both battery and EV simultaneously
-                available_power = self._get_available_ev_power(
-                    hour_key,
-                    charger_power_kw,
-                    battery_power_schedule,
-                    solar_surplus_kw=forecast.surplus_kw,
-                    reserved_ev_power_schedule=reserved_ev_power_schedule,
-                    minimum_charging_power_kw=minimum_charging_power_kw,
-                    charging_power_step_kw=charging_power_step_kw,
-                    allow_grid_import=False,
-                )
-
-                if available_power < minimum_charging_power_kw:
-                    continue
-
-                energy_this_hour = available_power * usable_fraction
-
-                # Don't over-allocate
-                energy_this_hour = min(energy_this_hour, energy_needed_kwh - energy_allocated)
-                planned_start = max(hour_dt, now)
-                planned_end = end_dt
-                if energy_this_hour + 1e-9 < available_power * usable_fraction:
-                    planned_end = planned_start + timedelta(
-                        hours=energy_this_hour / available_power
-                    )
-                display_start, display_end = _forecast_window_display_bounds(
-                    forecast.hour,
-                    planned_end,
-                    start_dt=planned_start,
-                )
-
-                windows.append(PlannedChargingWindow(
-                    start_time=display_start,
-                    end_time=display_end,
-                    source="solar_surplus",
-                    estimated_power_kw=available_power,
-                    estimated_energy_kwh=energy_this_hour,
-                    price_cents_kwh=float(export_value or 0),
-                    reason="solar_forecast",
-                ))
-
-                energy_allocated += energy_this_hour
-                total_confidence += forecast.confidence
+            forecast = surplus_by_hour.get(_forecast_hour_key(price.hour))
+            if forecast is None or forecast.surplus_kw < 1.0:
+                continue
+            if price_forecast is not None and not solar_surplus_price_allows_charging(
+                price.export_cents, policy,
+            ):
+                continue
+            bounds = _bounded_price_interval(prices, index, now, target_time_local)
+            if bounds is None:
+                continue
+            start, end = bounds
+            available_hours = (end - start).total_seconds() / 3600
+            native = bool(price.end_time) or price.period == "epex"
+            if not native and available_hours < 0.1:
+                continue
+            local = _parse_forecast_hour_local_naive(price.hour)
+            hour_key = local.replace(minute=0, second=0, microsecond=0).isoformat()
+            power = self._get_available_ev_power(
+                hour_key, charger_power_kw, battery_power_schedule,
+                solar_surplus_kw=forecast.surplus_kw,
+                reserved_ev_power_schedule=reserved_ev_power_schedule,
+                minimum_charging_power_kw=minimum_charging_power_kw,
+                charging_power_step_kw=charging_power_step_kw,
+                allow_grid_import=False,
+                interval_start=start,
+            )
+            if power <= 0:
+                continue
+            energy = min(power * available_hours, energy_needed_kwh - energy_allocated)
+            end = min(end, start + timedelta(hours=energy / power))
+            display_start, display_end = _price_window_times(start, end, native or hour_key in repeated_hours)
+            windows.append(PlannedChargingWindow(
+                start_time=display_start, end_time=display_end, source="solar_surplus",
+                estimated_power_kw=power, estimated_energy_kwh=energy,
+                price_cents_kwh=float(price.export_cents or 0), reason="solar_forecast",
+            ))
+            energy_allocated += energy
+            total_confidence += forecast.confidence
 
         # Calculate averages
         avg_confidence = total_confidence / len(windows) if windows else 0
@@ -3410,17 +3513,14 @@ class ChargingPlanner:
         price_forecast: List[PriceForecast],
         battery_power_schedule: Dict[str, float] = None,
         max_grid_price_cents: Optional[float] = None,
-        reserved_ev_power_schedule: Optional[Dict[str, float]] = None,
+        reserved_ev_power_schedule: Optional[Dict[str, float] | _EVPowerReservations] = None,
         minimum_charging_power_kw: float = MIN_CHARGING_POWER_KW,
         charging_power_step_kw: Optional[float] = None,
         available_from: Optional[datetime] = None,
     ) -> ChargingPlan:
         """Plan charging preferring solar, falling back to offpeak grid with dynamic power sharing."""
-        windows = []
-        solar_energy = 0
         grid_energy = 0
         total_cost = 0
-        total_confidence = 0
         battery_power_schedule = battery_power_schedule or {}
         now = _ha_local_now_naive()
         if available_from is not None:
@@ -3430,80 +3530,24 @@ class ChargingPlanner:
             if target_time is not None and target_time.tzinfo is not None
             else target_time
         )
+        price_forecast = self._planning_price_intervals(price_forecast, reserved_ev_power_schedule)
         repeated_price_hours = _repeated_forecast_local_hours(
             [price.hour for price in price_forecast]
         )
-        policy = await self._get_solar_surplus_config()
-        export_by_hour = {
-            key: price.export_cents
-            for price in price_forecast
-            if (key := _forecast_hour_key(price.hour)) is not None
-        }
-
-        # First pass: allocate solar
-        for forecast in surplus_forecast:
-            if solar_energy + grid_energy >= energy_needed_kwh:
-                break
-
-            if forecast.surplus_kw >= 1.0:
-                export_value = export_by_hour.get(_forecast_hour_key(forecast.hour))
-                if not solar_surplus_price_allows_charging(export_value, policy):
-                    continue
-                hour_dt = _parse_forecast_hour_local_naive(forecast.hour)
-                if hour_dt is None:
-                    continue
-                usable_window = _usable_forecast_window(
-                    hour_dt,
-                    now,
-                    target_time_local,
-                )
-                if usable_window is None:
-                    continue
-                end_dt, usable_fraction = usable_window
-                hour_key = hour_dt.replace(minute=0, second=0, microsecond=0).isoformat()
-
-                # Dynamic power sharing with battery
-                available_power = self._get_available_ev_power(
-                    hour_key,
-                    charger_power_kw,
-                    battery_power_schedule,
-                    solar_surplus_kw=forecast.surplus_kw,
-                    reserved_ev_power_schedule=reserved_ev_power_schedule,
-                    minimum_charging_power_kw=minimum_charging_power_kw,
-                    charging_power_step_kw=charging_power_step_kw,
-                )
-
-                if available_power < minimum_charging_power_kw:
-                    continue
-
-                energy_this_hour = min(
-                    available_power * usable_fraction,
-                    energy_needed_kwh - solar_energy - grid_energy,
-                )
-                planned_start = max(hour_dt, now)
-                planned_end = end_dt
-                if energy_this_hour + 1e-9 < available_power * usable_fraction:
-                    planned_end = planned_start + timedelta(
-                        hours=energy_this_hour / available_power
-                    )
-                display_start, display_end = _forecast_window_display_bounds(
-                    forecast.hour,
-                    planned_end,
-                    start_dt=planned_start,
-                )
-
-                windows.append(PlannedChargingWindow(
-                    start_time=display_start,
-                    end_time=display_end,
-                    source="solar_surplus",
-                    estimated_power_kw=available_power,
-                    estimated_energy_kwh=energy_this_hour,
-                    price_cents_kwh=float(export_value or 0),
-                    reason="solar_forecast",
-                ))
-
-                solar_energy += energy_this_hour
-                total_confidence += forecast.confidence
+        solar = await self._plan_solar_only(
+            vehicle_id, current_soc, target_soc, target_time, energy_needed_kwh,
+            charger_power_kw, surplus_forecast, price_forecast=price_forecast,
+            battery_power_schedule=battery_power_schedule,
+            reserved_ev_power_schedule=reserved_ev_power_schedule,
+            minimum_charging_power_kw=minimum_charging_power_kw,
+            charging_power_step_kw=charging_power_step_kw,
+            available_from=available_from,
+        )
+        windows = list(solar.windows)
+        solar_energy = solar.estimated_solar_kwh
+        total_confidence = solar.confidence * len(windows)
+        solar_intervals = {(_forecast_instant(w.start_time), _forecast_instant(w.end_time)) for w in windows}
+        used_grid_intervals = set()
 
         # Second pass: fill with cheapest grid hours if needed
         # Sort by price (cheapest first) to prefer offpeak/cheap hours
@@ -3511,32 +3555,32 @@ class ChargingPlanner:
         remaining_energy = energy_needed_kwh - solar_energy
         if remaining_energy > 0 and price_forecast:
             # Sort all hours by price (cheapest first)
-            sorted_by_price = sorted(price_forecast, key=lambda p: p.import_cents)
+            sorted_by_price = sorted(enumerate(price_forecast), key=lambda item: item[1].import_cents)
 
-            for price_data in sorted_by_price:
+            for index, price_data in sorted_by_price:
                 if grid_energy >= remaining_energy:
                     break
-
-                # Check if this hour is already covered by solar
-                already_covered = any(
-                    _forecast_hour_key(w.start_time)
-                    == _forecast_hour_key(price_data.hour)
-                    for w in windows
-                )
-                if already_covered:
-                    continue
 
                 hour_dt = _parse_forecast_hour_local_naive(price_data.hour)
                 if hour_dt is None:
                     continue
-                usable_window = _usable_forecast_window(
-                    hour_dt,
-                    now,
-                    target_time_local,
-                )
-                if usable_window is None:
+                interval_key = _forecast_interval_identity(price_data)
+                if interval_key in used_grid_intervals:
                     continue
-                end_dt, usable_fraction = usable_window
+                bounds = _bounded_price_interval(price_forecast, index, now, target_time_local)
+                if bounds is None:
+                    continue
+                planned_start, end_dt = bounds
+                if solar_intervals:
+                    start_utc = _forecast_instant(planned_start.isoformat())
+                    end_utc = _forecast_instant(end_dt.isoformat())
+                    if any(start_utc < solar_end and solar_start < end_utc
+                           for solar_start, solar_end in solar_intervals):
+                        continue
+                usable_fraction = (end_dt - planned_start).total_seconds() / 3600
+                native_interval = bool(getattr(price_data, "end_time", None)) or price_data.period == "epex"
+                if not native_interval and usable_fraction < 0.1:
+                    continue
                 hour_key = hour_dt.replace(minute=0, second=0, microsecond=0).isoformat()
 
                 # Skip hours that fall inside a demand window (unless override set)
@@ -3561,6 +3605,7 @@ class ChargingPlanner:
                     hour_key,
                     charger_power_kw,
                     battery_power_schedule,
+                    interval_start=planned_start,
                     solar_surplus_kw=0,  # No solar during grid-only hours
                     reserved_ev_power_schedule=reserved_ev_power_schedule,
                     minimum_charging_power_kw=minimum_charging_power_kw,
@@ -3574,24 +3619,14 @@ class ChargingPlanner:
                     available_power * usable_fraction,
                     remaining_energy - grid_energy,
                 )
-                planned_start = max(hour_dt, now)
                 planned_end = end_dt
                 if energy_this_hour + 1e-9 < available_power * usable_fraction:
                     planned_end = planned_start + timedelta(
                         hours=energy_this_hour / available_power
                     )
-                display_start, display_end = _forecast_window_display_bounds(
-                    price_data.hour,
-                    planned_end,
-                    start_dt=planned_start,
-                    preserve_offset=(
-                        hour_dt.replace(
-                            minute=0,
-                            second=0,
-                            microsecond=0,
-                        ).isoformat()
-                        in repeated_price_hours
-                    ),
+                local_hour = hour_dt.replace(minute=0, second=0, microsecond=0).isoformat()
+                display_start, display_end = _price_window_times(
+                    planned_start, planned_end, native_interval or local_hour in repeated_price_hours,
                 )
 
                 # Label source based on period type
@@ -3607,12 +3642,13 @@ class ChargingPlanner:
                     reason=reason,
                 ))
 
+                used_grid_intervals.add(interval_key)
                 grid_energy += energy_this_hour
                 total_cost += energy_this_hour * price_data.import_cents
                 total_confidence += 0.9  # Grid is reliable
 
         # Sort windows by time
-        windows.sort(key=lambda w: w.start_time)
+        windows.sort(key=lambda w: _forecast_instant(w.start_time))
 
         # Check if we can meet target
         total_energy = solar_energy + grid_energy
@@ -3657,7 +3693,7 @@ class ChargingPlanner:
         price_forecast: List[PriceForecast],
         battery_power_schedule: Dict[str, float] = None,
         max_grid_price_cents: Optional[float] = None,
-        reserved_ev_power_schedule: Optional[Dict[str, float]] = None,
+        reserved_ev_power_schedule: Optional[Dict[str, float] | _EVPowerReservations] = None,
         minimum_charging_power_kw: float = MIN_CHARGING_POWER_KW,
         charging_power_step_kw: Optional[float] = None,
         available_from: Optional[datetime] = None,
@@ -3698,6 +3734,7 @@ class ChargingPlanner:
 
         # Build charging options from price forecast (within deadline)
         charging_options = []
+        price_forecast = self._planning_price_intervals(price_forecast, reserved_ev_power_schedule)
         repeated_price_hours = _repeated_forecast_local_hours(
             [price.hour for price in price_forecast]
         )
@@ -3716,61 +3753,42 @@ class ChargingPlanner:
             except Exception:
                 continue
 
-            # Skip if past departure time (compare naive local times)
-            if target_time_local and hour_dt >= target_time_local:
+            bounds = _bounded_price_interval(price_forecast, i, now, target_time_local)
+            if bounds is None:
                 continue
-
-            # Skip if in the past
-            if hour_dt < now - timedelta(hours=1):
-                continue
-
-            # Bound each option by its real source interval.  EPEX prices are
-            # optimizer slots (normally five minutes), not hourly estimates.
-            hour_end = _forecast_interval_end(price_forecast, i, hour_dt)
-            if target_time_local and hour_end > target_time_local:
-                hour_end = target_time_local
-            interval_hours = max(
-                0.0,
-                (hour_end - hour_dt).total_seconds() / 3600,
-            )
-            usable_fraction = (
-                hour_end - max(hour_dt, now)
-            ).total_seconds() / 3600
-            usable_fraction = max(0.0, min(interval_hours, usable_fraction))
-            minimum_usable_fraction = 0.0 if price.period == "epex" else 0.1
-            if usable_fraction <= minimum_usable_fraction:
+            bounded_start, hour_end = bounds
+            usable_fraction = (hour_end - bounded_start).total_seconds() / 3600
+            native_interval = bool(getattr(price, "end_time", None)) or price.period == "epex"
+            if not native_interval and usable_fraction <= 0.1:
                 continue
 
             # Check for solar surplus at this hour
             surplus = surplus_by_hour.get(_forecast_hour_key(price.hour))
             solar_available = surplus.surplus_kw if surplus is not None else 0
-            display_start, display_end = _forecast_window_display_bounds(
-                price.hour,
-                hour_end,
-                start_dt=max(hour_dt, now),
-                preserve_offset=(
-                    hour_dt.replace(
-                        minute=0,
-                        second=0,
-                        microsecond=0,
-                    ).isoformat()
-                    in repeated_price_hours
-                ),
-            )
+            local_hour = hour_dt.replace(minute=0, second=0, microsecond=0).isoformat()
+            keep_offset = native_interval or local_hour in repeated_price_hours
+            display_start, display_end = _price_window_times(bounded_start, hour_end, keep_offset)
             option_identity = _forecast_interval_identity(price)
 
-            # Solar surplus is free
-            if solar_available >= 1.0 and solar_surplus_price_allows_charging(
-                price.export_cents,
-                solar_policy,
-            ):
+            solar_power = self._get_available_ev_power(
+                local_hour, charger_power_kw, battery_power_schedule,
+                solar_surplus_kw=solar_available,
+                interval_start=bounded_start,
+                reserved_ev_power_schedule=reserved_ev_power_schedule,
+                minimum_charging_power_kw=minimum_charging_power_kw,
+                charging_power_step_kw=charging_power_step_kw,
+                allow_grid_import=False,
+            )
+            if solar_power > 0 and solar_surplus_price_allows_charging(price.export_cents, solar_policy):
                 charging_options.append({
                     "hour": display_start,
                     "hour_dt": hour_dt,
+                    "bounded_start": bounded_start,
+                    "preserve_offset": keep_offset,
                     "end_time": display_end,
                     "identity": option_identity,
                     "source": "solar_surplus",
-                    "power_kw": min(solar_available, charger_power_kw),
+                    "power_kw": solar_power,
                     "cost_cents": price.export_cents,
                     "actual_price": price.import_cents,  # Store actual price for reference
                     "confidence": surplus.confidence if surplus is not None else 0.5,
@@ -3780,16 +3798,12 @@ class ChargingPlanner:
             # Grid option. Respect the home battery's optimizer allocation and
             # use only remaining site capacity. Free/negative grid can use all
             # remaining headroom; paid grid still yields forecast solar first.
-            hour_key = hour_dt.replace(
-                minute=0,
-                second=0,
-                microsecond=0,
-            ).isoformat()
             available_power = self._get_available_ev_power(
-                hour_key,
+                local_hour,
                 charger_power_kw,
                 battery_power_schedule,
                 solar_surplus_kw=solar_available,
+                interval_start=bounded_start,
                 reserved_ev_power_schedule=reserved_ev_power_schedule,
                 minimum_charging_power_kw=minimum_charging_power_kw,
                 charging_power_step_kw=charging_power_step_kw,
@@ -3824,17 +3838,8 @@ class ChargingPlanner:
                 charging_options.append({
                     "hour": display_start,
                     "hour_dt": hour_dt,
-                    "bounded_start": max(hour_dt, now),
-                    "bounded_end": hour_end,
-                    "forecast_hour": price.hour,
-                    "preserve_offset": (
-                        hour_dt.replace(
-                            minute=0,
-                            second=0,
-                            microsecond=0,
-                        ).isoformat()
-                        in repeated_price_hours
-                    ),
+                    "bounded_start": bounded_start,
+                    "preserve_offset": keep_offset,
                     "end_time": display_end,
                     "identity": option_identity,
                     "source": grid_source,
@@ -3938,15 +3943,10 @@ class ChargingPlanner:
             start_time = option["hour"]
             end_time = option["end_time"]
             if energy_this_hour + 1e-9 < option["power_kw"] * usable:
-                bounded_start = option.get("bounded_start", max(hour_dt, now))
-                bounded_end = bounded_start + timedelta(
-                    hours=energy_this_hour / option["power_kw"]
-                )
-                start_time, end_time = _forecast_window_display_bounds(
-                    option.get("forecast_hour", option["hour"]),
-                    bounded_end,
-                    start_dt=bounded_start,
-                    preserve_offset=bool(option.get("preserve_offset", False)),
+                bounded_start = option["bounded_start"]
+                bounded_end = bounded_start + timedelta(hours=energy_this_hour / option["power_kw"])
+                start_time, end_time = _price_window_times(
+                    bounded_start, bounded_end, option["preserve_offset"],
                 )
 
             windows.append(PlannedChargingWindow(
@@ -3969,7 +3969,7 @@ class ChargingPlanner:
             used_intervals.add(interval_key)
 
         # Sort windows by time for display
-        windows.sort(key=lambda w: w.start_time)
+        windows.sort(key=lambda w: _forecast_instant(w.start_time))
 
         # Calculate if we can meet target
         can_meet = energy_allocated >= energy_needed_kwh * 0.9
@@ -4023,7 +4023,7 @@ class ChargingPlanner:
         surplus_forecast: List[SurplusForecast],
         price_forecast: List[PriceForecast],
         battery_power_schedule: Dict[str, float] = None,
-        reserved_ev_power_schedule: Optional[Dict[str, float]] = None,
+        reserved_ev_power_schedule: Optional[Dict[str, float] | _EVPowerReservations] = None,
         minimum_charging_power_kw: float = MIN_CHARGING_POWER_KW,
         charging_power_step_kw: Optional[float] = None,
         available_from: Optional[datetime] = None,
@@ -4110,16 +4110,13 @@ class ChargingPlanner:
             for surplus in surplus_forecast
             if (key := _forecast_hour_key(surplus.hour)) is not None
         }
+        price_forecast = self._planning_price_intervals(price_forecast, reserved_ev_power_schedule)
         repeated_price_hours = _repeated_forecast_local_hours(
             [price.hour for price in price_forecast]
         )
-        combined = [
-            (surplus_by_hour.get(_forecast_hour_key(price.hour)), price)
-            for price in price_forecast
-        ]
-        combined.reverse()
-
-        for surplus, price in combined:
+        for index in reversed(range(len(price_forecast))):
+            price = price_forecast[index]
+            surplus = surplus_by_hour.get(_forecast_hour_key(price.hour))
             if energy_allocated >= energy_needed_kwh:
                 break
 
@@ -4127,36 +4124,36 @@ class ChargingPlanner:
             if hour_dt is None:
                 continue
 
-            if target_time_local and hour_dt >= target_time_local:
-                continue  # Skip hours that start at or after deadline
-
-            # Bound this candidate by the planning instant and departure.
-            bounded_start = max(hour_dt, now)
-            bounded_end = hour_dt + timedelta(hours=1)
-            if target_time_local and bounded_end > target_time_local:
-                bounded_end = target_time_local
-            usable_hours = (
-                bounded_end - bounded_start
-            ).total_seconds() / 3600
-            usable_hours = max(0.0, min(1.0, usable_hours))
-            if usable_hours <= 0:
+            bounds = _bounded_price_interval(price_forecast, index, now, target_time_local)
+            if bounds is None:
                 continue
+            bounded_start, bounded_end = bounds
+            usable_hours = (bounded_end - bounded_start).total_seconds() / 3600
 
-            # Use one consistent power for capacity, timestamps, publication,
-            # and downstream optimizer demand.
-            if surplus is not None and surplus.surplus_kw >= 1.0:
-                # Prefer solar
-                window_power_kw = min(surplus.surplus_kw, charger_power_kw)
+            # Deadlines can take priority over a battery charge, while other
+            # EVs still occupy supply. Price paid for grid import is secondary.
+            hour_key = hour_dt.replace(minute=0, second=0, microsecond=0).isoformat()
+            surplus_kw = surplus.surplus_kw if surplus is not None else 0.0
+            power_args = {
+                "reserved_ev_power_schedule": reserved_ev_power_schedule,
+                "minimum_charging_power_kw": minimum_charging_power_kw,
+                "charging_power_step_kw": charging_power_step_kw,
+                "interval_start": bounded_start,
+            }
+            window_power_kw = self._get_available_ev_power(
+                hour_key, charger_power_kw, {}, solar_surplus_kw=surplus_kw,
+                allow_grid_import=False, **power_args,
+            )
+            if window_power_kw > 0:
                 source = "solar_surplus"
                 cost = 0
             else:
-                # Skip grid hours that fall inside a demand window (unless override set).
-                # If this leaves the deadline unmet, the warning/can_meet_target fields
-                # will reflect that — user can opt into demand_allow_grid_charging if needed.
                 if self._is_grid_charging_blocked_at(hour_dt):
                     continue
-                # Use grid
-                window_power_kw = charger_power_kw
+                window_power_kw = self._get_available_ev_power(
+                    hour_key, charger_power_kw, {}, solar_surplus_kw=surplus_kw,
+                    **power_args,
+                )
                 source = f"grid_{price.period}"
                 cost = price.import_cents
 
@@ -4174,18 +4171,10 @@ class ChargingPlanner:
             else:
                 planned_start = bounded_start
 
-            display_start, display_end = _forecast_window_display_bounds(
-                price.hour,
-                bounded_end,
-                start_dt=planned_start,
-                preserve_offset=(
-                    hour_dt.replace(
-                        minute=0,
-                        second=0,
-                        microsecond=0,
-                    ).isoformat()
-                    in repeated_price_hours
-                ),
+            local_hour = hour_dt.replace(minute=0, second=0, microsecond=0).isoformat()
+            display_start, display_end = _price_window_times(
+                planned_start, bounded_end,
+                bool(getattr(price, "end_time", None)) or price.period == "epex" or local_hour in repeated_price_hours,
             )
 
             windows.append(PlannedChargingWindow(
@@ -6658,6 +6647,18 @@ class AutoScheduleExecutor:
                 )
                 return
 
+        # Every charging source shares the dynamic site-import ceiling. An
+        # absent sample can still run lifecycle cleanup, but cannot authorize
+        # a positive start or be synthesized into zero measured site load.
+        solar_power = live_status.get("solar_power")
+        load_power = live_status.get("load_power")
+        if solar_power is None or load_power is None:
+            state.last_decision = "waiting"
+            state.last_decision_reason = "Home Load unavailable" if load_power is None else "Solar power unavailable"
+            self._sync_active_charging_preserve_intent(
+                vehicle_id, effective_preserve_home_battery, state, state.last_decision_reason,
+            )
+            return
         # Tesla integrations can retain the previous EVSE pilot limit while a
         # moved vehicle is idle.  The refresh coordinator first waits/polls,
         # then wakes the exact VIN, and only as a final fallback performs one
@@ -6697,21 +6698,8 @@ class AutoScheduleExecutor:
             )
             return
 
-        # Get current conditions
-        battery_soc = live_status.get("battery_soc", 0)
-        solar_power_kw = live_status.get("solar_power", 0) / 1000
-        grid_power_kw = live_status.get("grid_power", 0) / 1000
-        load_power = live_status.get("load_power")
-        if load_power is None:
-            state.last_decision = "waiting"
-            state.last_decision_reason = "Home Load unavailable"
-            self._sync_active_charging_preserve_intent(
-                vehicle_id,
-                effective_preserve_home_battery,
-                state,
-                state.last_decision_reason,
-            )
-            return
+        battery_soc = live_status.get("battery_soc") or 0
+        solar_power_kw = solar_power / 1000
         load_power_kw = load_power / 1000
 
         # Calculate current surplus
@@ -7226,9 +7214,9 @@ class AutoScheduleExecutor:
     def _other_planned_ev_power_schedule(
         self,
         vehicle_id: str,
-    ) -> Dict[str, float]:
-        """Return hourly site capacity already reserved by other EV plans."""
-        reserved: Dict[str, float] = {}
+    ) -> _EVPowerReservations:
+        """Sum other cars' simultaneous reservations over their actual windows."""
+        events: dict[datetime, list[tuple[str, float, int]]] = {}
         for other_id, other_state in self._state.items():
             if vehicle_ids_match(vehicle_id, other_id):
                 continue
@@ -7248,26 +7236,35 @@ class AutoScheduleExecutor:
 
             for window in other_plan.windows:
                 try:
-                    start = datetime.fromisoformat(window.start_time)
-                    end = datetime.fromisoformat(window.end_time)
+                    start = _forecast_instant(window.start_time)
+                    end = _forecast_instant(window.end_time)
                     power_kw = float(window.estimated_power_kw)
                 except (TypeError, ValueError):
                     continue
                 if not math.isfinite(power_kw) or power_kw <= 0:
                     continue
-                if start.tzinfo is not None:
-                    start = _as_ha_local_naive(start)
-                if end.tzinfo is not None:
-                    end = _as_ha_local_naive(end)
                 if end <= start:
                     continue
+                events.setdefault(start, []).append((other_id, power_kw, 1))
+                events.setdefault(end, []).append((other_id, power_kw, -1))
 
-                hour = start.replace(minute=0, second=0, microsecond=0)
-                while hour < end:
-                    key = hour.isoformat()
-                    reserved[key] = reserved.get(key, 0.0) + power_kw
-                    hour += timedelta(hours=1)
-        return reserved
+        active: dict[str, Counter[float]] = {}
+        times = []
+        powers = []
+        for instant, changes in sorted(events.items()):
+            for other_id, power_kw, delta in changes:
+                counts = active.setdefault(other_id, Counter())
+                counts[power_kw] += delta
+                if counts[power_kw] == 0:
+                    del counts[power_kw]
+                if not counts:
+                    del active[other_id]
+            # Even overlapping legacy windows describe one physical car.
+            total = sum(max(counts) for counts in active.values())
+            if not powers or abs(total - powers[-1]) > 1e-9:
+                times.append(instant)
+                powers.append(total)
+        return _EVPowerReservations(tuple(times), tuple(powers))
 
     async def _regenerate_plan(
         self,
@@ -7405,6 +7402,8 @@ class AutoScheduleExecutor:
                 ),
             )
 
+            plan.charger_power_kw = charger_power_kw
+            plan.charging_power_step_kw = charging_power_step_kw
             state.current_plan = plan
             state.last_plan_update = now
 
@@ -7463,6 +7462,13 @@ class AutoScheduleExecutor:
             entry_data, active=True,
             source="smart_schedule", reason=reason,
         )
+
+    @property
+    def active_preserve_reason(self) -> str | None:
+        """Return the battery hold requested by still-charging Smart Schedule cars."""
+        if not self._active_charging_preserve_vehicles:
+            return None
+        return self._smart_schedule_active_preserve_reason("Smart Schedule charging")
 
     def _smart_schedule_active_preserve_reason(self, fallback: str = "") -> str:
         """Return a representative reason for active Smart Schedule preserve."""
@@ -7599,101 +7605,10 @@ class AutoScheduleExecutor:
         self._sync_inactive_smart_schedule_preserve_intent()
 
     async def _get_current_price(self) -> Optional[float]:
-        """Get current import price from available sources (provider-aware).
+        """Resolve the same selected retail price used by the periodic evaluator."""
+        from .ev_pricing import get_ev_control_import_price
 
-        Uses real-time TOU calculation for custom/Tesla tariffs to ensure prices
-        update when TOU periods change throughout the day.
-        """
-        from ..const import DOMAIN, CONF_ELECTRICITY_PROVIDER
-
-        try:
-            entry_data = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id, {})
-
-            # Get electricity provider
-            electricity_provider = self.config_entry.options.get(
-                CONF_ELECTRICITY_PROVIDER,
-                self.config_entry.data.get(CONF_ELECTRICITY_PROVIDER, "amber")
-            )
-
-            if electricity_provider in ("amber", "flow_power"):
-                # Amber/Flow Power: Read from coordinator data (live API prices)
-                amber_coordinator = entry_data.get("amber_coordinator")
-                if amber_coordinator and amber_coordinator.data:
-                    current_prices = amber_coordinator.data.get("current", [])
-                    for price in current_prices:
-                        if price.get("channelType") == "general":
-                            # perKwh is in cents for Amber
-                            return price.get("perKwh", 30.0)
-
-            elif electricity_provider == "epex":
-                from .ev_pricing import get_current_retail_price
-
-                return get_current_retail_price(
-                    self.hass,
-                    self.config_entry.entry_id,
-                )
-
-            elif electricity_provider in ("agl", "globird", "aemo_vpp"):
-                # Static providers: use real-time calculation from tariff schedule.
-                tariff_schedule = entry_data.get("tariff_schedule", {})
-                if tariff_schedule:
-                    from ..__init__ import get_current_price_from_tariff_schedule
-
-                    # Use real-time TOU calculation if TOU periods are defined
-                    if tariff_schedule.get("tou_periods"):
-                        buy_cents, _, current_period = get_current_price_from_tariff_schedule(tariff_schedule)
-                        _LOGGER.debug(f"Current price from TOU: {buy_cents}c ({current_period})")
-                        return buy_cents
-                    # Fallback to cached buy_price
-                    buy_price = tariff_schedule.get("buy_price")
-                    if buy_price is not None:
-                        return buy_price  # Already in cents
-
-            # Fallback: Try tariff schedule with TOU calculation for any provider
-            tariff_schedule = entry_data.get("tariff_schedule", {})
-            if tariff_schedule:
-                from ..__init__ import get_current_price_from_tariff_schedule
-
-                # Real-time TOU calculation
-                if tariff_schedule.get("tou_periods"):
-                    buy_cents, _, _ = get_current_price_from_tariff_schedule(tariff_schedule)
-                    return buy_cents
-
-                # Try Amber format with PERIOD_HH_MM keys
-                now = dt_util.now()  # HA tz, not container UTC
-                period_key = f"PERIOD_{now.hour:02d}_{30 if now.minute >= 30 else 0:02d}"
-                buy_prices = tariff_schedule.get("buy_prices", {})
-                if period_key in buy_prices:
-                    return buy_prices[period_key] * 100
-
-            # Fallback: Try Sigenergy tariff (for Sigenergy users with Amber)
-            sigenergy_tariff = entry_data.get("sigenergy_tariff", {})
-            if sigenergy_tariff:
-                buy_prices = sigenergy_tariff.get("buy_prices", [])
-                if buy_prices:
-                    # Find current time slot price
-                    # Format: [{"timeRange": "10:00-10:30", "price": 25.0}, ...]
-                    now = dt_util.now()  # HA tz, not container UTC
-                    current_time = f"{now.hour:02d}:{30 if now.minute >= 30 else 0:02d}"
-                    for slot in buy_prices:
-                        time_range = slot.get("timeRange", "")
-                        if time_range.startswith(current_time):
-                            return slot.get("price", 30.0)  # Already in cents
-
-            # Default fallback based on time of day
-            hour = dt_util.now().hour  # HA tz, not container UTC
-            if 7 <= hour < 9 or 17 <= hour < 21:
-                return 45.0  # Peak
-            elif 9 <= hour < 17:
-                return 25.0  # Shoulder
-            else:
-                return 15.0  # Off-peak
-
-        except Exception as e:
-            _LOGGER.debug(f"Failed to get current price: {e}")
-            if locals().get("electricity_provider") == "epex":
-                return None
-            return 25.0  # Default shoulder rate
+        return get_ev_control_import_price(self.hass, self.config_entry)
 
     def _is_sigenergy_system(self) -> bool:
         """Check if this is a SigEnergy system (vs Tesla Powerwall)."""
@@ -12938,6 +12853,7 @@ class ScheduledChargingExecutor:
             current_price_cents = get_current_retail_price(
                 self.hass,
                 self.config_entry.entry_id,
+                self.config_entry,
             )
             if current_price_cents is None:
                 reason = (

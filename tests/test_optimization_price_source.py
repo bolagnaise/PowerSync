@@ -4064,3 +4064,89 @@ def test_history_alone_does_not_subtract_ev_without_replacement(opt_module):
             "optimization_ev_integration": False, "optimization_use_historical_ev_data": True,
             "generic_charger_power_entity": "sensor.ev_power"}))
     assert coordinator._ev_load_subtraction_entities() == []
+
+
+@pytest.mark.parametrize("invalid_row", [None, {"perKwh": 0.0, "price_available": False}])
+def test_epex_missing_current_import_cannot_borrow_a_future_free_rate(opt_module, invalid_row):
+    coordinator = _coordinator_with_epex_provider(opt_module, [])
+    data = coordinator.price_coordinator.data
+    current, current_export = data["current"]
+    future = {**current, "perKwh": 0.0, "type": "ForecastInterval", "valid_from": "2026-05-03T08:45:00+00:00"}
+    data["current"] = [current_export]
+    if invalid_row:
+        data["current"].append({**current, **invalid_row})
+    data["forecast"] = [future]
+    assert asyncio.run(coordinator._get_price_forecast()) is None
+
+
+def test_epex_selected_import_sensor_remains_available_with_missing_native_rate(opt_module):
+    coordinator = _coordinator_with_epex_provider(
+        opt_module, [_State("sensor.actual_import_price", "31.5", unit="ct/kWh")],
+    )
+    data = coordinator.price_coordinator.data
+    data["current"] = [row for row in data["current"] if row["channelType"] == "feedIn"]
+    imports, exports = asyncio.run(coordinator._get_price_forecast())
+    assert imports == pytest.approx([0.315] * 12)
+    assert exports == pytest.approx([0.08] * 12)
+
+
+def test_epex_priced_mask_excludes_invalid_zero_and_preserves_genuine_zero(opt_module):
+    coordinator = _coordinator_with_epex_provider(opt_module, [])
+    data = coordinator.price_coordinator.data
+    real, export = data["current"]
+    def start(minute):
+        return f"2026-05-03T08:{minute}:00+00:00"
+    real.update(valid_from=start(30), valid_to=start(35))
+    data["forecast"] = [
+        {**real, "valid_from": start(35), "valid_to": start(40), "perKwh": 0.0, "price_available": False},
+        {**real, "valid_from": start(40), "valid_to": start(45), "perKwh": 0.0},
+    ]
+    assert coordinator._dynamic_import_price_dollar(data["forecast"][0], "epex") is None
+    assert coordinator._dynamic_import_price_dollar(data["forecast"][1], "epex") == 0.0
+    for invalid in (None, "unavailable", True, float("nan"), float("inf")):
+        assert coordinator._dynamic_import_price_dollar({"perKwh": invalid}, "epex") is None
+    asyncio.run(coordinator._get_price_forecast())
+    assert coordinator._last_priced_import_mask[:3] == [True, False, True]
+    assert coordinator._last_optimizer_price_valid_slots[:3] == [True, False, True]
+    assert coordinator._provider_priced_reference_prices() == [0.24, 0.0]
+
+
+@pytest.mark.parametrize("rates", [
+    {"price_values": {"2026-05-03T08:50:00+00:00": 0, "2026-05-03T08:55:00+00:00": 25}},
+    {"2026-05-03T08:31:00+00:00": 0, "2026-05-03T08:36:00+00:00": 25},
+    {"price_values": [None, 0, 25]},
+    {"price_values": {"2026-05-03T08:25:00+00:00": 0, "2026-05-03T08:30:00+00:00": "unavailable",
+                      "2026-05-03T08:35:00+00:00": 0}},
+])
+@pytest.mark.parametrize("native_current", [False, True])
+def test_epex_selected_series_without_a_current_rate_cannot_authorize_import(opt_module, rates, native_current):
+    coordinator = _coordinator_with_epex_provider(
+        opt_module, [_State("sensor.actual_import_price", "0", unit="ct/kWh", attributes=rates)],
+    )
+    data = coordinator.price_coordinator.data
+    if not native_current:
+        data["current"] = [row for row in data["current"] if row["channelType"] == "feedIn"]
+    assert asyncio.run(coordinator._get_price_forecast()) is None
+
+
+def test_epex_native_export_display_uses_its_own_coverage_with_custom_import(opt_module):
+    coordinator = _coordinator_with_epex_provider(
+        opt_module, [_State("sensor.actual_import_price", "31.5", unit="ct/kWh")],
+    )
+    data = coordinator.price_coordinator.data
+    feed = next(row for row in data["current"] if row["channelType"] == "feedIn")
+    data["current"] = [{**feed, "valid_to": "2026-05-03T08:45:00+00:00"}]
+    imports, exports = asyncio.run(coordinator._get_price_forecast())
+    assert imports == pytest.approx([0.315] * 12)
+    assert exports == pytest.approx([0.08] * 12)
+    assert coordinator._last_display_export_prices == pytest.approx([0.08] * 3)
+
+
+def test_epex_missing_raw_export_is_not_displayed_as_a_measured_zero(opt_module):
+    coordinator = _coordinator_with_epex_provider(opt_module, [], export_source="raw_wholesale")
+    data = coordinator.price_coordinator.data
+    raw_export = next(row for row in data["current"] if row["channelType"] == "feedIn")
+    raw_export.update(perKwh=0, price_available=False)
+    imports, exports = asyncio.run(coordinator._get_price_forecast())
+    assert imports and exports == [0] * 12
+    assert coordinator._last_display_export_prices == []

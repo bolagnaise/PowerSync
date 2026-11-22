@@ -360,6 +360,8 @@ def test_live_charger_limit_below_configured_is_still_honoured_for_planning():
 
     call = planner.calls[0]
     assert call["charger_power_kw"] == 15 * 230 * 1 / 1000
+    assert state.current_plan.charger_power_kw == call["charger_power_kw"]
+    assert state.current_plan.charging_power_step_kw == pytest.approx(0.23)
 
 
 def test_away_vehicle_does_not_reserve_site_capacity_from_the_plugged_in_car():
@@ -380,7 +382,7 @@ def test_away_vehicle_does_not_reserve_site_capacity_from_the_plugged_in_car():
 
     reserved = executor._other_planned_ev_power_schedule(HOME_VIN)
 
-    assert reserved == {}
+    assert not reserved
 
 
 def test_unplugged_vehicle_does_not_reserve_site_capacity():
@@ -399,7 +401,7 @@ def test_unplugged_vehicle_does_not_reserve_site_capacity():
     idle_state.last_decision_reason = "Vehicle not plugged in"
     executor._state[AWAY_VIN] = idle_state
 
-    assert executor._other_planned_ev_power_schedule(HOME_VIN) == {}
+    assert not executor._other_planned_ev_power_schedule(HOME_VIN)
 
 
 def test_present_second_vehicle_still_reserves_site_capacity():
@@ -419,10 +421,9 @@ def test_present_second_vehicle_still_reserves_site_capacity():
 
     reserved = executor._other_planned_ev_power_schedule(HOME_VIN)
 
-    assert reserved == {
-        datetime(2026, 8, 19, 2, 0).isoformat(): 7.36,
-        datetime(2026, 8, 19, 3, 0).isoformat(): 7.36,
-    }
+    assert reserved.power_at(start) == 7.36
+    assert reserved.power_at(start + timedelta(hours=1)) == 7.36
+    assert reserved.power_at(end) == 0.0
 
 
 def test_detached_history_planner_excludes_cheap_pre_arrival_hours(monkeypatch):
