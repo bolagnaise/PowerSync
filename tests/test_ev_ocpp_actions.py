@@ -15745,33 +15745,43 @@ def test_unknown_ble_command_keeps_radio_available_and_blocks_other_writers(monk
 
 
 
+@pytest.mark.parametrize("profile", ["pedro", "yoziru"])
 @pytest.mark.parametrize("scenario, expected", [
     ("stopped", "stopped"), ("charging", "charging"), ("stale", None),
+    ("incoherent", None), ("missing_power_packet", None),
     ("contradictory", None), ("other_bridge", None), ("operator_off", None),
 ])
-def test_ble_post_recovery_accepts_only_current_exact_vehicle_samples(monkeypatch, scenario, expected):
+def test_ble_post_recovery_accepts_only_current_exact_vehicle_samples(monkeypatch, profile, scenario, expected):
     now = datetime.now(timezone.utc)
     stamp = now - timedelta(minutes=10) if scenario == "stale" else now
     charging = "Charging" if scenario == "charging" else "Stopped"
     amps = 8 if scenario in {"charging", "contradictory"} else 0
     power = 1.8 if scenario == "charging" else 0
+    power_entity = f"sensor.car_{'charge' if profile == 'pedro' else 'charger'}_power"
     readings = {
         "sensor.car_charging_state": (charging, {}),
-        "sensor.car_charge_power": (power, {"unit_of_measurement": "kW"}),
-        "sensor.car_charge_current": (amps, {"unit_of_measurement": "A"}),
+        power_entity: (power, {"unit_of_measurement": "kW"}),
     }
+    if scenario == "contradictory":
+        readings["sensor.car_charge_current"] = (amps, {"unit_of_measurement": "A"})
     states = [
         _State("switch.car_charger", "off"),
         _State("binary_sensor.car_ble_status", "on", last_updated=stamp - timedelta(seconds=5)),
         _State("switch.car_ble_connection", "off" if scenario == "operator_off" else "on"),
     ]
     for entity, (value, attrs) in readings.items():
-        states.append(_State(entity, str(value), attrs, last_updated=stamp))
+        charging_state = entity.endswith("_charging_state")
+        observed_at = stamp - timedelta(seconds=3) if charging_state and scenario == "incoherent" else stamp
+        states.append(_State(entity, str(value), attrs, last_updated=observed_at))
+        if (charging_state and profile == "yoziru") or (
+            entity == power_entity and scenario == "missing_power_packet"
+        ):
+            continue
         states.append(_State(entity + "_sample", json.dumps(
-            {"v": 1, "t": stamp.isoformat(), "x": value}), last_updated=stamp))
+            {"v": 1, "t": observed_at.isoformat(), "x": value}), last_updated=observed_at))
     hass = _Hass(states)
     if scenario == "other_bridge":
-        hass.entity_registry.entities["sensor.car_charge_power_sample"].device_id = "other-bridge"
+        hass.entity_registry.entities[power_entity + "_sample"].device_id = "other-bridge"
     assert actions._tesla_ble_recovery_start_state(hass, "car") == expected
     assert not hass.services.calls
 

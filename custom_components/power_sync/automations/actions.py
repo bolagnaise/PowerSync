@@ -4808,23 +4808,29 @@ def _tesla_ble_recovery_start_state(hass: HomeAssistant, ble_prefix: str) -> str
     state = get_tesla_ble_charging_state(hass, ble_prefix)
     power = get_tesla_ble_charge_power_state(hass, ble_prefix)
     current = get_tesla_ble_charge_current_state(hass, ble_prefix)
-    stamps = (
-        get_tesla_ble_connected_charge_sample_time(hass, ble_prefix, state, power),
-        get_tesla_ble_connected_charge_sample_time(hass, ble_prefix, state, current),
+    power_at = get_tesla_ble_connected_charge_sample_time(
+        hass, ble_prefix, state, power, require_paired_charge_state=False,
     )
-    if not all(is_current_ev_power_observation(stamp) for stamp in stamps):
-        return None
-    if abs(stamps[0] - stamps[1]) > timedelta(seconds=1):
+    if not is_current_ev_power_observation(power_at):
         return None
     kw, available = _power_state_kw_reading(power)
-    # The paired native packet timestamps already prove freshness even
-    # when ESPHome suppresses an unchanged HA state.
-    amps = float(current.state)
-    if not available or not math.isfinite(amps) or amps < 0 or float(power.state) < 0:
+    if not available or float(power.state) < 0:
         return None
-    if state.state.strip().lower() == "stopped" and amps == 0 and kw == 0:
+    charging = kw > 0
+    # Current can corroborate the native power packet if a bridge supplies
+    # it. The shipped ESPHome packages need only the paired power packet.
+    current_at = get_tesla_ble_connected_charge_sample_time(
+        hass, ble_prefix, state, current, require_paired_charge_state=False,
+    )
+    if (is_current_ev_power_observation(current_at)
+            and abs(power_at - current_at) <= timedelta(seconds=1)):
+        amps = float(current.state)
+        if amps < 0 or (amps > 0) != charging:
+            return None
+    status = state.state.strip().lower()
+    if status == "stopped" and not charging:
         return "stopped"
-    if state.state.strip().lower() == "charging" and amps > 0 and kw > 0:
+    if status == "charging" and charging:
         return "charging"
     return None
 
