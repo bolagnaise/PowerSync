@@ -3293,14 +3293,30 @@ async def async_finish_attempt(ticket: RecoveryTicket, outcome: Any) -> bool:
                 # write is refused.  Keep the marker internal to this lock so
                 # monkeypatched legacy persistence remains compatible.
             attempts.pop(ticket.attempt_id, None)
-            stop_route_cleared = (
+            stop_matches_route = (
                 str(record.get("operation") or "").strip().lower() == "stop"
                 and isinstance(record.get("route"), Mapping)
-                and record["route"].get("cleanup_only") is True
                 and isinstance(ledger.get("route"), Mapping)
                 and dict(ledger["route"]) == dict(record["route"])
+            )
+            stop_route_cleared = (
+                stop_matches_route
+                and record["route"].get("cleanup_only") is True
                 and not attempts
                 and not ledger.get("hazards")
+            )
+            # A submitted native Stop can end its exact session even if a
+            # past recovery retained retired attempts or quarantine records.
+            # Keep that history and any still-active liability intact.
+            stopped_native_with_retired_history = (
+                stop_matches_route
+                and record["route"].get("kind") == "ha"
+                and normalized in ("accepted_unconfirmed", "confirmed")
+                and all(
+                    item.get("recovery_retired")
+                    for history in (attempts, ledger["hazards"])
+                    for item in history.values()
+                )
             )
             session_route_retained = (
                 normalized in ("accepted_unconfirmed", "confirmed")
@@ -3321,11 +3337,8 @@ async def async_finish_attempt(ticket: RecoveryTicket, outcome: Any) -> bool:
                 # Retain HA routing when an older attempt or isolation hazard
                 # still requires that exact producer.
                 ledger["route"] = None
-            elif stop_route_cleared:
-                # A terminal cleanup Stop releases the negative-only route for
-                # every exact producer kind. Full route equality and empty
-                # liabilities prevent a replacement route or hazard from
-                # inheriting the old Stop proof.
+            elif stopped_native_with_retired_history or stop_route_cleared:
+                # The Stop proof releases only the matching producer route.
                 ledger["route"] = None
         else:
             record["outcome"] = normalized

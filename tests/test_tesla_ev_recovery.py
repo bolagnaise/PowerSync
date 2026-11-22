@@ -1548,6 +1548,63 @@ def _sidecar_harness(harness):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("unresolved", [False, True])
+async def test_native_stop_unpins_ended_session_with_retired_ble_history(harness, unresolved):
+    hass, entry, store, _, owners = _sidecar_harness(harness)
+    assert await recovery.async_load_recovery_state(hass, entry)
+    runtime = hass.data["power_sync"][entry.entry_id]
+
+    ble_route = _route("bridge_a", "switch.car_a_charger", "switch.fallback")
+    old_start = await recovery.async_begin_attempt(
+        hass, entry, VIN_A, ble_route, "start", ble_route["entity_id"],
+    )
+    assert old_start and await recovery.async_finish_attempt(old_start, "sent_unknown")
+    await _seed_legacy_quarantine(old_start)
+    ledger = runtime[recovery.RECOVERY_KEY]["vehicles"][VIN_A]
+    # Match the retained journal shape after BLE producer recovery.
+    retirement = {"state": "producer_retired_reconciled", "historical_outcome": "unknown"}
+    ledger["attempts"][old_start.attempt_id]["recovery_retired"] = retirement
+    ledger["hazards"]["ble:bridge_a"].update(state="retired", recovery_retired=retirement)
+
+    owners[VIN_A].update(owner="powersync", owner_mode="smart_schedule")
+    native = {"kind": "ha", "entity_id": "switch.fallback"}
+    start = await recovery.async_begin_attempt(
+        hass, entry, VIN_A, native, "start", native["entity_id"],
+    )
+    assert start and await recovery.async_finish_attempt(start, "accepted_unconfirmed")
+    assert recovery.get_vehicle_route(hass, entry, VIN_A)["kind"] == "ha"
+    if unresolved:
+        rate = await recovery.async_begin_attempt(
+            hass, entry, VIN_A, native, "rate", native["entity_id"],
+        )
+        assert rate and await recovery.async_finish_attempt(rate, "sent_unknown")
+    owners.pop(VIN_A)
+    retained = deepcopy((ledger["attempts"], ledger["hazards"]))
+
+    stop = await recovery.async_begin_attempt(
+        hass, entry, VIN_A, native, "stop", native["entity_id"],
+    )
+    assert stop and await recovery.async_finish_attempt(stop, "accepted_unconfirmed")
+
+    if unresolved:
+        assert recovery.get_vehicle_route(hass, entry, VIN_A)["reason"] == "native_recovery"
+    else:
+        assert recovery.get_vehicle_route(hass, entry, VIN_A) is None
+    saved = store.value["recovery"]["vehicles"][VIN_A]
+    assert (saved["attempts"], saved["hazards"]) == retained
+    assert (saved["route"] is None) == (not unresolved)
+
+    assert await recovery.async_load_recovery_state(hass, entry)
+    if unresolved:
+        assert recovery.get_vehicle_route(hass, entry, VIN_A)["reason"] == "native_recovery"
+    else:
+        assert recovery.get_vehicle_route(hass, entry, VIN_A) is None
+        assert await recovery.async_begin_attempt(
+            hass, entry, VIN_A, ble_route, "start", ble_route["entity_id"],
+        )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("malformed", [[], {"journal": "without-vehicles"}])
 async def test_malformed_legacy_projection_is_held_without_empty_import(harness, malformed):
     hass, entry, store, _, _ = _sidecar_harness(harness)
