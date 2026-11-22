@@ -10,6 +10,7 @@ Plans optimal charging windows based on:
 """
 
 import asyncio
+import copy
 import logging
 import math
 import statistics
@@ -29,6 +30,7 @@ from homeassistant.util import dt as dt_util
 from ..sensitive_logging import obfuscate_log_arg, obfuscate_vin_tokens
 from ..registry_compat import iter_device_entries
 from ..ev_load import is_current_ev_power_observation
+from ..ev_mode_settings import charging_mode_settings, finite_price_cents
 from ..const import (
     CONF_SOLAR_FORECAST_PROVIDER,
     CONF_SOLCAST_ESTIMATE_TYPE,
@@ -157,6 +159,7 @@ AUTO_SCHEDULE_START_RETRY_MAX_SECONDS = 15 * 60
 PRICE_LEVEL_START_RETRY_BASE_SECONDS = 30
 PRICE_LEVEL_START_RETRY_MAX_SECONDS = 15 * 60
 FREE_GRID_PRICE_EPSILON_CENTS = 0.001
+DEFAULT_MAX_GRID_PRICE_CENTS = 25.0
 # The optimizer's fixed schedule interval is five minutes.  EPEX schedules
 # normally carry the next timestamp explicitly, but the final returned slot
 # needs this fallback to keep its duration bounded as well.
@@ -166,6 +169,27 @@ EPEX_FORECAST_INTERVAL = timedelta(minutes=5)
 # Their plans are retained to protect future demand, so any consumer that
 # models *present* demand must exclude them.
 AWAY_EV_DECISIONS = frozenset({"away", "unplugged"})
+
+
+def _departure_grid_prices(values: Any, *, legacy_fallback: Optional[float] = None) -> Dict[int, float]:
+    """Normalize JSON weekday keys. Old malformed caps cannot enable paid grid."""
+    if not isinstance(values, dict):
+        if legacy_fallback is not None:
+            return dict.fromkeys(range(7), legacy_fallback)
+        raise ValueError("departure_max_grid_price_cents must map weekdays 0 through 6 to prices")
+    prices = {}
+    for key, value in values.items():
+        if str(key) not in {"0", "1", "2", "3", "4", "5", "6"}:
+            if legacy_fallback is not None:
+                continue
+            raise ValueError("departure_max_grid_price_cents weekday must be 0 through 6")
+        try:
+            prices[int(key)] = finite_price_cents(value, "departure_max_grid_price_cents", legacy=legacy_fallback is not None)
+        except ValueError:
+            if legacy_fallback is None:
+                raise
+            prices[int(key)] = legacy_fallback
+    return prices
 
 
 def is_smart_schedule_grid_price_allowed(
@@ -182,13 +206,15 @@ def is_smart_schedule_grid_price_allowed(
     priority_value = getattr(priority, "value", priority)
     if str(priority_value or "").lower() == "time_critical":
         return True
-    if max_grid_price_cents is None or price_cents is None:
+    if max_grid_price_cents is None:
         return True
 
     try:
-        return float(price_cents) <= float(max_grid_price_cents)
-    except (TypeError, ValueError):
-        return True
+        return finite_price_cents(price_cents, "price_cents", legacy=True) <= finite_price_cents(
+            max_grid_price_cents, "max_grid_price_cents", legacy=True
+        )
+    except ValueError:
+        return False
 
 
 def _format_price_log_value(price_cents: Optional[float]) -> str:
@@ -4478,6 +4504,8 @@ class AutoScheduleSettings:
     vehicle_model: Optional[str] = None
     vehicle_trim: Optional[str] = None
 
+    shared_charger_profile_id: Optional[str] = None  # Runtime selection, resolved from the shared charger
+
     # Target settings
     target_soc: int = 80
     departure_time: Optional[str] = None  # HH:MM format (legacy, kept for backward compat)
@@ -4494,7 +4522,8 @@ class AutoScheduleSettings:
     stop_at_battery_floor: bool = True  # When battery hits consume level, stop EV (no grid fallback)
     limit_grid_import: bool = False  # Dynamically adjust EV charge amps to match inverter capacity
     preserve_home_battery: bool = False  # Request no-discharge mode while Smart Schedule is charging
-    max_grid_price_cents: float = 25.0  # Don't charge from grid above this price (backend only, not in mobile UI)
+    max_grid_price_cents: float = DEFAULT_MAX_GRID_PRICE_CENTS
+    departure_max_grid_price_cents: Dict[int, float] = field(default_factory=dict)
 
     # Per-day constraint overrides (days without entries fall back to global settings above)
     departure_min_battery_to_start: Dict[int, int] = field(default_factory=dict)  # {day_index: percent}
@@ -4564,7 +4593,7 @@ class AutoScheduleSettings:
 
     def get_effective_max_grid_price(self, weekday: int) -> float:
         """Get the effective max_grid_price_cents for a given weekday."""
-        return self.max_grid_price_cents
+        return self.departure_max_grid_price_cents.get(weekday, self.max_grid_price_cents)
 
     # Optional entity overrides for generic chargers
     charger_switch_entity: Optional[str] = None
@@ -4626,6 +4655,7 @@ class AutoScheduleSettings:
             # Use first found time as legacy departure_time
             legacy_departure_time = next(iter(self.departure_times.values()), None)
         return {
+            "shared_charger_profile_id": self.shared_charger_profile_id,
             "enabled": self.enabled,
             "vehicle_id": self.vehicle_id,
             "display_name": self.display_name,
@@ -4640,6 +4670,7 @@ class AutoScheduleSettings:
             "departure_time": legacy_departure_time,
             "departure_days": legacy_departure_days,
             "departure_times": {str(k): v for k, v in self.departure_times.items()},
+            "departure_max_grid_price_cents": {str(k): v for k, v in self.departure_max_grid_price_cents.items()},
             "departure_priorities": {str(k): v for k, v in self.departure_priorities.items()},
             "departure_min_battery_to_start": {str(k): v for k, v in self.departure_min_battery_to_start.items()},
             "departure_consume_battery_level": {str(k): v for k, v in self.departure_consume_battery_level.items()},
@@ -4700,6 +4731,16 @@ class AutoScheduleSettings:
         preserve_home_battery = data.get("preserve_home_battery", False)
         if preserve_home_battery and consume_battery_level:
             consume_battery_level = 0
+
+        try:
+            max_grid_price = finite_price_cents(
+                data.get("max_grid_price_cents", DEFAULT_MAX_GRID_PRICE_CENTS), "max_grid_price_cents", legacy=True,
+            )
+        except ValueError:
+            max_grid_price = 0.0
+        departure_grid_prices = _departure_grid_prices(
+            data.get("departure_max_grid_price_cents", {}), legacy_fallback=min(0.0, max_grid_price)
+        )
 
         # Handle departure_priorities (per-day strategy overrides)
         departure_priorities: Dict[int, str] = {}
@@ -4796,7 +4837,8 @@ class AutoScheduleSettings:
             stop_at_battery_floor=stop_at_battery_floor,
             limit_grid_import=limit_grid_import,
             preserve_home_battery=preserve_home_battery,
-            max_grid_price_cents=data.get("max_grid_price_cents", 25.0),
+            max_grid_price_cents=max_grid_price,
+            departure_max_grid_price_cents=departure_grid_prices,
             charger_type=data.get("charger_type", "tesla"),
             min_charge_amps=data.get("min_charge_amps", 5),
             max_charge_amps=data.get("max_charge_amps", 32),
@@ -4805,6 +4847,7 @@ class AutoScheduleSettings:
             charger_switch_entity=data.get("charger_switch_entity"),
             charger_amps_entity=data.get("charger_amps_entity"),
             charger_status_entity=data.get("charger_status_entity"),
+            charger_power_entity=data.get("charger_power_entity"),
             ocpp_charger_id=data.get("ocpp_charger_id"),
             pre_charge_wake_entity=data.get("pre_charge_wake_entity"),
             pre_charge_wake_duration_seconds=data.get("pre_charge_wake_duration_seconds"),
@@ -5003,6 +5046,7 @@ class AutoScheduleExecutor:
 
         # Settings per vehicle (loaded from storage)
         self._settings: Dict[str, AutoScheduleSettings] = {}
+        self._settings_write_lock = asyncio.Lock()
         # Fleet VINs discovered during settings load.  Runtime API/state
         # calls use this same identity set so a paired BLE alias cannot create
         # a second in-memory loadpoint.
@@ -5570,15 +5614,15 @@ class AutoScheduleExecutor:
                 if shared_data(self.hass, getattr(self, "config_entry", None)) is not None:
                     raise
 
+    def _settings_vehicle_id(self, vehicle_id: str) -> str:
+        return _canonical_auto_schedule_vehicle_id(
+            getattr(self, "hass", None), getattr(self, "config_entry", None),
+            vehicle_id, getattr(self, "_fleet_vins", ()), getattr(self, "_resolved_ble_prefixes", ()),
+        )
+
     def get_settings(self, vehicle_id: str) -> AutoScheduleSettings:
         """Get settings for a vehicle, creating defaults if needed."""
-        vehicle_id = _canonical_auto_schedule_vehicle_id(
-            getattr(self, "hass", None),
-            getattr(self, "config_entry", None),
-            vehicle_id,
-            getattr(self, "_fleet_vins", ()),
-            getattr(self, "_resolved_ble_prefixes", ()),
-        )
+        vehicle_id = self._settings_vehicle_id(vehicle_id)
         if vehicle_id not in self._settings:
             self._settings[vehicle_id] = AutoScheduleSettings(vehicle_id=vehicle_id)
             self._state[vehicle_id] = AutoScheduleState(vehicle_id=vehicle_id)
@@ -5588,18 +5632,67 @@ class AutoScheduleExecutor:
 
     def update_settings(self, vehicle_id: str, updates: dict) -> AutoScheduleSettings:
         """Update settings for a vehicle."""
-        vehicle_id = _canonical_auto_schedule_vehicle_id(
-            getattr(self, "hass", None),
-            getattr(self, "config_entry", None),
-            vehicle_id,
-            getattr(self, "_fleet_vins", ()),
-            getattr(self, "_resolved_ble_prefixes", ()),
+        vehicle_id = self._settings_vehicle_id(vehicle_id)
+        settings = self.get_settings(vehicle_id)
+        return self._apply_settings_update(vehicle_id, settings, updates)
+
+    async def async_save_settings_update(
+        self, store, vehicle_id: str, updates: dict, *, toggle: bool = False,
+    ) -> AutoScheduleSettings:
+        """Serialize app/action patches and expose them only after the owning store saves."""
+        from .. import _update_powerwall_store
+        from .shared_generic_charger import (
+            SharedChargerSelectionChanged, save_selected_schedule, selected_profile, shared_data,
         )
-        from .shared_generic_charger import entry_runtime, shared_data
+
+        vehicle_id = self._settings_vehicle_id(vehicle_id)
+        async with self._settings_write_lock:
+            existing = self._settings.get(vehicle_id)
+            candidate = copy.deepcopy(existing) if existing else AutoScheduleSettings(vehicle_id=vehicle_id)
+            shared = shared_data(self.hass, self.config_entry) if vehicle_id == "generic_ev" else None
+            if "shared_charger_profile_id" in updates:
+                profile = selected_profile(shared)
+                selected_id = profile.get("id") if profile else None
+                if updates["shared_charger_profile_id"] != selected_id:
+                    raise SharedChargerSelectionChanged("Shared charger selection changed. Reload the vehicle settings.")
+            if toggle:
+                updates = {"enabled": not candidate.enabled}
+            self._apply_settings_update(vehicle_id, candidate, updates)
+            if shared is not None:
+                # Shared vehicles restore from their selected profile. Write that single
+                # source of truth and retain the selection guard through persistence.
+                await save_selected_schedule(self, settings=candidate)
+            else:
+                def update_vehicle(data):
+                    profiles = dict(data.get("auto_schedule_settings") or {})
+                    profiles[vehicle_id] = candidate.to_dict()
+                    return {"auto_schedule_settings": profiles}
+
+                await _update_powerwall_store(store, update_vehicle)
+
+            if existing is None:
+                self._settings[vehicle_id] = candidate
+                self.get_state(vehicle_id)
+                return candidate
+            vars(existing).update(vars(candidate))
+            return existing
+
+    def _apply_settings_update(
+        self, vehicle_id: str, settings: AutoScheduleSettings, updates: dict,
+    ) -> AutoScheduleSettings:
+        from .shared_generic_charger import SharedChargerSelectionChanged, entry_runtime, shared_data
         if vehicle_id == "generic_ev" and shared_data(getattr(self, "hass", None), getattr(self, "config_entry", None)) is not None:
             if entry_runtime(self.hass, self.config_entry).get("_shared_generic_switching"):
-                raise ValueError("Shared charger selection is changing.")
-        settings = self.get_settings(vehicle_id)
+                raise SharedChargerSelectionChanged("Shared charger selection is changing.")
+        # Validate both caps before changing any live option in the patch.
+        updates = dict(updates)
+        if "max_grid_price_cents" in updates:
+            updates["max_grid_price_cents"] = finite_price_cents(updates["max_grid_price_cents"], "max_grid_price_cents")
+        if "departure_max_grid_price_cents" in updates:
+            updates["departure_max_grid_price_cents"] = _departure_grid_prices(updates["departure_max_grid_price_cents"])
+        # The canonical key above owns identity, including BLE aliases.
+        updates.pop("vehicle_id", None)
+        updates.pop("shared_charger_profile_id", None)
 
         for key, value in updates.items():
             if key in (
@@ -5639,7 +5732,7 @@ class AutoScheduleExecutor:
             if key == "departure_home_battery_min" and isinstance(value, dict):
                 key = "departure_min_battery_to_start"
                 value = {int(k): int(v) for k, v in value.items()}
-            if hasattr(settings, key):
+            if key in AutoScheduleSettings.__dataclass_fields__:
                 setattr(settings, key, value)
                 if key == "preserve_home_battery" and bool(value):
                     settings.consume_battery_level = 0
@@ -5654,9 +5747,14 @@ class AutoScheduleExecutor:
                         if consume_level > 0:
                             settings.departure_preserve_home_battery[day] = False
 
-        if isinstance(updates.get("departure_times"), dict):
-            # Apply after all fields so stale compatibility aliases cannot
-            # revive a cleared deadline regardless of JSON field order.
+        if "departure_times" not in updates and ("departure_time" in updates or "departure_days" in updates):
+            # Legacy clients edit a single clock and a set of weekdays.
+            # Normalize to the same persisted map that modern clients read.
+            settings.departure_times = (
+                dict.fromkeys(settings.departure_days or [], settings.departure_time)
+                if settings.departure_time else {}
+            )
+        if any(key in updates for key in ("departure_times", "departure_time", "departure_days")):
             settings.departure_time = next(iter(settings.departure_times.values()), None)
             settings.departure_days = sorted(settings.departure_times)
 
@@ -6708,6 +6806,11 @@ class AutoScheduleExecutor:
         # Use price from parameter or estimate
         if current_price_cents is None:
             current_price_cents = await self._get_current_price()
+        if current_price_cents is not None:
+            try:
+                current_price_cents = finite_price_cents(current_price_cents, "price_cents")
+            except ValueError:
+                current_price_cents = None
 
         # Note: min_battery_soc affects surplus calculation (prevents discharge),
         # but does NOT block EV charging from solar or grid.
@@ -6718,12 +6821,7 @@ class AutoScheduleExecutor:
         policy_weekday = _plan_policy_weekday(state.current_plan, weekday)
         effective_priority = settings.get_effective_priority(policy_weekday)
         effective_limit_grid = settings.get_effective_limit_grid_import(weekday)
-        plan_max_price = getattr(state.current_plan, "max_grid_price_cents", None)
-        effective_max_price = (
-            plan_max_price
-            if plan_max_price is not None
-            else settings.get_effective_max_grid_price(policy_weekday)
-        )
+        effective_max_price = settings.get_effective_max_grid_price(policy_weekday)
         effective_home_min = settings.get_effective_min_battery_to_start(weekday)
         effective_consume_level = settings.get_effective_consume_battery_level(weekday)
         effective_stop_at_floor = settings.get_effective_stop_at_battery_floor(weekday)
@@ -6820,7 +6918,11 @@ class AutoScheduleExecutor:
                 priority=effective_priority,
             ):
                 should_charge = False
-                reason = f"Grid price {current_price_cents:.0f}c > max {effective_max_price:.0f}c"
+                reason = (
+                    "Current grid price unavailable"
+                    if current_price_cents is None
+                    else f"Grid price {current_price_cents:g}c exceeds max {effective_max_price:g}c"
+                )
 
             # Solar-only blocks paid grid energy; the explicit free-grid
             # policy applies across every Smart Schedule strategy.
@@ -7288,36 +7390,23 @@ class AutoScheduleExecutor:
 
         # Determine target time from per-day departure_times
         target_time = None
-        if settings.departure_times:
-            # Find next applicable departure by walking forward through days
-            for days_ahead in range(8):  # Check up to 7 days ahead
-                check_time = departure_reference + timedelta(days=days_ahead)
-                weekday = check_time.weekday()
-                if weekday in settings.departure_times:
-                    dep_str = settings.departure_times[weekday]
-                    try:
-                        dep_hour, dep_min = map(int, dep_str.split(":"))
-                        candidate = check_time.replace(hour=dep_hour, minute=dep_min, second=0, microsecond=0)
-                        if candidate > departure_reference:
-                            target_time = candidate
-                            break
-                    except ValueError:
-                        _LOGGER.warning(f"Invalid departure time format for day {weekday}: {dep_str}")
-        elif settings.departure_time:
-            # Legacy fallback: single departure_time + departure_days
+        departures = settings.departure_times
+        if not departures and settings.departure_time:
+            departures = dict.fromkeys(settings.departure_days or [], settings.departure_time)
+        for days_ahead in range(8):
+            check_time = departure_reference + timedelta(days=days_ahead)
+            weekday = check_time.weekday()
+            if weekday not in departures:
+                continue
             try:
-                dep_hour, dep_min = map(int, settings.departure_time.split(":"))
-                target_time = departure_reference.replace(hour=dep_hour, minute=dep_min, second=0, microsecond=0)
-
-                # If departure is in the past today, use tomorrow
-                if target_time <= departure_reference:
-                    target_time += timedelta(days=1)
-
-                # Check if target day is in departure_days
-                while target_time.weekday() not in settings.departure_days:
-                    target_time += timedelta(days=1)
-            except ValueError:
-                _LOGGER.warning(f"Invalid departure time format: {settings.departure_time}")
+                dep_hour, dep_min = map(int, departures[weekday].split(":"))
+                candidate = check_time.replace(hour=dep_hour, minute=dep_min, second=0, microsecond=0)
+            except (AttributeError, TypeError, ValueError):
+                _LOGGER.warning("Invalid departure time for weekday %s", weekday)
+                continue
+            if candidate > departure_reference:
+                target_time = candidate
+                break
 
         # Get current SoC from vehicle sensors when the caller has not already
         # done so for availability/target checks.
@@ -10523,32 +10612,8 @@ class PriceLevelChargingExecutor:
         entry_data = self.hass.data.get(self._domain, {}).get(self.config_entry.entry_id, {})
         store = entry_data.get("automation_store")
 
-        defaults = {
-            "enabled": False,
-            "recovery_soc": 40,
-            "recovery_price_cents": 30,
-            "opportunity_price_cents": 10,
-            "preserve_home_battery": False,
-            "no_grid_import": False,
-            "min_battery_to_start": 20,  # Don't charge EV if home battery below this %
-            "home_battery_minimum": 20,  # Backward compat alias
-        }
-
-        if store:
-            stored_data = getattr(store, '_data', {}) or {}
-            settings = stored_data.get("price_level_charging", {})
-            _LOGGER.debug(
-                f"Price-level settings from store: {settings}, "
-                f"store._data keys: {list(stored_data.keys())}"
-            )
-            defaults.update(settings)
-        else:
-            _LOGGER.warning("Price-level charging: automation_store not found in entry_data")
-
-        if defaults.get("preserve_home_battery") and defaults.get("no_grid_import"):
-            defaults["no_grid_import"] = False
-
-        return defaults
+        stored = (getattr(store, "_data", None) or {}).get("price_level_charging")
+        return charging_mode_settings("price_level_charging", stored)
 
     async def _get_home_battery_soc(self) -> Optional[float]:
         """Get home battery (Powerwall/Sigenergy/Sungrow) state of charge.
@@ -12413,24 +12478,8 @@ class ScheduledChargingExecutor:
         entry_data = self.hass.data.get(self._domain, {}).get(self.config_entry.entry_id, {})
         store = entry_data.get("automation_store")
 
-        defaults = {
-            "enabled": False,
-            "start_time": "00:00",
-            "end_time": "06:00",
-            "max_price_cents": 30,
-            "preserve_home_battery": False,
-            "no_grid_import": False,
-        }
-
-        if store:
-            stored_data = getattr(store, '_data', {}) or {}
-            settings = stored_data.get("scheduled_charging", {})
-            defaults.update(settings)
-
-        if defaults.get("preserve_home_battery") and defaults.get("no_grid_import"):
-            defaults["no_grid_import"] = False
-
-        return defaults
+        stored = (getattr(store, "_data", None) or {}).get("scheduled_charging")
+        return charging_mode_settings("scheduled_charging", stored)
 
     def _set_preserve_home_battery_intent(self, reason: str) -> None:
         """Publish scheduled EV preserve intent for the optimiser to execute."""

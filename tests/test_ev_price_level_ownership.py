@@ -278,6 +278,24 @@ def test_auto_schedule_runtime_uses_plan_departure_policy_across_midnight(
     assert executor._start_charging.await_args.args[3] == "grid_peak"
     assert executor._start_charging.await_args.kwargs["force_max_rate"] is True
     assert "Grid price" not in state.last_decision_reason
+    # Editing the Monday ceiling takes effect even when Sunday's cached plan
+    # still carries 25 cents. A price of zero exceeds a negative ceiling.
+    settings.departure_priorities.clear()
+    executor._settings[VIN] = settings
+    executor.update_settings(VIN, {"departure_max_grid_price_cents": {"0": -2.0}})
+    executor._start_charging.reset_mock()
+    live = {"battery_soc": 100, "solar_power": 0, "load_power": 1000, "grid_power": 1000}
+    asyncio.run(executor._evaluate_vehicle(VIN, settings, live, current_price_cents=0))
+    executor._start_charging.assert_not_awaited()
+    assert "Grid price" in state.last_decision_reason
+    executor._get_current_price = AsyncMock(return_value=None)
+    for unavailable in (None, True, float("-inf"), float("nan")):
+        asyncio.run(executor._evaluate_vehicle(VIN, settings, live, current_price_cents=unavailable))
+        executor._start_charging.assert_not_awaited()
+        assert state.last_decision_reason == "Current grid price unavailable"
+    asyncio.run(executor._evaluate_vehicle(VIN, settings, live, current_price_cents=-2))
+    executor._start_charging.assert_awaited_once()
+
 
 
 def test_auto_schedule_rearms_after_dynamic_solar_owner_cleanup(monkeypatch):
@@ -1332,6 +1350,24 @@ def test_solar_only_plan_does_not_label_grid_capacity_as_solar(monkeypatch):
     assert plan.estimated_solar_kwh == pytest.approx(1.84)
     assert plan.estimated_grid_kwh == 0
     assert plan.can_meet_target is False
+
+
+@pytest.mark.parametrize("strategy", ["solar_preferred", "cost_optimized"])
+def test_negative_grid_cap_filters_zero_and_includes_equal_price_forecast(monkeypatch, strategy):
+    now = datetime(2026, 10, 11, 9, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda: now)
+    planner = ev_planner.ChargingPlanner(_FakeHass(), _FakeConfigEntry())
+    plan = asyncio.run(getattr(planner, f"_plan_{strategy}")(
+        vehicle_id=VIN, current_soc=25, target_soc=80, target_time=now + timedelta(hours=2),
+        energy_needed_kwh=30, charger_power_kw=3.6, surplus_forecast=[],
+        price_forecast=[
+            ev_planner.PriceForecast("2026-10-11T09:00:00", 0, 0, "offpeak"),
+            ev_planner.PriceForecast("2026-10-11T10:00:00", -2.25, 0, "offpeak"),
+        ],
+        max_grid_price_cents=-2.25,
+    ))
+    assert [window.price_cents_kwh for window in plan.windows] == [-2.25]
+    assert plan.estimated_grid_kwh > 0 and not plan.can_meet_target
 
 
 @pytest.mark.parametrize("strategy", ["solar_only", "solar_preferred", "cost_optimized"])
@@ -7042,17 +7078,23 @@ def test_time_critical_solar_window_falls_back_to_grid_only_when_permitted(
 
 
 @pytest.mark.parametrize(
-    ("priority", "demand_blocked", "expected_start"),
+    ("priority", "demand_blocked", "price", "cap", "expected_start"),
     (
-        (ev_planner.ChargingPriority.TIME_CRITICAL, False, True),
-        (ev_planner.ChargingPriority.SOLAR_ONLY, False, True),
-        (ev_planner.ChargingPriority.TIME_CRITICAL, True, False),
+        (ev_planner.ChargingPriority.TIME_CRITICAL, False, 0, -2, True),
+        (ev_planner.ChargingPriority.SOLAR_ONLY, False, 0, -2, False),
+        (ev_planner.ChargingPriority.SOLAR_ONLY, False, -2, -2, True),
+        (ev_planner.ChargingPriority.SOLAR_PREFERRED, False, 0, -2, False),
+        (ev_planner.ChargingPriority.COST_OPTIMIZED, False, 0, -2, False),
+        (ev_planner.ChargingPriority.SOLAR_ONLY, False, 0, 25, True),
+        (ev_planner.ChargingPriority.TIME_CRITICAL, True, 0, 25, False),
     ),
 )
 def test_auto_schedule_free_grid_overrides_priority_without_forcing_max_rate(
     monkeypatch,
     priority,
     demand_blocked,
+    price,
+    cap,
     expected_start,
 ):
     actions_module = importlib.import_module("power_sync.automations.actions")
@@ -7080,13 +7122,6 @@ def test_auto_schedule_free_grid_overrides_priority_without_forcing_max_rate(
         state.is_charging = True
         return True
 
-    class FreeGridPlanner:
-        async def should_charge_now(self, **kwargs):
-            return True, "Free grid power (0.0c/kWh)", "grid_free"
-
-        def _is_grid_charging_blocked_at(self, when):
-            return demand_blocked
-
     monkeypatch.setattr(ev_planner, "get_ev_location", at_home)
     monkeypatch.setattr(ev_planner, "is_ev_plugged_in", plugged_in)
     monkeypatch.setattr(
@@ -7102,22 +7137,21 @@ def test_auto_schedule_free_grid_overrides_priority_without_forcing_max_rate(
     monkeypatch.setattr(
         ev_planner.dt_util,
         "now",
-        lambda: SimpleNamespace(weekday=lambda: 0),
+        lambda: datetime(2026, 10, 5, 1, 0, tzinfo=timezone.utc),
     )
 
-    executor = ev_planner.AutoScheduleExecutor(
-        _FakeHass(),
-        _FakeConfigEntry(),
-        planner=FreeGridPlanner(),
-    )
+    hass, entry = _FakeHass(), _FakeConfigEntry()
+    planner = ev_planner.ChargingPlanner(hass, entry)
+    monkeypatch.setattr(planner, "_is_grid_charging_blocked_at", lambda now: demand_blocked)
+    executor = ev_planner.AutoScheduleExecutor(hass, entry, planner=planner)
     settings = ev_planner.AutoScheduleSettings(
         vehicle_id=VIN,
         display_name="TESSY",
         target_soc=80,
-        priority=priority,
+        priority=priority, max_grid_price_cents=cap,
     )
     state = ev_planner.AutoScheduleState(vehicle_id=VIN)
-    state.current_plan = SimpleNamespace(windows=[])
+    state.current_plan = SimpleNamespace(windows=[], target_time=None)
     state.last_plan_update = ev_planner.datetime.now()
     executor._state[VIN] = state
 
@@ -7131,7 +7165,7 @@ def test_auto_schedule_free_grid_overrides_priority_without_forcing_max_rate(
                 "load_power": 1800,
                 "grid_power": 13000,
             },
-            current_price_cents=0,
+            current_price_cents=price,
         )
     )
 

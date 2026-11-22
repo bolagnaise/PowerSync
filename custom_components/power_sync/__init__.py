@@ -22964,9 +22964,8 @@ class AutoScheduleSettingsView(HomeAssistantView):
     async def get(self, request):
         """Get auto-schedule settings for all vehicles."""
         try:
-            from .automations.ev_charging_planner import get_auto_schedule_executor
-
-            executor = get_auto_schedule_executor()
+            runtime = self._hass.data.get(DOMAIN, {}).get(self._config_entry.entry_id, {})
+            executor = runtime.get("auto_schedule_executor")
             if not executor:
                 return web.json_response({
                     "success": False,
@@ -22993,26 +22992,30 @@ class AutoScheduleSettingsView(HomeAssistantView):
     async def post(self, request):
         """Update auto-schedule settings for a vehicle."""
         try:
-            from .automations.ev_charging_planner import get_auto_schedule_executor, ChargingPlanner
+            from .automations.shared_generic_charger import SharedChargerSelectionChanged
 
             data = await request.json()
+            if not isinstance(data, dict):
+                return web.json_response({"success": False, "error": "EV settings must be an object"}, status=400)
             vehicle_id = data.get("vehicle_id", "_default")
 
-            executor = get_auto_schedule_executor()
+            runtime = self._hass.data.get(DOMAIN, {}).get(self._config_entry.entry_id, {})
+            executor = runtime.get("auto_schedule_executor")
             if not executor:
                 return web.json_response({
                     "success": False,
                     "error": "Auto-schedule executor not initialized"
                 }, status=503)
 
-            # Update settings
-            updated_settings = executor.update_settings(vehicle_id, data)
-
-            # Save to storage
-            entry_id = self._config_entry.entry_id
-            store = self._hass.data.get(DOMAIN, {}).get(entry_id, {}).get("store")
-            if store:
-                await executor.save_settings(store)
+            store = runtime.get("store")
+            if store is None:
+                return web.json_response({"success": False, "error": "Storage not available"}, status=503)
+            try:
+                updated_settings = await executor.async_save_settings_update(store, vehicle_id, data)
+            except SharedChargerSelectionChanged as err:
+                return web.json_response({"success": False, "error": str(err)}, status=409)
+            except ValueError as err:
+                return web.json_response({"success": False, "error": str(err)}, status=400)
 
             # Regenerate plan immediately with new settings
             plan_data = None
@@ -23057,9 +23060,8 @@ class AutoScheduleStatusView(HomeAssistantView):
     async def get(self, request):
         """Get auto-schedule status for all vehicles."""
         try:
-            from .automations.ev_charging_planner import get_auto_schedule_executor
-
-            executor = get_auto_schedule_executor()
+            runtime = self._hass.data.get(DOMAIN, {}).get(self._config_entry.entry_id, {})
+            executor = runtime.get("auto_schedule_executor")
             if not executor:
                 return web.json_response({
                     "success": False,
@@ -23092,6 +23094,9 @@ class AutoScheduleStatusView(HomeAssistantView):
                     "departure_time": legacy_departure_time,
                     "departure_days": legacy_departure_days,
                     "departure_times": {str(k): v for k, v in vehicle_settings.departure_times.items()},
+                    "shared_charger_profile_id": vehicle_settings.shared_charger_profile_id,
+                    "max_grid_price_cents": vehicle_settings.max_grid_price_cents,
+                    "departure_max_grid_price_cents": {str(k): v for k, v in vehicle_settings.departure_max_grid_price_cents.items()},
                     "departure_priorities": {str(k): v for k, v in vehicle_settings.departure_priorities.items()},
                     # New per-day constraint fields
                     "departure_min_battery_to_start": {str(k): v for k, v in vehicle_settings.departure_min_battery_to_start.items()},
@@ -23150,13 +23155,16 @@ class AutoScheduleToggleView(HomeAssistantView):
     async def post(self, request):
         """Toggle auto-schedule for a vehicle."""
         try:
-            from .automations.ev_charging_planner import get_auto_schedule_executor
+            from .automations.shared_generic_charger import SharedChargerSelectionChanged
 
             data = await request.json()
+            if not isinstance(data, dict):
+                return web.json_response({"success": False, "error": "EV settings must be an object"}, status=400)
             vehicle_id = data.get("vehicle_id", "_default")
             enabled = data.get("enabled")
 
-            executor = get_auto_schedule_executor()
+            runtime = self._hass.data.get(DOMAIN, {}).get(self._config_entry.entry_id, {})
+            executor = runtime.get("auto_schedule_executor")
             if not executor:
                 return web.json_response({
                     "success": False,
@@ -23167,25 +23175,27 @@ class AutoScheduleToggleView(HomeAssistantView):
             if vehicle_id in ("generic_ev", "_default", "ev") and shared_data(self._hass, self._config_entry) is not None:
                 if entry_runtime(self._hass, self._config_entry).get("_shared_generic_switching"):
                     return web.json_response({"success": False, "error": "Shared charger selection is changing."}, status=409)
-            settings = executor.get_settings(vehicle_id)
-
-            if enabled is not None:
-                settings.enabled = bool(enabled)
-            else:
-                # Toggle
-                settings.enabled = not settings.enabled
-
-            # Save to storage
-            entry_id = self._config_entry.entry_id
-            store = self._hass.data.get(DOMAIN, {}).get(entry_id, {}).get("store")
-            if store:
-                await executor.save_settings(store)
+            store = runtime.get("store")
+            if store is None:
+                return web.json_response({"success": False, "error": "Storage not available"}, status=503)
+            if enabled is not None and not isinstance(enabled, bool):
+                return web.json_response({"success": False, "error": "enabled must be a boolean"}, status=400)
+            try:
+                updates = {"enabled": enabled}
+                if "shared_charger_profile_id" in data:
+                    updates["shared_charger_profile_id"] = data["shared_charger_profile_id"]
+                settings = await executor.async_save_settings_update(store, vehicle_id, updates, toggle=enabled is None)
+            except SharedChargerSelectionChanged as err:
+                return web.json_response({"success": False, "error": str(err)}, status=409)
+            except ValueError as err:
+                return web.json_response({"success": False, "error": str(err)}, status=400)
 
             _LOGGER.info(f"Auto-schedule {'enabled' if settings.enabled else 'disabled'} for {vehicle_id}")
 
             return web.json_response({
                 "success": True,
-                "vehicle_id": vehicle_id,
+                "vehicle_id": settings.vehicle_id,
+                "shared_charger_profile_id": settings.shared_charger_profile_id,
                 "enabled": settings.enabled,
             })
 
@@ -23223,22 +23233,10 @@ class PriceLevelChargingSettingsView(HomeAssistantView):
         """Get price-level charging settings."""
         try:
             store = self._get_store()
-            settings = {
-                "enabled": False,
-                "recovery_soc": 40,
-                "recovery_price_cents": 30,
-                "opportunity_price_cents": 10,
-                "preserve_home_battery": False,
-                "no_grid_import": False,
-                "home_battery_minimum": 20,
-            }
+            from .ev_mode_settings import charging_mode_settings
 
-            if store:
-                stored_data = getattr(store, '_data', {}) or {}
-                stored_settings = stored_data.get("price_level_charging", {})
-                settings.update(stored_settings)
-            if settings.get("preserve_home_battery") and settings.get("no_grid_import"):
-                settings["no_grid_import"] = False
+            stored = (getattr(store, "_data", None) or {}).get("price_level_charging")
+            settings = charging_mode_settings("price_level_charging", stored)
 
             return web.json_response({
                 "success": True,
@@ -23285,6 +23283,8 @@ class PriceLevelChargingSettingsView(HomeAssistantView):
                 "settings": settings,
             })
 
+        except ValueError as err:
+            return web.json_response({"success": False, "error": str(err)}, status=400)
         except Exception as e:
             _LOGGER.error(f"Error updating price-level charging settings: {e}", exc_info=True)
             return web.json_response({
@@ -23359,21 +23359,10 @@ class ScheduledChargingSettingsView(HomeAssistantView):
         """Get scheduled charging settings."""
         try:
             store = self._get_store()
-            settings = {
-                "enabled": False,
-                "start_time": "00:00",
-                "end_time": "06:00",
-                "max_price_cents": 30,
-                "preserve_home_battery": False,
-                "no_grid_import": False,
-            }
+            from .ev_mode_settings import charging_mode_settings
 
-            if store:
-                stored_data = getattr(store, '_data', {}) or {}
-                stored_settings = stored_data.get("scheduled_charging", {})
-                settings.update(stored_settings)
-            if settings.get("preserve_home_battery") and settings.get("no_grid_import"):
-                settings["no_grid_import"] = False
+            stored = (getattr(store, "_data", None) or {}).get("scheduled_charging")
+            settings = charging_mode_settings("scheduled_charging", stored)
 
             return web.json_response({
                 "success": True,
@@ -23412,6 +23401,8 @@ class ScheduledChargingSettingsView(HomeAssistantView):
                 "settings": settings,
             })
 
+        except ValueError as err:
+            return web.json_response({"success": False, "error": str(err)}, status=400)
         except Exception as e:
             _LOGGER.error(f"Error updating scheduled charging settings: {e}", exc_info=True)
             return web.json_response({

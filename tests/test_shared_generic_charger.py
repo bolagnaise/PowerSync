@@ -34,10 +34,15 @@ def env(monkeypatch):
     monkeypatch.setitem(sys.modules, const.__name__, const)
     shared = importlib.import_module("power_sync.automations.shared_generic_charger")
     tree = ast.parse((ROOT / "automations/ev_charging_planner.py").read_text())
-    nodes = [n for n in tree.body if isinstance(n, ast.ClassDef) and n.name in ("ChargingPriority", "AutoScheduleSettings")]
+    nodes = [
+        n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.ClassDef))
+        and n.name in ("_departure_grid_prices", "ChargingPriority", "AutoScheduleSettings")
+    ]
     planner = types.ModuleType("power_sync.automations.ev_charging_planner")
     planner.__dict__.update(dataclass=dataclass, field=field, Enum=Enum,
                             Optional=Optional, List=List, Dict=Dict, Any=Any,
+                            finite_price_cents=importlib.import_module("power_sync.ev_mode_settings").finite_price_cents,
+                            DEFAULT_MAX_GRID_PRICE_CENTS=25.0,
                             CAPACITY_SOURCE_DEFAULT_ESTIMATE="default_estimate")
     monkeypatch.setitem(sys.modules, planner.__name__, planner)
     exec(compile(ast.fix_missing_locations(ast.Module(body=[ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0), *nodes], type_ignores=[])), "real_settings", "exec"), vars(planner))

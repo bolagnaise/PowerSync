@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
+import logging
 import importlib
 import sys
 import types
 from unittest.mock import AsyncMock
 from datetime import datetime, timezone
 from pathlib import Path
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parent.parent / "custom_components" / "power_sync"
@@ -127,6 +131,16 @@ def test_empty_departure_times_does_not_rehydrate_legacy_schedule():
     assert settings.to_dict()["departure_days"] == []
 
 
+def test_legacy_departure_edit_round_trips_and_empty_weekdays_clear_the_deadline():
+    executor = object.__new__(ev_planner.AutoScheduleExecutor)
+    executor._settings, executor._state = {}, {}
+    current = executor.update_settings("car", {"departure_time": "06:30", "departure_days": [1, 5]})
+    restored = ev_planner.AutoScheduleSettings.from_dict(current.to_dict())
+    assert restored.departure_times == {1: "06:30", 5: "06:30"}
+    current = executor.update_settings("car", {"departure_days": []})
+    assert current.departure_time is None and current.to_dict()["departure_times"] == {}
+
+
 def test_empty_per_day_overrides_clear_legacy_aliases():
     settings = ev_planner.AutoScheduleSettings.from_dict({
         "departure_priorities": {},
@@ -155,6 +169,154 @@ def test_generic_status_entity_round_trips_with_auto_schedule_settings():
 
     assert settings.charger_status_entity == "sensor.garage_ev_status"
     assert settings.to_dict()["charger_status_entity"] == "sensor.garage_ev_status"
+
+
+@pytest.mark.parametrize("invalid", [None, True, False, "5", [], {}, float("nan"), float("inf"), -float("inf"), 10**500])
+@pytest.mark.parametrize("field", ["max_grid_price_cents", "departure_max_grid_price_cents"])
+def test_smart_schedule_rejects_invalid_grid_caps_without_partial_update(invalid, field):
+    executor = object.__new__(ev_planner.AutoScheduleExecutor)
+    executor._settings, executor._state = {}, {}
+    settings = executor.update_settings("car", {"target_soc": 77, "max_grid_price_cents": -3})
+    value = {"0": invalid} if field.startswith("departure_") else invalid
+    with pytest.raises(ValueError, match="grid_price"):
+        executor.update_settings("car", {"target_soc": 90, field: value})
+    assert settings.target_soc == 77
+    assert settings.max_grid_price_cents == -3
+
+
+@pytest.mark.parametrize("invalid", [None, [], {"7": 4}, {"-1": 4}, {"1.2": 4}, {True: 4}])
+def test_smart_schedule_rejects_malformed_grid_cap_weekday_map(invalid):
+    executor = object.__new__(ev_planner.AutoScheduleExecutor)
+    executor._settings, executor._state = {}, {}
+    with pytest.raises(ValueError, match="departure_max_grid_price"):
+        executor.update_settings("car", {"departure_max_grid_price_cents": invalid})
+
+
+def test_smart_schedule_caps_round_trip_per_vehicle_weekday_and_clear():
+    executor = object.__new__(ev_planner.AutoScheduleExecutor)
+    executor._settings, executor._state = {}, {}
+    settings = executor.update_settings("car", {
+        "max_grid_price_cents": -2.25,
+        "departure_max_grid_price_cents": {"0": 0, "4": 1.125},
+        "charger_power_entity": "sensor.garage_charge_power",
+    })
+    executor.update_settings("car", {"target_soc": 89})
+    assert executor.get_settings("other").get_effective_max_grid_price(0) == 25
+    saved = settings.to_dict()
+    assert saved["departure_max_grid_price_cents"] == {"0": 0, "4": 1.125}
+    restored = ev_planner.AutoScheduleSettings.from_dict(saved)
+    assert restored.charger_power_entity == "sensor.garage_charge_power"
+    assert [restored.get_effective_max_grid_price(d) for d in (0, 3, 4)] == [0, -2.25, 1.125]
+    executor.update_settings("car", {"departure_max_grid_price_cents": {}})
+    assert settings.get_effective_max_grid_price(0) == -2.25
+
+
+def test_smart_schedule_restores_legacy_caps_with_a_finite_non_paid_fallback():
+    restore = ev_planner.AutoScheduleSettings.from_dict
+    assert restore({}).max_grid_price_cents == 25
+    assert restore({"max_grid_price_cents": "-3.5"}).max_grid_price_cents == -3.5
+    for invalid in (None, True, "no", float("inf"), float("nan")):
+        settings = restore({"max_grid_price_cents": invalid})
+        assert settings.get_effective_max_grid_price(0) == 0
+    settings = restore({"max_grid_price_cents": -3, "departure_max_grid_price_cents": {"1": "bad", "3": 8}})
+    assert settings.get_effective_max_grid_price(1) == -3
+    assert settings.get_effective_max_grid_price(3) == 8
+
+
+@pytest.mark.asyncio
+async def test_smart_schedule_api_saves_per_vehicle_and_returns_durable_caps(monkeypatch):
+    # Exercise the app routes and the real executor. Only the HA store and
+    # plan regeneration are substituted.
+    tree = ast.parse((ROOT / "__init__.py").read_text())
+    views = [n for n in tree.body if isinstance(n, ast.ClassDef) and n.name in {
+        "AutoScheduleSettingsView", "AutoScheduleStatusView", "AutoScheduleToggleView",
+    }]
+    namespace = {
+        "HomeAssistantView": object, "HomeAssistant": object, "ConfigEntry": object, "DOMAIN": "power_sync",
+        "web": types.SimpleNamespace(json_response=lambda data, status=200: (status, data)),
+        "_LOGGER": logging.getLogger(__name__), "__name__": "power_sync.test_views", "__package__": "power_sync",
+    }
+    exec(compile(ast.Module(body=views, type_ignores=[]), "smart_schedule_views", "exec"), namespace)
+    entry = types.SimpleNamespace(entry_id="one", options={}, data={})
+    hass = types.SimpleNamespace(data={"power_sync": {"one": {}}})
+    executor = ev_planner.AutoScheduleExecutor(hass, entry, planner=object())
+    executor._regenerate_plan = AsyncMock()
+    runtime = hass.data["power_sync"]["one"]
+    runtime.update(auto_schedule_executor=executor, store=object())
+    saved = {"auto_schedule_settings": {"other": {"max_grid_price_cents": 8}}}
+    async def persist(store, merge):
+        saved.update(merge(saved))
+        return True
+    storage = AsyncMock(side_effect=persist)
+    monkeypatch.setattr(sys.modules["power_sync"], "_update_powerwall_store", storage, raising=False)
+    get_post = namespace["AutoScheduleSettingsView"](hass, entry)
+    status = namespace["AutoScheduleStatusView"](hass, entry)
+    toggle = namespace["AutoScheduleToggleView"](hass, entry)
+    def request(fields):
+        return types.SimpleNamespace(json=AsyncMock(return_value={"vehicle_id": "car", **fields}))
+    code, response = await get_post.post(request({"max_grid_price_cents": 0, "departure_max_grid_price_cents": {"0": -2.5}}))
+    assert code == 200 and response["settings"]["max_grid_price_cents"] == 0
+    assert saved["auto_schedule_settings"]["other"] == {"max_grid_price_cents": 8}
+    assert saved["auto_schedule_settings"]["car"]["departure_max_grid_price_cents"] == {"0": -2.5}
+    for route in (get_post, status):
+        code, response = await route.get(None)
+        assert code == 200
+        assert response["settings"]["car"]["max_grid_price_cents"] == 0
+        assert response["settings"]["car"]["departure_max_grid_price_cents"] == {"0": -2.5}
+    assert (await get_post.post(request({"max_grid_price_cents": True})))[0] == 400
+    assert storage.await_count == 1
+    assert (await toggle.post(request({"enabled": True})))[0] == 200
+    storage.side_effect = OSError("disk full")
+    assert (await get_post.post(request({"max_grid_price_cents": 99})))[0] == 500
+    assert executor.get_settings("car").max_grid_price_cents == 0
+    assert (await toggle.post(request({"enabled": False})))[0] == 500
+    assert executor.get_settings("car").enabled
+    shared = importlib.import_module("power_sync.automations.shared_generic_charger")
+    profiles = [
+        {"id": name, "name": name, "battery_capacity_kwh": 60, "schedule": {}}
+        for name in ("first", "second")
+    ]
+    entered, release = asyncio.Event(), asyncio.Event()
+    async def delay_save():
+        entered.set()
+        await release.wait()
+    shared_store = types.SimpleNamespace(
+        _data={shared.KEY: {"profiles": profiles, "selected_vehicle_id": "first"}},
+        async_save=AsyncMock(side_effect=delay_save),
+    )
+    runtime["automation_store"] = shared_store
+    shared.restore_schedule(executor)
+    edit = request({"vehicle_id": "generic_ev", "shared_charger_profile_id": "first", "max_grid_price_cents": -6.5})
+    saving = asyncio.create_task(get_post.post(edit))
+    await asyncio.wait_for(entered.wait(), timeout=5)
+    assert shared.selection_block_reason(hass, entry, executor)
+    assert executor.get_settings("generic_ev").max_grid_price_cents == 25
+    release.set()
+    code, response = await saving
+    assert code == 200 and response["settings"]["shared_charger_profile_id"] == "first"
+    assert profiles[0]["schedule"]["max_grid_price_cents"] == -6.5
+
+    # A second request already sent by the old editor waits for the write lock.
+    # Change the selected profile before the request can commit.
+    async with executor._settings_write_lock:
+        pending_toggle = asyncio.create_task(toggle.post(request({
+            "vehicle_id": "generic_ev", "shared_charger_profile_id": "first", "enabled": True,
+        })))
+        await asyncio.sleep(0)
+        shared_store._data[shared.KEY]["selected_vehicle_id"] = "second"
+        shared.restore_schedule(executor)
+    assert (await pending_toggle)[0] == 409
+    assert (await get_post.post(edit))[0] == 409
+    shared_store.async_save.assert_awaited_once()
+    assert profiles[1]["schedule"] == {}
+    for route in (get_post, status):
+        code, response = await route.get(None)
+        assert code == 200 and response["settings"]["generic_ev"]["shared_charger_profile_id"] == "second"
+    code, response = await toggle.post(request({"vehicle_id": "generic_ev", "enabled": True}))
+    assert code == 200 and response["shared_charger_profile_id"] == "second"
+    assert profiles[1]["schedule"]["enabled"] and not profiles[0]["schedule"]["enabled"]
+    runtime.pop("store")
+    assert (await get_post.post(request({"max_grid_price_cents": 99})))[0] == 503
 
 
 def test_preserve_home_battery_round_trips_with_auto_schedule_settings():
@@ -1042,7 +1204,7 @@ def test_paired_ble_runtime_updates_use_canonical_vin():
 
     settings = executor.update_settings(
         "ble_bridge_alpha",
-        {"enabled": True},
+        {"enabled": True, "vehicle_id": "ble_bridge_alpha"},
     )
 
     assert settings.vehicle_id == vin
