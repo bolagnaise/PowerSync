@@ -22975,7 +22975,7 @@ class AutoScheduleSettingsView(HomeAssistantView):
             settings = {}
             for vehicle_id, vehicle_settings in executor._settings.items():
                 executor.resolve_vehicle_capacity(vehicle_id, vehicle_settings)
-                settings[vehicle_id] = vehicle_settings.to_dict()
+                settings[vehicle_id] = {**vehicle_settings.to_dict(), "settings_precondition_supported": True}
 
             return web.json_response({
                 "success": True,
@@ -22993,6 +22993,7 @@ class AutoScheduleSettingsView(HomeAssistantView):
         """Update auto-schedule settings for a vehicle."""
         try:
             from .automations.shared_generic_charger import SharedChargerSelectionChanged
+            from .ev_mode_settings import SmartScheduleSettingsConflict
 
             data = await request.json()
             if not isinstance(data, dict):
@@ -23013,7 +23014,9 @@ class AutoScheduleSettingsView(HomeAssistantView):
             try:
                 updated_settings = await executor.async_save_settings_update(store, vehicle_id, data)
             except SharedChargerSelectionChanged as err:
-                return web.json_response({"success": False, "error": str(err)}, status=409)
+                return web.json_response({"success": False, "code": "shared_profile_changed", "error": str(err)}, status=409)
+            except SmartScheduleSettingsConflict as err:
+                return web.json_response({"success": False, "code": "settings_conflict", "field": err.field, "error": str(err)}, status=409)
             except ValueError as err:
                 return web.json_response({"success": False, "error": str(err)}, status=400)
 
@@ -23031,7 +23034,7 @@ class AutoScheduleSettingsView(HomeAssistantView):
 
             return web.json_response({
                 "success": True,
-                "settings": updated_settings.to_dict(),
+                "settings": {**updated_settings.to_dict(), "settings_precondition_supported": True},
                 "plan": plan_data,
             })
 
@@ -23095,6 +23098,7 @@ class AutoScheduleStatusView(HomeAssistantView):
                     "departure_days": legacy_departure_days,
                     "departure_times": {str(k): v for k, v in vehicle_settings.departure_times.items()},
                     "shared_charger_profile_id": vehicle_settings.shared_charger_profile_id,
+                    "settings_precondition_supported": True,
                     "max_grid_price_cents": vehicle_settings.max_grid_price_cents,
                     "departure_max_grid_price_cents": {str(k): v for k, v in vehicle_settings.departure_max_grid_price_cents.items()},
                     "departure_priorities": {str(k): v for k, v in vehicle_settings.departure_priorities.items()},
@@ -23156,8 +23160,11 @@ class AutoScheduleToggleView(HomeAssistantView):
         """Toggle auto-schedule for a vehicle."""
         try:
             from .automations.shared_generic_charger import SharedChargerSelectionChanged
+            from .ev_mode_settings import SmartScheduleSettingsConflict
 
             data = await request.json()
+            if not isinstance(data, dict):
+                return web.json_response({"success": False, "error": "EV settings must be an object"}, status=400)
             if not isinstance(data, dict):
                 return web.json_response({"success": False, "error": "EV settings must be an object"}, status=400)
             vehicle_id = data.get("vehicle_id", "_default")
@@ -23174,7 +23181,7 @@ class AutoScheduleToggleView(HomeAssistantView):
             from .automations.shared_generic_charger import entry_runtime, shared_data
             if vehicle_id in ("generic_ev", "_default", "ev") and shared_data(self._hass, self._config_entry) is not None:
                 if entry_runtime(self._hass, self._config_entry).get("_shared_generic_switching"):
-                    return web.json_response({"success": False, "error": "Shared charger selection is changing."}, status=409)
+                    return web.json_response({"success": False, "code": "shared_profile_changed", "error": "Shared charger selection is changing."}, status=409)
             store = runtime.get("store")
             if store is None:
                 return web.json_response({"success": False, "error": "Storage not available"}, status=503)
@@ -23182,11 +23189,15 @@ class AutoScheduleToggleView(HomeAssistantView):
                 return web.json_response({"success": False, "error": "enabled must be a boolean"}, status=400)
             try:
                 updates = {"enabled": enabled}
+                if "expected_settings" in data:
+                    updates["expected_settings"] = data["expected_settings"]
                 if "shared_charger_profile_id" in data:
                     updates["shared_charger_profile_id"] = data["shared_charger_profile_id"]
                 settings = await executor.async_save_settings_update(store, vehicle_id, updates, toggle=enabled is None)
             except SharedChargerSelectionChanged as err:
-                return web.json_response({"success": False, "error": str(err)}, status=409)
+                return web.json_response({"success": False, "code": "shared_profile_changed", "error": str(err)}, status=409)
+            except SmartScheduleSettingsConflict as err:
+                return web.json_response({"success": False, "code": "settings_conflict", "field": err.field, "error": str(err)}, status=409)
             except ValueError as err:
                 return web.json_response({"success": False, "error": str(err)}, status=400)
 
@@ -23196,6 +23207,7 @@ class AutoScheduleToggleView(HomeAssistantView):
                 "success": True,
                 "vehicle_id": settings.vehicle_id,
                 "shared_charger_profile_id": settings.shared_charger_profile_id,
+                "settings_precondition_supported": True,
                 "enabled": settings.enabled,
             })
 

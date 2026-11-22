@@ -90,3 +90,64 @@ def charging_mode_settings(mode: str, stored=None, updates=None) -> dict:
     if settings["preserve_home_battery"]:
         settings["no_grid_import"] = False
     return settings
+
+
+class SmartScheduleSettingsConflict(ValueError):
+    """A guarded setting changed after the editor read it."""
+
+    def __init__(self, field: str):
+        self.field = field
+        super().__init__(f"{field} changed while editing. Reload the vehicle settings.")
+
+
+_SMART_DAY_FIELDS = {
+    "departure_times": "time",
+    "departure_priorities": "priority",
+    "departure_max_grid_price_cents": "max_grid_price_cents",
+    "departure_min_battery_to_start": "min_battery_to_start",
+    "departure_consume_battery_level": "consume_battery_level",
+    "departure_stop_at_battery_floor": "stop_at_battery_floor",
+    "departure_limit_grid_import": "limit_grid_import",
+    "departure_preserve_home_battery": "preserve_home_battery",
+}
+
+
+def _valid_guarded_value(key: str, value: Any) -> bool:
+    if key == "max_grid_price_cents":
+        finite_price_cents(value, key)
+        return True
+    if key == "priority":
+        return value in ("solar_only", "solar_preferred", "cost_optimized", "time_critical")
+    if key == "time":
+        return isinstance(value, str) and re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", value) is not None
+    if key in ("target_soc", "consume_battery_level", "min_battery_to_start"):
+        minimum = 1 if key == "target_soc" else 0
+        return type(value) in (int, float) and minimum <= value <= 100 and value == int(value)
+    if key in ("enabled", "preserve_home_battery", "limit_grid_import", "stop_at_battery_floor"):
+        return type(value) is bool
+    return False
+
+
+def _valid_guarded_field(key: str, value: Any) -> bool:
+    if key in _SMART_DAY_FIELDS:
+        return isinstance(value, dict) and all(
+            day in ("0", "1", "2", "3", "4", "5", "6") and _valid_guarded_value(_SMART_DAY_FIELDS[key], item)
+            for day, item in value.items()
+        )
+    return key != "time" and _valid_guarded_value(key, value)
+
+
+def check_smart_settings_precondition(current: dict, updates: dict) -> None:
+    """Check the proposed JSON patch against the latest editable vehicle snapshot."""
+    expected = updates["expected_settings"]
+    if not isinstance(expected, dict) or not expected:
+        raise ValueError("expected_settings must be a nonempty object of edited settings")
+    for key, before in expected.items():
+        if key not in updates or key not in current:
+            raise ValueError(f"expected_settings must name an edited setting: {key}")
+        if not _valid_guarded_field(key, before) or not _valid_guarded_field(key, updates[key]):
+            raise ValueError(f"Invalid expected_settings or update for {key}")
+    for key, before in expected.items():
+        latest = current[key]
+        if not _valid_guarded_field(key, latest) or (latest != before and latest != updates[key]):
+            raise SmartScheduleSettingsConflict(key)

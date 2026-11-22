@@ -5641,6 +5641,7 @@ class AutoScheduleExecutor:
     ) -> AutoScheduleSettings:
         """Serialize app/action patches and expose them only after the owning store saves."""
         from .. import _update_powerwall_store
+        from ..ev_mode_settings import check_smart_settings_precondition
         from .shared_generic_charger import (
             SharedChargerSelectionChanged, save_selected_schedule, selected_profile, shared_data,
         )
@@ -5655,9 +5656,22 @@ class AutoScheduleExecutor:
                 selected_id = profile.get("id") if profile else None
                 if updates["shared_charger_profile_id"] != selected_id:
                     raise SharedChargerSelectionChanged("Shared charger selection changed. Reload the vehicle settings.")
+            guarded = "expected_settings" in updates
+            if guarded:
+                if toggle:
+                    raise ValueError("A guarded toggle requires an explicit enabled value")
+                before = candidate.to_dict()
+                check_smart_settings_precondition(before, updates)
+                updates = {key: value for key, value in updates.items() if key != "expected_settings"}
             if toggle:
                 updates = {"enabled": not candidate.enabled}
             self._apply_settings_update(vehicle_id, candidate, updates)
+            if guarded and existing is not None and candidate.to_dict() == before:
+                # A retry still belongs to the selected shared profile. Let the
+                # normal shared-store guard refuse a missing or superseded one.
+                profile = selected_profile(shared) if shared is not None else None
+                if shared is None or (profile and profile["id"] == existing.shared_charger_profile_id):
+                    return existing
             if shared is not None:
                 # Shared vehicles restore from their selected profile. Write that single
                 # source of truth and retain the selection guard through persistence.

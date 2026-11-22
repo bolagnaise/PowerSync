@@ -223,8 +223,8 @@ def test_smart_schedule_restores_legacy_caps_with_a_finite_non_paid_fallback():
     assert settings.get_effective_max_grid_price(3) == 8
 
 
-@pytest.mark.asyncio
-async def test_smart_schedule_api_saves_per_vehicle_and_returns_durable_caps(monkeypatch):
+@pytest.fixture
+def smart_schedule_routes(monkeypatch):
     # Exercise the app routes and the real executor. Only the HA store and
     # plan regeneration are substituted.
     tree = ast.parse((ROOT / "__init__.py").read_text())
@@ -254,6 +254,13 @@ async def test_smart_schedule_api_saves_per_vehicle_and_returns_durable_caps(mon
     toggle = namespace["AutoScheduleToggleView"](hass, entry)
     def request(fields):
         return types.SimpleNamespace(json=AsyncMock(return_value={"vehicle_id": "car", **fields}))
+    return executor, runtime, saved, storage, get_post, status, toggle, request
+
+
+@pytest.mark.asyncio
+async def test_smart_schedule_api_saves_per_vehicle_and_returns_durable_caps(smart_schedule_routes):
+    executor, runtime, saved, storage, get_post, status, toggle, request = smart_schedule_routes
+    hass, entry = executor.hass, executor.config_entry
     code, response = await get_post.post(request({"max_grid_price_cents": 0, "departure_max_grid_price_cents": {"0": -2.5}}))
     assert code == 200 and response["settings"]["max_grid_price_cents"] == 0
     assert saved["auto_schedule_settings"]["other"] == {"max_grid_price_cents": 8}
@@ -295,18 +302,26 @@ async def test_smart_schedule_api_saves_per_vehicle_and_returns_durable_caps(mon
     code, response = await saving
     assert code == 200 and response["settings"]["shared_charger_profile_id"] == "first"
     assert profiles[0]["schedule"]["max_grid_price_cents"] == -6.5
+    wrong_value = await get_post.post(request({
+        "vehicle_id": "generic_ev", "shared_charger_profile_id": "first", "max_grid_price_cents": 0,
+        "expected_settings": {"max_grid_price_cents": 25},
+    }))
+    assert wrong_value[0] == 409 and wrong_value[1]["code"] == "settings_conflict"
 
     # A second request already sent by the old editor waits for the write lock.
     # Change the selected profile before the request can commit.
     async with executor._settings_write_lock:
         pending_toggle = asyncio.create_task(toggle.post(request({
             "vehicle_id": "generic_ev", "shared_charger_profile_id": "first", "enabled": True,
+            "expected_settings": {"enabled": False},
         })))
         await asyncio.sleep(0)
         shared_store._data[shared.KEY]["selected_vehicle_id"] = "second"
         shared.restore_schedule(executor)
-    assert (await pending_toggle)[0] == 409
-    assert (await get_post.post(edit))[0] == 409
+    toggle_conflict = await pending_toggle
+    assert toggle_conflict[0] == 409 and toggle_conflict[1]["code"] == "shared_profile_changed"
+    edit_conflict = await get_post.post(edit)
+    assert edit_conflict[0] == 409 and edit_conflict[1]["code"] == "shared_profile_changed"
     shared_store.async_save.assert_awaited_once()
     assert profiles[1]["schedule"] == {}
     for route in (get_post, status):
@@ -317,6 +332,88 @@ async def test_smart_schedule_api_saves_per_vehicle_and_returns_durable_caps(mon
     assert profiles[1]["schedule"]["enabled"] and not profiles[0]["schedule"]["enabled"]
     runtime.pop("store")
     assert (await get_post.post(request({"max_grid_price_cents": 99})))[0] == 503
+
+
+@pytest.mark.asyncio
+async def test_weekday_map_precondition_serializes_overlapping_edits_and_retries(smart_schedule_routes):
+    executor, _, saved, storage, editor, _, _, req = smart_schedule_routes
+    key = "departure_max_grid_price_cents"
+    await editor.post(req({key: {"2": 0}}))
+    opened_a = (await editor.get(None))[1]["settings"]["car"][key]
+    opened_b = (await editor.get(None))[1]["settings"]["car"][key]
+    entered, release = asyncio.Event(), asyncio.Event()
+    original_save = storage.side_effect
+
+    async def delayed_save(store, merge):
+        entered.set()
+        await release.wait()
+        return await original_save(store, merge)
+
+    storage.side_effect = delayed_save
+    first = {"expected_settings": {key: opened_a}, key: {**opened_a, "0": -2.125}}
+    second = {"expected_settings": {key: opened_b}, key: {**opened_b, "1": 0}}
+    writer_a = asyncio.create_task(editor.post(req(first)))
+    await asyncio.wait_for(entered.wait(), 3)
+    writer_b = asyncio.create_task(editor.post(req(second)))
+    await asyncio.sleep(0)
+    assert not writer_b.done()
+    release.set()
+    result_a, result_b = await asyncio.gather(writer_a, writer_b)
+    assert result_a[0] == 200
+    assert result_b[0] == 409, (result_b, saved["auto_schedule_settings"]["car"][key])
+    assert result_b[1]["code"] == "settings_conflict"
+    assert storage.await_count == 2
+    latest = saved["auto_schedule_settings"]["car"][key]
+    assert latest == {"2": 0, "0": -2.125}
+    assert executor.get_settings("car").to_dict()[key] == latest
+    refreshed = {"expected_settings": {key: latest}, key: {**latest, "1": 0}}
+    assert (await editor.post(req(refreshed)))[0] == 200
+    assert (await editor.post(req(refreshed)))[0] == 200
+    assert storage.await_count == 3
+    assert saved["auto_schedule_settings"]["car"][key] == {"0": -2.125, "1": 0, "2": 0}
+
+    # A stale request for a different value fails, even if the value is zero;
+    # an independently selected car can use its own baseline.
+    assert (await editor.post(req({"expected_settings": {key: {}}, key: {"1": 0}})))[0] == 409
+    assert (await editor.post(req({"vehicle_id": "different", "expected_settings": {key: {}}, key: {"1": 0}})))[0] == 200
+    assert saved["auto_schedule_settings"]["different"][key] == {"1": 0}
+
+
+@pytest.mark.asyncio
+async def test_smart_schedule_guard_types_capability_toggle_and_rollback(smart_schedule_routes):
+    executor, _, saved, storage, editor, status, toggle, req = smart_schedule_routes
+    key = "max_grid_price_cents"
+    assert (await editor.post(req({key: 0})))[0] == 200
+    for view in (editor, status):
+        response = (await view.get(None))[1]["settings"]["car"]
+        assert response["settings_precondition_supported"] is True
+    assert "settings_precondition_supported" not in saved["auto_schedule_settings"]["car"]
+    for expected in (None, {}, [], {key: True}, {key: "0"}, {key: float("nan")}, {key: float("inf")},
+                     {"vehicle_id": "car"}, {"unknown": 0}, {"priority": "cost_optimized"}):
+        assert (await editor.post(req({key: -0.25, "expected_settings": expected})))[0] == 400
+    for bad in ({"00": 0}, {"7": 0}, {"0": False}, {"4": float("nan")}, {"5": None}, []):
+        day = "departure_max_grid_price_cents"
+        assert (await editor.post(req({day: {}, "expected_settings": {day: bad}})))[0] == 400
+    assert (await editor.post(req({"departure_times": {}, "expected_settings": {"departure_times": {"0": "25:00"}}})))[0] == 400
+    assert (await editor.post(req({"departure_preserve_home_battery": {"0": "false"}, "expected_settings": {"departure_preserve_home_battery": {}}})))[0] == 400
+    assert (await toggle.post(req({"expected_settings": {"enabled": False}})))[0] == 400
+    assert storage.await_count == 1
+    good = {"enabled": True, "expected_settings": {"enabled": False}}
+    assert (await toggle.post(req(good)))[1]["enabled"] is True
+    assert (await toggle.post(req(good)))[1]["enabled"] is True
+    assert storage.await_count == 2
+    # An application/storage failure is independent of the successful expected-value check.
+    original_save = storage.side_effect
+    storage.side_effect = OSError("unavailable")
+    patch = {key: -2.125, "expected_settings": {key: 0}}
+    assert (await editor.post(req(patch)))[0] == 500
+    assert executor.get_settings("car").max_grid_price_cents == saved["auto_schedule_settings"]["car"][key] == 0
+    storage.side_effect = original_save
+    assert (await editor.post(req(patch)))[0] == 200
+    await editor.post(req({key: 7}))
+    conflict = await editor.post(req(patch))
+    assert conflict[0] == 409 and conflict[1]["field"] == key
+    assert saved["auto_schedule_settings"]["car"][key] == 7
 
 
 def test_preserve_home_battery_round_trips_with_auto_schedule_settings():
