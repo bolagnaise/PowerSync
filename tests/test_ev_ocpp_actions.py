@@ -4361,11 +4361,14 @@ def test_dynamic_tesla_resumes_after_site_headroom_returns(monkeypatch):
         )
     )
 
-    assert set_amps_calls == [(vehicle_id, 11)]
-    assert start_calls == [(vehicle_id, 11)]
+    # 11 A would draw 7,590 W against 7,500 W of available import.
+    assert set_amps_calls == [(vehicle_id, 10)]
+    assert start_calls == [(vehicle_id, 10)]
     assert actions._dynamic_ev_state["entry-1"][vehicle_id]["current_amps"] == 0
 
     # A failed physical start must leave state at 0A so the next update retries.
+    # A further 100 W of headroom now allows the retry to command 11 A.
+    live_status["grid_power"] = 4900
     asyncio.run(
         actions._dynamic_ev_update(
             _Hass([]),
@@ -4374,8 +4377,8 @@ def test_dynamic_tesla_resumes_after_site_headroom_returns(monkeypatch):
             vehicle_id,
         )
     )
-    assert set_amps_calls == [(vehicle_id, 11), (vehicle_id, 11)]
-    assert start_calls == [(vehicle_id, 11), (vehicle_id, 11)]
+    assert set_amps_calls == [(vehicle_id, 10), (vehicle_id, 11)]
+    assert start_calls == [(vehicle_id, 10), (vehicle_id, 11)]
     assert actions._dynamic_ev_state["entry-1"][vehicle_id]["current_amps"] == 11
     assert (
         actions._dynamic_ev_state["entry-1"][vehicle_id]["params"]["owner_mode"]
@@ -4387,7 +4390,7 @@ def test_dynamic_tesla_resumes_after_site_headroom_returns(monkeypatch):
     default_id = actions.DEFAULT_VEHICLE_ID
     live_status.update(
         {
-            "grid_power": 5000,
+            "grid_power": 4900,
             "solar_power": 15000,
             "ev_power": 0,
         }
