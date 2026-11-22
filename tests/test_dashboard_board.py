@@ -2683,6 +2683,34 @@ def test_ev_smart_policy_editor_prices_strategies_weekdays_and_shared_profile_ch
           out.both = {writes: both.writes.length, type: both.panel._notice.type, message: both.panel._notice.message,
             rules: both.panel._smartPolicyHtml('generic_ev', both.car, 'Model Y')};
 
+          const car = {...baseCar(), preserve_home_battery: true,
+            departure_preserve_home_battery: {'0': false}, departure_consume_battery_level: {'0': 30}};
+          const inherit = makePanel(car);
+          const mondayKeep = inherit.field('preserve_home_battery', '0', 'select-one', 'false');
+          const mondayFloor = inherit.field('consume_battery_level', '0', 'number', '30');
+          inherit.bind(); mondayKeep.edit('');
+          inherit.save.click(); await tick(); await tick();
+          assert.equal(inherit.writes.length, 0); assert.match(inherit.panel._notice.message, /Monday/);
+          mondayFloor.edit('');
+          inherit.save.click(); await tick(); await tick();
+          assert.deepEqual(inherit.writes[0][1].departure_preserve_home_battery, {});
+          assert.deepEqual(inherit.writes[0][1].departure_consume_battery_level, {});
+
+          // An unrelated price can still be saved from an old, inconsistent record.
+          const legacyRules = makePanel({...car, departure_preserve_home_battery: {}});
+          const unrelated = legacyRules.field('max_grid_price_cents', null, 'number', '25');
+          legacyRules.bind(); unrelated.edit('12');
+          legacyRules.save.click(); await tick(); await tick();
+          assert.equal(legacyRules.writes[0][1].max_grid_price_cents, 12);
+
+          // Choosing one weekday rule can safely override the inherited opposite
+          // via the backend's existing one-setting normalization.
+          const single = makePanel({...baseCar(), preserve_home_battery: true});
+          const singleFloor = single.field('consume_battery_level', '0', 'number', '');
+          single.bind(); singleFloor.edit('35');
+          single.save.click(); await tick(); await tick();
+          assert.deepEqual(single.writes[0][1].departure_consume_battery_level, {'0':35});
+
           // A poll shows another car selected on the shared charger mid-edit.
           const poll = makePanel();
           const pollPrice = poll.field('max_grid_price_cents', null, 'number', '25');

@@ -7050,14 +7050,35 @@ class PowerSyncEVPanel extends HTMLElement {
       if (day != null) days.push(EV_WEEKDAYS[Number(day)][1]);
       changed.set(field, days);
     }
-    const effective = (field, day) => {
-      const map = EV_SMART_POLICY_FIELDS[field].map;
-      if (day != null) return (changes[map] ?? opened[map] ?? {})[day];
-      return Object.hasOwn(changes, field) ? changes[field] : opened[field];
-    };
-    for (const day of [null, ...EV_WEEKDAYS.map(([key]) => key)]) {
-      if (effective('preserve_home_battery', day) === true && Number(effective('consume_battery_level', day)) > 0) {
-        return this._settingError(`Choose either keeping the home battery for the house or letting the car use it${day == null ? '' : ` on ${EV_WEEKDAYS[Number(day)][2]}`}, not both.`, undefined, vehicleId);
+    if (changed.has('preserve_home_battery') || changed.has('consume_battery_level')) {
+      const proposed = { ...opened, ...changes };
+      const fieldAt = (settings, field, day) => day == null
+        ? settings[field] : settings[EV_SMART_POLICY_FIELDS[field].map]?.[day];
+      const batteryRules = (settings, day, defaults, patch) => {
+        const preserve = fieldAt(settings, 'preserve_home_battery', day) ?? defaults?.preserve;
+        const floor = fieldAt(settings, 'consume_battery_level', day) ?? defaults?.floor;
+        // HA clears the opposite rule at the same scope for a single-setting
+        // edit. A removed weekday entry instead inherits the vehicle default.
+        const edited = field => {
+          const value = fieldAt(patch, field, day);
+          return day == null || value !== fieldAt(opened, field, day) ? value : undefined;
+        };
+        return {
+          preserve: Number(edited('consume_battery_level')) > 0 ? false : preserve,
+          floor: edited('preserve_home_battery') === true ? 0 : floor,
+        };
+      };
+      const oldDefaults = batteryRules(opened, null, null, {});
+      const newDefaults = batteryRules(proposed, null, null, changes);
+      for (const day of [null, ...EV_WEEKDAYS.map(([key]) => key)]) {
+        const previous = day == null ? oldDefaults : batteryRules(opened, day, oldDefaults, {});
+        const next = day == null ? newDefaults : batteryRules(proposed, day, newDefaults, changes);
+        const requestedBoth = parsed.some(e => e.day === day && e.field === 'preserve_home_battery' && e.value === true)
+          && parsed.some(e => e.day === day && e.field === 'consume_battery_level' && e.value > 0);
+        if (requestedBoth || (next.preserve === true && next.floor > 0
+          && (next.preserve !== previous.preserve || next.floor !== previous.floor))) {
+          return this._settingError(`Choose either keeping the home battery for the house or letting the car use it${day == null ? '' : ` on ${EV_WEEKDAYS[Number(day)][2]}`}, not both.`, undefined, vehicleId);
+        }
       }
     }
     const summary = [...changed].map(([field, days]) => {
