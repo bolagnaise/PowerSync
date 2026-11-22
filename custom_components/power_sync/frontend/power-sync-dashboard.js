@@ -1492,13 +1492,14 @@ const PS_SETTING_FIELDS = {
   use_historical_ev_data: { label: 'Use Historical EV Data', type: 'checkbox', help: 'Anticipate weekday EV demand while away; actual battery data takes over on return.' },
   ev_integration: { label: 'Include PowerSync EV plans', type: 'checkbox', help: 'Include planned car demand in battery planning.' },
   battery_efficiency_learning_enabled: { label: 'Learn battery efficiency', type: 'checkbox' },
-  household_buffer_kw: { label: 'Household buffer', unit: 'kW', min: 0, step: '0.1' },
-  max_export_price_cents: { label: 'Maximum export price for car charging', unit: 'c/kWh', min: 0, max: 200, step: '0.1' },
+  surplus_calculation: { label: 'Measure spare solar using', type: 'select', options: [['grid_based', 'Grid meter'], ['direct', 'Solar production and household load']] },
+  household_buffer_kw: { label: 'Household buffer', unit: 'kW', min: 0, max: 5, step: 'any' },
+  max_export_price_cents: { label: 'Maximum export price for solar charging', tariffUnit: true, min: 0, max: 200, step: 'any', help: 'Above this feed-in price, save spare solar for export.' },
   home_battery_minimum: { label: 'Minimum home battery before car charging', unit: '%', min: 0, max: 100 },
-  sustained_surplus_minutes: { label: 'Start delay', unit: 'minutes', min: 1 },
-  stop_delay_minutes: { label: 'Stop delay', unit: 'minutes', min: 1 },
+  sustained_surplus_minutes: { label: 'Start delay', unit: 'minutes', min: 1, max: 30 },
+  stop_delay_minutes: { label: 'Stop delay', unit: 'minutes', min: 1, max: 30 },
   allow_parallel_charging: { label: 'Charge the car and home battery together', type: 'checkbox' },
-  max_battery_charge_rate_kw: { label: 'Maximum home battery charge rate', unit: 'kW', min: 0.1, step: '0.1' },
+  max_battery_charge_rate_kw: { label: 'Maximum home battery charge rate', unit: 'kW', min: 1, max: 30, step: 'any' },
   dual_vehicle_strategy: { label: 'Multiple car strategy', type: 'select', options: [['priority_first', 'Priority first'], ['even', 'Even split'], ['priority_only', 'Primary car only']] },
 };
 const PS_SETTING_EDITORS = {
@@ -1507,12 +1508,13 @@ const PS_SETTING_EDITORS = {
   reserve: { path: 'power_sync/optimization/settings', fields: ['backup_reserve'] },
   cost_neutral: { path: 'power_sync/optimization/settings', fields: ['daily_supply_charge'] },
   charge_by_time: { path: 'power_sync/optimization/settings', fields: ['charge_by_time_target_soc', 'charge_by_time_target_time'] },
-  solar: { path: 'power_sync/ev/solar_surplus_config', fields: ['home_battery_minimum', 'household_buffer_kw', 'max_export_price_cents', 'sustained_surplus_minutes', 'stop_delay_minutes', 'allow_parallel_charging', 'max_battery_charge_rate_kw', 'dual_vehicle_strategy'] },
+  solar: { path: 'power_sync/ev/solar_surplus_config', fields: ['surplus_calculation', 'home_battery_minimum', 'household_buffer_kw', 'max_export_price_cents', 'sustained_surplus_minutes', 'stop_delay_minutes', 'allow_parallel_charging', 'max_battery_charge_rate_kw', 'dual_vehicle_strategy'] },
 };
 
 class PsSettingsDialog extends HTMLElement {
   async open(hass, row, opener) {
     this._hass = hass;
+    this._tariffUnit = row.tariffUnit || 'minor currency units/kWh';
     const editor = PS_SETTING_EDITORS[row.editor];
     this._editor = { ...editor, path: editor.path + (editor.entityScoped ? `?entity_id=${encodeURIComponent(row.entity)}` : '') };
     this._opener = opener;
@@ -1559,7 +1561,8 @@ class PsSettingsDialog extends HTMLElement {
 
   _fieldHtml(key) {
     const f = PS_SETTING_FIELDS[key], value = this._values[key];
-    const label = psEsc(f.label + (f.unit ? ` (${f.unit})` : ''));
+    const unit = f.tariffUnit ? this._tariffUnit : f.unit;
+    const label = psEsc(f.label + (unit ? ` (${unit})` : ''));
     const help = f.help ? `<small>${psEsc(f.help)}</small>` : '';
     const attrs = `name="${key}" id="setting-${key}"`;
     if (f.type === 'checkbox') {

@@ -11,21 +11,10 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
 
 from .const import DOMAIN
+from .ev_mode_settings import charging_mode_settings
 from .solar_surplus_control import async_update_solar_surplus_config
 
 ACTION_MODES = ("solar_surplus", "scheduled", "price_level", "smart_schedule")
-
-MODE_DEFAULTS = {
-    "scheduled_charging": {
-        "enabled": False, "start_time": "00:00", "end_time": "06:00",
-        "max_price_cents": 30, "preserve_home_battery": False, "no_grid_import": False,
-    },
-    "price_level_charging": {
-        "enabled": False, "recovery_soc": 40, "recovery_price_cents": 30,
-        "opportunity_price_cents": 10, "preserve_home_battery": False,
-        "no_grid_import": False, "home_battery_minimum": 20,
-    },
-}
 
 
 async def async_update_charging_config(hass, entry, store, mode, updates):
@@ -36,12 +25,7 @@ async def async_update_charging_config(hass, entry, store, mode, updates):
     lock = entry_data.setdefault(f"{mode}_config_lock", asyncio.Lock())
     async with lock:
         previous = store._data.get(mode)
-        settings = {**MODE_DEFAULTS[mode], **(previous or {})}
-        settings.update({k: v for k, v in updates.items() if k in MODE_DEFAULTS[mode]})
-        if settings.get("preserve_home_battery"):
-            settings["no_grid_import"] = False
-        elif settings.get("no_grid_import"):
-            settings["preserve_home_battery"] = False
+        settings = charging_mode_settings(mode, previous, updates)
         store._data[mode] = settings
         try:
             await store.async_save()
@@ -77,16 +61,7 @@ async def async_set_charging_mode(hass, entry, mode, enabled, vehicle_id=None):
     # Do not create a new/default vehicle or select a different shared loadpoint.
     if not vehicle_id or vehicle_id not in executor._settings:
         raise HomeAssistantError("Select an existing Smart Schedule vehicle ID")
-    lock = entry_data.setdefault("smart_schedule_action_lock", asyncio.Lock())
-    async with lock:
-        settings = executor._settings[vehicle_id]
-        previous = settings.enabled
-        executor.update_settings(vehicle_id, {"enabled": enabled})
-        try:
-            await executor.save_settings(store, raise_errors=True)
-        except Exception:
-            settings.enabled = previous
-            raise
+    settings = await executor.async_save_settings_update(store, vehicle_id, {"enabled": enabled})
     return {"vehicle_id": vehicle_id, "enabled": settings.enabled}
 
 

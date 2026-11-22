@@ -2,6 +2,7 @@
 
 import ast
 import asyncio
+import runpy
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -15,6 +16,7 @@ ROOT = Path(__file__).resolve().parent.parent / "custom_components/power_sync"
 @pytest.fixture
 def actions():
     namespace = {
+        "charging_mode_settings": runpy.run_path(str(ROOT / "ev_mode_settings.py"))["charging_mode_settings"],
         "asyncio": asyncio, "vol": vol, "DOMAIN": "power_sync",
         "HomeAssistantError": RuntimeError,
         "SupportsResponse": SimpleNamespace(OPTIONAL="optional"),
@@ -69,6 +71,36 @@ def test_save_failure_restores_original_and_does_not_refresh(actions, mode, prev
     data["optimization_coordinator"]._schedule_settings_reoptimization.assert_not_called()
 
 
+@pytest.mark.parametrize("mode,field", [
+    ("scheduled_charging", "max_price_cents"), ("price_level_charging", "recovery_price_cents"),
+    ("price_level_charging", "opportunity_price_cents"),
+])
+def test_mode_thresholds_reject_invalid_input_and_preserve_valid_legacy_values(actions, mode, field):
+    hass, entry, store, _ = runtime()
+    store._data[mode] = {field: "-2.25", "enabled": True, "preserve_home_battery": True}
+    saved = asyncio.run(actions.async_update_charging_config(hass, entry, store, mode, {"no_grid_import": True}))
+    assert saved[field] == -2.25 and saved["no_grid_import"] and not saved["preserve_home_battery"]
+    for invalid in (None, True, "5", float("nan"), float("inf")):
+        with pytest.raises(ValueError, match=field):
+            asyncio.run(actions.async_update_charging_config(hass, entry, store, mode, {"enabled": False, field: invalid}))
+        assert store._data[mode] == saved
+        assert actions.charging_mode_settings(mode, {field: invalid if invalid != "5" else "garbage"})[field] == 0
+    saved = asyncio.run(actions.async_update_charging_config(hass, entry, store, mode, {field: 0}))
+    assert saved[field] == 0
+
+
+@pytest.mark.parametrize("field,bad", [("enabled", "false"), ("start_time", "24:00"), ("end_time", "12:70")])
+def test_invalid_scheduled_input_is_rejected_and_corrupt_stored_times_disable_the_mode(actions, field, bad):
+    hass, entry, store, _ = runtime()
+    with pytest.raises(ValueError, match=field):
+        asyncio.run(actions.async_update_charging_config(hass, entry, store, "scheduled_charging", {field: bad}))
+    assert store._data == {}
+    stored = {"enabled": True, "start_time": "broken", "end_time": "2:00"}
+    assert actions.charging_mode_settings("scheduled_charging", stored)["enabled"] is False
+    saved = actions.charging_mode_settings("scheduled_charging", stored, {"start_time": "22:30"})
+    assert saved["enabled"] and saved["end_time"] == "02:00"
+
+
 def test_action_and_api_updates_serialize_and_keep_latest_options(actions):
     hass, entry, store, _ = runtime()
 
@@ -108,16 +140,20 @@ def test_two_entries_are_independent_and_solar_uses_existing_cleanup(actions):
 def test_smart_schedule_requires_existing_vehicle_and_preserves_other_vehicle(actions):
     hass, entry, _, data = runtime()
     one, two = SimpleNamespace(enabled=True), SimpleNamespace(enabled=True)
-    executor = SimpleNamespace(_settings={"VIN1": one, "VIN2": two}, save_settings=AsyncMock())
-    executor.update_settings = lambda vid, updates: setattr(executor._settings[vid], "enabled", updates["enabled"])
+    executor = SimpleNamespace(_settings={"VIN1": one, "VIN2": two})
+    async def save_update(store, vehicle_id, updates):
+        settings = executor._settings[vehicle_id]
+        settings.enabled = updates["enabled"]
+        return settings
+    executor.async_save_settings_update = AsyncMock(side_effect=save_update)
     data.update(auto_schedule_executor=executor, store=object())
     with pytest.raises(RuntimeError, match="existing Smart Schedule"):
         asyncio.run(actions.async_set_charging_mode(hass, entry, "smart_schedule", False, "unknown"))
-    executor.save_settings.assert_not_called()
+    executor.async_save_settings_update.assert_not_awaited()
     asyncio.run(actions.async_set_charging_mode(hass, entry, "smart_schedule", False, "VIN1"))
     assert one.enabled is False and two.enabled is True
-    executor.save_settings.assert_awaited_once_with(data["store"], raise_errors=True)
-    executor.save_settings.side_effect = OSError("disk full")
+    executor.async_save_settings_update.assert_awaited_once_with(data["store"], "VIN1", {"enabled": False})
+    executor.async_save_settings_update.side_effect = OSError("disk full")
     with pytest.raises(OSError):
         asyncio.run(actions.async_set_charging_mode(hass, entry, "smart_schedule", True, "VIN1"))
     assert one.enabled is False
