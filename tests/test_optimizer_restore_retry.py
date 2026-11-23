@@ -976,3 +976,29 @@ def test_goodwe_ev_preserve_reapplies_after_charge_mode(opt_module, failed_reapp
         assert len(calls) == (3 if failed_reapply else 2)
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("force_active", [False, True])
+def test_tesla_ev_preserve_refresh_after_unaccepted_charge_plan(opt_module, force_active):
+    """A planned charge without an accepted force must not suppress the hold."""
+    async def run():
+        coordinator, intent, calls = _ev_preserve_refresh_coordinator(opt_module)
+        coordinator.battery_system = "tesla"
+        action = _self_consumption_action()
+        action.action = "charge"
+        coordinator._get_current_action = lambda: action
+        coordinator._get_active_force_state = lambda: {
+            "active": force_active, "source": "optimizer", "type": "charge",
+        }
+
+        intent["active"] = True
+        coordinator.request_ev_preservation_refresh()
+        await coordinator._ev_preserve_refresh_task
+
+        assert calls == ([] if force_active else ["hold"])
+        assert coordinator._last_executed_action == (
+            "self_consumption" if force_active else "no_discharge"
+        )
+        assert action.action == "charge"
+
+    asyncio.run(run())

@@ -1156,9 +1156,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         )
                         if active and runtime_action not in (
                             "discharge", "export", "consume", "self_consumption", "idle",
+                        ) and not (
+                            runtime_action == "charge" and self.battery_system == "tesla"
                         ):
-                            # Charging already preserves the battery. Do not
-                            # reissue unrelated force commands for an EV event.
                             continue
                         if not self._cached_solar_export_has_settled_feed_in_price(
                             action, runtime_action
@@ -11942,6 +11942,19 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Optimizer-triggered force modes can be overridden if the LP changes
         # its mind (e.g. LP planned 1 export step but now wants self_consumption).
         force_state = self._get_active_force_state()
+        if (
+            execution_trigger == "ev_preservation"
+            and self.battery_system == "tesla"
+            and runtime_action == "charge"
+            and self._scheduled_ev_preserve_active()
+        ):
+            # A rejected Tesla force charge can leave a CHARGE slot in the
+            # plan with no active control protecting the battery. Apply the
+            # existing EV hold without replaying the charge command.
+            if force_state and force_state.get("active"):
+                return
+            runtime_action = "self_consumption"
+
         user_force_active = bool(
             force_state and force_state.get("active")
             and force_state.get("source", "user") != "optimizer"
