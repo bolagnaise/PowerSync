@@ -124,6 +124,13 @@ def observe_ev_stop(hass: Any, config_entry: Any, vehicle_id: str,
     if charging:
         if age < 90 or (datetime.now(timezone.utc) - observed_at).total_seconds() > 120:
             return
+        entry = hass.data.setdefault("power_sync", {}).setdefault(config_entry.entry_id, {})
+        observations = entry.setdefault("ev_stop_charging_observations", {})
+        previous = observations.get(vehicle_id)
+        if previous and previous[0] == stopped_at and observed_at <= previous[1]:
+            return
+        # Multiple callers can evaluate the same cached sample for this stop.
+        observations[vehicle_id] = (stopped_at, observed_at)
         publish_ev_command(hass, config_entry, vehicle_id, {
             **command, "success": False, "observed_at": observed_at.isoformat(),
             "reason": "Vehicle telemetry still reports charging at least 90 seconds after the stop request",

@@ -160,3 +160,34 @@ def test_continuing_charge_event_is_an_observation_not_a_transport_failure(env):
     hass, entry, _ = env
     events.observe_ev_stop(hass, entry, "car", command(), datetime.now(timezone.utc), charging=True)
     assert fired(hass, events.EVENT_EV_STOP_FAILED)[0]["record_type"] == "observation"
+
+
+def test_reused_charging_sample_is_reported_once_per_stop(env):
+    hass, entry, notice = env
+    stop = command(success=False, age=180)
+    first = datetime.now(timezone.utc) - timedelta(seconds=25)
+    second = first + timedelta(seconds=10)
+    events.publish_ev_command(hass, entry, "car", stop)
+
+    for observed_at in (first, first, second, first, second):
+        events.observe_ev_stop(hass, entry, "car", stop, observed_at, charging=True)
+
+    observations = [
+        event for event in fired(hass, events.EVENT_EV_COMMAND)
+        if event["record_type"] == "observation"
+    ]
+    assert [event["observed_at"] for event in observations] == [
+        first.isoformat(), second.isoformat(),
+    ]
+    assert all(not event["physical_confirmation"] for event in observations)
+    assert stop["success"] is False
+    assert len(fired(hass, events.EVENT_EV_STOP_FAILED)) == 1
+
+    stopped_at = datetime.now(timezone.utc)
+    events.observe_ev_stop(hass, entry, "car", stop, stopped_at, charging=False)
+    assert fired(hass, events.EVENT_EV_COMMAND)[-1]["command"] == "stop_observed"
+    notice.async_dismiss.assert_called_once()
+
+    another_stop = command(success=False, age=150)
+    events.observe_ev_stop(hass, entry, "car", another_stop, second, charging=True)
+    assert fired(hass, events.EVENT_EV_COMMAND)[-1]["observed_at"] == second.isoformat()
