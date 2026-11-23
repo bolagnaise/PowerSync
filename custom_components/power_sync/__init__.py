@@ -22964,9 +22964,8 @@ class AutoScheduleSettingsView(HomeAssistantView):
     async def get(self, request):
         """Get auto-schedule settings for all vehicles."""
         try:
-            from .automations.ev_charging_planner import get_auto_schedule_executor
-
-            executor = get_auto_schedule_executor()
+            runtime = self._hass.data.get(DOMAIN, {}).get(self._config_entry.entry_id, {})
+            executor = runtime.get("auto_schedule_executor")
             if not executor:
                 return web.json_response({
                     "success": False,
@@ -22976,7 +22975,7 @@ class AutoScheduleSettingsView(HomeAssistantView):
             settings = {}
             for vehicle_id, vehicle_settings in executor._settings.items():
                 executor.resolve_vehicle_capacity(vehicle_id, vehicle_settings)
-                settings[vehicle_id] = vehicle_settings.to_dict()
+                settings[vehicle_id] = {**vehicle_settings.to_dict(), "settings_precondition_supported": True}
 
             return web.json_response({
                 "success": True,
@@ -22993,26 +22992,33 @@ class AutoScheduleSettingsView(HomeAssistantView):
     async def post(self, request):
         """Update auto-schedule settings for a vehicle."""
         try:
-            from .automations.ev_charging_planner import get_auto_schedule_executor, ChargingPlanner
+            from .automations.shared_generic_charger import SharedChargerSelectionChanged
+            from .ev_mode_settings import SmartScheduleSettingsConflict
 
             data = await request.json()
+            if not isinstance(data, dict):
+                return web.json_response({"success": False, "error": "EV settings must be an object"}, status=400)
             vehicle_id = data.get("vehicle_id", "_default")
 
-            executor = get_auto_schedule_executor()
+            runtime = self._hass.data.get(DOMAIN, {}).get(self._config_entry.entry_id, {})
+            executor = runtime.get("auto_schedule_executor")
             if not executor:
                 return web.json_response({
                     "success": False,
                     "error": "Auto-schedule executor not initialized"
                 }, status=503)
 
-            # Update settings
-            updated_settings = executor.update_settings(vehicle_id, data)
-
-            # Save to storage
-            entry_id = self._config_entry.entry_id
-            store = self._hass.data.get(DOMAIN, {}).get(entry_id, {}).get("store")
-            if store:
-                await executor.save_settings(store)
+            store = runtime.get("store")
+            if store is None:
+                return web.json_response({"success": False, "error": "Storage not available"}, status=503)
+            try:
+                updated_settings = await executor.async_save_settings_update(store, vehicle_id, data)
+            except SharedChargerSelectionChanged as err:
+                return web.json_response({"success": False, "code": "shared_profile_changed", "error": str(err)}, status=409)
+            except SmartScheduleSettingsConflict as err:
+                return web.json_response({"success": False, "code": "settings_conflict", "field": err.field, "error": str(err)}, status=409)
+            except ValueError as err:
+                return web.json_response({"success": False, "error": str(err)}, status=400)
 
             # Regenerate plan immediately with new settings
             plan_data = None
@@ -23028,7 +23034,7 @@ class AutoScheduleSettingsView(HomeAssistantView):
 
             return web.json_response({
                 "success": True,
-                "settings": updated_settings.to_dict(),
+                "settings": {**updated_settings.to_dict(), "settings_precondition_supported": True},
                 "plan": plan_data,
             })
 
@@ -23057,14 +23063,27 @@ class AutoScheduleStatusView(HomeAssistantView):
     async def get(self, request):
         """Get auto-schedule status for all vehicles."""
         try:
-            from .automations.ev_charging_planner import get_auto_schedule_executor
-
-            executor = get_auto_schedule_executor()
+            runtime = self._hass.data.get(DOMAIN, {}).get(self._config_entry.entry_id, {})
+            executor = runtime.get("auto_schedule_executor")
             if not executor:
                 return web.json_response({
                     "success": False,
                     "error": "Auto-schedule executor not initialized"
                 }, status=503)
+
+            target_sync = getattr(executor, "target_sync", None)
+            query = getattr(request, "query", {}) or {}
+            if query.get("target_only") == "1":
+                vehicle_id = query.get("vehicle_id")
+                profile = executor._settings.get(vehicle_id)
+                if not profile:
+                    return web.json_response({"success": False, "error": "Unknown vehicle"}, status=404)
+                result = {"success": True, "vehicle_id": vehicle_id, "enabled": profile.enabled,
+                          "target_soc": profile.target_soc}
+                sync_status = target_sync.get_status(vehicle_id) if target_sync else None
+                if sync_status:
+                    result["target_sync_status"] = sync_status
+                return web.json_response(result)
 
             # Refresh app-managed vehicle names and charger properties before
             # serializing either settings or state.
@@ -23092,6 +23111,10 @@ class AutoScheduleStatusView(HomeAssistantView):
                     "departure_time": legacy_departure_time,
                     "departure_days": legacy_departure_days,
                     "departure_times": {str(k): v for k, v in vehicle_settings.departure_times.items()},
+                    "shared_charger_profile_id": vehicle_settings.shared_charger_profile_id,
+                    "settings_precondition_supported": True,
+                    "max_grid_price_cents": vehicle_settings.max_grid_price_cents,
+                    "departure_max_grid_price_cents": {str(k): v for k, v in vehicle_settings.departure_max_grid_price_cents.items()},
                     "departure_priorities": {str(k): v for k, v in vehicle_settings.departure_priorities.items()},
                     # New per-day constraint fields
                     "departure_min_battery_to_start": {str(k): v for k, v in vehicle_settings.departure_min_battery_to_start.items()},
@@ -23113,6 +23136,12 @@ class AutoScheduleStatusView(HomeAssistantView):
                 }
 
             states = executor.get_all_states()
+            if target_sync:
+                for vehicle_id in settings:
+                    sync_status = target_sync.get_status(vehicle_id)
+                    if sync_status:
+                        states.setdefault(vehicle_id, {})["target_sync_status"] = sync_status
+
 
             _LOGGER.debug(
                 "Auto-schedule status: %s",
@@ -23150,13 +23179,19 @@ class AutoScheduleToggleView(HomeAssistantView):
     async def post(self, request):
         """Toggle auto-schedule for a vehicle."""
         try:
-            from .automations.ev_charging_planner import get_auto_schedule_executor
+            from .automations.shared_generic_charger import SharedChargerSelectionChanged
+            from .ev_mode_settings import SmartScheduleSettingsConflict
 
             data = await request.json()
+            if not isinstance(data, dict):
+                return web.json_response({"success": False, "error": "EV settings must be an object"}, status=400)
+            if not isinstance(data, dict):
+                return web.json_response({"success": False, "error": "EV settings must be an object"}, status=400)
             vehicle_id = data.get("vehicle_id", "_default")
             enabled = data.get("enabled")
 
-            executor = get_auto_schedule_executor()
+            runtime = self._hass.data.get(DOMAIN, {}).get(self._config_entry.entry_id, {})
+            executor = runtime.get("auto_schedule_executor")
             if not executor:
                 return web.json_response({
                     "success": False,
@@ -23166,26 +23201,33 @@ class AutoScheduleToggleView(HomeAssistantView):
             from .automations.shared_generic_charger import entry_runtime, shared_data
             if vehicle_id in ("generic_ev", "_default", "ev") and shared_data(self._hass, self._config_entry) is not None:
                 if entry_runtime(self._hass, self._config_entry).get("_shared_generic_switching"):
-                    return web.json_response({"success": False, "error": "Shared charger selection is changing."}, status=409)
-            settings = executor.get_settings(vehicle_id)
-
-            if enabled is not None:
-                settings.enabled = bool(enabled)
-            else:
-                # Toggle
-                settings.enabled = not settings.enabled
-
-            # Save to storage
-            entry_id = self._config_entry.entry_id
-            store = self._hass.data.get(DOMAIN, {}).get(entry_id, {}).get("store")
-            if store:
-                await executor.save_settings(store)
+                    return web.json_response({"success": False, "code": "shared_profile_changed", "error": "Shared charger selection is changing."}, status=409)
+            store = runtime.get("store")
+            if store is None:
+                return web.json_response({"success": False, "error": "Storage not available"}, status=503)
+            if enabled is not None and not isinstance(enabled, bool):
+                return web.json_response({"success": False, "error": "enabled must be a boolean"}, status=400)
+            try:
+                updates = {"enabled": enabled}
+                if "expected_settings" in data:
+                    updates["expected_settings"] = data["expected_settings"]
+                if "shared_charger_profile_id" in data:
+                    updates["shared_charger_profile_id"] = data["shared_charger_profile_id"]
+                settings = await executor.async_save_settings_update(store, vehicle_id, updates, toggle=enabled is None)
+            except SharedChargerSelectionChanged as err:
+                return web.json_response({"success": False, "code": "shared_profile_changed", "error": str(err)}, status=409)
+            except SmartScheduleSettingsConflict as err:
+                return web.json_response({"success": False, "code": "settings_conflict", "field": err.field, "error": str(err)}, status=409)
+            except ValueError as err:
+                return web.json_response({"success": False, "error": str(err)}, status=400)
 
             _LOGGER.info(f"Auto-schedule {'enabled' if settings.enabled else 'disabled'} for {vehicle_id}")
 
             return web.json_response({
                 "success": True,
-                "vehicle_id": vehicle_id,
+                "vehicle_id": settings.vehicle_id,
+                "shared_charger_profile_id": settings.shared_charger_profile_id,
+                "settings_precondition_supported": True,
                 "enabled": settings.enabled,
             })
 
@@ -23223,22 +23265,10 @@ class PriceLevelChargingSettingsView(HomeAssistantView):
         """Get price-level charging settings."""
         try:
             store = self._get_store()
-            settings = {
-                "enabled": False,
-                "recovery_soc": 40,
-                "recovery_price_cents": 30,
-                "opportunity_price_cents": 10,
-                "preserve_home_battery": False,
-                "no_grid_import": False,
-                "home_battery_minimum": 20,
-            }
+            from .ev_mode_settings import charging_mode_settings
 
-            if store:
-                stored_data = getattr(store, '_data', {}) or {}
-                stored_settings = stored_data.get("price_level_charging", {})
-                settings.update(stored_settings)
-            if settings.get("preserve_home_battery") and settings.get("no_grid_import"):
-                settings["no_grid_import"] = False
+            stored = (getattr(store, "_data", None) or {}).get("price_level_charging")
+            settings = charging_mode_settings("price_level_charging", stored)
 
             return web.json_response({
                 "success": True,
@@ -23285,6 +23315,8 @@ class PriceLevelChargingSettingsView(HomeAssistantView):
                 "settings": settings,
             })
 
+        except ValueError as err:
+            return web.json_response({"success": False, "error": str(err)}, status=400)
         except Exception as e:
             _LOGGER.error(f"Error updating price-level charging settings: {e}", exc_info=True)
             return web.json_response({
@@ -23359,21 +23391,10 @@ class ScheduledChargingSettingsView(HomeAssistantView):
         """Get scheduled charging settings."""
         try:
             store = self._get_store()
-            settings = {
-                "enabled": False,
-                "start_time": "00:00",
-                "end_time": "06:00",
-                "max_price_cents": 30,
-                "preserve_home_battery": False,
-                "no_grid_import": False,
-            }
+            from .ev_mode_settings import charging_mode_settings
 
-            if store:
-                stored_data = getattr(store, '_data', {}) or {}
-                stored_settings = stored_data.get("scheduled_charging", {})
-                settings.update(stored_settings)
-            if settings.get("preserve_home_battery") and settings.get("no_grid_import"):
-                settings["no_grid_import"] = False
+            stored = (getattr(store, "_data", None) or {}).get("scheduled_charging")
+            settings = charging_mode_settings("scheduled_charging", stored)
 
             return web.json_response({
                 "success": True,
@@ -23412,6 +23433,8 @@ class ScheduledChargingSettingsView(HomeAssistantView):
                 "settings": settings,
             })
 
+        except ValueError as err:
+            return web.json_response({"success": False, "error": str(err)}, status=400)
         except Exception as e:
             _LOGGER.error(f"Error updating scheduled charging settings: {e}", exc_info=True)
             return web.json_response({
@@ -36915,6 +36938,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             and call.data.get("grid_import_target_w") is None
         )
 
+    async def _cloud_tariff_charge_headroom_blocked(power_w, grid_import_target_w=None):
+        """Check a known charge refusal before changing an active battery hold."""
+        from .native_rate_budget import RUNTIME_KEY, site_identity
+        call = make_service_call(hass, DOMAIN, "force_charge", {
+            "power_w": power_w, "grid_import_target_w": grid_import_target_w,
+        })
+        budget = hass.data.get(RUNTIME_KEY)
+        if budget is None or not _cloud_tariff_control_requested(call):
+            return False
+        await budget.load()
+        return _cloud_tariff_control_requested(call) and budget.blocks_cloud_tariff_charge(site_identity(entry))
+
     async def _prepare_cloud_tariff_control(direction, call):
         """Release previous authority without acquiring or polling local control."""
         if not _cloud_tariff_control_requested(call):
@@ -36937,9 +36972,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             site = site_identity(entry)
             if budget.native_max_claim(site):
                 raise HomeAssistantError("Previous native Powerwall control still owns this site")
-            if direction == "charge" and (
-                    budget.site_armed(site) or budget.unobserved_w(site) > 0
-                    or any(record.get("site") == site for record in budget.managed.values())):
+            if direction == "charge" and budget.blocks_cloud_tariff_charge(site):
                 raise HomeAssistantError("Cloud tariff charging cannot reserve shared EV headroom")
         if (not _local_powerwall_generation_current()
                 or not _cloud_tariff_control_requested(call)
@@ -48570,6 +48603,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Load saved settings
     if store:
         await auto_schedule_executor.load_settings(store)
+        from .automations.tesla_target_sync import TeslaTargetSync
+        auto_schedule_executor.target_sync = TeslaTargetSync(hass, entry, auto_schedule_executor, store)
+        auto_schedule_executor.target_sync.start()
     _LOGGER.info("🤖 Auto-schedule executor initialized")
 
     # Initialize price-level charging executor
@@ -50233,83 +50269,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 get_auto_schedule_executor,
                 get_ev_charging_coordinator,
             )
+            from .automations.actions import (
+                EV_LIVE_STATUS_COORDINATOR_KEYS,
+                _coordinator_has_normalized_ev_live_data,
+            )
+            from .automations.ev_pricing import get_ev_control_import_price
             from .automations.live_status import coordinator_data_to_ev_live_status
 
-            # Get live status from coordinator (more reliable than API calls)
             entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
-            tesla_coordinator = entry_data.get("tesla_coordinator")
-            sigenergy_coordinator = entry_data.get("sigenergy_coordinator")
-            sungrow_coordinator = entry_data.get("sungrow_coordinator")
-
             live_status = {}
-            if tesla_coordinator and tesla_coordinator.data:
-                live_status = coordinator_data_to_ev_live_status(tesla_coordinator.data)
-            else:
-                # Coordinators store power in kW; convert to watts so EV planner
-                # calculations use one unit convention.
-                _kw_coord = None
-                if sigenergy_coordinator and sigenergy_coordinator.data:
-                    _kw_coord = sigenergy_coordinator
-                elif sungrow_coordinator and sungrow_coordinator.data:
-                    _kw_coord = sungrow_coordinator
-                else:
-                    for _key in ("foxess_coordinator", "goodwe_coordinator",
-                                 "alphaess_coordinator", "solax_coordinator",
-                                 "saj_h2_coordinator", "fronius_reserva_coordinator",
-                                 "neovolt_coordinator", "solaredge_coordinator",
-                                 "anker_solix_coordinator"):
-                        _c = entry_data.get(_key)
-                        if _c and _c.data:
-                            _kw_coord = _c
-                            break
-                if _kw_coord:
-                    live_status = coordinator_data_to_ev_live_status(_kw_coord.data)
-
-            # Get current price from Amber coordinator if available
-            current_price = None
-            amber_coordinator = entry_data.get("amber_coordinator")
-            if amber_coordinator and amber_coordinator.data:
-                current_prices = amber_coordinator.data.get("current", [])
-                for price in current_prices:
-                    if price.get("channelType") == "general":
-                        current_price = price.get("perKwh")
-                        break
-
-            # Fallback to stored amber_prices
-            if current_price is None:
-                amber_prices = entry_data.get("amber_prices", {})
-                if amber_prices:
-                    current_price = amber_prices.get("import_cents")
-
-            # Fallback to Tesla tariff schedule (for Globird/AEMO VPP users)
-            if current_price is None:
-                tariff_schedule = entry_data.get("tariff_schedule", {})
-                if tariff_schedule:
-                    # Use real-time TOU calculation so price updates when periods change
-                    if tariff_schedule.get("tou_periods"):
-                        current_price, _, _ = get_current_price_from_tariff_schedule(tariff_schedule)
-                    else:
-                        current_price = tariff_schedule.get("buy_price")
-
-            # Fallback to Sigenergy tariff (for Sigenergy users with Amber)
-            if current_price is None:
-                sigenergy_tariff = entry_data.get("sigenergy_tariff", {})
-                if sigenergy_tariff:
-                    buy_prices = sigenergy_tariff.get("buy_prices", [])
-                    if buy_prices:
-                        # Find current time slot price
-                        # Format: [{"timeRange": "10:00-10:30", "price": 25.0}, ...]
-                        now = dt_util.now()  # HA tz; container UTC would pick wrong slot
-                        current_time = f"{now.hour:02d}:{30 if now.minute >= 30 else 0:02d}"
-                        for slot in buy_prices:
-                            time_range = slot.get("timeRange", "")
-                            if time_range.startswith(current_time):
-                                current_price = slot.get("price")
-                                break
-
-            # Evaluate auto-schedule executor (handles Smart Schedule mode with per-vehicle settings)
+            for key in EV_LIVE_STATUS_COORDINATOR_KEYS:
+                site = entry_data.get(key)
+                if _coordinator_has_normalized_ev_live_data(site):
+                    live_status = coordinator_data_to_ev_live_status(site.data)
+                    break
+            try:
+                current_price = get_ev_control_import_price(hass, entry)
+            except Exception as err:
+                _LOGGER.debug("EV retail price unavailable: %s", err)
+                current_price = None
+            # Disabled sessions still need their owned stop/restore even when
+            # the site meter is unavailable. Positive starts check telemetry.
             executor = get_auto_schedule_executor()
-            if executor and live_status:
+            if executor:
                 await executor.evaluate(live_status, current_price)
 
             # Evaluate coordinated charging modes (Price-Level + Scheduled combined with OR logic)
@@ -50907,6 +50889,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 tariff_schedule=tariff_schedule,  # For Globird/TOU-based pricing
                 force_state_getter=get_force_state,  # For checking if force mode is active
                 force_state_clearer=clear_force_state,  # For optimizer to clear before restore_normal
+                cloud_tariff_charge_headroom_blocked=_cloud_tariff_charge_headroom_blocked,
             )
 
             # Set up the coordinator
@@ -54063,6 +54046,11 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _LOGGER.warning("Ongoing diagnostics cleanup unavailable")
 
     if unload_ok:
+        if opt_coordinator:
+            try:
+                await opt_coordinator.async_close_battery_efficiency_learning()
+            except Exception:
+                _LOGGER.exception("Battery efficiency checkpoint could not be saved on unload")
         hass.data[DOMAIN].pop(entry.entry_id)
 
     # Remove services if this is the last entry

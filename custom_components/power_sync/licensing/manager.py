@@ -11,7 +11,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.storage import Store
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP
 
-from .runtime import LicenseRuntime, DATA_KEY, ADMISSION_KEY
+from .runtime import LicenseRuntime, PairingConflict, DATA_KEY, ADMISSION_KEY
 from .keys import PUBLIC_KEYS
 from .guard import optimizer_command, recovery_scope, OptimizerAccessLost
 
@@ -62,7 +62,8 @@ class HALicenseManager(LicenseRuntime):
         session = async_get_clientsession(self.hass)
         async with session.request("GET" if body is None else "POST", API + path,
                 json=body, timeout=ClientTimeout(total=20), allow_redirects=False) as response:
-            if response.status != 200:
+            pairing_conflict = path == "/pairing/exchange" and response.status == 409
+            if response.status != 200 and not pairing_conflict:
                 # Do not interpret an HTTP error as an authoritative signed denial.
                 raise ValueError("licensing_service_unavailable")
             if response.content_length and response.content_length > 16384:
@@ -75,9 +76,17 @@ class HALicenseManager(LicenseRuntime):
                     raise ValueError("invalid_licensing_response")
                 chunks.append(chunk)
             raw = b"".join(chunks)
-            value = json.loads(raw)
+            try:
+                value = json.loads(raw)
+            except (ValueError, RecursionError):
+                raise ValueError("invalid_licensing_response") from None
             if not isinstance(value, dict):
                 raise ValueError("invalid_licensing_response")
+            if pairing_conflict:
+                reason = value.get("error")
+                if reason in ("pairing_not_completed", "pairing_pending_or_expired", "installation_slot_in_use"):
+                    raise PairingConflict(reason)
+                raise ValueError("licensing_service_unavailable")
             return value
 
     async def async_referrals(self, *, force=False):
@@ -238,9 +247,11 @@ class HALicenseManager(LicenseRuntime):
                 except Exception:
                     _LOGGER.warning("Licence storage is unavailable; admission is closed and owned recovery will still run")
                 try:
-                    async with self.control_lock(entry_id):
-                        with recovery_scope():
-                            await coordinator.disable(licensing=True)
+                    # The coordinator drains dispatch before taking the entry
+                    # control lock for recovery. A queued dispatch may need
+                    # that lock to observe the closed admission and exit.
+                    with recovery_scope():
+                        await coordinator.disable(licensing=True)
                     force = coordinator._get_active_force_state()
                     hold = getattr(coordinator, "_solar_export_hold", None)
                     pending = bool(force and force.get("active") and force.get("source") == "optimizer")

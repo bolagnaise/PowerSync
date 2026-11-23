@@ -343,8 +343,8 @@ async def test_fleet_recovery_wake_timeout_stays_pending_without_start(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_newly_isolated_ble_fallback_repins_fleet_wake_read_then_starts(monkeypatch):
-    """Isolation completed by this request must use its newly pinned HA route."""
+async def test_unknown_ble_start_defers_then_verified_native_retry_wakes_before_start(monkeypatch):
+    """An unknown BLE Start cannot reuse its request to start via Fleet."""
     hass = _Hass(
         [_State(COMMAND, "off"), _State(WAKE, "unknown")],
         _fleet_registry(include_wake=True),
@@ -362,32 +362,33 @@ async def test_newly_isolated_ble_fallback_repins_fleet_wake_read_then_starts(mo
         "ev_provider": actions.EV_PROVIDER_BOTH,
     })
     monkeypatch.setattr(actions, "_is_ble_available", lambda *args: True)
-    monkeypatch.setattr(
-        actions,
-        "_run_ble_transport_command",
-        AsyncMock(return_value=(None, True)),
-    )
+    ble = AsyncMock(return_value=(None, False))
+    monkeypatch.setattr(actions, "_run_ble_transport_command", ble)
     routes = iter((None, _recovery_route()))
     monkeypatch.setattr(
         actions,
         "_tesla_transport_route",
         AsyncMock(side_effect=lambda *args, **kwargs: next(routes)),
     )
-    reads = iter((None, observation))
+    reads = iter((None, None, observation))
 
     async def recover_read(*args, **kwargs):
         events.append("observe")
         return next(reads)
 
     monkeypatch.setattr(actions, "_fresh_tesla_command_observation", recover_read)
-    result = await actions._action_start_ev_charging.__wrapped__(
-        hass,
-        entry,
-        {"charger_type": "tesla", "vehicle_vin": VIN},
-    )
+    first = {"charger_type": "tesla", "vehicle_vin": VIN}
+    assert await actions._action_start_ev_charging.__wrapped__(hass, entry, first) is None
+    assert first["_tesla_transport_recovery_pending"] is True
+    assert events == ["observe"]
+    assert hass.services.calls == []
 
-    assert result is True
-    assert events == ["observe", "button.press", "observe", "switch.turn_on"]
+    # The next request has a separately verified, exact native recovery route.
+    retry = {"charger_type": "tesla", "vehicle_vin": VIN}
+    assert await actions._action_start_ev_charging.__wrapped__(hass, entry, retry) is True
+
+    ble.assert_awaited_once()
+    assert events == ["observe", "observe", "button.press", "observe", "switch.turn_on"]
     assert hass.services.calls == [
         ("button", "press", {"entity_id": WAKE}),
         ("switch", "turn_on", {"entity_id": COMMAND}),

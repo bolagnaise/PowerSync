@@ -20,6 +20,7 @@ RESET_TIMEOUT = 180.0
 POLL_SECONDS = 0.1
 RECONCILE_READ_TIMEOUT = 40.0
 RECONCILE_RETRY_SECONDS = 5.0
+AUTOMATIC_RECOVERY_RETRY_SECONDS = 300.0
 
 # Supported source profiles, rather than an arbitrary project-name heuristic.
 # These profiles use ordinary supported stock-device trust, not binary
@@ -261,7 +262,9 @@ class StockBridgeTransaction:
         raise TimeoutError("stock_bridge_observation_timeout")
 
     async def restart(self) -> bool:
-        if not self.current() or getattr(self.bridge.runtime_data, "available", None) is not True:
+        radio = self.hass.states.get(self.bridge.identities["radio"]["entity_id"])
+        if (not self.current() or getattr(self.bridge.runtime_data, "available", None) is not True
+                or getattr(radio, "state", None) != "on"):
             return False
         # Observe availability concurrently with the blocking service; a fast
         # disconnect must not be missed while awaiting its normal return.
@@ -271,8 +274,11 @@ class StockBridgeTransaction:
             self.saw_disconnect = True
         observer = asyncio.create_task(watch())
         try:
-            await self.hass.services.async_call("button", "press", {
-                "entity_id": self.bridge.identities["restart"]["entity_id"]}, blocking=True)
+            await asyncio.wait_for(
+                self.hass.services.async_call("button", "press", {
+                    "entity_id": self.bridge.identities["restart"]["entity_id"]}, blocking=True),
+                timeout=max(0.001, self.deadline - time.monotonic()),
+            )
             await observer
         finally:
             if not observer.done():
@@ -318,18 +324,6 @@ class StockBridgeTransaction:
             return True
         await self.wait(changed)
         return dict(self.last_uptime)
-
-    async def contain(self) -> None:
-        if self.current():
-            entity_id = self.bridge.identities["radio"]["entity_id"]
-            await self.hass.services.async_call("switch", "turn_off", {
-                "entity_id": entity_id}, blocking=True)
-            _LOGGER.warning(
-                "Tesla transport recovery did not complete; requested BLE "
-                "Connection off for %s to contain the unresolved transport. "
-                "Charging commands remain held pending successful recovery",
-                entity_id,
-            )
 
 
 def reconciliation_evidence(observation: Any) -> dict[str, Any] | None:
@@ -449,6 +443,7 @@ async def async_register_evidence_loss(
 
 async def async_recover_vehicle_transport(
     hass: Any, entry: Any, vin: str, *, incident_id: str | None = None,
+    automatic: bool = False,
 ) -> bool:
     """Recover one exact stock producer without changing charging settings."""
     from .const import CONF_EV_PROVIDER, EV_PROVIDER_BOTH, EV_PROVIDER_FLEET_API
@@ -466,6 +461,11 @@ async def async_recover_vehicle_transport(
     bridge = resolve_stock_bridge(hass, entry, str(vin))
     snapshot = recovery_sidecar_snapshot(hass, entry)
     if bridge is None or snapshot is None:
+        return False
+    source_binding = independent_tesla_source_binding(hass, str(vin))
+    radio_entity = bridge.identities["radio"]["entity_id"]
+    radio = hass.states.get(radio_entity)
+    if source_binding is None or getattr(radio, "state", None) != "on":
         return False
     runtime = bridge.runtime_ref
     # Recovery work has its own lane; it never holds the car's Stop lane or
@@ -534,14 +534,16 @@ async def async_recover_vehicle_transport(
             return False
         if incident.get("phase") == "released":
             return True
-        transaction = StockBridgeTransaction(hass, entry, bridge)
-        source_binding = independent_tesla_source_binding(hass, str(vin))
-        if source_binding is None:
+        last_error_at = incident.get("last_error_at")
+        if (automatic and type(last_error_at) in (int, float)
+                and time.time() - last_error_at < AUTOMATIC_RECOVERY_RETRY_SECONDS):
             return False
+        transaction = StockBridgeTransaction(hass, entry, bridge)
         first_observations: dict[str, Any] = {}
 
         def source_current() -> bool:
             return (transaction.current()
+                    and getattr(hass.states.get(radio_entity), "state", None) == "on"
                     and independent_tesla_source_binding(hass, str(vin)) == source_binding)
 
         def observation_matches(observation: Any) -> bool:
@@ -641,8 +643,12 @@ async def async_recover_vehicle_transport(
                         vehicle, updated_after=first.source_charge_timestamp,
                         deadline=deadline,
                     )
-                    if second is not None:
+                    if (
+                        second is not None
+                        and second.source_charge_timestamp > first.source_charge_timestamp
+                    ):
                         break
+                    second = None
                     # Native providers may return the same charge document
                     # briefly after an independent read. Wait for acquisition
                     # to advance; neither an equal timestamp nor a cached HA
@@ -678,22 +684,11 @@ async def async_recover_vehicle_transport(
                 _observations[vehicle]["converged_observation"] = reconciliation_evidence(second)
             return bool(first_observations)
 
-        succeeded = False
-        try:
-            succeeded = await async_recover_stock(
-                hass, entry, incident_id=incident["incident_id"],
-                profile=bridge.profile, identity=bridge.identity,
-                restart=transaction.restart, wait_disconnected=transaction.disconnected,
-                wait_connected=transaction.connected, read_identity=transaction.identity,
-                read_uptime=transaction.uptime, quiesce=quiesce,
-                observe=observe, reconcile=reconcile,
-            )
-            return succeeded
-        finally:
-            if not succeeded:
-                # Best effort containment adds no success evidence. Durable
-                # phase/incident gates remain held even if this service fails.
-                try:
-                    await asyncio.shield(transaction.contain())
-                except BaseException:
-                    pass
+        return await async_recover_stock(
+            hass, entry, incident_id=incident["incident_id"],
+            profile=bridge.profile, identity=bridge.identity,
+            restart=transaction.restart, wait_disconnected=transaction.disconnected,
+            wait_connected=transaction.connected, read_identity=transaction.identity,
+            read_uptime=transaction.uptime, quiesce=quiesce,
+            observe=observe, reconcile=reconcile,
+        )

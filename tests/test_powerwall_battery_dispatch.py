@@ -421,7 +421,7 @@ def load_routing(monitored=False, paired=True, **options):
              '_try_local_powerwall_force_locked',
              '_stop_local_powerwall_dispatch_locked', '_stop_native_max_charge_locked',
              '_set_tesla_control_method', '_restore_local_grid_charging_via_cloud', '_stop_native_max_charge', '_try_native_max_charge', '_try_native_powerwall_force', '_powerwall_prefers_native_tariff',
-             '_cloud_tariff_control_requested', '_prepare_cloud_tariff_control',
+             '_cloud_tariff_control_requested', '_cloud_tariff_charge_headroom_blocked', '_prepare_cloud_tariff_control',
              'handle_force_charge', 'handle_force_discharge', 'persist_force_mode_state', 'restore_force_mode_from_persistence',
              '_local_powerwall_dispatch_config', '_local_powerwall_dispatch_acknowledged', '_local_powerwall_dispatch_failed', '_local_powerwall_generation_current', '_local_powerwall_settings_write_allowed'}
     nodes = [n for n in setup.body if isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef)) and n.name in names]

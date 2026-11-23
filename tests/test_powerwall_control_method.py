@@ -753,16 +753,19 @@ async def test_tariff_control_cannot_abandon_uncertain_local_cleanup():
 @pytest.mark.parametrize('reservation', ['armed', 'unobserved', 'managed', 'native_max'])
 async def test_cloud_tariff_keeps_shared_ev_and_native_ownership_guards(reservation):
     from test_powerwall_battery_dispatch import load_routing, call
-    from unittest.mock import AsyncMock
     ns, local, client, _ = load_routing(tesla_control_method='tariff')
     ns['site_identity'] = lambda entry: 'site'
-    ns['hass'].data['power_sync_native_rate_budget'] = SimpleNamespace(
-        load=AsyncMock(),
-        native_max_claim=lambda site: {'token': 'owner'} if reservation == 'native_max' else None,
-        site_armed=lambda site: reservation == 'armed',
-        unobserved_w=lambda site: 1000 if reservation == 'unobserved' else 0,
-        managed={'car': {'site': 'site'}} if reservation == 'managed' else {},
-    )
+    budget = importlib.import_module(PREFIX + ".native_rate_budget").SharedRateBudget(None)
+    budget.loaded = True
+    if reservation == 'armed':
+        budget.armed_sites.add('site')
+    elif reservation == 'unobserved':
+        budget.unobserved_w = Mock(return_value=1000)
+    elif reservation == 'managed':
+        budget.managed['car'] = {'site': 'site', 'reserved_w': 0}
+    else:
+        budget.entries['entry'] = {'site': 'site', 'native_max': {'token': 'owner'}}
+    ns['hass'].data['power_sync_native_rate_budget'] = budget
     with pytest.raises(RuntimeError, match='headroom|owns this site'):
         await ns['_try_local_powerwall_force']('charge', call(power_w=0), 15, 0)
     client.get_snapshot.assert_not_awaited()

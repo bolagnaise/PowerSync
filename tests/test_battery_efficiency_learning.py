@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import logging
 import math
 import sys
@@ -231,7 +232,7 @@ def test_gap_direction_mismatch_and_topology_change_reject_open_cycle():
     assert learner.history == []
 
 
-def test_store_round_trip_excludes_open_cycle_and_toggle_disables_application():
+def test_store_round_trip_preserves_open_cycle_and_toggle_disables_application():
     learner = BatteryEfficiencyLearner()
     start = datetime(2026, 7, 1, tzinfo=timezone.utc)
     learner.observe(
@@ -248,11 +249,29 @@ def test_store_round_trip_excludes_open_cycle_and_toggle_disables_application():
         now=start,
     )
 
-    assert restored.state == "idle"
+    assert restored.state == "anchored"
     assert resolved.battery_efficiency_source == "disabled"
     assert resolved.charge_efficiency == pytest.approx(0.92)
     assert restored.to_dict()["version"] == 1
     assert BatteryEfficiencyLearner.from_dict({"version": 999}).history == []
+
+
+@pytest.mark.parametrize("checkpoint", [None, {"last_soc": 4}, {"charge_kwh": -1},
+    {"topology_fingerprint": "other-site"}, {"last_timestamp": "invalid"}])
+def test_legacy_or_invalid_checkpoint_keeps_completed_history(checkpoint):
+    learner = BatteryEfficiencyLearner()
+    start = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    _record_cycle(learner, start)
+    stored = learner.to_dict()
+    if checkpoint is None:
+        stored.pop("active_cycle")
+    else:
+        stored["active_cycle"].update(checkpoint)
+
+    restored = BatteryEfficiencyLearner.from_dict(stored)
+
+    assert restored.state == "idle"
+    assert restored.to_dict()["history"] == stored["history"]
 
 
 def _continuous_profile(start, *, lower=False, endpoint=1.0):
@@ -302,6 +321,48 @@ def test_continuous_full_depth_loop_learns_without_quiet_anchor_or_return(lower)
     assert accepted[0].charge_kwh == pytest.approx(29.5)
     assert accepted[0].discharge_kwh == pytest.approx(23.6)
     assert "soc_boundary" not in learner.rejections
+
+
+@pytest.mark.parametrize("lower", [False, True])
+def test_short_restarts_preserve_full_depth_cycle(lower):
+    rows = _continuous_profile(datetime(2026, 7, 1, tzinfo=timezone.utc), lower=lower)
+    uninterrupted = _feed_profile(BatteryEfficiencyLearner(), rows)
+    learner = BatteryEfficiencyLearner()
+    assert _feed_profile(learner, rows[:15]) == []
+    learner = BatteryEfficiencyLearner.from_dict(json.loads(json.dumps(learner.to_dict())))
+    assert _feed_profile(learner, rows[15:31]) == []
+    learner = BatteryEfficiencyLearner.from_dict(json.loads(json.dumps(learner.to_dict())))
+    # Startup can report the last acquisition again before publishing a new one.
+    assert _feed_profile(learner, rows[30:31]) == []
+    assert learner.history == []
+    assert _feed_profile(learner, rows[31:]) == uninterrupted
+
+
+@pytest.mark.parametrize("invalid", ["long_gap", "stale", "changed_topology"])
+def test_restart_keeps_telemetry_and_topology_guards(invalid):
+    rows = _continuous_profile(datetime(2026, 7, 1, tzinfo=timezone.utc))
+    learner = BatteryEfficiencyLearner()
+    _feed_profile(learner, rows[:31])
+    restored = BatteryEfficiencyLearner.from_dict(learner.to_dict())
+    assert restored.state == "excursion"
+    at, soc, power = rows[31]
+    result = restored.observe(
+        timestamp=at + (timedelta(hours=1) if invalid == "long_gap" else timedelta()),
+        soc=soc,
+        battery_power_kw=power,
+        capacity_kwh=54.0,
+        topology_fingerprint=(
+            "changed-battery" if invalid == "changed_topology" else "synthetic-54kwh-ac"
+        ),
+        valid=invalid != "stale",
+        skip_reason="stale_telemetry" if invalid == "stale" else None,
+    )
+    assert result.rejection_reason == {
+        "long_gap": "telemetry_gap",
+        "stale": "stale_telemetry",
+        "changed_topology": "topology_changed",
+    }[invalid]
+    assert restored.history == []
 
 
 def test_repeated_normal_full_depth_cycles_advance_confidence_and_survive_store():
@@ -361,9 +422,14 @@ def _coordinator_methods(*names):
     path = MODULE_PATH.parent / "coordinator.py"
     tree = ast.parse(path.read_text())
     cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "OptimizationCoordinator")
-    methods = [n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name in names]
+    methods = [
+        n for n in cls.body
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name in names
+    ]
     namespace = {
         "datetime": datetime,
+        "dt_util": SimpleNamespace(now=lambda: datetime.now(timezone.utc)),
+        "BatteryEfficiencyLearner": BatteryEfficiencyLearner,
         "Any": Any,
         "math": math,
         "_LOGGER": logging.getLogger(__name__),

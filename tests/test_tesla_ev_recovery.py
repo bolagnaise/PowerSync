@@ -53,29 +53,9 @@ class _Entity:
 class _Services:
     def __init__(self, hass):
         self.hass, self.calls = hass, []
-        self.update_states = False
 
     async def async_call(self, domain, service, data, *, blocking):
         self.calls.append((domain, service, data, blocking))
-        if self.update_states:
-            # Deliver the provider receipt on the next event-loop turn.  The
-            # production isolation check must reject same-timestamp stale
-            # observations rather than depending on a synchronous fake.
-            await asyncio.sleep(0.001)
-            stamp = datetime.now(timezone.utc)
-            if domain == "text":
-                prefix = data["entity_id"].removeprefix("text.").removesuffix("_transport_isolation_request")
-            else:
-                prefix = data["entity_id"].removeprefix("switch.").removesuffix("_ble_connection")
-            for entity_id in (f"switch.{prefix}_ble_connection", f"binary_sensor.{prefix}_ble_status"):
-                self.hass.states_by_id[entity_id] = _State(entity_id, "off", stamp)
-            fence_id = f"sensor.{prefix}_transport_fence"
-            if self.hass.entity_registry.async_get(fence_id) is not None:
-                prior = self.hass.states_by_id.get(fence_id)
-                generation = json.loads(prior.state)["generation"] if prior else 0
-                self.hass.states_by_id[fence_id] = _State(
-                    fence_id, _fence_value(generation=generation + 1, isolated=True,
-                        request_id=data.get("value", "")), stamp)
 
 
 class _Hass:
@@ -158,6 +138,37 @@ def _old_bridge_states(hass, prefix="a"):
     stamp = datetime.fromtimestamp(1, timezone.utc)
     for entity_id in (f"switch.bridge_{prefix}_ble_connection", f"binary_sensor.bridge_{prefix}_ble_status"):
         hass.states_by_id[entity_id] = _State(entity_id, "off", stamp)
+
+
+async def _seed_legacy_quarantine(ticket, *, isolated=False):
+    """Load the journal shape written by earlier releases."""
+    hass, entry, route = ticket.hass, ticket.entry, ticket.route
+    runtime = hass.data["power_sync"][entry.entry_id]
+    ledger = runtime[recovery.RECOVERY_KEY]["vehicles"][ticket.vehicle_id]
+    prefix = route["prefix"]
+    now = time.time()
+    nonce = "1" * 32
+    hazard = {
+        "kind": "ble_quarantine", "state": "pending", "prefix": prefix,
+        "attempt_id": ticket.attempt_id, "producer_identity": route["producer_identity"],
+        "binding": recovery._ble_binding(hass, prefix, route["entity_id"]),
+        "requested_epoch": now - 2, "request_id": nonce,
+        "fence_baseline": {**json.loads(_fence_value()), "observed_at": now - 3},
+    }
+    if isolated:
+        fence = _fence_value(generation=2, isolated=True, request_id=nonce)
+        stamp = datetime.fromtimestamp(now - 1, timezone.utc)
+        for eid in (f"switch.{prefix}_ble_connection", f"binary_sensor.{prefix}_ble_status"):
+            hass.states_by_id[eid] = _State(eid, "off", stamp)
+        eid = f"sensor.{prefix}_transport_fence"
+        hass.states_by_id[eid] = _State(eid, fence, stamp)
+        observed = stamp.timestamp()
+        hazard.update(state="isolated", control_off_at=observed, status_off_at=observed,
+                      fence_proof={**json.loads(fence), "observed_at": observed})
+        ledger["route"] = deepcopy(route["fallback"])
+    ledger["hazards"][f"ble:{prefix}"] = hazard
+    assert await recovery._persist(hass, entry, runtime)
+    return hazard
 
 
 @pytest.mark.asyncio
@@ -537,17 +548,10 @@ async def test_wrong_device_and_stale_off_fail_closed_without_start(harness, mon
     ticket = await recovery.async_begin_attempt(hass, entry, VIN_A, route, "start", route["entity_id"])
     assert ticket is not None
     await recovery.async_finish_attempt(ticket, "sent_unknown")
+    await _seed_legacy_quarantine(ticket, isolated=True)
     registrations["switch.bridge_a_ble_connection"].device_id = "other-device"
-    assert not await recovery.async_isolate_ble(ticket, authorize=True)
-    registrations["switch.bridge_a_ble_connection"].device_id = "ble-device"
-    _old_bridge_states(hass)
-    hass.services.update_states = False
-    monkeypatch.setattr(recovery, "BLE_ISOLATION_TIMEOUT", 0.01)
-    assert not await recovery.async_isolate_ble(ticket, authorize=True)
-    assert hass.services.calls[0] == ("switch", "turn_off", {"entity_id": "switch.bridge_a_ble_connection"}, True)
-    assert len(hass.services.calls) == 2
-    assert hass.services.calls[1][:2] == ("text", "set_value")
     assert recovery.get_vehicle_route(hass, entry, VIN_A)["kind"] == "blocked"
+    assert not hass.services.calls
 
 
 @pytest.mark.asyncio
@@ -557,11 +561,8 @@ async def test_fresh_off_proof_pins_ha_and_never_starts_vehicle(harness, monkeyp
     ticket = await recovery.async_begin_attempt(hass, entry, VIN_A, route, "start", route["entity_id"])
     assert ticket is not None
     await recovery.async_finish_attempt(ticket, "sent_unknown")
-    _old_bridge_states(hass)
-    hass.services.update_states = True
-    monkeypatch.setattr(recovery, "BLE_ISOLATION_TIMEOUT", 0.2)
-    assert await recovery.async_isolate_ble(ticket, authorize=True)
-    assert hass.services.calls[0][1:] == ("turn_off", {"entity_id": "switch.bridge_a_ble_connection"}, True)
+    await _seed_legacy_quarantine(ticket, isolated=True)
+    assert not hass.services.calls
     assert recovery.get_vehicle_route(hass, entry, VIN_A)["kind"] == "ha"
     assert recovery.ble_quarantined(hass, "bridge_a")
     hass.states_by_id["binary_sensor.bridge_a_ble_status"].state = "on"
@@ -600,10 +601,7 @@ async def test_presence_off_does_not_prove_ble_producer_isolation(harness, monke
     assert ticket is not None
     await recovery.async_finish_attempt(ticket, "sent_unknown")
     _old_bridge_states(hass)
-    hass.services.update_states = True
-    monkeypatch.setattr(recovery, "BLE_ISOLATION_TIMEOUT", 0.02)
-
-    assert not await recovery.async_isolate_ble(ticket, authorize=True)
+    await _seed_legacy_quarantine(ticket)
     assert recovery.get_vehicle_route(hass, entry, VIN_A)["kind"] == "blocked"
     assert recovery.ble_quarantined(hass, "bridge_a")
 
@@ -616,17 +614,10 @@ async def test_current_nonce_proof_handles_an_unchanged_off_control(harness):
         hass, entry, VIN_A, route, "start", route["entity_id"])
     assert ticket is not None
     await recovery.async_finish_attempt(ticket, "sent_unknown")
-    _old_bridge_states(hass)
+    hazard = await _seed_legacy_quarantine(ticket, isolated=True)
     old_off = hass.states_by_id["switch.bridge_a_ble_connection"]
-    hass.services.update_states = True
-    original = hass.services.async_call
-
-    async def suppressed_duplicate(*args, **kwargs):
-        await original(*args, **kwargs)
-        hass.states_by_id["switch.bridge_a_ble_connection"] = old_off
-
-    hass.services.async_call = suppressed_duplicate
-    assert await recovery.async_isolate_ble(ticket, authorize=True)
+    old_off.last_reported = old_off.last_updated = datetime.fromtimestamp(1, timezone.utc)
+    hazard["control_off_at"] = 1.0
     assert recovery.get_vehicle_route(hass, entry, VIN_A)["kind"] == "ha"
 
 
@@ -646,19 +637,9 @@ async def test_handoff_requires_new_generation_and_all_producer_work_stopped(har
         hass, entry, VIN_A, route, "start", route["entity_id"])
     assert ticket is not None
     await recovery.async_finish_attempt(ticket, "sent_unknown")
-    hass.services.update_states = True
-    original = hass.services.async_call
-
-    async def incomplete_producer(*args, **kwargs):
-        await original(*args, **kwargs)
-        state = hass.states_by_id["sensor.bridge_a_transport_fence"]
-        value = json.loads(state.state)
-        value.update(change)
-        state.state = json.dumps(value)
-
-    hass.services.async_call = incomplete_producer
-    monkeypatch.setattr(recovery, "BLE_ISOLATION_TIMEOUT", 0.01)
-    assert not await recovery.async_isolate_ble(ticket, authorize=True)
+    await _seed_legacy_quarantine(ticket, isolated=True)
+    state = hass.states_by_id["sensor.bridge_a_transport_fence"]
+    state.state = json.dumps({**json.loads(state.state), **change})
     assert recovery.get_vehicle_route(hass, entry, VIN_A)["kind"] == "blocked"
     assert recovery.ble_quarantined(hass, "bridge_a")
 
@@ -673,95 +654,43 @@ async def test_fence_proof_is_bound_to_exact_bridge_and_valid_receipt(harness, m
         hass, entry, VIN_A, route, "start", route["entity_id"])
     assert ticket is not None
     await recovery.async_finish_attempt(ticket, "sent_unknown")
-    hass.services.update_states = True
-    original_call = hass.services.async_call
-
-    async def ordered_receipt(*args, **kwargs):
-        # A real bridge reply arrives after its request. Give the fake that
-        # ordering too: datetime's microsecond resolution can otherwise make
-        # an immediate receipt equal to the request's time.time() sample.
-        await asyncio.sleep(0.001)
-        await original_call(*args, **kwargs)
-
-    hass.services.async_call = ordered_receipt
-    # Keep receipt timestamps on real wall time, but make the bounded
-    # monotonic polling window deterministic under full-suite load.
-    import time as wall_clock
-    monotonic_tick = 0.0
-
-    def controlled_monotonic():
-        nonlocal monotonic_tick
-        monotonic_tick += 0.001
-        return monotonic_tick
-
-    monkeypatch.setattr(
-        recovery,
-        "time",
-        types.SimpleNamespace(time=wall_clock.time, monotonic=controlled_monotonic),
-    )
-    monkeypatch.setattr(recovery, "BLE_ISOLATION_TIMEOUT", 0.01)
+    hazard = await _seed_legacy_quarantine(ticket, isolated=True)
     if invalid == "wrong_device":
         registrations["sensor.bridge_a_transport_fence"].device_id = "ble-device-b"
     elif invalid == "disabled":
         registrations["sensor.bridge_a_transport_fence"].disabled_by = "user"
-    if invalid in {"wrong_device", "disabled"}:
-        assert not await recovery.async_isolate_ble(ticket, authorize=True)
+    elif invalid == "future":
+        from datetime import timedelta
+        hass.states_by_id["sensor.bridge_a_transport_fence"].last_reported = datetime.now(timezone.utc) + timedelta(seconds=60)
+    elif invalid == "legacy_proof":
+        hazard.pop("fence_proof")
+    elif invalid == "partial_saved_proof":
+        hazard["fence_proof"] = {key: hazard["fence_proof"][key] for key in ("boot_id", "generation")}
+    elif invalid == "float_generation":
+        hazard["fence_proof"]["generation"] = float(hazard["fence_proof"]["generation"])
+    elif invalid == "running_producer":
+        hazard["fence_proof"]["producer_stopped"] = False
     else:
-        assert await recovery.async_isolate_ble(ticket, authorize=True)
-        if invalid == "future":
-            from datetime import timedelta
-            hass.states_by_id["sensor.bridge_a_transport_fence"].last_reported = datetime.now(timezone.utc) + timedelta(seconds=60)
-        else:
-            hazard = hass.data["power_sync"][entry.entry_id][recovery.RECOVERY_KEY]["vehicles"][VIN_A]["hazards"]["ble:bridge_a"]
-            if invalid == "legacy_proof":
-                hazard.pop("fence_proof")
-            elif invalid == "partial_saved_proof":
-                hazard["fence_proof"] = {key: hazard["fence_proof"][key] for key in ("boot_id", "generation")}
-            elif invalid == "float_generation":
-                hazard["fence_proof"]["generation"] = float(hazard["fence_proof"]["generation"])
-            elif invalid == "running_producer":
-                hazard["fence_proof"]["producer_stopped"] = False
-            else:
-                hazard["fence_proof"]["observed_at"] = hazard["requested_epoch"] - 1
+        hazard["fence_proof"]["observed_at"] = hazard["requested_epoch"] - 1
     assert recovery.get_vehicle_route(hass, entry, VIN_A)["kind"] == "blocked"
 
 
-@pytest.mark.parametrize("during", ["authority", "persistence"])
 @pytest.mark.asyncio
-async def test_isolation_rechecks_live_fence_after_awaits(harness, monkeypatch, during):
+async def test_native_admission_rechecks_current_legacy_fence(harness):
     hass, entry, _, _ = harness
     route = _route("bridge_a", "switch.car_a_charger", "switch.fallback")
     ticket = await recovery.async_begin_attempt(
         hass, entry, VIN_A, route, "start", route["entity_id"])
     assert ticket is not None
     await recovery.async_finish_attempt(ticket, "sent_unknown")
-    hass.services.update_states = True
-
-    def changed_producer():
-        state = hass.states_by_id["sensor.bridge_a_transport_fence"]
-        value = json.loads(state.state)
-        value["queued_writes"] = 1
-        state.state = json.dumps(value)
-
-    gates = 0
-    async def authority():
-        nonlocal gates
-        gates += 1
-        if gates == 3 and during == "authority":
-            changed_producer()
-        return True
-
-    if during == "persistence":
-        original = recovery._persist
-        async def delayed_persist(*args):
-            result = await original(*args)
-            ledger = hass.data["power_sync"][entry.entry_id][recovery.RECOVERY_KEY]["vehicles"][VIN_A]
-            if ledger["hazards"]["ble:bridge_a"]["state"] == "isolated":
-                changed_producer()
-            return result
-        monkeypatch.setattr(recovery, "_persist", delayed_persist)
-
-    assert not await recovery.async_isolate_ble(ticket, authorize=authority)
+    await _seed_legacy_quarantine(ticket, isolated=True)
+    assert recovery.get_vehicle_route(hass, entry, VIN_A)["kind"] == "ha"
+    state = hass.states_by_id["sensor.bridge_a_transport_fence"]
+    state.state = json.dumps({**json.loads(state.state), "queued_writes": 1})
+    native_entity = "switch.fallback"
+    assert await recovery.async_begin_attempt(
+        hass, entry, VIN_A, {"kind": "ha", "entity_id": native_entity}, "start", native_entity,
+    ) is None
     assert recovery.get_vehicle_route(hass, entry, VIN_A)["kind"] == "blocked"
 
 
@@ -773,11 +702,8 @@ async def test_isolation_cannot_rebind_the_preselected_fallback(harness):
         hass, entry, VIN_A, route, "start", route["entity_id"])
     assert ticket is not None
     await recovery.async_finish_attempt(ticket, "sent_unknown")
+    await _seed_legacy_quarantine(ticket, isolated=True)
     registrations["switch.fallback"].device_id = "another-vehicle"
-    _old_bridge_states(hass)
-    hass.services.update_states = True
-
-    assert not await recovery.async_isolate_ble(ticket, authorize=True)
     assert recovery.get_vehicle_route(hass, entry, VIN_A)["kind"] == "blocked"
 
 
@@ -865,7 +791,7 @@ async def test_pairing_digest_tracks_prefix_mapping_and_producer(harness):
 
 
 @pytest.mark.asyncio
-async def test_reload_new_owner_can_isolate_old_unknown_attempt(harness, monkeypatch):
+async def test_reload_new_owner_preserves_old_unknown_attempt_without_radio_commands(harness):
     hass, entry, _, owners = harness
     route = _route("bridge_a", "switch.car_a_charger", "switch.fallback")
     ticket = await recovery.async_begin_attempt(
@@ -882,27 +808,13 @@ async def test_reload_new_owner_can_isolate_old_unknown_attempt(harness, monkeyp
     restored.entity_registry = hass.entity_registry
     restored.states_by_id = hass.states_by_id
     restored.states = types.SimpleNamespace(get=restored.states_by_id.get)
-    restored.services.update_states = True
-    original_call = restored.services.async_call
-
-    async def ordered_receipt(*args, **kwargs):
-        # Keep the fake service's state publication strictly after the
-        # isolation request, matching the provider's acknowledgement order.
-        await asyncio.sleep(0.001)
-        await original_call(*args, **kwargs)
-
-    restored.services.async_call = ordered_receipt
-    monkeypatch.setattr(recovery, "BLE_ISOLATION_TIMEOUT", 0.2)
     owners.pop(VIN_A)
     pending = recovery.pending_ble_attempt(restored, entry, VIN_A)
     assert pending is not None
     assert pending.runtime_ref is restored.data["power_sync"][entry.entry_id]
-    assert await recovery.async_isolate_ble(pending, authorize=True)
-    assert recovery.get_vehicle_route(restored, entry, VIN_A)["kind"] == "ha"
+    assert recovery.get_vehicle_route(restored, entry, VIN_A)["kind"] == "blocked"
     assert recovery.ble_quarantined(restored, "bridge_a")
-    assert all(call[1] in {"turn_off", "set_value"} for call in restored.services.calls)
-    # The ticket from the discarded generation cannot mutate the replacement.
-    assert not await recovery.async_isolate_ble(ticket, authorize=True)
+    assert not restored.services.calls
 
 
 @pytest.mark.asyncio
@@ -914,10 +826,7 @@ async def test_verified_isolation_allows_new_ha_claim_without_clearing_hazard(ha
     )
     assert ticket is not None
     await recovery.async_finish_attempt(ticket, "sent_unknown")
-    _old_bridge_states(hass)
-    hass.services.update_states = True
-    monkeypatch.setattr(recovery, "BLE_ISOLATION_TIMEOUT", 0.2)
-    assert await recovery.async_isolate_ble(ticket, authorize=True)
+    await _seed_legacy_quarantine(ticket, isolated=True)
 
     native = await recovery.async_begin_attempt(
         hass, entry, VIN_A, {"kind": "ha", "entity_id": "switch.fallback"},
@@ -938,10 +847,7 @@ async def test_stale_off_proof_blocks_ha_route_after_isolation(harness, monkeypa
     )
     assert ticket is not None
     await recovery.async_finish_attempt(ticket, "sent_unknown")
-    _old_bridge_states(hass)
-    hass.services.update_states = True
-    monkeypatch.setattr(recovery, "BLE_ISOLATION_TIMEOUT", 0.2)
-    assert await recovery.async_isolate_ble(ticket, authorize=True)
+    await _seed_legacy_quarantine(ticket, isolated=True)
     hazard = hass.data["power_sync"][entry.entry_id][recovery.RECOVERY_KEY]["vehicles"][VIN_A]["hazards"]["ble:bridge_a"]
     stale = datetime.fromtimestamp(1, timezone.utc)
     for entity_id in ("switch.bridge_a_ble_connection", "binary_sensor.bridge_a_ble_status"):
@@ -1366,10 +1272,7 @@ async def test_native_restore_resume_allows_isolated_ble_hazard(harness, monkeyp
     )
     assert ble is not None
     assert await recovery.async_finish_attempt(ble, "sent_unknown")
-    _old_bridge_states(hass)
-    hass.services.update_states = True
-    monkeypatch.setattr(recovery, "BLE_ISOLATION_TIMEOUT", 0.2)
-    assert await recovery.async_isolate_ble(ble, authorize=True)
+    await _seed_legacy_quarantine(ble, isolated=True)
 
     native = {"kind": "ha", "entity_id": "switch.fallback"}
     native_start = await recovery.async_begin_attempt(
@@ -1642,6 +1545,63 @@ def _sidecar_harness(harness):
     store = _SidecarStore()
     hass.data["power_sync"][entry.entry_id]["_tesla_ev_recovery_sidecar_store"] = store
     return hass, entry, store, registrations, owners
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("unresolved", [False, True])
+async def test_native_stop_unpins_ended_session_with_retired_ble_history(harness, unresolved):
+    hass, entry, store, _, owners = _sidecar_harness(harness)
+    assert await recovery.async_load_recovery_state(hass, entry)
+    runtime = hass.data["power_sync"][entry.entry_id]
+
+    ble_route = _route("bridge_a", "switch.car_a_charger", "switch.fallback")
+    old_start = await recovery.async_begin_attempt(
+        hass, entry, VIN_A, ble_route, "start", ble_route["entity_id"],
+    )
+    assert old_start and await recovery.async_finish_attempt(old_start, "sent_unknown")
+    await _seed_legacy_quarantine(old_start)
+    ledger = runtime[recovery.RECOVERY_KEY]["vehicles"][VIN_A]
+    # Match the retained journal shape after BLE producer recovery.
+    retirement = {"state": "producer_retired_reconciled", "historical_outcome": "unknown"}
+    ledger["attempts"][old_start.attempt_id]["recovery_retired"] = retirement
+    ledger["hazards"]["ble:bridge_a"].update(state="retired", recovery_retired=retirement)
+
+    owners[VIN_A].update(owner="powersync", owner_mode="smart_schedule")
+    native = {"kind": "ha", "entity_id": "switch.fallback"}
+    start = await recovery.async_begin_attempt(
+        hass, entry, VIN_A, native, "start", native["entity_id"],
+    )
+    assert start and await recovery.async_finish_attempt(start, "accepted_unconfirmed")
+    assert recovery.get_vehicle_route(hass, entry, VIN_A)["kind"] == "ha"
+    if unresolved:
+        rate = await recovery.async_begin_attempt(
+            hass, entry, VIN_A, native, "rate", native["entity_id"],
+        )
+        assert rate and await recovery.async_finish_attempt(rate, "sent_unknown")
+    owners.pop(VIN_A)
+    retained = deepcopy((ledger["attempts"], ledger["hazards"]))
+
+    stop = await recovery.async_begin_attempt(
+        hass, entry, VIN_A, native, "stop", native["entity_id"],
+    )
+    assert stop and await recovery.async_finish_attempt(stop, "accepted_unconfirmed")
+
+    if unresolved:
+        assert recovery.get_vehicle_route(hass, entry, VIN_A)["reason"] == "native_recovery"
+    else:
+        assert recovery.get_vehicle_route(hass, entry, VIN_A) is None
+    saved = store.value["recovery"]["vehicles"][VIN_A]
+    assert (saved["attempts"], saved["hazards"]) == retained
+    assert (saved["route"] is None) == (not unresolved)
+
+    assert await recovery.async_load_recovery_state(hass, entry)
+    if unresolved:
+        assert recovery.get_vehicle_route(hass, entry, VIN_A)["reason"] == "native_recovery"
+    else:
+        assert recovery.get_vehicle_route(hass, entry, VIN_A) is None
+        assert await recovery.async_begin_attempt(
+            hass, entry, VIN_A, ble_route, "start", ble_route["entity_id"],
+        )
 
 
 @pytest.mark.asyncio
@@ -2061,7 +2021,7 @@ async def test_terminal_stop_proof_clears_retained_cleanup_route_and_allows_ble_
         assert old and await recovery.async_finish_attempt(old, 'sent_unknown')
         # Create a real pending quarantine, then retire it and its unknown
         # attempt through the normal stock-recovery evidence pipeline.
-        assert not await recovery.async_isolate_ble(old, authorize=lambda: False)
+        await _seed_legacy_quarantine(old)
         producer = dict(old.route['entity_identity'], vin=VIN_A, prefix='bridge_a',
                         producer_identity=old.route['producer_identity'])
         incident = await recovery.async_record_evidence_loss(
@@ -2227,7 +2187,7 @@ async def test_terminal_cleanup_projection_clear_requires_saved_proof_and_no_new
         new=await recovery.async_begin_attempt(hass,entry,VIN_A,route,'stop',route['entity_id'])
         assert new
         if case=='hazard':
-            assert not await recovery.async_isolate_ble(new,authorize=lambda:False)
+            await _seed_legacy_quarantine(new)
             assert await recovery.async_finish_attempt(new,'not_sent')
     if case=='other_vin':
         other_route=_route('bridge_b','switch.car_b_charger','switch.fallback_b')

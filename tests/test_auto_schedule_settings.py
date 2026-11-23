@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
+import logging
 import importlib
 import sys
 import types
 from unittest.mock import AsyncMock
 from datetime import datetime, timezone
 from pathlib import Path
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parent.parent / "custom_components" / "power_sync"
@@ -127,6 +131,16 @@ def test_empty_departure_times_does_not_rehydrate_legacy_schedule():
     assert settings.to_dict()["departure_days"] == []
 
 
+def test_legacy_departure_edit_round_trips_and_empty_weekdays_clear_the_deadline():
+    executor = object.__new__(ev_planner.AutoScheduleExecutor)
+    executor._settings, executor._state = {}, {}
+    current = executor.update_settings("car", {"departure_time": "06:30", "departure_days": [1, 5]})
+    restored = ev_planner.AutoScheduleSettings.from_dict(current.to_dict())
+    assert restored.departure_times == {1: "06:30", 5: "06:30"}
+    current = executor.update_settings("car", {"departure_days": []})
+    assert current.departure_time is None and current.to_dict()["departure_times"] == {}
+
+
 def test_empty_per_day_overrides_clear_legacy_aliases():
     settings = ev_planner.AutoScheduleSettings.from_dict({
         "departure_priorities": {},
@@ -155,6 +169,251 @@ def test_generic_status_entity_round_trips_with_auto_schedule_settings():
 
     assert settings.charger_status_entity == "sensor.garage_ev_status"
     assert settings.to_dict()["charger_status_entity"] == "sensor.garage_ev_status"
+
+
+@pytest.mark.parametrize("invalid", [None, True, False, "5", [], {}, float("nan"), float("inf"), -float("inf"), 10**500])
+@pytest.mark.parametrize("field", ["max_grid_price_cents", "departure_max_grid_price_cents"])
+def test_smart_schedule_rejects_invalid_grid_caps_without_partial_update(invalid, field):
+    executor = object.__new__(ev_planner.AutoScheduleExecutor)
+    executor._settings, executor._state = {}, {}
+    settings = executor.update_settings("car", {"target_soc": 77, "max_grid_price_cents": -3})
+    value = {"0": invalid} if field.startswith("departure_") else invalid
+    with pytest.raises(ValueError, match="grid_price"):
+        executor.update_settings("car", {"target_soc": 90, field: value})
+    assert settings.target_soc == 77
+    assert settings.max_grid_price_cents == -3
+
+
+@pytest.mark.parametrize("invalid", [None, [], {"7": 4}, {"-1": 4}, {"1.2": 4}, {True: 4}])
+def test_smart_schedule_rejects_malformed_grid_cap_weekday_map(invalid):
+    executor = object.__new__(ev_planner.AutoScheduleExecutor)
+    executor._settings, executor._state = {}, {}
+    with pytest.raises(ValueError, match="departure_max_grid_price"):
+        executor.update_settings("car", {"departure_max_grid_price_cents": invalid})
+
+
+def test_smart_schedule_caps_round_trip_per_vehicle_weekday_and_clear():
+    executor = object.__new__(ev_planner.AutoScheduleExecutor)
+    executor._settings, executor._state = {}, {}
+    settings = executor.update_settings("car", {
+        "max_grid_price_cents": -2.25,
+        "departure_max_grid_price_cents": {"0": 0, "4": 1.125},
+        "charger_power_entity": "sensor.garage_charge_power",
+    })
+    executor.update_settings("car", {"target_soc": 89})
+    assert executor.get_settings("other").get_effective_max_grid_price(0) == 25
+    saved = settings.to_dict()
+    assert saved["departure_max_grid_price_cents"] == {"0": 0, "4": 1.125}
+    restored = ev_planner.AutoScheduleSettings.from_dict(saved)
+    assert restored.charger_power_entity == "sensor.garage_charge_power"
+    assert [restored.get_effective_max_grid_price(d) for d in (0, 3, 4)] == [0, -2.25, 1.125]
+    executor.update_settings("car", {"departure_max_grid_price_cents": {}})
+    assert settings.get_effective_max_grid_price(0) == -2.25
+
+
+def test_smart_schedule_restores_legacy_caps_with_a_finite_non_paid_fallback():
+    restore = ev_planner.AutoScheduleSettings.from_dict
+    assert restore({}).max_grid_price_cents == 25
+    assert restore({"max_grid_price_cents": "-3.5"}).max_grid_price_cents == -3.5
+    for invalid in (None, True, "no", float("inf"), float("nan")):
+        settings = restore({"max_grid_price_cents": invalid})
+        assert settings.get_effective_max_grid_price(0) == 0
+    settings = restore({"max_grid_price_cents": -3, "departure_max_grid_price_cents": {"1": "bad", "3": 8}})
+    assert settings.get_effective_max_grid_price(1) == -3
+    assert settings.get_effective_max_grid_price(3) == 8
+
+
+@pytest.fixture
+def smart_schedule_routes(monkeypatch):
+    # Exercise the app routes and the real executor. Only the HA store and
+    # plan regeneration are substituted.
+    tree = ast.parse((ROOT / "__init__.py").read_text())
+    views = [n for n in tree.body if isinstance(n, ast.ClassDef) and n.name in {
+        "AutoScheduleSettingsView", "AutoScheduleStatusView", "AutoScheduleToggleView",
+    }]
+    namespace = {
+        "HomeAssistantView": object, "HomeAssistant": object, "ConfigEntry": object, "DOMAIN": "power_sync",
+        "web": types.SimpleNamespace(json_response=lambda data, status=200: (status, data)),
+        "_LOGGER": logging.getLogger(__name__), "__name__": "power_sync.test_views", "__package__": "power_sync",
+    }
+    exec(compile(ast.Module(body=views, type_ignores=[]), "smart_schedule_views", "exec"), namespace)
+    entry = types.SimpleNamespace(entry_id="one", options={}, data={})
+    hass = types.SimpleNamespace(data={"power_sync": {"one": {}}})
+    executor = ev_planner.AutoScheduleExecutor(hass, entry, planner=object())
+    executor._regenerate_plan = AsyncMock()
+    runtime = hass.data["power_sync"]["one"]
+    runtime.update(auto_schedule_executor=executor, store=object())
+    saved = {"auto_schedule_settings": {"other": {"max_grid_price_cents": 8}}}
+    async def persist(store, merge):
+        saved.update(merge(saved))
+        return True
+    storage = AsyncMock(side_effect=persist)
+    monkeypatch.setattr(sys.modules["power_sync"], "_update_powerwall_store", storage, raising=False)
+    get_post = namespace["AutoScheduleSettingsView"](hass, entry)
+    status = namespace["AutoScheduleStatusView"](hass, entry)
+    toggle = namespace["AutoScheduleToggleView"](hass, entry)
+    def request(fields):
+        return types.SimpleNamespace(json=AsyncMock(return_value={"vehicle_id": "car", **fields}))
+    return executor, runtime, saved, storage, get_post, status, toggle, request
+
+
+@pytest.mark.asyncio
+async def test_smart_schedule_api_saves_per_vehicle_and_returns_durable_caps(smart_schedule_routes):
+    executor, runtime, saved, storage, get_post, status, toggle, request = smart_schedule_routes
+    hass, entry = executor.hass, executor.config_entry
+    code, response = await get_post.post(request({"max_grid_price_cents": 0, "departure_max_grid_price_cents": {"0": -2.5}}))
+    assert code == 200 and response["settings"]["max_grid_price_cents"] == 0
+    assert saved["auto_schedule_settings"]["other"] == {"max_grid_price_cents": 8}
+    assert saved["auto_schedule_settings"]["car"]["departure_max_grid_price_cents"] == {"0": -2.5}
+    for route in (get_post, status):
+        code, response = await route.get(None)
+        assert code == 200
+        assert response["settings"]["car"]["max_grid_price_cents"] == 0
+        assert response["settings"]["car"]["departure_max_grid_price_cents"] == {"0": -2.5}
+    assert (await get_post.post(request({"max_grid_price_cents": True})))[0] == 400
+    assert storage.await_count == 1
+    assert (await toggle.post(request({"enabled": True})))[0] == 200
+    storage.side_effect = OSError("disk full")
+    assert (await get_post.post(request({"max_grid_price_cents": 99})))[0] == 500
+    assert executor.get_settings("car").max_grid_price_cents == 0
+    assert (await toggle.post(request({"enabled": False})))[0] == 500
+    assert executor.get_settings("car").enabled
+    shared = importlib.import_module("power_sync.automations.shared_generic_charger")
+    profiles = [
+        {"id": name, "name": name, "battery_capacity_kwh": 60, "schedule": {}}
+        for name in ("first", "second")
+    ]
+    entered, release = asyncio.Event(), asyncio.Event()
+    async def delay_save():
+        entered.set()
+        await release.wait()
+    shared_store = types.SimpleNamespace(
+        _data={shared.KEY: {"profiles": profiles, "selected_vehicle_id": "first"}},
+        async_save=AsyncMock(side_effect=delay_save),
+    )
+    runtime["automation_store"] = shared_store
+    shared.restore_schedule(executor)
+    edit = request({"vehicle_id": "generic_ev", "shared_charger_profile_id": "first", "max_grid_price_cents": -6.5})
+    saving = asyncio.create_task(get_post.post(edit))
+    await asyncio.wait_for(entered.wait(), timeout=5)
+    assert shared.selection_block_reason(hass, entry, executor)
+    assert executor.get_settings("generic_ev").max_grid_price_cents == 25
+    release.set()
+    code, response = await saving
+    assert code == 200 and response["settings"]["shared_charger_profile_id"] == "first"
+    assert profiles[0]["schedule"]["max_grid_price_cents"] == -6.5
+    wrong_value = await get_post.post(request({
+        "vehicle_id": "generic_ev", "shared_charger_profile_id": "first", "max_grid_price_cents": 0,
+        "expected_settings": {"max_grid_price_cents": 25},
+    }))
+    assert wrong_value[0] == 409 and wrong_value[1]["code"] == "settings_conflict"
+
+    # A second request already sent by the old editor waits for the write lock.
+    # Change the selected profile before the request can commit.
+    async with executor._settings_write_lock:
+        pending_toggle = asyncio.create_task(toggle.post(request({
+            "vehicle_id": "generic_ev", "shared_charger_profile_id": "first", "enabled": True,
+            "expected_settings": {"enabled": False},
+        })))
+        await asyncio.sleep(0)
+        shared_store._data[shared.KEY]["selected_vehicle_id"] = "second"
+        shared.restore_schedule(executor)
+    toggle_conflict = await pending_toggle
+    assert toggle_conflict[0] == 409 and toggle_conflict[1]["code"] == "shared_profile_changed"
+    edit_conflict = await get_post.post(edit)
+    assert edit_conflict[0] == 409 and edit_conflict[1]["code"] == "shared_profile_changed"
+    shared_store.async_save.assert_awaited_once()
+    assert profiles[1]["schedule"] == {}
+    for route in (get_post, status):
+        code, response = await route.get(None)
+        assert code == 200 and response["settings"]["generic_ev"]["shared_charger_profile_id"] == "second"
+    code, response = await toggle.post(request({"vehicle_id": "generic_ev", "enabled": True}))
+    assert code == 200 and response["shared_charger_profile_id"] == "second"
+    assert profiles[1]["schedule"]["enabled"] and not profiles[0]["schedule"]["enabled"]
+    runtime.pop("store")
+    assert (await get_post.post(request({"max_grid_price_cents": 99})))[0] == 503
+
+
+@pytest.mark.asyncio
+async def test_weekday_map_precondition_serializes_overlapping_edits_and_retries(smart_schedule_routes):
+    executor, _, saved, storage, editor, _, _, req = smart_schedule_routes
+    key = "departure_max_grid_price_cents"
+    await editor.post(req({key: {"2": 0}}))
+    opened_a = (await editor.get(None))[1]["settings"]["car"][key]
+    opened_b = (await editor.get(None))[1]["settings"]["car"][key]
+    entered, release = asyncio.Event(), asyncio.Event()
+    original_save = storage.side_effect
+
+    async def delayed_save(store, merge):
+        entered.set()
+        await release.wait()
+        return await original_save(store, merge)
+
+    storage.side_effect = delayed_save
+    first = {"expected_settings": {key: opened_a}, key: {**opened_a, "0": -2.125}}
+    second = {"expected_settings": {key: opened_b}, key: {**opened_b, "1": 0}}
+    writer_a = asyncio.create_task(editor.post(req(first)))
+    await asyncio.wait_for(entered.wait(), 3)
+    writer_b = asyncio.create_task(editor.post(req(second)))
+    await asyncio.sleep(0)
+    assert not writer_b.done()
+    release.set()
+    result_a, result_b = await asyncio.gather(writer_a, writer_b)
+    assert result_a[0] == 200
+    assert result_b[0] == 409, (result_b, saved["auto_schedule_settings"]["car"][key])
+    assert result_b[1]["code"] == "settings_conflict"
+    assert storage.await_count == 2
+    latest = saved["auto_schedule_settings"]["car"][key]
+    assert latest == {"2": 0, "0": -2.125}
+    assert executor.get_settings("car").to_dict()[key] == latest
+    refreshed = {"expected_settings": {key: latest}, key: {**latest, "1": 0}}
+    assert (await editor.post(req(refreshed)))[0] == 200
+    assert (await editor.post(req(refreshed)))[0] == 200
+    assert storage.await_count == 3
+    assert saved["auto_schedule_settings"]["car"][key] == {"0": -2.125, "1": 0, "2": 0}
+
+    # A stale request for a different value fails, even if the value is zero;
+    # an independently selected car can use its own baseline.
+    assert (await editor.post(req({"expected_settings": {key: {}}, key: {"1": 0}})))[0] == 409
+    assert (await editor.post(req({"vehicle_id": "different", "expected_settings": {key: {}}, key: {"1": 0}})))[0] == 200
+    assert saved["auto_schedule_settings"]["different"][key] == {"1": 0}
+
+
+@pytest.mark.asyncio
+async def test_smart_schedule_guard_types_capability_toggle_and_rollback(smart_schedule_routes):
+    executor, _, saved, storage, editor, status, toggle, req = smart_schedule_routes
+    key = "max_grid_price_cents"
+    assert (await editor.post(req({key: 0})))[0] == 200
+    for view in (editor, status):
+        response = (await view.get(None))[1]["settings"]["car"]
+        assert response["settings_precondition_supported"] is True
+    assert "settings_precondition_supported" not in saved["auto_schedule_settings"]["car"]
+    for expected in (None, {}, [], {key: True}, {key: "0"}, {key: float("nan")}, {key: float("inf")},
+                     {"vehicle_id": "car"}, {"unknown": 0}, {"priority": "cost_optimized"}):
+        assert (await editor.post(req({key: -0.25, "expected_settings": expected})))[0] == 400
+    for bad in ({"00": 0}, {"7": 0}, {"0": False}, {"4": float("nan")}, {"5": None}, []):
+        day = "departure_max_grid_price_cents"
+        assert (await editor.post(req({day: {}, "expected_settings": {day: bad}})))[0] == 400
+    assert (await editor.post(req({"departure_times": {}, "expected_settings": {"departure_times": {"0": "25:00"}}})))[0] == 400
+    assert (await editor.post(req({"departure_preserve_home_battery": {"0": "false"}, "expected_settings": {"departure_preserve_home_battery": {}}})))[0] == 400
+    assert (await toggle.post(req({"expected_settings": {"enabled": False}})))[0] == 400
+    assert storage.await_count == 1
+    good = {"enabled": True, "expected_settings": {"enabled": False}}
+    assert (await toggle.post(req(good)))[1]["enabled"] is True
+    assert (await toggle.post(req(good)))[1]["enabled"] is True
+    assert storage.await_count == 2
+    # An application/storage failure is independent of the successful expected-value check.
+    original_save = storage.side_effect
+    storage.side_effect = OSError("unavailable")
+    patch = {key: -2.125, "expected_settings": {key: 0}}
+    assert (await editor.post(req(patch)))[0] == 500
+    assert executor.get_settings("car").max_grid_price_cents == saved["auto_schedule_settings"]["car"][key] == 0
+    storage.side_effect = original_save
+    assert (await editor.post(req(patch)))[0] == 200
+    await editor.post(req({key: 7}))
+    conflict = await editor.post(req(patch))
+    assert conflict[0] == 409 and conflict[1]["field"] == key
+    assert saved["auto_schedule_settings"]["car"][key] == 7
 
 
 def test_preserve_home_battery_round_trips_with_auto_schedule_settings():
@@ -250,6 +509,60 @@ def test_auto_schedule_departure_preserve_and_consume_settings_are_mutually_excl
 
     assert settings.departure_consume_battery_level == {0: 30}
     assert settings.departure_preserve_home_battery == {0: False}
+
+
+@pytest.mark.asyncio
+async def test_battery_rule_inheritance_cannot_enable_preserve_and_consume_together(smart_schedule_routes):
+    executor, _, saved, storage, route, _, _, request = smart_schedule_routes
+    # Either single-setting edit remains supported. The positive weekday floor
+    # deliberately overrides the vehicle's preserve setting on Monday.
+    await route.post(request({"preserve_home_battery": True}))
+    code, reply = await route.post(request({"departure_consume_battery_level": {"0": 30}}))
+    assert code == 200
+    assert reply["settings"]["departure_preserve_home_battery"] == {"0": False}
+    before = executor.get_settings("car").to_dict()
+    writes = storage.await_count
+
+    # Removing only the synthesized Off would reinstate default Preserve On
+    # while the car still has an explicit Monday consume floor.
+    patch = {"departure_preserve_home_battery": {}, "max_grid_price_cents": -2}
+    code, reply = await route.post(request(patch))
+    assert code == 400 and "Monday" in reply["error"]
+    assert storage.await_count == writes
+    assert executor.get_settings("car").to_dict() == before
+    assert saved["auto_schedule_settings"]["car"] == before
+    with pytest.raises(ValueError, match="Monday"):
+        executor.update_settings("car", patch)
+    assert executor.get_settings("car").to_dict() == before
+
+    # Clearing both overrides restores the vehicle defaults.
+    code, _ = await route.post(request({**patch, "departure_consume_battery_level": {}}))
+    assert code == 200
+    assert executor.get_settings("car").get_effective_consume_battery_level(0) == 0
+
+    # A client editing Tuesday sends a whole replacement map. Monday's
+    # unchanged positive floor must not manufacture a new Preserve Off there.
+    assert (await route.post(request({"preserve_home_battery": False})))[0] == 200
+    assert (await route.post(request({"departure_consume_battery_level": {"0": 30}})))[0] == 200
+    assert (await route.post(request({"departure_preserve_home_battery": {}})))[0] == 200
+    code, reply = await route.post(request({"departure_consume_battery_level": {"0": 30, "1": 25}}))
+    assert code == 200 and reply["settings"]["departure_preserve_home_battery"] == {"1": False}
+    # The vehicle default also cannot introduce a mixed Monday policy.
+    assert (await route.post(request({"preserve_home_battery": True})))[0] == 400
+
+    # A pre-existing mixed record retains its raw settings for repair, but
+    # never permits battery use on a preserved day or blocks an unrelated price edit.
+    legacy = ev_planner.AutoScheduleSettings.from_dict({
+        "vehicle_id": "car", "preserve_home_battery": True,
+        "departure_consume_battery_level": {"0": 30, "1": 40},
+        "departure_preserve_home_battery": {"1": False},
+    })
+    executor._settings["car"] = legacy
+    assert legacy.get_effective_consume_battery_level(0) == 0
+    assert legacy.get_effective_consume_battery_level(1) == 40
+    code, _ = await route.post(request({"max_grid_price_cents": -1}))
+    assert code == 200
+    assert saved["auto_schedule_settings"]["car"]["departure_consume_battery_level"] == {"0": 30, "1": 40}
 
 
 def test_vehicle_charger_config_syncs_generic_status_entity():
@@ -1042,7 +1355,7 @@ def test_paired_ble_runtime_updates_use_canonical_vin():
 
     settings = executor.update_settings(
         "ble_bridge_alpha",
-        {"enabled": True},
+        {"enabled": True, "vehicle_id": "ble_bridge_alpha"},
     )
 
     assert settings.vehicle_id == vin
@@ -1330,3 +1643,143 @@ def test_action_smart_schedule_save_reports_storage_failure(monkeypatch):
     with pytest.raises(OSError, match="disk full"):
         asyncio.run(executor.save_settings(store, raise_errors=True))
     failed_save.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_linked_tesla_target_round_trip_uses_vehicle_readback_and_survives_restart(
+    smart_schedule_routes, monkeypatch,
+):
+    from power_sync.automations import tesla_target_sync as sync
+    from unittest.mock import Mock
+
+    executor, runtime, saved, _, settings_view, status_view, toggle, request = smart_schedule_routes
+    vin = "5YJTEST0000000001"
+    executor.hass.bus = types.SimpleNamespace(async_fire=Mock())
+    coordinator = sync.TeslaTargetSync(executor.hass, executor.config_entry, executor, runtime["store"])
+    executor.target_sync = coordinator
+    clock = [1000.0]
+    monkeypatch.setattr(sync, "time", types.SimpleNamespace(time=lambda: clock[0]))
+    monkeypatch.setattr(coordinator, "request", Mock())
+    sample = AsyncMock(return_value=(999.0, 80))
+    monkeypatch.setattr(coordinator, "_sample", sample)
+    monkeypatch.setattr(coordinator, "_read", lambda _: sample.return_value)
+    writer = AsyncMock(return_value=True)
+    fake = types.ModuleType("power_sync.automations.actions")
+    fake._action_set_ev_charge_limit = writer
+    monkeypatch.setitem(sys.modules, fake.__name__, fake)
+    query = types.SimpleNamespace(query={"target_only": "1", "vehicle_id": vin})
+    async def edit(**fields):
+        code, reply = await settings_view.post(request({"vehicle_id": vin, **fields}))
+        assert code == 200, reply
+
+    await edit(enabled=True, target_soc=70)
+    await coordinator._tick(vin)
+    assert writer.await_args.args[-1]["percent"] == 70
+    assert writer.await_args.args[-1]["vehicle_vin"] == vin
+    assert (await status_view.get(query))[1]["target_sync_status"]["status"] == "pending"
+    # An unchanged old report cannot confirm or retry the submitted command.
+    await coordinator._tick(vin)
+    assert writer.await_count == 1
+    clock[0] += 2
+    sample.return_value = (clock[0], 70)
+    await coordinator._tick(vin)
+    assert (await status_view.get(query))[1]["target_sync_status"]["status"] == "synced"
+    # A newer change in the Tesla app changes the saved target with no echo.
+    clock[0] += 2
+    sample.return_value = (clock[0], 85)
+    await coordinator._tick(vin)
+    persisted = saved["auto_schedule_settings"][vin]
+    assert persisted["target_soc"] == 85
+    restored = ev_planner.AutoScheduleSettings.from_dict(persisted)
+    assert restored._tesla_target_link["baseline"] == 85
+    assert "_tesla_target_link" not in restored.to_dict()
+    assert writer.await_count == 1
+    # A new app edit invalidates any previous pending write. Disabling the
+    # schedule also revokes a captured transport callback before submission.
+    await edit(target_soc=75)
+    clock[0] += 1
+    await coordinator._tick(vin)
+    params = writer.await_args.args[-1]
+    assert params["percent"] == 75 and params["_target_sync_current"]()
+    # A coordinator update can precede the HA entity event during transport.
+    old_sample = sample.return_value
+    sample.return_value = (clock[0], 60)
+    assert not params["_target_sync_current"]()
+    assert vin in coordinator.dirty
+    sample.return_value = old_sample
+    assert (await toggle.post(request({"vehicle_id": vin, "enabled": False})))[0] == 200
+    assert not params["_target_sync_current"]()
+    await coordinator._tick(vin)
+    assert (await status_view.get(query))[1] == {
+        "success": True, "vehicle_id": vin, "enabled": False, "target_soc": 75,
+    }
+    assert saved["auto_schedule_settings"]["other"] == {"max_grid_price_cents": 8}
+    assert (await status_view.get(types.SimpleNamespace(query={"target_only":"1","vehicle_id":"unknown"})))[0] == 404
+
+
+def test_link_keeps_lower_initial_target_and_rejects_stale_or_superseded_vehicle_echo():
+    from power_sync.automations.tesla_target_sync import TargetLink, reconcile
+    target, link, send = reconcile(90, TargetLink(), 70, 100, 101)
+    assert (target, send, link.baseline) == (70, False, 70)
+    first = link.app_edit(70, 105)
+    target, attempted, send = reconcile(75, first, 70, 106, 106)
+    assert target == 75 and send
+    from dataclasses import replace
+    pending = replace(attempted, attempts=1, sent_at=106).app_edit(75, 107)
+    target, pending, send = reconcile(85, pending, 75, 108, 108)
+    assert target == 85 and send
+    target, _, send = reconcile(85, pending, 60, 109, 109)
+    assert target == 60 and not send
+    target, _, send = reconcile(85, pending, 60, 5, 110)
+    assert target == 85 and not send
+    # A superseded command can reach Tesla even after its successor was confirmed.
+    second = replace(attempted, attempts=1, sent_at=106).app_edit(75, 107)
+    second = replace(second, sent_at=108, attempts=1)
+    _, confirmed, send = reconcile(85, second, 85, 109, 109)
+    assert not send and confirmed.baseline == 85
+    target, _, send = reconcile(85, confirmed, 75, 110, 110)
+    assert target == 85 and send
+    # A fresh, explicit edit made while enabling supersedes a lower car setting.
+    target, _, send = reconcile(90, TargetLink().app_edit(70, 110), 70, 111, 111)
+    assert target == 90 and send
+
+
+@pytest.mark.asyncio
+async def test_target_sync_uses_exact_vehicle_reports_and_tracks_only_its_limit_entities(
+    smart_schedule_routes, monkeypatch,
+):
+    from datetime import datetime, timezone
+    from unittest.mock import Mock
+    from power_sync.automations import tesla_target_sync as sync
+
+    executor, runtime, *_ = smart_schedule_routes
+    hass, entry = executor.hass, executor.config_entry
+    vin = "5YJTEST0000000001"
+    other = "5YJTEST0000000002"
+    entry.options.update(ev_provider="both", tesla_ble_entity_prefix="left,right",
+                         tesla_ble_vehicle_mapping=f"{vin}=right,{other}=left")
+    when = datetime.now(timezone.utc)
+    values = {"sensor.right_charge_limit": types.SimpleNamespace(state="65", last_reported=when),
+              "sensor.left_charge_limit": types.SimpleNamespace(state="95", last_reported=when)}
+    hass.states = types.SimpleNamespace(get=values.get)
+    source = types.SimpleNamespace(vin=vin, source_charge_timestamp=when.timestamp()-4, charge_limit_soc=80)
+    native = Mock(return_value=source)
+    monkeypatch.setattr(sync, "get_tesla_vehicle_observation", native)
+    monkeypatch.setattr(sync, "get_tesla_ble_observed_at", lambda _, state: state.last_reported if state else None)
+    actions = types.ModuleType("power_sync.automations.actions")
+    actions._get_tesla_ev_entity = AsyncMock(return_value="number.blue_charge_limit")
+    actions._resolve_ble_prefix_for_vehicle = lambda h, e, v: "right" if v == vin else "left"
+    monkeypatch.setitem(sys.modules, actions.__name__, actions)
+    track = Mock(return_value=Mock())
+    monkeypatch.setattr(sys.modules["homeassistant.helpers.event"], "async_track_state_change_event", track, raising=False)
+    manager = sync.TeslaTargetSync(hass, entry, executor, runtime["store"])
+    assert await manager._sample(vin) == (when.timestamp(), 65)
+    assert track.call_args.args[1] == ("number.blue_charge_limit", "sensor.right_charge_limit")
+    native.assert_called_once_with(hass, vin, preferred_entity_id="number.blue_charge_limit")
+    values["sensor.right_charge_limit"].state = "unavailable"
+    assert (await manager._sample(vin))[1] == 80
+    source.vin = other
+    assert await manager._sample(vin) is None
+    manager.request = Mock()
+    await track.call_args.args[2](None)
+    manager.request.assert_called_once_with(vin)

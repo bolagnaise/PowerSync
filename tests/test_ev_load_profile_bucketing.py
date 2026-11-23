@@ -259,6 +259,34 @@ def test_load_profile_weekend_flag_uses_local_weekday():
     assert weekend_profile[23] != pytest.approx(2.5)
 
 
+@pytest.mark.parametrize(
+    ("home_entity", "home_reading", "expected_kw"),
+    [
+        ("sensor.power_sync_home_load", "1", 1),
+        ("sensor.renamed_household_demand", "1", 1),
+        ("sensor.renamed_household_demand", "unavailable", 8),
+    ],
+)
+def test_standalone_forecast_prefers_recorded_household_load(
+    monkeypatch, home_entity, home_reading, expected_kw,
+):
+    instant = datetime(2026, 7, 8, 8, 0, tzinfo=timezone.utc)
+    raw = "sensor.inverter_load_power"
+    hass = _FakeHass(raw, [_FakeState(raw, "8000", instant)])
+    hass.states = _FakeStates([raw, home_entity])
+    hass._fake_recorder._history[home_entity] = [
+        _FakeState(home_entity, home_reading, instant, {"unit_of_measurement": "kW", "home_load_basis": "excludes_ev"})
+    ]
+    registry = SimpleNamespace(async_get_entity_id=lambda domain, platform, unique_id: (
+        home_entity if (domain, platform, unique_id) == ("sensor", "power_sync", "entry-1_home_load") else None
+    ))
+    monkeypatch.setattr(sys.modules["homeassistant.helpers"], "entity_registry", _ha_er, raising=False)
+    monkeypatch.setattr(_ha_er, "async_get", lambda _hass: registry)
+    estimator = ev_planner.SurplusForecaster(hass, SimpleNamespace(entry_id="entry-1")).load_estimator
+    _run(estimator.update_from_history())
+    assert estimator._load_history["weekday"][18] == pytest.approx(expected_kw)
+
+
 def test_load_profile_preserves_kw_sensor_units():
     """Recorder states already expressed in kW must not be divided twice."""
     utc_instant = datetime(2026, 8, 17, 22, 0, tzinfo=timezone.utc)
@@ -444,6 +472,25 @@ def _run_overlay(coordinator: _FakeOverlayCoordinator, load: list[float]) -> lis
     }
     exec(compile(wrapped, "<ev_overlay_block>", "exec"), namespace)
     return asyncio.run(namespace["_run"](list(load)))
+
+
+def test_inflight_ev_replan_keeps_committed_vehicle_ceiling(monkeypatch):
+    coordinator = _FakeOverlayCoordinator(
+        external_forecast=None, internal_forecast=None, ev_integration_enabled=True
+    )
+    committed_at = datetime(2026, 8, 21, tzinfo=timezone.utc)
+    coordinator._last_ev_charge_by_vehicle_w = {"car": [0.0]}
+    coordinator._last_ev_charge_schedule_updated = committed_at
+
+    async def interrupt_projection(_n):
+        # The EV loop can run here, even if the replacement solve never finishes.
+        assert coordinator._last_ev_charge_by_vehicle_w == {"car": [0.0]}
+        assert coordinator._last_ev_charge_schedule_updated == committed_at
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(coordinator, "_build_price_level_projection", interrupt_projection)
+    with pytest.raises(asyncio.CancelledError):
+        _run_overlay(coordinator, [1500.0])
 
 
 def test_ev_overlay_external_entity_only_applies_external_forecast():
@@ -814,8 +861,12 @@ def test_internal_ev_forecast_suppresses_price_blocked_plan_but_keeps_deadline()
     assert components["tessy"] == pytest.approx([2300.0] * 12)
 
 
-def test_internal_ev_forecast_applies_per_day_policy_across_midnight():
-    """Each slot uses its own local weekday, not the window start weekday."""
+@pytest.mark.parametrize(
+    ("deadline", "expected_before"),
+    [(None, 2300.0), ("2026-08-18T07:00:00", 0.0)],
+)
+def test_internal_ev_forecast_applies_per_day_policy_across_midnight(deadline, expected_before):
+    """Use the departure weekday when set, else the local weekday of each slot."""
     now = datetime(2026, 8, 17, 23, 30, tzinfo=timezone(LOCAL_OFFSET))
     old_now = _ha_dt.now
     old_executor = ev_planner.get_auto_schedule_executor()
@@ -825,7 +876,7 @@ def test_internal_ev_forecast_applies_per_day_policy_across_midnight():
         vehicle_id="ev",
         current_soc=60,
         target_soc=80,
-        target_time=None,
+        target_time=deadline,
         energy_needed_kwh=2.3,
         windows=[
             ev_planner.PlannedChargingWindow(
@@ -869,8 +920,7 @@ def test_internal_ev_forecast_applies_per_day_policy_across_midnight():
         _ha_dt.now = old_now
         ev_planner.set_auto_schedule_executor(old_executor)
 
-    assert components["ev"][:6] == pytest.approx([2300.0] * 6)
-    assert components["ev"][6:] == pytest.approx([0.0] * 6)
+    assert components.get("ev", [0.0] * 12) == pytest.approx([expected_before] * 6 + [0.0] * 6)
 
 
 def test_internal_ev_forecast_suppresses_grid_slots_blocked_by_demand_window():

@@ -26,7 +26,6 @@ _TERMINAL_ATTEMPT_OUTCOMES = frozenset({
     "not_sent", "accepted_unconfirmed", "confirmed", "rejected",
 })
 _TERMINAL_REMOVALS_KEY = "terminal_removals"
-BLE_ISOLATION_TIMEOUT = 10.0
 RECOVERY_DRAIN_TIMEOUT = 30.0
 _MISSING = object()
 _JOURNAL_LOCK_KEY = "_ev_transport_recovery_lock"
@@ -2153,6 +2152,10 @@ async def async_track_submission(
         return (
             type(generation) is int
             and recovery_control_allowed(hass, entry, vid, generation, operation_name)
+            and (
+                operation_name == "stop"
+                or _legacy_ble_fallback_current(hass, runtime, vid, metadata)
+            )
         )
 
     if not _allowed():
@@ -2686,8 +2689,11 @@ async def async_recover_stock(
             "historical_outcome": "unknown",
         }
         _next_revision(state)
-        if not await _save_sidecar(hass, entry, runtime, state):
-            return False
+        phase_saved = await _save_sidecar(hass, entry, runtime, state)
+    if not phase_saved:
+        await _mark_recovery_failure(hass, entry, runtime, selected_id, "quiesce_phase_not_persisted")
+        return False
+
     try:
         drained = await async_drain_submissions(
             hass, entry, vehicle_ids=vehicles,
@@ -2723,8 +2729,11 @@ async def async_recover_stock(
         state["obligations"][selected_id]["phase"] = "reset_pending"
         state["obligations"][selected_id]["phase_token"] = phase_token
         _next_revision(state)
-        if not await _save_sidecar(hass, entry, runtime, state):
-            return False
+        phase_saved = await _save_sidecar(hass, entry, runtime, state)
+    if not phase_saved:
+        await _mark_recovery_failure(hass, entry, runtime, selected_id, "reset_phase_not_persisted")
+        return False
+
     try:
         retirement = await async_execute_stock_reset(
             profile=profile or {}, identity=identity or {}, restart=restart,
@@ -2758,8 +2767,11 @@ async def async_recover_stock(
         state["obligations"][selected_id]["phase"] = "reconciling"
         state["obligations"][selected_id]["phase_token"] = phase_token
         _next_revision(state)
-        if not await _save_sidecar(hass, entry, runtime, state):
-            return False
+        phase_saved = await _save_sidecar(hass, entry, runtime, state)
+    if not phase_saved:
+        await _mark_recovery_failure(hass, entry, runtime, selected_id, "reconcile_phase_not_persisted")
+        return False
+
     try:
         observations: dict[str, Any] = {}
         observed_after = float(retirement.get("qualified_at", time.time()))
@@ -2996,22 +3008,15 @@ async def _restore_after_cancel(
         pass
 
 
-def _isolation_ready_for_route(hass: Any, ledger: Mapping[str, Any],
-                               route: Mapping[str, Any]) -> bool:
-    prefix = str(route.get("prefix") or "")
-    if not prefix:
-        return False
-    for hazard in _hazards(ledger):
-        if (hazard.get("kind") == "ble_quarantine"
-                and str(hazard.get("prefix") or "") == prefix):
-            return hazard.get("state") == "isolated" and _isolation_valid(hass, hazard)
-    return False
-
-
 def _ha_fallback_allowed(hass: Any, ledger: Mapping[str, Any],
                          route: Mapping[str, Any]) -> bool:
-    """Permit a new HA claim only when every old BLE hazard is isolated."""
+    """Honor a historical isolation only for its exact attempt and native pin."""
     if route.get("kind") != "ha":
+        return False
+    active_hazards = [hazard for hazard in _hazards(ledger)
+                      if hazard.get("kind") == "ble_quarantine"
+                      and not hazard.get("recovery_retired")]
+    if any(hazard.get("state") != "isolated" for hazard in active_hazards):
         return False
     attempts = ledger.get("attempts", {})
     found = False
@@ -3020,18 +3025,57 @@ def _ha_fallback_allowed(hass: Any, ledger: Mapping[str, Any],
                 or record.get("outcome", "pending") not in ("pending", "sent_unknown")):
             continue
         old_route = record.get("route", {})
-        if isinstance(old_route, Mapping) and old_route.get("kind") == "ble":
-            found = True
-            if not _isolation_ready_for_route(hass, ledger, old_route):
-                return False
-    for hazard in _hazards(ledger):
-        if (hazard.get("kind") == "ble_quarantine"
-                and not hazard.get("recovery_retired")
-                and hazard.get("state") == "pending"):
-            found = True
-            if hazard.get("state") != "isolated" or not _isolation_valid(hass, hazard):
-                return False
+        if not isinstance(old_route, Mapping) or old_route.get("kind") != "ble":
+            return False
+        fallback = old_route.get("fallback")
+        anchor = route.get("session_anchor") or route
+        identity = route.get("entity_identity")
+        if (not isinstance(fallback, Mapping)
+                or fallback.get("kind") != "ha"
+                or fallback.get("vehicle_id") != route.get("vehicle_id")
+                or not isinstance(anchor, Mapping)
+                or not isinstance(identity, Mapping)
+                or not isinstance(anchor.get("entity_identity"), Mapping)
+                or any(fallback.get(key) != anchor.get(key)
+                       for key in ("entity_id", "entity_identity"))
+                or any(identity.get(key) != anchor["entity_identity"].get(key)
+                       for key in ("platform", "config_entry_id", "device_id"))):
+            return False
+        if not any(
+            hazard.get("attempt_id") == record.get("attempt_id")
+            and hazard.get("producer_identity") == old_route.get("producer_identity")
+            and hazard.get("prefix") == old_route.get("prefix")
+            and _isolation_valid(hass, hazard)
+            and hazard["binding"]["entities"].get("charger") == old_route.get("entity_identity")
+            for hazard in active_hazards
+        ):
+            return False
+        found = True
     return found
+
+
+def _legacy_ble_fallback_current(hass, runtime, vehicle_id, metadata):
+    """Recheck retained physical isolation immediately before native handoff."""
+    route = metadata.get("route") if isinstance(metadata, Mapping) else None
+    if not isinstance(route, Mapping) or route.get("kind") != "ha":
+        return True
+    ledger = _ledger(runtime, vehicle_id, migrate=False)
+    if ledger is None:
+        return True
+    ble_attempts = {
+        key: record for key, record in ledger.get("attempts", {}).items()
+        if isinstance(record, Mapping) and isinstance(record.get("route"), Mapping)
+        and record["route"].get("kind") == "ble"
+        and not record.get("recovery_retired")
+        and record.get("outcome", "pending") in ("pending", "sent_unknown")
+    }
+    live_hazards = any(
+        hazard.get("kind") == "ble_quarantine" and not hazard.get("recovery_retired")
+        for hazard in _hazards(ledger)
+    )
+    if not ble_attempts and not live_hazards:
+        return True
+    return _ha_fallback_allowed(hass, {**ledger, "attempts": ble_attempts}, route)
 
 
 async def async_begin_attempt(
@@ -3249,14 +3293,30 @@ async def async_finish_attempt(ticket: RecoveryTicket, outcome: Any) -> bool:
                 # write is refused.  Keep the marker internal to this lock so
                 # monkeypatched legacy persistence remains compatible.
             attempts.pop(ticket.attempt_id, None)
-            stop_route_cleared = (
+            stop_matches_route = (
                 str(record.get("operation") or "").strip().lower() == "stop"
                 and isinstance(record.get("route"), Mapping)
-                and record["route"].get("cleanup_only") is True
                 and isinstance(ledger.get("route"), Mapping)
                 and dict(ledger["route"]) == dict(record["route"])
+            )
+            stop_route_cleared = (
+                stop_matches_route
+                and record["route"].get("cleanup_only") is True
                 and not attempts
                 and not ledger.get("hazards")
+            )
+            # A submitted native Stop can end its exact session even if a
+            # past recovery retained retired attempts or quarantine records.
+            # Keep that history and any still-active liability intact.
+            stopped_native_with_retired_history = (
+                stop_matches_route
+                and record["route"].get("kind") == "ha"
+                and normalized in ("accepted_unconfirmed", "confirmed")
+                and all(
+                    item.get("recovery_retired")
+                    for history in (attempts, ledger["hazards"])
+                    for item in history.values()
+                )
             )
             session_route_retained = (
                 normalized in ("accepted_unconfirmed", "confirmed")
@@ -3277,11 +3337,8 @@ async def async_finish_attempt(ticket: RecoveryTicket, outcome: Any) -> bool:
                 # Retain HA routing when an older attempt or isolation hazard
                 # still requires that exact producer.
                 ledger["route"] = None
-            elif stop_route_cleared:
-                # A terminal cleanup Stop releases the negative-only route for
-                # every exact producer kind. Full route equality and empty
-                # liabilities prevent a replacement route or hazard from
-                # inheriting the old Stop proof.
+            elif stopped_native_with_retired_history or stop_route_cleared:
+                # The Stop proof releases only the matching producer route.
                 ledger["route"] = None
         else:
             record["outcome"] = normalized
@@ -3982,10 +4039,7 @@ def pending_ble_attempt(hass: Any, entry: Any, vehicle_id: Any) -> RecoveryTicke
                and record.get("route", {}).get("kind") == "ble"] if isinstance(attempts, Mapping) else []
     for record in sorted(records, key=lambda item: _epoch(item.get("submitted_epoch")) or 0, reverse=True):
         route = record.get("route", {})
-        prefix = str(route.get("prefix") or "")
-        binding = _ble_binding(hass, prefix, str(route.get("entity_id") or "")) if prefix else None
-        if (_record_compatible(hass, entry, runtime, vid, record) and binding is not None
-                and binding["entities"]["charger"] == route.get("entity_identity")):
+        if route.get("prefix") and _record_compatible(hass, entry, runtime, vid, record):
             return RecoveryTicket(
                 hass, entry, vid, str(record["attempt_id"]), deepcopy(dict(route)), runtime
             )
@@ -4025,161 +4079,10 @@ def ble_quarantined(hass: Any, prefix: str) -> bool:
     return False
 
 
-async def async_isolate_ble(ticket: RecoveryTicket, *, authorize: Any) -> bool:
-    runtime = _runtime(ticket.hass, ticket.entry)
-    if (runtime is None
-            or (ticket.runtime_ref is not None and runtime is not ticket.runtime_ref)):
-        return False
-
-    async with _journal_lock(runtime):
-        ledger = _ledger(runtime, ticket.vehicle_id) if runtime else None
-        record = ledger.get("attempts", {}).get(ticket.attempt_id) if ledger else None
-        route = record.get("route") if isinstance(record, Mapping) else None
-        if (ledger is None or not isinstance(record, Mapping)
-                or not isinstance(route, Mapping) or route.get("kind") != "ble"
-                or record.get("outcome", "pending") not in ("pending", "sent_unknown")
-                or not _record_compatible(ticket.hass, ticket.entry, runtime,
-                                           ticket.vehicle_id, record)):
-            return False
-        prefix = str(route.get("prefix") or "")
-        binding = _ble_binding(ticket.hass, prefix, str(route.get("entity_id") or ""))
-        if (not prefix or binding is None
-                or binding["entities"]["charger"] != route.get("entity_identity")):
-            return False
-        hazards = ledger["hazards"]
-        key = f"ble:{prefix}"
-        existing = hazards.get(key)
-        if (isinstance(existing, Mapping) and existing.get("state") == "isolated"
-                and _isolation_valid(ticket.hass, existing)):
-            return True
-        before = _snapshot_recovery(runtime)
-        fence_baseline = _fence_receipt(ticket.hass, binding)
-        request_id = uuid4().hex
-        hazards[key] = {
-            "kind": "ble_quarantine", "state": "pending", "prefix": prefix,
-            "attempt_id": ticket.attempt_id, "binding": deepcopy(binding),
-            "producer_identity": route.get("producer_identity"),
-            "requested_epoch": time.time(),
-            "fence_baseline": deepcopy(fence_baseline),
-            "request_id": request_id,
-        }
-        try:
-            if not await _persist(ticket.hass, ticket.entry, runtime):
-                _restore_recovery(runtime, before)
-                return False
-        except asyncio.CancelledError:
-            # Keep the durable pending hazard if the initial save committed;
-            # cancellation must not permit a later Start on this BLE path.
-            try:
-                await _persist(ticket.hass, ticket.entry, runtime)
-            except BaseException:
-                pass
-            raise
-        pending = _snapshot_recovery(runtime)
-
-    try:
-        if not await _gate(authorize) or _ble_binding(ticket.hass, prefix, route["entity_id"]) != binding:
-            return False
-        started = time.time()
-        await ticket.hass.services.async_call(
-            "switch", "turn_off", {"entity_id": binding["entities"]["control"]["entity_id"]}, blocking=True
-        )
-        request_binding = binding["entities"].get("request")
-        if fence_baseline is None or not isinstance(request_binding, Mapping):
-            # Keep containment and the journal, but a legacy bridge provides
-            # no queue/GATT proof. Its presence sensor must never permit handoff.
-            return False
-        # An echoed nonce correlates proof to this disable. HA receipt time
-        # alone cannot distinguish a delayed earlier fence notification.
-        if not await _gate(authorize) or _ble_binding(ticket.hass, prefix, route["entity_id"]) != binding:
-            return False
-        request_started = time.time()
-        await ticket.hass.services.async_call(
-            "text", "set_value", {"entity_id": request_binding["entity_id"], "value": request_id}, blocking=True
-        )
-        deadline = time.monotonic() + BLE_ISOLATION_TIMEOUT
-        samples = None
-        while time.monotonic() < deadline:
-            samples = _off_samples(ticket.hass, binding, started)
-            if (samples is not None
-                    and samples["fence"]["boot_id"] == fence_baseline["boot_id"]
-                    and samples["fence"]["generation"] > fence_baseline["generation"]
-                    and samples["fence"]["request_id"] == request_id
-                    and samples["fence"]["observed_at"] > request_started):
-                break
-            samples = None
-            await asyncio.sleep(0.1)
-        if samples is None or not await _gate(authorize) or _ble_binding(ticket.hass, prefix, route["entity_id"]) != binding:
-            return False
-    except asyncio.CancelledError:
-        raise
-    except Exception:
-        return False
-    async with _journal_lock(runtime):
-        # A reload or setup replacement during provider I/O invalidates this
-        # in-flight generation.  Leave the old pending hazard for cleanup.
-        if _runtime(ticket.hass, ticket.entry) is not runtime:
-            return False
-        ledger = _ledger(runtime, ticket.vehicle_id)
-        if ledger is None:
-            return False
-        current = ledger.get("attempts", {}).get(ticket.attempt_id)
-        current_route = current.get("route") if isinstance(current, Mapping) else None
-        if (not isinstance(current, Mapping) or current_route != route
-                or _ble_binding(ticket.hass, prefix, route["entity_id"]) != binding):
-            return False
-        current_samples = _off_samples(ticket.hass, binding, started)
-        if (current_samples is None
-                or current_samples["fence"]["boot_id"] != samples["fence"]["boot_id"]
-                or current_samples["fence"]["generation"] != samples["fence"]["generation"]):
-            return False
-        samples = current_samples
-        fallback = route.get("fallback")
-        if (not isinstance(fallback, Mapping)
-                or not _compatible(ticket.hass, ticket.entry, runtime, ticket.vehicle_id, fallback)):
-            return False
-        pinned = _pin(ticket.hass, ticket.entry, runtime, ticket.vehicle_id, fallback,
-                      str(fallback.get("entity_id") or ""))
-        if pinned is None:
-            return False
-        hazards = ledger["hazards"]
-        hazard = hazards.get(key)
-        if not isinstance(hazard, dict):
-            return False
-        final_before = _snapshot_recovery(runtime)
-        hazard.update({
-            "state": "isolated", "binding": deepcopy(binding),
-            "control_off_at": samples["control"], "status_off_at": samples["status"],
-            "fence_proof": deepcopy(samples["fence"]),
-        })
-        ledger["route"] = pinned
-        try:
-            if not await _persist(ticket.hass, ticket.entry, runtime):
-                _restore_recovery(runtime, final_before)
-                return False
-        except asyncio.CancelledError:
-            await _restore_after_cancel(ticket.hass, ticket.entry, runtime, pending)
-            raise
-        # Saving and authority checks yield to provider/registry updates. A
-        # durable record never substitutes for live queue/connection proof.
-        if not await _gate(authorize):
-            return False
-        return (_runtime(ticket.hass, ticket.entry) is runtime
-                and _ble_binding(ticket.hass, prefix, route["entity_id"]) == binding
-                and _isolation_valid(ticket.hass, hazard))
-
-
-async def _gate(gate: Any) -> bool:
-    result = gate() if callable(gate) else gate
-    if inspect.isawaitable(result):
-        result = await result
-    return result is True
-
-
 __all__ = [
     "RecoveryTicket", "RecoverySubmissionDenied", "RecoveryPersistenceRefused",
     "async_begin_attempt", "async_finish_attempt", "pending_ble_attempt",
-    "get_vehicle_route", "ble_quarantined", "async_isolate_ble",
+    "get_vehicle_route", "ble_quarantined",
     "async_load_recovery_state", "async_shutdown_recovery_state",
     "recovery_sidecar_snapshot", "restore_recovery_projection",
     "async_persist_recovery_state", "async_update_recovery_obligations",

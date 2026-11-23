@@ -2,7 +2,8 @@
 
 PowerSync Home Assistant optimiser access is separate from PowerSync Cloud.
 The subscription covers one active Home Assistant installation; multiple
-PowerSync battery entries on that installation share access.
+PowerSync battery entries on that installation share access. Cloud subscriptions do not
+grant HA optimiser access.
 
 ## Subscribe and pair Home Assistant
 
@@ -12,10 +13,17 @@ seven-day trial, then bills automatically until cancelled. GitHub sponsorship
 is charged immediately and has no HA trial. See the
 [setup and subscription guide](https://powersync.cc/ha-optimiser).
 
-In the integration options, open **HA optimiser access** to start or finish pairing,
-refresh access, resume optimisation when required, or reset pairing. Review the
-status shown for this Home Assistant installation. Cloud subscriptions do not
-grant HA optimiser access.
+In the integration options, open **HA optimiser access** and select **Start
+pairing**. Keep this dialog open. Approve the code on your [PowerSync account
+page](https://powersync.cc/app/ha), then select **Finish pairing** in the
+original HA dialog within ten minutes. If the dialog has closed or the code has
+expired, start again with a new code.
+
+If you previously disconnected **this HA server** on your account page and want
+to reconnect it, select **Reset pairing** in HA, then **Start pairing**. Approve
+the new code and finish pairing in the same HA dialog. If another installation
+is listed and you cannot identify it, contact support. To check access for an
+already paired server, select **Refresh access**.
 
 ## Expiry and recovery
 

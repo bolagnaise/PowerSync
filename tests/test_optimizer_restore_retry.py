@@ -699,6 +699,49 @@ def test_successful_self_consumption_restore_advances_marker(opt_module):
     asyncio.run(_run())
 
 
+@pytest.mark.parametrize("source", ["optimizer", "user"])
+@pytest.mark.parametrize("planned_action", ["charge", "export"])
+def test_degraded_plan_restores_optimizer_force_and_respects_manual_force(
+    opt_module, source, planned_action,
+):
+    from unittest.mock import AsyncMock
+
+    battery = SimpleNamespace(
+        restore_normal=AsyncMock(return_value=True),
+        set_self_consumption_mode=AsyncMock(return_value=True),
+        force_charge=AsyncMock(return_value=True),
+        force_discharge=AsyncMock(return_value=True),
+    )
+    coordinator = _execute_coordinator(opt_module, battery)
+    coordinator._last_optimizer_result = SimpleNamespace(degraded=True)
+    coordinator.price_coordinator = type("OctopusPriceCoordinator", (), {
+        "last_update_success": False,
+        "data": {"revision": "new"},
+    })()
+    coordinator._octopus_schedule_revision = "old"
+    state = {
+        "active": True, "source": source, "type": "discharge",
+        "scope": source, "power_w": 12000,
+    }
+    coordinator._optimizer_force_state = dict(state) if source == "optimizer" else None
+    coordinator._get_active_force_state = lambda: state
+    coordinator._optimizer_force_discharge_commitment_remaining = lambda *_: None
+    action = _self_consumption_action()
+    action.action = planned_action
+    action.power_w = 12600.0
+
+    asyncio.run(coordinator._execute_optimizer_action(action))
+
+    battery.force_charge.assert_not_awaited()
+    battery.force_discharge.assert_not_awaited()
+    if source == "optimizer":
+        battery.restore_normal.assert_awaited_once()
+        assert coordinator._last_executed_action == "self_consumption"
+    else:
+        battery.restore_normal.assert_not_awaited()
+        battery.set_self_consumption_mode.assert_not_awaited()
+
+
 @pytest.mark.parametrize("failure", ["false", "exception"])
 def test_foxess_service_failure_reaches_optimizer_retry(opt_module, failure):
     """A FoxESS restore failure must cross service and wrapper boundaries."""
@@ -931,5 +974,84 @@ def test_goodwe_ev_preserve_reapplies_after_charge_mode(opt_module, failed_reapp
         # Stable preservation still avoids duplicate commands.
         await coordinator._execute_optimizer_action(_self_consumption_action())
         assert len(calls) == (3 if failed_reapply else 2)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("force_active", [False, True])
+def test_tesla_ev_preserve_refresh_after_unaccepted_charge_plan(opt_module, force_active):
+    """A planned charge without an accepted force must not suppress the hold."""
+    async def run():
+        coordinator, intent, calls = _ev_preserve_refresh_coordinator(opt_module)
+        coordinator.battery_system = "tesla"
+        action = _self_consumption_action()
+        action.action = "charge"
+        coordinator._get_current_action = lambda: action
+        coordinator._get_active_force_state = lambda: {
+            "active": force_active, "source": "optimizer", "type": "charge",
+        }
+
+        intent["active"] = True
+        coordinator.request_ev_preservation_refresh()
+        await coordinator._ev_preserve_refresh_task
+
+        assert calls == ([] if force_active else ["hold"])
+        assert coordinator._last_executed_action == (
+            "self_consumption" if force_active else "no_discharge"
+        )
+        assert action.action == "charge"
+
+    asyncio.run(run())
+
+
+def test_tesla_idle_retains_reserve_when_tariff_charge_lacks_ev_headroom(opt_module):
+    """A known tariff admission refusal must not release a live IDLE hold."""
+    from unittest.mock import AsyncMock
+    from test_powerwall_battery_dispatch import call, load_routing
+
+    async def run():
+        routing, _, _, _ = load_routing(tesla_control_method="tariff")
+        budget_module = importlib.import_module("power_sync.native_rate_budget")
+        budget = budget_module.SharedRateBudget(SimpleNamespace(async_load=AsyncMock(return_value=None)))
+        site = budget_module.site_identity(routing["entry"])
+        budget.armed_sites.add(site)
+        routing["site_identity"] = budget_module.site_identity
+        routing["RUNTIME_KEY"] = budget_module.RUNTIME_KEY
+        routing["hass"].data[budget_module.RUNTIME_KEY] = budget
+
+        async def force_charge(**kwargs):
+            try:
+                await routing["_prepare_cloud_tariff_control"]("charge", call(**kwargs))
+            except RuntimeError as err:
+                assert "shared EV headroom" in str(err)
+                return False
+            pytest.fail("Tariff charge must be refused for the armed site")
+
+        battery = SimpleNamespace(set_backup_reserve=AsyncMock(return_value=True),
+                                  force_charge=AsyncMock(side_effect=force_charge))
+        coordinator = _execute_coordinator(opt_module, battery)
+        coordinator.battery_system = "tesla"
+        coordinator.hass = routing["hass"]
+        coordinator._entry = routing["entry"]
+        coordinator._last_executed_action = "idle"
+        coordinator._pre_idle_backup_reserve = 5
+        coordinator._idle_hold_reserve = 41
+        coordinator._powerwall_service_power = lambda *_: 0
+        coordinator._cloud_tariff_charge_headroom_blocked = routing["_cloud_tariff_charge_headroom_blocked"]
+        coordinator._grid_charge_soc_cap_reached = AsyncMock(return_value=(False, 0.41, 1.0))
+        coordinator._tesla_force_charge_should_yield_to_live_solar = lambda _: False
+        coordinator._supports_target_charge_power = lambda: True
+        coordinator._minutes_to_demand_start = lambda: None
+        coordinator._is_in_demand_window = lambda: False
+        action = _self_consumption_action()
+        action.action = "charge"
+        action.power_w = 3330
+
+        await coordinator._execute_optimizer_action(action)
+
+        battery.set_backup_reserve.assert_not_awaited()
+        battery.force_charge.assert_not_awaited()
+        assert coordinator._idle_hold_reserve == 41
+        assert coordinator._last_executed_action == "idle"
 
     asyncio.run(run())

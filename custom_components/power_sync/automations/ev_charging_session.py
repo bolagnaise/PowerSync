@@ -12,7 +12,7 @@ import json
 import statistics
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timedelta
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Callable
 
 from homeassistant.util import dt as dt_util
 from enum import Enum
@@ -41,6 +41,12 @@ class ChargingSource(Enum):
     GRID_OFFPEAK = "grid_offpeak"
     GRID_PEAK = "grid_peak"
     MIXED = "mixed"
+
+
+def _reading_source(is_solar: bool | None) -> str:
+    if is_solar is None:
+        return ChargingSource.MIXED.value
+    return ChargingSource.SOLAR_SURPLUS.value if is_solar else ChargingSource.GRID_PEAK.value
 
 
 @dataclass
@@ -191,7 +197,7 @@ class ChargingSession:
         self,
         power_kw: float,
         amps: int,
-        is_solar: bool,
+        is_solar: bool | None,
         import_price_cents: float,
         export_price_cents: float,
     ) -> None:
@@ -200,7 +206,7 @@ class ChargingSession:
         Args:
             power_kw: Current charging power in kW
             amps: Current charging amps
-            is_solar: True if this power is from solar surplus
+            is_solar: True for solar, False for grid, None for mixed or unknown
             import_price_cents: Grid import price in cents/kWh
             export_price_cents: Feed-in tariff in cents/kWh
         """
@@ -209,7 +215,7 @@ class ChargingSession:
 
         if not self._current_segment_start:
             # Auto-start a segment
-            source = ChargingSource.SOLAR_SURPLUS.value if is_solar else ChargingSource.GRID_PEAK.value
+            source = _reading_source(is_solar)
             self.start_segment(source)
 
         # Calculate elapsed time from last reading
@@ -238,12 +244,15 @@ class ChargingSession:
             savings_cents = energy_kwh * import_price_cents
             solar_kwh = energy_kwh
             grid_kwh = 0.0
-        else:
+        elif is_solar is False:
             # Using grid power
             cost_cents = energy_kwh * import_price_cents
             savings_cents = 0.0
             solar_kwh = 0.0
             grid_kwh = energy_kwh
+        else:
+            # Count charging energy without inventing its source or cost.
+            cost_cents = savings_cents = solar_kwh = grid_kwh = 0.0
 
         # Store reading for segment aggregation
         self._current_segment_readings.append({
@@ -384,7 +393,10 @@ class ChargingSessionManager:
         mode: str,
         start_soc: Optional[int] = None,
         target_soc: Optional[int] = None,
-    ) -> ChargingSession:
+        *,
+        session_id: Optional[str] = None,
+        still_current: Optional[Callable[[], bool]] = None,
+    ) -> Optional[ChargingSession]:
         """Start a new charging session.
 
         Args:
@@ -399,12 +411,17 @@ class ChargingSessionManager:
         async with self._session_lock:
             await self._load_sessions()
 
+            if still_current is not None and not still_current():
+                return None
+
             # End any existing session for this vehicle
             if vehicle_id in self.active_sessions:
                 await self._end_session_unlocked(vehicle_id, "new_session_started")
+                if still_current is not None and not still_current():
+                    return None
 
             session = ChargingSession(
-                id=str(uuid.uuid4()),
+                id=session_id or str(uuid.uuid4()),
                 vehicle_id=vehicle_id,
                 start_time=dt_util.now().isoformat(),
                 mode=mode,
@@ -422,7 +439,7 @@ class ChargingSessionManager:
         vehicle_id: str,
         power_kw: float,
         amps: int,
-        is_solar: bool,
+        is_solar: bool | None,
         import_price_cents: float = 30.0,
         export_price_cents: float = 8.0,
         battery_soc: Optional[int] = None,
@@ -435,7 +452,7 @@ class ChargingSessionManager:
             vehicle_id: Vehicle identifier
             power_kw: Current charging power in kW
             amps: Current charging amps
-            is_solar: True if power is from solar surplus
+            is_solar: True for solar, False for grid, None for mixed or unknown
             import_price_cents: Grid import price (cents/kWh)
             export_price_cents: Feed-in tariff (cents/kWh)
             battery_soc: Current battery SoC (if available)
@@ -448,7 +465,7 @@ class ChargingSessionManager:
             return None
 
         # Determine source from is_solar flag
-        source = ChargingSource.SOLAR_SURPLUS.value if is_solar else ChargingSource.GRID_PEAK.value
+        source = _reading_source(is_solar)
 
         # Check if source changed - if so, end current segment and start new one
         if session._current_segment_source and session._current_segment_source != source:

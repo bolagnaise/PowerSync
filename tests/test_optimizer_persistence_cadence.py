@@ -10,6 +10,7 @@ from __future__ import annotations
 import ast
 import asyncio
 from contextlib import suppress
+from datetime import datetime, timezone
 import heapq
 import json
 import logging
@@ -20,6 +21,11 @@ from types import SimpleNamespace
 import pytest
 
 from conftest import load_source_node
+from test_battery_efficiency_learning import (
+    BatteryEfficiencyLearner,
+    _continuous_profile,
+    _coordinator_methods,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -83,7 +89,7 @@ def _ha_store_class():
     exec(compile(FIXTURE.read_text(), str(FIXTURE), "exec"), namespace)
     cls = namespace["Store"]
 
-    def init(self, hass, version, key):
+    def init(self, hass, version, key, *, atomic_writes=False):
         self.hass, self.version, self.minor_version, self.key = hass, version, 1, key
         self._data = self._delay_handle = self._unsub_final_write_listener = None
         self._next_write_time, self._read_only = 0.0, False
@@ -91,6 +97,7 @@ def _ha_store_class():
         self._manager = SimpleNamespace(async_invalidate=lambda key: None)
         self.path = hass.directory / key
         self.writes, self.fail_next = [], False
+        self.atomic_writes = atomic_writes
 
     async def write(self, data):
         if "data_func" in data:
@@ -277,4 +284,69 @@ def test_cancel_flush_and_shutdown_allow_subsequent_saves(tmp_path, operation):
         coordinator._schedule_cost_save()
         await hass.loop.advance(700)
         assert store.writes[-1] == (700, {"value": 2})
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("operation", ["restart", "reload"])
+def test_battery_efficiency_checkpoints_reload_from_disk_and_finish_cycle(tmp_path, operation):
+    async def run():
+        observe, restore, close = _coordinator_methods(
+            "_observe_battery_efficiency",
+            "_restore_battery_efficiency_learning",
+            "async_close_battery_efficiency_learning",
+        )
+        coordinator, hass, listeners = _environment(tmp_path)
+        store = coordinator._battery_efficiency_learning_store
+        assert store.atomic_writes
+        rows = _continuous_profile(datetime(2026, 7, 1, tzinfo=timezone.utc))
+
+        def configure(owner):
+            owner.battery_efficiency_learning_enabled = True
+            owner._battery_efficiency_learner = BatteryEfficiencyLearner()
+            owner._battery_efficiency_topology_fingerprint = lambda capacity: "synthetic-ac"
+
+        def feed(owner, row):
+            at, soc, power = row
+            owner._get_energy_data = lambda: {
+                "last_update": at, "battery_level": soc * 100, "battery_power": power,
+            }
+            observe(owner, timestamp=at, capacity_wh=54000)
+
+        configure(coordinator)
+        for row in rows[:31]:
+            await hass.loop.advance((row[0] - rows[0][0]).total_seconds())
+            feed(coordinator, row)
+        assert store.writes[-1][1]["active_cycle"]["last_soc"] < 1
+
+        if operation == "restart":
+            hass.state = "stopping"
+            for callback in list(listeners):
+                listeners.pop(callback)
+                await callback(None)
+        else:
+            await close(coordinator)
+            coordinator._schedule_battery_efficiency_learning_save()
+
+        assert store.writes[-1][1]["active_cycle"]["last_soc"] == 1
+        assert not listeners
+        write_count = len(store.writes)
+        await hass.loop.advance(hass.loop.time() + 300)
+        assert len(store.writes) == write_count
+
+        reopened, _, _ = _environment(tmp_path)
+        configure(reopened)
+
+        async def load():
+            path = reopened._battery_efficiency_learning_store.path
+            return json.loads(path.read_text())["data"]
+
+        reopened._battery_efficiency_learning_store.async_load = load
+        await restore(reopened)
+        assert reopened._battery_efficiency_learner.history == []
+        for row in rows[30:]:
+            feed(reopened, row)
+        [completed] = reopened._battery_efficiency_learner.history
+        assert completed.round_trip_efficiency == pytest.approx(0.8)
+        assert completed.charge_kwh == pytest.approx(29.5)
+
     asyncio.run(run())

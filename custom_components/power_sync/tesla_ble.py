@@ -225,9 +225,15 @@ def get_tesla_ble_status_state(hass: Any, prefix: str) -> Any | None:
 
 
 def get_tesla_ble_connected_charge_sample_time(
-    hass: Any, prefix: str, charge_state: Any, power_state: Any,
+    hass: Any, prefix: str, charge_state: Any, power_state: Any, *,
+    require_paired_charge_state: bool = True,
 ) -> datetime | None:
-    """Find contemporaneous native samples from the currently connected bridge."""
+    """Find contemporaneous samples from the currently connected bridge.
+
+    The measurement always requires the native paired packet. Recovery Start
+    can also use the matching ESPHome state report on bridges that publish a
+    paired power packet but no paired charging-state packet.
+    """
     if charge_state is None or power_state is None:
         return None
     connection = hass.states.get(TESLA_BLE_BINARY_CONNECTION_STATUS.format(prefix=prefix))
@@ -254,9 +260,17 @@ def get_tesla_ble_connected_charge_sample_time(
     if bridge is None or binding(connection.entity_id) != bridge:
         return None
     stamps = []
-    for state in (charge_state, power_state):
+    for state, required in ((charge_state, require_paired_charge_state), (power_state, True)):
+        if binding(state.entity_id) != bridge:
+            return None
         sample = get_tesla_ble_companion_state(hass, state.entity_id, "_sample")
-        if sample is None or binding(state.entity_id) != bridge or binding(sample.entity_id) != bridge:
+        if sample is None:
+            if required:
+                return None
+            receipt = get_tesla_ble_companion_state(hass, state.entity_id, "_received")
+            if receipt is not None and binding(receipt.entity_id) != bridge:
+                return None
+        elif binding(sample.entity_id) != bridge:
             return None
         stamp = get_tesla_ble_observed_at(hass, state)
         if stamp is None or stamp <= connected_at:

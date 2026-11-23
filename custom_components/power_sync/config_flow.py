@@ -12351,6 +12351,7 @@ class PowerSyncOptionsFlow(
     async def async_step_optimizer_access(self, user_input=None):
         """Pair this server without storing account/password credentials in HA."""
         from .licensing.manager import async_get_manager
+        from .licensing.runtime import PairingConflict
         from .licensing.presentation import optimizer_access_description
         manager = await async_get_manager(self.hass)
         errors = {}
@@ -12362,10 +12363,11 @@ class PowerSyncOptionsFlow(
                     self._license_pairing_code = response["pairing_code"]
                 elif action == "finish_pairing":
                     code = getattr(self, "_license_pairing_code", None)
-                    if not code:
-                        raise ValueError("pairing_code_required")
-                    await manager.finish_pairing(code)
-                    self._license_pairing_code = None
+                    if code:
+                        await manager.finish_pairing(code)
+                        self._license_pairing_code = None
+                    else:
+                        errors["base"] = "optimizer_pairing_no_code"
                 elif action == "refresh":
                     await manager.maintain(force=True)
                     await manager.reconcile_entries()
@@ -12374,11 +12376,18 @@ class PowerSyncOptionsFlow(
                 elif action == "reset_pairing":
                     await manager.reset_pairing()
                     self._license_pairing_code = None
+            except PairingConflict as error:
+                errors["base"] = f"optimizer_{error}"
             except Exception:
                 errors["base"] = "optimizer_access_unavailable"
         status = manager.status(self.config_entry.entry_id)
         if hasattr(manager, "async_referrals"):
             status["referrals"] = await manager.async_referrals()
+        description = optimizer_access_description(status, getattr(self, "_license_pairing_code", None))
+        if errors.get("base") in (
+            "optimizer_pairing_no_code", "optimizer_pairing_not_completed", "optimizer_installation_slot_in_use",
+        ):
+            description["next_step"] = ""  # The error supplies the next step for this attempt.
         return self.async_show_form(
             step_id="optimizer_access",
             data_schema=vol.Schema({vol.Required("action", default="refresh"): SelectSelector(SelectSelectorConfig(
@@ -12391,9 +12400,7 @@ class PowerSyncOptionsFlow(
                 ], mode=SelectSelectorMode.DROPDOWN,
             ))}),
             errors=errors,
-            description_placeholders=optimizer_access_description(
-                status, getattr(self, "_license_pairing_code", None)
-            ),
+            description_placeholders=description,
         )
 
     async def _async_step_optimization(

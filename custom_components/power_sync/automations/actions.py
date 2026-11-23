@@ -32,8 +32,9 @@ import inspect
 import math
 import re
 import time
-from collections.abc import Iterable, Mapping
+from collections.abc import Awaitable, Iterable, Mapping
 from contextvars import ContextVar
+from uuid import uuid4
 from dataclasses import dataclass
 from typing import List, Dict, Any, Optional, Callable
 
@@ -430,9 +431,33 @@ def _record_manual_generic_failure(
         manual_failure.setdefault("entity_id", str(entity_id).strip())
 
 
+def _targets_tesla_ble_connection(hass: HomeAssistant, target: Any) -> bool:
+    """Keep the operator's BLE connection switch out of charger service targets."""
+    entities = target if isinstance(target, (list, tuple)) else (target,)
+    for value in entities:
+        if not isinstance(value, str):
+            continue
+        for entity_id in value.split(","):
+            entity_id = entity_id.strip().lower()
+            if not entity_id.startswith("switch."):
+                continue
+            if entity_id.endswith("_ble_connection"):
+                return True
+            try:
+                registered = er.async_get(hass).async_get(entity_id)
+            except (AttributeError, KeyError):
+                continue
+            if (getattr(registered, "platform", None) == "esphome"
+                    and str(getattr(registered, "original_name", "") or "").lower().endswith("ble connection")):
+                return True
+    return False
+
+
 @generic_entity_command
 async def _stop_generic_charger_switch(hass: HomeAssistant, entity_id: str) -> bool:
     """Keep the physical profile fixed until a switch-off call completes."""
+    if _targets_tesla_ble_connection(hass, entity_id):
+        return False
     await hass.services.async_call(
         "switch", "turn_off", {"entity_id": str(entity_id).strip()}, blocking=True
     )
@@ -444,10 +469,12 @@ async def _start_generic_charger_switch(
     hass: HomeAssistant,
     entity_id: str,
     manual_failure: dict | None = None,
+    *,
+    before_turn_on: Callable[[], Awaitable[bool]] | None = None,
 ) -> bool:
     """Start a generic charger switch without duplicating active transactions."""
     entity_id = str(entity_id or "").strip()
-    if not entity_id.startswith("switch."):
+    if not entity_id.startswith("switch.") or _targets_tesla_ble_connection(hass, entity_id):
         _LOGGER.error("Generic charger start: invalid switch entity %s", entity_id)
         _record_manual_generic_failure(
             manual_failure, "switch_validation", entity_id
@@ -496,6 +523,8 @@ async def _start_generic_charger_switch(
                 blocking=True,
             )
             await asyncio.sleep(1)
+        if before_turn_on is not None and not await before_turn_on():
+            return False
         await hass.services.async_call(
             "switch",
             "turn_on",
@@ -1458,6 +1487,26 @@ def _tesla_plan_expired(params: Dict[str, Any]) -> bool:
         or not math.isfinite(deadline) or datetime.now(dt_timezone.utc).timestamp() >= deadline)
 
 
+async def _track_recovered_scheduled_start(hass, entry, vehicle_id, state, current):
+    """Open the reserved session after charging confirmation under the same lease."""
+    from .ev_charging_session import get_session_manager
+
+    def can_open():
+        return current() and not state.get("session_id")
+
+    manager = get_session_manager()
+    if manager is None or not can_open():
+        return
+    initial_soc = await _ev_session_soc(hass, entry, vehicle_id, state["params"])
+    if can_open():
+        session = await manager.start_session(
+            vehicle_id=vehicle_id, mode="scheduled", start_soc=initial_soc,
+            session_id=state["ownership"].get("session_id"), still_current=can_open,
+        )
+        if session and can_open():
+            state["session_id"] = session.id
+
+
 async def _restart_owned_tesla(hass, entry, vehicle_id, state, amps):
     """Retry a current plan without renewing its deadline or replaying saved intent."""
     params = dict(state.get("params") or {})
@@ -1467,21 +1516,42 @@ async def _restart_owned_tesla(hass, entry, vehicle_id, state, amps):
     started_at = datetime.now().astimezone()
     state["last_physical_restart_attempt_at"] = started_at
     ownership = state.get("ownership")
+    scheduled_recovery = (
+        params.get("owner_mode") == "scheduled" and params["_tesla_plan_recovery_attempt"]
+    )
+
     def current():
+        if scheduled_recovery:
+            from .ev_ownership import get_ev_ownership
+            if ownership is None or get_ev_ownership(hass, entry, vehicle_id)[1] is not ownership:
+                return False
         return (_dynamic_ev_state.get(entry.entry_id, {}).get(vehicle_id) is state
                 and state.get("active") and state.get("ownership") is ownership)
+
+    if not current():
+        return False
     success = await _action_start_ev_charging(hass, entry, params, context=None)
     if not current():
         return False
-    if success and params.get("_tesla_start_live_read_required"):
+    if success and (scheduled_recovery or params.get("_tesla_start_live_read_required")):
         success, _evidence = await _wait_for_tesla_physical_start(
             hass, entry, vehicle_id, params, baseline, started_at)
         if not current():
             return False
-    if not success and (success is None or params.get("_tesla_transport_recovery_pending")
+    if not success and (scheduled_recovery or success is None or params.get("_tesla_transport_recovery_pending")
                         or params.get("_tesla_allow_plan_recovery")):
         _mark_tesla_plan_pending(state, amps)
     if success:
+        if scheduled_recovery:
+            from .ev_ownership import record_ev_command
+            try:
+                await _track_recovered_scheduled_start(hass, entry, vehicle_id, state, current)
+            except Exception as err:
+                _LOGGER.debug("Could not track recovered Scheduled charging: %s", err)
+            if not current():
+                return False
+            record_ev_command(hass, entry, vehicle_id, command="start_scheduled",
+                              success=True, reason="Tesla charging confirmed after recovery")
         state.pop("transport_recovery_pending", None)
         state["reason"] = ""
     return bool(success)
@@ -1613,6 +1683,52 @@ async def _reconcile_stopped_smart_schedule_tesla(
     return True
 
 
+def _has_fresh_scheduled_ble_stop(
+    hass: HomeAssistant, config_entry: ConfigEntry, vehicle_id: str, started_at: datetime | None,
+) -> bool:
+    """Check the configured BLE loadpoint without falling through to Fleet telemetry."""
+    from ..tesla_ble import (
+        get_tesla_ble_charge_current_state,
+        get_tesla_ble_charge_power_state,
+        get_tesla_ble_charging_state,
+        get_tesla_ble_observed_at,
+    )
+
+    config = {**config_entry.data, **config_entry.options}
+    prefix = vehicle_id[4:]
+    if vehicle_id.startswith("ble_"):
+        if config.get(CONF_EV_PROVIDER) != EV_PROVIDER_TESLA_BLE or prefix not in resolve_ble_prefixes(hass, config):
+            return False
+    elif config.get(CONF_EV_PROVIDER) == EV_PROVIDER_BOTH and _is_explicit_tesla_vin(vehicle_id):
+        prefix = _resolve_ble_prefix_for_vehicle(hass, config_entry, vehicle_id)
+        if not prefix:
+            return False
+    else:
+        return False
+
+    def fresh(sample):
+        observed_at = get_tesla_ble_observed_at(hass, sample)
+        return is_current_ev_power_observation(observed_at) and (
+            started_at is None or _datetime_is_after(observed_at, started_at)
+        )
+
+    charging = get_tesla_ble_charging_state(hass, prefix)
+    if str(getattr(charging, "state", "")).strip().lower() != "stopped" or not fresh(charging):
+        return False
+
+    current = get_tesla_ble_charge_current_state(hass, prefix)
+    amps, _, _ = _phase_current_state_amps(current) if fresh(current) else (None, None, None)
+    if amps is not None and amps > 0.5:
+        return False
+
+    power = get_tesla_ble_charge_power_state(hass, prefix)
+    if fresh(power) and float(power.state) >= 0:
+        power_kw, available = _power_state_kw_reading(power)
+        if available:
+            return power_kw <= _ACTIVE_EV_POWER_EPSILON_KW
+    return amps is not None
+
+
 async def _release_stopped_scheduled_tesla(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
@@ -1635,42 +1751,50 @@ async def _release_stopped_scheduled_tesla(
     ):
         return False
 
-    entity_id = await _get_tesla_ev_entity(
-        hass, r"sensor\..*_(charging_state|charging|charge_state)(?:_\d+)?$",
-        vehicle_id, warn_on_missing=False, config_entry=config_entry,
-    )
-    charging = hass.states.get(entity_id) if entity_id else None
-    observed_at = getattr(charging, "last_reported", None) or getattr(charging, "last_updated", None)
     started_at = state.get("last_start_command_at")
-    if (
-        str(getattr(charging, "state", "")).strip().lower() != "stopped"
-        or not is_current_ev_power_observation(observed_at)
-        or (started_at is not None and not _datetime_is_after(observed_at, started_at))
-    ):
-        return False
+    native_confirmed = False
+    if not vehicle_id.startswith("ble_"):
+        entity_id = await _get_tesla_ev_entity(
+            hass, r"sensor\..*_(charging_state|charging|charge_state)(?:_\d+)?$",
+            vehicle_id, warn_on_missing=False, config_entry=config_entry,
+        )
+        charging = hass.states.get(entity_id) if entity_id else None
+        observed_at = getattr(charging, "last_reported", None) or getattr(charging, "last_updated", None)
+        native_status = str(getattr(charging, "state", "")).strip().lower()
+        native_status_fresh = is_current_ev_power_observation(observed_at) and (
+            started_at is None or _datetime_is_after(observed_at, started_at)
+        )
+        if native_status_fresh and native_status not in {"stopped", "", "unknown", "unavailable", "none"}:
+            return False
 
-    current_entity = await _get_tesla_ev_entity(
-        hass,
-        r"sensor\..*_(charge_current|charging_current|charger_current|charger_actual_current)(?:_\d+)?$",
-        vehicle_id,
-        warn_on_missing=False,
-        config_entry=config_entry,
-    )
-    power_kw, power_available = await _get_observed_ev_power_reading_kw(hass, vehicle_id, {})
-    current = hass.states.get(current_entity) if current_entity else None
-    amps, _error, _age = _phase_current_state_amps(current)
-    if (
-        hass.states.get(entity_id) is not charging
-        or (amps is None and not power_available)
-        or (amps is not None and amps > 0.5)
-        or (power_available and power_kw > _ACTIVE_EV_POWER_EPSILON_KW)
-    ):
-        return False
+        current_entity = await _get_tesla_ev_entity(
+            hass,
+            r"sensor\..*_(charge_current|charging_current|charger_current|charger_actual_current)(?:_\d+)?$",
+            vehicle_id,
+            warn_on_missing=False,
+            config_entry=config_entry,
+        )
+        power_kw, power_available = await _get_observed_ev_power_reading_kw(hass, vehicle_id, {})
+        current = hass.states.get(current_entity) if current_entity else None
+        amps, _error, _age = _phase_current_state_amps(current)
+        if (
+            (entity_id is not None and hass.states.get(entity_id) is not charging)
+            or (amps is not None and amps > 0.5)
+            or (power_available and power_kw > _ACTIVE_EV_POWER_EPSILON_KW)
+        ):
+            return False
+
+        native_confirmed = (
+            native_status_fresh and native_status == "stopped"
+            and (amps is not None or power_available)
+        )
 
     # A concurrent Start can transfer the dynamic controller in place.
     if _start_dynamic_lock.locked():
         return False
     async with _start_dynamic_lock:
+        if not native_confirmed and not _has_fresh_scheduled_ble_stop(hass, config_entry, vehicle_id, started_at):
+            return False
         await _action_stop_ev_charging_dynamic(hass, config_entry, {
             "vehicle_id": vehicle_id,
             "stop_charging": False,
@@ -2107,6 +2231,51 @@ async def _get_dynamic_ev_battery_level(
         return None
 
 
+async def _ev_session_soc(hass, config_entry, vehicle_id: str, params: dict) -> int | None:
+    """Record the identified vehicle's percentage in EV charging history."""
+    if _dynamic_ev_soc_vehicle_vin(vehicle_id, params) in (None, DEFAULT_VEHICLE_ID):
+        return None
+    level = await _get_dynamic_ev_battery_level(hass, config_entry, vehicle_id, params)
+    return int(level) if level is not None and 0 <= level <= 100 else None
+
+
+async def _solar_surplus_tesla_charge_limit(hass, config_entry, vehicle_id: str) -> float | None:
+    """Read the latest numeric limit reported for this Tesla without waking it."""
+    from ..const import TESLA_BLE_SENSOR_CHARGE_LIMIT
+    from ..tesla_ble import get_tesla_ble_observed_at
+    from .generic_charger_soc import ev_soc_from_state
+
+    config = {**config_entry.data, **config_entry.options}
+    limits = []
+    if _is_explicit_tesla_vin(vehicle_id):
+        entity = await _get_tesla_ev_entity(
+            hass, r"(?:number|sensor)\..*_charge_limit(?:_soc)?(?:_\d+)?$",
+            vehicle_id, config_entry=config_entry, warn_on_missing=False,
+        )
+        sample = hass.states.get(entity) if entity else None
+        value = ev_soc_from_state(sample)
+        if value is not None and value > 0:
+            observed = getattr(sample, "last_reported", None) or getattr(sample, "last_updated", None)
+            limits.append((observed, value))
+
+    if vehicle_id.startswith("ble_") or (
+        _is_explicit_tesla_vin(vehicle_id) and config.get(CONF_EV_PROVIDER) == EV_PROVIDER_BOTH
+    ):
+        prefix = _resolve_ble_prefix_for_vehicle(hass, config_entry, vehicle_id)
+        if prefix:
+            sample = hass.states.get(TESLA_BLE_SENSOR_CHARGE_LIMIT.format(prefix=prefix))
+            value = ev_soc_from_state(sample)
+            if value is not None and value > 0:
+                limits.append((get_tesla_ble_observed_at(hass, sample), value))
+
+    if not limits:
+        return None
+    # If equally recent providers disagree, respect the lower limit.
+    return max(limits, key=lambda item: (
+        item[0].timestamp() if isinstance(item[0], datetime) else 0, -item[1]
+    ))[1]
+
+
 async def _dynamic_ev_full_soc_reason(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
@@ -2120,9 +2289,39 @@ async def _dynamic_ev_full_soc_reason(
         vehicle_id,
         params,
     )
-    if ev_soc is None or ev_soc < FULL_EV_SOC:
+    if ev_soc is not None and ev_soc >= FULL_EV_SOC:
+        return f"EV {ev_soc}% >= {FULL_EV_SOC}%, already full"
+
+    mode = params.get("owner_mode") or params.get("dynamic_mode", "solar_surplus")
+    if mode != "solar_surplus":
         return None
-    return f"EV {ev_soc}% >= {FULL_EV_SOC}%, already full"
+
+    executor = hass.data.get(DOMAIN, {}).get(config_entry.entry_id, {}).get("auto_schedule_executor")
+    target = executor.enabled_target_soc(vehicle_id) if executor is not None else None
+    if params.get("charger_type", "tesla") == "tesla":
+        vehicle = _dynamic_ev_soc_vehicle_vin(vehicle_id, params)
+        if vehicle:
+            if ev_soc is None and _is_explicit_tesla_vin(vehicle):
+                config = {**config_entry.data, **config_entry.options}
+                if config.get(CONF_EV_PROVIDER) == EV_PROVIDER_BOTH:
+                    from ..tesla_ble import get_tesla_ble_battery_state, get_tesla_ble_observed_at
+                    from .generic_charger_soc import ev_soc_from_state
+
+                    prefix = _resolve_ble_prefix_for_vehicle(hass, config_entry, vehicle)
+                    if prefix:
+                        sample = get_tesla_ble_battery_state(hass, prefix)
+                        if is_current_ev_power_observation(get_tesla_ble_observed_at(hass, sample)):
+                            ev_soc = ev_soc_from_state(sample)
+            limit = await _solar_surplus_tesla_charge_limit(hass, config_entry, vehicle)
+            if limit is not None:
+                target = min(target, limit) if target is not None else limit
+    if target is None:
+        return None
+    if ev_soc is None:
+        return f"EV battery level unavailable for Solar Surplus ceiling {target:g}%"
+    if ev_soc >= target:
+        return f"EV {ev_soc:g}% reached Solar Surplus ceiling {target:g}%"
+    return None
 
 
 async def _get_observed_ev_power_reading_kw(
@@ -4129,6 +4328,7 @@ async def _tesla_ble_prepare_mutation(
     allow_backoff: bool,
     authorize: Optional[Callable[[], Any]],
     wake_first: bool,
+    passive_only: bool = False,
     expected_identity: tuple[tuple[Any, ...], ...] | None,
     charge_binding_holder: list | None = None,
     stock_token: tuple[Any, Any, Any, Any, Any, tuple[str, str, str], Any, bool]
@@ -4196,6 +4396,8 @@ async def _tesla_ble_prepare_mutation(
         stock_source_token=stock_source_token,
     ):
         return True
+    if passive_only:
+        return False
     if wake_first:
         if not await _wake_tesla_ble(
             hass, ble_prefix, allow_backoff=allow_backoff,
@@ -4713,6 +4915,65 @@ async def _tesla_legacy_transport_authorized(
     return bool(result)
 
 
+def _tesla_ble_recovery_start_state(
+    hass: HomeAssistant,
+    ble_prefix: str,
+    *,
+    require_paired_charge_state: bool = False,
+) -> str | None:
+    """Use paired vehicle readings from the exact connected bridge for plan retry."""
+    from ..tesla_ble import (
+        get_tesla_ble_charge_current_state,
+        get_tesla_ble_charge_power_state,
+        get_tesla_ble_charging_state,
+        get_tesla_ble_connected_charge_sample_time,
+        get_tesla_ble_observed_at,
+    )
+
+    if not _is_ble_available(hass, ble_prefix):
+        return None
+    charger = TESLA_BLE_SWITCH_CHARGER.format(prefix=ble_prefix)
+    if not _tesla_ble_radio_matches_target(hass, ble_prefix, charger):
+        return None
+    state = get_tesla_ble_charging_state(hass, ble_prefix)
+    power = get_tesla_ble_charge_power_state(hass, ble_prefix)
+    current = get_tesla_ble_charge_current_state(hass, ble_prefix)
+    power_at = get_tesla_ble_connected_charge_sample_time(
+        hass, ble_prefix, state, power,
+        require_paired_charge_state=require_paired_charge_state,
+    )
+    if not is_current_ev_power_observation(power_at):
+        return None
+    kw, available = _power_state_kw_reading(power)
+    if not available or float(power.state) < 0:
+        return None
+    charging = kw > 0
+    # Current can corroborate the native power packet if a bridge supplies
+    # it. The shipped ESPHome packages need only the paired power packet.
+    current_at = get_tesla_ble_connected_charge_sample_time(
+        hass, ble_prefix, state, current, require_paired_charge_state=False,
+    )
+    if (is_current_ev_power_observation(current_at)
+            and abs(power_at - current_at) <= timedelta(seconds=1)):
+        amps = float(current.state)
+        if amps < 0 or (amps > 0) != charging:
+            return None
+    if require_paired_charge_state and current is not None:
+        latest_current_at = get_tesla_ble_observed_at(hass, current)
+        if (
+            is_current_ev_power_observation(latest_current_at)
+            and latest_current_at >= power_at
+            and _coerce_positive_float(current.state)
+        ):
+            return None
+    status = state.state.strip().lower()
+    if status == "stopped" and not charging:
+        return "stopped"
+    if status == "charging" and charging:
+        return "charging"
+    return None
+
+
 async def _start_ev_charging_ble(
     hass: HomeAssistant,
     ble_prefix: str,
@@ -4960,6 +5221,7 @@ async def _set_ev_charge_limit_ble(
     percent: int,
     *,
     allow_backoff: bool = True,
+    passive_only: bool = False,
     authorize: Optional[Callable[[], Any]] = None,
 ) -> Optional[bool]:
     """Set EV charge limit via Tesla BLE."""
@@ -4981,7 +5243,8 @@ async def _set_ev_charge_limit_ble(
             limit_entity,
             allow_backoff=allow_backoff,
             authorize=authorize,
-            wake_first=True,
+            wake_first=not passive_only,
+            passive_only=passive_only,
             expected_identity=expected_identity,
             charge_binding_holder=charge_binding_holder,
             stock_token=stock_token,
@@ -5813,6 +6076,9 @@ def _tesla_transport_authority(
     original_pairing = pairing()
     deadline = params.get("_boost_start_deadline")
     def current():
+        sync_current = params.get("_target_sync_current")
+        if sync_current is not None and (not callable(sync_current) or not sync_current()):
+            return False
         active_recovery = runtime.get(ACTIVE_KEY) if isinstance(runtime, dict) else None
         if isinstance(active_recovery, dict):
             # Whole-entry recovery covers legacy aliases as well as physical
@@ -5846,7 +6112,6 @@ def _tesla_transport_authority(
 async def _tesla_transport_route(hass, entry, params, operation):
     """Resolve inherited uncertainty before selecting another command writer."""
     from ..tesla_ev_recovery import (
-        async_isolate_ble,
         get_vehicle_route,
         pending_ble_attempt,
         recovery_sidecar_snapshot,
@@ -5860,7 +6125,7 @@ async def _tesla_transport_route(hass, entry, params, operation):
     # route selection cannot fall back to BLE during that handoff window.
     vehicle = params.get("vehicle_vin") or params.get("vehicle_id")
     # A producer-proof recovery owns a read-only bridge session. Do not let
-    # normal route discovery or automatic isolation interrupt that session.
+    # normal route discovery interrupt that session.
     from ..tesla_ble_stop_recovery import ACTIVE_KEY
     recovery_runtime = hass.data.get(DOMAIN, {}).get(entry.entry_id)
     active_recovery = recovery_runtime.get(ACTIVE_KEY) if isinstance(recovery_runtime, dict) else None
@@ -5873,12 +6138,18 @@ async def _tesla_transport_route(hass, entry, params, operation):
             return {"kind": "ha"}
         return {"kind": "blocked", "reason": "ble_stop_recovery_active"}
     route = get_vehicle_route(hass, entry, vehicle)
-    if operation == "start" and route and route.get("reason") == "route_identity_changed":
+    rate_retry_current = params.get("_tesla_scheduled_rate_recovery_current")
+    resume_for_rate = operation == "rate" and callable(rate_retry_current) and rate_retry_current()
+    if (operation == "start" or resume_for_rate) and route and route.get("reason") == "route_identity_changed":
         from ..tesla_ev_recovery import async_resume_completed_native_route
 
         authority = _tesla_transport_authority(
-            hass, entry, params, operation="start", ignore_recovery_gate=True)
-        if await async_resume_completed_native_route(hass, entry, vehicle, authorize=authority):
+            hass, entry, params, operation=operation, ignore_recovery_gate=True)
+
+        def can_resume():
+            return authority() and (not resume_for_rate or rate_retry_current())
+
+        if await async_resume_completed_native_route(hass, entry, vehicle, authorize=can_resume):
             route = get_vehicle_route(hass, entry, vehicle)
     if (operation != "stop" and route and route.get("reason") == "native_recovery"):
         await _tesla_reconcile_native_history(hass, entry, params)
@@ -5899,12 +6170,6 @@ async def _tesla_transport_route(hass, entry, params, operation):
     pending = None
     if route and route.get("kind") == "blocked":
         pending = pending_ble_attempt(hass, entry, vehicle)
-        if pending is not None:
-            isolated = await async_isolate_ble(
-                pending, authorize=_tesla_transport_authority(hass, entry, params, cleanup=True))
-            if isolated:
-                route = get_vehicle_route(hass, entry, vehicle)
-                pending = None
         # Stops remain available while older starts are being contained.
         if operation == "stop":
             return {"kind": "ha"}
@@ -5954,7 +6219,7 @@ async def _tesla_transport_route(hass, entry, params, operation):
                         from ..tesla_ev_stock_recovery import async_recover_vehicle_transport
 
                         recovered = await async_recover_vehicle_transport(
-                            hass, entry, str(vehicle), incident_id=incident_id,
+                            hass, entry, str(vehicle), incident_id=incident_id, automatic=True,
                         )
                     except asyncio.CancelledError:
                         raise
@@ -5987,7 +6252,6 @@ async def _run_ble_transport_command(
     from ..tesla_ev_recovery import (
         async_begin_attempt,
         async_finish_attempt,
-        async_isolate_ble,
         async_track_submission,
         current_vehicle_generation,
     )
@@ -6248,7 +6512,7 @@ async def _run_ble_transport_command(
             # example, an unstructured range exception followed by a refused
             # retry).  The request is then ambiguous and cannot retire its
             # journal ticket as not_sent.  Continue through the ordinary
-            # unknown-result path so Both-mode isolation/fallback still runs.
+            # unknown-result path so its durable hold remains in effect.
             result = None
         no_write_satisfied = result is True and params.get(
             "_tesla_ble_native_satisfied"
@@ -6272,12 +6536,9 @@ async def _run_ble_transport_command(
     if result is not None:
         return result, False
     params["_tesla_transport_recovery_pending"] = True
-    config = {**entry.data, **entry.options}
-    if config.get(CONF_EV_PROVIDER) != EV_PROVIDER_BOTH:
-        return None, False
-    isolated = await async_isolate_ble(
-        ticket, authorize=_tesla_transport_authority(hass, entry, effective_params, cleanup=True))
-    return None, bool(isolated and authority())
+    # The durable attempt blocks new writes. Keep the bridge available for
+    # readback and let a later request enter the verified recovery flow.
+    return None, False
 
 
 async def _run_teslemetry_bt_transport_command(
@@ -7358,6 +7619,26 @@ def _tesla_observed_command_state(observation):
     if state in {"stopped", "complete", "disconnected"} and measured and all(value == 0 for value in measured):
         return "stopped"
     return None
+
+
+def _tessie_handoff_observation(hass, vehicle_id, command_entity, max_amps):
+    """Read an already charging Tessie vehicle within the incoming plan limit."""
+    from ..tesla_ev_observation import get_tesla_vehicle_observation
+
+    observation = get_tesla_vehicle_observation(
+        hass, vehicle_id, preferred_entity_id=command_entity,
+    )
+    if (
+        observation is None
+        or observation.domain != "tessie"
+        or _tesla_observed_command_state(observation) != "charging"
+        or observation.charger_actual_current is None
+        or not 0 < observation.charger_actual_current <= max_amps
+        or observation.requested_current is None
+        or not 0 < observation.requested_current <= max_amps
+    ):
+        return None
+    return observation
 
 
 async def _run_modern_teslemetry_bluetooth(hass, entry, params, operation, value=None):
@@ -9631,6 +9912,14 @@ async def _run_pre_charge_wake_sequence(
     try:
         on_data = {"entity_id": entity_id}
         on_data.update(_pre_charge_wake_service_data(params, "pre_charge_wake_on_service_data"))
+        off_data = {"entity_id": entity_id}
+        off_data.update(_pre_charge_wake_service_data(params, "pre_charge_wake_off_service_data"))
+        if (
+            _targets_tesla_ble_connection(hass, on_data.get("entity_id"))
+            or (off_service is not None and _targets_tesla_ble_connection(hass, off_data.get("entity_id")))
+        ):
+            _LOGGER.error("Pre-charge wake cannot control a Tesla Bluetooth connection switch")
+            return False
         await hass.services.async_call(
             on_service[0],
             on_service[1],
@@ -9649,8 +9938,9 @@ async def _run_pre_charge_wake_sequence(
             await asyncio.sleep(duration_seconds)
 
         if off_service is not None:
-            off_data = {"entity_id": entity_id}
-            off_data.update(_pre_charge_wake_service_data(params, "pre_charge_wake_off_service_data"))
+            if _targets_tesla_ble_connection(hass, off_data.get("entity_id")):
+                _LOGGER.error("Pre-charge wake cleanup targeted a Tesla Bluetooth connection switch")
+                return False
             await hass.services.async_call(
                 off_service[0],
                 off_service[1],
@@ -10193,6 +10483,13 @@ async def _action_start_ev_charging(
                 )
                 return False
 
+    if owner_mode == "solar_surplus":
+        vehicle_id = params.get("vehicle_vin") or params.get("vehicle_id") or DEFAULT_VEHICLE_ID
+        reason = await _dynamic_ev_full_soc_reason(hass, config_entry, vehicle_id, params)
+        if reason:
+            _LOGGER.info("Solar Surplus start blocked for %s: %s", vehicle_id, reason)
+            return False
+
     # OCPP charger: use HA switch entity
     if charger_type == "ocpp":
         ocpp_charger_id = params.get("ocpp_charger_id")
@@ -10291,9 +10588,22 @@ async def _action_start_ev_charging(
         return False
     recovering_route = route and route.get("kind") in {"blocked", "ha"}
     tessie_wake_anchor = None
-    if recovering_route or params.get("_tesla_plan_recovery_attempt"):
-        # A previous local command may already have taken effect. Reconcile
-        # physical state before issuing another Start, even after isolation.
+    if (
+        ev_provider == EV_PROVIDER_TESLA_BLE
+        and params.get("_tesla_plan_recovery_attempt")
+        and not recovering_route
+    ):
+        # The durable hold is gone. Require current vehicle evidence from the
+        # selected local bridge, then use the normal Start admission below.
+        observed = _tesla_ble_recovery_start_state(hass, ble_prefix)
+        if observed == "charging":
+            return True
+        if observed != "stopped":
+            params["_tesla_transport_recovery_pending"] = True
+            return None
+    elif recovering_route or params.get("_tesla_plan_recovery_attempt"):
+        # A previous command may already have taken effect. Reconcile its
+        # physical state before selecting another write.
         observation = await _fresh_tesla_command_observation(
             hass, config_entry, vehicle_vin, params,
             start_recovery_after=datetime.now(dt_timezone.utc).timestamp(),
@@ -10320,8 +10630,9 @@ async def _action_start_ev_charging(
             return True
         route_blocked = bool(route and route.get("kind") == "blocked")
         if route_blocked or observed != "stopped":
-            reason = "route_blocked"
-            if not route_blocked:
+            if route_blocked:
+                reason = f"route_blocked ({route.get('reason') or 'unspecified'})"
+            else:
                 reason = "read_unavailable" if observation is None else "read_unconfirmed"
             _LOGGER.debug(
                 "Tesla Start withheld: %s (source_charge_timestamp=%s)",
@@ -10345,7 +10656,7 @@ async def _action_start_ev_charging(
         if _is_ble_available(hass, ble_prefix):
             hass.data.setdefault(DOMAIN, {}).setdefault("_ev_ble_start_dispatched_at", {}).pop(ble_prefix, None)
             command_started_at = datetime.now(dt_timezone.utc)
-            result, fallback_ready = await _run_ble_transport_command(
+            result, _ = await _run_ble_transport_command(
                 hass, config_entry, params, ble_prefix, "start",
                 lambda: _run_tesla_legacy_with_authority(
                     request_authority,
@@ -10373,40 +10684,6 @@ async def _action_start_ev_charging(
                 if observed == "charging":
                     params["_tesla_start_observation"] = observation
                     result = True
-                elif fallback_ready:
-                    # Isolation may have completed during this request. Re-pin
-                    # the exact HA fallback before attempting its read/wake
-                    # recovery; never continue with a stale pre-isolation
-                    # route or use Charge as a wake probe.
-                    route = await _tesla_transport_route(
-                        hass, config_entry, params, "start"
-                    )
-                    if not route or route.get("kind") != "ha":
-                        params["_tesla_transport_recovery_pending"] = True
-                        return None
-                    observation, observed, recovery_ok, tessie_wake_anchor = (
-                        await _tesla_recovery_wake_read_if_missing(
-                            hass, config_entry, vehicle_vin, params, route,
-                            request_authority, observation, observed,
-                        )
-                    )
-                    if not request_authority():
-                        return None
-                    if not recovery_ok:
-                        params["_tesla_transport_recovery_pending"] = True
-                        return None
-                    if observed == "charging":
-                        params["_tesla_start_observation"] = observation
-                        result = True
-                    elif observed == "stopped":
-                        # The failed producer is durably isolated. Preserve
-                        # the plan and continue through the configured HA
-                        # integration after exact-source recovery.
-                        ev_provider = EV_PROVIDER_FLEET_API
-                        result = False
-                    else:
-                        params["_tesla_transport_recovery_pending"] = True
-                        return None
                 else:
                     params["_tesla_transport_recovery_pending"] = True
                     return None
@@ -10990,7 +11267,7 @@ async def _action_set_ev_charge_limit(
     # Try ESPHome BLE if configured
     if ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
         if _is_ble_available(hass, ble_prefix):
-            result, fallback_ready = await _run_ble_transport_command(hass, config_entry, params,
+            result, _ = await _run_ble_transport_command(hass, config_entry, params,
                 ble_prefix, "limit", lambda: _run_tesla_legacy_with_authority(
                     request_authority,
                     lambda: _set_ev_charge_limit_ble(
@@ -10998,16 +11275,15 @@ async def _action_set_ev_charge_limit(
                         ble_prefix,
                         percent,
                         allow_backoff=not bool(params.get("_user_initiated")),
+                        **({"passive_only": True} if "_target_sync_current" in params else {}),
                     ),
                     hass=hass,
                     entity_ids=(TESLA_BLE_NUMBER_CHARGING_LIMIT.format(prefix=ble_prefix),),
                 ),
                 effect_bound={"kind": "limit", "min_percent": percent, "max_percent": percent},
             )
-            if result is None and not fallback_ready:
+            if result is None:
                 return None
-            if result is None and fallback_ready:
-                ev_provider = EV_PROVIDER_FLEET_API
             if result or ev_provider == EV_PROVIDER_TESLA_BLE:
                 return result
 
@@ -11031,12 +11307,15 @@ async def _action_set_ev_charge_limit(
             return False
 
         try:
-            wake_success = await _wake_tesla_ev_for_command(
-                hass, vehicle_vin, charge_limit_entity, config_entry.entry_id
-            )
-            if not wake_success:
-                _LOGGER.debug("Wake failed (possibly due to API credits), skipping set charge limit command")
-                return False
+            # Target sync only dispatches from a fresh vehicle report. Leave a
+            # sleeping vehicle pending for its next natural report.
+            if "_target_sync_current" not in params:
+                wake_success = await _wake_tesla_ev_for_command(
+                    hass, vehicle_vin, charge_limit_entity, config_entry.entry_id
+                )
+                if not wake_success:
+                    _LOGGER.debug("Wake failed (possibly due to API credits), skipping set charge limit command")
+                    return False
 
             if (not request_authority() or await _tesla_ha_command_entity(
                     hass, config_entry, params, "limit") != charge_limit_entity):
@@ -11178,7 +11457,7 @@ async def _action_set_ev_charging_amps(
                 allow_stale_entity_max_override=allow_stale_entity_max_override,
                 configured_max_amps=configured_max_amps,
             )
-            result, fallback_ready = await _run_ble_transport_command(hass, config_entry, params,
+            result, _ = await _run_ble_transport_command(hass, config_entry, params,
                 ble_prefix, "rate", lambda: _run_tesla_legacy_with_authority(
                     request_authority,
                     lambda: _set_ev_charging_amps_ble(
@@ -11195,10 +11474,8 @@ async def _action_set_ev_charging_amps(
                 ),
                 effect_bound=ble_effect_bound,
             )
-            if result is None and not fallback_ready:
+            if result is None:
                 return None
-            if result is None and fallback_ready:
-                ev_provider = EV_PROVIDER_FLEET_API
             range_fallback_applied = (
                 params.get("_tesla_entity_range_fallback_amps") is not None
             )
@@ -11748,8 +12025,8 @@ async def _start_ha_native_charger(
     entity_id = _ha_native_charger_entity(params)
     domain = _ha_native_charger_domain(params, entity_id)
 
-    if not entity_id:
-        _LOGGER.error("HA-native charger start: no charger entity configured")
+    if not entity_id or _targets_tesla_ble_connection(hass, entity_id):
+        _LOGGER.error("HA-native charger start: no usable charger entity configured")
         return False
 
     try:
@@ -11784,8 +12061,8 @@ async def _stop_ha_native_charger(
     entity_id = _ha_native_charger_entity(params)
     domain = _ha_native_charger_domain(params, entity_id)
 
-    if not entity_id:
-        _LOGGER.error("HA-native charger stop: no charger entity configured")
+    if not entity_id or _targets_tesla_ble_connection(hass, entity_id):
+        _LOGGER.error("HA-native charger stop: no usable charger entity configured")
         return False
 
     try:
@@ -12529,14 +12806,28 @@ def _calculate_solar_surplus(
     return available_kw
 
 
-def _is_ev_charging_from_solar(grid_power_kw: float, ev_power_kw: float) -> bool:
-    """Determine if EV is charging primarily from solar.
-
-    If less than 20% of EV power is coming from the grid, consider it solar.
-    """
-    if ev_power_kw <= 0:
-        return False
-    return grid_power_kw < (ev_power_kw * 0.2)
+def _is_ev_charging_from_solar(live_status: dict, ev_power_kw: float) -> bool | None:
+    """Classify dynamic EV history only when the meters support the source."""
+    if not math.isfinite(ev_power_kw) or ev_power_kw <= 0:
+        return None
+    try:
+        grid_kw = float(live_status["grid_power"]) / 1000
+        if not math.isfinite(grid_kw):
+            return None
+        if grid_kw >= ev_power_kw * 0.2:
+            return False
+        solar_kw = float(live_status["solar_power"]) / 1000
+        battery_kw = float(live_status["battery_power"]) / 1000
+    except (KeyError, TypeError, ValueError):
+        return None
+    if (
+        math.isfinite(solar_kw)
+        and math.isfinite(battery_kw)
+        and solar_kw >= ev_power_kw * 0.8
+        and battery_kw < ev_power_kw * 0.2
+    ):
+        return True
+    return None
 
 
 def _get_current_ev_prices(hass, entry_id: str) -> tuple:
@@ -12896,21 +13187,15 @@ async def _solar_surplus_switch_to_next_vehicle(
             _LOGGER.debug(f"Solar surplus fallback: {name} ({vin[:8]}...) not plugged in, skipping")
             continue
 
-        # Check if charge is already complete
+        new_params = {**current_params, "vehicle_vin": vin, "vehicle_id": vin, "vehicle_name": name}
         if await _is_vehicle_charge_complete(hass, vin):
-            _LOGGER.debug(f"Solar surplus fallback: {name} ({vin[:8]}...) already complete, skipping")
+            continue
+        if await _dynamic_ev_full_soc_reason(hass, config_entry, vin, new_params):
             continue
 
-        # Found a candidate — start surplus charging with same params but new VIN
-        _LOGGER.info(
-            f"⚡ Solar surplus EV: Switching from {completed_name} to {name} ({vin[:8]}...)"
-        )
-        new_params = dict(current_params)
-        new_params["vehicle_vin"] = vin
-        new_params["vehicle_name"] = name
-
         try:
-            await _action_start_ev_charging_dynamic(hass, config_entry, new_params, context=None)
+            if not await _action_start_ev_charging_dynamic(hass, config_entry, new_params, context=None):
+                continue
             await _send_expo_push(
                 hass, "EV Charging",
                 f"Solar surplus switching to {name}"
@@ -13012,6 +13297,53 @@ async def _set_vehicle_amps(
         return success
 
 
+def _prioritise_switch_only_price_level(hass, config_entry, params) -> bool:
+    from .ev_ownership import owner_family
+
+    return (
+        config_entry is not None
+        and params.get("charger_type") == "generic"
+        and bool(params.get("charger_switch_entity"))
+        and not params.get("charger_amps_entity")
+        and owner_family(params.get("owner_mode")) == "price_level"
+        and not params.get("no_grid_import", False)
+        and config_entry.options.get(
+            CONF_GENERIC_CHARGER_PRIORITISE_PRICE_LEVEL_EV,
+            config_entry.data.get(CONF_GENERIC_CHARGER_PRIORITISE_PRICE_LEVEL_EV),
+        ) is True
+        and not _phase_load_management_enabled(hass, config_entry)
+    )
+
+
+async def _switch_only_start_fits_budget(hass, config_entry, vehicle_id, params) -> bool:
+    """A switch adds its entire configured load. Delayed EV power cannot offset it."""
+    limit_kw = await _resolve_max_grid_import_kw(hass, config_entry, params)
+    site = await _get_initial_smart_schedule_live_status(hass, config_entry)
+    grid_w = (site or {}).get("grid_power")
+    voltage = _coerce_positive_float(params.get("voltage", 240))
+    if (
+        isinstance(grid_w, bool)
+        or not isinstance(grid_w, (int, float))
+        or not math.isfinite(grid_w)
+        or voltage is None
+    ):
+        _LOGGER.info("Price Level: waiting for valid site import and charger voltage before switch-on")
+        return False
+
+    amps = _effective_max_charge_amps(params, hass)
+    phases = _get_phases_from_config(hass, config_entry, params)
+    full_w = amps * voltage * phases
+    headroom_w = (limit_kw if limit_kw is not None else 12.5) * 1000 - grid_w
+    plan_kw = _optimizer_planned_ev_charge_kw(hass, config_entry, vehicle_id)
+    if full_w > headroom_w + 1e-6 or (plan_kw is not None and full_w > plan_kw * 1000 + 1e-6):
+        _LOGGER.info(
+            "Price Level: holding switch off (full rate %.0f W, site headroom %.0f W, EV plan %s kW)",
+            full_w, headroom_w, plan_kw,
+        )
+        return False
+    return True
+
+
 async def _set_vehicle_amps_unchecked(
     hass: HomeAssistant,
     config_entry: ConfigEntry | None,
@@ -13066,6 +13398,19 @@ async def _set_vehicle_amps_unchecked(
                 False,
             ),
         }
+        if params.get("owner_mode") == "scheduled":
+            from .ev_ownership import get_ev_ownership
+            state = _dynamic_ev_state.get(config_entry.entry_id, {}).get(vehicle_id)
+            if state and state.get("params") is params and state.get("transport_recovery_pending"):
+                owner = state.get("ownership")
+
+                def still_owns_scheduled_retry():
+                    return (owner is not None and owner.get("owner_mode") == "scheduled"
+                            and state.get("active") and state.get("transport_recovery_pending")
+                            and _dynamic_ev_state.get(config_entry.entry_id, {}).get(vehicle_id) is state
+                            and get_ev_ownership(hass, config_entry, vehicle_id)[1] is owner)
+
+                command_params["_tesla_scheduled_rate_recovery_current"] = still_owns_scheduled_retry
         success = await _action_set_ev_charging_amps(
             hass,
             config_entry,
@@ -13213,6 +13558,10 @@ async def _set_vehicle_amps_unchecked(
                         manual_failure, "readiness", params.get("charger_status_entity")
                     )
                     return False
+                prioritise_switch = _prioritise_switch_only_price_level(hass, config_entry, params)
+                if prioritise_switch:
+                    session = _dynamic_ev_state.get(config_entry.entry_id, {}).get(vehicle_id)
+                    ownership = (session or {}).get("ownership")
                 if not await _run_pre_charge_wake_sequence(hass, params, "generic"):
                     _record_manual_generic_failure(
                         manual_failure, "pre_charge_wake", params.get("pre_charge_wake_entity")
@@ -13240,8 +13589,32 @@ async def _set_vehicle_amps_unchecked(
                     # Setup/wake/current writes can take time. Their telemetry
                     # must not confirm the later switch start.
                     confirmation_started_at = datetime.now(dt_timezone.utc)
+                before_turn_on = None
+                if prioritise_switch:
+                    async def admit_switch_start() -> bool:
+                        nonlocal confirmation_started_at
+                        if not await _switch_only_start_fits_budget(hass, config_entry, vehicle_id, params):
+                            return False
+                        current = _dynamic_ev_state.get(config_entry.entry_id, {}).get(vehicle_id)
+                        if current is not session or (
+                            current is not None and (
+                                not current.get("active") or current.get("ownership") is not ownership
+                            )
+                        ):
+                            return False
+                        pending = params.get("_generic_pending_start") or {}
+                        if pending.get("cancelled") or not _generic_start_cleanup_is_current(
+                            hass, config_entry, vehicle_id, params
+                        ):
+                            return False
+                        if confirmation_started_at is not None:
+                            confirmation_started_at = datetime.now(dt_timezone.utc)
+                        return True
+
+                    before_turn_on = admit_switch_start
+
                 if switch_entity and not await _start_generic_charger_switch(
-                    hass, switch_entity, manual_failure
+                    hass, switch_entity, manual_failure, before_turn_on=before_turn_on
                 ):
                     return False
                 if confirmation_started_at is not None:
@@ -13920,6 +14293,12 @@ def _optimizer_planned_ev_charge_kw(
         action = get_action()
         if action is None or not vehicle_id:
             return None
+
+        executor = entry_data.get("auto_schedule_executor")
+        if executor is not None:
+            settings = executor._settings.get(str(vehicle_id))
+            if settings is None or not settings.enabled:
+                return None  # The car can already be under a different EV mode.
 
         schedule = getattr(coordinator, "_current_schedule", None)
         actions = getattr(schedule, "actions", None) or []
@@ -14861,16 +15240,17 @@ async def _update_smart_schedule_battery_target_group(
             import_price, export_price = _get_current_ev_prices(hass, entry_id)
             for vehicle_id, state in sessions:
                 params = state.get("params") or {}
-                if _session_energy_tracked_by_charger_poll(params):
+                if (params.get("owner_mode") == "scheduled" and state.get("transport_recovery_pending")
+                        or _session_energy_tracked_by_charger_poll(params)):
                     continue
                 prior_amps = previous_amps[vehicle_id]
                 current_amps = int(state.get("current_amps", 0) or 0)
                 if prior_amps > 0 and current_amps <= 0:
-                    live_soc = live_status.get("battery_soc")
                     await session_manager.end_session(
                         vehicle_id=vehicle_id,
                         reason="battery_target_stop",
-                        end_soc=int(live_soc) if live_soc else None,
+                        end_soc=await _ev_session_soc(hass, config_entry, vehicle_id, params),
+                        expected_session_id=state.get("session_id"),
                     )
                 elif current_amps > 0:
                     power_kw = _dynamic_ev_commanded_power_kw(state)
@@ -14878,10 +15258,7 @@ async def _update_smart_schedule_battery_target_group(
                         vehicle_id=vehicle_id,
                         power_kw=power_kw,
                         amps=current_amps,
-                        is_solar=_is_ev_charging_from_solar(
-                            grid_power_kw,
-                            power_kw,
-                        ),
+                        is_solar=_is_ev_charging_from_solar(live_status, power_kw),
                         import_price_cents=import_price,
                         export_price_cents=export_price,
                     )
@@ -15194,6 +15571,12 @@ async def _dynamic_ev_update_surplus(
     if _session_was_replaced("charge-limit check"):
         return
     if full_soc_reason:
+        from .ev_ownership import get_ev_ownership
+
+        _, lease = get_ev_ownership(hass, config_entry, vehicle_id)
+        if state.get("external_manual_override") or (lease and lease.get("owner") != "powersync"):
+            state["reason"] = full_soc_reason
+            return
         _LOGGER.info("⚡ Solar surplus EV: Stopping - %s", full_soc_reason)
         await _action_stop_ev_charging_dynamic(
             hass,
@@ -15201,7 +15584,10 @@ async def _dynamic_ev_update_surplus(
             {
                 "vehicle_id": vehicle_id,
                 "stop_charging": True,
-                "stop_reason": "already full",
+                "_expected_state": state,
+                "_expected_lease": lease,
+                "_solar_ceiling_stop": True,
+                "stop_reason": "already full" if full_soc_reason.endswith("already full") else full_soc_reason,
             },
         )
         return
@@ -16410,9 +16796,7 @@ async def _dynamic_ev_update_surplus(
             from .ev_charging_session import get_session_manager
             session_manager = get_session_manager()
             if session_manager:
-                # Determine if we're charging from solar using grid import
-                grid_power_kw = (live_status.get("grid_power") or 0) / 1000
-                is_solar = _is_ev_charging_from_solar(grid_power_kw, current_ev_kw)
+                is_solar = _is_ev_charging_from_solar(live_status, current_ev_kw)
 
                 import_price, export_price = _get_current_ev_prices(hass, config_entry.entry_id)
 
@@ -16508,7 +16892,8 @@ async def _dynamic_ev_update_surplus(
                         await session_manager.end_session(
                             vehicle_id=vehicle_id,
                             reason=reason,
-                            end_soc=int(battery_soc) if battery_soc else None,
+                            end_soc=await _ev_session_soc(hass, config_entry, vehicle_id, params),
+                            expected_session_id=state.get("session_id"),
                         )
                         _LOGGER.debug(f"Solar surplus EV: Ended session for {vehicle_id} ({reason})")
                 except Exception as e:
@@ -18118,8 +18503,6 @@ async def _dynamic_ev_update(
     Battery power convention: Positive = discharging, Negative = charging
     Grid power convention: Positive = importing, Negative = exporting
     """
-    from .ev_ownership import owner_family
-
     vehicles = _dynamic_ev_state.get(entry_id, {})
     state = vehicles.get(vehicle_id)
     if not state or not state.get("active"):
@@ -18287,18 +18670,7 @@ async def _dynamic_ev_update(
     params = state.get("params") or {}
 
     no_grid_import = params.get("no_grid_import", False)
-    prioritise_ev = (
-        params.get("charger_type") == "generic"
-        and params.get("charger_switch_entity")
-        and not params.get("charger_amps_entity")
-        and owner_family(params.get("owner_mode")) == "price_level"
-        and not no_grid_import
-        and config_entry.options.get(
-            CONF_GENERIC_CHARGER_PRIORITISE_PRICE_LEVEL_EV,
-            config_entry.data.get(CONF_GENERIC_CHARGER_PRIORITISE_PRICE_LEVEL_EV),
-        ) is True
-        and not _phase_load_management_enabled(hass, config_entry)
-    )
+    prioritise_ev = _prioritise_switch_only_price_level(hass, config_entry, params)
     # The current optimizer interval outranks the battery target at session start.
     target_battery_charge_kw = _resolve_battery_reservation_kw(
         session_target_kw=params.get("target_battery_charge_kw", 5.0),
@@ -18581,6 +18953,7 @@ async def _dynamic_ev_update(
     # battery's own grid-charging draw, which is not spare capacity. The
     # scheduled minimum-rate floor below still overrides this at amp level.
     available_power_kw = min(available_power_kw, grid_headroom_kw)
+    site_headroom_kw = grid_headroom_kw
 
     # When the optimizer has co-planned the car against prices and the import
     # limit, its figure for this interval is a ceiling. Deliberately a ceiling
@@ -18607,8 +18980,9 @@ async def _dynamic_ev_update(
         if params.get("charger_type", "tesla") == "tesla" and not no_grid_import:
             lendable_kw = managed_borrowable_w(hass, config_entry, vehicle_id, params)/1000
             if lendable_kw > 0:
+                site_headroom_kw += lendable_kw
                 available_power_kw = max(available_power_kw, min(
-                    planned_ev_charge_kw-current_ev_power_kw, grid_headroom_kw+lendable_kw))
+                    planned_ev_charge_kw - current_ev_power_kw, site_headroom_kw))
         available_power_kw = min(
             available_power_kw,
             planned_ev_charge_kw - current_ev_power_kw,
@@ -18625,6 +18999,11 @@ async def _dynamic_ev_update(
         new_amps = 0
     else:
         new_amps = int(round(max(min_amps, min(max_amps, raw_new_amps))))
+        # Round a control target to the nearest amp only within the site limit.
+        site_ceiling_amps = math.floor(
+            current_amps + site_headroom_kw * 1000 / (voltage * phases) + 1e-9
+        )
+        new_amps = min(new_amps, max(0, site_ceiling_amps))
     optimizer_ceiling_amps = _optimizer_ev_ceiling_amps(
         planned_ev_charge_kw,
         voltage=voltage,
@@ -18756,10 +19135,11 @@ async def _dynamic_ev_update(
         from ..const import DOMAIN
         from .ev_charging_session import get_session_manager
         session_manager = get_session_manager()
-        if session_manager and not _session_energy_tracked_by_charger_poll(params):
+        if (session_manager and not _session_energy_tracked_by_charger_poll(params)
+                and not (params.get("owner_mode") == "scheduled" and state.get("transport_recovery_pending"))):
             if current_amps > 0 and new_amps > 0:
                 # Session update - still charging
-                is_solar = _is_ev_charging_from_solar(grid_power_kw, current_ev_power_kw)
+                is_solar = _is_ev_charging_from_solar(live_status, current_ev_power_kw)
                 import_price, export_price = _get_current_ev_prices(hass, entry_id)
 
                 await session_manager.update_session(
@@ -18770,14 +19150,13 @@ async def _dynamic_ev_update(
                     import_price_cents=import_price,
                     export_price_cents=export_price,
                 )
-            elif current_amps > 0 and new_amps == 0:
-                # Session end - charging stopped
-                live_soc = live_status.get("battery_soc")
-                end_soc = int(live_soc) if live_soc else None
+            elif current_amps > 0 and new_amps == 0 and state.get("current_amps") == 0:
+                end_soc = await _ev_session_soc(hass, config_entry, vehicle_id, params)
                 await session_manager.end_session(
                     vehicle_id=vehicle_id,
                     reason="battery_target_stop",
                     end_soc=end_soc,
+                    expected_session_id=state.get("session_id"),
                 )
                 _LOGGER.debug(f"Dynamic EV: Ended session for {vehicle_id}")
     except Exception as e:
@@ -19628,24 +20007,137 @@ async def _action_start_ev_charging_dynamic_locked(
             return False
         start_amps = phase_safe_start_amps
 
+    # A Price Level takeover can keep an already charging Tessie loadpoint
+    # running when its measured draw fits the new plan's initial limit. Use
+    # the current vehicle report, not Solar Surplus's requested current or
+    # a switch state that can lag the physical charger.
+    handoff_observation = None
+    solar_state = entry_vehicles.get(vehicle_id)
+    solar_update_lock = _dynamic_ev_solar_update_locks.setdefault(
+        f"{entry_id}:{vehicle_id}", asyncio.Lock()
+    ) if solar_state and solar_state.get("active") and (
+        solar_state.get("params", {}).get("dynamic_mode") == "solar_surplus"
+    ) else None
+    if (
+        charger_type == "tesla"
+        and dynamic_mode == "battery_target"
+        and owner_family(owner_mode) == "price_level"
+        and allow_takeover
+        and params.get("require_physical_start_confirmation")
+        and not mode_params["no_grid_import"]
+        and not params.get("quick_control")
+        and solar_update_lock is not None
+        and not solar_update_lock.locked()
+        and _lease_id == vehicle_id
+        and _lease.get("owner_mode") == "solar_surplus"
+    ):
+        from ..tesla_ev_recovery import get_vehicle_route
+        from .ev_ownership import get_ev_quick_control_obligation
+
+        headroom = hass.data.get(DOMAIN, {}).get(entry_id, {}).get("solar_ev_headroom")
+        route = get_vehicle_route(hass, config_entry, vehicle_id)
+        if (
+            (headroom is None or not headroom.lease)
+            and get_ev_quick_control_obligation(hass, config_entry, vehicle_id) is None
+            and (
+                route is None
+                or (
+                    route.get("kind") == "ha"
+                    and route.get("entity_id")
+                    and (route.get("entity_identity") or {}).get("platform") == "tessie"
+                    and not route.get("session_scope")
+                    and not route.get("cleanup_only")
+                )
+            )
+            and _tesla_transport_authority(
+                hass, config_entry, {**params, "vehicle_vin": vehicle_id},
+                operation="start",
+            )()
+            and not manual_stop_hold_reason(hass, config_entry, vehicle_id)
+        ):
+            command_entity = route["entity_id"] if route else None
+            handoff_observation = _tessie_handoff_observation(
+                hass, vehicle_id, command_entity, start_amps,
+            )
+
     # Stop any existing dynamic charging for this vehicle.  Record whether that
     # teardown actually commanded the charger off: cloud EV telemetry lags the
     # command by a poll interval, so the not-yet-settled aftermath of our own
     # stop must never read back as evidence that the car is already charging.
     teardown_report: Dict[str, Any] = {}
-    teardown_success = await _action_stop_ev_charging_dynamic(
-        hass,
-        config_entry,
-        {
-            "vehicle_id": vehicle_id,
-            "_physical_stop_report": teardown_report,
-            "_user_initiated": bool(params.get("_user_initiated")),
-            # Preserve an existing finite obligation while the old session is
-            # torn down.  A replacement obligation is persisted only after
-            # this matching stop has returned successfully.
-            "_preserve_quick_control_obligation": True,
-        },
-    )
+    teardown_params = {
+        "vehicle_id": vehicle_id,
+        "_physical_stop_report": teardown_report,
+        "_user_initiated": bool(params.get("_user_initiated")),
+        # A replacement finite obligation is persisted only after this
+        # matching teardown succeeds.
+        "_preserve_quick_control_obligation": True,
+    }
+    if (
+        charger_type == "tesla" and dynamic_mode == "battery_target"
+        and owner_mode == "smart_schedule" and allow_takeover
+        and params.get("require_physical_start_confirmation") and not params.get("quick_control")
+        and solar_update_lock is not None and not solar_update_lock.locked()
+        and _lease_id == vehicle_id and (_lease or {}).get("owner_mode") == "solar_surplus"
+        and solar_state.get("charging_started") is False
+        and solar_state.get("current_amps") == solar_state.get("target_amps") == 0
+    ):
+        # Keep the waiting Solar timer from starting the vehicle while its
+        # exact native stopped report is checked and the controller is retired.
+        teardown_params.update(
+            _smart_schedule_waiting_solar_handoff=True,
+            _expected_state=solar_state, _expected_lease=_lease,
+        )
+        async with solar_update_lock:
+            teardown_success = await _action_stop_ev_charging_dynamic(
+                hass, config_entry, teardown_params,
+            )
+        if (
+            not teardown_success or solar_state.get("active")
+            or get_ev_ownership(hass, config_entry, vehicle_id)[1] is not None
+        ):
+            return False
+    elif handoff_observation is None:
+        teardown_success = await _action_stop_ev_charging_dynamic(
+            hass, config_entry, teardown_params,
+        )
+    else:
+        def revalidate_handoff():
+            nonlocal handoff_observation
+            current_observation = _tessie_handoff_observation(
+                hass, vehicle_id, command_entity, start_amps,
+            )
+            headroom = hass.data.get(DOMAIN, {}).get(entry_id, {}).get("solar_ev_headroom")
+            if (
+                not solar_state.get("active")
+                or (headroom is not None and headroom.lease)
+                or get_ev_quick_control_obligation(hass, config_entry, vehicle_id) is not None
+                or manual_stop_hold_reason(hass, config_entry, vehicle_id)
+                or get_vehicle_route(hass, config_entry, vehicle_id) != route
+                or current_observation is None
+                or current_observation.producer_identity != handoff_observation.producer_identity
+            ):
+                return False
+            handoff_observation = current_observation
+            return True
+
+        teardown_params.update(
+            stop_charging=False, _expected_state=solar_state, _expected_lease=_lease,
+            _revalidate_handoff=revalidate_handoff,
+        )
+        # Keep the Solar timer and lease until the handoff is revalidated
+        # after session history is saved.
+        async with solar_update_lock:
+            teardown_success = await _action_stop_ev_charging_dynamic(
+                hass, config_entry, teardown_params,
+            )
+        if (
+            not teardown_success
+            or solar_state.get("active")
+            or get_ev_ownership(hass, config_entry, vehicle_id)[1] is not None
+        ):
+            return False
+
     quick_control_obligation = None
     if params.get("quick_control") and params.get("expires_at"):
         # Keep an already accepted finite obligation and its timer intact while
@@ -19957,6 +20449,9 @@ async def _action_start_ev_charging_dynamic_locked(
                 )
         elif charger_type in ("ocpp", "generic", "zaptec", "sigenergy") or _is_ha_native_charger_type(charger_type):
             start_params = dict(params)
+            if _prioritise_switch_only_price_level(hass, config_entry, params):
+                start_amps = max_charge_amps
+                start_params["max_charge_amps"] = max_charge_amps
             if charger_type == "sigenergy":
                 start_params["_sigenergy_start_after_rate_limit"] = True
             pending_starts = None
@@ -20005,7 +20500,7 @@ async def _action_start_ev_charging_dynamic_locked(
             confirmation_baseline = None
             already_physically_charging = False
             command_started_at = None
-            if require_physical_confirmation:
+            if require_physical_confirmation and handoff_observation is None:
                 confirmation_baseline = _tesla_physical_charging_snapshot(
                     hass,
                     config_entry,
@@ -20029,7 +20524,7 @@ async def _action_start_ev_charging_dynamic_locked(
 
             start_params = dict(params)
             start_params["amps"] = start_amps
-            if already_physically_charging:
+            if handoff_observation is not None or already_physically_charging:
                 start_success = True
                 _LOGGER.info(
                     "Dynamic EV: %s was already physically charging; "
@@ -20074,7 +20569,8 @@ async def _action_start_ev_charging_dynamic_locked(
             # register a new session after that late completion; contain the
             # exact vehicle first and leave any unknown outcome fail-closed.
             if not registration_authority():
-                await _compensate_late_positive_start()
+                if handoff_observation is None:
+                    await _compensate_late_positive_start()
                 record_ev_command(
                     hass,
                     config_entry,
@@ -20106,12 +20602,17 @@ async def _action_start_ev_charging_dynamic_locked(
                 )
                 if amps_success or applied_start_amps != start_amps:
                     start_amps = applied_start_amps
+                elif handoff_observation is not None:
+                    start_amps = max(1, round(handoff_observation.charger_actual_current))
                 if not amps_success:
                     # This is expected - Tesla reports lower max amps until charging actually starts
                     _LOGGER.debug(f"Dynamic EV: Could not set initial amps to {start_amps}A (will adjust once charging starts)")
 
             if (require_physical_confirmation or start_params.get("_tesla_start_live_read_required")) and not transport_pending:
-                if already_physically_charging:
+                if handoff_observation is not None:
+                    confirmed = True
+                    evidence = f"Tessie reported {handoff_observation.charger_actual_current:g}A"
+                elif already_physically_charging:
                     confirmed = True
                     evidence = ", ".join(
                         sorted(confirmation_baseline["measurements"])
@@ -20441,20 +20942,16 @@ async def _action_start_ev_charging_dynamic_locked(
     try:
         from .ev_charging_session import get_session_manager
         session_manager = get_session_manager()
-        if session_manager:
-            # Get initial SoC if available
-            initial_soc = None
-            live_status = await _get_tesla_live_status(hass, config_entry)
+        if session_manager and not (owner_mode == "scheduled" and transport_pending):
+            initial_soc = await _ev_session_soc(hass, config_entry, vehicle_id, params)
             if not registration_is_current():
                 discard_registration()
                 return False
-            if live_status:
-                initial_soc = live_status.get("battery_soc")
 
             session = await session_manager.start_session(
                 vehicle_id=vehicle_id,
                 mode=owner_mode,
-                start_soc=int(initial_soc) if initial_soc else None,
+                start_soc=initial_soc,
             )
             if not registration_is_current():
                 discard_registration()
@@ -20488,6 +20985,10 @@ async def _action_start_ev_charging_dynamic_locked(
         discard_registration()
         return False
     session_id = registered_state.get("session_id")
+    if transport_pending and owner_mode == "scheduled":
+        # A native route is bound to the whole lease, including its session ID.
+        # Reserve the ID now; open its history only when the vehicle confirms.
+        session_id = str(uuid4())
     ownership = claim_ev_ownership(
         hass,
         config_entry,
@@ -20606,9 +21107,14 @@ async def _action_start_ev_charging_dynamic_locked(
 
     mode_label = "solar surplus" if dynamic_mode == "solar_surplus" else "battery target"
     zaptec_start_pending = full_params["zaptec_pending_start"]
+    start_status = "started"
+    if transport_pending:
+        start_status = "waiting for Tesla command recovery"
+    elif zaptec_start_pending:
+        start_status = "armed; waiting for charger power"
     _LOGGER.info(
         "Dynamic EV charging %s (%s mode, vehicle=%s)",
-        "armed; waiting for charger power" if zaptec_start_pending else "started",
+        start_status,
         mode_label, vehicle_id,
     )
 
@@ -20635,33 +21141,71 @@ async def _action_start_ev_charging_dynamic_locked(
     return True
 
 
-async def _waiting_solar_tesla_is_stopped(hass, entry, vehicle_id, state, params):
+def _solar_controller_waited_without_start(state: dict) -> bool:
+    """Distinguish a waiting session from a submitted or interrupted Start."""
+    return (
+        state.get("active") is True
+        and state.get("charging_started") is False
+        and state.get("current_amps") == state.get("target_amps") == 0
+        and not any(state.get(key) for key in (
+            "last_physical_restart_attempt_at", "last_start_command_at",
+            "transport_recovery_pending", "stop_outcome", "external_manual_override",
+        ))
+    )
+
+
+def _waiting_smart_schedule_ble_is_stopped(hass, entry, vehicle_id, state) -> bool:
+    """Prove that an idle Smart Schedule solar controller needs no BLE Stop."""
+    from ..tesla_ble_recovery_status import ble_recovery_status
+    from ..tesla_ev_recovery import (
+        current_vehicle_generation, get_vehicle_route, recovery_control_allowed,
+    )
+
+    config = {**entry.data, **entry.options}
+    if (
+        config.get(CONF_EV_PROVIDER) != EV_PROVIDER_TESLA_BLE
+        or not vehicle_id.startswith("ble_")
+        or not _solar_controller_waited_without_start(state)
+    ):
+        return False
+    prefix = vehicle_id[4:]
+    if prefix not in resolve_ble_prefixes(hass, config) or not recovery_control_allowed(
+        hass, entry, vehicle_id, current_vehicle_generation(hass, entry, vehicle_id), "start",
+    ):
+        return False
+    route = get_vehicle_route(hass, entry, vehicle_id)
+    if route is not None and (
+        route.get("kind") != "ble" or route.get("prefix") != prefix or route.get("cleanup_only")
+    ):
+        return False
+    history = ble_recovery_status(hass, entry)
+    return (
+        history.get("success") is True
+        and history.get("recovery", {}).get("required") is False
+        and _tesla_ble_recovery_start_state(
+            hass, prefix, require_paired_charge_state=True,
+        ) == "stopped"
+    )
+
+
+async def _waiting_solar_tesla_is_stopped(hass, entry, vehicle_id, state, params, *, smart_handoff=False):
     """Prove that a waiting Solar Surplus session has no Tesla charge to stop."""
     from ..tesla_ev_observation import MAX_SOURCE_AGE_SECONDS, get_tesla_vehicle_observation
     from ..tesla_ev_recovery import ev_recovery_status, get_vehicle_route
 
-    def still_waiting():
-        return (
-            state.get("active") is True
-            and state.get("charging_started") is False
-            and state.get("current_amps") == state.get("target_amps") == 0
-            and not any(state.get(key) for key in (
-                "last_physical_restart_attempt_at", "last_start_command_at",
-                "transport_recovery_pending", "stop_outcome", "external_manual_override",
-            ))
-        )
-
-    if params.get("charger_type", "tesla") != "tesla" or not still_waiting():
+    if params.get("charger_type", "tesla") != "tesla" or not _solar_controller_waited_without_start(state):
         return False
     route = get_vehicle_route(hass, entry, vehicle_id)
+    provider = _get_ev_config(entry)["ev_provider"]
+    unbound_both = route is None and smart_handoff and provider == EV_PROVIDER_BOTH
     if route is None:
-        if _get_ev_config(entry)["ev_provider"] != EV_PROVIDER_FLEET_API:
+        if provider != EV_PROVIDER_FLEET_API and not unbound_both:
             return False
     elif route.get("kind") != "ha" or route.get("cleanup_only"):
         return False
 
     entity = await _tesla_ha_command_entity(hass, entry, {**params, "vehicle_vin": vehicle_id}, "stop")
-    if not entity or not still_waiting() or get_vehicle_route(hass, entry, vehicle_id) != route:
+    if not entity or not _solar_controller_waited_without_start(state) or get_vehicle_route(hass, entry, vehicle_id) != route:
         return False
     if ev_recovery_status(hass, entry, vehicle_id).get("recovery_required") is not False:
         return False
@@ -20669,6 +21213,18 @@ async def _waiting_solar_tesla_is_stopped(hass, entry, vehicle_id, state, params
     identity = _tesla_native_binding_identity(binding)
     if not identity or identity["platform"] != "tesla_fleet":
         return False
+    if smart_handoff and route is not None and route.get("entity_id") != entity:
+        return False
+    if unbound_both:
+        # An exact native mutation anchor selects Fleet for Stop. Without one,
+        # Both can select either writer, so require stopped proof on both.
+        if params.get("_tesla_command_entity_id"):
+            if _tesla_native_anchor_binding(hass, params) != binding:
+                return False
+        else:
+            prefix = _resolve_ble_prefix_for_vehicle(hass, entry, vehicle_id)
+            if not prefix or _tesla_ble_recovery_start_state(hass, prefix) != "stopped":
+                return False
     observed = get_tesla_vehicle_observation(hass, vehicle_id, preferred_entity_id=entity)
     if not (
         observed is not None
@@ -20801,14 +21357,25 @@ async def _action_stop_ev_charging_dynamic(
     replaced_vehicle_ids: set[str] = set()
     notify_after_physical_stop: Dict[str, dict] = {}
 
-    from .ev_ownership import get_ev_ownerships, owner_family
+    from .ev_ownership import (
+        get_ev_ownerships, get_ev_quick_control_obligation, owner_family,
+    )
 
     expected_lease = params.get("_expected_lease")
+    revalidate_handoff = params.get("_revalidate_handoff")
 
-    def session_matches(vid, state):
+    def session_matches(vid, state, ble_waiting_lease):
+        leases = get_ev_ownerships(hass, config_entry)
+        if ble_waiting_lease is not None and (
+            leases.get(vid) is not ble_waiting_lease
+            or DEFAULT_VEHICLE_ID in leases
+            or ble_waiting_lease.get("owner") != "powersync"
+            or ble_waiting_lease.get("owner_mode") != "smart_schedule_solar_surplus"
+        ):
+            return False
         return vehicles.get(vid) is state and (
             expected_lease is None
-            or get_ev_ownerships(hass, config_entry).get(vid) is expected_lease
+            or leases.get(vid) is expected_lease
         )
 
     for vid in vehicle_ids_to_stop:
@@ -20820,6 +21387,29 @@ async def _action_stop_ev_charging_dynamic(
 
         state_params = vehicle_params.get(vid, {})
         state_owner = state_params.get("owner_mode") or state_params.get("dynamic_mode")
+        ble_waiting_lease = None
+        if (
+            stop_charging
+            and vid == vehicle_id
+            and vid.startswith("ble_")
+            and state_owner == "smart_schedule_solar_surplus"
+            and params.get("charger_type", "tesla") == "tesla"
+            and state_params.get("charger_type", "tesla") == "tesla"
+            and params.get("owner_mode") == "smart_schedule"
+            and not any(params.get(key) for key in (
+                "stop_untracked", "manual_stop", "_user_initiated", "quick_control",
+                "_force_tesla_stop_request", "_ev_cleanup_only", "_quick_control_obligation_id",
+            ))
+        ):
+            leases = get_ev_ownerships(hass, config_entry)
+            lease = leases.get(vid)
+            if (
+                lease is not None
+                and lease.get("owner") == "powersync"
+                and lease.get("owner_mode") == state_owner
+                and DEFAULT_VEHICLE_ID not in leases
+            ):
+                ble_waiting_lease = lease
         if (
             stop_charging
             and state_owner
@@ -20840,51 +21430,35 @@ async def _action_stop_ev_charging_dynamic(
                     vid,
                     away_location,
                 )
-            elif (
-                params.get("_automatic_solar_disable") is True
-                and state_owner == "solar_surplus"
-                and state is not None
-            ):
-                try:
-                    if await _waiting_solar_tesla_is_stopped(hass, config_entry, vid, state, state_params):
-                        passive_vehicle_ids.add(vid)
-                except Exception:
-                    _LOGGER.debug("Could not verify the waiting Tesla is stopped", exc_info=True)
 
-        if state is not None and not session_matches(vid, state):
+        if state is not None and not session_matches(vid, state, ble_waiting_lease):
             replaced_vehicle_ids.add(vid)
             continue
 
         if state:
+            def cancel_session_timers():
+                cancel_timer = state.get("cancel_timer")
+                if cancel_timer:
+                    cancel_timer()
+                    _LOGGER.debug(f"Dynamic EV: Cancelled periodic timer for {vid}")
+                quick_stop_timer = state.get("quick_stop_timer")
+                if quick_stop_timer:
+                    quick_stop_timer()
+                    _LOGGER.debug(f"Dynamic EV: Cancelled quick-stop timer for {vid}")
 
-            # Cancel the timer
-            cancel_timer = state.get("cancel_timer")
-            if cancel_timer:
-                cancel_timer()
-                _LOGGER.debug(f"Dynamic EV: Cancelled periodic timer for {vid}")
-            quick_stop_timer = state.get("quick_stop_timer")
-            if quick_stop_timer:
-                quick_stop_timer()
-                _LOGGER.debug(f"Dynamic EV: Cancelled quick-stop timer for {vid}")
+            if revalidate_handoff is None:
+                cancel_session_timers()
 
             # End charging session tracking
             try:
                 from .ev_charging_session import get_session_manager
                 session_manager = get_session_manager()
                 if session_manager and state.get("session_id"):
-                    # Try to get current SoC for end_soc
-                    end_soc = None
-                    try:
-                        live_status = hass.data.get(DOMAIN, {}).get(entry_id, {}).get("live_status", {})
-                        if live_status.get("battery_soc"):
-                            end_soc = int(live_status["battery_soc"])
-                    except Exception:
-                        pass
-
                     await session_manager.end_session(
                         vehicle_id=vid,
                         reason="manual" if params.get("manual_stop") else "stopped",
-                        end_soc=end_soc,
+                        end_soc=await _ev_session_soc(hass, config_entry, vid, state.get("params") or {}),
+                        expected_session_id=state["session_id"],
                     )
                     _LOGGER.debug(f"Dynamic EV: Ended charging session for {vid}")
             except Exception as e:
@@ -20895,7 +21469,31 @@ async def _action_stop_ev_charging_dynamic(
             # the downstream charger command has returned success.
             notify_after_physical_stop[vid] = state.get("params", {})
 
-            if not session_matches(vid, state):
+            if (
+                stop_charging and vid not in passive_vehicle_ids and state_owner == "solar_surplus"
+                and (params.get("_automatic_solar_disable") is True
+                     or params.get("_smart_schedule_waiting_solar_handoff") is True
+                     or params.get("_solar_ceiling_stop") is True)
+                and session_matches(vid, state, ble_waiting_lease)
+            ):
+                # Ending session history can await telemetry. Decide whether
+                # to omit Stop only after that await, immediately before release.
+                try:
+                    smart_handoff = params.get("_smart_schedule_waiting_solar_handoff") is True
+                    if await _waiting_solar_tesla_is_stopped(
+                        hass, config_entry, vid, state, state_params, smart_handoff=smart_handoff,
+                    ):
+                        headroom = hass.data.get(DOMAIN, {}).get(entry_id, {}).get("solar_ev_headroom")
+                        if (
+                            params.get("_automatic_solar_disable") is True
+                            or ((headroom is None or not headroom.lease)
+                                and get_ev_quick_control_obligation(hass, config_entry, vid) is None)
+                        ):
+                            passive_vehicle_ids.add(vid)
+                except Exception:
+                    _LOGGER.debug("Could not verify the waiting Tesla is stopped", exc_info=True)
+
+            if not session_matches(vid, state, ble_waiting_lease):
                 replaced_vehicle_ids.add(vid)
                 _LOGGER.debug(
                     "Dynamic EV: Session for %s was replaced during teardown; "
@@ -20903,6 +21501,24 @@ async def _action_stop_ev_charging_dynamic(
                     vid,
                 )
                 continue
+
+            if revalidate_handoff is not None:
+                if not revalidate_handoff():
+                    return False
+                cancel_session_timers()
+
+            if (
+                ble_waiting_lease is not None
+                and state.get("params") is state_params
+                and state_params.get("owner_mode") == "smart_schedule_solar_surplus"
+                and get_ev_quick_control_obligation(hass, config_entry, vid) is None
+            ):
+                try:
+                    if _waiting_smart_schedule_ble_is_stopped(hass, config_entry, vid, state):
+                        passive_vehicle_ids.add(vid)
+                        _LOGGER.info("Releasing waiting Smart Schedule for %s without a BLE Stop", vid)
+                except Exception:
+                    _LOGGER.debug("Could not verify the waiting BLE Tesla is stopped", exc_info=True)
 
             state["active"] = False
             from .ev_ownership import release_ev_ownership

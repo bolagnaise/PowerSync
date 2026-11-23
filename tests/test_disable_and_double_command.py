@@ -24,15 +24,18 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import logging
 import sys
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
+from conftest import load_power_sync_function
 
 # Reuse the HA/power_sync stub scaffolding from the sibling regression file
 # (pytest prepends this directory to sys.path, so the import is stable).
 from test_battery_export_allowed_slots import (
+    COMPONENT_ROOT,
     _SENTINEL,
     _STUB_MODULE_NAMES,
     _install_ha_stubs,
@@ -184,15 +187,78 @@ def test_disable_cancels_untracked_price_reoptimize_task(opt_module):
 
     async def _run():
         coordinator = _disable_coordinator(opt_module)
-        fake_task = _FakeTask()
-        coordinator._price_reoptimize_task = fake_task
+        price_task = asyncio.create_task(asyncio.Event().wait())
+        coordinator._price_reoptimize_task = price_task
 
         await coordinator.disable()
 
-        assert fake_task.cancelled is True
+        assert price_task.cancelled()
         assert coordinator._price_reoptimize_task is None
 
     asyncio.run(_run())
+
+
+def test_disable_drains_a_cached_charge_transition_before_restoring(
+    opt_module, monkeypatch,
+):
+    """The HA refresh is independent of the tasks cancelled by disable()."""
+    from test_battery_export_allowed_slots import _FakeBattery, _execution_coordinator
+
+    async def run():
+        reconnecting = asyncio.Event()
+        contactor_settled = asyncio.Event()
+        original_sleep = asyncio.sleep
+
+        async def wait_for_contactor(delay):
+            if delay == 3:
+                reconnecting.set()
+                await contactor_settled.wait()
+            else:
+                await original_sleep(delay)
+
+        async def reconnect(**kwargs):
+            return True
+
+        battery = _FakeBattery()
+        coordinator = _execution_coordinator(opt_module, battery, soc=0.5)
+        shutdown_defaults = _disable_coordinator(opt_module)
+        for name, value in vars(shutdown_defaults).items():
+            if name not in vars(coordinator):
+                setattr(coordinator, name, value)
+        coordinator._enabled = True
+        coordinator._last_executed_action = "off_grid"
+        coordinator._execute_lock = asyncio.Lock()
+        coordinator._optimization_lock = asyncio.Lock()
+        action = SimpleNamespace(action="charge", power_w=5000, timestamp=opt_module.dt_util.now())
+        coordinator._get_current_action = lambda: action
+        coordinator._current_schedule = SimpleNamespace(actions=[action])
+
+        async def stop(restore_normal=True):
+            if restore_normal:
+                await battery.restore_normal()
+
+        coordinator._executor.stop = stop
+        monkeypatch.setitem(sys.modules, "power_sync.powerwall_local.curtailment_fallback",
+                            SimpleNamespace(get_fallback=lambda *_: SimpleNamespace(release=reconnect)))
+        monkeypatch.setattr(opt_module.asyncio, "sleep", wait_for_contactor)
+
+        refresh = asyncio.create_task(coordinator._execute_cached_current_action_if_changed())
+        await asyncio.wait_for(reconnecting.wait(), 1)
+        shutdown = asyncio.create_task(coordinator.disable())
+        await original_sleep(0)
+        try:
+            assert not coordinator.enabled
+            assert not shutdown.done()
+            assert battery.restore_normal_calls == 0
+        finally:
+            contactor_settled.set()
+            await asyncio.wait_for(asyncio.gather(refresh, shutdown), 1)
+        assert battery.force_charge_calls == []
+        assert battery.restore_normal_calls == 1
+        assert coordinator._last_executed_action is None
+        assert coordinator._current_schedule is None
+
+    asyncio.run(run())
 
 
 def test_disable_tolerates_missing_price_reoptimize_task_attr(opt_module):
@@ -206,6 +272,187 @@ def test_disable_tolerates_missing_price_reoptimize_task_attr(opt_module):
         await coordinator.disable()  # must not raise AttributeError
 
     asyncio.run(_run())
+
+
+def test_enable_waits_for_shutdown_and_rejects_the_previous_sessions_queued_solve(opt_module):
+    async def run():
+        coordinator = _disable_coordinator(opt_module)
+        coordinator._optimizer = object()
+        coordinator._optimization_lock = asyncio.Lock()
+        coordinator._energy_telemetry_ready = lambda: True
+        waiting = asyncio.Event()
+        release_solve = asyncio.Event()
+        shutdown_saving = asyncio.Event()
+        release_save = asyncio.Event()
+        touched_planner = []
+
+        async def wait_for_startup():
+            waiting.set()
+            await release_solve.wait()
+            return True
+
+        async def finish_save(_):
+            shutdown_saving.set()
+            await release_save.wait()
+
+        async def enable():
+            assert coordinator._current_schedule is None
+            assert coordinator._last_optimizer_result is None
+            coordinator._enabled = True
+            return True
+
+        async def detect_specs():
+            touched_planner.append(True)
+
+        coordinator._current_schedule = object()
+        coordinator._last_optimizer_result = object()
+        coordinator._wait_for_deferred_enable_restore = wait_for_startup
+        coordinator._wait_for_restart_force_restore = _noop_async
+        coordinator._cost_store.async_save = finish_save
+        coordinator._enable_optimizer = enable
+        coordinator._battery_specs_source = "default"
+        coordinator._auto_detect_battery_specs = detect_specs
+        old_solve = asyncio.create_task(coordinator._run_optimization(force=True))
+        await asyncio.wait_for(waiting.wait(), 1)
+        stop = asyncio.create_task(coordinator.disable())
+        await asyncio.wait_for(shutdown_saving.wait(), 1)
+        start = asyncio.create_task(coordinator.enable())
+        await asyncio.sleep(0)
+        assert not start.done()
+        release_save.set()
+        await asyncio.wait_for(stop, 1)
+        assert await asyncio.wait_for(start, 1) is True
+        release_solve.set()
+        assert await asyncio.wait_for(old_solve, 1) is False
+        assert touched_planner == []
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("interruption", ["cancelled", "refused", "new_manual_owner"])
+def test_enable_retries_unfinished_executor_restoration(opt_module, interruption):
+    async def run():
+        coordinator = _disable_coordinator(opt_module)
+        attempts = []
+        hardware_restored = False
+        entered_restore = asyncio.Event()
+        first_attempt = True
+
+        async def restore():
+            nonlocal first_attempt, hardware_restored
+            attempts.append("restore")
+            if first_attempt:
+                first_attempt = False
+                entered_restore.set()
+                if interruption == "refused":
+                    return False
+                await asyncio.Event().wait()
+            hardware_restored = True
+            return True
+
+        # Run the real stop method. It closes its own admission before I/O.
+        stop_executor = load_power_sync_function(
+            "stop",
+            {"_LOGGER": logging.getLogger(__name__)},
+            COMPONENT_ROOT / "optimization/executor.py",
+        )
+        executor = SimpleNamespace(
+            _enabled=True,
+            _cancel_timer=None,
+            _status=SimpleNamespace(enabled=True),
+            _restore_normal_operation=restore,
+        )
+        executor.stop = stop_executor.__get__(executor)
+        coordinator._executor = executor
+        coordinator._get_active_force_state = lambda: None
+        stop = asyncio.create_task(coordinator.disable())
+        await asyncio.wait_for(entered_restore.wait(), 2)
+        if interruption == "refused":
+            with pytest.raises(RuntimeError, match="optimizer_restore_pending"):
+                await stop
+        else:
+            stop.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await stop
+        if interruption == "new_manual_owner":
+            coordinator._get_active_force_state = lambda: {"active": True, "source": "user"}
+
+        async def enable():
+            assert hardware_restored or interruption == "new_manual_owner"
+            attempts.append("enable")
+            return True
+
+        coordinator._enable_optimizer = enable
+        assert await coordinator.enable()
+        assert attempts == (["restore", "enable"] if interruption == "new_manual_owner"
+                            else ["restore", "restore", "enable"])
+
+    asyncio.run(run())
+
+
+def test_interrupted_shutdown_yields_battery_to_new_manual_owner_before_restore(opt_module):
+    async def run():
+        coordinator = _disable_coordinator(opt_module)
+        coordinator._optimization_lock = asyncio.Lock()
+        restores = []
+
+        async def stop_executor(*, restore_normal):
+            restores.append(restore_normal)
+            return True
+
+        coordinator._executor = SimpleNamespace(stop=stop_executor)
+        async with coordinator._optimization_lock:
+            shutdown = asyncio.create_task(coordinator.disable())
+            await asyncio.sleep(0)
+            assert coordinator._enabled is False
+            shutdown.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await shutdown
+        coordinator._get_active_force_state = lambda: {"active": True, "source": "user"}
+        coordinator._enable_optimizer = _noop_async
+        await coordinator.enable()
+        assert restores == [False]
+
+    asyncio.run(run())
+
+
+def test_licensing_shutdown_drains_dispatch_before_locking_recovery(opt_module, monkeypatch):
+    async def run():
+        coordinator = _disable_coordinator(opt_module)
+        coordinator.entry_id = "test-entry"
+        coordinator._get_active_force_state = lambda: None
+        coordinator._execute_lock = asyncio.Lock()
+        control_lock = asyncio.Lock()
+        manager = SimpleNamespace(control_lock=lambda entry_id: control_lock)
+        monkeypatch.setattr(opt_module, "manager_for", lambda _: manager)
+        dispatch_started = asyncio.Event()
+        finish_dispatch = asyncio.Event()
+        events = []
+
+        async def dispatch():
+            async with coordinator._execute_lock:
+                dispatch_started.set()
+                await finish_dispatch.wait()
+                async with control_lock:
+                    events.append("dispatch drained")
+
+        async def restore(**kwargs):
+            assert control_lock.locked()
+            events.append("restored")
+            return True
+
+        coordinator._executor = SimpleNamespace(stop=restore)
+        work = asyncio.create_task(dispatch())
+        await dispatch_started.wait()
+        stop = asyncio.create_task(coordinator.disable(licensing=True))
+        await asyncio.sleep(0)
+        assert not coordinator.enabled
+        assert not control_lock.locked()
+        finish_dispatch.set()
+        await asyncio.wait_for(asyncio.gather(work, stop), 1)
+        assert events == ["dispatch drained", "restored"]
+
+    asyncio.run(run())
 
 
 def test_disable_drains_ev_preservation_before_restoration(opt_module):

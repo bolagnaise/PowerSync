@@ -331,13 +331,6 @@ async def test_ble_unstructured_range_error_does_not_retry_and_keeps_prior_submi
     recovery = importlib.import_module("power_sync.tesla_ev_recovery")
     monkeypatch.setattr(recovery, "_registry", lambda _hass: hass.entity_registry)
     entry.options = {"ev_provider": actions.EV_PROVIDER_BOTH}
-    isolated = []
-
-    async def isolate(ticket, **_kwargs):
-        isolated.append(ticket.attempt_id)
-        return True
-
-    monkeypatch.setattr(recovery, "async_isolate_ble", isolate)
     _patch_ble_scope(monkeypatch)
 
     async def prepare(*_args, **kwargs):
@@ -377,10 +370,9 @@ async def test_ble_unstructured_range_error_does_not_retry_and_keeps_prior_submi
         ),
     )
 
-    assert result == (None, True)
+    assert result == (None, False)
     assert submission_calls == 1
     assert len(hass.services.calls) == 1
-    assert len(isolated) == 1
     ledger = runtime[recovery.RECOVERY_KEY]["vehicles"][VIN]
     attempt = next(iter(ledger["attempts"].values()))
     assert attempt["outcome"] == "sent_unknown"
@@ -802,7 +794,6 @@ async def test_stop_recovery_read_session_blocks_normal_route_and_isolation(monk
     def unexpected(*args, **kwargs):
         raise AssertionError("normal discovery/isolation interrupted read-only recovery")
     monkeypatch.setattr(recovery,"get_vehicle_route",unexpected)
-    monkeypatch.setattr(recovery,"async_isolate_ble",unexpected)
     params = {"vehicle_vin": VIN}
     assert (await actions._tesla_transport_route(hass,entry,params,operation))["kind"] == ("ha" if operation == "stop" else "blocked")
     assert params["_tesla_transport_recovery_pending"] is True

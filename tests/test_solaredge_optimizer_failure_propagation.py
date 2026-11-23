@@ -69,7 +69,7 @@ def test_solaredge_startup_restore_failure_blocks_the_first_solve():
 
 def test_solaredge_disable_failure_retains_idle_action_marker():
     source = COORDINATOR_PATH.read_text()
-    disable = _method_source(source, "disable")
+    disable = _method_source(source, "_finish_optimizer_shutdown")
 
     assert "idle_work_mode_restore_failed = False" in disable
     assert "idle_work_mode_restore_failed = True" in disable

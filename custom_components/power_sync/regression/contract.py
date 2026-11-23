@@ -39,7 +39,8 @@ STATE_FIELDS = (
     "_last_grid_export_limits_w", "_prevent_simultaneous_grid_flow",
     "_quota_export_caps_by_group", "_quota_export_group_ids",
     "_quota_import_caps_by_group", "_quota_import_group_ids", "_relaxing",
-    "backup_reserve", "capacity_kwh", "capacity_wh", "charge_efficiency",
+    "allow_greedy_fallback", "backup_reserve", "capacity_kwh", "capacity_wh",
+    "charge_efficiency",
     "discharge_efficiency", "dt_hours", "economic_round_trip_efficiency",
     "efficiency", "export_reserve_floor", "export_reserve_floor_slots",
     "grid_charge_soc_cap", "hardware_reserve", "hardware_reserve_known",
@@ -53,9 +54,14 @@ STATE_FIELDS = (
     "suppress_reserve_warning", "target_charge_power_supported", "terminal_weight",
     "use_per_kwh_terminal",
 )
-OPTIONAL_STATE = frozenset(("_acquisition_cost_known_zero", "_initial_solar_energy_kwh", "_relaxing"))
+OPTIONAL_STATE = frozenset((
+    "_acquisition_cost_known_zero", "_initial_solar_energy_kwh", "_relaxing",
+    "allow_greedy_fallback",
+))
 # These are intentionally mutated by optimize(), not concurrent configuration.
-SOLVE_MUTATIONS = OPTIONAL_STATE | {"_last_grid_export_limits_w", "_below_reserve_recovery_target"}
+SOLVE_MUTATIONS = (OPTIONAL_STATE - {"allow_greedy_fallback"}) | {
+    "_last_grid_export_limits_w", "_below_reserve_recovery_target",
+}
 CLASS_FIELDS = {
     "EVChargePlan": (
         "vehicle_id", "max_power_kw", "energy_needed_kwh", "charge_efficiency",
@@ -245,6 +251,11 @@ def validate_bundle(bundle):
         raise ContractError("unsupported_contract")
     if type(bundle["inputs"]) is not dict or type(bundle["state"]) is not dict:
         raise ContractError("incomplete_contract")
+    if (
+        "allow_greedy_fallback" in bundle["state"]
+        and type(bundle["state"]["allow_greedy_fallback"]) is not bool
+    ):
+        raise ContractError("invalid_fallback_policy")
     if set(bundle["inputs"]) != set(INPUT_FIELDS) or not set(STATE_FIELDS) - OPTIONAL_STATE <= set(bundle["state"]) or set(bundle["state"]) - set(STATE_FIELDS):
         raise ContractError("incomplete_contract")
     if bundle["outcome"] not in ("feasible", "infeasible", "exception") or type(bundle["currency"]) is not str or not re.fullmatch(r"[A-Z]{3}", bundle["currency"]):

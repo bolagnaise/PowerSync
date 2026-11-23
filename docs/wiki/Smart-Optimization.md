@@ -632,10 +632,9 @@ Notes:
   below the planned figure for live site conditions, and start/stop stays with
   the EV planner — a stale or missing plan can never strand a plugged-in car at
   zero amps.
-- **The greedy fallback still accounts for the car.** When the LP solver is
-  unavailable, the heuristic cannot co-optimize, so it treats the car as known
-  load charging as soon as its window allows. The battery plan is still correct;
-  only the cost-shifting is lost.
+- **Solver failure suspends joint EV planning.** The optimizer uses
+  self-consumption and reports degraded status until a usable plan is available.
+  Independently controlled EV charging retains its existing control rules.
 - `ev_charge_w` appears on schedule slots that carry planned EV power.
 
 ### EV home-battery preservation status

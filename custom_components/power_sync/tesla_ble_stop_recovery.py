@@ -144,7 +144,6 @@ class Bridge:
             raise StopRecoveryRefused("vehicle_identity_or_generation_mismatch")
         self.nonce = uuid4().hex
         self.started = 0.0
-        self.prepared = False
 
     def current(self):
         from . import tesla_ev_recovery as manager
@@ -173,8 +172,6 @@ class Bridge:
 
     async def prepare(self, authorize):
         self.started = time.time()
-        # Mark before the await: an ambiguous service result must be contained.
-        self.prepared = True
         await self.send("prepare", authorize)
 
     async def wait_verified(self, authorize):
@@ -210,14 +207,6 @@ class Bridge:
                 return proof
             await asyncio.sleep(POLL_SECONDS)
         raise StopRecoveryRefused("bridge_unlock_unconfirmed")
-
-    async def contain(self):
-        # No request may cross a rebound device. The nonce further confines a
-        # late cleanup to this bridge's own still-current recovery generation.
-        if self.prepared and self.current():
-            await self.hass.services.async_call("text", "set_value", {
-                "entity_id": self.ids["request"], "value": f"hold:{self.nonce}",
-            }, blocking=True)
 
 
 def _inventory_bridges(hass, entry, inventory):
@@ -333,27 +322,34 @@ async def async_recover_ble_stops(hass, entry, inventory, *, confirm_complete_hi
         config = deepcopy(_configuration(entry))
         owners = {vid: manager._owner_snapshot(hass, entry, vid) for vid in affected.values()}
         scope_digest = manager._digest(refs)
-        inventory_digest = manager._digest(inventory)
-        incident = None
+        scope = {
+            "kind": "ble_command_inventory_v2" if _allow_positive else "ble_stop_inventory_v2",
+            "inventory_digest": manager._digest(inventory),
+            "historical_identity_reconstructed": False,
+            "complete_affected_inventory": deepcopy(inventory),
+        }
         snapshot = manager.recovery_sidecar_snapshot(hass, entry)
-        for candidate in snapshot["incidents"].values():
-            if candidate.get("phase") != "released":
-                basis = candidate.get("scope_basis") or {}
-                if basis.get("kind") not in {"ble_stop_inventory_v2", "ble_command_inventory_v2"} or basis.get("inventory_digest") != inventory_digest:
-                    raise StopRecoveryRefused("another_recovery_scope_is_held")
-                if incident is not None:
-                    raise StopRecoveryRefused("ambiguous_recovery_incidents")
-                incident = candidate
-        if incident is None:
+        held = [item for item in snapshot["incidents"].values() if item.get("phase") != "released"]
+        if len(held) > 1:
+            raise StopRecoveryRefused("ambiguous_recovery_incidents")
+        incident = held[0] if held else None
+        if incident is not None:
+            basis = incident.get("scope_basis")
+            if (not isinstance(basis, Mapping)
+                    or basis.get("kind") not in {"ble_stop_inventory_v2", "ble_command_inventory_v2"}
+                    or basis.get("inventory_digest") != scope["inventory_digest"]):
+                await _adopt_held_stock_scope(
+                    hass, entry, runtime, incident, snapshot["revision"],
+                    scope, bridges, affected, refs,
+                )
+        else:
             incident = await manager.async_record_evidence_loss(
                 hass, entry, kind="evidence_lost", covered_attempts=refs,
                 candidate_producers=[b.identity for b in bridges.values()],
                 candidate_vehicles=list(affected.values()),
                 surviving_facts=[{"prefix": p, "journal_vehicle_id": affected[p], "declared_physical_vin": b.vin}
                                  for p, b in bridges.items()],
-                scope_basis={"kind": "ble_command_inventory_v2" if _allow_positive else "ble_stop_inventory_v2", "inventory_digest": inventory_digest,
-                             "historical_identity_reconstructed": False,
-                             "complete_affected_inventory": deepcopy(inventory)},
+                scope_basis=scope,
             )
         if incident is None:
             raise StopRecoveryRefused("recovery_scope_not_persisted")
@@ -368,6 +364,58 @@ async def async_recover_ble_stops(hass, entry, inventory, *, confirm_complete_hi
             raise StopRecoveryRefused("historical_inventory_not_confirmed")
         return await _run_inventory(hass, entry, runtime, bridges, refs, affected, config, owners,
                                     scope_digest, incident["incident_id"])
+
+
+async def _adopt_held_stock_scope(hass, entry, runtime, candidate, revision,
+                                  scope, bridges, affected, refs):
+    """Keep the original incident when the operator can prove that same stock scope."""
+    from . import tesla_ev_recovery as manager
+
+    producers = candidate.get("current_candidate_producers")
+    stock_refs = candidate.get("liability_refs")
+    if (candidate.get("kind") != "command_uncertainty" or candidate.get("phase") != "held"
+            or not isinstance(producers, list) or len(producers) != 1
+            or not isinstance(producers[0], Mapping)
+            or not isinstance(stock_refs, list) or not stock_refs
+            or any(ref not in refs for ref in stock_refs)):
+        raise StopRecoveryRefused("another_recovery_scope_is_held")
+    producer = producers[0]
+    prefix = producer.get("prefix")
+    bridge = bridges.get(prefix)
+    if (bridge is None or affected.get(prefix) != bridge.vin
+            or candidate.get("current_candidate_vehicles") != [bridge.vin]
+            or producer.get("vin") != bridge.vin
+            or any(producer.get(field) != value for field, value in bridge.identity.items())
+            or any(ref.get("vehicle_id") != bridge.vin
+                   or not manager._liability_matches_stock_scope(ref, producer) for ref in stock_refs)):
+        raise StopRecoveryRefused("another_recovery_scope_is_held")
+
+    async with manager._journal_lock(runtime):
+        state = runtime[manager._SIDECAR_STATE_KEY]
+        incident_id = candidate["incident_id"]
+        selected = state["incidents"].get(incident_id)
+        if (state.get("revision") != revision or selected != candidate
+                or not all(item.current() for item in bridges.values())
+                or _live_refs(runtime) != refs):
+            raise StopRecoveryRefused("recovery_scope_changed")
+        before = deepcopy(state)
+        try:
+            selected["prior_stock_scope"] = {
+                key: deepcopy(selected[key]) for key in (
+                    "scope_basis", "current_candidate_producers", "current_candidate_vehicles",
+                    "operator_scope_confirmation",
+                ) if key in selected
+            }
+            selected.update(scope_basis=deepcopy(scope), scope_closed=False,
+                            operator_scope_confirmation=None,
+                            current_candidate_producers=[item.identity for item in bridges.values()],
+                            current_candidate_vehicles=list(affected.values()))
+            manager._next_revision(state)
+            if not await manager._save_sidecar(hass, entry, runtime, state):
+                raise StopRecoveryRefused("recovery_scope_not_persisted")
+        except BaseException:
+            manager._restore_sidecar_state(state, before)
+            raise
 
 
 async def _refresh_held_scope(hass, entry, runtime, incident_id, inventory, bridges, refs, affected, *, allow_positive=False):
@@ -612,11 +660,9 @@ async def _run_inventory(hass, entry, runtime, bridges, refs, affected, config, 
             expected_incident=incident_id)
     finally:
         if not succeeded:
-            for bridge in bridges.values():
-                try:
-                    await asyncio.shield(bridge.contain())
-                except BaseException:
-                    pass # durable incident remains held even if containment fails
+            # A delivered prepare persists the firmware lock before reboot.
+            # An ambiguous prepare leaves the HA hold in place. Neither case
+            # needs the legacy hold message that could disable Bluetooth.
             incident = runtime.get(manager._SIDECAR_STATE_KEY, {}).get("incidents", {}).get(incident_id, {})
             if (manager._runtime(hass, entry) is runtime
                     and incident.get("phase_token") == token
@@ -634,7 +680,8 @@ async def _resume_released(hass, entry, runtime, bridges, inventory, *, expected
     state = runtime[manager._SIDECAR_STATE_KEY]
     matches = [item for item in state["incidents"].values()
         if item.get("phase") == "released"
-        and (item.get("scope_basis") or {}).get("kind") in {"ble_stop_inventory_v2", "ble_command_inventory_v2"}
+        and isinstance(item.get("scope_basis"), Mapping)
+        and item["scope_basis"].get("kind") in {"ble_stop_inventory_v2", "ble_command_inventory_v2"}
         and item["scope_basis"].get("inventory_digest") == manager._digest(inventory)
         and (expected_incident is None or item.get("incident_id") == expected_incident)]
     if not matches or any(item.get("phase") != "released" for item in state["incidents"].values()):
@@ -686,11 +733,30 @@ async def _resume_released(hass, entry, runtime, bridges, inventory, *, expected
                 raise StopRecoveryRefused("completed_recovery_producer_changed")
             if proof["m"] in {"i", "r"}:
                 continue # NVS says the exact completed generation is unlocked
-            if proof["b"] != old["b"] or proof["o"] != old["o"]:
+            if proof["o"] != old["o"]:
                 raise StopRecoveryRefused("completed_recovery_boot_changed")
             bridge.baseline = {"b": old["o"], "g": old["g"] - 1}
-            bridge.nonce, bridge.started, bridge.prepared = old["n"], time.time(), True
+            bridge.nonce, bridge.started = old["n"], time.time()
+            if proof.get("parked") is True and proof["m"] == "h":
+                await bridge.send("read", current)
             fresh = await bridge.wait_verified(current)
+            if fresh["second"]["b"] != proof["b"]:
+                raise StopRecoveryRefused("completed_recovery_boot_changed")
+            if fresh["second"]["b"] != old["b"]:
+                # A still-locked reboot may prove the same persisted nonce,
+                # VIN and generation again. Save new-boot proof before commit.
+                async with manager._journal_lock(runtime):
+                    if not current():
+                        raise StopRecoveryRefused("completed_recovery_scope_changed")
+                    before = deepcopy(state)
+                    selected["reconciliation_evidence"][prefix] = deepcopy(fresh)
+                    manager._next_revision(state)
+                    try:
+                        if not await manager._save_sidecar(hass, entry, runtime, state):
+                            raise StopRecoveryRefused("recovery_activation_proof_not_persisted")
+                    except BaseException:
+                        manager._restore_sidecar_state(state, before)
+                        raise
             await bridge.unlock(fresh, current)
         # Keep normal admission closed across HA restarts until every
         # firmware commit is acknowledged and this installation is durable.

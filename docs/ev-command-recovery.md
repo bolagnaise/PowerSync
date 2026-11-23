@@ -4,6 +4,14 @@
 - [Recover native Tesla charging after a lost response](#tesla-native-recovery)
 - [Recover retained EV charging headroom](#ev-headroom-recovery)
 
+
+PowerSync leaves the Tesla bridge's Bluetooth connection under your control.
+An uncertain charge command can pause further charging commands while the
+bridge stays available for vehicle readings. A supported recovery checks the
+original vehicle and bridge, then requires fresh proof before charging can
+resume. If Bluetooth was previously switched off, check the recovery status
+before enabling it. A bridge can still have an unresolved command in its history.
+
 <a id="tesla-ble-stop-recovery"></a>
 
 ## Recovering held charging commands on a BLE-only Tesla bridge
@@ -73,7 +81,7 @@ Merge these substitutions with your existing ones:
 
 ```yaml
 substitutions:
-  tesla_ble_component: github://bolagnaise/PowerSync@v2.12.1776
+  tesla_ble_component: github://bolagnaise/PowerSync@v2.12.1790
   BLE_library: https://github.com/PedroKTFC/tesla-ble.git#969f05f9dfdd5bfb9f3da5ad6b9f5c2265be133b
 
 packages:
@@ -87,7 +95,7 @@ packages:
       - packages/client.yml
   powersync_stop_recovery:
     url: https://github.com/bolagnaise/PowerSync/
-    ref: v2.12.1776
+    ref: v2.12.1790
     files:
       - esphome/stop-recovery.yaml
 ```

@@ -158,9 +158,11 @@ assumption. Once sufficient evidence exists, the planning value moves gradually;
 it can differ from the measured estimate. Higher measured efficiency does not
 relax the optimizer's conservative arbitrage margin.
 
-Accepted history is retained for 30 days. A Home Assistant restart retains that
-history but discards any unfinished cycle, so learning can take longer after
-frequent restarts. Disabling learning returns planning to the default assumption.
+Accepted cycles are retained for 30 days. Home Assistant can resume an unfinished
+cycle after a quick restart when the next fresh battery reading arrives within
+15 minutes of the last saved reading and the battery configuration still matches.
+Longer telemetry gaps start a new measurement. Disabling learning returns
+planning to the default assumption.
 The Battery Power Forecast sensor's `efficiency_learning` attributes show cycle
 counts, evidence confidence and the reason the most recent incomplete cycle was
 rejected.

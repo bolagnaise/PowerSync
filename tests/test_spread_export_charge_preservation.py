@@ -616,6 +616,52 @@ def test_bridge_does_not_replace_fixed_manual_self_consumption_slot(opt_module):
     assert bridged.actions[1].battery_discharge_w == pytest.approx(0.0)
 
 
+@pytest.mark.parametrize("overlay", ["spread", "bridge"])
+def test_export_shaping_preserves_a_joint_ev_slot(opt_module, overlay):
+    """A battery export overlay must leave the solver's EV power source intact."""
+    coordinator = _coordinator(opt_module, "agl")
+    coordinator.battery_system = "foxess"
+    coordinator._config.interval_minutes = 5
+    coordinator._config.battery_capacity_wh = 10_000
+    coordinator._config.max_discharge_w = 7_000
+    start = datetime(2026, 10, 6, 6, 10, tzinfo=timezone.utc)
+
+    def make_schedule():
+        return opt_module.OptimizationSchedule(
+            actions=[
+                opt_module.ScheduleAction(
+                    timestamp=start + timedelta(minutes=5 * idx),
+                    action="self_consumption" if idx == 1 else "export",
+                    power_w=0.0 if idx == 1 else 4_500.0,
+                    soc=0.8 - 0.04 * idx,
+                    battery_discharge_w=0.0 if idx == 1 else 4_500.0,
+                    ev_charge_w=3_600.0 if idx == 1 else 0.0,
+                )
+                for idx in range(3)
+            ],
+            predicted_cost=0.0,
+            predicted_savings=0.0,
+            last_updated=start,
+        )
+
+    def apply_overlay(preserve_ev_sources):
+        schedule = make_schedule()
+        if overlay == "spread":
+            return coordinator._spread_export_schedule(
+                schedule, [True] * 3, export_reserve_floor=0.2,
+                export_prices=[0.28] * 3, preserve_ev_sources=preserve_ev_sources,
+            )
+        return coordinator._bridge_short_export_gaps(
+            schedule, export_prices=[0.28] * 3, authoritative_reserve_floor=0.2,
+            preserve_ev_sources=preserve_ev_sources,
+        )
+
+    assert apply_overlay(False).actions[1].battery_discharge_w > 0
+    protected = apply_overlay(True)
+    assert protected.actions[1] == make_schedule().actions[1]
+    assert [action.power_w for action in protected.actions] == [4_500.0, 0.0, 4_500.0]
+
+
 def test_spread_export_respects_different_confidence_values_across_source_intervals(opt_module):
     coordinator = _coordinator(opt_module, "amber")
     coordinator._config.max_discharge_w = 10000

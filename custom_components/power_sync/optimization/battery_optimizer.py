@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 import math
 import time
+from collections import deque
 from contextlib import contextmanager
 from contextvars import ContextVar
 from functools import wraps
@@ -251,6 +252,81 @@ def _fallback_ev_source_series(
     return sources
 
 
+def _allocate_ev_sources_for_slot(
+    targets: dict[str, float],
+    prior: dict[str, dict[str, float]],
+    limits: dict[str, dict[str, float]],
+    budgets: dict[str, float],
+) -> dict[str, dict[str, float]] | None:
+    """Keep incumbent allocations where possible, sharing only permitted power."""
+    vehicles = sorted(targets)
+    source_order = {
+        car: sorted(("solar", "battery", "grid"), key=prior[car].__getitem__, reverse=True)
+        for car in vehicles
+    }
+    assigned = {car: dict.fromkeys(budgets, 0.0) for car in vehicles}
+    remaining = dict(targets)
+    available = dict(budgets)
+    for car in vehicles:
+        for source in source_order[car]:
+            amount = min(remaining[car], available[source], prior[car][source])
+            assigned[car][source] = amount
+            remaining[car] -= amount
+            available[source] -= amount
+
+    for car in vehicles:
+        while remaining[car] > 1e-9:
+            # Find a source with spare capacity, possibly by moving other
+            # vehicles' allocations. The shortest path keeps existing splits
+            # intact whenever the car can use a free source directly.
+            search = deque([car])
+            previous_source: dict[str, str] = {}
+            previous_car: dict[str, str] = {}
+            free_source = None
+            while search and free_source is None:
+                current = search.popleft()
+                for source in source_order[current]:
+                    if source in previous_car:
+                        continue
+                    if limits[current][source] - assigned[current][source] <= 1e-9:
+                        continue
+                    previous_car[source] = current
+                    if available[source] > 1e-9:
+                        free_source = source
+                        break
+                    for other in vehicles:
+                        if (
+                            other != car and other not in previous_source
+                            and assigned[other][source] > 1e-9
+                        ):
+                            previous_source[other] = source
+                            search.append(other)
+
+            if free_source is None:
+                break
+            path = []
+            amount = min(remaining[car], available[free_source])
+            source = free_source
+            while True:
+                current = previous_car[source]
+                amount = min(amount, limits[current][source] - assigned[current][source])
+                path.append((current, source))
+                if current == car:
+                    break
+                source = previous_source[current]
+                amount = min(amount, assigned[current][source])
+            for current, source in path:
+                assigned[current][source] += amount
+                if current != car:
+                    assigned[current][previous_source[current]] -= amount
+            available[free_source] -= amount
+            remaining[car] -= amount
+
+    if math.fsum(remaining.values()) > EV_SOURCE_ROUNDING_TOLERANCE_KW:
+        return None
+    return assigned
+
+
 def _reconcile_ev_sources_to_schedule(
     ev_charge_by_vehicle_kw: dict[str, list[float]],
     prior_sources_by_vehicle_kw: dict[str, dict[str, list[float]]],
@@ -258,6 +334,11 @@ def _reconcile_ev_sources_to_schedule(
     solar_kw: list[float],
     house_load_kw: list[float],
     grid_import_kw: list[float],
+    *,
+    grid_reallocation_allowed: dict[str, list[bool]] | None = None,
+    solar_reallocation_allowed: dict[str, list[bool]] | None = None,
+    max_grid_import_kw: float | None = None,
+    battery_grid_charge_allowed: list[bool] | None = None,
 ) -> dict[str, dict[str, list[float]]] | None:
     """Reattribute EV draw to sources available in the emitted schedule.
 
@@ -269,8 +350,9 @@ def _reconcile_ev_sources_to_schedule(
     schedule's house/solar/battery/grid balance.  Battery export is deliberately
     removed before battery-to-EV capacity is computed.
 
-    Leave sub-watt settlement rounding unattributed. Return ``None`` if the
-    combined deficit exceeds that tolerance so callers can reject the plan.
+    A permitted window can also use solar or import already in the final schedule.
+    Leave sub-watt settlement rounding unattributed. Return ``None`` when
+    the remaining deficit exceeds that tolerance.
     """
     vehicle_ids = list(ev_charge_by_vehicle_kw)
     n = max(
@@ -291,7 +373,6 @@ def _reconcile_ev_sources_to_schedule(
         for vehicle_id in vehicle_ids
     }
     actions = schedule.actions or []
-    source_order = ("solar", "battery", "grid")
 
     for slot in range(n):
         target_by_vehicle = {
@@ -348,85 +429,65 @@ def _reconcile_ev_sources_to_schedule(
             "battery": battery_for_ev,
         }
 
-        remaining = dict(target_by_vehicle)
-        # First preserve the LP's selected source proportions, subject to the
-        # final physical budgets.  A later fill pass can move the clipped
-        # remainder to another source the LP had already selected.
-        for vehicle_id in vehicle_ids:
-            prior = prior_sources_by_vehicle_kw.get(vehicle_id, {}) or {}
-            ordered = sorted(
-                source_order,
-                key=lambda source: max(
-                    0.0,
-                    float(
-                        (prior.get(source) or [0.0] * n)[slot]
-                        if slot < len(prior.get(source) or [])
-                        else 0.0
-                    ),
-                ),
-                reverse=True,
+        within_import_limit = (
+            max_grid_import_kw is None
+            or grid_import <= max_grid_import_kw + EV_SOURCE_ROUNDING_TOLERANCE_KW
+        )
+        if max_grid_import_kw is not None:
+            budgets["grid"] = min(
+                grid_for_ev, max(0.0, max_grid_import_kw - grid_to_house - grid_to_battery)
             )
-            for source in ordered:
-                if remaining[vehicle_id] <= 1e-9 or budgets[source] <= 1e-9:
-                    continue
-                requested = max(
-                    0.0,
-                    float(
-                        (prior.get(source) or [0.0] * n)[slot]
-                        if slot < len(prior.get(source) or [])
-                        else 0.0
-                    ),
-                )
-                allocated = min(remaining[vehicle_id], requested, budgets[source])
-                if allocated <= 0.0:
-                    continue
-                sources[vehicle_id][source][slot] += allocated
-                remaining[vehicle_id] -= allocated
-                budgets[source] -= allocated
 
-        # Fill only from source columns the LP actually used for that vehicle;
-        # this preserves source-policy decisions while correcting their final
-        # physical amount after settlement.
-        for vehicle_id in vehicle_ids:
-            if remaining[vehicle_id] <= 1e-9:
-                continue
-            prior = prior_sources_by_vehicle_kw.get(vehicle_id, {}) or {}
-            ordered = sorted(
-                source_order,
-                key=lambda source: max(
-                    0.0,
-                    float(
-                        (prior.get(source) or [0.0] * n)[slot]
-                        if slot < len(prior.get(source) or [])
-                        else 0.0
-                    ),
-                ),
-                reverse=True,
+        prior = {}
+        limits = {}
+        for car, target in target_by_vehicle.items():
+            prior[car] = dict.fromkeys(budgets, 0.0)
+            for source, series in prior_sources_by_vehicle_kw.get(car, {}).items():
+                if source in budgets and slot < len(series):
+                    prior[car][source] = max(0.0, float(series[slot]))
+            grid_allowed = (grid_reallocation_allowed or {}).get(car, [])
+            solar_allowed = (solar_reallocation_allowed or {}).get(car, [])
+            # An import-limited car may retain its solved grid allocation,
+            # but another car must not move extra grid power onto it.
+            can_add_grid = (
+                within_import_limit and slot < len(grid_allowed) and grid_allowed[slot]
             )
-            for source in ordered:
-                if remaining[vehicle_id] <= 1e-9 or budgets[source] <= 1e-9:
-                    continue
-                prior_value = max(
-                    0.0,
-                    float(
-                        (prior.get(source) or [0.0] * n)[slot]
-                        if slot < len(prior.get(source) or [])
-                        else 0.0
-                    ),
-                )
-                if prior_value <= 1e-9:
-                    continue
-                allocated = min(remaining[vehicle_id], budgets[source])
-                sources[vehicle_id][source][slot] += allocated
-                remaining[vehicle_id] -= allocated
-                budgets[source] -= allocated
-
-        if math.fsum(remaining.values()) > EV_SOURCE_ROUNDING_TOLERANCE_KW:
+            can_add_solar = prior[car]["solar"] > 1e-9 or (
+                slot < len(solar_allowed) and solar_allowed[slot]
+            )
+            limits[car] = {
+                "grid": target if can_add_grid else prior[car]["grid"],
+                "solar": target if can_add_solar else 0.0,
+                "battery": target if prior[car]["battery"] > 1e-9 else 0.0,
+            }
+        allocated = _allocate_ev_sources_for_slot(target_by_vehicle, prior, limits, budgets)
+        if (
+            allocated is None
+            and action.action == "charge"
+            and battery_grid_charge_allowed
+            and slot < len(battery_grid_charge_allowed)
+            and battery_grid_charge_allowed[slot]
+            and within_import_limit
+            and solar_to_battery > 0
+            and budgets["grid"] > 0
+            and discharge == 0
+            and total_ev_kw <= solar_for_ev + budgets["grid"] + EV_SOURCE_ROUNDING_TOLERANCE_KW
+        ):
+            # The emitted battery charge can use import already on the meter.
+            # Swap one kW of battery solar for one kW of that import when a
+            # solar-only car needs it. The total-draw bound above keeps the
+            # overlapping grid and solar capacities from being counted twice.
+            budgets["solar"] += min(solar_to_battery, budgets["grid"])
+            allocated = _allocate_ev_sources_for_slot(target_by_vehicle, prior, limits, budgets)
+        if allocated is None:
             return None
+        for car, by_source in allocated.items():
+            for source, amount in by_source.items():
+                sources[car][source][slot] = amount
 
     return sources
 
-# Try to import the HiGHS solver; fall back to greedy if unavailable.
+# HiGHS is required for an executable economic plan in Home Assistant.
 try:
     import highspy
 
@@ -435,8 +496,7 @@ except ImportError:
     HIGHS_AVAILABLE = False
     highspy = None
     _LOGGER.warning(
-        "highspy not available — using greedy fallback optimizer. "
-        "Install highspy for optimal LP-based scheduling."
+        "highspy not available — LP-based scheduling is unavailable."
     )
 
 
@@ -940,6 +1000,11 @@ class OptimizerResult:
     future_export_protection_floor_slots: list[float] | None = None
     free_import_command_slots: list[bool] = field(default_factory=list)
     solar_curtailment_w: list[float] | None = None
+    degraded: bool = False
+    # Keep solver-resolved eligibility for the final schedule reconciliation.
+    ev_grid_reallocation_allowed: dict[str, list[bool]] = field(default_factory=dict)
+    ev_solar_reallocation_allowed: dict[str, list[bool]] = field(default_factory=dict)
+    battery_grid_charge_allowed: list[bool] = field(default_factory=list)
 
 
 class BatteryOptimizer:
@@ -966,7 +1031,9 @@ class BatteryOptimizer:
         horizon_hours: int = 48,
         terminal_weight: float = 1.0,
         target_charge_power_supported: bool = True,
+        allow_greedy_fallback: bool = True,
     ):
+        self.allow_greedy_fallback = allow_greedy_fallback
         self.capacity_wh = capacity_wh
         self.max_charge_w = max_charge_w
         self.max_discharge_w = max_discharge_w
@@ -1540,6 +1607,29 @@ class BatteryOptimizer:
         fallback_details = {"fallback_reason": "highs_unavailable"}
         suppressed_export_slots: set[int] = set()
 
+        def _native_fallback(stats: dict[str, Any]) -> OptimizerResult:
+            hold = self._solve_self_consumption_hold(
+                n_steps, import_prices, export_prices, solar_forecast,
+                load_forecast, current_soc, cost_function,
+                export_bonus_prices=export_bonus_prices,
+                export_bonus_cap_kwh=export_bonus_cap_kwh,
+                import_bonus_prices=import_bonus_prices,
+                import_bonus_cap_kwh=import_bonus_cap_kwh,
+                schedule_timestamps=schedule_timestamps,
+                ev_plan=ev_plan,
+            )
+            hold.lp_stats = stats
+            return hold
+
+        def _finish(result: OptimizerResult) -> OptimizerResult:
+            result.solve_time_s = time.monotonic() - start_time
+            result.modeled_backup_reserve = modeled_backup_reserve
+            result.modeled_export_reserve_floor = modeled_export_reserve_floor
+            result.modeled_export_reserve_floor_slots = (
+                modeled_export_reserve_floor_slots
+            )
+            return result
+
         def _micro_export_slots(result: OptimizerResult) -> list[int]:
             if cost_neutral_plan is None:
                 return []
@@ -1641,6 +1731,8 @@ class BatteryOptimizer:
                                 ev_plan,
                                 price_valid_slots,
                             )
+                            if not self.allow_greedy_fallback and not result.feasible:
+                                return result
                             small_slots = _micro_export_slots(result)
                             if not small_slots or micro_pass == 3:
                                 break
@@ -1692,7 +1784,11 @@ class BatteryOptimizer:
                         if isinstance(account_for_planned_imports, dict)
                         else account_for_planned_imports
                     )
-                    if seeded_plan is not None and not all_days_account_for_imports:
+                    if (
+                        seeded_plan is not None
+                        and not all_days_account_for_imports
+                        and (self.allow_greedy_fallback or result.feasible)
+                    ):
                         # A clipped zero cap or negative fixed balance must
                         # first produce a safe static-cap plan. Required imports
                         # in that emitted plan may then reopen only the uncovered
@@ -1772,6 +1868,8 @@ class BatteryOptimizer:
                                 account_for_planned_imports,
                             )
                             reconciliation_iterations += 1
+                            if not self.allow_greedy_fallback and not result.feasible:
+                                break
                     if cost_neutral_plan is not None:
                         baseline_caps = {
                             day: round(cap, 6)
@@ -1790,22 +1888,24 @@ class BatteryOptimizer:
                         result.lp_stats[
                             "cost_neutral_reconciliation_iterations"
                         ] = reconciliation_iterations
-                    result.solve_time_s = time.monotonic() - start_time
-                    result.modeled_backup_reserve = modeled_backup_reserve
-                    result.modeled_export_reserve_floor = modeled_export_reserve_floor
-                    result.modeled_export_reserve_floor_slots = (
-                        modeled_export_reserve_floor_slots
-                    )
-                    return result
+                    if (
+                        not self.allow_greedy_fallback
+                        and (not result.feasible or result.solver_used != "highs")
+                        and not result.degraded
+                    ):
+                        result = _native_fallback(result.lp_stats)
+                    return _finish(result)
                 except Exception as e:
-                    _LOGGER.error(f"LP solver failed, falling back to greedy: {e}")
+                    _LOGGER.error("Battery optimizer solver failed: %s", e)
                     fallback_details = {
                         "fallback_reason": "lp_exception",
                         "error": type(e).__name__,
                         "message": str(e),
                     }
 
-            # Greedy fallback
+            if not self.allow_greedy_fallback:
+                return _finish(_native_fallback(fallback_details))
+
             result = self._solve_greedy(
                 n_steps,
                 import_prices,
@@ -1839,13 +1939,7 @@ class BatteryOptimizer:
             )
             result.lp_stats.update(fallback_details)
             result = _finish_micro_exports(result, cost_neutral_plan)
-            result.solve_time_s = time.monotonic() - start_time
-            result.modeled_backup_reserve = modeled_backup_reserve
-            result.modeled_export_reserve_floor = modeled_export_reserve_floor
-            result.modeled_export_reserve_floor_slots = (
-                modeled_export_reserve_floor_slots
-            )
-            return result
+            return _finish(result)
         finally:
             if export_reserve_floor is not None:
                 self.export_reserve_floor = previous_export_floor
@@ -4893,6 +4987,14 @@ class BatteryOptimizer:
             # charger/policy rows per vehicle-period (on, start, minimum
             # power, minimum start SOC, consume floor and preserve mode).
             A_ub_rows += 5 * p_n + 17 * n_ev_vehicles * p_n
+            ev_solar_periods = {
+                t for t in range(p_n)
+                if p_solar[t] > 0 and any(
+                    p_ev_allow_solar[vehicle][t] and p_ev_max_by_vehicle[vehicle][t] > 0
+                    for vehicle in range(n_ev_vehicles)
+                )
+            }
+            A_ub_rows += len(ev_solar_periods)
         if cost_neutral_active:
             # Six rows witness a retained executable export mode. Two more
             # rows make the initial grid-charge mode mutually exclusive with
@@ -5223,6 +5325,16 @@ class BatteryOptimizer:
                 A_ub[len(b_ub), battery_to_grid_var(t)] = -1.0
                 A_ub[len(b_ub), curtail_var(t)] = 1.0
                 b_ub.append(max(0.0, p_solar[t]))
+
+                if t in ev_solar_periods:
+                    # The car and battery share the PV left after the house.
+                    # Only the battery's solar share consumes this budget.
+                    # Export and curtailment keep their separate physical bound above.
+                    for vehicle in range(n_ev_vehicles):
+                        A_ub[len(b_ub), ev_solar_source_var(vehicle, t)] = 1.0
+                    A_ub[len(b_ub), charge_var(t)] = 1.0
+                    A_ub[len(b_ub), grid_charge_var(t)] = -1.0
+                    b_ub.append(max(0.0, p_solar[t] - p_load[t]))
 
                 A_ub[len(b_ub), grid_charge_var(t)] = 1.0
                 A_ub[len(b_ub), charge_var(t)] = -1.0
@@ -6421,9 +6533,9 @@ class BatteryOptimizer:
                 )
             else:
                 _LOGGER.warning("LP solver status: %s", result.message)
-            if (
-                "infeasible" in result.message.lower()
-                and not any(mode is not None for mode in manual_control_slots)
+            infeasible = "infeasible" in result.message.lower()
+            if not self.allow_greedy_fallback or (
+                infeasible and not any(mode is not None for mode in manual_control_slots)
             ):
                 # The LP could not be satisfied with the real backup-reserve
                 # floor. Rather than relaxing that floor to 5% and re-solving
@@ -6434,10 +6546,11 @@ class BatteryOptimizer:
                 # drops below the genuine reserve.
                 if not projection_pass:
                     _LOGGER.warning(
-                        "LP infeasible — holding in self-consumption: battery "
-                        "serves home load and charges from solar only (no grid "
-                        "export/charge), drawing down to the hardware reserve "
-                        "floor as the inverter would natively",
+                        "%s — holding in self-consumption: battery serves home "
+                        "load and charges from solar only (no grid export/charge), "
+                        "drawing down to the hardware reserve floor as the inverter "
+                        "would natively",
+                        "LP infeasible" if infeasible else "LP plan unavailable",
                     )
                 hold = self._solve_self_consumption_hold(
                     n, import_prices, export_prices, solar, load, soc_0, cost_function,
@@ -6454,7 +6567,12 @@ class BatteryOptimizer:
                     disable_idle=disable_idle,
                     ev_plan=ev_plan,
                 )
-                hold.lp_stats = {**lp_stats, "fallback_reason": "infeasible_self_consumption_hold"}
+                hold.lp_stats = {
+                    **lp_stats,
+                    "fallback_reason": (
+                        "infeasible_self_consumption_hold" if infeasible else "solver_failed"
+                    ),
+                }
                 return hold
             # Fall back to greedy
             greedy = self._solve_greedy(
@@ -6512,6 +6630,8 @@ class BatteryOptimizer:
         )
         ev_charge_kw_by_vehicle: dict[str, list[float]] = {}
         ev_source_kw_by_vehicle: dict[str, dict[str, list[float]]] = {}
+        ev_grid_reallocation_allowed: dict[str, list[bool]] = {}
+        ev_solar_reallocation_allowed: dict[str, list[bool]] = {}
         if ev_charge_active:
             for vehicle in range(n_ev_vehicles):
                 # HiGHS can leave trace power in an inactive period within
@@ -6560,6 +6680,31 @@ class BatteryOptimizer:
                         ]
                 else:
                     ev_source_kw_by_vehicle[vehicle_id] = source_series
+                if cost_neutral_active:
+                    # A grid-limited session keeps its original source split.
+                    # A below-minimum-SOC start granted by the solver must use solar.
+                    grid_allowed = [False] * n
+                    solar_allowed = [False] * n
+                    for t, period in enumerate(periods):
+                        allowed = (
+                            p_ev_allow_grid[vehicle][t]
+                            and not p_ev_limit_grid_import[vehicle][t]
+                            and x[ev_solar_exception_var(vehicle, t)] < 0.5
+                        )
+                        grid_allowed[period.start:period.end] = [allowed] * period.slot_count
+                        solar_allowed[period.start:period.end] = [
+                            p_ev_allow_solar[vehicle][t]
+                        ] * period.slot_count
+                    for permissions, allowed_slots in (
+                        (ev_grid_reallocation_allowed, grid_allowed),
+                        (ev_solar_reallocation_allowed, solar_allowed),
+                    ):
+                        prior = permissions.get(vehicle_id)
+                        permissions[vehicle_id] = (
+                            [a and b for a, b in zip(prior, allowed_slots)]
+                            if prior is not None
+                            else allowed_slots
+                        )
         ev_charge_kw = (
             [
                 sum(series[t] for series in ev_charge_kw_by_vehicle.values())
@@ -6654,7 +6799,12 @@ class BatteryOptimizer:
         grid_import, grid_export = self._grid_flows_from_schedule(
             schedule, n, solar, load
         )
+        battery_grid_charge_allowed = []
         if ev_charge_active and cost_neutral_active:
+            battery_grid_charge_allowed = [
+                allow_grid_charge and permitted and not blocked
+                for permitted, blocked in zip(grid_charge_allowed, block_battery_charge)
+            ]
             reconciled_sources = _reconcile_ev_sources_to_schedule(
                 ev_charge_kw_by_vehicle,
                 ev_source_kw_by_vehicle,
@@ -6662,6 +6812,10 @@ class BatteryOptimizer:
                 solar,
                 load,
                 grid_import,
+                grid_reallocation_allowed=ev_grid_reallocation_allowed,
+                solar_reallocation_allowed=ev_solar_reallocation_allowed,
+                max_grid_import_kw=self.max_grid_import_kw,
+                battery_grid_charge_allowed=battery_grid_charge_allowed,
             )
             if reconciled_sources is None:
                 raise ValueError(
@@ -6799,6 +6953,9 @@ class BatteryOptimizer:
                 }
                 for vehicle_id, sources in ev_source_kw_by_vehicle.items()
             },
+            ev_grid_reallocation_allowed=ev_grid_reallocation_allowed,
+            ev_solar_reallocation_allowed=ev_solar_reallocation_allowed,
+            battery_grid_charge_allowed=battery_grid_charge_allowed,
         )
 
     def _build_reserve_recommendation(
@@ -7020,6 +7177,14 @@ class BatteryOptimizer:
         eff = self.efficiency
         cap = self.capacity_kwh
         dt = self.dt_hours
+        degraded = not self.allow_greedy_fallback
+        if degraded:
+            # Native operation authorizes no economic battery command or
+            # planned EV dispatch. Dedicated EV modes keep their own control.
+            allow_grid_charge = False
+            disable_idle = True
+            block_battery_charge = None
+            ev_plan = None
         # The coordinator blanks its EV load overlay whenever it hands the
         # solver an ev_plan, because the LP models the car as a decision
         # variable. This hold has no such variable, so without folding the car
@@ -7140,13 +7305,15 @@ class BatteryOptimizer:
             soc = max(self_consumption_floor, min(1.0, soc))
 
         load = [base + extra for base, extra in zip(house_load, ev_load_kw)]
-        free_import_command_slots = self._quota_backed_free_import_command_slots(
-            import_prices,
-            import_bonus_prices,
-            import_bonus_cap_kwh,
-            solar,
-            load,
-        )
+        free_import_command_slots = []
+        if not degraded:
+            free_import_command_slots = self._quota_backed_free_import_command_slots(
+                import_prices,
+                import_bonus_prices,
+                import_bonus_cap_kwh,
+                solar,
+                load,
+            )
         schedule = self._build_schedule(
             n, grid_import, grid_export, battery_charge, battery_discharge,
             solar, house_load, soc_0, import_prices,
@@ -7201,6 +7368,7 @@ class BatteryOptimizer:
             solver_used="self_consumption_hold",
             # Fallback solve: never let Auto-Apply ratchet the reserve off this.
             feasible=False,
+            degraded=degraded,
             grid_import_w=[v * 1000 for v in grid_import],
             grid_export_w=[v * 1000 for v in grid_export],
             reserve_recommendation={},
@@ -10466,7 +10634,10 @@ class BatteryOptimizer:
         _suppress_micro_exports: bool = True,
     ) -> OptimizerResult:
         """Make result flows and economics describe the final emitted schedule."""
-        if result.lp_stats.get("ev_sources_reconciled_to_schedule") is False:
+        if (
+            getattr(result, "degraded", False)
+            or result.lp_stats.get("ev_sources_reconciled_to_schedule") is False
+        ):
             # A later coordinator overlay cannot re-authorize a rejected plan.
             return result
 
@@ -10873,6 +11044,14 @@ class BatteryOptimizer:
                 list(solar[:n]),
                 list(load[:n]),
                 list(grid_import[:n]),
+                grid_reallocation_allowed=getattr(
+                    result, "ev_grid_reallocation_allowed", None
+                ),
+                solar_reallocation_allowed=getattr(
+                    result, "ev_solar_reallocation_allowed", None
+                ),
+                max_grid_import_kw=self.max_grid_import_kw,
+                battery_grid_charge_allowed=getattr(result, "battery_grid_charge_allowed", None),
             )
             if reconciled_sources is None:
                 _LOGGER.warning(

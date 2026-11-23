@@ -16,6 +16,10 @@ KEY = "shared_generic_charger"
 RUNTIME_ID = "generic_ev"
 
 
+class SharedChargerSelectionChanged(ValueError):
+    """A schedule write belongs to a superseded shared vehicle selection."""
+
+
 def entry_runtime(hass: Any, entry: Any) -> dict:
     return getattr(hass, "data", {}).get("power_sync", {}).get(getattr(entry, "entry_id", ""), {})
 
@@ -110,19 +114,22 @@ def restore_schedule(executor: Any) -> None:
     apply_profile(executor, RUNTIME_ID, settings)
 
 
-async def save_selected_schedule(executor: Any) -> None:
+async def save_selected_schedule(executor: Any, *, settings: Any = None) -> None:
     """Persist each car's latest schedule before the next selection or restart."""
     data = shared_data(getattr(executor, "hass", None), getattr(executor, "config_entry", None))
     profile = selected_profile(data)
-    settings = executor._settings.get(RUNTIME_ID)
+    if settings is not None and profile is None:
+        raise ValueError("Select a vehicle for this shared charger first.")
+    if settings is None:
+        settings = executor._settings.get(RUNTIME_ID)
     if profile is None or settings is None:
         return
     # A superseded settings object must not overwrite the newly selected car.
     if getattr(settings, "shared_charger_profile_id", None) != profile["id"]:
-        raise ValueError("shared charger selection changed")
+        raise SharedChargerSelectionChanged("Shared charger selection changed. Reload the vehicle settings.")
     runtime = entry_runtime(executor.hass, executor.config_entry)
     if runtime.get("_shared_generic_switching"):
-        raise ValueError("Shared charger selection is changing.")
+        raise SharedChargerSelectionChanged("Shared charger selection is changing.")
     runtime["_shared_generic_schedule_saving"] = runtime.get("_shared_generic_schedule_saving", 0) + 1
     previous = profile.get("schedule")
     profile["schedule"] = settings.to_dict()

@@ -13,6 +13,7 @@ import pytest_asyncio
 from test_tesla_ev_recovery import (harness, _sidecar_harness, _Entity, _State,
     VIN_A, VIN_B, recovery)
 from power_sync import tesla_ble_stop_recovery as stop
+from test_tesla_ev_recovery import _seed_legacy_quarantine
 
 
 @pytest_asyncio.fixture
@@ -66,7 +67,7 @@ async def inventory(harness, monkeypatch):
             assert ticket
             assert await recovery.async_finish_attempt(ticket, "sent_unknown")
             if prefix == "bridge_a" or index < 3:
-                assert not await recovery.async_isolate_ble(ticket, authorize=True)
+                await _seed_legacy_quarantine(ticket)
                 ledger = hass.data["power_sync"][entry.entry_id][recovery.RECOVERY_KEY]["vehicles"][aliases[prefix]]
                 ledger["hazards"][f"retained-{index}"] = ledger["hazards"].pop(f"ble:{prefix}")
                 # Assemble the sanitized historical fixture with distinct
@@ -151,6 +152,47 @@ async def test_full_two_alias_inventory_retires_exact_unknown_stops_and_survives
     # second historical incident.
     assert (await recover(c))["incident_id"] == result["incident_id"]
     assert len(c.calls) == 4
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exact", [True, False])
+async def test_existing_stock_hold_can_change_method_only_for_its_recorded_producer(inventory, monkeypatch, exact):
+    c = inventory
+    bridge = stop.Bridge(c.hass, c.entry, "bridge_a", VIN_A)
+    route = {"kind": "ble", "prefix": "bridge_a", "entity_identity": bridge.identity}
+    refs = [{"operation": "rate", "attempt_id": "old-rate", "vehicle_id": VIN_A,
+             "outcome": "sent_unknown", "route": route}]
+    producer = {**bridge.identity, "prefix": "bridge_a", "vin": VIN_A}
+    if not exact:
+        producer["device_id"] = "replaced-device"
+    candidate = {
+        "incident_id": "old-stock", "kind": "command_uncertainty", "phase": "held",
+        "scope_basis": "known_journal_and_registry", "scope_closed": True,
+        "current_candidate_producers": [producer], "current_candidate_vehicles": [VIN_A],
+        "liability_refs": refs,
+    }
+    state = c.runtime[recovery._SIDECAR_STATE_KEY]
+    state["incidents"]["old-stock"] = deepcopy(candidate)
+    monkeypatch.setattr(stop, "_live_refs", lambda runtime: refs)
+    scope = {"kind": "ble_command_inventory_v2"}
+    async def adopt():
+        await stop._adopt_held_stock_scope(
+            c.hass, c.entry, c.runtime, candidate, state["revision"], scope,
+            {"bridge_a": bridge}, {"bridge_a": VIN_A}, refs,
+        )
+
+    if not exact:
+        with pytest.raises(stop.StopRecoveryRefused, match="another_recovery_scope"):
+            await adopt()
+        assert state["incidents"]["old-stock"] == candidate
+    else:
+        await adopt()
+        updated = state["incidents"]["old-stock"]
+        assert updated["scope_basis"] == scope
+        assert updated["prior_stock_scope"]["scope_basis"] == "known_journal_and_registry"
+        assert updated["liability_refs"] == refs
+        assert updated["phase"] == "held" and updated["scope_closed"] is False
+    assert c.calls == []
 
 
 @pytest.mark.asyncio
@@ -284,11 +326,11 @@ async def _interrupt_with_rekeyed_quarantine(c):
     original = await recovery.async_begin_attempt(
         c.hass, c.entry, c.aliases[prefix], route, "stop", route["entity_id"])
     assert await recovery.async_finish_attempt(original, "sent_unknown")
-    assert not await recovery.async_isolate_ble(original, authorize=True)
+    await _seed_legacy_quarantine(original)
     added, incident_id, original_refs = await _interrupt_with_added_stop(c)
     # Normal containment reuses ble:<prefix>; the durable merge preserves
     # the original quarantine at ble:<prefix>@<original attempt>.
-    assert not await recovery.async_isolate_ble(added, authorize=True)
+    await _seed_legacy_quarantine(added)
     current = stop._live_refs(c.runtime)
     old_hazard = next(ref for ref in original_refs
                       if ref.get("hazard_id") == f"ble:{prefix}")
@@ -508,7 +550,7 @@ async def test_recovery_waits_for_real_submission_to_drain(inventory, physical_v
 
 
 @pytest.mark.asyncio
-async def test_cancellation_after_prepare_preserves_exact_scope_and_contains(inventory):
+async def test_cancellation_after_prepare_preserves_exact_scope_and_radio(inventory):
     import asyncio
     c = inventory
     async def cancel(prefix,action):
@@ -517,7 +559,7 @@ async def test_cancellation_after_prepare_preserves_exact_scope_and_contains(inv
     with pytest.raises(asyncio.CancelledError): await recover(c)
     assert stop._live_refs(c.runtime)
     assert all(i["phase"] == "held" for i in c.store.value["incidents"].values())
-    assert c.calls[1][1] == "hold"
+    assert [action for _, action, _ in c.calls] == ["prepare"]
     assert stop.ACTIVE_KEY not in c.runtime
 
 
@@ -658,6 +700,28 @@ async def test_restart_between_release_and_bridge_commit_keeps_positive_admissio
     assert (await stop.async_recover_ble_history(c.hass, c.entry, c.declared, confirm_complete_history=True))["success"]
     assert all(i["activation_pending"] is False for i in c.store.value["incidents"].values())
     assert len([x for x in c.calls if x[1] == "prepare"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_reproof_after_second_reboot_resumes_already_durable_release(inventory):
+    c = inventory
+    async def fail_second_commit(prefix, action):
+        if prefix == "bridge_b" and action == "commit":
+            raise stop.StopRecoveryRefused("connection_lost")
+
+    c.hook["call"] = fail_second_commit
+    with pytest.raises(stop.StopRecoveryRefused, match="connection_lost"):
+        await recover(c)
+    assert c.receipts["bridge_a"]["m"] == "r"
+    assert c.receipts["bridge_b"]["m"] == "v"
+    c.receipts["bridge_b"].update(b="a" * 16, m="q", s=0, t=0)
+    c.hook["call"] = None
+    calls = len(c.calls)
+    assert (await recover(c))["success"]
+    assert [(prefix, action) for prefix, action, _ in c.calls[calls:]] == [("bridge_b", "commit")]
+    incident = next(iter(c.store.value["incidents"].values()))
+    assert incident["activation_pending"] is False
+    assert incident["reconciliation_evidence"]["bridge_b"]["second"]["b"] == "a" * 16
 
 
 @pytest.mark.asyncio

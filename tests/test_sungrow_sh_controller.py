@@ -4086,3 +4086,164 @@ def test_sungrow_hardware_coverage_gap_also_blanks_mtd_average():
     assert summary["export_earnings_coverage"] == "partial"
     assert summary["avg_cost_per_kwh_today"] is None
     assert summary["avg_cost_per_kwh_mtd"] is None
+
+
+@pytest.fixture
+def sungrow_charge_hold_site():
+    """Use the real adapter, child coordinator and register encoder over a fake device."""
+    from unittest.mock import AsyncMock
+    from conftest import load_power_sync_submodule
+
+    module = load_power_sync_submodule("optimization.solar_export", "_sungrow_export_register_test")
+    coordinator_type, restore_modules = _load_sungrow_energy_coordinator()
+
+    def child(host, raw_limit):
+        driver = SungrowSHController(host)
+        device = types.SimpleNamespace(raw=raw_limit, writes=[], ignore_restore=False)
+        driver.connect = AsyncMock(return_value=True)
+        driver.disconnect = AsyncMock()
+
+        async def read(address, count):
+            assert address == 33046 and count == 1
+            return [device.raw] if device.raw is not None else None
+
+        async def write(address, value):
+            assert address == 33046
+            device.writes.append(value)
+            if not (value > 0 and device.ignore_restore):
+                device.raw = value
+            return True
+
+        driver._read_register = read
+        driver._write_register = write
+        coord = _new_sungrow_coordinator(coordinator_type, driver)
+        coord.host, coord.port, coord.slave_id = driver.host, driver.port, driver.slave_id
+        coord.data = {"charge_rate_limit_source": "configured_power", "charge_rate_limit_kw": 10.0}
+        return coord, device
+
+    try:
+        yield child, module
+    finally:
+        restore_modules()
+
+
+@pytest.mark.parametrize("unavailable", [None, 0xFFFF])
+def test_sungrow_hold_requires_direct_register_even_with_cached_limit(sungrow_charge_hold_site, unavailable):
+    child, module = sungrow_charge_hold_site
+    coord, device = child("192.0.2.1", unavailable)
+    adapter = module.resolve_solar_export_adapter("sungrow", coord)
+    hold = module.SolarExportHoldController(_FakeStore(), adapter)
+
+    assert adapter.capability().supported
+    assert not asyncio.run(hold.apply("entry", "slot"))
+    assert not hold.active
+    assert device.writes == []
+
+
+def test_sungrow_dual_hold_restores_only_owned_zero_and_verifies_writes(sungrow_charge_hold_site):
+    child, module = sungrow_charge_hold_site
+    first, first_device = child("192.0.2.1", 1000)
+    second, second_device = child("192.0.2.2", 725)
+    sites = types.SimpleNamespace(_coord1=first, _coord2=second)
+    adapter = module.resolve_solar_export_adapter("sungrow", sites)
+    store = _FakeStore()
+    hold = module.SolarExportHoldController(store, adapter)
+
+    assert asyncio.run(hold.apply("entry", "slot"))
+    first.data["charge_rate_limit_kw"] = second.data["charge_rate_limit_kw"] = 0
+    assert hold.capability()["supported"] and not adapter.capability().supported
+    assert asyncio.run(hold.apply("entry", "next-slot"))
+    assert [t["value"] for t in store.data["plan"]["targets"]] == [10.0, 7.25]
+
+    first_device.raw = 800  # The owner selected a new positive charge limit.
+    second_device.ignore_restore = True
+    restarted = module.SolarExportHoldController(store, adapter)
+    assert not asyncio.run(restarted.async_reconcile_startup())
+    assert store.data["phase"] == "clear_pending"
+    assert first_device.writes == [0] and second_device.writes == [0, 725]
+    second_device.ignore_restore = False
+    assert asyncio.run(restarted.clear("retry"))
+    assert store.data == {}
+    assert (first_device.raw, second_device.raw) == (800, 725)
+    assert first_device.writes == [0] and second_device.writes == [0, 725, 725]
+
+
+@pytest.mark.parametrize("raw", [None, 0, 0xFFFF, 1000, 2100])
+def test_sungrow_legacy_cleanup_never_writes_bms_estimate(sungrow_charge_hold_site, raw):
+    child, module = sungrow_charge_hold_site
+    coord, device = child("192.0.2.1", raw)
+    coord.data.update(charge_rate_limit_source="bms_current", charge_rate_limit_kw=21.0)
+    adapter = module.resolve_solar_export_adapter("sungrow", coord)
+    store = _FakeStore({
+        "phase": "clear_pending",
+        "plan": {"schema_version": 1, "adapter": adapter.key,
+                 "targets": [{"id": "inverter_1", "value": 21.0}]},
+    })
+    hold = module.SolarExportHoldController(store, adapter)
+    assert asyncio.run(hold.async_reconcile_startup()) is (raw in (1000, 2100))
+    if hold.active:
+        assert store.data["phase"] == "clear_pending"
+        assert not asyncio.run(hold.apply("entry", "cached-slot"))
+        assert hold.active and store.data["plan"]["targets"][0]["value"] == 21.0
+        device.raw = 1000  # A subsequent independent register read sees normal operation.
+        assert asyncio.run(hold.clear("retry"))
+    assert store.data == {}
+    assert device.writes == []
+
+
+@pytest.mark.parametrize("replacement_limit", [0, 1000])
+def test_sungrow_saved_limit_cannot_follow_reconfigured_endpoint(sungrow_charge_hold_site, replacement_limit):
+    child, module = sungrow_charge_hold_site
+    coord, device = child("192.0.2.1", 1000)
+    hold = module.SolarExportHoldController(_FakeStore(), module.resolve_solar_export_adapter("sungrow", coord))
+    assert asyncio.run(hold.apply("entry", "slot"))
+
+    replacement, other_device = child("192.0.2.2", replacement_limit)
+    restart = module.SolarExportHoldController(hold._store, module.resolve_solar_export_adapter("sungrow", replacement))
+    assert not asyncio.run(restart.async_reconcile_startup())
+    assert restart.active and other_device.writes == [] and device.writes == [0]
+
+
+@pytest.mark.parametrize("invalid", [True, float("nan"), 0.001, 655.35, "10.0"])
+def test_sungrow_corrupted_register_baseline_cannot_write(sungrow_charge_hold_site, invalid):
+    child, module = sungrow_charge_hold_site
+    coord, device = child("192.0.2.1", 1000)
+    store = _FakeStore()
+    hold = module.SolarExportHoldController(store, module.resolve_solar_export_adapter("sungrow", coord))
+    assert asyncio.run(hold.apply("entry", "slot"))
+    store.data["plan"]["targets"][0]["value"] = invalid
+    assert not asyncio.run(hold.async_reconcile_startup())
+    assert device.writes == [0] and hold.active
+
+
+def test_sungrow_monitoring_defers_zero_limit_recovery(sungrow_charge_hold_site):
+    child, module = sungrow_charge_hold_site
+    coord, device = child("192.0.2.1", 1000)
+    store = _FakeStore()
+    hold = module.SolarExportHoldController(store, module.resolve_solar_export_adapter("sungrow", coord))
+    assert asyncio.run(hold.apply("entry", "slot"))
+    coord._monitoring_mode_active = lambda: True
+    assert not asyncio.run(hold.async_reconcile_startup())
+    assert device.writes == [0] and hold.active
+    coord._monitoring_mode_active = lambda: False
+    assert asyncio.run(hold.clear("retry"))
+    assert device.writes == [0, 1000] and not hold.active
+
+
+def test_sungrow_reordered_children_keep_the_original_restore_plan(sungrow_charge_hold_site):
+    child, module = sungrow_charge_hold_site
+    first, first_device = child("192.0.2.1", 1000)
+    second, second_device = child("192.0.2.2", 725)
+    pair = types.SimpleNamespace(_coord1=first, _coord2=second)
+    adapter = module.resolve_solar_export_adapter("sungrow", pair)
+    store = _FakeStore()
+    hold = module.SolarExportHoldController(store, adapter)
+    assert asyncio.run(hold.apply("entry", "slot"))
+
+    pair._coord1, pair._coord2 = second, first
+    assert not asyncio.run(adapter.verify_charge_hold(store.data["plan"]))
+    assert not asyncio.run(hold.async_reconcile_startup())
+    assert first_device.writes == [0] and second_device.writes == [0]
+    pair._coord1, pair._coord2 = first, second
+    assert asyncio.run(hold.clear("retry"))
+    assert first_device.writes == [0, 1000] and second_device.writes == [0, 725]

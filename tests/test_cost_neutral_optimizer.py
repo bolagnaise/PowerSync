@@ -1162,6 +1162,202 @@ def test_cost_neutral_ev_attribution_bounds_schedule_rounding(
         assert sources["car"]["grid"] == [0.0]
     else:
         assert sources is None
+
+
+@pytest.mark.parametrize(
+    "allow_grid,import_limit,accepted",
+    [(True, 14.0, True), (False, 14.0, False), (True, 12.0, False)],
+    ids=["allowed-within-limit", "solar-only", "over-import-limit"],
+)
+def test_cost_neutral_ev_reassigns_existing_grid_import_after_projection(
+    optimizer_module, allow_grid, import_limit, accepted,
+):
+    """Charging the home battery can use the solar first assigned to the car."""
+    module = optimizer_module
+    schedule = module.OptimizationSchedule(
+        actions=[module.ScheduleAction(
+            timestamp=_timestamps(1)[0], action="charge", power_w=12_000.0,
+            soc=0.5, battery_charge_w=12_000.0, ev_charge_w=6_000.0,
+        )],
+        predicted_cost=0.0,
+        predicted_savings=0.0,
+    )
+    sources = module._reconcile_ev_sources_to_schedule(
+        {"car": [6.0]}, {"car": {"solar": [6.0]}},
+        schedule, [8.0], [3.0], [13.0],
+        grid_reallocation_allowed={"car": [allow_grid]},
+        max_grid_import_kw=import_limit,
+    )
+    if accepted:
+        assert sources == {"car": {"grid": [6.0], "solar": [0.0], "battery": [0.0]}}
+    else:
+        assert sources is None
+
+
+def test_cost_neutral_keeps_grid_enabled_ev_plan_during_free_battery_charge(
+    optimizer_module,
+):
+    """The emitted battery charge and EV draw share the same import budget."""
+    module = optimizer_module
+    optimizer = module.BatteryOptimizer(
+        capacity_wh=10_000, max_charge_w=7_000, max_discharge_w=5_000,
+        max_grid_import_w=9_000, efficiency=0.92, backup_reserve=0.2,
+        hardware_reserve=0.0, interval_minutes=30, horizon_hours=4,
+        allow_greedy_fallback=False,
+    )
+    start = _timestamps(1)[0]
+    result = optimizer.optimize(
+        import_prices=[0.0, 0.30], export_prices=[0.05, 0.03],
+        solar_forecast=[6.0, 0.0], load_forecast=[1.0, 1.0],
+        current_soc=0.5, allow_battery_export=True, allow_grid_charge=True,
+        cost_neutral_earnings_cap=0.60, cost_neutral_slots=[True, True],
+        schedule_timestamps=[start, start + timedelta(minutes=30)],
+        disable_idle=True,
+        ev_plan=module.EVChargePlan(
+            vehicle_id="car", max_power_kw=(3.6, 0.0),
+            energy_needed_kwh=3.0, charge_efficiency=1.0, min_power_kw=1.0,
+            allow_grid=(True, True), allow_battery=(True, True),
+        ),
+    )
+
+    assert result.solver_used == "highs"
+    assert result.feasible is True
+    assert result.lp_stats["ev_sources_reconciled_to_schedule"] is True
+    assert result.schedule.actions[0].battery_charge_w == pytest.approx(7_000)
+    assert result.ev_charge_by_vehicle_w["car"] == pytest.approx([3_600, 0])
+    assert result.ev_source_by_vehicle_w["car"]["grid"] == pytest.approx([3_600, 0])
+    assert result.grid_import_w[0] == pytest.approx(5_600)
+
+
+@pytest.mark.parametrize("solar_only_first", [False, True])
+def test_cost_neutral_free_charge_shares_solar_with_a_solar_only_car(
+    optimizer_module, solar_only_first,
+):
+    module = optimizer_module
+    optimizer = module.BatteryOptimizer(
+        capacity_wh=10_000, max_charge_w=2_000, max_discharge_w=5_000,
+        max_grid_import_w=15_000, efficiency=0.92, backup_reserve=0.2,
+        hardware_reserve=0.0, interval_minutes=30, horizon_hours=4,
+        allow_greedy_fallback=False,
+    )
+    plans = [
+        module.EVChargePlan(
+            vehicle_id=vehicle_id, max_power_kw=(power, 0.0),
+            energy_needed_kwh=power / 2, charge_efficiency=1.0,
+            min_power_kw=1.0, allow_grid=(grid, grid),
+            allow_solar=(True, True), allow_battery=(False, False),
+        )
+        for vehicle_id, power, grid in (
+            ("flexible", 2.0, True), ("solar_only", 1.4, False)
+        )
+    ]
+    start = _timestamps(1)[0]
+    result = optimizer.optimize(
+        import_prices=[0.0, 0.30], export_prices=[0.05, 0.03],
+        solar_forecast=[5.0, 0.0], load_forecast=[1.0, 1.0],
+        current_soc=0.5, allow_battery_export=True, allow_grid_charge=True,
+        cost_neutral_earnings_cap=0.60, cost_neutral_slots=[True, True],
+        schedule_timestamps=[start, start + timedelta(minutes=30)],
+        disable_idle=True, ev_plan=plans[::-1] if solar_only_first else plans,
+    )
+
+    assert result.feasible and result.solver_used == "highs"
+    assert result.schedule.actions[0].battery_charge_w == pytest.approx(2000)
+    assert result.grid_import_w[0] == pytest.approx(1400)
+    assert result.ev_charge_by_vehicle_w["flexible"][0] == pytest.approx(2000)
+    assert result.ev_charge_by_vehicle_w["solar_only"][0] == pytest.approx(1400)
+    sources = result.ev_source_by_vehicle_w
+    assert sources["flexible"]["grid"][0] == pytest.approx(1400)
+    assert sources["flexible"]["solar"][0] == pytest.approx(600)
+    assert sources["solar_only"]["solar"][0] == pytest.approx(1400)
+    assert sources["solar_only"]["grid"][0] == 0
+
+
+@pytest.mark.parametrize(
+    "grid_reallocation,site_cap,feasible",
+    [(True, 1.4, True), (False, 1.4, False), (True, 1.3, False)],
+)
+def test_cost_neutral_source_swap_respects_grid_permissions_and_limit(
+    optimizer_module, grid_reallocation, site_cap, feasible,
+):
+    module = optimizer_module
+    schedule = module.OptimizationSchedule(
+        actions=[module.ScheduleAction(
+            timestamp=_timestamps(1)[0], action="charge", power_w=2000,
+            soc=0.5, battery_charge_w=2000, ev_charge_w=3400,
+        )], predicted_cost=0, predicted_savings=0,
+    )
+    sources = module._reconcile_ev_sources_to_schedule(
+        {"flexible": [2.0], "solar_only": [1.4]},
+        {"flexible": {"solar": [1.6], "grid": [0.4]},
+         "solar_only": {"solar": [1.4]}},
+        schedule, [5.0], [1.0], [1.4],
+        grid_reallocation_allowed={"flexible": [grid_reallocation]},
+        solar_reallocation_allowed={"flexible": [True], "solar_only": [True]},
+        max_grid_import_kw=site_cap,
+    )
+    assert (sources is not None) is feasible
+
+
+@pytest.mark.parametrize("battery_permission", [True, False])
+def test_cost_neutral_can_reassign_through_two_other_cars(
+    optimizer_module, battery_permission,
+):
+    module = optimizer_module
+    schedule = module.OptimizationSchedule(
+        actions=[module.ScheduleAction(
+            timestamp=_timestamps(1)[0], action="self_consumption", power_w=0,
+            soc=0.5, battery_discharge_w=1000, ev_charge_w=3000,
+        )], predicted_cost=0, predicted_savings=0,
+    )
+    # One kW each of solar, grid and battery. The solar-only car needs the
+    # first car to switch to grid, which requires the second to use battery.
+    sources = module._reconcile_ev_sources_to_schedule(
+        {"a": [1.0], "b": [1.0], "solar_only": [1.0]},
+        {"a": {"solar": [1.0]},
+         "b": {"grid": [0.9], "battery": [0.1 if battery_permission else 0.0]},
+         "solar_only": {"solar": [1.0]}},
+        schedule, [2.0], [1.0], [1.0],
+        grid_reallocation_allowed={"a": [True]}, max_grid_import_kw=1.0,
+    )
+    if battery_permission:
+        assert sources["solar_only"]["solar"] == pytest.approx([1.0])
+        assert sources["a"]["grid"] == pytest.approx([1.0])
+        assert sources["b"]["battery"] == pytest.approx([1.0])
+    else:
+        assert sources is None
+
+
+@pytest.mark.parametrize("allow_solar", [True, False], ids=["solar-allowed", "solar-blocked"])
+def test_cost_neutral_reserves_remaining_solar_for_the_grid_blocked_ev(
+    optimizer_module, allow_solar,
+):
+    module = optimizer_module
+    schedule = module.OptimizationSchedule(
+        actions=[module.ScheduleAction(
+            timestamp=_timestamps(1)[0], action="charge", power_w=1000.0,
+            soc=0.5, battery_charge_w=1000.0, ev_charge_w=6000.0,
+        )],
+        predicted_cost=0.0,
+        predicted_savings=0.0,
+    )
+    sources = module._reconcile_ev_sources_to_schedule(
+        {"flexible": [4.0], "grid_blocked": [2.0]},
+        {"flexible": {"battery": [4.0]}, "grid_blocked": {"battery": [2.0]}},
+        schedule, [4.0], [1.0], [4.0],
+        grid_reallocation_allowed={"flexible": [True], "grid_blocked": [False]},
+        solar_reallocation_allowed={"flexible": [True], "grid_blocked": [allow_solar]},
+        max_grid_import_kw=4.0,
+    )
+    if allow_solar:
+        assert sources == {
+            "flexible": {"grid": [4.0], "solar": [0.0], "battery": [0.0]},
+            "grid_blocked": {"grid": [0.0], "solar": [2.0], "battery": [0.0]},
+        }
+    else:
+        assert sources is None
+
+
 @pytest.mark.parametrize("use_highs", [True, False], ids=["lp-then-greedy", "greedy"])
 def test_unreconciled_cost_neutral_ev_plan_cannot_force_grid_charge(
     optimizer_module, monkeypatch, use_highs,
@@ -2607,3 +2803,143 @@ def test_final_solar_budget_preserves_manual_export_and_blocks_extra_export(
     assert result.schedule.actions[0].battery_discharge_w == pytest.approx(2000)
     assert result.battery_to_grid_w[0] == pytest.approx(2000)
     assert result.battery_to_grid_w[1:] == pytest.approx([0.0] * 3)
+
+
+@pytest.mark.parametrize(
+    ("grid_charge_allowed", "action_name", "solar", "grid", "site_limit", "feasible"),
+    [
+        (True, "charge", 7.0, 10.0, 10.0, True),
+        (False, "charge", 7.0, 10.0, 10.0, False),
+        (True, "self_consumption", 7.0, 10.0, 10.0, False),
+        (True, "charge", 6.0, 11.0, 12.0, False),
+        (True, "charge", 7.0, 10.0, 9.0, False),
+        (True, "charge", 7.0, 9.0, 10.0, False),
+    ],
+)
+def test_grid_charging_home_battery_can_share_solar_with_solar_only_ev(
+    optimizer_module, grid_charge_allowed, action_name, solar, grid, site_limit, feasible,
+):
+    module = optimizer_module
+    schedule = module.OptimizationSchedule(
+        actions=[module.ScheduleAction(
+            timestamp=_timestamps(1)[0], action=action_name, power_w=10_000.0,
+            soc=0.5, battery_charge_w=10_000.0, ev_charge_w=4_000.0,
+        )],
+        predicted_cost=0.0, predicted_savings=0.0,
+    )
+    sources = module._reconcile_ev_sources_to_schedule(
+        {"solar_car": [4.0]}, {"solar_car": {"solar": [4.0]}},
+        schedule, [solar], [3.0], [grid],
+        grid_reallocation_allowed={"solar_car": [False]},
+        solar_reallocation_allowed={"solar_car": [True]},
+        max_grid_import_kw=site_limit, battery_grid_charge_allowed=[grid_charge_allowed],
+    )
+    if feasible:
+        assert sources == {"solar_car": {"grid": [0.0], "solar": [4.0], "battery": [0.0]}}
+    else:
+        assert sources is None
+
+
+def test_free_grid_charge_keeps_joint_plan_for_solar_only_ev(optimizer_module):
+    module = optimizer_module
+    optimizer = module.BatteryOptimizer(
+        capacity_wh=16_000, max_charge_w=10_000, max_discharge_w=9_000,
+        max_grid_import_w=10_000, efficiency=0.92, backup_reserve=0.2,
+        hardware_reserve=0.0, interval_minutes=30, horizon_hours=4,
+        allow_greedy_fallback=False,
+    )
+    car = module.EVChargePlan(
+        vehicle_id="solar_car", max_power_kw=(4, 0, 0, 0),
+        energy_needed_kwh=2, charge_efficiency=1, min_power_kw=1,
+        allow_solar=(True,) * 4, allow_grid=(False,) * 4, allow_battery=(False,) * 4,
+    )
+    start = _timestamps(1)[0]
+    result = optimizer.optimize(
+        import_prices=[0, 0.6, 0.6, 0.6], export_prices=[0] * 4,
+        solar_forecast=[7, 0, 0, 0], load_forecast=[3, 6, 6, 6],
+        current_soc=0.24, allow_grid_charge=True, allow_battery_export=True,
+        cost_neutral_earnings_cap=0.5, cost_neutral_slots=[True] * 4,
+        disable_idle=True, ev_plan=car,
+        schedule_timestamps=[start + timedelta(minutes=30 * i) for i in range(4)],
+    )
+    assert result.feasible and result.solver_used == "highs"
+    result = optimizer.reconcile_result_with_schedule(
+        result, result.schedule, import_prices=[0, 0.6, 0.6, 0.6],
+        export_prices=[0] * 4, solar=[7, 0, 0, 0], load=[3, 6, 6, 6],
+        initial_soc=0.24, cost_neutral_earnings_cap=0.5,
+        cost_neutral_slots=[True] * 4,
+    )
+    assert result.feasible and not result.degraded
+    first = result.schedule.actions[0]
+    assert first.action == "charge"
+    assert 0 < first.battery_charge_w <= 10_000
+    assert first.ev_charge_w == pytest.approx(4_000)
+    assert result.ev_source_by_vehicle_w["solar_car"] == {
+        "solar": pytest.approx([4_000, 0, 0, 0]),
+        "battery": [0.0] * 4, "grid": [0.0] * 4,
+    }
+
+
+@pytest.mark.parametrize("cost_neutral", [True, False], ids=["cost-neutral", "economic"])
+@pytest.mark.parametrize("grid_charge_allowed", [False, True], ids=["solar-battery", "grid-battery"])
+def test_joint_solar_ev_and_battery_charge_reserve_household_pv(
+    optimizer_module, cost_neutral, grid_charge_allowed,
+):
+    module = optimizer_module
+    optimizer = module.BatteryOptimizer(
+        capacity_wh=10_000, max_charge_w=3_000, max_discharge_w=5_000,
+        max_grid_import_w=9_000, efficiency=0.92, backup_reserve=0.2,
+        hardware_reserve=0.0, interval_minutes=30, horizon_hours=1,
+        allow_greedy_fallback=False,
+    )
+    ev = module.EVChargePlan(
+        vehicle_id="solar_car", max_power_kw=(3.0, 0.0),
+        energy_needed_kwh=1.5, charge_efficiency=1.0, min_power_kw=1.0,
+        allow_grid=(False, False), allow_solar=(True, True), allow_battery=(False, False),
+    )
+    start = _timestamps(1)[0]
+    result = optimizer.optimize(
+        import_prices=[0.0 if grid_charge_allowed else 0.05, 0.70], export_prices=[0, 0],
+        solar_forecast=[6.0, 0.0], load_forecast=[2.0, 2.0], current_soc=0.6,
+        allow_battery_export=True, allow_grid_charge=grid_charge_allowed,
+        schedule_timestamps=[start, start + timedelta(minutes=30)], ev_plan=ev,
+        cost_neutral_earnings_cap=0.7 if cost_neutral else None,
+        cost_neutral_slots=[cost_neutral, cost_neutral],
+    )
+
+    assert result.feasible and result.solver_used == "highs"
+    first = result.schedule.actions[0]
+    assert first.ev_charge_w == pytest.approx(3000)
+    assert result.ev_source_by_vehicle_w["solar_car"]["solar"] == pytest.approx([3000, 0])
+    assert result.ev_source_by_vehicle_w["solar_car"]["grid"] == [0, 0]
+    if grid_charge_allowed:
+        assert first.action == "charge"
+        assert first.battery_charge_w == pytest.approx(3000)
+        assert result.grid_import_w[0] == pytest.approx(2000)
+    else:
+        assert first.action == "self_consumption"
+        assert first.battery_charge_w == pytest.approx(1000)
+        assert result.grid_import_w[0] == pytest.approx(0)
+
+
+def test_joint_ev_solar_budget_keeps_separate_solar_curtailment(optimizer_module):
+    module = optimizer_module
+    optimizer = module.BatteryOptimizer(
+        capacity_wh=10_000, max_charge_w=3_000, max_discharge_w=5_000,
+        max_grid_import_w=9_000, efficiency=0.92, backup_reserve=0.2,
+        interval_minutes=30, horizon_hours=1, allow_greedy_fallback=False,
+    )
+    ev = module.EVChargePlan(
+        vehicle_id="solar_car", max_power_kw=(3.0, 3.0),
+        energy_needed_kwh=1.5, charge_efficiency=1.0, min_power_kw=1.0,
+        allow_grid=(False, False), allow_solar=(True, True), allow_battery=(False, False),
+    )
+    result = optimizer.optimize(
+        import_prices=[-0.8, 0.2], export_prices=[0, 0],
+        solar_forecast=[2.0, 6.0], load_forecast=[2.0, 2.0], current_soc=1.0,
+        allow_battery_export=False, allow_grid_charge=False, ev_plan=ev,
+    )
+
+    assert result.feasible and result.solver_used == "highs"
+    assert result.solar_curtailment_w == pytest.approx([2000, 0])
+    assert result.ev_source_by_vehicle_w["solar_car"]["solar"] == pytest.approx([0, 3000])

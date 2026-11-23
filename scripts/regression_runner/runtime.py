@@ -144,7 +144,8 @@ def replay(bundle, component_root, *, allow_changed_source=False):
     root = Path(component_root).resolve(strict=True)
     clock = contract.decision_clock(bundle)
     module = load_component(root, clock)
-    if dependency_inventory(root) != set(contract.STATE_FIELDS):
+    dependencies = dependency_inventory(root)
+    if dependencies | {"allow_greedy_fallback"} != set(contract.STATE_FIELDS):
         raise contract.ContractError("unsupported_state_dependencies")
     import inspect
     if tuple(inspect.signature(module.BatteryOptimizer.optimize).parameters)[1:] != contract.INPUT_FIELDS:
@@ -159,6 +160,10 @@ def replay(bundle, component_root, *, allow_changed_source=False):
     if any(binding[key] != bundle["source"][key] for key in binding if key != "component_sha256"):
         raise contract.ContractError("dependency_image_mismatch")
     optimizer = module.BatteryOptimizer()
+    if "allow_greedy_fallback" in dependencies and "allow_greedy_fallback" not in bundle["state"]:
+        # Older HA captures omit the new policy. Apply the candidate's live
+        # policy, while replaying an older component still runs its own code.
+        optimizer.allow_greedy_fallback = False
     for key, value in bundle["state"].items():
         setattr(optimizer, key, contract.decode(value, module))
     inputs = {key: contract.decode(value, module) for key, value in bundle["inputs"].items()}

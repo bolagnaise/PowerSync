@@ -1,6 +1,7 @@
 # EV charging and shared chargers
 
 - [EV charging actions in Home Assistant](#ev-charging-actions)
+- [Tessie Price Level handoff](#tessie-price-level-handoff)
 - [Zaptec Price Level charging](#zaptec-price-level-charging)
 - [EV SoC sensors with OCPP](#ev-soc-sensors-with-ocpp)
 - [Multiple vehicles on one generic charger](#shared-charger-vehicles)
@@ -35,9 +36,37 @@ Re-enable it with the same action and `enabled: true`. Check battery charge both
 
 These actions change the mode's saved eligibility, not the physical charger directly. Scheduled Charging, Price Level and Smart Schedule apply changes on the normal EV evaluation cycle. Solar Surplus also uses its existing disable cleanup. Enabling a mode does not force a charging start, and disabling one mode does not disable other eligible charging modes. A successful action confirms the setting was saved, not that the charger physically stopped. Monitoring Mode and existing ownership and provider safeguards still apply.
 
+## Solar Surplus charge limits
+
+When Smart Schedule is enabled for a vehicle, standalone Solar Surplus stops at that vehicle’s Smart Schedule target. For a Tesla, the lower of that target and the charge limit reported by the car applies. With Smart Schedule off, Solar Surplus uses the Tesla charge limit. A vehicle at its ceiling is skipped so another eligible vehicle can use the surplus.
+
+When Smart Schedule is on for a Tesla, its target and the car’s charge limit are linked. An edit in PowerSync updates the car, and a new limit reported by the car updates the schedule. When the link starts with different values, the lower one wins. Turning Smart Schedule off stops synchronization. An offline car can show a pending update until it reports again. Tesla accepts targets from 50% to 100%.
+
+## Using EV charging with or without Smart Optimization
+
+Scheduled Charging and Price Level can use the current retail rate from EPEX, Octopus or Localvolts with the battery optimizer switched off. A price-limited session waits when its provider has no valid rate covering the current time. Smart Schedule still needs live site power before increasing charging. Disabling Smart Schedule lets it clean up its own session if site telemetry goes offline.
+
+When the battery optimizer includes Smart Schedule, it uses the vehicle's resolved charger limit and the price policy for its next departure. A five-minute cheap interval can supply five minutes of charging. If two cars request **Preserve Home Battery**, ending one mode keeps the other car's protection active until its request also ends.
+
+## Smart Schedule grid price
+
+In PowerSync Mobile, open **EV → Smart schedule**, select the vehicle and tap **Maximum grid price** under **Default Strategy**. The initial limit is 25 minor currency units per kWh, such as 25¢/kWh for an Australian site. Enter the most you want to pay for grid charging. The exact limit qualifies. Zero allows free or negative prices, and a negative limit requires the retailer to pay you at least that amount.
+
+Tap a weekday to set a different limit or use the vehicle default. An overnight plan uses the weekday of the next departure in your Home Assistant time zone. With no departure, it uses the current local day. A saved price change applies at the next charging decision, including when an older plan is still displayed.
+
+On the Home Assistant EV panel, find the car under **Smart Schedule**. Enter its **Maximum grid price** under **Default strategy**. Use **Weekday overrides** to set a different price for a day, or clear that day’s price to use the vehicle default. Choose **Save charging rules** for that car.
+
+**Prefer Solar** can start on spare solar and can use eligible low-cost grid periods. **Cheapest** compares planned solar and grid costs. **Solar Only** can also use an eligible free-grid period. **Meet Deadline** can use grid power above the limit to meet a departure target. Vehicle readiness, battery protections and site import limits still apply.
+
 ## Site import limits during EV charging
 
-From v2.12.1766, Dynamic EV reads Smart Optimization’s **Maximum grid import** on each charging control cycle. Changing or clearing that setting takes effect during the active session. Independent site and charger limits still apply. With no configured site limit, battery-target charging uses a 12.5 kW fallback.
+From v2.12.1766, Dynamic EV reads Smart Optimization’s **Maximum grid import** on each charging control cycle. Changing or clearing that setting takes effect during the active session. When adjusting the rate, PowerSync rounds down to a whole amp if rounding up would exceed the site import limit. Independent site and charger limits still apply. With no configured site limit, battery-target charging uses a 12.5 kW fallback.
+
+With **Prioritise switch-only charging in Price Level** enabled, the charger starts only when its configured full draw fits both the measured site headroom and any current EV charging plan. PowerSync checks immediately before switching on, after any configured wake delay. Once the switch is on, it waits up to 150 seconds by default for fresh charging status or measured power. If you changed **Generic charger start confirmation timeout**, allow enough time for your charger to report.
+
+When Tesla command recovery holds a Scheduled start, PowerSync shows the vehicle as waiting and keeps control for the next eligible retry. Charging history begins once the car confirms charging. If the previous command has finished and the same vehicle and charging control are still available, PowerSync can set the permitted current before retrying Start.
+
+EV charging history records the car’s state of charge at the start and end of a managed session when that reading is available. For dynamic charging, intervals with insufficient evidence to attribute the power source still count toward total energy. Those intervals are excluded from estimated solar and grid energy and cost.
 
 ## EV SoC sensors with OCPP
 
@@ -46,6 +75,12 @@ In the integration's **EV Charging** options, set **EV battery SoC sensor** and,
 PowerSync prefers a valid SoC reported by that OCPP connector, then tries your primary sensor and finally the fallback. The resolved value feeds the EV display, Smart Schedule and target-SoC checks. Invalid or unavailable readings remain unknown; Smart Schedule waits for a usable SoC and requests a stop if its charging session loses that reading.
 
 The global sensor pair is not assigned automatically when multiple OCPP chargers or a separate generic charger are configured. Native per-connector SoC still works. For multiple cars sharing a generic charger, use the selected vehicle profiles below. See [EV SoC sources](ev-soc-sources.md) for source precedence and limitations.
+
+## Tessie Price Level handoff
+
+When Price Level takes over from Solar Surplus, PowerSync can keep your Tesla charging while it changes modes. It needs a fresh Tessie report for that car and checks that both the measured and requested current fit the incoming plan. If the plan prohibits grid imports, the vehicle report is unavailable, or transport recovery is pending, the normal start checks apply.
+
+If the Tessie report becomes unavailable or no longer fits the Price Level plan during the handoff, Solar Surplus keeps control and Price Level can try again at a later evaluation.
 
 ## Zaptec Price Level charging
 

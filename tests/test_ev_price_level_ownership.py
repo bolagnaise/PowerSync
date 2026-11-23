@@ -278,6 +278,24 @@ def test_auto_schedule_runtime_uses_plan_departure_policy_across_midnight(
     assert executor._start_charging.await_args.args[3] == "grid_peak"
     assert executor._start_charging.await_args.kwargs["force_max_rate"] is True
     assert "Grid price" not in state.last_decision_reason
+    # Editing the Monday ceiling takes effect even when Sunday's cached plan
+    # still carries 25 cents. A price of zero exceeds a negative ceiling.
+    settings.departure_priorities.clear()
+    executor._settings[VIN] = settings
+    executor.update_settings(VIN, {"departure_max_grid_price_cents": {"0": -2.0}})
+    executor._start_charging.reset_mock()
+    live = {"battery_soc": 100, "solar_power": 0, "load_power": 1000, "grid_power": 1000}
+    asyncio.run(executor._evaluate_vehicle(VIN, settings, live, current_price_cents=0))
+    executor._start_charging.assert_not_awaited()
+    assert "Grid price" in state.last_decision_reason
+    executor._get_current_price = AsyncMock(return_value=None)
+    for unavailable in (None, True, float("-inf"), float("nan")):
+        asyncio.run(executor._evaluate_vehicle(VIN, settings, live, current_price_cents=unavailable))
+        executor._start_charging.assert_not_awaited()
+        assert state.last_decision_reason == "Current grid price unavailable"
+    asyncio.run(executor._evaluate_vehicle(VIN, settings, live, current_price_cents=-2))
+    executor._start_charging.assert_awaited_once()
+
 
 
 def test_auto_schedule_rearms_after_dynamic_solar_owner_cleanup(monkeypatch):
@@ -842,8 +860,8 @@ def test_solar_preferred_excludes_past_and_post_deadline_windows(monkeypatch):
         "2026-07-17T11:00:00",
         "2026-07-17T13:00:00",
     ]
-    assert plan.estimated_solar_kwh == pytest.approx(7.36)
-    assert plan.estimated_grid_kwh == pytest.approx(0.64)
+    assert plan.estimated_solar_kwh == pytest.approx(3.0)
+    assert plan.estimated_grid_kwh == pytest.approx(5.0)
     assert plan.can_meet_target is True
 
 
@@ -1334,8 +1352,27 @@ def test_solar_only_plan_does_not_label_grid_capacity_as_solar(monkeypatch):
     assert plan.can_meet_target is False
 
 
-def test_solar_only_plan_respects_battery_and_other_ev_solar_reservations(
-    monkeypatch,
+@pytest.mark.parametrize("strategy", ["solar_preferred", "cost_optimized"])
+def test_negative_grid_cap_filters_zero_and_includes_equal_price_forecast(monkeypatch, strategy):
+    now = datetime(2026, 10, 11, 9, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda: now)
+    planner = ev_planner.ChargingPlanner(_FakeHass(), _FakeConfigEntry())
+    plan = asyncio.run(getattr(planner, f"_plan_{strategy}")(
+        vehicle_id=VIN, current_soc=25, target_soc=80, target_time=now + timedelta(hours=2),
+        energy_needed_kwh=30, charger_power_kw=3.6, surplus_forecast=[],
+        price_forecast=[
+            ev_planner.PriceForecast("2026-10-11T09:00:00", 0, 0, "offpeak"),
+            ev_planner.PriceForecast("2026-10-11T10:00:00", -2.25, 0, "offpeak"),
+        ],
+        max_grid_price_cents=-2.25,
+    ))
+    assert [window.price_cents_kwh for window in plan.windows] == [-2.25]
+    assert plan.estimated_grid_kwh > 0 and not plan.can_meet_target
+
+
+@pytest.mark.parametrize("strategy", ["solar_only", "solar_preferred", "cost_optimized"])
+def test_solar_plan_respects_battery_and_other_ev_solar_reservations(
+    monkeypatch, strategy,
 ):
     brisbane_tz = timezone(timedelta(hours=10))
     monkeypatch.setattr(
@@ -1374,9 +1411,13 @@ def test_solar_only_plan_respects_battery_and_other_ev_solar_reservations(
         "charging_power_step_kw": 0.23,
     }
 
-    battery_only = asyncio.run(planner._plan_solar_only(**kwargs))
+    plan = getattr(planner, "_plan_" + strategy)
+    kwargs["price_forecast"] = [ev_planner.PriceForecast(hour, 100, 0, "peak")]
+    if strategy != "solar_only":
+        kwargs["max_grid_price_cents"] = 25.0
+    battery_only = asyncio.run(plan(**kwargs))
     battery_and_other_ev = asyncio.run(
-        planner._plan_solar_only(
+        plan(
             **kwargs,
             reserved_ev_power_schedule={hour: 1.15},
         )
@@ -2366,6 +2407,38 @@ def _scheduled_price_hass(schedule: dict | None) -> _FakeHass:
     return hass
 
 
+@pytest.mark.parametrize("ev_enabled", [False, True])
+@pytest.mark.parametrize("optimizer_enabled", [False, True])
+def test_scheduled_charging_mode_matrix_uses_selected_retail_rate(
+    monkeypatch, ev_enabled, optimizer_enabled,
+):
+    now = datetime(2026, 8, 5, 12, 7, tzinfo=timezone.utc)
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda: now)
+    monkeypatch.setattr(ev_pricing.dt_util, "now", lambda: now)
+    monkeypatch.setattr(ev_planner, "get_ev_location", AsyncMock(return_value="home"))
+    monkeypatch.setattr(ev_planner, "is_ev_plugged_in", AsyncMock(return_value=True))
+    start = now.replace(minute=0).isoformat()
+    end = now.replace(minute=15).isoformat()
+    # A previous battery forecast put the slot above the car's 20-cent limit.
+    hass = _scheduled_price_hass({
+        "timestamps": [start, end],
+        "import_price": [0.9, 0.9],
+    } if optimizer_enabled else None)
+    entry = _FakeConfigEntry()
+    entry.options = {"electricity_provider": "epex"}
+    runtime = hass.data["power_sync"][entry.entry_id]
+    runtime["automation_store"]._data["scheduled_charging"]["enabled"] = ev_enabled
+    runtime["epex_coordinator"] = SimpleNamespace(
+        last_update_success=True, data={"current": [{
+            "channelType": "general", "startTime": start, "endTime": end, "perKwh": 5,
+        }]},
+    )
+
+    executor = ev_planner.ScheduledChargingExecutor(hass, entry)
+    eligible, _, _ = asyncio.run(executor.get_charging_decision(None))
+    assert eligible is ev_enabled
+
+
 def test_scheduled_none_price_uses_timestamp_aligned_optimizer_retail_price(monkeypatch):
     now = datetime(2026, 8, 5, 12, 7, tzinfo=timezone.utc)
     monkeypatch.setattr(
@@ -2523,6 +2596,12 @@ def test_scheduled_none_price_fails_closed_without_current_retail_slot(
     assert "price" in reason.lower()
 
 
+@pytest.mark.parametrize("value,expected", [("NaN", None), ("101", None), ("-1", None), ("0", 0), ("43.2", 43.2)])
+def test_managed_ble_vehicle_soc_requires_a_valid_percentage(value, expected):
+    hass = _FakeHass(states={"sensor.car_battery_level": value})
+    assert asyncio.run(ev_planner.get_ev_battery_level(hass, _FakeConfigEntry(), "ble_car")) == expected
+
+
 def test_explicit_fleet_schedule_does_not_borrow_multi_ble_soc():
     entry = SimpleNamespace(
         entry_id="entry-1",
@@ -2672,7 +2751,7 @@ def fake_actions(monkeypatch):
     actions._is_vehicle_charge_complete = AsyncMock(return_value=False)
     actions._release_stopped_scheduled_tesla = AsyncMock(return_value=False)
 
-    actions._is_vehicle_charge_complete = AsyncMock(return_value=False)
+    actions._dynamic_ev_full_soc_reason = AsyncMock(return_value=None)
     monkeypatch.setitem(sys.modules, "power_sync.automations.actions", actions)
     monkeypatch.setattr(
         sys.modules["power_sync.automations"],
@@ -4749,6 +4828,40 @@ def test_preserve_mode_handoff_does_not_release_battery():
         ev_planner.set_scheduled_charging_executor(previous_scheduled)
 
 
+@pytest.mark.parametrize("other_mode", ["scheduled_charging", "price_level_charging"])
+@pytest.mark.parametrize("smart_first", [False, True])
+def test_smart_schedule_preserve_survives_other_mode_ending(monkeypatch, other_mode, smart_first):
+    hass = _FakeHass()
+    entry = _FakeConfigEntry()
+    data = hass.data["power_sync"]["entry-1"]
+    calls = []
+    data["optimization_coordinator"] = SimpleNamespace(
+        request_ev_preservation_refresh=lambda: calls.append(
+            data["scheduled_ev_preserve_state"]["active"]
+        )
+    )
+    smart = ev_planner.AutoScheduleExecutor(hass, entry, None)
+    data["auto_schedule_executor"] = smart
+    price = ev_planner.PriceLevelChargingExecutor(hass, entry)
+    scheduled = ev_planner.ScheduledChargingExecutor(hass, entry)
+    monkeypatch.setattr(ev_planner, "get_price_level_executor", lambda: price)
+    monkeypatch.setattr(ev_planner, "get_scheduled_charging_executor", lambda: scheduled)
+    other = scheduled if other_mode == "scheduled_charging" else price
+
+    if smart_first:
+        smart._set_active_charging_preserve_intent(VIN, "Car A is charging")
+    other._set_preserve_home_battery_intent("Car B is charging")
+    if not smart_first:
+        smart._set_active_charging_preserve_intent(VIN, "Car A is charging")
+
+    other._clear_preserve_home_battery_intent("Car B stopped")
+    assert data["scheduled_ev_preserve_state"]["active"] is True
+    assert data["scheduled_ev_preserve_state"]["source"] == "smart_schedule"
+    assert data["scheduled_ev_preserve_state"]["reason"] == "Car A is charging"
+    smart._clear_active_charging_preserve_intent(VIN, "Car A stopped")
+    assert calls == [True, False]
+
+
 def test_scheduled_does_not_yield_an_ambiguous_default_loadpoint(monkeypatch, fake_actions):
     fake_actions._dynamic_ev_state = {}
     fake_actions._action_stop_ev_charging_dynamic = AsyncMock(return_value=True)
@@ -6280,7 +6393,17 @@ def test_auto_schedule_external_stop_requires_specific_tesla_loadpoint(
     fake_actions._action_stop_ev_charging_dynamic.assert_not_awaited()
 
 
-def test_auto_schedule_battery_floor_reconciles_external_charging(monkeypatch):
+@pytest.mark.parametrize(
+    ("managed", "stop_result", "decision"),
+    [
+        (False, False, "waiting"),
+        (True, False, "stopping"),
+        (True, True, "stopped"),
+    ],
+)
+def test_auto_schedule_battery_floor_reports_stop_result(
+    monkeypatch, managed, stop_result, decision,
+):
     now = datetime(2026, 7, 31, 10, 0, tzinfo=timezone(timedelta(hours=10)))
 
     async def at_home(*args, **kwargs):
@@ -6302,26 +6425,29 @@ def test_auto_schedule_battery_floor_reconciles_external_charging(monkeypatch):
         _FakeConfigEntry(),
         planner=SimpleNamespace(),
     )
+    vehicle_id = "ble_donkey"
+    executor._stop_charging = AsyncMock(return_value=stop_result)
     executor._stop_external_charging_if_needed = AsyncMock(return_value=False)
     settings = ev_planner.AutoScheduleSettings(
         enabled=True,
-        vehicle_id=VIN,
+        vehicle_id=vehicle_id,
         target_soc=80,
-        consume_battery_level=25,
+        consume_battery_level=30,
         stop_at_battery_floor=True,
     )
-    state = ev_planner.AutoScheduleState(vehicle_id=VIN)
+    state = ev_planner.AutoScheduleState(vehicle_id=vehicle_id)
+    state.is_charging = managed
     state.current_plan = SimpleNamespace(windows=[])
     state.last_plan_update = ev_planner._ha_local_now_naive()
-    executor._settings[VIN] = settings
-    executor._state[VIN] = state
+    executor._settings[vehicle_id] = settings
+    executor._state[vehicle_id] = state
 
     asyncio.run(
         executor._evaluate_vehicle(
-            VIN,
+            vehicle_id,
             settings,
             {
-                "battery_soc": 24,
+                "battery_soc": 27,
                 "solar_power": 4000,
                 "load_power": 3000,
                 "grid_power": 16000,
@@ -6330,12 +6456,20 @@ def test_auto_schedule_battery_floor_reconciles_external_charging(monkeypatch):
         )
     )
 
-    executor._stop_external_charging_if_needed.assert_awaited_once()
-    assert state.last_decision == "waiting"
-    assert state.last_decision_reason == (
-        "Battery 24% at consume floor 25% — "
-        "EV charging stopped (stop at floor enabled)"
-    )
+    assert state.last_decision == decision
+    if managed:
+        executor._stop_charging.assert_awaited_once_with(
+            vehicle_id, settings, state,
+            reason="Battery 27% at consume floor 30% (stop at floor enabled)",
+        )
+        executor._stop_external_charging_if_needed.assert_not_awaited()
+    else:
+        executor._stop_charging.assert_not_awaited()
+        executor._stop_external_charging_if_needed.assert_awaited_once()
+    assert "Battery 27% at consume floor 30%" in state.last_decision_reason
+    if managed and not stop_result:
+        assert state.is_charging
+        assert "stop unconfirmed" in state.last_decision_reason
 
 
 def test_auto_schedule_owned_stop_suppression_is_per_vehicle(
@@ -6965,17 +7099,23 @@ def test_time_critical_solar_window_falls_back_to_grid_only_when_permitted(
 
 
 @pytest.mark.parametrize(
-    ("priority", "demand_blocked", "expected_start"),
+    ("priority", "demand_blocked", "price", "cap", "expected_start"),
     (
-        (ev_planner.ChargingPriority.TIME_CRITICAL, False, True),
-        (ev_planner.ChargingPriority.SOLAR_ONLY, False, True),
-        (ev_planner.ChargingPriority.TIME_CRITICAL, True, False),
+        (ev_planner.ChargingPriority.TIME_CRITICAL, False, 0, -2, True),
+        (ev_planner.ChargingPriority.SOLAR_ONLY, False, 0, -2, False),
+        (ev_planner.ChargingPriority.SOLAR_ONLY, False, -2, -2, True),
+        (ev_planner.ChargingPriority.SOLAR_PREFERRED, False, 0, -2, False),
+        (ev_planner.ChargingPriority.COST_OPTIMIZED, False, 0, -2, False),
+        (ev_planner.ChargingPriority.SOLAR_ONLY, False, 0, 25, True),
+        (ev_planner.ChargingPriority.TIME_CRITICAL, True, 0, 25, False),
     ),
 )
 def test_auto_schedule_free_grid_overrides_priority_without_forcing_max_rate(
     monkeypatch,
     priority,
     demand_blocked,
+    price,
+    cap,
     expected_start,
 ):
     actions_module = importlib.import_module("power_sync.automations.actions")
@@ -7003,13 +7143,6 @@ def test_auto_schedule_free_grid_overrides_priority_without_forcing_max_rate(
         state.is_charging = True
         return True
 
-    class FreeGridPlanner:
-        async def should_charge_now(self, **kwargs):
-            return True, "Free grid power (0.0c/kWh)", "grid_free"
-
-        def _is_grid_charging_blocked_at(self, when):
-            return demand_blocked
-
     monkeypatch.setattr(ev_planner, "get_ev_location", at_home)
     monkeypatch.setattr(ev_planner, "is_ev_plugged_in", plugged_in)
     monkeypatch.setattr(
@@ -7025,22 +7158,21 @@ def test_auto_schedule_free_grid_overrides_priority_without_forcing_max_rate(
     monkeypatch.setattr(
         ev_planner.dt_util,
         "now",
-        lambda: SimpleNamespace(weekday=lambda: 0),
+        lambda: datetime(2026, 10, 5, 1, 0, tzinfo=timezone.utc),
     )
 
-    executor = ev_planner.AutoScheduleExecutor(
-        _FakeHass(),
-        _FakeConfigEntry(),
-        planner=FreeGridPlanner(),
-    )
+    hass, entry = _FakeHass(), _FakeConfigEntry()
+    planner = ev_planner.ChargingPlanner(hass, entry)
+    monkeypatch.setattr(planner, "_is_grid_charging_blocked_at", lambda now: demand_blocked)
+    executor = ev_planner.AutoScheduleExecutor(hass, entry, planner=planner)
     settings = ev_planner.AutoScheduleSettings(
         vehicle_id=VIN,
         display_name="TESSY",
         target_soc=80,
-        priority=priority,
+        priority=priority, max_grid_price_cents=cap,
     )
     state = ev_planner.AutoScheduleState(vehicle_id=VIN)
-    state.current_plan = SimpleNamespace(windows=[])
+    state.current_plan = SimpleNamespace(windows=[], target_time=None)
     state.last_plan_update = ev_planner.datetime.now()
     executor._state[VIN] = state
 
@@ -7054,7 +7186,7 @@ def test_auto_schedule_free_grid_overrides_priority_without_forcing_max_rate(
                 "load_power": 1800,
                 "grid_power": 13000,
             },
-            current_price_cents=0,
+            current_price_cents=price,
         )
     )
 
@@ -7361,6 +7493,54 @@ def test_auto_schedule_reconciles_failed_source_family_switch(
     assert state.is_charging is expected_is_charging
     assert state.last_decision == expected_decision
     assert executor._restore_curtailment.await_count == expected_restore_count
+
+
+@pytest.mark.parametrize(
+    ("owner_mode", "expected_decision"),
+    [
+        ("manual_solar_surplus", "external"),
+        ("smart_schedule_solar_surplus", "charging"),
+    ],
+)
+def test_smart_schedule_reports_existing_solar_session_owner(
+    monkeypatch, owner_mode, expected_decision,
+):
+    monkeypatch.setattr(ev_planner, "get_ev_location", AsyncMock(return_value="home"))
+    monkeypatch.setattr(ev_planner, "is_ev_plugged_in", AsyncMock(return_value=True))
+    hass = _FakeHass()
+    hass.data["power_sync"]["entry-1"]["ev_ownership"] = {
+        VIN: {"owner": "powersync", "owner_mode": owner_mode},
+    }
+    planner = SimpleNamespace(
+        should_charge_now=AsyncMock(return_value=(
+            True, "In planned solar_surplus window (1c)", "solar_surplus",
+        )),
+    )
+    executor = ev_planner.AutoScheduleExecutor(hass, _FakeConfigEntry(), planner=planner)
+    executor._get_vehicle_soc = AsyncMock(return_value=66)
+    executor._start_charging = AsyncMock()
+    executor._stop_charging = AsyncMock()
+    settings = ev_planner.AutoScheduleSettings(vehicle_id=VIN, display_name="Model 3")
+    state = ev_planner.AutoScheduleState(vehicle_id=VIN)
+    state.current_plan = SimpleNamespace(windows=[])
+    state.last_plan_update = ev_planner.datetime.now()
+    state.is_charging = True
+    executor._state[VIN] = state
+
+    asyncio.run(executor._evaluate_vehicle(
+        VIN,
+        settings,
+        {
+            "battery_soc": 34, "solar_power": 12500, "load_power": 2200,
+            "grid_power": 0, "ev_power": 0,
+        },
+        current_price_cents=4.4,
+    ))
+
+    executor._start_charging.assert_not_awaited()
+    executor._stop_charging.assert_not_awaited()
+    assert state.is_charging is True
+    assert state.last_decision == expected_decision
 
 
 @pytest.mark.parametrize(
@@ -9418,8 +9598,23 @@ def test_solar_surplus_skips_unplugged_priority_vehicle(monkeypatch):
     assert [config["vehicle_id"] for config in selected] == [plugged_vin]
 
 
+def test_solar_ceiling_lookup_ignores_disabled_and_unconfigured_vehicles():
+    vin = "5YJTEST0000000001"
+    absent_vin = "5YJTEST0000000002"
+    executor = ev_planner.AutoScheduleExecutor(_FakeHass(), _FakeConfigEntry(), planner=None)
+    settings = ev_planner.AutoScheduleSettings(vehicle_id=vin, enabled=False, target_soc=70)
+    executor._settings[vin] = settings
+
+    assert executor.enabled_target_soc(vin) is None
+    settings.enabled = True
+    assert executor.enabled_target_soc(vin) == 70
+    assert executor.enabled_target_soc(absent_vin) is None
+    assert list(executor._settings) == [vin]
+
+
+@pytest.mark.parametrize("at_charge_ceiling", [False, True], ids=["tesla-complete", "soc-ceiling"])
 def test_solar_surplus_skips_complete_tesla_before_opening_a_session(
-    monkeypatch, fake_actions
+    monkeypatch, fake_actions, at_charge_ceiling,
 ):
     complete_vin = "LRWYHCEKXTC687964"
     eligible_vin = "XP7YGCEL7NB001704"
@@ -9428,7 +9623,12 @@ def test_solar_surplus_skips_complete_tesla_before_opening_a_session(
         return vehicle_vin in {complete_vin, eligible_vin}
 
     fake_actions._is_vehicle_charge_complete = AsyncMock(
-        side_effect=lambda _hass, vin: vin == complete_vin
+        side_effect=lambda _hass, vin: not at_charge_ceiling and vin == complete_vin
+    )
+    fake_actions._dynamic_ev_full_soc_reason = AsyncMock(
+        side_effect=lambda _hass, _entry, vin, params: (
+            "EV reached target 70%" if at_charge_ceiling and vin == complete_vin else None
+        )
     )
     monkeypatch.setattr(ev_planner, "is_ev_plugged_in", plugged_in)
 
@@ -9777,13 +9977,7 @@ def test_localvolts_forecast_covers_each_remaining_interval(monkeypatch, unavail
 def test_epex_price_forecast_uses_real_optimizer_slots_not_generic_tou(monkeypatch):
     """A high current EPEX price must not become a synthetic 15c off-peak."""
     now = datetime(2026, 9, 16, 21, 11, tzinfo=timezone.utc)
-    monkeypatch.setattr(ev_planner, "_ha_local_now_naive", lambda: now.replace(tzinfo=None))
-    # Slot timestamps go through dt_util.as_local; keep both sides in one zone
-    # whatever HA clock stub another test file installed.
-    monkeypatch.setattr(
-        ev_planner, "_as_ha_local_naive",
-        lambda value: value.astimezone(timezone.utc).replace(tzinfo=None),
-    )
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda: now)
     hass = _FakeHass()
     hass.data["power_sync"]["entry-1"]["optimization_coordinator"] = SimpleNamespace(
         data={
@@ -9876,6 +10070,218 @@ def test_epex_cost_optimized_bounds_each_slot_to_real_duration(monkeypatch):
     assert plan.estimated_grid_kwh == pytest.approx(0.5)
     assert plan.can_meet_target is False
     assert "0.5kWh" in plan.warning
+
+
+@pytest.mark.parametrize(("strategy", "start_min", "end_min", "energy", "can_meet"), [
+    ("solar_preferred", 0, 10, 1.0, False),
+    ("time_critical", 10, 60, 5.0, True),
+])
+def test_epex_departure_windows_fit_real_price_intervals(
+    monkeypatch, strategy, start_min, end_min, energy, can_meet,
+):
+    now = datetime(2026, 9, 17, 18, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda: now)
+    start = now.replace(tzinfo=None)
+    planner = ev_planner.ChargingPlanner(_FakeHass(), _FakeConfigEntry())
+    prices = [
+        ev_planner.PriceForecast(
+            (start + timedelta(minutes=minute)).isoformat(),
+            5.0 if minute < 10 else 100.0, 0.0, "epex",
+        )
+        for minute in range(0, 60, 5)
+    ]
+    plan = asyncio.run(getattr(planner, "_plan_" + strategy)(
+        vehicle_id=VIN, current_soc=60, target_soc=70,
+        target_time=start + timedelta(hours=1), energy_needed_kwh=5.0,
+        charger_power_kw=6.0, surplus_forecast=[], price_forecast=prices,
+        **({"max_grid_price_cents": 25.0} if strategy == "solar_preferred" else {}),
+    ))
+
+    bounds = [(datetime.fromisoformat(w.start_time), datetime.fromisoformat(w.end_time))
+              for w in plan.windows]
+    assert bounds == [(start + timedelta(minutes=i), start + timedelta(minutes=i + 5))
+                      for i in range(start_min, end_min, 5)]
+    assert plan.estimated_grid_kwh == pytest.approx(energy)
+    assert plan.can_meet_target is can_meet
+
+
+@pytest.mark.parametrize("strategy", ["solar_preferred", "time_critical", "cost_optimized"])
+def test_native_price_intervals_cross_dst_and_stop_at_departure(monkeypatch, strategy):
+    eastern = ZoneInfo("America/New_York")
+    now = datetime(2026, 11, 1, 1, 57, tzinfo=eastern, fold=0)
+    departure = datetime(2026, 11, 1, 1, 23, tzinfo=eastern, fold=1)
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda: now)
+    monkeypatch.setattr(ev_planner.dt_util, "as_local", lambda value: value.astimezone(eastern), raising=False)
+    planner = ev_planner.ChargingPlanner(_FakeHass(), _FakeConfigEntry())
+    prices = [
+        ev_planner.PriceForecast(start, 20.0, 0.0, "octopus", end)
+        for start, end in [
+            ("2026-11-01T01:55:00-04:00", "2026-11-01T01:05:00-05:00"),
+            ("2026-11-01T01:15:00-05:00", "2026-11-01T01:30:00-05:00"),
+        ]
+    ]
+    plan = asyncio.run(getattr(planner, "_plan_" + strategy)(
+        vehicle_id=VIN, current_soc=50, target_soc=70, target_time=departure,
+        energy_needed_kwh=10.0, charger_power_kw=6.0,
+        surplus_forecast=[], price_forecast=prices,
+    ))
+    assert [(w.start_time, w.end_time) for w in plan.windows] == [
+        (now.isoformat(), "2026-11-01T01:00:00-05:00"),
+        ("2026-11-01T01:00:00-05:00", "2026-11-01T01:05:00-05:00"),
+        ("2026-11-01T01:15:00-05:00", departure.isoformat()),
+    ]
+    assert plan.estimated_grid_kwh == pytest.approx(1.6)
+
+
+@pytest.mark.parametrize("strategy", ["solar_only", "solar_preferred"])
+def test_solar_uses_each_native_export_price_and_real_surplus(monkeypatch, strategy):
+    now = datetime(2026, 9, 17, 12, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda: now)
+    planner = ev_planner.ChargingPlanner(_FakeHass(), _FakeConfigEntry())
+    prices = [
+        ev_planner.PriceForecast(start, 100.0, export, "epex", end)
+        for start, end, export in [
+            ("2026-09-17T12:00:00+00:00", "2026-09-17T12:15:00+00:00", 5.0),
+            ("2026-09-17T12:15:00+00:00", "2026-09-17T12:45:00+00:00", 100.0),
+        ]
+    ]
+    plan = asyncio.run(getattr(planner, "_plan_" + strategy)(
+        vehicle_id=VIN, current_soc=40, target_soc=80,
+        target_time=now.replace(hour=13), energy_needed_kwh=5.0,
+        charger_power_kw=7.0, price_forecast=prices,
+        surplus_forecast=[ev_planner.SurplusForecast(now.replace(tzinfo=None).isoformat(), 4, 1, 3, 0.9)],
+        **({"max_grid_price_cents": 25.0} if strategy == "solar_preferred" else {}),
+    ))
+    assert [(w.start_time, w.end_time) for w in plan.windows] == [(prices[0].hour, prices[0].end_time)]
+    assert plan.estimated_solar_kwh == pytest.approx(0.75)
+
+
+@pytest.mark.parametrize("strategy", ["cost_optimized", "solar_preferred", "time_critical", "solar_only"])
+@pytest.mark.parametrize("other_simultaneous_kw", [0.0, 2.0])
+@pytest.mark.parametrize("month, day, minute", [(9, 17, 0), (11, 1, 40)])
+def test_planning_shares_only_concurrent_ev_window_power(
+    monkeypatch, strategy, other_simultaneous_kw, month, day, minute,
+):
+    eastern = ZoneInfo("America/New_York")
+    start = datetime(2026, month, day, 1, minute, tzinfo=eastern, fold=0)
+    utc_start = start.astimezone(timezone.utc)
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda: start)
+    monkeypatch.setattr(ev_planner.dt_util, "as_local", lambda value: value.astimezone(eastern), raising=False)
+    planner = ev_planner.ChargingPlanner(_FakeHass(), _FakeConfigEntry(), grid_capacity_kw=6.0)
+    executor = ev_planner.AutoScheduleExecutor(planner.hass, planner.config_entry, planner)
+    def stamp(minutes):
+        return (utc_start + timedelta(minutes=minutes)).astimezone(eastern).isoformat()
+    def reserve(vehicle, windows):
+        executor._settings[vehicle] = SimpleNamespace(enabled=True)
+        selected = [SimpleNamespace(start_time=stamp(a), end_time=stamp(b), estimated_power_kw=power)
+                    for a, b, power in windows]
+        executor._state[vehicle] = SimpleNamespace(last_decision="charging", current_plan=SimpleNamespace(windows=selected))
+
+    # Equal adjacent 3 kW windows from one car, then a disjoint later window.
+    # A duplicate overlapping record for the same physical car also cannot add a second draw.
+    reserve("car-a", [(0, 15, 3), (15, 30, 3), (25, 31, 2), (45, 55, 3)])
+    if other_simultaneous_kw:
+        reserve("car-c", [(10, 20, other_simultaneous_kw)])
+    reservations = executor._other_planned_ev_power_schedule("car-b")
+    # Reservation boundaries fall inside one tariff interval, including across DST.
+    prices = [ev_planner.PriceForecast(stamp(0), 20.0, 0.0, "octopus", stamp(60))]
+    surplus = [ev_planner.SurplusForecast(stamp(minute), 6, 0, 6, 1) for minute in (0, 20)]
+    plan = asyncio.run(getattr(planner, "_plan_" + strategy)(
+        vehicle_id="car-b", current_soc=20, target_soc=80,
+        target_time=datetime.fromisoformat(stamp(60)), energy_needed_kwh=10.0,
+        charger_power_kw=6.0, price_forecast=prices, minimum_charging_power_kw=1.0,
+        surplus_forecast=surplus if strategy == "solar_only" else [],
+        reserved_ev_power_schedule=reservations,
+    ))
+
+    draws = []
+    for minute in range(60):
+        at = utc_start + timedelta(minutes=minute, seconds=30)
+        draws.append(sum(w.estimated_power_kw for w in plan.windows
+                         if datetime.fromisoformat(w.start_time) <= at < datetime.fromisoformat(w.end_time)))
+    expected = [6.0 - (3 if minute < 30 or 45 <= minute < 55 else 2 if minute == 30 else 0)
+                - (other_simultaneous_kw if 10 <= minute < 20 else 0) for minute in range(60)]
+    assert draws == pytest.approx(expected)
+    assert plan.estimated_grid_kwh + plan.estimated_solar_kwh == pytest.approx(sum(expected) / 60)
+
+
+@pytest.mark.parametrize("strategy", ["cost_optimized", "solar_preferred", "time_critical"])
+@pytest.mark.parametrize("start_min, end_min, expected", [(30, 60, [(0, 30)]), (15, 45, [(0, 15), (45, 60)])])
+def test_native_grid_plan_observes_actual_demand_window(
+    monkeypatch, strategy, start_min, end_min, expected,
+):
+    from test_demand_charge_coordinator import _coordinator_module
+
+    brisbane = ZoneInfo("Australia/Brisbane")
+    start = datetime(2026, 11, 16, 16, tzinfo=brisbane)
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda: start)
+    monkeypatch.setattr(ev_planner.dt_util, "as_local", lambda value: value.astimezone(brisbane), raising=False)
+    def at(minutes):
+        return start + timedelta(minutes=minutes)
+    hass = _FakeHass()
+    with monkeypatch.context() as isolated:
+        demand = _coordinator_module(isolated).DemandChargeCoordinator(
+            hass, SimpleNamespace(), enabled=True, days="Weekdays Only",
+            start_time=at(start_min).strftime("%H:%M"), end_time=at(end_min).strftime("%H:%M"),
+        )
+    hass.data["power_sync"]["entry-1"]["demand_charge_coordinator"] = demand
+    planner = ev_planner.ChargingPlanner(hass, _FakeConfigEntry(), grid_capacity_kw=6.0)
+    assert planner._is_grid_charging_blocked_at(at(start_min).astimezone(timezone.utc))
+    assert not planner._is_grid_charging_blocked_at(at(end_min).astimezone(timezone.utc))
+    plan = asyncio.run(getattr(planner, "_plan_" + strategy)(
+        vehicle_id=VIN, current_soc=20, target_soc=90, target_time=at(60),
+        energy_needed_kwh=6.0, charger_power_kw=6.0, surplus_forecast=[],
+        price_forecast=[ev_planner.PriceForecast(at(0).isoformat(), 10, 0, "epex", at(60).isoformat())],
+    ))
+    assert [(w.start_time, w.end_time) for w in plan.windows] == [
+        (at(a).isoformat(), at(b).isoformat()) for a, b in expected
+    ]
+    assert plan.estimated_grid_kwh == pytest.approx(3)
+    assert plan.can_meet_target is False
+
+
+@pytest.mark.parametrize("strategy", ["solar_only", "solar_preferred", "cost_optimized", "time_critical"])
+def test_unaligned_native_price_rechecks_hourly_solar(monkeypatch, strategy):
+    zone = ZoneInfo("Asia/Kathmandu")
+    start = datetime(2026, 9, 17, 16, 45, tzinfo=zone)
+    end = start + timedelta(hours=1)
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda: start)
+    monkeypatch.setattr(ev_planner.dt_util, "as_local", lambda value: value.astimezone(zone), raising=False)
+    planner = ev_planner.ChargingPlanner(_FakeHass(), _FakeConfigEntry(), grid_capacity_kw=6)
+    prices = [ev_planner.PriceForecast(start.astimezone(timezone.utc).isoformat(), 100, 0, "epex",
+                                       end.astimezone(timezone.utc).isoformat())]
+    solar = [ev_planner.SurplusForecast(start.replace(minute=0).isoformat(), 6, 0, 6, 1),
+             ev_planner.SurplusForecast(end.replace(minute=0).isoformat(), 0, 0, 0, 1)]
+    plan = asyncio.run(getattr(planner, "_plan_" + strategy)(
+        vehicle_id=VIN, current_soc=20, target_soc=90, target_time=end,
+        energy_needed_kwh=6.0, charger_power_kw=6.0, surplus_forecast=solar,
+        price_forecast=prices,
+        **({"max_grid_price_cents": 25} if strategy in {"solar_preferred", "cost_optimized"} else {}),
+    ))
+    assert plan.estimated_solar_kwh == pytest.approx(1.5)
+    assert plan.estimated_grid_kwh == pytest.approx(4.5 if strategy == "time_critical" else 0)
+
+
+@pytest.mark.parametrize("demand_blocked", [False, True])
+def test_time_critical_uses_permitted_grid_when_another_ev_consumes_solar(monkeypatch, demand_blocked):
+    now = datetime(2026, 9, 17, 16, tzinfo=timezone.utc)
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda: now)
+    planner = ev_planner.ChargingPlanner(_FakeHass(), _FakeConfigEntry(), grid_capacity_kw=10)
+    monkeypatch.setattr(planner, "_is_grid_charging_blocked_at", lambda _when: demand_blocked)
+    hour = now.replace(tzinfo=None).isoformat()
+    plan = asyncio.run(planner._plan_time_critical(
+        VIN, 20, 80, now + timedelta(hours=1), 4.0, 6.0,
+        [ev_planner.SurplusForecast(hour, 2, 0, 2, 1)],
+        [ev_planner.PriceForecast(hour, 10, 0, "shoulder")],
+        reserved_ev_power_schedule={hour: 2.0},
+    ))
+    assert plan.can_meet_target is (not demand_blocked)
+    assert plan.estimated_solar_kwh == 0
+    assert plan.estimated_grid_kwh == pytest.approx(0 if demand_blocked else 4)
+    if not demand_blocked:
+        assert [(w.start_time, w.end_time, w.source) for w in plan.windows] == [
+            ("2026-09-17T16:20:00", "2026-09-17T17:00:00", "grid_shoulder")
+        ]
 
 
 def test_epex_cost_optimized_accumulates_distinct_final_slots(monkeypatch):
@@ -10093,6 +10499,32 @@ def test_scheduled_owner_with_fresh_stopped_telemetry_retries_start(
         f.actions._action_start_ev_charging_dynamic.assert_not_awaited()
         assert f.actions._dynamic_ev_state["entry-1"][vin] is f.original_state
         assert f.ownership.get_active_ev_owner_mode(f.hass, f.entry, vin) == "scheduled"
+
+
+def test_scheduled_withheld_tesla_start_keeps_one_controller_without_reporting_charging(
+    stopped_scheduled_session,
+):
+    f = stopped_scheduled_session
+    state = f.original_state
+    state.update(charging_started=False, transport_recovery_pending=True)
+    for _ in range(2):
+        asyncio.run(f.coordinator.evaluate({}, 10))
+        view = f.scheduled.get_state()
+        assert view["is_charging"] is False
+        assert view["last_decision"] == "starting"
+        assert view["vehicle_results"][f.vin]["start_pending"] is True
+        assert f.coordinator.get_state()["is_charging"] is False
+        assert view["preserve_home_battery_active"] is True
+        assert f.ownership.get_active_ev_owner_mode(f.hass, f.entry, f.vin) == "scheduled"
+    f.actions._action_start_ev_charging_dynamic.assert_not_awaited()
+    f.actions._action_stop_ev_charging_dynamic.assert_not_awaited()
+
+    # The same controller can confirm a subsequent retry.
+    state.update(charging_started=True, transport_recovery_pending=False)
+    f.actions._release_stopped_scheduled_tesla = AsyncMock(return_value=False)
+    asyncio.run(f.coordinator.evaluate({}, 10))
+    assert f.scheduled.get_state()["is_charging"] is True
+    assert f.coordinator.get_state()["is_charging"] is True
 
 
 def test_scheduled_stopped_session_recovery_waits_for_force_charge_to_end(
@@ -10805,3 +11237,228 @@ def test_sigenergy_price_level_restarts_for_next_ev_after_unplug_cleanup(
     fake_actions._action_start_ev_charging_dynamic.assert_awaited_once()
     assert fake_actions._action_start_ev_charging_dynamic.await_args.args[2]["vehicle_id"] == loadpoint_id
     fake_actions._action_stop_ev_charging_dynamic.assert_not_awaited()
+
+
+@pytest.mark.parametrize("provider", ["epex", "octopus", "localvolts"])
+def test_standalone_scheduled_uses_only_current_selected_retail_interval(monkeypatch, provider):
+    now = datetime(2026, 8, 5, 12, 7, tzinfo=timezone.utc)
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda: now)
+    monkeypatch.setattr(ev_pricing.dt_util, "now", lambda: now)
+    monkeypatch.setattr(ev_planner, "get_ev_location", AsyncMock(return_value="home"))
+    monkeypatch.setattr(ev_planner, "is_ev_plugged_in", AsyncMock(return_value=True))
+    hass, entry = _scheduled_price_hass(None), _FakeConfigEntry()
+    entry.options = {"electricity_provider": provider}
+    runtime = hass.data["power_sync"][entry.entry_id]
+    def row(minute, price):
+        return {"channelType": "general", "perKwh": price,
+                "startTime": now.replace(minute=minute).isoformat(),
+                "endTime": now.replace(minute=minute+5).isoformat()}
+    expired, current, future = row(0, 99), row(5, 5), row(15, -10)
+    feed = SimpleNamespace(last_update_success=True, data={
+        "current": [expired, current], "forecast": [future], "last_update": now,
+    })
+    runtime[f"{provider}_coordinator"] = feed
+    scheduled = ev_planner.ScheduledChargingExecutor(hass, entry)
+    smart = ev_planner.AutoScheduleExecutor(hass, entry, None)
+    assert asyncio.run(scheduled.get_charging_decision(None))[0]
+    assert asyncio.run(smart._get_current_price()) == 5
+    feed.data["current"] = [expired, future]
+    assert not asyncio.run(scheduled.get_charging_decision(None))[0]
+    assert asyncio.run(smart._get_current_price()) is None
+    feed.data["current"] = [current]
+    feed.last_update_success = False
+    assert not asyncio.run(scheduled.get_charging_decision(None))[0]
+
+
+def test_standalone_epex_preserves_interval_bounds_and_selected_sensor(monkeypatch):
+    now = datetime(2026, 8, 5, 12, 7, tzinfo=timezone.utc)
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda: now)
+    monkeypatch.setattr(ev_pricing.dt_util, "now", lambda: now)
+    hass, entry = _FakeHass(), _FakeConfigEntry()
+    entry.options = {"electricity_provider": "epex", "epex_region": "BE"}
+    runtime = hass.data["power_sync"][entry.entry_id]
+    a, b, c, d = [now.replace(minute=n).isoformat() for n in (0, 15, 30, 45)]
+    runtime["epex_coordinator"] = SimpleNamespace(last_update_success=True, data={
+        "current": [{"channelType":"general", "startTime":a, "endTime":b, "perKwh":8}],
+        "forecast": [{"channelType":"general", "startTime":c, "endTime":d, "perKwh":23}],
+    })
+    forecaster = ev_planner.PriceForecaster(hass, entry)
+    forecast = asyncio.run(forecaster.get_price_forecast(hours=1))
+    assert [x.import_cents for x in forecast] == [8, 23]
+    start = now.replace(minute=0, tzinfo=None)
+    assert ev_planner._forecast_interval_end(forecast, 0, start) == start + timedelta(minutes=15)
+    assert ev_planner._forecast_interval_end(forecast, 1, start+timedelta(minutes=30)) == start+timedelta(minutes=45)
+    entry.options["epex_import_price_entity"] = "sensor.retail"
+    assert not asyncio.run(forecaster.get_price_forecast(hours=1))
+    hass.states._states["sensor.retail"] = SimpleNamespace(state="0.31", attributes={
+        "unit_of_measurement":"EUR/kWh", "price_values":{a:0.31, b:0.17, c:0.20},
+    })
+    assert [round(x.import_cents) for x in asyncio.run(forecaster.get_price_forecast(hours=1))] == [31, 17, 20]
+
+
+@pytest.mark.parametrize("site_key", [
+    "esy_sunhome_coordinator", "custom_energy_coordinator", "amber_smartshift_coordinator", None,
+])
+def test_standalone_ev_tick_runs_disabled_cleanup_and_supplies_retail_price(monkeypatch, site_key):
+    import ast
+    import logging
+
+    now = datetime(2026, 8, 5, 12, 7, tzinfo=timezone.utc)
+    monkeypatch.setattr(ev_pricing.dt_util, "now", lambda: now)
+    hass, entry = _FakeHass(), _FakeConfigEntry()
+    entry.options = {"electricity_provider": "epex"}
+    runtime = hass.data["power_sync"][entry.entry_id]
+    runtime["epex_coordinator"] = SimpleNamespace(last_update_success=True, data={"current": [{
+        "channelType": "general", "perKwh": 5, "startTime": now.replace(minute=0).isoformat(),
+        "endTime": now.replace(minute=15).isoformat(),
+    }]})
+    if site_key:
+        runtime[site_key] = SimpleNamespace(last_update_success=True, data={
+            "battery_level": 80, "load_power": 2, "solar_power": 5, "battery_power": 0, "grid_power": -3,
+        })
+    # Use the production control-side selection and validation with isolated HA modules.
+    nodes = ast.parse((ROOT / "automations" / "actions.py").read_text()).body
+    keys = next(n for n in nodes if isinstance(n, ast.Assign)
+                and any(isinstance(t, ast.Name) and t.id == "EV_LIVE_STATUS_COORDINATOR_KEYS" for t in n.targets))
+    valid = next(n for n in nodes if isinstance(n, ast.FunctionDef) and n.name == "_coordinator_has_normalized_ev_live_data")
+    fake_actions = types.ModuleType("power_sync.automations.actions")
+    fake_actions.__dict__.update(Any=object, math=__import__("math"))
+    exec(compile(ast.Module(body=[keys, valid], type_ignores=[]), "<site source>", "exec"), fake_actions.__dict__)
+    monkeypatch.setitem(sys.modules, fake_actions.__name__, fake_actions)
+    auto = ev_planner.AutoScheduleExecutor(hass, entry, None)
+    auto.update_settings(VIN, {"enabled": False})
+    auto.get_state(VIN).is_charging = True
+    auto._stop_charging = AsyncMock(return_value=True)
+    auto._retry_curtailment_restoration = AsyncMock()
+    auto._save_cached_soc_if_needed = AsyncMock()
+    monkeypatch.setattr(ev_planner, "get_auto_schedule_executor", lambda: auto)
+    combined = SimpleNamespace(evaluate=AsyncMock())
+    monkeypatch.setattr(ev_planner, "get_ev_charging_coordinator", lambda: combined)
+    tick = next(n for n in ast.walk(ast.parse((ROOT / "__init__.py").read_text()))
+                if isinstance(n, ast.AsyncFunctionDef) and n.name == "auto_evaluate_automations")
+    namespace = {"__package__": "power_sync", "entry": entry, "hass": hass, "DOMAIN": "power_sync",
+                 "_LOGGER": logging.getLogger(__name__),
+                 "automation_engine": SimpleNamespace(async_evaluate_all=AsyncMock(return_value=0))}
+    exec(compile(ast.Module(body=[tick], type_ignores=[]), "<timer>", "exec"), namespace)
+    asyncio.run(namespace["auto_evaluate_automations"](now))
+    auto._stop_charging.assert_awaited_once()
+    live, price = combined.evaluate.await_args.args
+    assert price == 5
+    assert live.get("load_power") == (2000 if site_key else None)
+
+
+def test_epex_disabled_optimizer_cache_cannot_authorize_ev_or_hide_new_source(monkeypatch):
+    now = datetime(2026, 8, 5, 12, 7, tzinfo=timezone.utc)
+    monkeypatch.setattr(ev_pricing.dt_util, "now", lambda: now)
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda: now)
+    hass, entry = _FakeHass(), _FakeConfigEntry()
+    entry.options = {"electricity_provider": "epex"}
+    runtime = hass.data["power_sync"][entry.entry_id]
+    a, b, c = [now.replace(minute=n).isoformat() for n in (5, 10, 15)]
+    runtime["optimization_coordinator"] = SimpleNamespace(enabled=False, data={"schedule": {
+        "timestamps": [a, b], "import_price": [0, 0], "export_price": [0, 0],
+    }})
+    forecaster = ev_planner.PriceForecaster(hass, entry)
+    assert ev_pricing.get_ev_control_import_price(hass, entry) is None
+    assert ev_pricing.get_current_export_price(hass, entry.entry_id) is None
+    assert not asyncio.run(forecaster.get_price_forecast(1))
+    runtime["entry"] = entry
+    runtime["epex_coordinator"] = SimpleNamespace(last_update_success=True, data={
+        "current": [{"channelType": "general", "startTime": a, "endTime": b, "perKwh": 32}],
+        "forecast": [{"channelType": "feedIn", "startTime": b, "endTime": c, "perKwh": 0}],
+    })
+    assert ev_pricing.get_ev_control_import_price(hass, entry) == 32
+    assert ev_pricing.get_current_export_price(hass, entry.entry_id) is None
+    assert asyncio.run(forecaster.get_price_forecast(1))[0].export_cents is None
+
+
+@pytest.mark.parametrize("site", [{}, {"solar_power": None, "load_power": 1000}])
+def test_missing_site_snapshot_blocks_smart_schedule_capability_probe_and_grid_start(monkeypatch, site):
+    now = datetime(2026, 8, 5, 12, 7, tzinfo=timezone.utc)
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda: now)
+    monkeypatch.setattr(ev_planner, "get_ev_location", AsyncMock(return_value="home"))
+    monkeypatch.setattr(ev_planner, "is_ev_plugged_in", AsyncMock(return_value=True))
+    hass, entry = _FakeHass(), _FakeConfigEntry()
+    smart = ev_planner.AutoScheduleExecutor(hass, entry, None)
+    smart._get_vehicle_soc = AsyncMock(return_value=40)
+    smart._resolve_effective_charger_capability = AsyncMock(return_value={
+        "association_known": True, "capability_known": False, "max_charge_amps": 16,
+        "voltage": 230, "phases": 1, "max_charge_amps_source": "configured_charger",
+        "capability_refresh_required": True,
+    })
+    smart._capability_refresh_coordinator = SimpleNamespace(request=AsyncMock())
+    smart._start_charging = AsyncMock()
+    state = smart.get_state(VIN)
+    state.current_plan = SimpleNamespace(windows=[], target_time=None)
+    state.last_plan_update = now.replace(tzinfo=None)
+    settings = ev_planner.AutoScheduleSettings(enabled=True, vehicle_id=VIN, target_soc=80)
+    asyncio.run(smart._evaluate_vehicle(VIN, settings, site, -5))
+    smart._capability_refresh_coordinator.request.assert_not_awaited()
+    smart._start_charging.assert_not_awaited()
+    assert state.last_decision == "waiting"
+
+
+def test_octopus_published_blocks_require_a_real_vat_inclusive_rate():
+    """An absent Octopus retail rate must never become a free EV interval."""
+    import ast
+    import math
+
+    root = ast.parse((ROOT / "coordinator.py").read_text())
+    cls = next(n for n in root.body if isinstance(n, ast.ClassDef) and n.name == "OctopusPriceCoordinator")
+    expand = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "_expand_to_half_hourly")
+    expand.decorator_list = []
+    finite = next(n for n in root.body if isinstance(n, ast.FunctionDef) and n.name == "_finite_float")
+    namespace = {"Any": object, "datetime": datetime, "timedelta": timedelta, "math": math}
+    exec(compile(ast.Module(body=[finite, expand], type_ignores=[]), "<Octopus retail block>", "exec"), namespace)
+    row = {"valid_from": "2026-08-05T12:00:00+00:00", "valid_to": "2026-08-05T12:30:00+00:00"}
+    for price in (None, True, "nan"):
+        assert not namespace["_expand_to_half_hourly"]([{**row, "value_inc_vat": price}])
+    assert not namespace["_expand_to_half_hourly"]([row])
+    assert namespace["_expand_to_half_hourly"]([{**row, "value_inc_vat": 0}])[0]["value_inc_vat"] == 0
+
+
+def test_configured_but_unavailable_retail_source_cannot_borrow_optimizer_cache(monkeypatch):
+    now = datetime(2026, 8, 5, 12, 7, tzinfo=timezone.utc)
+    monkeypatch.setattr(ev_pricing.dt_util, "now", lambda: now)
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda: now)
+    hass, entry = _FakeHass(), _FakeConfigEntry()
+    entry.options = {"electricity_provider": "epex"}
+    runtime = hass.data["power_sync"][entry.entry_id]
+    runtime["optimization_coordinator"] = SimpleNamespace(enabled=True, data={"schedule": {
+        "timestamps": [now.replace(minute=i).isoformat() for i in (5, 10)],
+        "import_price": [0, 0], "export_price": [0, 0],
+    }})
+    assert ev_pricing.get_ev_control_import_price(hass, entry) == 0
+    runtime["epex_coordinator"] = None
+    runtime["entry"] = entry
+    assert ev_pricing.get_ev_control_import_price(hass, entry) is None
+    assert ev_pricing.get_current_export_price(hass, entry.entry_id) is None
+    assert not asyncio.run(ev_planner.PriceForecaster(hass, entry).get_price_forecast(1))
+
+
+@pytest.mark.parametrize("export_bounds, expected", [
+    ([(0, 15, -5), (15, 30, 0), (30, 45, 8), (45, 60, 13)],
+     [(0, 15, -5), (15, 30, 0), (30, 45, 8), (45, 60, 13)]),
+    ([(5, 15, -3), (30, 70, 10)], [(0, 5, None), (5, 15, -3), (15, 30, None), (30, 60, 10)]),
+    ([(-5, 5, 8), (5, 15, 12)], [(0, 5, 8), (5, 15, 12), (15, 60, None)]),
+])
+def test_native_ev_forecast_splits_import_at_export_boundaries(monkeypatch, export_bounds, expected):
+    now = datetime(2026, 8, 5, 12, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda: now)
+    hass, entry = _FakeHass(), _FakeConfigEntry()
+    entry.options = {"electricity_provider": "epex"}
+    def row(channel, start, end, cents):
+        return {"channelType": channel, "perKwh": cents,
+                "startTime": (now + timedelta(minutes=start)).isoformat(),
+                "endTime": (now + timedelta(minutes=end)).isoformat()}
+    rates = [row("general", 0, 60, -2)]
+    rates.extend(row("feedIn", start, end, -value) for start, end, value in export_bounds)
+    hass.data["power_sync"][entry.entry_id]["epex_coordinator"] = SimpleNamespace(
+        last_update_success=True, data={"forecast": rates},
+    )
+    result = asyncio.run(ev_planner.PriceForecaster(hass, entry).get_price_forecast(1))
+    assert [(datetime.fromisoformat(item.hour), datetime.fromisoformat(item.end_time),
+             item.import_cents, item.export_cents) for item in result] == [
+        (now + timedelta(minutes=start), now + timedelta(minutes=end), -2.0, value)
+        for start, end, value in expected
+    ]

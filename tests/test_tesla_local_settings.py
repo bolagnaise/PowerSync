@@ -626,7 +626,7 @@ async def test_ev_planner_saves_preserve_concurrent_powerwall_incident(monkeypat
         return value
     ns["store"].async_load.side_effect = pause_planner_snapshot
     planner = SimpleNamespace(_store=ns["store"], _cached_soc={"vehicle": {"soc": 42}},
-        _settings={"vehicle": SimpleNamespace(to_dict=lambda: {"enabled": True})})
+        _settings={"vehicle": SimpleNamespace(to_storage_dict=lambda: {"enabled": True})})
     ns["datetime"] = __import__("datetime").datetime
     # Keep the production lazy import, exposing the real extracted helper.
     package = __import__("types").ModuleType("power_sync")
@@ -636,12 +636,12 @@ async def test_ev_planner_saves_preserve_concurrent_powerwall_incident(monkeypat
     save_planner = load_function(ROOT / "automations/ev_charging_planner.py", writer, ns)
     planner_task = asyncio.create_task(save_planner(planner, ns["store"]) if writer == "save_settings"
                                        else save_planner(planner))
-    await loaded.wait()
+    await asyncio.wait_for(loaded.wait(), timeout=10)
     record = {"id": "new-incident", "site_id": "site", "updates": {"default_real_mode": "backup"}}
     change = (ns["_record_tesla_settings_submission"](record) if transition == "stage"
               else ns["handle_resume_powerwall_settings"](recovery_call()))
     settings_task = asyncio.create_task(change)
-    await settings_waiting.wait()
+    await asyncio.wait_for(settings_waiting.wait(), timeout=10)
     release.set()
     await asyncio.gather(planner_task, settings_task)
     pending = saved["tesla_settings_pending"]

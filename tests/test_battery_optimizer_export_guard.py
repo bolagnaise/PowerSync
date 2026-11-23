@@ -5715,6 +5715,97 @@ def test_primary_limit_without_incumbent_returns_labeled_greedy_plan(
     assert result.lp_stats["message"] == message
 
 
+@pytest.mark.parametrize(
+    ("failure", "expected_reason"),
+    [
+        ("timeout", "solver_failed"),
+        ("infeasible", "infeasible_self_consumption_hold"),
+        ("exception", "lp_exception"),
+        ("unavailable", "highs_unavailable"),
+    ],
+)
+def test_live_policy_returns_native_schedule_on_solver_failure(
+    battery_optimizer_module, monkeypatch, failure, expected_reason,
+):
+    module = battery_optimizer_module
+    optimizer = module.BatteryOptimizer(
+        capacity_wh=24180, max_charge_w=12600, backup_reserve=0.30,
+        hardware_reserve=0.05, allow_greedy_fallback=False,
+    )
+    optimizer.pre_window_slot = 4
+    optimizer.pre_window_soc_target = 1.0
+    monkeypatch.setattr(module, "HIGHS_AVAILABLE", failure != "unavailable")
+
+    def fail_solve(*args, **kwargs):
+        if failure == "exception":
+            raise RuntimeError("Native solver raised")
+        if failure == "infeasible":
+            return module._HighsResult(None, False, "Infeasible", 8, None)
+        return module._HighsResult(None, False, "Time limit reached", 13, None)
+
+    def reject_greedy(*args, **kwargs):
+        pytest.fail("Live optimizer must not run the greedy planner")
+
+    monkeypatch.setattr(module, "_solve_lp_highs", fail_solve)
+    monkeypatch.setattr(optimizer, "_solve_greedy", reject_greedy)
+    at = datetime(2026, 11, 22, 6, 30, tzinfo=timezone(timedelta(hours=10)))
+    timestamps = [at + timedelta(minutes=5 * idx) for idx in range(4)]
+    result = optimizer.optimize(
+        import_prices=[0.096, 0.25, 0.0, 0.25],
+        export_prices=[0.001, 0.01, 0.0, 0.40],
+        solar_forecast=[1.9, 0.0, 4.0, 0.0],
+        load_forecast=[0.7, 3.0, 0.7, 3.0],
+        current_soc=0.064,
+        allow_battery_export=True,
+        allow_grid_charge=True,
+        priority_export_slots=[False, False, False, True],
+        schedule_timestamps=timestamps,
+    )
+
+    assert result.degraded
+    assert not result.feasible
+    assert result.solver_used == "self_consumption_hold"
+    assert result.lp_stats["fallback_reason"] == expected_reason
+    assert not result.free_import_command_slots
+    assert not result.reserve_recommendation
+    actions = result.schedule.actions
+    assert [action.timestamp for action in actions] == timestamps
+    assert {action.action for action in actions} == {"self_consumption"}
+    assert actions[0].battery_charge_w == pytest.approx(1200.0)
+    assert actions[2].battery_charge_w == pytest.approx(3300.0)
+    assert actions[3].soc >= optimizer.hardware_reserve
+    assert result.grid_export_w == pytest.approx([0.0] * 4)
+
+
+def test_live_policy_keeps_valid_projected_highs_plan_on_later_timeout(
+    battery_optimizer_module, monkeypatch,
+):
+    module = battery_optimizer_module
+    optimizer = module.BatteryOptimizer(allow_greedy_fallback=False)
+    solve = module._solve_lp_highs
+    calls = 0
+
+    def time_out_after_first_pass(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return solve(*args, **kwargs)
+        return module._HighsResult(None, False, "Time limit reached", 13, None)
+
+    monkeypatch.setattr(module, "_solve_lp_highs", time_out_after_first_pass)
+    result = optimizer.optimize(
+        import_prices=[0.25, 0.25], export_prices=[0.08, 0.08],
+        solar_forecast=[0.0, 0.0], load_forecast=[0.7, 0.7],
+        current_soc=0.50,
+    )
+
+    assert calls == 2
+    assert result.feasible
+    assert not result.degraded
+    assert result.solver_used == "highs"
+    assert result.lp_stats["fallback_reason"] == "mode_projection_timeout_projected_highs"
+
+
 @pytest.mark.parametrize("starting_soc", [0.24, 0.37])
 @pytest.mark.parametrize("disable_idle", [False, True])
 def test_hold_cheap_charge_for_later_home_import_peak(

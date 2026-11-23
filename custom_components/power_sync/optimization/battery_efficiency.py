@@ -10,7 +10,7 @@ application are owned by the coordinator.
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 import math
 from typing import Any
@@ -247,7 +247,7 @@ class BatteryEfficiencySample:
 
 @dataclass
 class _ActiveCycle:
-    """Non-persisted state for one possible closed SOC loop."""
+    """Measurements accumulated toward one closed SOC loop."""
 
     state: str
     anchor_timestamp: datetime
@@ -262,6 +262,76 @@ class _ActiveCycle:
     discharge_kwh: float = 0.0
     min_soc: float = 1.0
     max_soc: float = 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        data = asdict(self)
+        data["anchor_timestamp"] = self.anchor_timestamp.isoformat()
+        data["last_timestamp"] = self.last_timestamp.isoformat()
+        return data
+
+    @classmethod
+    def from_dict(
+        cls, data: Any, topology_fingerprint: str | None
+    ) -> "_ActiveCycle | None":
+        if (
+            not isinstance(data, dict)
+            or not topology_fingerprint
+            or data.get("topology_fingerprint") != topology_fingerprint
+            or data.get("energy_source") != "integrated_ac_power"
+            or data.get("state") not in ("anchored", "excursion")
+        ):
+            return None
+        try:
+            anchor_timestamp = datetime.fromisoformat(data["anchor_timestamp"])
+            last_timestamp = datetime.fromisoformat(data["last_timestamp"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if (
+            anchor_timestamp.tzinfo is None
+            or last_timestamp.tzinfo is None
+            or not timedelta(0) <= last_timestamp - anchor_timestamp <= MAX_CYCLE_DURATION
+        ):
+            return None
+
+        anchor_soc = _finite(data.get("anchor_soc"))
+        last_soc = _finite(data.get("last_soc"))
+        last_power_kw = _finite(data.get("last_power_kw"))
+        capacity_kwh = _finite(data.get("capacity_kwh"))
+        charge_kwh = _finite(data.get("charge_kwh"))
+        discharge_kwh = _finite(data.get("discharge_kwh"))
+        min_soc = _finite(data.get("min_soc"))
+        max_soc = _finite(data.get("max_soc"))
+        if (
+            anchor_soc is None
+            or last_soc is None
+            or last_power_kw is None
+            or capacity_kwh is None
+            or charge_kwh is None
+            or discharge_kwh is None
+            or min_soc is None
+            or max_soc is None
+            or not ANCHOR_SOC_MIN <= anchor_soc <= ANCHOR_SOC_MAX
+            or not 0.0 <= min_soc <= min(anchor_soc, last_soc)
+            or not max(anchor_soc, last_soc) <= max_soc <= 1.0
+            or capacity_kwh <= 0
+            or min(charge_kwh, discharge_kwh) < 0
+        ):
+            return None
+        return cls(
+            state=data["state"],
+            anchor_timestamp=anchor_timestamp,
+            anchor_soc=anchor_soc,
+            last_timestamp=last_timestamp,
+            last_soc=last_soc,
+            last_power_kw=last_power_kw,
+            capacity_kwh=capacity_kwh,
+            topology_fingerprint=topology_fingerprint,
+            energy_source=data["energy_source"],
+            charge_kwh=charge_kwh,
+            discharge_kwh=discharge_kwh,
+            min_soc=min_soc,
+            max_soc=max_soc,
+        )
 
 
 @dataclass(frozen=True)
@@ -505,9 +575,7 @@ class BatteryEfficiencyLearner:
                 # Clipped SOC samples are useful once a cycle is active, but
                 # cannot establish an anchor for a new cycle.
                 return self._reject("soc_boundary")
-            # Open-cycle state is deliberately not persisted. Only the first
-            # topology fingerprint changes serialized state here.
-            return ObservationResult(topology_changed)
+            return ObservationResult(True)
 
         if timestamp == active.last_timestamp:
             return ObservationResult(False)
@@ -629,8 +697,7 @@ class BatteryEfficiencyLearner:
         ):
             active.state = "excursion"
 
-        # Integrated open-cycle state is not serialized.
-        return ObservationResult(False)
+        return ObservationResult(True)
 
     def _prune(self, now: datetime) -> None:
         cutoff = now - timedelta(days=HISTORY_DAYS)
@@ -818,6 +885,7 @@ class BatteryEfficiencyLearner:
             "topology_fingerprint": self.topology_fingerprint,
             "last_accepted_cycle": self.last_accepted_cycle,
             "last_rejection_reason": self.last_rejection_reason,
+            "active_cycle": self._active.to_dict() if self._active is not None else None,
         }
 
     @classmethod
@@ -871,5 +939,7 @@ class BatteryEfficiencyLearner:
                 else None
             ),
         )
-        # Open cycles are intentionally never serialized or restored.
+        learner._active = _ActiveCycle.from_dict(
+            data.get("active_cycle"), learner.topology_fingerprint
+        )
         return learner
