@@ -507,8 +507,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         tariff_schedule: dict | None = None,
         force_state_getter: Callable[[], dict] | None = None,
         force_state_clearer: Callable[[], None] | None = None,
-        cloud_tariff_charge_headroom_blocked: Callable[..., Awaitable[bool]] | None = None,
         entry: Any | None = None,
+        cloud_tariff_charge_headroom_blocked: Callable[..., Awaitable[bool]] | None = None,
         **kwargs,  # Ignore legacy feature flags
     ):
         """Initialize the optimization coordinator."""
