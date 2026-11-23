@@ -4328,6 +4328,7 @@ async def _tesla_ble_prepare_mutation(
     allow_backoff: bool,
     authorize: Optional[Callable[[], Any]],
     wake_first: bool,
+    passive_only: bool = False,
     expected_identity: tuple[tuple[Any, ...], ...] | None,
     charge_binding_holder: list | None = None,
     stock_token: tuple[Any, Any, Any, Any, Any, tuple[str, str, str], Any, bool]
@@ -4395,6 +4396,8 @@ async def _tesla_ble_prepare_mutation(
         stock_source_token=stock_source_token,
     ):
         return True
+    if passive_only:
+        return False
     if wake_first:
         if not await _wake_tesla_ble(
             hass, ble_prefix, allow_backoff=allow_backoff,
@@ -5218,6 +5221,7 @@ async def _set_ev_charge_limit_ble(
     percent: int,
     *,
     allow_backoff: bool = True,
+    passive_only: bool = False,
     authorize: Optional[Callable[[], Any]] = None,
 ) -> Optional[bool]:
     """Set EV charge limit via Tesla BLE."""
@@ -5239,7 +5243,8 @@ async def _set_ev_charge_limit_ble(
             limit_entity,
             allow_backoff=allow_backoff,
             authorize=authorize,
-            wake_first=True,
+            wake_first=not passive_only,
+            passive_only=passive_only,
             expected_identity=expected_identity,
             charge_binding_holder=charge_binding_holder,
             stock_token=stock_token,
@@ -6071,6 +6076,9 @@ def _tesla_transport_authority(
     original_pairing = pairing()
     deadline = params.get("_boost_start_deadline")
     def current():
+        sync_current = params.get("_target_sync_current")
+        if sync_current is not None and (not callable(sync_current) or not sync_current()):
+            return False
         active_recovery = runtime.get(ACTIVE_KEY) if isinstance(runtime, dict) else None
         if isinstance(active_recovery, dict):
             # Whole-entry recovery covers legacy aliases as well as physical
@@ -11267,6 +11275,7 @@ async def _action_set_ev_charge_limit(
                         ble_prefix,
                         percent,
                         allow_backoff=not bool(params.get("_user_initiated")),
+                        **({"passive_only": True} if "_target_sync_current" in params else {}),
                     ),
                     hass=hass,
                     entity_ids=(TESLA_BLE_NUMBER_CHARGING_LIMIT.format(prefix=ble_prefix),),
@@ -11298,12 +11307,15 @@ async def _action_set_ev_charge_limit(
             return False
 
         try:
-            wake_success = await _wake_tesla_ev_for_command(
-                hass, vehicle_vin, charge_limit_entity, config_entry.entry_id
-            )
-            if not wake_success:
-                _LOGGER.debug("Wake failed (possibly due to API credits), skipping set charge limit command")
-                return False
+            # Target sync only dispatches from a fresh vehicle report. Leave a
+            # sleeping vehicle pending for its next natural report.
+            if "_target_sync_current" not in params:
+                wake_success = await _wake_tesla_ev_for_command(
+                    hass, vehicle_vin, charge_limit_entity, config_entry.entry_id
+                )
+                if not wake_success:
+                    _LOGGER.debug("Wake failed (possibly due to API credits), skipping set charge limit command")
+                    return False
 
             if (not request_authority() or await _tesla_ha_command_entity(
                     hass, config_entry, params, "limit") != charge_limit_entity):

@@ -4540,6 +4540,8 @@ class AutoScheduleSettings:
     voltage: int = 230  # Australia standard voltage
     phases: int = 1  # 1 for single phase, 3 for three phase
 
+    _tesla_target_link: dict = field(default_factory=dict, repr=False)
+
     def get_min_surplus_kw(self) -> float:
         """Calculate minimum surplus based on charger electrical requirements.
 
@@ -4656,6 +4658,12 @@ class AutoScheduleSettings:
                 if source_key == "display_name" and not str(value or "").strip():
                     continue
                 setattr(self, attr_name, value)
+
+    def to_storage_dict(self) -> dict:
+        data = self.to_dict()
+        if self._tesla_target_link:
+            data["_tesla_target_link"] = self._tesla_target_link
+        return data
 
     def to_dict(self) -> dict:
         """Convert to dictionary."""
@@ -4834,6 +4842,7 @@ class AutoScheduleSettings:
             vehicle_model=data.get("vehicle_model", data.get("model")),
             vehicle_trim=data.get("vehicle_trim", data.get("trim")),
             target_soc=data.get("target_soc", 80),
+            _tesla_target_link=dict(data["_tesla_target_link"]) if isinstance(data.get("_tesla_target_link"), dict) else {},
             departure_time=legacy_time,
             departure_days=legacy_days,
             departure_times=departure_times,
@@ -5608,7 +5617,7 @@ class AutoScheduleExecutor:
 
             auto_schedule_data = {}
             for vehicle_id, settings in self._settings.items():
-                auto_schedule_data[vehicle_id] = settings.to_dict()
+                auto_schedule_data[vehicle_id] = settings.to_storage_dict()
 
             if hasattr(store, 'async_save'):
                 await _update_powerwall_store(store, {
@@ -5691,6 +5700,10 @@ class AutoScheduleExecutor:
                 profile = selected_profile(shared) if shared is not None else None
                 if shared is None or (profile and profile["id"] == existing.shared_charger_profile_id):
                     return existing
+            target_sync = getattr(self, "target_sync", None)
+            target_changed = existing is None or (existing.enabled, existing.target_soc) != (candidate.enabled, candidate.target_soc)
+            if target_sync and target_changed:
+                target_sync.prepare_edit(vehicle_id, existing, candidate, updates)
             if shared is not None:
                 # Shared vehicles restore from their selected profile. Write that single
                 # source of truth and retain the selection guard through persistence.
@@ -5698,7 +5711,7 @@ class AutoScheduleExecutor:
             else:
                 def update_vehicle(data):
                     profiles = dict(data.get("auto_schedule_settings") or {})
-                    profiles[vehicle_id] = candidate.to_dict()
+                    profiles[vehicle_id] = candidate.to_storage_dict()
                     return {"auto_schedule_settings": profiles}
 
                 await _update_powerwall_store(store, update_vehicle)
@@ -5706,9 +5719,11 @@ class AutoScheduleExecutor:
             if existing is None:
                 self._settings[vehicle_id] = candidate
                 self.get_state(vehicle_id)
-                return candidate
-            vars(existing).update(vars(candidate))
-            return existing
+            else:
+                vars(existing).update(vars(candidate))
+            if target_sync and target_changed:
+                target_sync.request(vehicle_id)
+            return self._settings[vehicle_id]
 
     def _apply_settings_update(
         self, vehicle_id: str, settings: AutoScheduleSettings, updates: dict,
@@ -5734,6 +5749,8 @@ class AutoScheduleExecutor:
         previous_conflicts = settings.conflicting_battery_rules() if battery_policy_edit else {}
 
         for key, value in updates.items():
+            if key.startswith("_"):
+                continue
             if key in (
                 "battery_capacity_kwh",
                 "charger_fallback_battery_capacity_kwh",

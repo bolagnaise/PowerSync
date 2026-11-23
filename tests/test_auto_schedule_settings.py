@@ -1643,3 +1643,143 @@ def test_action_smart_schedule_save_reports_storage_failure(monkeypatch):
     with pytest.raises(OSError, match="disk full"):
         asyncio.run(executor.save_settings(store, raise_errors=True))
     failed_save.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_linked_tesla_target_round_trip_uses_vehicle_readback_and_survives_restart(
+    smart_schedule_routes, monkeypatch,
+):
+    from power_sync.automations import tesla_target_sync as sync
+    from unittest.mock import Mock
+
+    executor, runtime, saved, _, settings_view, status_view, toggle, request = smart_schedule_routes
+    vin = "5YJTEST0000000001"
+    executor.hass.bus = types.SimpleNamespace(async_fire=Mock())
+    coordinator = sync.TeslaTargetSync(executor.hass, executor.config_entry, executor, runtime["store"])
+    executor.target_sync = coordinator
+    clock = [1000.0]
+    monkeypatch.setattr(sync, "time", types.SimpleNamespace(time=lambda: clock[0]))
+    monkeypatch.setattr(coordinator, "request", Mock())
+    sample = AsyncMock(return_value=(999.0, 80))
+    monkeypatch.setattr(coordinator, "_sample", sample)
+    monkeypatch.setattr(coordinator, "_read", lambda _: sample.return_value)
+    writer = AsyncMock(return_value=True)
+    fake = types.ModuleType("power_sync.automations.actions")
+    fake._action_set_ev_charge_limit = writer
+    monkeypatch.setitem(sys.modules, fake.__name__, fake)
+    query = types.SimpleNamespace(query={"target_only": "1", "vehicle_id": vin})
+    async def edit(**fields):
+        code, reply = await settings_view.post(request({"vehicle_id": vin, **fields}))
+        assert code == 200, reply
+
+    await edit(enabled=True, target_soc=70)
+    await coordinator._tick(vin)
+    assert writer.await_args.args[-1]["percent"] == 70
+    assert writer.await_args.args[-1]["vehicle_vin"] == vin
+    assert (await status_view.get(query))[1]["target_sync_status"]["status"] == "pending"
+    # An unchanged old report cannot confirm or retry the submitted command.
+    await coordinator._tick(vin)
+    assert writer.await_count == 1
+    clock[0] += 2
+    sample.return_value = (clock[0], 70)
+    await coordinator._tick(vin)
+    assert (await status_view.get(query))[1]["target_sync_status"]["status"] == "synced"
+    # A newer change in the Tesla app changes the saved target with no echo.
+    clock[0] += 2
+    sample.return_value = (clock[0], 85)
+    await coordinator._tick(vin)
+    persisted = saved["auto_schedule_settings"][vin]
+    assert persisted["target_soc"] == 85
+    restored = ev_planner.AutoScheduleSettings.from_dict(persisted)
+    assert restored._tesla_target_link["baseline"] == 85
+    assert "_tesla_target_link" not in restored.to_dict()
+    assert writer.await_count == 1
+    # A new app edit invalidates any previous pending write. Disabling the
+    # schedule also revokes a captured transport callback before submission.
+    await edit(target_soc=75)
+    clock[0] += 1
+    await coordinator._tick(vin)
+    params = writer.await_args.args[-1]
+    assert params["percent"] == 75 and params["_target_sync_current"]()
+    # A coordinator update can precede the HA entity event during transport.
+    old_sample = sample.return_value
+    sample.return_value = (clock[0], 60)
+    assert not params["_target_sync_current"]()
+    assert vin in coordinator.dirty
+    sample.return_value = old_sample
+    assert (await toggle.post(request({"vehicle_id": vin, "enabled": False})))[0] == 200
+    assert not params["_target_sync_current"]()
+    await coordinator._tick(vin)
+    assert (await status_view.get(query))[1] == {
+        "success": True, "vehicle_id": vin, "enabled": False, "target_soc": 75,
+    }
+    assert saved["auto_schedule_settings"]["other"] == {"max_grid_price_cents": 8}
+    assert (await status_view.get(types.SimpleNamespace(query={"target_only":"1","vehicle_id":"unknown"})))[0] == 404
+
+
+def test_link_keeps_lower_initial_target_and_rejects_stale_or_superseded_vehicle_echo():
+    from power_sync.automations.tesla_target_sync import TargetLink, reconcile
+    target, link, send = reconcile(90, TargetLink(), 70, 100, 101)
+    assert (target, send, link.baseline) == (70, False, 70)
+    first = link.app_edit(70, 105)
+    target, attempted, send = reconcile(75, first, 70, 106, 106)
+    assert target == 75 and send
+    from dataclasses import replace
+    pending = replace(attempted, attempts=1, sent_at=106).app_edit(75, 107)
+    target, pending, send = reconcile(85, pending, 75, 108, 108)
+    assert target == 85 and send
+    target, _, send = reconcile(85, pending, 60, 109, 109)
+    assert target == 60 and not send
+    target, _, send = reconcile(85, pending, 60, 5, 110)
+    assert target == 85 and not send
+    # A superseded command can reach Tesla even after its successor was confirmed.
+    second = replace(attempted, attempts=1, sent_at=106).app_edit(75, 107)
+    second = replace(second, sent_at=108, attempts=1)
+    _, confirmed, send = reconcile(85, second, 85, 109, 109)
+    assert not send and confirmed.baseline == 85
+    target, _, send = reconcile(85, confirmed, 75, 110, 110)
+    assert target == 85 and send
+    # A fresh, explicit edit made while enabling supersedes a lower car setting.
+    target, _, send = reconcile(90, TargetLink().app_edit(70, 110), 70, 111, 111)
+    assert target == 90 and send
+
+
+@pytest.mark.asyncio
+async def test_target_sync_uses_exact_vehicle_reports_and_tracks_only_its_limit_entities(
+    smart_schedule_routes, monkeypatch,
+):
+    from datetime import datetime, timezone
+    from unittest.mock import Mock
+    from power_sync.automations import tesla_target_sync as sync
+
+    executor, runtime, *_ = smart_schedule_routes
+    hass, entry = executor.hass, executor.config_entry
+    vin = "5YJTEST0000000001"
+    other = "5YJTEST0000000002"
+    entry.options.update(ev_provider="both", tesla_ble_entity_prefix="left,right",
+                         tesla_ble_vehicle_mapping=f"{vin}=right,{other}=left")
+    when = datetime.now(timezone.utc)
+    values = {"sensor.right_charge_limit": types.SimpleNamespace(state="65", last_reported=when),
+              "sensor.left_charge_limit": types.SimpleNamespace(state="95", last_reported=when)}
+    hass.states = types.SimpleNamespace(get=values.get)
+    source = types.SimpleNamespace(vin=vin, source_charge_timestamp=when.timestamp()-4, charge_limit_soc=80)
+    native = Mock(return_value=source)
+    monkeypatch.setattr(sync, "get_tesla_vehicle_observation", native)
+    monkeypatch.setattr(sync, "get_tesla_ble_observed_at", lambda _, state: state.last_reported if state else None)
+    actions = types.ModuleType("power_sync.automations.actions")
+    actions._get_tesla_ev_entity = AsyncMock(return_value="number.blue_charge_limit")
+    actions._resolve_ble_prefix_for_vehicle = lambda h, e, v: "right" if v == vin else "left"
+    monkeypatch.setitem(sys.modules, actions.__name__, actions)
+    track = Mock(return_value=Mock())
+    monkeypatch.setattr(sys.modules["homeassistant.helpers.event"], "async_track_state_change_event", track, raising=False)
+    manager = sync.TeslaTargetSync(hass, entry, executor, runtime["store"])
+    assert await manager._sample(vin) == (when.timestamp(), 65)
+    assert track.call_args.args[1] == ("number.blue_charge_limit", "sensor.right_charge_limit")
+    native.assert_called_once_with(hass, vin, preferred_entity_id="number.blue_charge_limit")
+    values["sensor.right_charge_limit"].state = "unavailable"
+    assert (await manager._sample(vin))[1] == 80
+    source.vin = other
+    assert await manager._sample(vin) is None
+    manager.request = Mock()
+    await track.call_args.args[2](None)
+    manager.request.assert_called_once_with(vin)

@@ -40,6 +40,8 @@ These actions change the mode's saved eligibility, not the physical charger dire
 
 When Smart Schedule is enabled for a vehicle, standalone Solar Surplus stops at that vehicle’s Smart Schedule target. For a Tesla, the lower of that target and the charge limit reported by the car applies. With Smart Schedule off, Solar Surplus uses the Tesla charge limit. A vehicle at its ceiling is skipped so another eligible vehicle can use the surplus.
 
+When Smart Schedule is on for a Tesla, its target and the car’s charge limit are linked. An edit in PowerSync updates the car, and a new limit reported by the car updates the schedule. When the link starts with different values, the lower one wins. Turning Smart Schedule off stops synchronization. An offline car can show a pending update until it reports again. Tesla accepts targets from 50% to 100%.
+
 ## Using EV charging with or without Smart Optimization
 
 Scheduled Charging and Price Level can use the current retail rate from EPEX, Octopus or Localvolts with the battery optimizer switched off. A price-limited session waits when its provider has no valid rate covering the current time. Smart Schedule still needs live site power before increasing charging. Disabling Smart Schedule lets it clean up its own session if site telemetry goes offline.

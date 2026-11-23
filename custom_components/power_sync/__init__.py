@@ -23071,6 +23071,20 @@ class AutoScheduleStatusView(HomeAssistantView):
                     "error": "Auto-schedule executor not initialized"
                 }, status=503)
 
+            target_sync = getattr(executor, "target_sync", None)
+            query = getattr(request, "query", {}) or {}
+            if query.get("target_only") == "1":
+                vehicle_id = query.get("vehicle_id")
+                profile = executor._settings.get(vehicle_id)
+                if not profile:
+                    return web.json_response({"success": False, "error": "Unknown vehicle"}, status=404)
+                result = {"success": True, "vehicle_id": vehicle_id, "enabled": profile.enabled,
+                          "target_soc": profile.target_soc}
+                sync_status = target_sync.get_status(vehicle_id) if target_sync else None
+                if sync_status:
+                    result["target_sync_status"] = sync_status
+                return web.json_response(result)
+
             # Refresh app-managed vehicle names and charger properties before
             # serializing either settings or state.
             settings = {}
@@ -23122,6 +23136,12 @@ class AutoScheduleStatusView(HomeAssistantView):
                 }
 
             states = executor.get_all_states()
+            if target_sync:
+                for vehicle_id in settings:
+                    sync_status = target_sync.get_status(vehicle_id)
+                    if sync_status:
+                        states.setdefault(vehicle_id, {})["target_sync_status"] = sync_status
+
 
             _LOGGER.debug(
                 "Auto-schedule status: %s",
@@ -48583,6 +48603,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Load saved settings
     if store:
         await auto_schedule_executor.load_settings(store)
+        from .automations.tesla_target_sync import TeslaTargetSync
+        auto_schedule_executor.target_sync = TeslaTargetSync(hass, entry, auto_schedule_executor, store)
+        auto_schedule_executor.target_sync.start()
     _LOGGER.info("🤖 Auto-schedule executor initialized")
 
     # Initialize price-level charging executor
