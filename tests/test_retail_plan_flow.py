@@ -341,7 +341,9 @@ def test_whole_hour_rows_build_without_minute_fields(modules):
     for ranges in tariff["seasons"]["All Year"]["tou_periods"].values():
         for item in ranges:
             assert "fromMinute" not in item and "toMinute" not in item
-    assert set(tariff) == {"name", "utility", "currency", "seasons", "energy_charges", "sell_tariff", "power_sync_explicit_periods"}
+    assert set(tariff) == {"name", "utility", "currency", "seasons", "energy_charges", "sell_tariff",
+                           "power_sync_explicit_periods", "power_sync_standard_rates"}
+    assert tariff["power_sync_standard_rates"] == {"import": 0.2, "export": 0.05}
 
 
 def test_period_editor_can_edit_a_row_and_continue_without_adding(modules):
@@ -450,3 +452,233 @@ def test_every_new_step_field_and_error_has_strings():
                 if name.startswith(("retail_plan", "tariff_allowance")):
                     for placeholder in re.findall(r"\{(\w+)\}", step.get("description", "")):
                         assert placeholder in steps_source, (name, placeholder)
+
+
+# --- review fixes -----------------------------------------------------------
+
+
+def test_allowance_ending_at_midnight_is_stored_in_the_runtime_spelling(modules):
+    flow_helpers = modules.retail_plan_flow
+    quota, error = flow_helpers.build_import_quota(
+        limit_kwh=10, start="21:00", end="24:00", price_minor=0, periods=[], standard_import=0.3,
+    )
+    assert error is None and quota["windows"] == [["21:00", "00:00"]]
+    quota_module = retail_plan_support.load_quota_modules()
+    rule = quota_module.custom_tariff_import_quota_rule({"import_quota": quota}, default_timezone="Australia/Sydney")
+    assert rule is not None, "the runtime accepts the saved window"
+    from zoneinfo import ZoneInfo
+
+    sydney = ZoneInfo("Australia/Sydney")
+    assert rule.contains(datetime(2026, 11, 2, 23, 30, tzinfo=sydney))
+    assert not rule.contains(datetime(2026, 11, 2, 20, 30, tzinfo=sydney))
+
+    # The form shows the saved midnight end as 24:00 again.
+    flow = _setup_flow(modules)
+    flow._tariff_import_quota = quota
+    defaults = {field: field.default for field in asyncio.run(flow.async_step_tariff_allowance())["data_schema"]}
+    assert defaults["allowance_end"] == "24:00"
+
+    imported = {"schedule": {"baseImportC": 30, "baseExportC": 5, "dailySupplyC": 0, "rates": [], "allowances": [
+        {"direction": "import", "startMinute": 1260, "endMinute": 1440, "limitKwh": 5, "priceC": 0, "period": "day"}]}}
+    draft = modules.aer_tariff_import.schedule_to_tariff_draft(imported, utility="x")
+    assert draft["import_quota"]["windows"] == [["21:00", "00:00"]]
+
+
+def test_allowance_discount_uses_only_rates_that_apply_in_the_window(modules):
+    covered = [{"name": "PEAK", "start": 11, "end": 14, "days": "all_days", "import_rate": 0.3, "export_rate": None}]
+    quota, error = modules.retail_plan_flow.build_import_quota(
+        limit_kwh=10, start="11:00", end="14:00", price_minor=20, periods=covered, standard_import=0.1,
+    )
+    assert error is None, "the 10c standard rate never applies inside a fully covered window"
+    assert (quota["base_price_c_per_kwh"], quota["bonus_price_c_per_kwh"]) == (30.0, 10.0)
+
+    weekdays_only = [{**covered[0], "days": "weekdays"}]
+    quota, _ = modules.retail_plan_flow.build_import_quota(
+        limit_kwh=10, start="11:00", end="14:00", price_minor=0, periods=weekdays_only, standard_import=0.1,
+    )
+    assert quota["base_price_c_per_kwh"] == 10.0, "weekends fall back to the standard rate"
+
+    seasonal = [{**covered[0], "season": "Summer"}]
+    seasons = [{"name": "Summer", "from_month": 11, "to_month": 3}, {"name": "Winter", "from_month": 4, "to_month": 10}]
+    quota, _ = modules.retail_plan_flow.build_import_quota(
+        limit_kwh=10, start="11:00", end="14:00", price_minor=0, periods=seasonal, standard_import=0.4, seasons=seasons,
+    )
+    assert quota["base_price_c_per_kwh"] == 30.0
+
+
+def test_allowance_rebuild_keeps_other_quota_settings(modules):
+    flow = _setup_flow(modules)
+    flow._retail_plan_retailer = "ergon"
+    asyncio.run(flow.async_step_retail_plan_preset({"retail_plan_preset": "ergon_solar_sharer_12f_2026"}))
+    flow._custom_tariff_data = {"name": "Ergon"}
+    form = asyncio.run(flow.async_step_tariff_allowance())
+    unchanged = {field: field.default for field in form["data_schema"]}
+    asyncio.run(flow.async_step_tariff_allowance(unchanged))
+    quota = flow._custom_tariff_data["import_quota"]
+    assert quota["stop_grid_charging_at_quota"] is True
+    assert quota["timezone_token"] == "Australia/Brisbane"
+    assert quota["name"] == "Solar Sharer free allowance"
+    assert (quota["windows"], quota["daily_cap_kwh"], quota["bonus_price_c_per_kwh"]) == ([["11:00", "14:00"]], 24.0, 8.101)
+
+
+def test_intermediate_usage_tiers_are_reported(modules):
+    imported = modules.aer_tariff_import.import_prd_electricity_plan({
+        "planId": "TIER@EME",
+        "electricityContract": {"tariffPeriod": [{"rateBlockUType": "singleRate", "singleRate": {
+            "displayName": "Tiered", "rates": [
+                {"volume": 10, "unitPrice": "0.10"}, {"volume": 10, "unitPrice": "0.20"}, {"unitPrice": "0.30"}]}}]},
+    })
+    assert any("Tiered: usage tiers between the first block" in text for text in imported["warnings"])
+    two_tier = modules.aer_tariff_import.import_prd_electricity_plan({
+        "planId": "TWO@EME",
+        "electricityContract": {"tariffPeriod": [{"rateBlockUType": "singleRate", "singleRate": {
+            "rates": [{"volume": 10, "unitPrice": "0.10"}, {"unitPrice": "0.30"}]}}]},
+    })
+    assert not any("usage tiers" in text for text in two_tier["warnings"])
+
+
+def _flow_namespace(modules):
+    namespace = retail_plan_support.config_flow_namespace(modules)
+    retail_plan_support.config_flow_class(modules, namespace)
+    namespace.update(
+        CONF_GLOBIRD_PLAN="globird_plan",
+        GLOBIRD_PLAN_FOUR4FREE_CUSTOM="four4free_custom",
+        GLOBIRD_PLAN_NOT_ZEROHERO="not_zerohero",
+        CONF_ELECTRICITY_PROVIDER="electricity_provider",
+        CONF_DAILY_SUPPLY_CHARGE="daily_supply_charge",
+        CONF_AGL_BATTERY_REWARDS_OFFPEAK_EXPORT_RATE="agl_battery_rewards_offpeak_export_rate",
+        dt_util=SimpleNamespace(now=lambda: datetime(2026, 11, 2, 12, 0)),
+    )
+    return namespace
+
+
+def test_flat_tariff_allowance_discounts_the_flat_rate(modules):
+    namespace = _flow_namespace(modules)
+    flow_class = namespace["PowerSyncConfigFlow"]
+    setup_step = retail_plan_support.flow_method(modules, "PowerSyncConfigFlow", "async_step_custom_tariff", namespace)
+    options_step = retail_plan_support.flow_method(
+        modules, "PowerSyncOptionsFlow", "async_step_custom_tariff_options", namespace)
+
+    class Setup(modules.retail_plan_steps.RetailPlanSetupMixin):
+        _selected_electricity_provider = "other"
+        _tariff_currency = "AUD"
+        hass = None
+        _build_tariff_from_periods = flow_class._build_tariff_from_periods
+
+        def __init__(self):
+            self._custom_tariff_data = {}
+
+        def _selector_unit(self, kind="minor_rate"):
+            return "c/kWh"
+
+        def async_show_form(self, **kwargs):
+            return {"type": "form", **kwargs}
+
+        async def async_step_custom_tariff(self, user_input=None):
+            return await setup_step(self, user_input)
+
+        async def async_step_battery_system(self):
+            return {"step_id": "battery_system"}
+
+    flow = Setup()
+    form = asyncio.run(flow.async_step_custom_tariff({"tariff_type": "flat", "flat_rate": 30, "offpeak_rate": 15, "fit_rate": 5}))
+    assert form["step_id"] == "tariff_allowance"
+    asyncio.run(flow.async_step_tariff_allowance(
+        {"allowance_kwh": 10, "allowance_start": "11:00", "allowance_end": "14:00", "allowance_price": 0}))
+    assert flow._custom_tariff_data["import_quota"]["bonus_price_c_per_kwh"] == 30.0
+
+    saved = []
+
+    class Options:
+        _provider = "other"
+        _amber_options: dict = {}
+        hass = SimpleNamespace(data={})
+
+        def _get_option(self, key, default=None):
+            return default
+
+        def _selector_unit(self, kind="minor_rate"):
+            return "c/kWh"
+
+        def _currency(self):
+            return "AUD"
+
+        def _build_tariff_from_periods_compat(self, periods):
+            return {"periods": periods, "standard": self._tariff_offpeak_rate}
+
+        async def _save_custom_tariff(self, tariff):
+            saved.append(tariff)
+
+        async def async_step_tariff_allowance_options(self):
+            return {"step_id": "tariff_allowance_options"}
+
+    options = Options()
+    asyncio.run(options_step(options, {"tariff_type": "flat", "flat_rate": 28, "offpeak_rate": 15, "fit_rate": 5}))
+    assert options._tariff_offpeak_rate == 0.28 and saved[-1]["standard"] == 0.28
+
+
+def test_options_removal_keeps_a_row_held_for_editing(modules):
+    namespace = _flow_namespace(modules)
+    namespace.update(DEFAULT_AGL_BATTERY_REWARDS_OFFPEAK_EXPORT_RATE=3.0)
+    step = retail_plan_support.flow_method(modules, "PowerSyncOptionsFlow", "async_step_tariff_period_options", namespace)
+    rows = [{"name": "PEAK", "start": hour, "end": hour + 1, "days": "all_days", "import_rate": 0.5, "export_rate": None}
+            for hour in (16, 17, 18)]
+
+    class Options:
+        _provider = "other"
+
+        def __init__(self):
+            self._tariff_periods = [dict(row) for row in rows]
+            self.saved = []
+
+        def _get_option(self, key, default=None):
+            return default
+
+        def _build_tariff_from_periods_compat(self, periods):
+            return {"periods": [dict(period) for period in periods]}
+
+        async def _save_custom_tariff(self, tariff):
+            self.saved.append(tariff["periods"])
+
+        async def async_step_tariff_period_options(self, user_input=None):
+            return {"step_id": "tariff_period_options"}
+
+    flow = Options()
+    asyncio.run(step(flow, {"edit_period": "0"}))
+    asyncio.run(step(flow, {"remove_period": "0"}))
+    assert [row["start"] for row in flow.saved[-1]] == [18, 16], "the edited row is still saved"
+    assert flow._tariff_period_editing["start"] == 16
+
+
+def test_fully_covered_schedule_reopens_with_its_standard_rates(modules):
+    namespace = _flow_namespace(modules)
+    flow_class = namespace["PowerSyncConfigFlow"]
+    step = retail_plan_support.flow_method(modules, "PowerSyncOptionsFlow", "async_step_custom_tariff_options", namespace)
+    context = SimpleNamespace(_tariff_offpeak_rate=0.30, _tariff_fit_rate=0.04, _tariff_plan_name="Covered",
+                              _selected_electricity_provider="other", _tariff_currency="AUD", hass=None)
+    tariff = flow_class._build_tariff_from_periods(context, [
+        {"name": "PEAK", "start": 0, "end": 12, "days": "all_days", "import_rate": 0.5, "export_rate": 0.1},
+        {"name": "SHOULDER", "start": 12, "end": 24, "days": "all_days", "import_rate": None, "export_rate": None},
+    ])
+    assert "OFF_PEAK" not in tariff["energy_charges"]["All Year"] and "OFF_PEAK_AUTO" not in tariff["energy_charges"]["All Year"]
+
+    class Store:
+        def get_custom_tariff(self):
+            return tariff
+
+    class Options:
+        _provider = "other"
+        hass = SimpleNamespace(data={"power_sync": {"entry": {"automation_store": Store()}}})
+
+        def _get_option(self, key, default=None):
+            return default
+
+        def _selector_unit(self, kind="minor_rate"):
+            return "c/kWh"
+
+        def async_show_form(self, **kwargs):
+            return kwargs
+
+    form = step(Options())
+    defaults = {field: field.default for field in asyncio.run(form)["data_schema"]}
+    assert defaults["offpeak_rate"] == 30.0 and defaults["fit_rate"] == 4.0

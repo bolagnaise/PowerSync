@@ -7155,6 +7155,9 @@ class PowerSyncConfigFlow(
 
             if tariff_type == "flat":
                 flat_rate = user_input.get("flat_rate", 30) / 100
+                # A flat tariff has no periods: the flat rate is what the
+                # free import allowance discounts.
+                self._tariff_offpeak_rate = flat_rate
                 self._tariff_seasons = [
                     {"name": "All Year", "from_month": 1, "to_month": 12}
                 ]
@@ -8082,6 +8085,12 @@ class PowerSyncConfigFlow(
             # Keep the user-authored rows alongside the runtime tariff so an
             # options reopen cannot replace them with generated off-peak gaps.
             "power_sync_explicit_periods": [dict(period) for period in periods],
+            # Blank period prices mean these rates; keep them even when the
+            # periods leave no uncovered time to generate OFF_PEAK from.
+            "power_sync_standard_rates": {
+                "import": standard_import,
+                "export": standard_export,
+            },
         }
         daily_supply_charge = getattr(self, "_tariff_daily_supply_charge", None)
         if isinstance(daily_supply_charge, (int, float)) and daily_supply_charge >= 0:
@@ -18516,6 +18525,9 @@ class PowerSyncOptionsFlow(
 
             if tariff_type == "flat":
                 flat_rate = user_input.get("flat_rate", 30) / 100
+                # A flat tariff has no periods: the flat rate is what the
+                # free import allowance discounts.
+                self._tariff_offpeak_rate = flat_rate
                 self._tariff_seasons = [
                     {"name": "All Year", "from_month": 1, "to_month": 12}
                 ]
@@ -18636,6 +18648,19 @@ class PowerSyncOptionsFlow(
                     if isinstance(v, (int, float)):
                         default_fit = round(v * 100, 1)
                         break
+            # A generated OFF_PEAK_AUTO rate is the standard rate. Without
+            # one (a fully covered week, or an explicit OFF_PEAK period),
+            # use the standard rates saved with the editor rows instead.
+            standard_rates = current_tariff.get("power_sync_standard_rates")
+            if isinstance(standard_rates, dict):
+                if not isinstance(
+                    charges.get("OFF_PEAK_AUTO"), (int, float)
+                ) and isinstance(standard_rates.get("import"), (int, float)):
+                    default_offpeak = round(standard_rates["import"] * 100, 3)
+                if not isinstance(
+                    sell_charges.get("OFF_PEAK_AUTO"), (int, float)
+                ) and isinstance(standard_rates.get("export"), (int, float)):
+                    default_fit = round(standard_rates["export"] * 100, 3)
         self._custom_tariff_for_options = current_tariff
         draft_seasons = (draft or {}).get("seasons") or []
         if draft:
@@ -19148,8 +19173,11 @@ class PowerSyncOptionsFlow(
                     self._tariff_periods, remove_period
                 )
                 if removed is not None:
+                    # A row selected for editing is out of the list until it
+                    # is saved; it must not be dropped from the saved tariff.
+                    held = getattr(self, "_tariff_period_editing", None)
                     custom_tariff = self._build_tariff_from_periods_compat(
-                        self._tariff_periods,
+                        self._tariff_periods + ([held] if held else []),
                     )
                     await self._save_custom_tariff(custom_tariff)
                 return await self.async_step_tariff_period_options()

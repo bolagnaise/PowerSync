@@ -463,6 +463,55 @@ def quota_effective_price(quota: Any) -> float | None:
     return max(0.0, base - min(base, bonus))
 
 
+def slot_import_rate(
+    periods: list[dict[str, Any]],
+    *,
+    standard_import: float,
+    weekday: int,
+    slot: int,
+    season: str | None = None,
+) -> float:
+    """Import rate for one half hour on one Tesla weekday (shortest period wins).
+
+    Matches the runtime: an overnight period belongs to its start day, and a
+    blank import price is the standard rate.
+    """
+    minute = slot * 30
+    yesterday = (weekday - 1) % 7
+    best: tuple[int, float] | None = None
+    for period in periods:
+        if season is not None and period.get("season", season) != season:
+            continue
+        start, end = int(float(period["start"]) * 60), int(float(period["end"]) * 60)
+        end = end or 1440
+        days = day_numbers(period.get("days"))
+        if start < end:
+            active = weekday in days and start <= minute < end
+        else:
+            active = (weekday in days and minute >= start) or (yesterday in days and minute < end)
+        if not active:
+            continue
+        duration = (end - start) % 1440 or 1440
+        rate = standard_import if period.get("import_rate") is None else float(period["import_rate"])
+        if best is None or duration < best[0]:
+            best = (duration, rate)
+    return standard_import if best is None else best[1]
+
+
+def quota_clock_text(hours: Any) -> str:
+    """Runtime quota windows spell midnight as 00:00, never 24:00."""
+    text = clock_text(hours)
+    return "00:00" if text == "24:00" else text
+
+
+# Fields the allowance form rebuilds; anything else on a saved quota (for
+# example ``stop_grid_charging_at_quota``) is carried over unchanged.
+_QUOTA_FORM_FIELDS = frozenset(
+    {"enabled", "windows", "start_time", "end_time", "daily_cap_kwh",
+     "base_price_c_per_kwh", "bonus_price_c_per_kwh"}
+)
+
+
 def build_import_quota(
     *,
     limit_kwh: Any,
@@ -471,8 +520,8 @@ def build_import_quota(
     price_minor: Any,
     periods: list[dict[str, Any]],
     standard_import: float,
-    name: str | None = None,
-    timezone_token: str | None = None,
+    seasons: list[dict[str, Any]] | None = None,
+    existing: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, str | None]:
     """Build the custom tariff import quota from the allowance form."""
     try:
@@ -484,46 +533,51 @@ def build_import_quota(
         return None, None
     start_hours = parse_clock(start)
     end_hours = parse_clock(end, end=True)
+    if end_hours == 0:
+        end_hours = 24
     if start_hours is None or end_hours is None or start_hours == end_hours or price < 0:
         return None, "allowance_invalid"
     start_minute, end_minute = int(start_hours * 60), int(end_hours * 60)
 
-    def overlaps(period: dict[str, Any]) -> bool:
-        p_start, p_end = int(float(period["start"]) * 60), int(float(period["end"]) * 60)
-        for slot in range(48):
-            minute = slot * 30
-            in_window = (
-                start_minute <= minute < end_minute
-                if start_minute < end_minute
-                else minute >= start_minute or minute < end_minute
-            )
-            in_period = p_start <= minute < p_end if p_start < p_end else minute >= p_start or minute < p_end
-            if in_window and in_period:
-                return True
-        return False
-
-    # The allowance discounts whichever rate applies inside the window. Use
-    # the lowest candidate (any season or day) so the discount never exceeds
-    # the real benefit.
-    underlying = {standard_import * 100} | {
-        float(period["import_rate"]) * 100
-        for period in periods
-        if period.get("import_rate") is not None and overlaps(period)
-    }
+    # The allowance discounts whichever rate actually applies inside the
+    # window. Resolve every season, day and half hour there and use the lowest
+    # so the discount never exceeds the real benefit.
+    season_names = [str(season["name"]) for season in seasons or [] if season.get("name")] or [None]
+    underlying: set[float] = set()
+    for season in season_names:
+        for weekday in range(7):
+            for slot in range(48):
+                minute = slot * 30
+                inside = (
+                    start_minute <= minute < end_minute
+                    if start_minute < end_minute
+                    else minute >= start_minute or minute < end_minute
+                )
+                if inside:
+                    underlying.add(
+                        slot_import_rate(
+                            periods, standard_import=standard_import,
+                            weekday=weekday, slot=slot, season=season,
+                        ) * 100
+                    )
     base = min(underlying) if underlying else standard_import * 100
     discount = round(base - price, 6)
     if discount <= 0:
         return None, "allowance_not_cheaper"
+    preserved = {
+        key: value
+        for key, value in (existing or {}).items()
+        if key not in _QUOTA_FORM_FIELDS
+    }
     quota = {
+        **preserved,
         "enabled": True,
-        "name": name or "Free import allowance",
-        "windows": [[clock_text(start_hours), clock_text(end_hours)]],
+        "name": preserved.get("name") or "Free import allowance",
+        "windows": [[quota_clock_text(start_hours), quota_clock_text(end_hours)]],
         "daily_cap_kwh": limit,
         "base_price_c_per_kwh": round(base, 6),
         "bonus_price_c_per_kwh": discount,
     }
-    if timezone_token:
-        quota["timezone_token"] = timezone_token
     return quota, None
 
 
@@ -598,27 +652,12 @@ def price_strip(
 ) -> str:
     """A 48-character import price strip for one day (shortest period wins)."""
     weekday = (when.weekday() + 1) % 7
-    yesterday = (weekday - 1) % 7
-    prices: list[float] = []
-    for slot in range(48):
-        minute = slot * 30
-        best: tuple[int, float] | None = None
-        for period in periods:
-            if season is not None and period.get("season", season) != season:
-                continue
-            start, end = int(float(period["start"]) * 60), int(float(period["end"]) * 60)
-            days = day_numbers(period.get("days"))
-            if start < end:
-                active = weekday in days and start <= minute < end
-            else:
-                active = (weekday in days and minute >= start) or (yesterday in days and minute < end)
-            if not active:
-                continue
-            duration = (end - start) % 1440 or 1440
-            rate = standard_import if period.get("import_rate") is None else float(period["import_rate"])
-            if best is None or duration < best[0]:
-                best = (duration, rate)
-        prices.append(standard_import if best is None else best[1])
+    prices = [
+        slot_import_rate(
+            periods, standard_import=standard_import, weekday=weekday, slot=slot, season=season
+        )
+        for slot in range(48)
+    ]
     low, high = min(prices), max(prices)
     if high == low:
         return PRICE_STRIP_LEVELS[0] * 48

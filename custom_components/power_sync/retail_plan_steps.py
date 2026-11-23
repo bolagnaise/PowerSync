@@ -285,6 +285,8 @@ class _RetailPlanSteps:
     def _rp_allowance_schema(self) -> vol.Schema:
         quota = getattr(self, "_tariff_import_quota", None)
         window = quota_window(quota) or ("11:00", "14:00")
+        # Saved quotas spell a midnight end 00:00; the end selector uses 24:00.
+        window = (window[0], "24:00" if window[1] == "00:00" else window[1])
         limit = float(quota.get("daily_cap_kwh", 0)) if isinstance(quota, dict) else 0.0
         price = quota_effective_price(quota) or 0.0
         return vol.Schema(
@@ -310,8 +312,8 @@ class _RetailPlanSteps:
             price_minor=user_input.get(CONF_ALLOWANCE_PRICE, 0),
             periods=list(getattr(self, "_tariff_periods", None) or []),
             standard_import=float(getattr(self, "_tariff_offpeak_rate", 0.0) or 0.0),
-            name=existing.get("name"),
-            timezone_token=existing.get("timezone_token"),
+            seasons=getattr(self, "_tariff_seasons", None),
+            existing=existing,
         )
 
     def _rp_allowance_placeholders(self) -> dict[str, str]:

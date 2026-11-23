@@ -298,6 +298,13 @@ def _build(direction: str, entries: list[dict[str, Any]], warnings: dict[str, No
     for entry in entries:
         balance = entry["blocks"][-1]
         quota = entry["blocks"][0] if len(entry["blocks"]) > 1 or balance["volume"] is not None else None
+        if len(entry["blocks"]) > 2:
+            # Only the first block (as an allowance) and the final rate are
+            # modelled; say so rather than silently repricing the middle tiers.
+            warnings[
+                f"{entry['label']}: usage tiers between the first block and the "
+                "final rate were ignored; check the tiered rates on your contract."
+            ] = None
         if quota and quota["volume"]:
             shape = entry["windows"] or [{"startMinute": 0, "endMinute": 1440}]
             if entry["volumePeriod"] != "day":
@@ -564,7 +571,9 @@ def _season_periods(
 
 
 def _minute_text(minute: int) -> str:
-    return "24:00" if minute == 1440 else f"{minute // 60:02d}:{minute % 60:02d}"
+    """Runtime quota windows spell midnight 00:00 (an end of 00:00 wraps)."""
+    minute %= 1440
+    return f"{minute // 60:02d}:{minute % 60:02d}"
 
 
 def _import_allowance(

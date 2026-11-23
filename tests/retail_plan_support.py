@@ -169,3 +169,20 @@ def flow_method(modules: SimpleNamespace, class_name: str, method_name: str, nam
     source = textwrap.dedent(source).replace("        from .const import DOMAIN\n", '        DOMAIN = "power_sync"\n')
     exec(source, namespace)
     return namespace[method_name]
+
+
+def load_quota_modules():
+    """The runtime quota rule parser, without Home Assistant."""
+    package = types.ModuleType(PACKAGE + "_quota")
+    package.__path__ = [str(COMPONENT_ROOT)]
+    sys.modules[package.__name__] = package
+    loaded = None
+    for name in ("quota", "tariff_quota"):
+        qualified = f"{package.__name__}.{name}"
+        spec = importlib.util.spec_from_file_location(qualified, COMPONENT_ROOT / f"{name}.py")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[qualified] = module
+        assert spec and spec.loader
+        spec.loader.exec_module(module)
+        loaded = module
+    return loaded

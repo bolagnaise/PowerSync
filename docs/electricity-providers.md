@@ -199,8 +199,8 @@ tariff editor for review and nothing is saved until you finish:
 - A daily first-kWh block becomes the free import allowance.
 
 Closed government premium feed-in schemes, controlled load, demand charges,
-incentives, non-daily blocks, seasonal allowances and premium export allowances
-are not loaded; the editor lists them so you can check your contract. A premium
+incentives, non-daily blocks, usage tiers between the first block and the final
+rate, seasonal allowances and premium export allowances are not loaded; the editor lists them so you can check your contract. A premium
 export window uses the rate that applies after its allowance.
 
 The editor shows the periods as a table with today's 24-hour import price strip.
