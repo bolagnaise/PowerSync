@@ -56,6 +56,7 @@ def score(bundle, schedule, *, terminal_price=0.0):
     manual_modes = (inputs["manual_control"] or {}).get("mode_slots") or []
     soc = opening_soc
     optimizer_reserve = state["backup_reserve"]
+    grid_charge_cap = state["grid_charge_soc_cap"]
     hardware_reserve = (
         state["hardware_reserve"] if state["hardware_reserve_known"]
         else optimizer_reserve
@@ -80,11 +81,10 @@ def score(bundle, schedule, *, terminal_price=0.0):
     if any(export_allowed) and any(active(value) for value in (
             inputs["export_reserve_floor"], state["export_reserve_floor"], state["export_reserve_floor_slots"])):
         unsupported.append("export_reserve_policy")
-    if state["hardware_reserve_known"] and active(state["hardware_reserve"]):
-        unsupported.append("hardware_reserve_policy")
     if state["max_battery_export_w"] is not None and state["max_battery_export_w"] < state["max_discharge_w"] and any(export_allowed):
         unsupported.append("battery_export_limit_policy")
-    if state["grid_charge_soc_cap"] < 1 and inputs["allow_grid_charge"]:
+    complex_grid_charge = inputs["ev_plan"] is not None
+    if grid_charge_cap < 0.999 and inputs["allow_grid_charge"] and complex_grid_charge:
         unsupported.append("grid_charge_soc_cap_policy")
     if inputs["priority_export_enabled"] or active(inputs["priority_export_slots"]):
         unsupported.append("priority_export_policy")
@@ -112,15 +112,29 @@ def score(bundle, schedule, *, terminal_price=0.0):
             inputs["allow_grid_charge"] and can_charge[index]
             and not blocked[index] and valid[index]
         )
-        requested_import = load[index] + ev + charge - solar[index] - discharge
-        # The published free-import charge field carries the full-rate
-        # request. Storage stops accepting energy once it reaches capacity.
+        solar_surplus = max(0.0, solar[index] - load[index] - ev)
         if (
+            row["action"] == "charge" and mode != "charge"
+            and grid_charge_cap < 0.999 and not complex_grid_charge
+        ):
+            grid_energy_kwh = max(0.0, charge - solar_surplus) * dt * state["charge_efficiency"]
+            grid_headroom_kwh = max(0.0, grid_charge_cap - soc) * capacity
+            if grid_energy_kwh > grid_headroom_kwh + 0.0002 * capacity:
+                violations.append({"slot": index, "rule": "grid_charge_soc_cap"})
+        requested_import = load[index] + ev + charge - solar[index] - discharge
+        free_charge_request = (
             row["action"] == "charge" and mode is None and discharge == 0
             and grid_charge_allowed and prices_in[index] <= 0.001
-            and state["grid_charge_soc_cap"] >= 0.999
+            and grid_charge_cap >= 0.999
             and row["battery_charge_w"] == row["power_w"]
-        ):
+        )
+        native_solar_charge = (
+            row["action"] == "self_consumption" and mode is None and discharge == 0
+            and not blocked[index] and charge <= solar_surplus + 0.00005
+        )
+        # These modes can report requested or available power even when
+        # storage stops accepting energy at capacity.
+        if free_charge_request or native_solar_charge:
             room_kwh = max(0.0, (1.0 - soc) * capacity)
             charge = min(charge, room_kwh / (state["charge_efficiency"] * dt))
         soc += (charge * state["charge_efficiency"] - discharge / state["discharge_efficiency"]) * dt / capacity

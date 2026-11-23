@@ -254,6 +254,7 @@ def test_replay_scores_hardware_and_optimizer_reserves_by_action(api):
 
     bundle["state"]["hardware_reserve"] = 0.10
     assert {"slot": 0, "rule": "soc_limit"} in score(bundle, rows)["violations"]
+    assert "hardware_reserve_policy" not in score(bundle, rows)["unsupported_metrics"]
 
 
 def test_coordinator_edits_are_not_solver_coverage():
@@ -289,6 +290,55 @@ def test_replay_saturates_full_rate_requests_in_genuinely_free_slots(api):
     capped = copy.deepcopy(bundle)
     capped["state"]["max_grid_import_w"] = 1000
     assert {"slot": 1, "rule": "grid_import_limit"} in score(capped, rows)["violations"]
+
+
+def test_replay_saturates_native_solar_independently_of_grid_charge_cap(api):
+    module, _, _ = api
+    optimizer = module.BatteryOptimizer(
+        capacity_wh=10000, backup_reserve=0.20, hardware_reserve=0.15,
+        interval_minutes=60, horizon_hours=8, grid_charge_soc_cap=0.65,
+        terminal_weight=0.3, max_grid_import_w=8000, max_grid_export_w=5000,
+    )
+    values = {
+        **inputs(), "import_prices": [0.31, 0, 0, 0, 0.31, 0.51, 0.51, 0.51],
+        "export_prices": [0] * 5 + [0.10] * 3,
+        "solar_forecast": [0, 3, 3, 3, 3, 0, 0, 0],
+        "load_forecast": [1] * 8, "current_soc": 0.90,
+        "allow_battery_export": True, "acquisition_cost_kwh": 0.12,
+    }
+    _, bundle, _ = capture_one(api, values=values, optimizer=optimizer)
+    rows = bundle["result"]["schedule"]
+    assert rows[1]["soc"] < rows[2]["soc"] == 1
+    assert rows[2]["action"] == "self_consumption"
+    assert rows[2]["battery_charge_w"] == 2000
+    assert score(bundle, rows)["violations"] == []
+
+    unsupported_flow = copy.deepcopy(rows)
+    unsupported_flow[2]["battery_charge_w"] += 100
+    assert {"slot": 2, "rule": "soc_limit"} in score(bundle, unsupported_flow)["violations"]
+
+
+def test_replay_checks_grid_charge_cap_against_grid_energy_only(api):
+    module, _, _ = api
+    optimizer = module.BatteryOptimizer(
+        capacity_wh=10000, hardware_reserve=0, grid_charge_soc_cap=0.60,
+        interval_minutes=60, horizon_hours=8,
+    )
+    values = {
+        **inputs(), "import_prices": [0.0, 0.0] + [0.50] * 6,
+        "solar_forecast": [0, 2, 0, 0, 0, 0, 0, 0],
+        "load_forecast": [0, 0, 2, 2, 2, 0, 0, 0], "current_soc": 0.50,
+    }
+    _, bundle, _ = capture_one(api, values=values, optimizer=optimizer)
+    rows = bundle["result"]["schedule"]
+    assert rows[0]["action"] == "charge"
+    assert rows[0]["soc"] == pytest.approx(0.60)
+    assert rows[1]["soc"] > 0.60
+    assert score(bundle, rows)["violations"] == []
+
+    exceeded = copy.deepcopy(rows)
+    exceeded[0]["battery_charge_w"] += 500
+    assert {"slot": 0, "rule": "grid_charge_soc_cap"} in score(bundle, exceeded)["violations"]
 
 
 def test_trusted_state_recorder_does_not_freeze_solver_only_methods(tmp_path):
@@ -544,9 +594,7 @@ def test_unscored_active_policy_cannot_receive_equivalence_or_partial_cashflows(
     candidate["schedule"][0]["power_w"] += 1
     variants = [
         ({"export_reserve_floor": 0.9, "allow_battery_export": True}, {}, "export_reserve_policy"),
-        ({}, {"hardware_reserve_known": True, "hardware_reserve": 0.8}, "hardware_reserve_policy"),
         ({"allow_battery_export": True}, {"max_battery_export_w": 10}, "battery_export_limit_policy"),
-        ({}, {"grid_charge_soc_cap": 0.6}, "grid_charge_soc_cap_policy"),
         ({"priority_export_enabled": True}, {}, "priority_export_policy"),
         ({"disable_idle": True}, {}, "disable_idle_policy"),
     ]
