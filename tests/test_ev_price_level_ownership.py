@@ -7496,6 +7496,54 @@ def test_auto_schedule_reconciles_failed_source_family_switch(
 
 
 @pytest.mark.parametrize(
+    ("owner_mode", "expected_decision"),
+    [
+        ("manual_solar_surplus", "external"),
+        ("smart_schedule_solar_surplus", "charging"),
+    ],
+)
+def test_smart_schedule_reports_existing_solar_session_owner(
+    monkeypatch, owner_mode, expected_decision,
+):
+    monkeypatch.setattr(ev_planner, "get_ev_location", AsyncMock(return_value="home"))
+    monkeypatch.setattr(ev_planner, "is_ev_plugged_in", AsyncMock(return_value=True))
+    hass = _FakeHass()
+    hass.data["power_sync"]["entry-1"]["ev_ownership"] = {
+        VIN: {"owner": "powersync", "owner_mode": owner_mode},
+    }
+    planner = SimpleNamespace(
+        should_charge_now=AsyncMock(return_value=(
+            True, "In planned solar_surplus window (1c)", "solar_surplus",
+        )),
+    )
+    executor = ev_planner.AutoScheduleExecutor(hass, _FakeConfigEntry(), planner=planner)
+    executor._get_vehicle_soc = AsyncMock(return_value=66)
+    executor._start_charging = AsyncMock()
+    executor._stop_charging = AsyncMock()
+    settings = ev_planner.AutoScheduleSettings(vehicle_id=VIN, display_name="Model 3")
+    state = ev_planner.AutoScheduleState(vehicle_id=VIN)
+    state.current_plan = SimpleNamespace(windows=[])
+    state.last_plan_update = ev_planner.datetime.now()
+    state.is_charging = True
+    executor._state[VIN] = state
+
+    asyncio.run(executor._evaluate_vehicle(
+        VIN,
+        settings,
+        {
+            "battery_soc": 34, "solar_power": 12500, "load_power": 2200,
+            "grid_power": 0, "ev_power": 0,
+        },
+        current_price_cents=4.4,
+    ))
+
+    executor._start_charging.assert_not_awaited()
+    executor._stop_charging.assert_not_awaited()
+    assert state.is_charging is True
+    assert state.last_decision == expected_decision
+
+
+@pytest.mark.parametrize(
     (
         "schedule_vehicle_id",
         "resolved_vehicle_id",

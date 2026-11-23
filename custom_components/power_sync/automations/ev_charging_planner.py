@@ -7348,6 +7348,9 @@ class AutoScheduleExecutor:
             else:
                 state.last_decision = "waiting"
             state.last_decision_reason = reason
+        elif active_owner_mode == "manual_solar_surplus":
+            state.last_decision = "external"
+            state.last_decision_reason = "A timed Solar Surplus session controls charging"
         else:
             state.last_decision = "charging"
             state.last_decision_reason = reason
