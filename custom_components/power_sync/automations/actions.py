@@ -32,7 +32,7 @@ import inspect
 import math
 import re
 import time
-from collections.abc import Iterable, Mapping
+from collections.abc import Awaitable, Iterable, Mapping
 from contextvars import ContextVar
 from uuid import uuid4
 from dataclasses import dataclass
@@ -469,6 +469,8 @@ async def _start_generic_charger_switch(
     hass: HomeAssistant,
     entity_id: str,
     manual_failure: dict | None = None,
+    *,
+    before_turn_on: Callable[[], Awaitable[bool]] | None = None,
 ) -> bool:
     """Start a generic charger switch without duplicating active transactions."""
     entity_id = str(entity_id or "").strip()
@@ -521,6 +523,8 @@ async def _start_generic_charger_switch(
                 blocking=True,
             )
             await asyncio.sleep(1)
+        if before_turn_on is not None and not await before_turn_on():
+            return False
         await hass.services.async_call(
             "switch",
             "turn_on",
@@ -13184,6 +13188,53 @@ async def _set_vehicle_amps(
         return success
 
 
+def _prioritise_switch_only_price_level(hass, config_entry, params) -> bool:
+    from .ev_ownership import owner_family
+
+    return (
+        config_entry is not None
+        and params.get("charger_type") == "generic"
+        and bool(params.get("charger_switch_entity"))
+        and not params.get("charger_amps_entity")
+        and owner_family(params.get("owner_mode")) == "price_level"
+        and not params.get("no_grid_import", False)
+        and config_entry.options.get(
+            CONF_GENERIC_CHARGER_PRIORITISE_PRICE_LEVEL_EV,
+            config_entry.data.get(CONF_GENERIC_CHARGER_PRIORITISE_PRICE_LEVEL_EV),
+        ) is True
+        and not _phase_load_management_enabled(hass, config_entry)
+    )
+
+
+async def _switch_only_start_fits_budget(hass, config_entry, vehicle_id, params) -> bool:
+    """A switch adds its entire configured load. Delayed EV power cannot offset it."""
+    limit_kw = await _resolve_max_grid_import_kw(hass, config_entry, params)
+    site = await _get_initial_smart_schedule_live_status(hass, config_entry)
+    grid_w = (site or {}).get("grid_power")
+    voltage = _coerce_positive_float(params.get("voltage", 240))
+    if (
+        isinstance(grid_w, bool)
+        or not isinstance(grid_w, (int, float))
+        or not math.isfinite(grid_w)
+        or voltage is None
+    ):
+        _LOGGER.info("Price Level: waiting for valid site import and charger voltage before switch-on")
+        return False
+
+    amps = _effective_max_charge_amps(params, hass)
+    phases = _get_phases_from_config(hass, config_entry, params)
+    full_w = amps * voltage * phases
+    headroom_w = (limit_kw if limit_kw is not None else 12.5) * 1000 - grid_w
+    plan_kw = _optimizer_planned_ev_charge_kw(hass, config_entry, vehicle_id)
+    if full_w > headroom_w + 1e-6 or (plan_kw is not None and full_w > plan_kw * 1000 + 1e-6):
+        _LOGGER.info(
+            "Price Level: holding switch off (full rate %.0f W, site headroom %.0f W, EV plan %s kW)",
+            full_w, headroom_w, plan_kw,
+        )
+        return False
+    return True
+
+
 async def _set_vehicle_amps_unchecked(
     hass: HomeAssistant,
     config_entry: ConfigEntry | None,
@@ -13398,6 +13449,10 @@ async def _set_vehicle_amps_unchecked(
                         manual_failure, "readiness", params.get("charger_status_entity")
                     )
                     return False
+                prioritise_switch = _prioritise_switch_only_price_level(hass, config_entry, params)
+                if prioritise_switch:
+                    session = _dynamic_ev_state.get(config_entry.entry_id, {}).get(vehicle_id)
+                    ownership = (session or {}).get("ownership")
                 if not await _run_pre_charge_wake_sequence(hass, params, "generic"):
                     _record_manual_generic_failure(
                         manual_failure, "pre_charge_wake", params.get("pre_charge_wake_entity")
@@ -13425,8 +13480,32 @@ async def _set_vehicle_amps_unchecked(
                     # Setup/wake/current writes can take time. Their telemetry
                     # must not confirm the later switch start.
                     confirmation_started_at = datetime.now(dt_timezone.utc)
+                before_turn_on = None
+                if prioritise_switch:
+                    async def admit_switch_start() -> bool:
+                        nonlocal confirmation_started_at
+                        if not await _switch_only_start_fits_budget(hass, config_entry, vehicle_id, params):
+                            return False
+                        current = _dynamic_ev_state.get(config_entry.entry_id, {}).get(vehicle_id)
+                        if current is not session or (
+                            current is not None and (
+                                not current.get("active") or current.get("ownership") is not ownership
+                            )
+                        ):
+                            return False
+                        pending = params.get("_generic_pending_start") or {}
+                        if pending.get("cancelled") or not _generic_start_cleanup_is_current(
+                            hass, config_entry, vehicle_id, params
+                        ):
+                            return False
+                        if confirmation_started_at is not None:
+                            confirmation_started_at = datetime.now(dt_timezone.utc)
+                        return True
+
+                    before_turn_on = admit_switch_start
+
                 if switch_entity and not await _start_generic_charger_switch(
-                    hass, switch_entity, manual_failure
+                    hass, switch_entity, manual_failure, before_turn_on=before_turn_on
                 ):
                     return False
                 if confirmation_started_at is not None:
@@ -18311,8 +18390,6 @@ async def _dynamic_ev_update(
     Battery power convention: Positive = discharging, Negative = charging
     Grid power convention: Positive = importing, Negative = exporting
     """
-    from .ev_ownership import owner_family
-
     vehicles = _dynamic_ev_state.get(entry_id, {})
     state = vehicles.get(vehicle_id)
     if not state or not state.get("active"):
@@ -18480,18 +18557,7 @@ async def _dynamic_ev_update(
     params = state.get("params") or {}
 
     no_grid_import = params.get("no_grid_import", False)
-    prioritise_ev = (
-        params.get("charger_type") == "generic"
-        and params.get("charger_switch_entity")
-        and not params.get("charger_amps_entity")
-        and owner_family(params.get("owner_mode")) == "price_level"
-        and not no_grid_import
-        and config_entry.options.get(
-            CONF_GENERIC_CHARGER_PRIORITISE_PRICE_LEVEL_EV,
-            config_entry.data.get(CONF_GENERIC_CHARGER_PRIORITISE_PRICE_LEVEL_EV),
-        ) is True
-        and not _phase_load_management_enabled(hass, config_entry)
-    )
+    prioritise_ev = _prioritise_switch_only_price_level(hass, config_entry, params)
     # The current optimizer interval outranks the battery target at session start.
     target_battery_charge_kw = _resolve_battery_reservation_kw(
         session_target_kw=params.get("target_battery_charge_kw", 5.0),
@@ -20246,6 +20312,9 @@ async def _action_start_ev_charging_dynamic_locked(
                 )
         elif charger_type in ("ocpp", "generic", "zaptec", "sigenergy") or _is_ha_native_charger_type(charger_type):
             start_params = dict(params)
+            if _prioritise_switch_only_price_level(hass, config_entry, params):
+                start_amps = max_charge_amps
+                start_params["max_charge_amps"] = max_charge_amps
             if charger_type == "sigenergy":
                 start_params["_sigenergy_start_after_rate_limit"] = True
             pending_starts = None

@@ -5347,6 +5347,41 @@ def test_price_level_switch_only_ev_can_leave_battery_taper_to_inverter(
         assert state["current_amps"] == expected
 
 
+@pytest.mark.parametrize("last_charger_w", ["0", "7680"])
+def test_price_level_switch_only_uses_site_import_while_charger_draw_lags(monkeypatch, last_charger_w):
+    now = datetime.now(timezone.utc)
+    monkeypatch.setattr(actions.dt_util, "utcnow", lambda: now, raising=False)
+    monkeypatch.setattr(actions, "_clear_ble_dynamic_session_if_unplugged", AsyncMock(return_value=False))
+    switch = _State("switch.garage_ev", "on")
+    power = _State("sensor.garage_ev_power", last_charger_w, {"unit_of_measurement": "W"},
+                   last_reported=now - timedelta(seconds=90))
+    hass = _Hass([switch, power])
+    entry = _Entry()
+    entry.options = {"generic_charger_prioritise_price_level_ev": True}
+    site = {"grid_power": 11.6, "battery_power": -4.4, "solar_power": 1.7,
+            "load_power": 8.9, "battery_level": 64}
+    hass.data["power_sync"][entry.entry_id]["goodwe_coordinator"] = SimpleNamespace(
+        data=site, last_update_success=True, last_update_success_time=now,
+        update_interval=timedelta(seconds=5),
+    )
+    state = {"active": True, "current_amps": 32, "target_amps": 32, "params": {
+        "dynamic_mode": "battery_target", "owner_mode": "price_level_opportunity",
+        "charger_type": "generic", "charger_switch_entity": switch.entity_id,
+        "charger_power_entity": power.entity_id, "max_grid_import_kw": 14.4,
+        "target_battery_charge_kw": 10, "max_charge_amps": 32, "min_charge_amps": 5,
+        "phases": 1, "voltage": 240,
+    }}
+    actions._dynamic_ev_state[entry.entry_id] = {"generic_ev": state}
+    asyncio.run(actions._dynamic_ev_update(hass, entry, entry.entry_id, "generic_ev"))
+    assert hass.services.calls == []
+    assert state["current_amps"] == 32
+
+    site.update(grid_power=14.45, load_power=11.75)
+    asyncio.run(actions._dynamic_ev_update(hass, entry, entry.entry_id, "generic_ev"))
+    assert hass.services.calls == [("switch", "turn_off", {"entity_id": switch.entity_id})]
+    assert state["current_amps"] == 0
+
+
 def test_dynamic_battery_target_uses_solar_and_home_load_to_preserve_grid_charge(monkeypatch):
     set_amps_calls: list[int] = []
 
@@ -5897,6 +5932,138 @@ def test_generic_dynamic_start_promotes_only_fresh_physical_readback():
     assert hass.services.calls == [
         ("switch", "turn_on", {"entity_id": "switch.garage_ev"}),
     ]
+
+
+@pytest.mark.parametrize(
+    ("grid_kw", "plan_kw", "already_on", "may_start"),
+    [
+        pytest.param(13.6, None, False, False, id="only-800-watts-free"),
+        pytest.param(6.721, None, False, False, id="one-watt-short"),
+        pytest.param(None, None, False, False, id="missing-grid"),
+        pytest.param(5.0, 7.679, False, False, id="optimizer-one-watt-short"),
+        pytest.param(6.72, 7.68, False, True, id="full-rate-fits-exactly"),
+        pytest.param(13.6, 7.68, True, True, id="adopt-already-on-without-new-draw"),
+    ],
+)
+def test_price_level_switch_only_initial_admission(
+    monkeypatch, grid_kw, plan_kw, already_on, may_start,
+):
+    now = datetime.now(timezone.utc)
+    switch = _State("switch.garage_ev", "on" if already_on else "off")
+    # At a cloud-backed charger the last report can predate the current request.
+    power = _State(
+        "sensor.garage_ev_power", "7680" if already_on else "0",
+        {"unit_of_measurement": "W"}, last_updated=now - timedelta(seconds=90),
+    )
+    hass = _Hass([switch, power])
+    entry = _Entry()
+    entry.options = {"generic_charger_prioritise_price_level_ev": True}
+    entry_data = hass.data["power_sync"][entry.entry_id]
+
+    async def refresh_site():
+        # A charger update during admission precedes the physical switch write.
+        # It cannot confirm that write even when it reports positive power.
+        power.state = "7680"
+        power.last_reported = datetime.now(timezone.utc)
+
+    entry_data["goodwe_coordinator"] = SimpleNamespace(
+        async_refresh=refresh_site,
+        last_update_success=True, last_update_success_time=now,
+        update_interval=timedelta(seconds=5),
+        data={
+            "grid_power": grid_kw, "solar_power": 0.0, "battery_power": 0.0,
+            "load_power": grid_kw, "battery_level": 70,
+        },
+    )
+    if plan_kw is not None:
+        slot = SimpleNamespace(action="hold")
+        entry_data["optimization_coordinator"] = SimpleNamespace(
+            _get_current_action=lambda: slot,
+            _current_schedule=SimpleNamespace(actions=[slot], last_updated=now),
+            _last_ev_charge_schedule_updated=now,
+            _last_ev_charge_by_vehicle_w={"generic_ev": [plan_kw * 1000]},
+        )
+    params = {
+        "dynamic_mode": "battery_target", "owner_mode": "price_level_opportunity",
+        "vehicle_id": "generic_ev", "vehicle_vin": "generic_ev",
+        "charger_type": "generic", "charger_switch_entity": switch.entity_id,
+        "charger_power_entity": power.entity_id, "require_physical_start_confirmation": True,
+        "max_grid_import_kw": 14.4, "min_charge_amps": 5, "max_charge_amps": 32,
+        "voltage": 240, "phases": 1,
+    }
+    elapsed = 0.0
+
+    async def advance_cloud_poll(seconds):
+        nonlocal elapsed
+        assert not actions._dynamic_ev_state
+        assert not entry_data.get("ev_ownership")
+        elapsed += seconds
+        if elapsed >= 90:
+            power.state = "7680"
+            power.last_reported = datetime.now(timezone.utc)
+
+    async def run_start():
+        with monkeypatch.context() as patch:
+            patch.setattr(actions.dt_util, "utcnow", lambda: now, raising=False)
+            patch.setattr(actions.dt_util, "now", lambda: now, raising=False)
+            patch.setattr(actions.asyncio, "get_running_loop",
+                          lambda: SimpleNamespace(time=lambda: elapsed))
+            patch.setattr(actions.asyncio, "sleep", advance_cloud_poll)
+            return await actions._action_start_ev_charging_dynamic(hass, entry, params)
+
+    started = asyncio.run(run_start())
+    expected_calls = (
+        [("switch", "turn_on", {"entity_id": switch.entity_id})]
+        if may_start and not already_on else []
+    )
+    assert hass.services.calls == expected_calls
+    assert started is may_start
+    if may_start:
+        assert elapsed == 90
+        assert actions._dynamic_ev_state[entry.entry_id]["generic_ev"]["current_amps"] == 32
+    else:
+        assert elapsed == 0
+        assert not actions._dynamic_ev_state
+        assert not entry_data.get("ev_ownership")
+
+
+def test_price_level_switch_only_rechecks_import_after_wake(monkeypatch):
+    now = datetime.now(timezone.utc)
+    monkeypatch.setattr(actions.dt_util, "utcnow", lambda: now, raising=False)
+    charger = _State("switch.garage_ev", "off")
+    wake = _State("switch.vehicle_wake", "off")
+    power = _State("sensor.garage_ev_power", "0", {"unit_of_measurement": "W"})
+    hass = _Hass([charger, wake, power])
+    entry = _Entry()
+    entry.options = {"generic_charger_prioritise_price_level_ev": True}
+    site = {"grid_power": 6.0, "solar_power": 0.0, "battery_power": 0.0,
+            "load_power": 6.0, "battery_level": 70}
+    hass.data["power_sync"][entry.entry_id]["goodwe_coordinator"] = SimpleNamespace(
+        data=site, last_update_success=True, last_update_success_time=now,
+        update_interval=timedelta(seconds=5),
+    )
+
+    async def wake_and_increase_household_load(domain, service, data, blocking=True):
+        hass.services.calls.append((domain, service, data))
+        if data["entity_id"] == wake.entity_id and service == "turn_off":
+            site.update(grid_power=13.6, load_power=13.6)
+
+    hass.services.async_call = wake_and_increase_household_load
+    started = asyncio.run(actions._action_start_ev_charging_dynamic(hass, entry, {
+        "dynamic_mode": "battery_target", "owner_mode": "price_level_recovery",
+        "charger_type": "generic", "charger_switch_entity": charger.entity_id,
+        "charger_power_entity": power.entity_id, "max_grid_import_kw": 14.4,
+        "max_charge_amps": 32, "voltage": 240, "phases": 1,
+        "pre_charge_wake_entity": wake.entity_id, "pre_charge_wake_duration_seconds": 0,
+        "require_physical_start_confirmation": True,
+        "_generic_start_confirmation_timeout_seconds": 0,
+    }))
+    assert hass.services.calls == [
+        ("switch", "turn_on", {"entity_id": wake.entity_id}),
+        ("switch", "turn_off", {"entity_id": wake.entity_id}),
+    ]
+    assert started is False
+    assert not actions._dynamic_ev_state
 
 
 @pytest.mark.parametrize("readback", [
