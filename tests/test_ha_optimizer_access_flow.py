@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 import sys
 from types import ModuleType, SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -118,7 +118,10 @@ def flow_method(monkeypatch, manager):
         module = ModuleType(name)
         module.__path__ = []
         monkeypatch.setitem(sys.modules, name, module)
+    from test_ha_optimizer_runtime import runtime
+
     module = ModuleType(f"{package}.licensing.manager")
+    monkeypatch.setitem(sys.modules, f"{package}.licensing.runtime", runtime)
     module.async_get_manager = AsyncMock(return_value=manager)
     monkeypatch.setitem(sys.modules, module.__name__, module)
     monkeypatch.setitem(sys.modules, f"{package}.licensing.presentation", presentation)
@@ -164,6 +167,108 @@ def test_failed_pairing_retains_code_for_retry(monkeypatch):
     assert flow._license_pairing_code == "retry-code"
     assert "retry-code" in result["description_placeholders"]["next_step"]
     assert result["errors"]["base"] == "optimizer_access_unavailable"
+
+
+def test_reopened_dialog_guides_user_back_to_original_without_disclosing_its_code(monkeypatch):
+    manager = SimpleNamespace(
+        start_pairing=AsyncMock(return_value={"pairing_code": "original-code"}),
+        finish_pairing=AsyncMock(), status=lambda entry: status(paired=False),
+    )
+    step = flow_method(monkeypatch, manager)
+    original = SimpleNamespace(hass=object(), config_entry=SimpleNamespace(entry_id="one"),
+                               async_show_form=lambda **kwargs: kwargs)
+    reopened = SimpleNamespace(**vars(original))
+    asyncio.run(step(original, {"action": "start_pairing"}))
+    result = asyncio.run(step(reopened, {"action": "finish_pairing"}))
+    assert result["errors"] == {"base": "optimizer_pairing_no_code"}
+    assert "original-code" not in str(result)
+    assert not result["description_placeholders"]["next_step"]
+    manager.finish_pairing.assert_not_awaited()
+
+    assert not asyncio.run(step(original, {"action": "finish_pairing"}))["errors"]
+    manager.finish_pairing.assert_awaited_once_with("original-code")
+
+
+def http_transport(http_status, chunks, *, content_length=None):
+    """Use the production HA transport with a local, chunked HTTP response."""
+    import test_ha_optimizer_runtime as rt
+    from aiohttp import ClientTimeout
+
+    response = SimpleNamespace(status=http_status, content_length=content_length,
+                               content=SimpleNamespace(read=AsyncMock(side_effect=[*chunks, b""])))
+    session = MagicMock()
+    session.request.return_value.__aenter__.return_value = response
+    transport = rt.manager_method("_transport")
+    transport.__globals__.update(async_get_clientsession=lambda hass: session, ClientTimeout=ClientTimeout,
+                                 API="https://example.invalid", PairingConflict=rt.runtime.PairingConflict)
+    return transport, response
+
+
+@pytest.mark.parametrize(("reason", "expected", "guidance"), [
+    ("pairing_not_completed", "optimizer_pairing_not_completed", "previously disconnected this HA server"),
+    ("installation_slot_in_use", "optimizer_installation_slot_in_use", "connected installation"),
+    ("pairing_pending_or_expired", "optimizer_pairing_pending_or_expired", "new one"),
+    ("unrecognised private detail", "optimizer_access_unavailable", "Unable to complete"),
+])
+def test_exchange_conflict_explains_next_step_and_preserves_identity(monkeypatch, reason, expected, guidance):
+    import test_ha_optimizer_runtime as rt
+
+    async def run():
+        h = rt.Harness()
+        manager = h.client
+        await manager.initialize()
+        original_identity = (manager.installation_id, manager.credential)
+        manager.hass = object()
+        transport, _ = http_transport(409, [json.dumps({"error": reason}).encode()])
+        manager._request = lambda path, body: transport(manager, path, body)
+        flow = SimpleNamespace(hass=manager.hass, config_entry=SimpleNamespace(entry_id="one"),
+                               _license_pairing_code="pending-code", async_show_form=lambda **kw: kw)
+        step = flow_method(monkeypatch, manager)
+        result = await step(flow, {"action": "finish_pairing"})
+        assert result["errors"] == {"base": expected}
+        assert "unrecognised private detail" not in str(result)
+        texts = [json.loads((COMPONENT / name).read_text())["options"]["error"][expected]
+                 for name in ("strings.json", "translations/en.json")]
+        assert texts[0] == texts[1]
+        assert guidance in texts[0]
+        if reason == "pairing_not_completed":
+            assert all(action in texts[0] for action in ("Reset pairing", "Start pairing", "Finish pairing"))
+        if reason in ("pairing_not_completed", "installation_slot_in_use"):
+            assert not result["description_placeholders"]["next_step"]
+        assert (manager.installation_id, manager.credential) == original_identity
+        assert not manager.paired and not manager.permits("one")
+        assert h.stored["paired"] is False
+
+        if reason == "pairing_not_completed":
+            assert not (await step(flow, {"action": "reset_pairing"}))["errors"]
+            assert manager.installation_id != original_identity[0]
+            assert manager.credential != original_identity[1]
+            manager._request = h.request
+            assert not (await step(flow, {"action": "start_pairing"}))["errors"]
+            assert not (await step(flow, {"action": "finish_pairing"}))["errors"]
+            assert manager.paired and h.stored["paired"]
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(("path", "http_status", "chunks", "length", "reads"), [
+    ("/refresh", 409, [b'{"error":"pairing_not_completed"}'], None, 0),
+    ("/pairing/exchange", 503, [b'{"error":"pairing_not_completed"}'], None, 0),
+    ("/pairing/exchange", 409, [b'{"error":"pairing_not_completed"}'], 16385, 0),
+    ("/pairing/exchange", 409, [b" " * 8192, b" " * 8192, b" "], None, 3),
+    ("/pairing/exchange", 409, [b"invalid JSON"], None, 2),
+    ("/pairing/exchange", 409, [b'{"error":["pairing_not_completed"]}'], None, 2),
+    ("/pairing/exchange", 409, [b'{"paired":true}'], None, 2),
+])
+def test_only_known_bounded_exchange_conflicts_have_specific_errors(path, http_status, chunks, length, reads):
+    import test_ha_optimizer_runtime as rt
+
+    transport, response = http_transport(http_status, chunks, content_length=length)
+    with pytest.raises(ValueError) as exc:
+        asyncio.run(transport(SimpleNamespace(hass=object()), path, {}))
+    assert not isinstance(exc.value, rt.runtime.PairingConflict)
+    assert str(exc.value) in ("licensing_service_unavailable", "invalid_licensing_response")
+    assert response.content.read.await_count == reads
 
 
 def test_translations_render_the_actual_placeholders():

@@ -36,13 +36,13 @@ def optimizer_access_description(status: dict, pairing_code: str | None = None) 
     account_url = status["account_url"]
     if pairing_code:
         next_step = (
-            f"Sign in at {account_url} and approve this code: **{pairing_code}**. "
+            f"Keep this HA dialog open. Sign in at {account_url} and approve this code: **{pairing_code}**. "
             "Then choose **Finish pairing** below and submit. The code is valid for ten minutes."
         )
     elif not paired:
         next_step = (
             "To link this HA server, choose **Start pairing** below and submit. "
-            f"Approve the code at {account_url}, then return here and choose **Finish pairing**. "
+            f"Keep this dialog open while you approve the code at {account_url}, then choose **Finish pairing** here. "
             "Linking GitHub or Discord on the website does not complete HA server pairing."
         )
     elif status.get("recovery_pending"):

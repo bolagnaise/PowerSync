@@ -19,6 +19,10 @@ ADMISSION_KEY = "power_sync_licensing"
 ACCOUNT_URL = "https://powersync.cc/app/ha"
 
 
+class PairingConflict(ValueError):
+    """A recognised account response to an installation's pairing exchange."""
+
+
 class LicenseRuntime:
     def __init__(self, load, save, request, public_keys, *, wall_clock=time.time, monotonic=time.monotonic):
         self._load, self._save, self._request = load, save, request
