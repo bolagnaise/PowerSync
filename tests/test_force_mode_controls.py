@@ -881,7 +881,8 @@ def test_tesla_tou_upload_waits_for_site_info_readback():
     assert "await _confirm_tesla_tariff_uploaded(" in function_source
     assert "site_info" in confirm_source
     assert "_extract_tesla_tariff_content(site_info)" in confirm_source
-    assert "_tesla_tariff_readback_status(tariff_data, observed)" in confirm_source
+    assert "_tesla_tariff_readback_status(" in confirm_source
+    assert "mismatch_fields=mismatch_fields" in confirm_source
     assert "_tesla_tariff_rate_maps_match" in status_source
     assert "_tariff_charge_rates(expected, sell=False)" in status_source
     assert "TESLA_TOU_READBACK_ZERO_NORMALIZED" in status_source
@@ -954,11 +955,14 @@ def test_tesla_tou_readback_accepts_delayed_match_without_reupload():
             return next(self.responses)
 
     class FakeLogger:
+        def __init__(self):
+            self.debug_calls = []
+
         def info(self, *_args):
             pass
 
-        def debug(self, *_args):
-            pass
+        def debug(self, *args):
+            self.debug_calls.append(args)
 
         def warning(self, *_args):
             pass
@@ -979,8 +983,8 @@ def test_tesla_tou_readback_accepts_delayed_match_without_reupload():
             site_info.get("tariff_content_v2")
             or site_info.get("tariff_content")
         ),
-        "_tesla_tariff_readback_status": lambda expected, observed: (
-            "exact" if expected == observed else None
+        "_tesla_tariff_readback_status": lambda expected, observed, *, mismatch_fields: (
+            "exact" if expected == observed else mismatch_fields.append("code")
         ),
         "TESLA_TOU_READBACK_EXACT": "exact",
         "TESLA_TOU_READBACK_ZERO_NORMALIZED": "tesla_zero_normalized",
@@ -1027,6 +1031,7 @@ def test_tesla_tou_readback_accepts_delayed_match_without_reupload():
     assert clock.now == 25.0
     assert [call[2] for call in session.calls] == [5.0] * 6
     assert readback_status == {"status": "exact"}
+    assert any(call[-1] == "code" for call in namespace["_LOGGER"].debug_calls)
 
 
 def test_tesla_force_charge_exposes_optional_optimizer_result():

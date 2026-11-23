@@ -6618,17 +6618,23 @@ def _tesla_tariff_rate_maps_match(
 def _tesla_tariff_readback_status(
     expected: dict[str, Any],
     observed: dict[str, Any] | None,
+    *,
+    mismatch_fields: list[str] | None = None,
 ) -> str | None:
     """Return the verified Tesla representation, or ``None`` on mismatch."""
+    def mismatch(*fields: str) -> None:
+        if mismatch_fields is not None:
+            mismatch_fields.extend(fields)
+
     if not isinstance(observed, dict):
-        return None
+        return mismatch("tariff_content")
 
     code = expected.get("code")
     if (isinstance(code, str) and code.startswith(("CHARGE_NATIVE_MAX_", "DISCHARGE_NATIVE_MAX_"))
             and observed.get("code") != code):
         # Cleanup owns this exact attempt. Equal prices from an older native
         # episode cannot prove that its replacement upload has arrived.
-        return None
+        return mismatch("code")
 
     # Static custom payloads carry a stable marker and must verify every
     # non-empty buy and sell season. This prevents a correct All Year map from
@@ -6638,16 +6644,13 @@ def _tesla_tariff_readback_status(
         observed_buy_by_season = _strict_static_tariff_rates_by_season(observed, sell=False)
         expected_sell_by_season = _strict_static_tariff_rates_by_season(expected, sell=True)
         observed_sell_by_season = _strict_static_tariff_rates_by_season(observed, sell=True)
-        if (
-            bool(expected_buy_by_season)
-            and bool(expected_sell_by_season)
-            and observed_buy_by_season is not None
-            and observed_sell_by_season is not None
-            and expected_buy_by_season == observed_buy_by_season
-            and expected_sell_by_season == observed_sell_by_season
-        ):
-            return TESLA_TOU_READBACK_EXACT
-        return None
+        buy_matches = bool(expected_buy_by_season) and expected_buy_by_season == observed_buy_by_season
+        sell_matches = bool(expected_sell_by_season) and expected_sell_by_season == observed_sell_by_season
+        if not buy_matches:
+            mismatch("energy_charges")
+        if not sell_matches:
+            mismatch("sell_tariff.energy_charges")
+        return TESLA_TOU_READBACK_EXACT if buy_matches and sell_matches else None
 
     # Dynamic payloads retain the original preferred-Summer comparison and
     # optional-sell semantics. Tesla may omit its sentinel ALL season on readback.
@@ -6658,7 +6661,7 @@ def _tesla_tariff_readback_status(
             expected_buy, observed_buy
         )
         if not buy_matches:
-            return None
+            return mismatch("energy_charges.Summer")
 
         expected_sell = _tariff_charge_rates(expected, sell=True)
         observed_sell = _tariff_charge_rates(observed, sell=True)
@@ -6673,7 +6676,7 @@ def _tesla_tariff_readback_status(
             expected_sell, observed_sell
         )
         if not sell_matches:
-            return None
+            return mismatch("sell_tariff.energy_charges.Summer")
         if buy_zero_normalized or sell_zero_normalized:
             return TESLA_TOU_READBACK_ZERO_NORMALIZED
         return TESLA_TOU_READBACK_EXACT
@@ -6685,9 +6688,9 @@ def _tesla_tariff_readback_status(
         if expected_value is None or observed_value is None:
             continue
         if str(expected_value) != str(observed_value):
-            return None
+            return mismatch(field)
         matched += 1
-    return TESLA_TOU_READBACK_EXACT if matched > 0 else None
+    return TESLA_TOU_READBACK_EXACT if matched > 0 else mismatch("energy_charges.Summer or tariff identity")
 
 
 def _tesla_tariff_matches_readback(
@@ -6760,7 +6763,10 @@ async def _confirm_tesla_tariff_uploaded(
                 data = await response.json()
                 site_info = data.get("response", {})
                 observed = _extract_tesla_tariff_content(site_info)
-                status = _tesla_tariff_readback_status(tariff_data, observed)
+                mismatch_fields: list[str] = []
+                status = _tesla_tariff_readback_status(
+                    tariff_data, observed, mismatch_fields=mismatch_fields
+                )
                 if status is not None:
                     if readback_status is not None:
                         readback_status["status"] = status
@@ -6784,10 +6790,11 @@ async def _confirm_tesla_tariff_uploaded(
                         )
                     return True
                 _LOGGER.debug(
-                    "Tesla TOU readback for site %s did not match yet (attempt %d/%d)",
+                    "Tesla TOU readback for site %s did not match yet (attempt %d/%d): %s",
                     site_id,
                     attempt,
                     attempts,
+                    ", ".join(mismatch_fields),
                 )
         except Exception as err:
             _LOGGER.warning(

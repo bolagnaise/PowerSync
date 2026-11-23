@@ -416,6 +416,15 @@ def _hhmm_to_minutes(value: Any, default: str = "17:15") -> int:
     return 17 * 60 + 15
 
 
+@dataclass(frozen=True)
+class _TeslaGridChargeSample:
+    source: str | None
+    observed_at: datetime
+    charge_kw: float
+    import_kw: float
+    soc_pct: float
+
+
 @dataclass
 class ProviderPriceConfig:
     """Configuration for price modifications from electricity provider settings."""
@@ -11711,29 +11720,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return True, None, cap
         return soc >= cap - 0.0001, soc, cap
 
-    def _tesla_stale_grid_charge_reading(
-        self,
-        reserve_pct: int | None,
-    ) -> tuple[float, float, float] | None:
-        """Return a material unintended Tesla grid-charge reading.
-
-        Tesla can confirm ``self_consumption`` and the restored backup reserve
-        while retaining the previous force-charge dispatch. Only treat the
-        flow as stale when the battery is materially charging from the grid,
-        SOC is already clear of the reserve, and native grid services are not
-        active. Solar-funded charging and reserve recovery remain untouched.
-        """
-        if self.battery_system != "tesla" or reserve_pct is None:
-            return None
-
-        entry_data = self.hass.data.get("power_sync", {}).get(
-            self.entry_id,
-            {},
-        )
-        if entry_data.get("calibration_suspected"):
-            return None
-
-        data = self._get_energy_data()
+    def _tesla_grid_charge_sample(
+        self, data: dict[str, Any] | None
+    ) -> _TeslaGridChargeSample | None:
+        """Return the source, acquisition time and flows for measured grid charge."""
         if not isinstance(data, dict) or data.get("grid_services_active"):
             return None
         # A failed refresh can leave the last successful site sample in the
@@ -11771,10 +11761,49 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if (
             charge_kw < 0.5
             or grid_import_kw < max(0.5, charge_kw * 0.5)
-            or soc_pct <= float(reserve_pct) + 2.0
         ):
             return None
-        return charge_kw, grid_import_kw, soc_pct
+        return _TeslaGridChargeSample(
+            data.get("data_source"), observed_at, charge_kw, grid_import_kw, soc_pct
+        )
+
+    def _observe_tesla_grid_charge(self, data: dict[str, Any] | None) -> None:
+        """Maintain two consecutive qualifying acquisitions without issuing commands."""
+        runtime = self.hass.data.get(DOMAIN, {}).get(self.entry_id, {})
+        if getattr(self, "_cost_tracking_stopping", False) or runtime.get("calibration_suspected"):
+            self._tesla_grid_charge_observations = (None, None)
+            return
+
+        sample = self._tesla_grid_charge_sample(data)
+        previous, latest = getattr(self, "_tesla_grid_charge_observations", (None, None))
+        if (
+            sample is None
+            or latest is None
+            or sample.source != latest.source
+            or sample.observed_at < latest.observed_at
+        ):
+            previous = None
+        elif sample.observed_at > latest.observed_at:
+            previous = latest
+        self._tesla_grid_charge_observations = (previous, sample)
+
+    def _tesla_stale_grid_charge_reading(
+        self,
+        reserve_pct: int | None,
+    ) -> tuple[float, float, float] | None:
+        """Require continued measured import before recovering a Tesla dispatch."""
+        if self.battery_system != "tesla" or reserve_pct is None:
+            return None
+
+        self._observe_tesla_grid_charge(self._get_energy_data())
+        previous, latest = self._tesla_grid_charge_observations
+        if previous is None or latest is None:
+            return None
+        if dt_util.utcnow() - previous.observed_at > TESLA_GRID_CHARGE_SAMPLE_MAX_AGE:
+            return None
+        if min(previous.soc_pct, latest.soc_pct) <= float(reserve_pct) + 2.0:
+            return None
+        return latest.charge_kw, latest.import_kw, latest.soc_pct
 
     @optimizer_work
     async def _execute_optimizer_action(
@@ -20243,6 +20272,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def _stop_cost_tracking_listeners(self) -> None:
         """Stop passive accounting before awaited shutdown and final persistence."""
         self._cost_tracking_stopping = True
+        self._tesla_grid_charge_observations = (None, None)
         listeners = getattr(self, "_cost_tracking_listeners", {})
         for unsubscribe in list(listeners.values()):
             unsubscribe()
@@ -20274,6 +20304,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._sync_cost_tracking_listeners()
         now = dt_util.now()
         data = self._get_energy_data()
+        if getattr(self, "battery_system", None) == "tesla":
+            self._observe_tesla_grid_charge(data)
         tracking_time = now
         observed_at = data.get("last_update") if data else None
         if (

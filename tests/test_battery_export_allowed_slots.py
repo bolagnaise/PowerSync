@@ -5986,6 +5986,12 @@ def test_monitoring_mode_defers_startup_solar_export_hold_reconciliation(opt_mod
     assert calls == []
 
 
+def _observe_previous_grid_charge(coordinator, data):
+    coordinator._observe_tesla_grid_charge({
+        **data, "last_update": data["last_update"] - timedelta(seconds=15)
+    })
+
+
 def test_tesla_self_consumption_restores_stale_grid_charge(opt_module):
     """A confirmed mode/reserve cannot hide continued force-charge flow."""
     battery = _FakeBattery(
@@ -6004,6 +6010,7 @@ def test_tesla_self_consumption_restores_stale_grid_charge(opt_module):
         }
     )
     coordinator._get_energy_data = lambda: coordinator.energy_coordinator.data
+    _observe_previous_grid_charge(coordinator, coordinator.energy_coordinator.data)
     action = SimpleNamespace(
         action="self_consumption",
         power_w=0,
@@ -6040,6 +6047,7 @@ def test_tesla_stale_grid_charge_rechecks_after_restore_cooldown(opt_module):
     current_time = {"now": now}
     opt_module.dt_util.utcnow = lambda *args, **kwargs: current_time["now"]
     coordinator.energy_coordinator.data["last_update"] = now
+    _observe_previous_grid_charge(coordinator, coordinator.energy_coordinator.data)
     action = SimpleNamespace(action="self_consumption", power_w=0)
 
     asyncio.run(coordinator._execute_optimizer_action(action))
@@ -6050,6 +6058,11 @@ def test_tesla_stale_grid_charge_rechecks_after_restore_cooldown(opt_module):
     asyncio.run(coordinator._execute_optimizer_action(action))
     assert battery.restore_normal_calls == 1
 
+    coordinator.energy_coordinator.data["last_update"] = current_time["now"]
+    asyncio.run(coordinator._execute_optimizer_action(action))
+    assert battery.restore_normal_calls == 1
+
+    current_time["now"] += timedelta(seconds=15)
     coordinator.energy_coordinator.data["last_update"] = current_time["now"]
     asyncio.run(coordinator._execute_optimizer_action(action))
 
@@ -6074,6 +6087,7 @@ def test_tesla_stale_grid_charge_retries_failed_restore(opt_module):
         }
     )
     coordinator._get_energy_data = lambda: coordinator.energy_coordinator.data
+    _observe_previous_grid_charge(coordinator, coordinator.energy_coordinator.data)
     action = SimpleNamespace(action="self_consumption", power_w=0)
 
     asyncio.run(coordinator._execute_optimizer_action(action))
@@ -6109,6 +6123,45 @@ def test_tesla_self_consumption_ignores_old_grid_import_during_solar_charge(opt_
     data.update(battery_power=-4.5, grid_power=0.12, last_update=now)
     asyncio.run(coordinator._execute_optimizer_action(action))
     assert battery.restore_normal_calls == 0
+
+
+def test_tesla_self_consumption_ignores_one_fresh_import_sample(opt_module):
+    battery = _FakeBattery(hardware_mode="self_consumption", backup_reserve=20)
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.315)
+    now = datetime(2026, 11, 23, 0, 41, 2, tzinfo=timezone.utc)
+    opt_module.dt_util.utcnow = lambda: now
+    data = {
+        "battery_power": -3.73,
+        "grid_power": 4.496,
+        "solar_power": 0.017,
+        "battery_level": 31.5,
+        "last_update": now - timedelta(seconds=1),
+    }
+    coordinator._get_energy_data = lambda: data
+    action = SimpleNamespace(action="self_consumption", power_w=0)
+
+    coordinator._observe_tesla_grid_charge({
+        **data, "last_update": now - timedelta(seconds=3),
+        "grid_power": -0.042, "solar_power": 4.93, "battery_power": -4.45,
+    })
+    asyncio.run(coordinator._execute_optimizer_action(action))
+    asyncio.run(coordinator._execute_optimizer_action(action))
+    assert battery.restore_normal_calls == 0
+
+    now += timedelta(seconds=2)
+    coordinator._observe_tesla_grid_charge({
+        **data, "last_update": now,
+        "grid_power": 0.003, "solar_power": 4.916, "battery_power": -4.52,
+    })
+    now += timedelta(seconds=2)
+    data["last_update"] = now
+    asyncio.run(coordinator._execute_optimizer_action(action))
+    assert battery.restore_normal_calls == 0
+
+    now += timedelta(seconds=2)
+    data["last_update"] = now
+    asyncio.run(coordinator._execute_optimizer_action(action))
+    assert battery.restore_normal_calls == 1
 
 
 @pytest.mark.parametrize(

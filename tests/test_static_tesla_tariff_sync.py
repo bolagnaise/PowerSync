@@ -613,7 +613,15 @@ def test_dynamic_readback_identifies_tesla_zero_normalized_negative_rates():
     positive_mismatch = copy.deepcopy(expected)
     positive_mismatch["energy_charges"]["Summer"]["rates"]["PERIOD_18_00"] = 0.0
     assert not matches(expected, positive_mismatch)
-    assert status(expected, positive_mismatch) is None
+    mismatch_fields = []
+    assert status(expected, positive_mismatch, mismatch_fields=mismatch_fields) is None
+    assert mismatch_fields == ["energy_charges.Summer"]
+
+    sell_mismatch = copy.deepcopy(expected)
+    sell_mismatch["sell_tariff"]["energy_charges"]["Summer"]["rates"]["PERIOD_18_00"] = 0.0
+    mismatch_fields.clear()
+    assert status(expected, sell_mismatch, mismatch_fields=mismatch_fields) is None
+    assert mismatch_fields == ["sell_tariff.energy_charges.Summer"]
 
 
 @pytest.mark.parametrize('direction', ['CHARGE', 'DISCHARGE'])

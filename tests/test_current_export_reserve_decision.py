@@ -11,6 +11,7 @@ import pytest
 from test_battery_export_allowed_slots import (
     _api_action,
     _execution_coordinator,
+    _observe_previous_grid_charge,
     _FakeBattery,
     opt_module as _opt_module_fixture,
 )
@@ -301,6 +302,7 @@ def test_tesla_stale_grid_charge_restore_reports_existing_return_value(opt_modul
         "battery_level": 80.0, "grid_services_active": False,
         "last_update": opt_module.dt_util.utcnow(),
     }
+    _observe_previous_grid_charge(coordinator, coordinator._get_energy_data())
 
     _run(coordinator, actions[0])
 
