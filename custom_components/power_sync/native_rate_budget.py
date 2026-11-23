@@ -318,6 +318,13 @@ class SharedRateBudget:
         return site in self.armed_sites or any(entry.get("site") == site and entry.get("sessions")
                                              for entry in self.entries.values())
 
+    def blocks_cloud_tariff_charge(self, site):
+        """Whether cloud tariff control cannot accommodate this site's EV demand."""
+        return (
+            self.site_armed(site) or self.unobserved_w(site) > 0
+            or any(record.get("site") == site for record in self.managed.values())
+        )
+
     def native_claimed(self, vin):
         return any(vin in entry.get("sessions", {}) for entry in self.entries.values())
 

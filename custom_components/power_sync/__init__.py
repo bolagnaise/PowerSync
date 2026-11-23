@@ -36918,6 +36918,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             and call.data.get("grid_import_target_w") is None
         )
 
+    async def _cloud_tariff_charge_headroom_blocked(power_w, grid_import_target_w=None):
+        """Check a known charge refusal before changing an active battery hold."""
+        from .native_rate_budget import RUNTIME_KEY, site_identity
+        call = make_service_call(hass, DOMAIN, "force_charge", {
+            "power_w": power_w, "grid_import_target_w": grid_import_target_w,
+        })
+        budget = hass.data.get(RUNTIME_KEY)
+        if budget is None or not _cloud_tariff_control_requested(call):
+            return False
+        await budget.load()
+        return _cloud_tariff_control_requested(call) and budget.blocks_cloud_tariff_charge(site_identity(entry))
+
     async def _prepare_cloud_tariff_control(direction, call):
         """Release previous authority without acquiring or polling local control."""
         if not _cloud_tariff_control_requested(call):
@@ -36940,9 +36952,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             site = site_identity(entry)
             if budget.native_max_claim(site):
                 raise HomeAssistantError("Previous native Powerwall control still owns this site")
-            if direction == "charge" and (
-                    budget.site_armed(site) or budget.unobserved_w(site) > 0
-                    or any(record.get("site") == site for record in budget.managed.values())):
+            if direction == "charge" and budget.blocks_cloud_tariff_charge(site):
                 raise HomeAssistantError("Cloud tariff charging cannot reserve shared EV headroom")
         if (not _local_powerwall_generation_current()
                 or not _cloud_tariff_control_requested(call)
@@ -50856,6 +50866,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 tariff_schedule=tariff_schedule,  # For Globird/TOU-based pricing
                 force_state_getter=get_force_state,  # For checking if force mode is active
                 force_state_clearer=clear_force_state,  # For optimizer to clear before restore_normal
+                cloud_tariff_charge_headroom_blocked=_cloud_tariff_charge_headroom_blocked,
             )
 
             # Set up the coordinator

@@ -20,7 +20,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 if TYPE_CHECKING:
     from ..flow_power import FlowPowerPlanSnapshot
@@ -507,6 +507,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         tariff_schedule: dict | None = None,
         force_state_getter: Callable[[], dict] | None = None,
         force_state_clearer: Callable[[], None] | None = None,
+        cloud_tariff_charge_headroom_blocked: Callable[..., Awaitable[bool]] | None = None,
         entry: Any | None = None,
         **kwargs,  # Ignore legacy feature flags
     ):
@@ -528,6 +529,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._tariff_schedule = tariff_schedule
         self._force_state_getter = force_state_getter
         self._force_state_clearer = force_state_clearer
+        self._cloud_tariff_charge_headroom_blocked = cloud_tariff_charge_headroom_blocked
 
         # Configuration
         self._enabled = False
@@ -12915,6 +12917,20 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # what IDLE did (restore work mode and backup_reserve) before
             # executing the new LP action.
             prev = self._last_executed_action
+            if prev == "idle" and effective_action == "charge":
+                charge_headroom_blocked = getattr(self, "_cloud_tariff_charge_headroom_blocked", None)
+                if self.battery_system == "tesla" and charge_headroom_blocked is not None:
+                    charge_power_w = self._charge_command_power_w(action)
+                    if await charge_headroom_blocked(
+                        self._powerwall_service_power("charge", charge_power_w),
+                        **self._charge_grid_target_kwargs(action),
+                    ):
+                        _LOGGER.info(
+                            "Optimizer: Keeping IDLE hold because cloud tariff charging "
+                            "cannot reserve shared EV headroom"
+                        )
+                        publish_optimizer_action(self, action, "runtime_target", "idle")
+                        return
             if prev == "idle" and effective_action != "idle":
                 if getattr(self, "_idle_no_discharge_active", False):
                     if not await self._restore_idle_no_discharge_mode(
