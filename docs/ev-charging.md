@@ -60,7 +60,7 @@ With **Prioritise switch-only charging in Price Level** enabled, the charger sta
 
 When Tesla command recovery holds a Scheduled start, PowerSync shows the vehicle as waiting and keeps control for the next eligible retry. Charging history begins once the car confirms charging. If the previous command has finished and the same vehicle and charging control are still available, PowerSync can set the permitted current before retrying Start.
 
-EV charging history records the car’s state of charge at the start and end of a managed session when that reading is available.
+EV charging history records the car’s state of charge at the start and end of a managed session when that reading is available. For dynamic charging, intervals with insufficient evidence to attribute the power source still count toward total energy. Those intervals are excluded from estimated solar and grid energy and cost.
 
 ## EV SoC sensors with OCPP
 
