@@ -12720,14 +12720,28 @@ def _calculate_solar_surplus(
     return available_kw
 
 
-def _is_ev_charging_from_solar(grid_power_kw: float, ev_power_kw: float) -> bool:
-    """Determine if EV is charging primarily from solar.
-
-    If less than 20% of EV power is coming from the grid, consider it solar.
-    """
-    if ev_power_kw <= 0:
-        return False
-    return grid_power_kw < (ev_power_kw * 0.2)
+def _is_ev_charging_from_solar(live_status: dict, ev_power_kw: float) -> bool | None:
+    """Classify dynamic EV history only when the meters support the source."""
+    if not math.isfinite(ev_power_kw) or ev_power_kw <= 0:
+        return None
+    try:
+        grid_kw = float(live_status["grid_power"]) / 1000
+        if not math.isfinite(grid_kw):
+            return None
+        if grid_kw >= ev_power_kw * 0.2:
+            return False
+        solar_kw = float(live_status["solar_power"]) / 1000
+        battery_kw = float(live_status["battery_power"]) / 1000
+    except (KeyError, TypeError, ValueError):
+        return None
+    if (
+        math.isfinite(solar_kw)
+        and math.isfinite(battery_kw)
+        and solar_kw >= ev_power_kw * 0.8
+        and battery_kw < ev_power_kw * 0.2
+    ):
+        return True
+    return None
 
 
 def _get_current_ev_prices(hass, entry_id: str) -> tuple:
@@ -15164,10 +15178,7 @@ async def _update_smart_schedule_battery_target_group(
                         vehicle_id=vehicle_id,
                         power_kw=power_kw,
                         amps=current_amps,
-                        is_solar=_is_ev_charging_from_solar(
-                            grid_power_kw,
-                            power_kw,
-                        ),
+                        is_solar=_is_ev_charging_from_solar(live_status, power_kw),
                         import_price_cents=import_price,
                         export_price_cents=export_price,
                     )
@@ -16696,9 +16707,7 @@ async def _dynamic_ev_update_surplus(
             from .ev_charging_session import get_session_manager
             session_manager = get_session_manager()
             if session_manager:
-                # Determine if we're charging from solar using grid import
-                grid_power_kw = (live_status.get("grid_power") or 0) / 1000
-                is_solar = _is_ev_charging_from_solar(grid_power_kw, current_ev_kw)
+                is_solar = _is_ev_charging_from_solar(live_status, current_ev_kw)
 
                 import_price, export_price = _get_current_ev_prices(hass, config_entry.entry_id)
 
@@ -19041,7 +19050,7 @@ async def _dynamic_ev_update(
                 and not (params.get("owner_mode") == "scheduled" and state.get("transport_recovery_pending"))):
             if current_amps > 0 and new_amps > 0:
                 # Session update - still charging
-                is_solar = _is_ev_charging_from_solar(grid_power_kw, current_ev_power_kw)
+                is_solar = _is_ev_charging_from_solar(live_status, current_ev_power_kw)
                 import_price, export_price = _get_current_ev_prices(hass, entry_id)
 
                 await session_manager.update_session(

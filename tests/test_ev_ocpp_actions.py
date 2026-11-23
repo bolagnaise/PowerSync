@@ -19821,3 +19821,31 @@ def test_ble_same_rate_confirms_only_native_current_limit_sample(monkeypatch, pr
     assert len(writes) == (0 if proof == "other_device" else 1)
     assert hass.states.get("number.car_charging_amps").last_updated == old
     assert clock[0] <= 35
+
+
+@pytest.mark.parametrize(
+    ("grid_w", "solar_w", "battery_w", "expected"),
+    [(0, 500, 8210, None), (0, 7500, 0, True), (7300, 0, 0, False),
+     (0, None, None, None)],
+)
+def test_dynamic_ev_history_uses_source_evidence(monkeypatch, grid_w, solar_w, battery_w, expected):
+    """Low grid import cannot turn a battery-powered charge into solar energy."""
+    from power_sync.automations import ev_charging_session as tracking
+
+    now = datetime(2026, 11, 23, tzinfo=timezone.utc)
+    monkeypatch.setattr(tracking.dt_util, "now", lambda: now)
+    meter = {"grid_power": grid_w, "solar_power": solar_w, "battery_power": battery_w}
+    is_solar = actions._is_ev_charging_from_solar(meter, 7.30)
+    assert is_solar is expected
+
+    manager = tracking.ChargingSessionManager(None)
+    session = tracking.ChargingSession("session", "car", now.isoformat(), mode="scheduled")
+    manager.active_sessions["car"] = session
+    asyncio.run(manager.update_session("car", 7.30, 32, is_solar))
+
+    assert session.total_energy_kwh > 0
+    assert session.solar_percentage == (100 if expected is True else 0)
+    if expected is None:
+        assert session.grid_energy_kwh == 0
+        assert session.total_cost_cents == 0
+        assert session.end_segment().source == "mixed"

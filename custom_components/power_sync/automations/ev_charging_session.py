@@ -43,6 +43,12 @@ class ChargingSource(Enum):
     MIXED = "mixed"
 
 
+def _reading_source(is_solar: bool | None) -> str:
+    if is_solar is None:
+        return ChargingSource.MIXED.value
+    return ChargingSource.SOLAR_SURPLUS.value if is_solar else ChargingSource.GRID_PEAK.value
+
+
 @dataclass
 class ChargingSegment:
     """A continuous charging segment with consistent source."""
@@ -191,7 +197,7 @@ class ChargingSession:
         self,
         power_kw: float,
         amps: int,
-        is_solar: bool,
+        is_solar: bool | None,
         import_price_cents: float,
         export_price_cents: float,
     ) -> None:
@@ -200,7 +206,7 @@ class ChargingSession:
         Args:
             power_kw: Current charging power in kW
             amps: Current charging amps
-            is_solar: True if this power is from solar surplus
+            is_solar: True for solar, False for grid, None for mixed or unknown
             import_price_cents: Grid import price in cents/kWh
             export_price_cents: Feed-in tariff in cents/kWh
         """
@@ -209,7 +215,7 @@ class ChargingSession:
 
         if not self._current_segment_start:
             # Auto-start a segment
-            source = ChargingSource.SOLAR_SURPLUS.value if is_solar else ChargingSource.GRID_PEAK.value
+            source = _reading_source(is_solar)
             self.start_segment(source)
 
         # Calculate elapsed time from last reading
@@ -238,12 +244,15 @@ class ChargingSession:
             savings_cents = energy_kwh * import_price_cents
             solar_kwh = energy_kwh
             grid_kwh = 0.0
-        else:
+        elif is_solar is False:
             # Using grid power
             cost_cents = energy_kwh * import_price_cents
             savings_cents = 0.0
             solar_kwh = 0.0
             grid_kwh = energy_kwh
+        else:
+            # Count charging energy without inventing its source or cost.
+            cost_cents = savings_cents = solar_kwh = grid_kwh = 0.0
 
         # Store reading for segment aggregation
         self._current_segment_readings.append({
@@ -430,7 +439,7 @@ class ChargingSessionManager:
         vehicle_id: str,
         power_kw: float,
         amps: int,
-        is_solar: bool,
+        is_solar: bool | None,
         import_price_cents: float = 30.0,
         export_price_cents: float = 8.0,
         battery_soc: Optional[int] = None,
@@ -443,7 +452,7 @@ class ChargingSessionManager:
             vehicle_id: Vehicle identifier
             power_kw: Current charging power in kW
             amps: Current charging amps
-            is_solar: True if power is from solar surplus
+            is_solar: True for solar, False for grid, None for mixed or unknown
             import_price_cents: Grid import price (cents/kWh)
             export_price_cents: Feed-in tariff (cents/kWh)
             battery_soc: Current battery SoC (if available)
@@ -456,7 +465,7 @@ class ChargingSessionManager:
             return None
 
         # Determine source from is_solar flag
-        source = ChargingSource.SOLAR_SURPLUS.value if is_solar else ChargingSource.GRID_PEAK.value
+        source = _reading_source(is_solar)
 
         # Check if source changed - if so, end current segment and start new one
         if session._current_segment_source and session._current_segment_source != source:
