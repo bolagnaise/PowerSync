@@ -6000,6 +6000,7 @@ def test_tesla_self_consumption_restores_stale_grid_charge(opt_module):
             "grid_power": 3.96,
             "battery_level": 22.5,
             "grid_services_active": False,
+            "last_update": opt_module.dt_util.utcnow(),
         }
     )
     coordinator._get_energy_data = lambda: coordinator.energy_coordinator.data
@@ -6038,6 +6039,7 @@ def test_tesla_stale_grid_charge_rechecks_after_restore_cooldown(opt_module):
     now = datetime(2026, 8, 22, 7, 20, tzinfo=timezone.utc)
     current_time = {"now": now}
     opt_module.dt_util.utcnow = lambda *args, **kwargs: current_time["now"]
+    coordinator.energy_coordinator.data["last_update"] = now
     action = SimpleNamespace(action="self_consumption", power_w=0)
 
     asyncio.run(coordinator._execute_optimizer_action(action))
@@ -6045,6 +6047,10 @@ def test_tesla_stale_grid_charge_rechecks_after_restore_cooldown(opt_module):
     assert battery.restore_normal_calls == 1
 
     current_time["now"] += opt_module.TESLA_STALE_GRID_CHARGE_RESTORE_COOLDOWN
+    asyncio.run(coordinator._execute_optimizer_action(action))
+    assert battery.restore_normal_calls == 1
+
+    coordinator.energy_coordinator.data["last_update"] = current_time["now"]
     asyncio.run(coordinator._execute_optimizer_action(action))
 
     assert battery.restore_normal_calls == 2
@@ -6064,6 +6070,7 @@ def test_tesla_stale_grid_charge_retries_failed_restore(opt_module):
             "grid_power": 3.96,
             "battery_level": 23.5,
             "grid_services_active": False,
+            "last_update": opt_module.dt_util.utcnow(),
         }
     )
     coordinator._get_energy_data = lambda: coordinator.energy_coordinator.data
@@ -6074,6 +6081,34 @@ def test_tesla_stale_grid_charge_retries_failed_restore(opt_module):
 
     assert battery.restore_normal_calls == 2
     assert not hasattr(coordinator, "_last_tesla_stale_grid_charge_restore_at")
+
+
+def test_tesla_self_consumption_ignores_old_grid_import_during_solar_charge(opt_module):
+    """A cached import sample must not restore tariff and controls."""
+    battery = _FakeBattery(hardware_mode="self_consumption", backup_reserve=20)
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.315)
+    now = datetime(2026, 11, 23, 0, 41, 7, tzinfo=timezone.utc)
+    opt_module.dt_util.utcnow = lambda: now
+    data = {
+        "battery_power": -3.73,
+        "grid_power": 4.50,
+        "battery_level": 31.5,
+        "last_update": now - timedelta(minutes=3),
+    }
+    coordinator._get_energy_data = lambda: data
+    action = SimpleNamespace(action="self_consumption", power_w=0)
+
+    asyncio.run(coordinator._execute_optimizer_action(action))
+    assert battery.restore_normal_calls == 0
+
+    data.update(last_update=now, telemetry_observed_at={"battery_power": None})
+    asyncio.run(coordinator._execute_optimizer_action(action))
+    assert battery.restore_normal_calls == 0
+
+    data["telemetry_observed_at"]["battery_power"] = now
+    data.update(battery_power=-4.5, grid_power=0.12, last_update=now)
+    asyncio.run(coordinator._execute_optimizer_action(action))
+    assert battery.restore_normal_calls == 0
 
 
 @pytest.mark.parametrize(
@@ -6102,6 +6137,7 @@ def test_tesla_self_consumption_keeps_expected_charge_sources(
             "grid_power": grid_kw,
             "battery_level": soc_pct,
             "grid_services_active": grid_services_active,
+            "last_update": opt_module.dt_util.utcnow(),
         }
     )
     coordinator._get_energy_data = lambda: coordinator.energy_coordinator.data

@@ -202,6 +202,7 @@ BOUNDARY_FRESH_SOLVE_GRACE = timedelta(seconds=30)
 OPTIMIZER_FORCE_CHARGE_MIN_COMMITMENT = timedelta(minutes=20)
 OPTIMIZER_FORCE_DISCHARGE_MIN_COMMITMENT = timedelta(minutes=20)
 TESLA_STALE_GRID_CHARGE_RESTORE_COOLDOWN = timedelta(minutes=5)
+TESLA_GRID_CHARGE_SAMPLE_MAX_AGE = timedelta(minutes=2)
 SUNGROW_INFERRED_RESTORE_COOLDOWN = timedelta(minutes=5)
 GLOBIRD_QUOTA_EXPORT_RULE_ID = "globird_zerohero_bonus_export"
 GLOBIRD_QUOTA_IMPORT_RULE_ID = "globird_zerocharge_import"
@@ -11734,6 +11735,24 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         data = self._get_energy_data()
         if not isinstance(data, dict) or data.get("grid_services_active"):
+            return None
+        # A failed refresh can leave the last successful site sample in the
+        # coordinator. It cannot prove charging continued into this cycle.
+        observed_at = data.get("last_update")
+        field_times = data.get("telemetry_observed_at")
+        if isinstance(field_times, dict):
+            # When the producer provides an acquisition timestamp, use it
+            # even if it is unknown. Republishing can advance last_update.
+            observed_at = field_times.get("battery_power", observed_at)
+        if (
+            not isinstance(observed_at, datetime)
+            or observed_at.utcoffset() is None
+            or not (
+                timedelta(0)
+                <= dt_util.utcnow() - observed_at
+                <= TESLA_GRID_CHARGE_SAMPLE_MAX_AGE
+            )
+        ):
             return None
 
         try:

@@ -299,6 +299,7 @@ def test_tesla_stale_grid_charge_restore_reports_existing_return_value(opt_modul
     coordinator._get_energy_data = lambda: {
         "battery_power": -3.34, "grid_power": 3.96,
         "battery_level": 80.0, "grid_services_active": False,
+        "last_update": opt_module.dt_util.utcnow(),
     }
 
     _run(coordinator, actions[0])
