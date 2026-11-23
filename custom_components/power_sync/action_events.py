@@ -124,6 +124,12 @@ def observe_ev_stop(hass: Any, config_entry: Any, vehicle_id: str,
     if charging:
         if age < 90 or (datetime.now(timezone.utc) - observed_at).total_seconds() > 120:
             return
+        sample_timestamp = observed_at.timestamp()
+        last_reported = command.get("last_charging_observation_ts")
+        if isinstance(last_reported, (int, float)) and sample_timestamp <= last_reported:
+            return
+        # Reconciliation can revisit the same cached sample several times.
+        command["last_charging_observation_ts"] = sample_timestamp
         publish_ev_command(hass, config_entry, vehicle_id, {
             **command, "success": False, "observed_at": observed_at.isoformat(),
             "reason": "Vehicle telemetry still reports charging at least 90 seconds after the stop request",

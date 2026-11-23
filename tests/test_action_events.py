@@ -89,6 +89,29 @@ def test_fresh_charging_after_grace_warns_once_without_rewriting_ack(env):
     assert not last.get("settled_at")
 
 
+def test_stop_reports_each_new_charging_sample_once(env):
+    hass, entry, notice = env
+    last = command(success=False, age=150)
+    first = datetime.now(timezone.utc) - timedelta(seconds=30)
+    second = first + timedelta(seconds=10)
+
+    events.publish_ev_command(hass, entry, "car", last)
+    for sample in (first, first, second, first, second):
+        events.observe_ev_stop(hass, entry, "car", last, sample, charging=True)
+    events.observe_ev_stop(hass, entry, "car", last, datetime.now(timezone.utc), charging=False)
+
+    reports = fired(hass, events.EVENT_EV_COMMAND)
+    continued = [report for report in reports if report["record_type"] == "observation"
+                 and not report["physical_confirmation"]]
+    assert [report["observed_at"] for report in continued] == [first.isoformat(), second.isoformat()]
+    assert reports[0]["record_type"] == "command"
+    assert last["success"] is False
+    assert reports[-1]["physical_confirmation"] is True
+    assert len(fired(hass, events.EVENT_EV_STOP_FAILED)) == 1
+    notice.async_create.assert_called_once()
+    notice.async_dismiss.assert_called_once()
+
+
 @pytest.mark.parametrize("case", ["missing", "old", "future", "settling", "stale", "settled", "external", "new_start"])
 def test_telemetry_must_match_a_current_stop_and_be_fresh(env, case):
     hass, entry, notice = env
