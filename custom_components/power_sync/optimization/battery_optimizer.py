@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 import math
 import time
+from collections import deque
 from contextlib import contextmanager
 from contextvars import ContextVar
 from functools import wraps
@@ -251,6 +252,81 @@ def _fallback_ev_source_series(
     return sources
 
 
+def _allocate_ev_sources_for_slot(
+    targets: dict[str, float],
+    prior: dict[str, dict[str, float]],
+    limits: dict[str, dict[str, float]],
+    budgets: dict[str, float],
+) -> dict[str, dict[str, float]] | None:
+    """Keep incumbent allocations where possible, sharing only permitted power."""
+    vehicles = sorted(targets)
+    source_order = {
+        car: sorted(("solar", "battery", "grid"), key=prior[car].__getitem__, reverse=True)
+        for car in vehicles
+    }
+    assigned = {car: dict.fromkeys(budgets, 0.0) for car in vehicles}
+    remaining = dict(targets)
+    available = dict(budgets)
+    for car in vehicles:
+        for source in source_order[car]:
+            amount = min(remaining[car], available[source], prior[car][source])
+            assigned[car][source] = amount
+            remaining[car] -= amount
+            available[source] -= amount
+
+    for car in vehicles:
+        while remaining[car] > 1e-9:
+            # Find a source with spare capacity, possibly by moving other
+            # vehicles' allocations. The shortest path keeps existing splits
+            # intact whenever the car can use a free source directly.
+            search = deque([car])
+            previous_source: dict[str, str] = {}
+            previous_car: dict[str, str] = {}
+            free_source = None
+            while search and free_source is None:
+                current = search.popleft()
+                for source in source_order[current]:
+                    if source in previous_car:
+                        continue
+                    if limits[current][source] - assigned[current][source] <= 1e-9:
+                        continue
+                    previous_car[source] = current
+                    if available[source] > 1e-9:
+                        free_source = source
+                        break
+                    for other in vehicles:
+                        if (
+                            other != car and other not in previous_source
+                            and assigned[other][source] > 1e-9
+                        ):
+                            previous_source[other] = source
+                            search.append(other)
+
+            if free_source is None:
+                break
+            path = []
+            amount = min(remaining[car], available[free_source])
+            source = free_source
+            while True:
+                current = previous_car[source]
+                amount = min(amount, limits[current][source] - assigned[current][source])
+                path.append((current, source))
+                if current == car:
+                    break
+                source = previous_source[current]
+                amount = min(amount, assigned[current][source])
+            for current, source in path:
+                assigned[current][source] += amount
+                if current != car:
+                    assigned[current][previous_source[current]] -= amount
+            available[free_source] -= amount
+            remaining[car] -= amount
+
+    if math.fsum(remaining.values()) > EV_SOURCE_ROUNDING_TOLERANCE_KW:
+        return None
+    return assigned
+
+
 def _reconcile_ev_sources_to_schedule(
     ev_charge_by_vehicle_kw: dict[str, list[float]],
     prior_sources_by_vehicle_kw: dict[str, dict[str, list[float]]],
@@ -262,6 +338,7 @@ def _reconcile_ev_sources_to_schedule(
     grid_reallocation_allowed: dict[str, list[bool]] | None = None,
     solar_reallocation_allowed: dict[str, list[bool]] | None = None,
     max_grid_import_kw: float | None = None,
+    battery_grid_charge_allowed: list[bool] | None = None,
 ) -> dict[str, dict[str, list[float]]] | None:
     """Reattribute EV draw to sources available in the emitted schedule.
 
@@ -296,7 +373,6 @@ def _reconcile_ev_sources_to_schedule(
         for vehicle_id in vehicle_ids
     }
     actions = schedule.actions or []
-    source_order = ("solar", "battery", "grid")
 
     for slot in range(n):
         target_by_vehicle = {
@@ -353,107 +429,61 @@ def _reconcile_ev_sources_to_schedule(
             "battery": battery_for_ev,
         }
 
-        remaining = dict(target_by_vehicle)
-        # First preserve the LP's selected source proportions, subject to the
-        # final physical budgets.  A later fill pass can move the clipped
-        # remainder to another source the LP had already selected.
-        for vehicle_id in vehicle_ids:
-            prior = prior_sources_by_vehicle_kw.get(vehicle_id, {}) or {}
-            ordered = sorted(
-                source_order,
-                key=lambda source: max(
-                    0.0,
-                    float(
-                        (prior.get(source) or [0.0] * n)[slot]
-                        if slot < len(prior.get(source) or [])
-                        else 0.0
-                    ),
-                ),
-                reverse=True,
-            )
-            for source in ordered:
-                if remaining[vehicle_id] <= 1e-9 or budgets[source] <= 1e-9:
-                    continue
-                requested = max(
-                    0.0,
-                    float(
-                        (prior.get(source) or [0.0] * n)[slot]
-                        if slot < len(prior.get(source) or [])
-                        else 0.0
-                    ),
-                )
-                allocated = min(remaining[vehicle_id], requested, budgets[source])
-                if allocated <= 0.0:
-                    continue
-                sources[vehicle_id][source][slot] += allocated
-                remaining[vehicle_id] -= allocated
-                budgets[source] -= allocated
-
-        # Prefer the sources the LP used when redistributing the settled draw.
-        for vehicle_id in vehicle_ids:
-            if remaining[vehicle_id] <= 1e-9:
-                continue
-            prior = prior_sources_by_vehicle_kw.get(vehicle_id, {}) or {}
-            ordered = sorted(
-                source_order,
-                key=lambda source: max(
-                    0.0,
-                    float(
-                        (prior.get(source) or [0.0] * n)[slot]
-                        if slot < len(prior.get(source) or [])
-                        else 0.0
-                    ),
-                ),
-                reverse=True,
-            )
-            for source in ordered:
-                if remaining[vehicle_id] <= 1e-9 or budgets[source] <= 1e-9:
-                    continue
-                prior_value = max(
-                    0.0,
-                    float(
-                        (prior.get(source) or [0.0] * n)[slot]
-                        if slot < len(prior.get(source) or [])
-                        else 0.0
-                    ),
-                )
-                if prior_value <= 1e-9:
-                    continue
-                allocated = min(remaining[vehicle_id], budgets[source])
-                sources[vehicle_id][source][slot] += allocated
-                remaining[vehicle_id] -= allocated
-                budgets[source] -= allocated
-
-        # Reuse unassigned solar or import already in the final schedule.
-        # Reserve the remaining supply for cars with fewer permitted sources
-        # before allocating to cars that can use either source.
         within_import_limit = (
             max_grid_import_kw is None
             or grid_import <= max_grid_import_kw + EV_SOURCE_ROUNDING_TOLERANCE_KW
         )
-        reallocation: dict[str, list[str]] = {}
-        for source, permissions in (
-            ("solar", solar_reallocation_allowed),
-            ("grid", grid_reallocation_allowed if within_import_limit else None),
-        ):
-            if budgets[source] <= 1e-9:
-                continue
-            for vehicle_id, allowed in (permissions or {}).items():
-                if (
-                    remaining.get(vehicle_id, 0.0) > 1e-9
-                    and slot < len(allowed)
-                    and allowed[slot]
-                ):
-                    reallocation.setdefault(vehicle_id, []).append(source)
-        for vehicle_id, available in sorted(reallocation.items(), key=lambda item: len(item[1])):
-            for source in available:
-                allocated = min(remaining[vehicle_id], budgets[source])
-                sources[vehicle_id][source][slot] += allocated
-                remaining[vehicle_id] -= allocated
-                budgets[source] -= allocated
+        if max_grid_import_kw is not None:
+            budgets["grid"] = min(
+                grid_for_ev, max(0.0, max_grid_import_kw - grid_to_house - grid_to_battery)
+            )
 
-        if math.fsum(remaining.values()) > EV_SOURCE_ROUNDING_TOLERANCE_KW:
+        prior = {}
+        limits = {}
+        for car, target in target_by_vehicle.items():
+            prior[car] = dict.fromkeys(budgets, 0.0)
+            for source, series in prior_sources_by_vehicle_kw.get(car, {}).items():
+                if source in budgets and slot < len(series):
+                    prior[car][source] = max(0.0, float(series[slot]))
+            grid_allowed = (grid_reallocation_allowed or {}).get(car, [])
+            solar_allowed = (solar_reallocation_allowed or {}).get(car, [])
+            # An import-limited car may retain its solved grid allocation,
+            # but another car must not move extra grid power onto it.
+            can_add_grid = (
+                within_import_limit and slot < len(grid_allowed) and grid_allowed[slot]
+            )
+            can_add_solar = prior[car]["solar"] > 1e-9 or (
+                slot < len(solar_allowed) and solar_allowed[slot]
+            )
+            limits[car] = {
+                "grid": target if can_add_grid else prior[car]["grid"],
+                "solar": target if can_add_solar else 0.0,
+                "battery": target if prior[car]["battery"] > 1e-9 else 0.0,
+            }
+        allocated = _allocate_ev_sources_for_slot(target_by_vehicle, prior, limits, budgets)
+        if (
+            allocated is None
+            and action.action == "charge"
+            and battery_grid_charge_allowed
+            and slot < len(battery_grid_charge_allowed)
+            and battery_grid_charge_allowed[slot]
+            and within_import_limit
+            and solar_to_battery > 0
+            and budgets["grid"] > 0
+            and discharge == 0
+            and total_ev_kw <= solar_for_ev + budgets["grid"] + EV_SOURCE_ROUNDING_TOLERANCE_KW
+        ):
+            # The emitted battery charge can use import already on the meter.
+            # Swap one kW of battery solar for one kW of that import when a
+            # solar-only car needs it. The total-draw bound above keeps the
+            # overlapping grid and solar capacities from being counted twice.
+            budgets["solar"] += min(solar_to_battery, budgets["grid"])
+            allocated = _allocate_ev_sources_for_slot(target_by_vehicle, prior, limits, budgets)
+        if allocated is None:
             return None
+        for car, by_source in allocated.items():
+            for source, amount in by_source.items():
+                sources[car][source][slot] = amount
 
     return sources
 
@@ -974,6 +1004,7 @@ class OptimizerResult:
     # Keep solver-resolved eligibility for the final schedule reconciliation.
     ev_grid_reallocation_allowed: dict[str, list[bool]] = field(default_factory=dict)
     ev_solar_reallocation_allowed: dict[str, list[bool]] = field(default_factory=dict)
+    battery_grid_charge_allowed: list[bool] = field(default_factory=list)
 
 
 class BatteryOptimizer:
@@ -6750,7 +6781,12 @@ class BatteryOptimizer:
         grid_import, grid_export = self._grid_flows_from_schedule(
             schedule, n, solar, load
         )
+        battery_grid_charge_allowed = []
         if ev_charge_active and cost_neutral_active:
+            battery_grid_charge_allowed = [
+                allow_grid_charge and permitted and not blocked
+                for permitted, blocked in zip(grid_charge_allowed, block_battery_charge)
+            ]
             reconciled_sources = _reconcile_ev_sources_to_schedule(
                 ev_charge_kw_by_vehicle,
                 ev_source_kw_by_vehicle,
@@ -6761,6 +6797,7 @@ class BatteryOptimizer:
                 grid_reallocation_allowed=ev_grid_reallocation_allowed,
                 solar_reallocation_allowed=ev_solar_reallocation_allowed,
                 max_grid_import_kw=self.max_grid_import_kw,
+                battery_grid_charge_allowed=battery_grid_charge_allowed,
             )
             if reconciled_sources is None:
                 raise ValueError(
@@ -6900,6 +6937,7 @@ class BatteryOptimizer:
             },
             ev_grid_reallocation_allowed=ev_grid_reallocation_allowed,
             ev_solar_reallocation_allowed=ev_solar_reallocation_allowed,
+            battery_grid_charge_allowed=battery_grid_charge_allowed,
         )
 
     def _build_reserve_recommendation(
@@ -10995,6 +11033,7 @@ class BatteryOptimizer:
                     result, "ev_solar_reallocation_allowed", None
                 ),
                 max_grid_import_kw=self.max_grid_import_kw,
+                battery_grid_charge_allowed=getattr(result, "battery_grid_charge_allowed", None),
             )
             if reconciled_sources is None:
                 _LOGGER.warning(
