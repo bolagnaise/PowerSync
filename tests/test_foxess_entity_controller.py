@@ -1245,3 +1245,77 @@ def test_read_only_reserve_sensor_does_not_satisfy_writable_requirement():
         asyncio.run(controller.connect())
 
     assert "number.foxess_min_soc_on_grid" in str(exc.value)
+
+
+def test_force_discharge_keeps_owned_export_cap_recoverable():
+    states = _base_states()
+    cap = next(state for state in states if state.entity_id == "number.foxess_export_power_limit")
+    cap.state = "5000"
+    hass = _FakeHass(states)
+    controller = FoxESSEntityController(hass, entity_prefix="foxess")
+    asyncio.run(controller.connect())
+
+    async def apply_number(domain, service, data, blocking=True):
+        hass.services.calls.append((domain, service, data))
+        if data["entity_id"] == cap.entity_id:
+            cap.state = str(data["value"])
+
+    hass.services.async_call = apply_number
+    assert asyncio.run(controller.curtail())
+    assert float(cap.state) == 0
+    assert asyncio.run(controller.force_discharge(power_w=4999))
+    assert controller.owns_export_limit
+
+    cap.state = "unknown"
+    assert not asyncio.run(controller.restore())
+    assert controller.owns_export_limit
+
+    cap.state = "0"
+    assert asyncio.run(controller.restore())
+    assert float(cap.state) == 5000
+    assert not controller.owns_export_limit
+
+
+def test_unowned_zero_export_cap_is_not_changed():
+    states = _base_states()
+    cap = next(state for state in states if state.entity_id == "number.foxess_export_power_limit")
+    cap.state = "0"
+    hass = _FakeHass(states)
+    controller = FoxESSEntityController(hass, entity_prefix="foxess")
+    asyncio.run(controller.connect())
+
+    assert asyncio.run(controller.curtail())
+    assert asyncio.run(controller.restore())
+    assert hass.services.calls == []
+    assert not controller.owns_export_limit
+
+
+
+def test_owned_cap_release_never_disables_remote_force():
+    hass = _FakeHass(_base_states())
+    controller = FoxESSEntityController(hass, entity_prefix="foxess")
+    asyncio.run(controller.connect())
+    controller._remote_control_active = True
+
+    assert asyncio.run(controller.restore(owned_export_limit_only=True))
+    assert hass.services.calls == []
+    assert controller._remote_control_active
+
+
+
+def test_contrary_export_cap_readback_retires_ownership():
+    states = _base_states()
+    cap = next(state for state in states if state.entity_id == "number.foxess_export_power_limit")
+    cap.state = "5000"
+    hass = _FakeHass(states)
+    controller = FoxESSEntityController(hass, entity_prefix="foxess")
+    asyncio.run(controller.connect())
+    assert asyncio.run(controller.curtail())
+    assert controller.owns_export_limit
+
+    cap.state = "1000"
+    assert not asyncio.run(controller.restore())
+    cap.state = "0"
+    assert asyncio.run(controller.restore())
+    assert len(hass.services.calls) == 1
+    assert not controller.owns_export_limit

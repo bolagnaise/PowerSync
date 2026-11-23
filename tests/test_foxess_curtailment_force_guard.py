@@ -81,7 +81,9 @@ class FakeFoxESSCoordinator:
         self.curtail_calls += 1
         return True
 
-    async def restore_curtailment(self) -> bool:
+    async def restore_curtailment(self, *, owned_export_limit_only: bool = False) -> bool:
+        if getattr(self, "owns_export_limit", False):
+            assert owned_export_limit_only
         self.restore_calls += 1
         return True
 
@@ -299,3 +301,20 @@ def test_foxess_restores_when_export_earnings_recover():
 
     assert coordinator.restore_calls == 1
     assert hass.data[DOMAIN][ENTRY_ID]["foxess_curtailment_state"] == "normal"
+
+
+def test_owned_export_cap_remains_tracked_through_force_dispatch():
+    """The independent export cap survives a shared force command."""
+    entry_data, coordinator = _entry_data(current_state="curtailed")
+    coordinator.owns_export_limit = True
+    handler, hass = _load_handler(entry_data, force_discharge_active=True)
+    asyncio.run(handler(feedin_price=1.0, import_price=30.0))
+
+    assert coordinator.restore_calls == 0
+    assert hass.data[DOMAIN][ENTRY_ID]["foxess_curtailment_state"] == "curtailed"
+
+    # Force transition resets the shared curtailment state. The independent cap
+    # still needs to be restored when export becomes economic.
+    entry_data["foxess_curtailment_state"] = "normal"
+    asyncio.run(handler(feedin_price=POSITIVE_EARNINGS_FEEDIN_PRICE, import_price=30.0))
+    assert coordinator.restore_calls == 1

@@ -124,6 +124,8 @@ class FoxESSEntityController:
         self._entity_map: dict[str, str] = {}
         self._remote_control_settle_seconds = 1.0
         self._remote_control_active = False
+        self._export_limit_lock = asyncio.Lock()
+        self._owned_export_limit: tuple[str, float, float] | None = None
         # Rate-limit the "curtailment unavailable" diagnostic to once per
         # discovery so a missing/disabled export-limit entity does not spam
         # the log every curtailment cycle.
@@ -362,10 +364,42 @@ class FoxESSEntityController:
         await self._set_number("max_discharge_current", max(0.0, float(amps)))
         return True
 
+    @property
+    def owns_export_limit(self) -> bool:
+        """Whether this bridge has a separate export cap to restore."""
+        return self._owned_export_limit is not None
+
     async def curtail(self, home_load_w: int | None = None) -> bool:
-        """Apply an export limit when the upstream entity exposes it."""
-        self._ensure_entity_map()
-        if not self._entity_exists("export_power_limit"):
+        """Apply an export limit without raising the site's existing limit."""
+        async with self._export_limit_lock:
+            self._ensure_entity_map()
+            if self._entity_exists("export_power_limit") or self.owns_export_limit:
+                entity_id = self._entity_map.get("export_power_limit")
+                current = self._read_float("export_power_limit")
+                if not entity_id or current is None or current < 0:
+                    return False
+                baseline = current
+                if self._owned_export_limit is not None:
+                    bound_entity, baseline, applied = self._owned_export_limit
+                    if bound_entity != entity_id:
+                        return False
+                    if current not in (baseline, applied):
+                        self._owned_export_limit = None
+                        return False
+                    if current == applied:
+                        return True
+                state = self.hass.states.get(entity_id)
+                target = self._clamp_number_value(
+                    entity_id, state, max(0, int(home_load_w or 0))
+                )
+                if target >= current:
+                    return True
+                if self._clamp_number_value(entity_id, state, baseline) != baseline:
+                    return False
+                self._owned_export_limit = (entity_id, baseline, target)
+                await self._set_number("export_power_limit", target)
+                return True
+
             if await self._curtail_via_foxess_modbus_remote_control(home_load_w):
                 return True
             if not self._export_limit_warned:
@@ -375,22 +409,35 @@ class FoxESSEntityController:
                     self._diagnose_missing_export_limit(),
                 )
             return False
-        await self._set_number("export_power_limit", max(0, int(home_load_w or 0)))
-        return True
 
-    async def restore(self) -> bool:
-        """Remove export limit when the upstream entity exposes it."""
-        self._ensure_entity_map()
-        if not self._entity_exists("export_power_limit"):
-            if await self._restore_foxess_modbus_remote_control():
-                return True
-            _LOGGER.debug(
-                "FoxESS entity bridge: export_power_limit entity not found; "
-                "nothing to restore"
-            )
-            return False
-        await self._set_number("export_power_limit", 99999)
-        return True
+    async def restore(self, *, owned_export_limit_only: bool = False) -> bool:
+        """Release the exact limit this bridge previously lowered."""
+        async with self._export_limit_lock:
+            self._ensure_entity_map()
+            if self._owned_export_limit is None:
+                if owned_export_limit_only or self._entity_exists("export_power_limit"):
+                    return True
+                return await self._restore_foxess_modbus_remote_control()
+
+            entity_id, baseline, applied = self._owned_export_limit
+            if self._entity_map.get("export_power_limit") != entity_id:
+                return False
+            current = self._read_float("export_power_limit")
+            if current is None:
+                return False
+            if current not in (baseline, applied):
+                self._owned_export_limit = None
+                return False
+            if current == applied:
+                state = self.hass.states.get(entity_id)
+                if self._clamp_number_value(entity_id, state, baseline) != baseline:
+                    return False
+                await self._set_number("export_power_limit", baseline)
+                current = self._read_float("export_power_limit")
+            if current != baseline:
+                return False
+            self._owned_export_limit = None
+            return True
 
     async def _force_via_foxess_modbus_remote_control(
         self,

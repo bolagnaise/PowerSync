@@ -9638,10 +9638,10 @@ class FoxESSEntityEnergyCoordinator(
             return False
         return await self._controller.curtail(home_load_w)
 
-    async def restore_curtailment(self) -> bool:
+    async def restore_curtailment(self, *, owned_export_limit_only: bool = False) -> bool:
         if not self._native_control_allowed("FoxESS restore_curtailment"):
             return False
-        return await self._controller.restore()
+        return await self._controller.restore(owned_export_limit_only=owned_export_limit_only)
 
     async def async_shutdown(self) -> None:
         await self._energy_acc.async_flush()

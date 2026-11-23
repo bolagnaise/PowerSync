@@ -31384,11 +31384,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             return
 
         controller = getattr(fc, "_controller", fc)
+        owns_export_limit = getattr(controller, "owns_export_limit", False) is True
+        if owns_export_limit:
+            current_state = "curtailed"
 
         try:
             if export_uneconomic:
                 if _foxess_force_dispatch_active():
-                    if current_state != "normal":
+                    if current_state != "normal" and not owns_export_limit:
                         entry_data["foxess_curtailment_state"] = "normal"
                         entry_data.pop("_last_foxess_curtailment_reapply", None)
                     _LOGGER.info(
@@ -31530,7 +31533,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             else:
                 # Positive export earnings → restore
                 if current_state != "normal":
-                    if _foxess_force_dispatch_active():
+                    if not owns_export_limit and _foxess_force_dispatch_active():
                         active_mode = "charge" if force_charge_state.get("active") else "discharge"
                         _LOGGER.info(
                             "FoxESS curtailment restore deferred: force %s is active; "
@@ -31539,7 +31542,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         )
                         return
                     _LOGGER.info("FoxESS curtailment RESTORED: export_earnings=%.2fc (at or above threshold) → normal export", export_earnings)
-                    if hasattr(fc, "restore_curtailment"):
+                    if owns_export_limit:
+                        success = await fc.restore_curtailment(owned_export_limit_only=True)
+                    elif hasattr(fc, "restore_curtailment"):
                         success = await fc.restore_curtailment()
                     else:
                         success = await controller.restore()
