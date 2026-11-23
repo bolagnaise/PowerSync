@@ -2878,3 +2878,68 @@ def test_free_grid_charge_keeps_joint_plan_for_solar_only_ev(optimizer_module):
         "solar": pytest.approx([4_000, 0, 0, 0]),
         "battery": [0.0] * 4, "grid": [0.0] * 4,
     }
+
+
+@pytest.mark.parametrize("cost_neutral", [True, False], ids=["cost-neutral", "economic"])
+@pytest.mark.parametrize("grid_charge_allowed", [False, True], ids=["solar-battery", "grid-battery"])
+def test_joint_solar_ev_and_battery_charge_reserve_household_pv(
+    optimizer_module, cost_neutral, grid_charge_allowed,
+):
+    module = optimizer_module
+    optimizer = module.BatteryOptimizer(
+        capacity_wh=10_000, max_charge_w=3_000, max_discharge_w=5_000,
+        max_grid_import_w=9_000, efficiency=0.92, backup_reserve=0.2,
+        hardware_reserve=0.0, interval_minutes=30, horizon_hours=1,
+        allow_greedy_fallback=False,
+    )
+    ev = module.EVChargePlan(
+        vehicle_id="solar_car", max_power_kw=(3.0, 0.0),
+        energy_needed_kwh=1.5, charge_efficiency=1.0, min_power_kw=1.0,
+        allow_grid=(False, False), allow_solar=(True, True), allow_battery=(False, False),
+    )
+    start = _timestamps(1)[0]
+    result = optimizer.optimize(
+        import_prices=[0.0 if grid_charge_allowed else 0.05, 0.70], export_prices=[0, 0],
+        solar_forecast=[6.0, 0.0], load_forecast=[2.0, 2.0], current_soc=0.6,
+        allow_battery_export=True, allow_grid_charge=grid_charge_allowed,
+        schedule_timestamps=[start, start + timedelta(minutes=30)], ev_plan=ev,
+        cost_neutral_earnings_cap=0.7 if cost_neutral else None,
+        cost_neutral_slots=[cost_neutral, cost_neutral],
+    )
+
+    assert result.feasible and result.solver_used == "highs"
+    first = result.schedule.actions[0]
+    assert first.ev_charge_w == pytest.approx(3000)
+    assert result.ev_source_by_vehicle_w["solar_car"]["solar"] == pytest.approx([3000, 0])
+    assert result.ev_source_by_vehicle_w["solar_car"]["grid"] == [0, 0]
+    if grid_charge_allowed:
+        assert first.action == "charge"
+        assert first.battery_charge_w == pytest.approx(3000)
+        assert result.grid_import_w[0] == pytest.approx(2000)
+    else:
+        assert first.action == "self_consumption"
+        assert first.battery_charge_w == pytest.approx(1000)
+        assert result.grid_import_w[0] == pytest.approx(0)
+
+
+def test_joint_ev_solar_budget_keeps_separate_solar_curtailment(optimizer_module):
+    module = optimizer_module
+    optimizer = module.BatteryOptimizer(
+        capacity_wh=10_000, max_charge_w=3_000, max_discharge_w=5_000,
+        max_grid_import_w=9_000, efficiency=0.92, backup_reserve=0.2,
+        interval_minutes=30, horizon_hours=1, allow_greedy_fallback=False,
+    )
+    ev = module.EVChargePlan(
+        vehicle_id="solar_car", max_power_kw=(3.0, 3.0),
+        energy_needed_kwh=1.5, charge_efficiency=1.0, min_power_kw=1.0,
+        allow_grid=(False, False), allow_solar=(True, True), allow_battery=(False, False),
+    )
+    result = optimizer.optimize(
+        import_prices=[-0.8, 0.2], export_prices=[0, 0],
+        solar_forecast=[2.0, 6.0], load_forecast=[2.0, 2.0], current_soc=1.0,
+        allow_battery_export=False, allow_grid_charge=False, ev_plan=ev,
+    )
+
+    assert result.feasible and result.solver_used == "highs"
+    assert result.solar_curtailment_w == pytest.approx([2000, 0])
+    assert result.ev_source_by_vehicle_w["solar_car"]["solar"] == pytest.approx([0, 3000])

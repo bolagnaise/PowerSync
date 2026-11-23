@@ -4987,6 +4987,14 @@ class BatteryOptimizer:
             # charger/policy rows per vehicle-period (on, start, minimum
             # power, minimum start SOC, consume floor and preserve mode).
             A_ub_rows += 5 * p_n + 17 * n_ev_vehicles * p_n
+            ev_solar_periods = {
+                t for t in range(p_n)
+                if p_solar[t] > 0 and any(
+                    p_ev_allow_solar[vehicle][t] and p_ev_max_by_vehicle[vehicle][t] > 0
+                    for vehicle in range(n_ev_vehicles)
+                )
+            }
+            A_ub_rows += len(ev_solar_periods)
         if cost_neutral_active:
             # Six rows witness a retained executable export mode. Two more
             # rows make the initial grid-charge mode mutually exclusive with
@@ -5317,6 +5325,16 @@ class BatteryOptimizer:
                 A_ub[len(b_ub), battery_to_grid_var(t)] = -1.0
                 A_ub[len(b_ub), curtail_var(t)] = 1.0
                 b_ub.append(max(0.0, p_solar[t]))
+
+                if t in ev_solar_periods:
+                    # The car and battery share the PV left after the house.
+                    # Only the battery's solar share consumes this budget.
+                    # Export and curtailment keep their separate physical bound above.
+                    for vehicle in range(n_ev_vehicles):
+                        A_ub[len(b_ub), ev_solar_source_var(vehicle, t)] = 1.0
+                    A_ub[len(b_ub), charge_var(t)] = 1.0
+                    A_ub[len(b_ub), grid_charge_var(t)] = -1.0
+                    b_ub.append(max(0.0, p_solar[t] - p_load[t]))
 
                 A_ub[len(b_ub), grid_charge_var(t)] = 1.0
                 A_ub[len(b_ub), charge_var(t)] = -1.0
