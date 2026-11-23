@@ -8584,7 +8584,23 @@ class BatteryOptimizer:
                 continue
 
             remaining_output_kwh = max_paired_output_kwh
+            paired_output_kwh = 0.0
+            projected_path = _projected_soc_path(n) if profit_max_pair else ()
             for recharge_idx in range(t + 1, n):
+                previous_idx = recharge_idx - 1
+                if (
+                    projected_path
+                    and import_prices[previous_idx] > export_value
+                    and load[previous_idx] > solar[previous_idx]
+                ):
+                    # An export still awaiting refill must not spend energy
+                    # that the current plan uses for more valuable home load.
+                    home_margin_kwh = max(
+                        0.0,
+                        (projected_path[recharge_idx] - self_consumption_floor)
+                        * cap * eff,
+                    )
+                    remaining_output_kwh = min(remaining_output_kwh, home_margin_kwh)
                 if remaining_output_kwh <= 1e-9:
                     break
                 can_grid_refill = allow_grid_charge and grid_charge_allowed[recharge_idx]
@@ -8726,7 +8742,9 @@ class BatteryOptimizer:
                     if take_input_kwh <= 1e-9:
                         continue
                     added_input_kwh += take_input_kwh
-                    remaining_output_kwh -= take_input_kwh * eff * eff
+                    replaced_output_kwh = take_input_kwh * eff * eff
+                    remaining_output_kwh -= replaced_output_kwh
+                    paired_output_kwh += replaced_output_kwh
                     if uses_bonus:
                         bonus_charge_consumed_by_group[recharge_group] = (
                             bonus_charge_consumed_by_group.get(recharge_group, 0.0)
@@ -8754,7 +8772,6 @@ class BatteryOptimizer:
                         0.0,
                     )
 
-            paired_output_kwh = max_paired_output_kwh - remaining_output_kwh
             if paired_output_kwh <= 0.001:
                 continue
             actions[t] = (
@@ -8996,12 +9013,13 @@ class BatteryOptimizer:
                 priority_export_slot = battery_export_allowed and _priority_export_slot(t)
                 if (
                     manual_mode != "export"
-                    and (
-                        priority_export_slot or export_profitable_slot
-                        or t in profit_max_paired_exports
-                    )
+                    and (priority_export_slot or export_profitable_slot)
                 ):
-                    discharge_floor = max(discharge_floor, _future_export_protection_floor(t))
+                    discharge_floor = _future_export_protection_floor(t)
+                if t in profit_max_paired_exports:
+                    discharge_floor = max(
+                        discharge_floor, _future_export_protection_floor(t)
+                    )
             original_discharge_kw = discharge_kw
             if (
                 manual_mode is None

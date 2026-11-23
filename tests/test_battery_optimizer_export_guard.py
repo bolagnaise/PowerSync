@@ -5545,6 +5545,33 @@ def test_profit_max_ordinary_refill_respects_rebate_and_export_reserve(
     assert result.grid_import_w[2] <= 1001
 
 
+@pytest.mark.parametrize("use_highs", [True, False])
+def test_profit_max_refill_preserves_more_valuable_home_use_before_refill(
+    battery_optimizer_module, monkeypatch, use_highs,
+):
+    module = battery_optimizer_module
+    monkeypatch.setattr(module, "HIGHS_AVAILABLE", use_highs)
+    result = module.BatteryOptimizer(
+        capacity_wh=10000, max_charge_w=5000, max_discharge_w=5000,
+        backup_reserve=0.05, hardware_reserve=0.0,
+        interval_minutes=60, horizon_hours=3, terminal_weight=0.3,
+    ).optimize(
+        import_prices=[0.51, 0.51, 0.0],
+        export_prices=[0.10, 0.0, 0.0],
+        solar_forecast=[0.0] * 3,
+        load_forecast=[0.0, 3.5, 0.0],
+        current_soc=0.40,
+        acquisition_cost_kwh=0.107,
+        allow_battery_export=[True, False, False],
+        disable_idle=True,
+    )
+
+    assert result.solver_used == ("highs" if use_highs else "greedy")
+    assert result.battery_to_grid_w[0] == pytest.approx(180.0, abs=1)
+    assert result.schedule.actions[0].soc >= 0.05
+    assert result.grid_import_w[1] == pytest.approx(0, abs=1)
+
+
 def _planned_export_window_optimizer(module):
     """Optimizer for the #334 planned-evening-export-window regressions."""
     return module.BatteryOptimizer(
