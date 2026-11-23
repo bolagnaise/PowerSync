@@ -261,6 +261,36 @@ def test_coordinator_edits_are_not_solver_coverage():
     assert source_coverage(paths, COMPONENT, COMPONENT) == {paths[0]: "not-covered", paths[1]: "solver_v1"}
 
 
+def test_replay_saturates_full_rate_requests_in_genuinely_free_slots(api):
+    module, _, _ = api
+    optimizer = module.BatteryOptimizer(
+        capacity_wh=10000, hardware_reserve=0, interval_minutes=60,
+        horizon_hours=8, terminal_weight=0.3,
+    )
+    values = {
+        **inputs(), "import_prices": [0.51, 0, 0, 0.51, 0.51, 0.51, 0.51, 0.51],
+        "export_prices": [0.0] * 8, "load_forecast": [0, 0.2, 0.2, 1, 1, 1, 1, 0],
+        "current_soc": 0.9, "import_bonus_prices": [0.0] * 8,
+    }
+    _, bundle, _ = capture_one(api, values=values, optimizer=optimizer)
+    rows = bundle["result"]["schedule"]
+    assert rows[1]["battery_charge_w"] == rows[2]["battery_charge_w"] == 5000
+    assert rows[1]["soc"] == rows[2]["soc"] == 1
+    metrics = score(bundle, rows)
+    assert metrics["violations"] == []
+    assert metrics["unsupported_metrics"] == []
+    assert metrics["import_kwh"] == pytest.approx(0.4 + 1 / 0.92)
+    assert metrics["terminal_soc"] == pytest.approx(rows[-1]["soc"], abs=0.0001)
+
+    paid = copy.deepcopy(bundle)
+    paid["inputs"]["import_prices"][1] = 0.51
+    assert {"slot": 1, "rule": "soc_limit"} in score(paid, rows)["violations"]
+
+    capped = copy.deepcopy(bundle)
+    capped["state"]["max_grid_import_w"] = 1000
+    assert {"slot": 1, "rule": "grid_import_limit"} in score(capped, rows)["violations"]
+
+
 def test_trusted_state_recorder_does_not_freeze_solver_only_methods(tmp_path):
     baseline, candidate = tmp_path / "baseline", tmp_path / "candidate"
     for root, number in ((baseline, 1), (candidate, 2)):

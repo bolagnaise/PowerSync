@@ -64,18 +64,19 @@ def score(bundle, schedule, *, terminal_price=0.0):
     import_cost = export_revenue = import_kwh = export_kwh = throughput = 0.0
     violations = []
     unsupported = []
+    def active(value):
+        if type(value) in (list, tuple):
+            return any(active(item) for item in value)
+        return value is not None and bool(value)
+
     if inputs["ev_plan"] is not None:
         unsupported.append("ev_policy_and_deadlines")
     if inputs["manual_control"] is not None:
         unsupported.append("manual_control")
     if inputs["cost_neutral_plan"] is not None or inputs["cost_neutral_earnings_cap"] is not None:
         unsupported.append("cost_neutral_settlement")
-    if inputs["export_bonus_prices"] is not None or inputs["import_bonus_prices"] is not None:
+    if active(inputs["export_bonus_prices"]) or active(inputs["import_bonus_prices"]):
         unsupported.append("settlement_bonuses")
-    def active(value):
-        if type(value) in (list, tuple):
-            return any(active(item) for item in value)
-        return value is not None and bool(value)
     if any(export_allowed) and any(active(value) for value in (
             inputs["export_reserve_floor"], state["export_reserve_floor"], state["export_reserve_floor_slots"])):
         unsupported.append("export_reserve_policy")
@@ -106,10 +107,25 @@ def score(bundle, schedule, *, terminal_price=0.0):
             violations.append({"slot": index, "rule": "slot_duration"})
         if charge * 1000 > state["max_charge_w"] + 1 or discharge * 1000 > state["max_discharge_w"] + 1:
             violations.append({"slot": index, "rule": "battery_power_limit"})
+        mode = manual_modes[index] if index < len(manual_modes) else None
+        grid_charge_allowed = (
+            inputs["allow_grid_charge"] and can_charge[index]
+            and not blocked[index] and valid[index]
+        )
+        requested_import = load[index] + ev + charge - solar[index] - discharge
+        # The published free-import charge field carries the full-rate
+        # request. Storage stops accepting energy once it reaches capacity.
+        if (
+            row["action"] == "charge" and mode is None and discharge == 0
+            and grid_charge_allowed and prices_in[index] <= 0.001
+            and state["grid_charge_soc_cap"] >= 0.999
+            and row["battery_charge_w"] == row["power_w"]
+        ):
+            room_kwh = max(0.0, (1.0 - soc) * capacity)
+            charge = min(charge, room_kwh / (state["charge_efficiency"] * dt))
         soc += (charge * state["charge_efficiency"] - discharge / state["discharge_efficiency"]) * dt / capacity
         floor = natural_floor
-        manual_export = index < len(manual_modes) and manual_modes[index] == "export"
-        if discharge > 1e-6 and row["action"] in ("export", "discharge") and not manual_export:
+        if discharge > 1e-6 and row["action"] in ("export", "discharge") and mode != "export":
             floor = max(floor, optimizer_reserve)
         if soc < floor - 0.0002 or soc > 1.0002:
             violations.append({"slot": index, "rule": "soc_limit"})
@@ -117,13 +133,13 @@ def score(bundle, schedule, *, terminal_price=0.0):
             violations.append({"slot": index, "rule": "soc_energy_balance"})
         net = load[index] + ev + charge - solar[index] - discharge
         importing, exporting = max(0.0, net), max(0.0, -net)
-        if state["max_grid_import_w"] is not None and importing * 1000 > state["max_grid_import_w"] + 1:
+        if state["max_grid_import_w"] is not None and requested_import * 1000 > state["max_grid_import_w"] + 1:
             violations.append({"slot": index, "rule": "grid_import_limit"})
         if caps[index] is not None and exporting * 1000 > caps[index] + 1:
             # Solar curtailment isn't represented by ScheduleAction alone.
             unsupported.append("solar_curtailment")
             accounting_complete = False
-        if row["action"] == "charge" and (not inputs["allow_grid_charge"] or not can_charge[index] or blocked[index] or not valid[index]):
+        if row["action"] == "charge" and not grid_charge_allowed:
             violations.append({"slot": index, "rule": "forbidden_grid_charge"})
         if row["action"] in ("export", "discharge") and (not export_allowed[index] or not valid[index]):
             violations.append({"slot": index, "rule": "forbidden_battery_export"})
