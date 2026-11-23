@@ -56,6 +56,8 @@ On the Home Assistant EV panel, find the car under **Smart Schedule**. Enter its
 
 From v2.12.1766, Dynamic EV reads Smart Optimization’s **Maximum grid import** on each charging control cycle. Changing or clearing that setting takes effect during the active session. When adjusting the rate, PowerSync rounds down to a whole amp if rounding up would exceed the site import limit. Independent site and charger limits still apply. With no configured site limit, battery-target charging uses a 12.5 kW fallback.
 
+With **Prioritise switch-only charging in Price Level** enabled, the charger starts only when its configured full draw fits both the measured site headroom and any current EV charging plan. PowerSync checks immediately before switching on, after any configured wake delay. Once the switch is on, it waits up to 150 seconds by default for fresh charging status or measured power. If you changed **Generic charger start confirmation timeout**, allow enough time for your charger to report.
+
 When Tesla command recovery holds a Scheduled start, PowerSync shows the vehicle as waiting and keeps control for the next eligible retry. Charging history begins once the car confirms charging. If the previous command has finished and the same vehicle and charging control are still available, PowerSync can set the permitted current before retrying Start.
 
 EV charging history records the car’s state of charge at the start and end of a managed session when that reading is available.
