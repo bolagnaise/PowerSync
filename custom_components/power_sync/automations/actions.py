@@ -4845,13 +4845,19 @@ async def _tesla_legacy_transport_authorized(
     return bool(result)
 
 
-def _tesla_ble_recovery_start_state(hass: HomeAssistant, ble_prefix: str) -> str | None:
+def _tesla_ble_recovery_start_state(
+    hass: HomeAssistant,
+    ble_prefix: str,
+    *,
+    require_paired_charge_state: bool = False,
+) -> str | None:
     """Use paired vehicle readings from the exact connected bridge for plan retry."""
     from ..tesla_ble import (
         get_tesla_ble_charge_current_state,
         get_tesla_ble_charge_power_state,
         get_tesla_ble_charging_state,
         get_tesla_ble_connected_charge_sample_time,
+        get_tesla_ble_observed_at,
     )
 
     if not _is_ble_available(hass, ble_prefix):
@@ -4863,7 +4869,8 @@ def _tesla_ble_recovery_start_state(hass: HomeAssistant, ble_prefix: str) -> str
     power = get_tesla_ble_charge_power_state(hass, ble_prefix)
     current = get_tesla_ble_charge_current_state(hass, ble_prefix)
     power_at = get_tesla_ble_connected_charge_sample_time(
-        hass, ble_prefix, state, power, require_paired_charge_state=False,
+        hass, ble_prefix, state, power,
+        require_paired_charge_state=require_paired_charge_state,
     )
     if not is_current_ev_power_observation(power_at):
         return None
@@ -4880,6 +4887,14 @@ def _tesla_ble_recovery_start_state(hass: HomeAssistant, ble_prefix: str) -> str
             and abs(power_at - current_at) <= timedelta(seconds=1)):
         amps = float(current.state)
         if amps < 0 or (amps > 0) != charging:
+            return None
+    if require_paired_charge_state and current is not None:
+        latest_current_at = get_tesla_ble_observed_at(hass, current)
+        if (
+            is_current_ev_power_observation(latest_current_at)
+            and latest_current_at >= power_at
+            and _coerce_positive_float(current.state)
+        ):
             return None
     status = state.state.strip().lower()
     if status == "stopped" and not charging:
@@ -21028,23 +21043,59 @@ async def _action_start_ev_charging_dynamic_locked(
     return True
 
 
+def _solar_controller_waited_without_start(state: dict) -> bool:
+    """Distinguish a waiting session from a submitted or interrupted Start."""
+    return (
+        state.get("active") is True
+        and state.get("charging_started") is False
+        and state.get("current_amps") == state.get("target_amps") == 0
+        and not any(state.get(key) for key in (
+            "last_physical_restart_attempt_at", "last_start_command_at",
+            "transport_recovery_pending", "stop_outcome", "external_manual_override",
+        ))
+    )
+
+
+def _waiting_smart_schedule_ble_is_stopped(hass, entry, vehicle_id, state) -> bool:
+    """Prove that an idle Smart Schedule solar controller needs no BLE Stop."""
+    from ..tesla_ble_recovery_status import ble_recovery_status
+    from ..tesla_ev_recovery import (
+        current_vehicle_generation, get_vehicle_route, recovery_control_allowed,
+    )
+
+    config = {**entry.data, **entry.options}
+    if (
+        config.get(CONF_EV_PROVIDER) != EV_PROVIDER_TESLA_BLE
+        or not vehicle_id.startswith("ble_")
+        or not _solar_controller_waited_without_start(state)
+    ):
+        return False
+    prefix = vehicle_id[4:]
+    if prefix not in resolve_ble_prefixes(hass, config) or not recovery_control_allowed(
+        hass, entry, vehicle_id, current_vehicle_generation(hass, entry, vehicle_id), "start",
+    ):
+        return False
+    route = get_vehicle_route(hass, entry, vehicle_id)
+    if route is not None and (
+        route.get("kind") != "ble" or route.get("prefix") != prefix or route.get("cleanup_only")
+    ):
+        return False
+    history = ble_recovery_status(hass, entry)
+    return (
+        history.get("success") is True
+        and history.get("recovery", {}).get("required") is False
+        and _tesla_ble_recovery_start_state(
+            hass, prefix, require_paired_charge_state=True,
+        ) == "stopped"
+    )
+
+
 async def _waiting_solar_tesla_is_stopped(hass, entry, vehicle_id, state, params, *, smart_handoff=False):
     """Prove that a waiting Solar Surplus session has no Tesla charge to stop."""
     from ..tesla_ev_observation import MAX_SOURCE_AGE_SECONDS, get_tesla_vehicle_observation
     from ..tesla_ev_recovery import ev_recovery_status, get_vehicle_route
 
-    def still_waiting():
-        return (
-            state.get("active") is True
-            and state.get("charging_started") is False
-            and state.get("current_amps") == state.get("target_amps") == 0
-            and not any(state.get(key) for key in (
-                "last_physical_restart_attempt_at", "last_start_command_at",
-                "transport_recovery_pending", "stop_outcome", "external_manual_override",
-            ))
-        )
-
-    if params.get("charger_type", "tesla") != "tesla" or not still_waiting():
+    if params.get("charger_type", "tesla") != "tesla" or not _solar_controller_waited_without_start(state):
         return False
     route = get_vehicle_route(hass, entry, vehicle_id)
     provider = _get_ev_config(entry)["ev_provider"]
@@ -21056,7 +21107,7 @@ async def _waiting_solar_tesla_is_stopped(hass, entry, vehicle_id, state, params
         return False
 
     entity = await _tesla_ha_command_entity(hass, entry, {**params, "vehicle_vin": vehicle_id}, "stop")
-    if not entity or not still_waiting() or get_vehicle_route(hass, entry, vehicle_id) != route:
+    if not entity or not _solar_controller_waited_without_start(state) or get_vehicle_route(hass, entry, vehicle_id) != route:
         return False
     if ev_recovery_status(hass, entry, vehicle_id).get("recovery_required") is not False:
         return False
@@ -21208,15 +21259,25 @@ async def _action_stop_ev_charging_dynamic(
     replaced_vehicle_ids: set[str] = set()
     notify_after_physical_stop: Dict[str, dict] = {}
 
-    from .ev_ownership import get_ev_ownerships, owner_family
+    from .ev_ownership import (
+        get_ev_ownerships, get_ev_quick_control_obligation, owner_family,
+    )
 
     expected_lease = params.get("_expected_lease")
     revalidate_handoff = params.get("_revalidate_handoff")
 
-    def session_matches(vid, state):
+    def session_matches(vid, state, ble_waiting_lease):
+        leases = get_ev_ownerships(hass, config_entry)
+        if ble_waiting_lease is not None and (
+            leases.get(vid) is not ble_waiting_lease
+            or DEFAULT_VEHICLE_ID in leases
+            or ble_waiting_lease.get("owner") != "powersync"
+            or ble_waiting_lease.get("owner_mode") != "smart_schedule_solar_surplus"
+        ):
+            return False
         return vehicles.get(vid) is state and (
             expected_lease is None
-            or get_ev_ownerships(hass, config_entry).get(vid) is expected_lease
+            or leases.get(vid) is expected_lease
         )
 
     for vid in vehicle_ids_to_stop:
@@ -21228,6 +21289,29 @@ async def _action_stop_ev_charging_dynamic(
 
         state_params = vehicle_params.get(vid, {})
         state_owner = state_params.get("owner_mode") or state_params.get("dynamic_mode")
+        ble_waiting_lease = None
+        if (
+            stop_charging
+            and vid == vehicle_id
+            and vid.startswith("ble_")
+            and state_owner == "smart_schedule_solar_surplus"
+            and params.get("charger_type", "tesla") == "tesla"
+            and state_params.get("charger_type", "tesla") == "tesla"
+            and params.get("owner_mode") == "smart_schedule"
+            and not any(params.get(key) for key in (
+                "stop_untracked", "manual_stop", "_user_initiated", "quick_control",
+                "_force_tesla_stop_request", "_ev_cleanup_only", "_quick_control_obligation_id",
+            ))
+        ):
+            leases = get_ev_ownerships(hass, config_entry)
+            lease = leases.get(vid)
+            if (
+                lease is not None
+                and lease.get("owner") == "powersync"
+                and lease.get("owner_mode") == state_owner
+                and DEFAULT_VEHICLE_ID not in leases
+            ):
+                ble_waiting_lease = lease
         if (
             stop_charging
             and state_owner
@@ -21249,7 +21333,7 @@ async def _action_stop_ev_charging_dynamic(
                     away_location,
                 )
 
-        if state is not None and not session_matches(vid, state):
+        if state is not None and not session_matches(vid, state, ble_waiting_lease):
             replaced_vehicle_ids.add(vid)
             continue
 
@@ -21291,7 +21375,7 @@ async def _action_stop_ev_charging_dynamic(
                 stop_charging and vid not in passive_vehicle_ids and state_owner == "solar_surplus"
                 and (params.get("_automatic_solar_disable") is True
                      or params.get("_smart_schedule_waiting_solar_handoff") is True)
-                and session_matches(vid, state)
+                and session_matches(vid, state, ble_waiting_lease)
             ):
                 # Ending session history can await telemetry. Decide whether
                 # to omit Stop only after that await, immediately before release.
@@ -21300,8 +21384,6 @@ async def _action_stop_ev_charging_dynamic(
                     if await _waiting_solar_tesla_is_stopped(
                         hass, config_entry, vid, state, state_params, smart_handoff=smart_handoff,
                     ):
-                        from .ev_ownership import get_ev_quick_control_obligation
-
                         headroom = hass.data.get(DOMAIN, {}).get(entry_id, {}).get("solar_ev_headroom")
                         if (
                             params.get("_automatic_solar_disable") is True
@@ -21312,7 +21394,7 @@ async def _action_stop_ev_charging_dynamic(
                 except Exception:
                     _LOGGER.debug("Could not verify the waiting Tesla is stopped", exc_info=True)
 
-            if not session_matches(vid, state):
+            if not session_matches(vid, state, ble_waiting_lease):
                 replaced_vehicle_ids.add(vid)
                 _LOGGER.debug(
                     "Dynamic EV: Session for %s was replaced during teardown; "
@@ -21325,6 +21407,19 @@ async def _action_stop_ev_charging_dynamic(
                 if not revalidate_handoff():
                     return False
                 cancel_session_timers()
+
+            if (
+                ble_waiting_lease is not None
+                and state.get("params") is state_params
+                and state_params.get("owner_mode") == "smart_schedule_solar_surplus"
+                and get_ev_quick_control_obligation(hass, config_entry, vid) is None
+            ):
+                try:
+                    if _waiting_smart_schedule_ble_is_stopped(hass, config_entry, vid, state):
+                        passive_vehicle_ids.add(vid)
+                        _LOGGER.info("Releasing waiting Smart Schedule for %s without a BLE Stop", vid)
+                except Exception:
+                    _LOGGER.debug("Could not verify the waiting BLE Tesla is stopped", exc_info=True)
 
             state["active"] = False
             from .ev_ownership import release_ev_ownership

@@ -7487,6 +7487,119 @@ def test_solar_surplus_releases_only_verified_idle_tesla(
         assert observe.call_args.kwargs["preferred_entity_id"] == charge_switch
 
 
+@pytest.mark.parametrize("scenario", [
+    "idle", "stale", "wrong_bridge", "positive_draw", "start_attempted",
+    "unresolved_history", "persistence_hold", "explicit_stop", "user_initiated",
+    "lease_replaced", "unpaired_state", "newer_positive_current",
+])
+def test_smart_schedule_stop_releases_only_verified_waiting_ble(monkeypatch, scenario):
+    from power_sync import tesla_ev_recovery
+    from power_sync.automations import ev_ownership
+
+    entry = _Entry()
+    entry.options = {
+        actions.CONF_EV_PROVIDER: actions.EV_PROVIDER_TESLA_BLE,
+        actions.CONF_TESLA_BLE_ENTITY_PREFIX: "car,other",
+    }
+    stamp = datetime.now(timezone.utc)
+    if scenario == "stale":
+        stamp -= timedelta(minutes=10)
+    states = [
+        _State("switch.car_charger", "off"),
+        _State("switch.car_ble_connection", "on"),
+        _State("binary_sensor.car_ble_status", "on", last_updated=stamp - timedelta(seconds=5)),
+    ]
+    for entity, value, attributes in (
+        ("sensor.car_charging_state", "Stopped", {}),
+        ("sensor.car_charge_power", 1 if scenario == "positive_draw" else 0,
+         {"unit_of_measurement": "kW"}),
+    ):
+        states.extend([
+            _State(entity, str(value), attributes, last_updated=stamp),
+            _State(entity + "_sample", json.dumps(
+                {"v": 1, "t": stamp.isoformat(), "x": value}), last_updated=stamp),
+        ])
+    if scenario == "unpaired_state":
+        states = [state for state in states if state.entity_id != "sensor.car_charging_state_sample"]
+    if scenario == "newer_positive_current":
+        newer_at = stamp - timedelta(seconds=1)
+        for sample in states:
+            if sample.entity_id.startswith("sensor.car_"):
+                sample.last_updated -= timedelta(seconds=3)
+                if sample.entity_id.endswith("_sample"):
+                    reading = json.loads(sample.state)
+                    reading["t"] = sample.last_updated.isoformat()
+                    sample.state = json.dumps(reading)
+        states.append(_State("sensor.car_charge_current", "8",
+                             {"unit_of_measurement": "A"}, last_updated=newer_at))
+    hass = _Hass(states)
+    if scenario == "wrong_bridge":
+        hass.entity_registry.entities["sensor.car_charge_power_sample"].device_id = "other-bridge"
+    runtime = hass.data["power_sync"][entry.entry_id]
+    runtime[tesla_ev_recovery.RECOVERY_KEY] = {"vehicles": {}}
+    if scenario == "unresolved_history":
+        runtime[tesla_ev_recovery.RECOVERY_KEY] = {"vehicles": None}
+    if scenario == "persistence_hold":
+        runtime["_tesla_ev_recovery_sidecar_hold"] = "load_failed"
+
+    state = {
+        "active": True,
+        "charging_started": False,
+        "current_amps": 0,
+        "target_amps": 0,
+        "cancel_timer": Mock(),
+        "params": {
+            "vehicle_vin": "ble_car",
+            "charger_type": "tesla",
+            "owner_mode": "smart_schedule_solar_surplus",
+            "dynamic_mode": "solar_surplus",
+            "notify_on_complete": False,
+        },
+    }
+    if scenario == "start_attempted":
+        state["last_physical_restart_attempt_at"] = stamp
+    monkeypatch.setitem(actions._dynamic_ev_state, entry.entry_id, {"ble_car": state})
+    ev_ownership.claim_ev_ownership(
+        hass, entry, "ble_car", owner_mode="smart_schedule_solar_surplus",
+    )
+    async def observe_location(*args):
+        if scenario == "lease_replaced":
+            leases = ev_ownership.get_ev_ownerships(hass, entry)
+            leases["ble_car"] = {**leases["ble_car"], "owner_mode": "manual"}
+        return None
+
+    monkeypatch.setattr(actions, "_tesla_vehicle_away_location", observe_location)
+    stop = AsyncMock(return_value=False)
+    monkeypatch.setattr(actions, "_action_stop_ev_charging", stop)
+
+    result = asyncio.run(actions._action_stop_ev_charging_dynamic(hass, entry, {
+        "vehicle_id": "ble_car",
+        "vehicle_vin": "ble_car",
+        "charger_type": "tesla",
+        "owner_mode": "smart_schedule",
+        "stop_reason": "Smart Schedule disabled",
+        "manual_stop": scenario == "explicit_stop",
+        "_user_initiated": scenario == "user_initiated",
+    }))
+
+    if scenario == "lease_replaced":
+        assert actions._dynamic_ev_state[entry.entry_id]["ble_car"] is state
+        assert ev_ownership.get_ev_ownerships(hass, entry)["ble_car"]["owner_mode"] == "manual"
+        state["cancel_timer"].assert_not_called()
+        stop.assert_not_awaited()
+        return
+    if scenario == "idle":
+        assert result is True
+        stop.assert_not_awaited()
+    else:
+        assert result is False
+        stop.assert_awaited_once()
+    state["cancel_timer"].assert_called_once_with()
+    assert "ble_car" not in actions._dynamic_ev_state.get(entry.entry_id, {})
+    assert not ev_ownership.get_ev_ownerships(hass, entry)
+    assert not hass.services.calls
+
+
 def test_direct_ev_start_action_can_skip_ownership(monkeypatch):
     async def fake_start(*args, **kwargs):
         return True
