@@ -11,7 +11,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.storage import Store
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP
 
-from .runtime import LicenseRuntime, DATA_KEY, ADMISSION_KEY
+from .runtime import LicenseRuntime, PairingConflict, DATA_KEY, ADMISSION_KEY
 from .keys import PUBLIC_KEYS
 from .guard import optimizer_command, recovery_scope, OptimizerAccessLost
 
@@ -62,7 +62,8 @@ class HALicenseManager(LicenseRuntime):
         session = async_get_clientsession(self.hass)
         async with session.request("GET" if body is None else "POST", API + path,
                 json=body, timeout=ClientTimeout(total=20), allow_redirects=False) as response:
-            if response.status != 200:
+            pairing_conflict = path == "/pairing/exchange" and response.status == 409
+            if response.status != 200 and not pairing_conflict:
                 # Do not interpret an HTTP error as an authoritative signed denial.
                 raise ValueError("licensing_service_unavailable")
             if response.content_length and response.content_length > 16384:
@@ -75,9 +76,17 @@ class HALicenseManager(LicenseRuntime):
                     raise ValueError("invalid_licensing_response")
                 chunks.append(chunk)
             raw = b"".join(chunks)
-            value = json.loads(raw)
+            try:
+                value = json.loads(raw)
+            except (ValueError, RecursionError):
+                raise ValueError("invalid_licensing_response") from None
             if not isinstance(value, dict):
                 raise ValueError("invalid_licensing_response")
+            if pairing_conflict:
+                reason = value.get("error")
+                if reason in ("pairing_not_completed", "pairing_pending_or_expired", "installation_slot_in_use"):
+                    raise PairingConflict(reason)
+                raise ValueError("licensing_service_unavailable")
             return value
 
     async def async_referrals(self, *, force=False):

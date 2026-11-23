@@ -1277,6 +1277,10 @@
       "invalid_tesla_site": "Select a Tesla energy site from the list.",
       "no_energy_sites": "No Tesla energy sites found for this account.",
       "invalid_auth": "The Tesla API connection could not be authenticated. Check your selected provider and sign in again.",
+      "optimizer_pairing_no_code": "There is no pairing code in this dialog. If the original HA dialog is still open, choose Finish pairing there. Otherwise choose Start pairing here, approve the new code in your account, then choose Finish pairing in this dialog within ten minutes.",
+      "optimizer_pairing_not_completed": "Pairing could not finish. If you previously disconnected this HA server on your PowerSync account page, choose Reset pairing in HA, then Start pairing. Approve the new code in your account and choose Finish pairing in this HA dialog. Otherwise, contact support before resetting.",
+      "optimizer_pairing_pending_or_expired": "Approve the code in your PowerSync account, then choose Finish pairing here. If the code is over ten minutes old, choose Start pairing to get a new one.",
+      "optimizer_installation_slot_in_use": "Check the connected installation on your PowerSync account page. One HA server can be connected at a time. Contact support if you cannot identify the connected installation.",
       "optimizer_access_unavailable": "Unable to complete activation. Check your account, pairing code, subscription and any pending restoration, then retry.",
       "tesla_force_discharge_prices_invalid": "Enter finite Tesla force-discharge prices from $0 to $99/kWh, with the sell price higher than the buy price.",
       "invalid_flow_power_plan": "Choose a Flow Power plan and a region supported by that plan.",
@@ -1337,7 +1341,7 @@
     "step": {
       "optimizer_access": {
         "title": "HA optimiser access",
-        "description": "**Access:** {access_summary}\n\n**This HA server:** {pairing_status}\n\n{next_step}\n\nMonitoring, dashboards, manual controls and recovery remain available.\n\nUse Reset pairing only to disconnect this server locally. Revoke the old installation in your account before pairing a replacement.\n\n{referral_summary}",
+        "description": "**Access:** {access_summary}\n\n**This HA server:** {pairing_status}\n\n{next_step}\n\nMonitoring, dashboards, manual controls and recovery remain available.\n\nReset pairing clears this server’s local pairing.\n\n{referral_summary}",
         "data": {
           "action": "Action"
         },
