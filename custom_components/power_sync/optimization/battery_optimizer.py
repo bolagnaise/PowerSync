@@ -1679,6 +1679,11 @@ class BatteryOptimizer:
                 )
             return result
 
+        # A terminal weight of 0.3 denotes the coordinator's Profit Max
+        # profile. It is already included in captured optimizer state.
+        cycle = _SOLVER_CYCLE.get()
+        if cycle is not None and self.terminal_weight == 0.3:
+            cycle["profit_max_refill_valid_slots"] = tuple(price_valid_slots)
         try:
             if HIGHS_AVAILABLE:
                 try:
@@ -4139,12 +4144,71 @@ class BatteryOptimizer:
                 ]
                 if earlier_solar or t in initial_solar_slots:
                     solar_backed_priority_exports[t] = earlier_solar
+        # Model each eligible export/refill pair in delivered kWh. Per-source
+        # capacity rows prevent two exports from spending the same refill,
+        # including when different export rates can afford different sources.
+        refill_pairs: list[tuple[int, int, str]] = []
+        cycle = _SOLVER_CYCLE.get() or {}
+        if cycle.get("profit_max_refill_valid_slots") and acquisition_cost_kwh > 0:
+            refill_costs = [(math.inf, math.inf)] * p_n
+            for t in range(p_n):
+                if (
+                    not p_price_valid_slots[t] or p_block_charge[t]
+                    or p_manual_control[t] or p_priority_export[t]
+                    or p_mode[t] not in (None, "charge", "self_use")
+                ):
+                    continue
+                grid_cost = math.inf
+                if allow_grid_charge and p_grid_charge_allowed[t]:
+                    grid_cost = max(0.0, p_import[t])
+                solar_cost = math.inf
+                if p_solar[t] > p_load[t] + 1e-9:
+                    solar_cost = max(0.0, p_export[t] + p_export_bonus[t])
+                refill_costs[t] = grid_cost, solar_cost
+            for t in range(p_n):
+                sell_price = p_export[t]
+                if (
+                    not p_allow_export[t] or not p_price_valid_slots[t]
+                    or p_manual_control[t] or p_cost_neutral[t]
+                    or _priority_export_slot(t) or p_mode[t] not in (None, "export")
+                    or not 0.001 < sell_price < p_effective_acquisition[t]
+                ):
+                    continue
+                limit = sell_price * self.economic_round_trip_efficiency
+                for j in range(t + 1, p_n):
+                    grid_cost, solar_cost = refill_costs[j]
+                    if grid_cost < limit:
+                        refill_pairs.append((t, j, "grid"))
+                    elif (
+                        math.isfinite(grid_cost) and bonus_import_active
+                        and p_import_bonus[j] > 0
+                        and max(0.0, grid_cost - p_import_bonus[j]) < limit
+                    ):
+                        refill_pairs.append((t, j, "rebate"))
+                    if solar_cost < limit:
+                        refill_pairs.append((t, j, "solar"))
+        refill_by_export: dict[int, list[int]] = {}
+        refill_by_charge: dict[int, list[int]] = {}
+        solar_refill_by_charge: dict[int, list[int]] = {}
+        grid_refill_by_charge: dict[int, list[int]] = {}
+        rebate_refill_by_charge: dict[int, list[int]] = {}
+        for i, (export_t, charge_t, source) in enumerate(refill_pairs):
+            refill_by_export.setdefault(export_t, []).append(i)
+            refill_by_charge.setdefault(charge_t, []).append(i)
+            if source == "solar":
+                solar_refill_by_charge.setdefault(charge_t, []).append(i)
+            else:
+                grid_refill_by_charge.setdefault(charge_t, []).append(i)
+                if source == "rebate":
+                    rebate_refill_by_charge.setdefault(charge_t, []).append(i)
+
         battery_to_grid_active = (
             cost_neutral_active
             or economic_adjustment_active
             or future_reservation_active
             or ev_source_tracking_requested
             or bool(solar_backed_priority_exports)
+            or bool(refill_pairs)
         )
         battery_to_grid_offset = next_offset
         if battery_to_grid_active:
@@ -4362,6 +4426,8 @@ class BatteryOptimizer:
         cost_neutral_day_export_offset = next_offset
         next_offset += len(cost_neutral_final_solar_days)
 
+        refill_pair_offset = next_offset
+        next_offset += len(refill_pairs)
         energy_offset = next_offset
         num_vars = energy_offset + p_n + 1
 
@@ -4878,6 +4944,14 @@ class BatteryOptimizer:
         if paired_priority_recharge_periods:
             A_ub_rows += len(paired_priority_recharge_periods) + 1
         A_ub_rows += len(solar_backed_priority_exports)
+        refill_requires_source_split = not (ev_charge_active or grid_charge_cap_active)
+        A_ub_rows += (
+            len(refill_by_export) + len(refill_by_charge)
+            + 2 * len(solar_refill_by_charge) + len(grid_refill_by_charge)
+            + len(rebate_refill_by_charge)
+        )
+        if refill_requires_source_split:
+            A_ub_rows += 3 * len(refill_by_charge)
         if future_reservation_active:
             A_ub_rows += 2 * sum(future_reservation_periods)
         if battery_to_grid_active:
@@ -5643,6 +5717,58 @@ class BatteryOptimizer:
                             )
                 b_ub.append(fixed_cost_allowance)
 
+        for t, pairs in refill_by_export.items():
+            A_ub[len(b_ub), battery_to_grid_var(t)] = p_dt[t]
+            for pair in pairs:
+                A_ub[len(b_ub), refill_pair_offset + pair] = -1.0
+            b_ub.append(0.0)
+
+        for t, pairs in refill_by_charge.items():
+            conversion = eff * eff * p_dt[t]
+            A_ub[len(b_ub), charge_var(t)] = -conversion
+            for pair in pairs:
+                A_ub[len(b_ub), refill_pair_offset + pair] = 1.0
+            b_ub.append(0.0)
+            if refill_requires_source_split:
+                A_ub[len(b_ub), grid_charge_var(t)] = 1.0
+                A_ub[len(b_ub), grid_import_var(t)] = -1.0
+                b_ub.append(0.0)
+                A_ub[len(b_ub), grid_charge_var(t)] = 1.0
+                A_ub[len(b_ub), charge_var(t)] = -1.0
+                b_ub.append(0.0)
+                A_ub[len(b_ub), charge_var(t)] = 1.0
+                A_ub[len(b_ub), grid_charge_var(t)] = -1.0
+                A_ub[len(b_ub), grid_export_var(t)] = 1.0
+                A_ub[len(b_ub), battery_to_grid_var(t)] = -1.0
+                A_ub[len(b_ub), curtail_var(t)] = 1.0
+                b_ub.append(max(0.0, p_solar[t]))
+
+            solar_pairs = solar_refill_by_charge.get(t)
+            if solar_pairs:
+                A_ub[len(b_ub), charge_var(t)] = -conversion
+                A_ub[len(b_ub), grid_charge_var(t)] = conversion
+                for pair in solar_pairs:
+                    A_ub[len(b_ub), refill_pair_offset + pair] = 1.0
+                b_ub.append(0.0)
+                for pair in solar_pairs:
+                    A_ub[len(b_ub), refill_pair_offset + pair] = 1.0
+                for vehicle in range(n_ev_vehicles):
+                    A_ub[len(b_ub), ev_solar_source_var(vehicle, t)] = conversion
+                b_ub.append(max(0.0, p_solar[t] - p_load[t]) * conversion)
+
+            grid_pairs = grid_refill_by_charge.get(t)
+            if grid_pairs:
+                A_ub[len(b_ub), grid_charge_var(t)] = -conversion
+                for pair in grid_pairs:
+                    A_ub[len(b_ub), refill_pair_offset + pair] = 1.0
+                b_ub.append(0.0)
+            rebate_pairs = rebate_refill_by_charge.get(t)
+            if rebate_pairs:
+                A_ub[len(b_ub), bonus_import_var(t)] = -conversion
+                for pair in rebate_pairs:
+                    A_ub[len(b_ub), refill_pair_offset + pair] = 1.0
+                b_ub.append(0.0)
+
         if paired_priority_recharge_periods:
             # Per-period pairing prevents a cheap slot before a later export
             # from being counted as its replacement.
@@ -5654,6 +5780,8 @@ class BatteryOptimizer:
                     A_ub[len(b_ub), charge_var(recharge_idx)] = (
                         -eff * eff * p_dt[recharge_idx]
                     )
+                    for pair in refill_by_charge.get(recharge_idx, ()):
+                        A_ub[len(b_ub), refill_pair_offset + pair] = 1.0
                 b_ub.append(
                     max(0.0, p_load[export_idx] - p_solar[export_idx])
                     * p_dt[export_idx]
@@ -5676,6 +5804,8 @@ class BatteryOptimizer:
                 A_ub[len(b_ub), charge_var(recharge_idx)] = (
                     -eff * eff * p_dt[recharge_idx]
                 )
+                for pair in refill_by_charge.get(recharge_idx, ()):
+                    A_ub[len(b_ub), refill_pair_offset + pair] = 1.0
             b_ub.append(paired_home_kwh)
 
         if bonus_export_active:
@@ -5886,6 +6016,7 @@ class BatteryOptimizer:
             if p_allow_export[t]
             and not _cost_neutral_export_slot(t)
             and t not in solar_backed_priority_exports
+            and t not in refill_by_export
             and acquisition_cost_kwh > 0
             and (p_export[t] + p_export_bonus[t])
             < _export_acquisition_threshold(t)
@@ -6094,6 +6225,7 @@ class BatteryOptimizer:
                     or (
                         not _cost_neutral_export_slot(t)
                         and t not in solar_backed_priority_exports
+                        and t not in refill_by_export
                         and acquisition_cost_kwh > 0
                         and (p_export[t] + p_export_bonus[t])
                         < _export_acquisition_threshold(t)
@@ -6131,7 +6263,10 @@ class BatteryOptimizer:
                 bounds.append((0, self.max_discharge_kw))  # battery_discharge
 
         for t in range(p_n):
-            if not grid_charge_cap_active and not ev_charge_active:
+            if (
+                not grid_charge_cap_active and not ev_charge_active
+                and t not in refill_by_charge
+            ):
                 bounds.append((0, 0.0))
                 continue
             if p_manual_control[t] and p_mode[t] == "charge":
@@ -6298,6 +6433,7 @@ class BatteryOptimizer:
                     )
 
         bounds.extend((0.0, 1.0) for _ in cost_neutral_final_solar_days)
+        bounds.extend((0.0, None) for _ in refill_pairs)
 
         bounds.append((soc_0 * cap, soc_0 * cap))
         for t in range(1, p_n + 1):
@@ -8370,14 +8506,28 @@ class BatteryOptimizer:
                     idx,
                     existing_grid_export_kw * dt,
                 )
+        cycle = _SOLVER_CYCLE.get() or {}
+        refill_valid_slots = cycle.get("profit_max_refill_valid_slots", ())
+        profit_max_paired_exports: set[int] = set()
         for t in range(n):
             max_grid_export_kw = _max_grid_export_kw(t)
-            export_value = effective_export_prices[t]
+            priority_pair = _priority_export_slot(t)
+            export_value = (
+                effective_export_prices[t] if priority_pair else export_prices[t]
+            )
+            profit_max_pair = (
+                not priority_pair
+                and t < len(refill_valid_slots) and refill_valid_slots[t]
+                and allow_battery_export[t] and not below_optimizer_reserve
+                and manual_control_slots[t] is None
+                and not _cost_neutral_export_slot(t)
+                and export_value > 0.001
+            )
             if (
-                not _priority_export_slot(t)
+                not (priority_pair or profit_max_pair)
                 or acquisition_cost_kwh <= 0
                 or export_value + 1e-9 >= effective_acquisition_costs[t]
-                or future_priority_recharge_cost[t] > export_value + 1e-9
+                or (priority_pair and future_priority_recharge_cost[t] > export_value + 1e-9)
             ):
                 continue
 
@@ -8418,7 +8568,7 @@ class BatteryOptimizer:
                 export_prices[t] + 1e-9 >= future_priority_recharge_cost[t]
             )
             bonus_only_pair = (
-                export_bonus_prices[t] > 0
+                priority_pair and export_bonus_prices[t] > 0
                 and not base_export_can_fund_recharge
             )
             if bonus_only_pair:
@@ -8437,10 +8587,16 @@ class BatteryOptimizer:
             for recharge_idx in range(t + 1, n):
                 if remaining_output_kwh <= 1e-9:
                     break
-                if (
-                    not allow_grid_charge
-                    or not grid_charge_allowed[recharge_idx]
-                    or block_battery_charge[recharge_idx]
+                can_grid_refill = allow_grid_charge and grid_charge_allowed[recharge_idx]
+                if block_battery_charge[recharge_idx]:
+                    continue
+                if priority_pair:
+                    if not can_grid_refill:
+                        continue
+                elif (
+                    not refill_valid_slots[recharge_idx]
+                    or manual_control_slots[recharge_idx] is not None
+                    or _priority_export_slot(recharge_idx)
                 ):
                     continue
                 existing_charge_kw, future_discharge_kw = actions.get(
@@ -8452,7 +8608,7 @@ class BatteryOptimizer:
                 charge_limit_kw = self._charge_limit_kw(
                     load[recharge_idx],
                     solar[recharge_idx],
-                    True,
+                    can_grid_refill,
                 )
                 available_charge_input_kwh = max(
                     0.0,
@@ -8471,9 +8627,9 @@ class BatteryOptimizer:
                     )
                     * dt,
                 )
-                grid_charge_input_kwh = max(
-                    0.0,
-                    available_charge_input_kwh - solar_charge_input_kwh,
+                grid_charge_input_kwh = (
+                    max(0.0, available_charge_input_kwh - solar_charge_input_kwh)
+                    if can_grid_refill else 0.0
                 )
                 if grid_charge_cap_active:
                     projected_soc = _projected_soc_before(recharge_idx)
@@ -8522,7 +8678,10 @@ class BatteryOptimizer:
                 recharge_tiers = []
                 if solar_charge_input_kwh > 1e-9:
                     recharge_tiers.append((
-                        max(0.0, export_prices[recharge_idx]),
+                        max(0.0, (
+                            effective_export_prices[recharge_idx]
+                            if profit_max_pair else export_prices[recharge_idx]
+                        )),
                         solar_charge_input_kwh,
                         False,
                         False,
@@ -8602,6 +8761,8 @@ class BatteryOptimizer:
                 0.0,
                 net_home_kw + paired_output_kwh / dt,
             )
+            if profit_max_pair:
+                profit_max_paired_exports.add(t)
             if bonus_only_pair:
                 _consume_for(
                     paired_bonus_export_remaining,
@@ -8835,9 +8996,12 @@ class BatteryOptimizer:
                 priority_export_slot = battery_export_allowed and _priority_export_slot(t)
                 if (
                     manual_mode != "export"
-                    and (priority_export_slot or export_profitable_slot)
+                    and (
+                        priority_export_slot or export_profitable_slot
+                        or t in profit_max_paired_exports
+                    )
                 ):
-                    discharge_floor = _future_export_protection_floor(t)
+                    discharge_floor = max(discharge_floor, _future_export_protection_floor(t))
             original_discharge_kw = discharge_kw
             if (
                 manual_mode is None
@@ -9101,6 +9265,7 @@ class BatteryOptimizer:
             and not _cost_neutral_export_slot(t)
             and acquisition_cost_kwh > 0
             and effective_export_prices[t] < effective_acquisition_costs[t]
+            and t not in profit_max_paired_exports
         )
         active_export_constraint_reasons = []
         if any(future_reservation_slots):

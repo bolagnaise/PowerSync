@@ -465,9 +465,10 @@ not add a hidden home-load bridge or require an overnight top-up. When Auto-Appl
 Optimizer Reserve is enabled, its explicit forecast bridge raises only the
 intentional-export floor. Grid charging is scheduled only when the modeled tariff
 value, efficiency, limits, and future load/export value make it worthwhile.
-Provider priority is permission, not a synthetic subsidy: export below the
-modeled acquisition cost is allowed only when an actual, reachable quantity of
-cheaper future recharge is paired with it.
+Profit Max can account for cheaper future battery charging on any tariff.
+An export below the estimated cost of stored energy requires enough scheduled
+refill from solar or permitted grid charging to replace the export after battery
+losses. The active export reserve and site limits still apply.
 
 On systems with a reversible, readable charge-only control, Profit Max can also
 defer solar charging during a high feed-in-price interval and export that solar

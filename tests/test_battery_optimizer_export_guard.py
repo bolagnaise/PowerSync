@@ -5431,6 +5431,120 @@ def test_acquisition_cost_block_is_reported_separately_from_future_reservation(
     assert guard["acquisition_blocked_periods"] > 0
 
 
+@pytest.mark.parametrize("use_highs", [True, False])
+@pytest.mark.parametrize(
+    ("refill_source", "allow_grid_charge", "cheap_price"),
+    [
+        ("grid", True, 0.0),
+        ("grid", True, 0.04),
+        ("solar", True, 0.0),
+        ("solar", False, 0.0),
+    ],
+)
+def test_profit_max_pairs_ordinary_export_with_cheaper_refill(
+    battery_optimizer_module, monkeypatch, use_highs, refill_source,
+    allow_grid_charge, cheap_price,
+):
+    module = battery_optimizer_module
+    monkeypatch.setattr(module, "HIGHS_AVAILABLE", use_highs)
+    grid_refill = refill_source == "grid"
+    kwargs = dict(
+        import_prices=[0.51, 0.31, cheap_price if grid_refill else 0.31],
+        export_prices=[0.10, 0.0, 0.0 if grid_refill else cheap_price],
+        solar_forecast=[0.0, 0.0, 0.0 if grid_refill else 2.0],
+        load_forecast=[0.0, 0.5, 0.0],
+        current_soc=0.65,
+        acquisition_cost_kwh=0.107,
+        allow_battery_export=[True, False, False],
+        allow_grid_charge=allow_grid_charge,
+    )
+
+    def solve(*, profit_max=True, **overrides):
+        optimizer = module.BatteryOptimizer(
+            capacity_wh=10000, max_charge_w=2000, max_discharge_w=5000,
+            max_grid_import_w=2000, max_grid_export_w=5000,
+            backup_reserve=0.05, hardware_reserve=0.0,
+            interval_minutes=60, horizon_hours=3, terminal_weight=0.3 if profit_max else 1.0,
+        )
+        return optimizer.optimize(**(kwargs | overrides))
+
+    baseline = solve(profit_max=False)
+    candidate = solve()
+    assert candidate.solver_used == ("highs" if use_highs else "greedy")
+    assert baseline.battery_to_grid_w[0] == pytest.approx(0)
+    assert candidate.battery_to_grid_w[0] > 1000
+    assert candidate.battery_to_grid_w[0] <= 2000 * 0.92**2 + 1
+    assert candidate.schedule.actions[0].soc >= 0.05
+    assert candidate.schedule.actions[2].battery_charge_w >= 1000
+
+    for overrides in (
+        {"price_valid_slots": [True, True, False]},
+        {"block_battery_charge": [False, False, True]},
+        {"allow_battery_export": False},
+        {"current_soc": 0.05},
+        (
+            {"import_prices": [0.51, 0.31, 0.10]}
+            if grid_refill else {"export_prices": [0.10, 0.0, 0.10]}
+        ),
+    ):
+        assert solve(**overrides).battery_to_grid_w[0] == pytest.approx(0)
+
+
+def test_profit_max_refill_cannot_back_two_exports_with_the_same_charge(
+    battery_optimizer_module,
+):
+    result = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=20000, max_charge_w=2000, max_discharge_w=7000,
+        max_grid_import_w=2000, max_grid_export_w=5000, backup_reserve=0.05,
+        hardware_reserve=0.0, interval_minutes=60, horizon_hours=4,
+        terminal_weight=0.3,
+    ).optimize(
+        import_prices=[0.50, 0.50, 0.0, 0.0],
+        export_prices=[0.14, 0.10, 0.0, 0.0],
+        solar_forecast=[0.0] * 4,
+        load_forecast=[0.0, 0.0, 0.0, 2.0],
+        current_soc=0.70,
+        acquisition_cost_kwh=0.16,
+        allow_battery_export=[True, True, False, False],
+    )
+
+    assert result.solver_used == "highs"
+    assert result.battery_to_grid_w[0] > 1000
+    assert sum(result.battery_to_grid_w[:2]) <= 2000 * 0.92**2 + 1
+
+
+@pytest.mark.parametrize("use_highs", [True, False])
+@pytest.mark.parametrize("start_soc, export_cap_w", [(0.80, 846.4), (0.10, 460.0)])
+def test_profit_max_ordinary_refill_respects_rebate_and_export_reserve(
+    battery_optimizer_module, monkeypatch, use_highs, start_soc, export_cap_w,
+):
+    module = battery_optimizer_module
+    monkeypatch.setattr(module, "HIGHS_AVAILABLE", use_highs)
+    optimizer = module.BatteryOptimizer(
+        capacity_wh=10000, max_charge_w=4000, max_discharge_w=5000,
+        max_grid_import_w=4000, max_grid_export_w=5000,
+        backup_reserve=0.05, hardware_reserve=0.0,
+        interval_minutes=60, horizon_hours=3,
+        terminal_weight=0.3,
+    )
+    result = optimizer.optimize(
+        import_prices=[0.51, 0.25, 0.25],
+        export_prices=[0.10, 0.0, 0.0],
+        solar_forecast=[0.0] * 3,
+        load_forecast=[0.0] * 3,
+        current_soc=start_soc,
+        acquisition_cost_kwh=0.107,
+        allow_battery_export=[True, False, False],
+        import_bonus_prices=[0.0, 0.0, 0.25],
+        import_bonus_cap_kwh=1.0,
+    )
+
+    assert result.solver_used == ("highs" if use_highs else "greedy")
+    assert result.battery_to_grid_w[0] == pytest.approx(export_cap_w, abs=1)
+    assert result.schedule.actions[0].soc >= 0.05 - 1e-6
+    assert result.grid_import_w[2] <= 1001
+
+
 def _planned_export_window_optimizer(module):
     """Optimizer for the #334 planned-evening-export-window regressions."""
     return module.BatteryOptimizer(
