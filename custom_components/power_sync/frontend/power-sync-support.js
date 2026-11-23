@@ -6,7 +6,16 @@ class PowerSyncSupportCard extends HTMLElement {
   set config(value) { this._config = value; }
   setConfig(value) { this.config = value; }
   getCardSize() { return 5; }
-  connectedCallback() { this._connected = true; this.scheduleRefresh(); }
+  connectedCallback() {
+    this._connected = true;
+    // A dashboard can assign hass before the browser upgrades this element.
+    if (Object.hasOwn(this, 'hass')) {
+      const hass = this.hass;
+      delete this.hass;
+      this.hass = hass;
+    }
+    this.scheduleRefresh();
+  }
   disconnectedCallback() { this._connected = false; clearTimeout(this._refresh); }
   scheduleRefresh() {
     clearTimeout(this._refresh);

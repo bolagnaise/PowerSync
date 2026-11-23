@@ -23,7 +23,32 @@ def test_support_card_requires_admin_and_reviewed_scope_before_confirmation():
       setTimeout:(fn,delay)=>{timers.set(++timerId,{fn,delay});return timerId;},clearTimeout:id=>timers.delete(id),navigator:{clipboard:{writeText:async()=>{throw Error('clipboard unavailable');}}} };
     vm.createContext(context);vm.runInContext(fs.readFileSync(process.argv[1],'utf8'),context);
     (async()=>{
-    const Card=registry.get('ps-support-card'),card=new Card();card._hass={user:{is_admin:false}};card.render();
+    const Card = registry.get('ps-support-card');
+    // The dashboard can assign hass before the custom element is registered.
+    const upgraded = new Card();
+    const requests = [];
+    const hass = {user: {is_admin: true}, callApi: async (...args) => {
+      requests.push(args);
+      return {entries: [{entry_id: 'entry-one', status: {state: 'closed'}}], grants: []};
+    }};
+    Object.defineProperty(upgraded, 'hass', {value: hass, writable: true, configurable: true});
+    upgraded.connectedCallback();
+    await new Promise(setImmediate);
+    assert.ok(!Object.hasOwn(upgraded, 'hass'), 'upgrade restores the hass setter');
+    assert.equal(requests.filter(([, path]) => path === 'power_sync/support').length, 1);
+    assert.ok(upgraded.shadowRoot.querySelectorAll().some(x => x.attributes['aria-label'] === 'Support invitation'));
+    upgraded.disconnectedCallback();
+
+    const nonAdmin = new Card();
+    Object.defineProperty(nonAdmin, 'hass', {
+      value: {user: {is_admin: false}, callApi: hass.callApi}, configurable: true,
+    });
+    const requestCount = requests.length;
+    nonAdmin.connectedCallback();
+    assert.equal(requests.length, requestCount, 'upgrade does not load support for non-admins');
+    nonAdmin.disconnectedCallback();
+
+    const card=new Card();card._hass={user:{is_admin:false}};card.render();
     assert.equal(card.shadowRoot.querySelectorAll().filter(x=>x.tag==='button').length,0,'non-admin has no consent controls');
     const canary='<img src=x onerror=alert(1)>',calls=[];
     card.diagnosticsApi=async()=>({grants:[]});card._diagnostics={grants:[]};card._diagnosticsError=false;card._ongoing=false;
