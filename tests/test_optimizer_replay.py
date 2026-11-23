@@ -229,9 +229,59 @@ def test_currency_and_terminal_energy_are_explicit(api):
     assert value["common_score"] == pytest.approx(value["tariff_net_cost"] - value["terminal_energy_delta_kwh"] * 0.4)
 
 
+def test_replay_scores_hardware_and_optimizer_reserves_by_action(api):
+    module, _, _ = api
+    optimizer = module.BatteryOptimizer(
+        capacity_wh=10000, backup_reserve=0.20, hardware_reserve=0,
+        interval_minutes=60, horizon_hours=8,
+    )
+    values = {
+        **inputs(), "import_prices": [0.50] * 8, "export_prices": [0.0] * 8,
+        "load_forecast": [2.0, 2.0, 0, 0, 0, 0, 0, 0],
+        "current_soc": 0.30, "allow_grid_charge": False,
+    }
+    _, bundle, _ = capture_one(api, values=values, optimizer=optimizer)
+    rows = bundle["result"]["schedule"]
+    assert rows[0]["action"] == "self_consumption"
+    assert 0 < rows[0]["soc"] < 0.20
+    assert score(bundle, rows)["violations"] == []
+
+    bundle["inputs"]["allow_battery_export"] = True
+    bundle["inputs"]["manual_control"] = {"mode_slots": [None, "export"]}
+    forced = copy.deepcopy(rows)
+    forced[0]["action"] = "export"
+    assert score(bundle, forced)["violations"] == [{"slot": 0, "rule": "soc_limit"}]
+
+    bundle["state"]["hardware_reserve"] = 0.10
+    assert {"slot": 0, "rule": "soc_limit"} in score(bundle, rows)["violations"]
+
+
 def test_coordinator_edits_are_not_solver_coverage():
     paths = ["custom_components/power_sync/optimization/coordinator.py", "custom_components/power_sync/optimization/battery_optimizer.py"]
     assert source_coverage(paths, COMPONENT, COMPONENT) == {paths[0]: "not-covered", paths[1]: "solver_v1"}
+
+
+def test_trusted_state_recorder_does_not_freeze_solver_only_methods(tmp_path):
+    baseline, candidate = tmp_path / "baseline", tmp_path / "candidate"
+    for root, number in ((baseline, 1), (candidate, 2)):
+        (root / "optimization").mkdir(parents=True)
+        (root / "regression").mkdir()
+        (root / "regression" / "contract.py").write_bytes(
+            (COMPONENT / "regression" / "contract.py").read_bytes()
+        )
+        (root / "optimization" / "battery_optimizer.py").write_text(
+            "class BatteryOptimizer:\n"
+            "    def optimize(self):\n"
+            "        return self.solve()\n"
+            "    def solve(self):\n"
+            f"        return {number}\n"
+        )
+    path = "custom_components/power_sync/optimization/battery_optimizer.py"
+    assert source_coverage([path], baseline, candidate) == {path: "solver_v1"}
+
+    contract_path = candidate / "regression" / "contract.py"
+    contract_path.write_text(contract_path.read_text() + "\ngetattr(optimizer, setting)()\n")
+    assert source_coverage([path], baseline, candidate) == {path: "not-covered"}
 
 
 def test_environment_change_is_not_silently_attributed_to_candidate(api):

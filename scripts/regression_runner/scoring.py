@@ -53,7 +53,14 @@ def score(bundle, schedule, *, terminal_price=0.0):
     export_allowed = series("allow_battery_export", False)
     caps = series("grid_export_limits_w", state["max_grid_export_w"])
     timestamps = inputs["schedule_timestamps"]
+    manual_modes = (inputs["manual_control"] or {}).get("mode_slots") or []
     soc = opening_soc
+    optimizer_reserve = state["backup_reserve"]
+    hardware_reserve = (
+        state["hardware_reserve"] if state["hardware_reserve_known"]
+        else optimizer_reserve
+    )
+    natural_floor = min(opening_soc, hardware_reserve)
     import_cost = export_revenue = import_kwh = export_kwh = throughput = 0.0
     violations = []
     unsupported = []
@@ -100,7 +107,10 @@ def score(bundle, schedule, *, terminal_price=0.0):
         if charge * 1000 > state["max_charge_w"] + 1 or discharge * 1000 > state["max_discharge_w"] + 1:
             violations.append({"slot": index, "rule": "battery_power_limit"})
         soc += (charge * state["charge_efficiency"] - discharge / state["discharge_efficiency"]) * dt / capacity
-        floor = min(opening_soc, state["backup_reserve"])
+        floor = natural_floor
+        manual_export = index < len(manual_modes) and manual_modes[index] == "export"
+        if discharge > 1e-6 and row["action"] in ("export", "discharge") and not manual_export:
+            floor = max(floor, optimizer_reserve)
         if soc < floor - 0.0002 or soc > 1.0002:
             violations.append({"slot": index, "rule": "soc_limit"})
         if reported is not None and (not math.isfinite(reported) or abs(reported - soc) > 0.0002):

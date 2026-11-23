@@ -3,7 +3,7 @@ from .scoring import score
 from pathlib import Path
 import ast
 import hashlib
-from .trusted_contract import ContractError
+from .trusted_contract import ContractError, STATE_FIELDS, _PATH as TRUSTED_CONTRACT_PATH
 
 
 def changed_component_paths(baseline, candidate):
@@ -111,10 +111,22 @@ def reconstruction_surface(path):
     for node in tree.body:
         if node is not cls:
             external.update(called(node))
-    for other in Path(path).parents[1].rglob("*.py"):
+    component = Path(path).parents[1]
+    trusted_contract = TRUSTED_CONTRACT_PATH.read_bytes()
+    for other in component.rglob("*.py"):
         if other == Path(path) or "__pycache__" in other.parts:
             continue
-        external.update(called(ast.parse(other.read_text())) - {"optimize"})
+        source = other.read_bytes()
+        module = ast.parse(source)
+        if other == component / "regression" / "contract.py" and source == trusted_contract:
+            # This recorder reads a fixed inventory. Treat those reads as
+            # literal references while preserving every other dynamic lookup.
+            external.update(methods.keys() & set(STATE_FIELDS))
+            module.body = [
+                node for node in module.body
+                if not isinstance(node, ast.FunctionDef) or node.name != "state_snapshot"
+            ]
+        external.update(called(module) - {"optimize"})
     implicit = {name for name in methods if name.startswith("__") and name.endswith("__")}
     frozen = reachable((set(methods) - solving) | properties | external | implicit | {"__init__", "update_config"})
     for node in cls.body:
