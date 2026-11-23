@@ -6,6 +6,7 @@ import asyncio
 import io
 import json
 import logging
+import re
 import importlib
 import sys
 import types
@@ -7349,7 +7350,7 @@ def test_solar_surplus_disable_preserves_manual_solar_policy(monkeypatch):
         ("both_stale_anchor", True),
     ],
 )
-@pytest.mark.parametrize("transition", ["global", "vehicle", "smart_schedule"])
+@pytest.mark.parametrize("transition", ["global", "vehicle", "smart_schedule", "charge_ceiling"])
 def test_solar_surplus_releases_only_verified_idle_tesla(
     monkeypatch, scenario, expect_physical_stop, transition,
 ):
@@ -7467,6 +7468,11 @@ def test_solar_surplus_releases_only_verified_idle_tesla(
     elif transition == "vehicle":
         monkeypatch.setattr(actions, "_solar_surplus_vehicle_opted_out", lambda *args: True)
         asyncio.run(actions._dynamic_ev_update_surplus(hass, entry, entry.entry_id, vehicle_id))
+    elif transition == "charge_ceiling":
+        assert asyncio.run(actions._action_stop_ev_charging_dynamic(hass, entry, {
+            "vehicle_id": vehicle_id, "_expected_state": state, "stop_charging": True,
+            "_solar_ceiling_stop": True, "stop_reason": "EV 70% reached Solar Surplus ceiling 70%",
+        })) is True
     else:
         assert asyncio.run(actions._action_start_ev_charging_dynamic(
             hass, entry, {**_handover_start_params(vehicle_id), "owner_mode": "smart_schedule"},
@@ -7866,9 +7872,7 @@ def test_solar_surplus_restart_reclaims_exact_recovered_session(monkeypatch):
         return current_entity
 
     async def tesla_entity(hass, pattern, *args, **kwargs):
-        if "charging_state|charging" in pattern:
-            return charging_entity
-        return current_entity
+        return next((entity for entity in (charging_entity, current_entity) if re.search(pattern, entity)), None)
 
     monkeypatch.setattr(
         actions,
@@ -8049,9 +8053,7 @@ def test_solar_native_resume_rejection_ends_new_session(monkeypatch, handoff_mod
         return current_entity
 
     async def tesla_entity(hass, pattern, *args, **kwargs):
-        if "charging_state|charging" in pattern:
-            return charging_entity
-        return current_entity
+        return next((entity for entity in (charging_entity, current_entity) if re.search(pattern, entity)), None)
 
     async def live_status(*args, **kwargs):
         return {"battery_soc": 50}
@@ -8354,14 +8356,15 @@ def test_solar_surplus_vehicle_toggle_prefers_the_vin_profile(
     assert actions._solar_surplus_vehicle_opted_out(hass, entry, vin) is expected
 
 
-def test_solar_surplus_dynamic_start_blocks_full_ev(monkeypatch):
+@pytest.mark.parametrize("ev_soc,ceiling", [(100.0, None), (70.0, 70)])
+def test_solar_surplus_dynamic_start_blocks_full_ev(monkeypatch, ev_soc, ceiling):
     ev_planner = types.ModuleType("power_sync.automations.ev_charging_planner")
 
     async def plugged_in(*args, **kwargs):
         return True
 
     async def full_ev_soc(*args, **kwargs):
-        return 100.0
+        return ev_soc
 
     ev_planner.is_ev_plugged_in = plugged_in
     ev_planner.get_ev_battery_level = full_ev_soc
@@ -8371,6 +8374,9 @@ def test_solar_surplus_dynamic_start_blocks_full_ev(monkeypatch):
         ev_planner,
     )
     hass = _Hass([])
+    hass.data["power_sync"]["entry-1"]["auto_schedule_executor"] = SimpleNamespace(
+        enabled_target_soc=lambda vehicle_id: ceiling,
+    )
     actions._dynamic_ev_state.clear()
 
     result = asyncio.run(
@@ -8392,7 +8398,144 @@ def test_solar_surplus_dynamic_start_blocks_full_ev(monkeypatch):
     last_command = hass.data["power_sync"]["entry-1"]["ev_last_command"]["VIN123"]
     assert last_command["command"] == "start_solar_surplus"
     assert last_command["success"] is False
-    assert last_command["reason"] == "EV 100.0% >= 100%, already full"
+    if ceiling is None:
+        assert last_command["reason"] == "EV 100.0% >= 100%, already full"
+    else:
+        assert "70" in last_command["reason"]
+
+
+@pytest.mark.parametrize(
+    "ev_soc,smart_enabled,same_vehicle,tesla_limit,expected_ceiling",
+    [
+        (70, True, True, 80, 70),
+        (66, True, True, 65, 65),
+        (69, True, True, 80, None),
+        (70, False, True, 80, None),
+        (70, True, False, 80, None),
+        (65, False, True, 65, 65),
+        (None, True, True, 80, 70),
+    ],
+)
+def test_solar_surplus_uses_lower_exact_vehicle_ceiling(
+    monkeypatch, ev_soc, smart_enabled, same_vehicle, tesla_limit, expected_ceiling,
+):
+    vin = "5YJTEST0000000001"
+    schedule_vin = vin if same_vehicle else "5YJTEST0000000002"
+    hass = _Hass([])
+    hass.data["power_sync"]["entry-1"]["auto_schedule_executor"] = SimpleNamespace(
+        enabled_target_soc=lambda candidate: 70 if smart_enabled and candidate == schedule_vin else None,
+    )
+    _install_solar_surplus_runtime_stubs(monkeypatch, {}, ev_soc=ev_soc)
+    monkeypatch.setattr(actions, "_solar_surplus_tesla_charge_limit",
+                        AsyncMock(return_value=tesla_limit))
+    params = {"vehicle_vin": vin, "dynamic_mode": "solar_surplus",
+              "owner_mode": "solar_surplus", "charger_type": "tesla"}
+
+    reason = asyncio.run(actions._dynamic_ev_full_soc_reason(hass, _Entry(), vin, params))
+
+    if expected_ceiling is None:
+        assert reason is None
+    else:
+        assert reason and str(expected_ceiling) in reason
+
+
+def test_solar_start_rechecks_target_before_tesla_dispatch(monkeypatch):
+    vin = "5YJTEST0000000001"
+    hass = _Hass([])
+    hass.data["power_sync"]["entry-1"]["auto_schedule_executor"] = SimpleNamespace(
+        enabled_target_soc=lambda vehicle: 70 if vehicle == vin else None,
+    )
+    _install_solar_surplus_runtime_stubs(monkeypatch, {}, ev_soc=70)
+    params = {"charger_type": "tesla", "owner_mode": "solar_surplus", "vehicle_vin": vin}
+    assert asyncio.run(actions._action_start_ev_charging(hass, _Entry(), params)) is False
+    assert not hass.services.calls
+
+
+def test_solar_surplus_reads_only_the_requested_teslas_charge_limit():
+    vin = "5YJTEST0000000001"
+    other_vin = "5YJTEST0000000002"
+    this_limit = "number.blue_car_charge_limit"
+    other_limit = "number.red_car_charge_limit"
+    hass = _Hass([_State(other_limit, "50"), _State(this_limit, "85")])
+    _install_native_ha_writer(hass, vin, this_limit)
+    _install_native_ha_writer(hass, other_vin, other_limit)
+
+    assert asyncio.run(actions._solar_surplus_tesla_charge_limit(hass, _Entry(), vin)) == 85
+    hass.states._states[this_limit].state = "unavailable"
+    assert asyncio.run(actions._solar_surplus_tesla_charge_limit(hass, _Entry(), vin)) is None
+
+
+@pytest.mark.parametrize("charging_started", [False, True], ids=["waiting", "charging"])
+def test_owned_solar_at_target_cannot_restart_or_notify(monkeypatch, charging_started):
+    vin = "5YJTEST0000000001"
+    hass = _Hass([_State("sensor.parked_ev_charging_state", "stopped")])
+    hass.data["power_sync"]["entry-1"]["auto_schedule_executor"] = SimpleNamespace(
+        enabled_target_soc=lambda vehicle_id: 70 if vehicle_id == vin else None,
+    )
+    state = _solar_surplus_state(current_amps=6 if charging_started else 0)
+    state.update(charging_started=charging_started,
+                 high_surplus_start=datetime.now() - timedelta(minutes=5))
+    state["params"].update(owner_mode="solar_surplus", vehicle_vin=vin,
+                           tesla_charging_state_entity="sensor.parked_ev_charging_state")
+    monkeypatch.setitem(actions._dynamic_ev_state, "entry-1", {vin: state})
+    _install_solar_surplus_runtime_stubs(
+        monkeypatch, {"battery_soc": 100, "grid_power": -3000, "battery_power": 0,
+                      "solar_power": 4000, "load_power": 1000}, ev_soc=70,
+    )
+    stop = AsyncMock(return_value=True)
+    start = AsyncMock(return_value=True)
+    notify = AsyncMock()
+    monkeypatch.setattr(actions, "_action_stop_ev_charging_dynamic", stop)
+    monkeypatch.setattr(actions, "_action_start_ev_charging", start)
+    monkeypatch.setattr(actions, "_send_expo_push", notify)
+
+    asyncio.run(actions._dynamic_ev_update_surplus(hass, _Entry(), "entry-1", vin))
+
+    stop.assert_awaited_once()
+    assert stop.await_args.args[2]["vehicle_id"] == vin
+    if charging_started:
+        assert stop.await_args.args[2]["stop_charging"] is True
+    start.assert_not_awaited()
+    notify.assert_not_awaited()
+
+
+def test_solar_surplus_completion_handoff_notifies_only_for_eligible_accepted_vehicle(monkeypatch):
+    vin_done = "5YJTEST0000000001"
+    vin_capped = "5YJTEST0000000002"
+    vin_denied = "5YJTEST0000000003"
+    vin_ready = "5YJTEST0000000004"
+    vehicles = [
+        {"vin": vin_done, "name": "Finished"},
+        {"vin": vin_capped, "name": "At target"},
+        {"vin": vin_denied, "name": "Busy"},
+        {"vin": vin_ready, "name": "Ready"},
+    ]
+    hass = _Hass([])
+    hass.data["power_sync"]["entry-1"]["auto_schedule_executor"] = SimpleNamespace(
+        enabled_target_soc=lambda vehicle_id: 70 if vehicle_id == vin_capped else None,
+    )
+    planner = types.ModuleType("power_sync.automations.ev_charging_planner")
+    planner.discover_all_tesla_vehicles = AsyncMock(return_value=vehicles)
+    planner.is_ev_plugged_in = AsyncMock(return_value=True)
+    planner.get_ev_battery_level = AsyncMock(
+        side_effect=lambda _hass, _entry, vin: 70 if vin == vin_capped else 40,
+    )
+    monkeypatch.setitem(sys.modules, "power_sync.automations.ev_charging_planner", planner)
+    monkeypatch.setattr(actions, "_action_stop_ev_charging_dynamic", AsyncMock(return_value=True))
+    start = AsyncMock(side_effect=lambda _hass, _entry, params, context: params["vehicle_vin"] == vin_ready)
+    notify = AsyncMock()
+    monkeypatch.setattr(actions, "_action_start_ev_charging_dynamic", start)
+    monkeypatch.setattr(actions, "_send_expo_push", notify)
+    params = {"owner_mode": "solar_surplus", "dynamic_mode": "solar_surplus",
+              "vehicle_vin": vin_done, "charger_type": "tesla"}
+
+    asyncio.run(actions._solar_surplus_switch_to_next_vehicle(hass, _Entry(), "entry-1", vin_done, params))
+
+    assert [call.args[2]["vehicle_vin"] for call in start.await_args_list] == [vin_denied, vin_ready]
+    messages = [call.args[2] for call in notify.await_args_list]
+    assert len(messages) == 2
+    assert "charge complete" in messages[0]
+    assert "Ready" in messages[1]
 
 
 def test_solar_surplus_dynamic_start_blocks_unplugged_ev(monkeypatch):

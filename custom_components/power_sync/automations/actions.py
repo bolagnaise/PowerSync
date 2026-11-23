@@ -2239,6 +2239,43 @@ async def _ev_session_soc(hass, config_entry, vehicle_id: str, params: dict) -> 
     return int(level) if level is not None and 0 <= level <= 100 else None
 
 
+async def _solar_surplus_tesla_charge_limit(hass, config_entry, vehicle_id: str) -> float | None:
+    """Read the latest numeric limit reported for this Tesla without waking it."""
+    from ..const import TESLA_BLE_SENSOR_CHARGE_LIMIT
+    from ..tesla_ble import get_tesla_ble_observed_at
+    from .generic_charger_soc import ev_soc_from_state
+
+    config = {**config_entry.data, **config_entry.options}
+    limits = []
+    if _is_explicit_tesla_vin(vehicle_id):
+        entity = await _get_tesla_ev_entity(
+            hass, r"(?:number|sensor)\..*_charge_limit(?:_soc)?(?:_\d+)?$",
+            vehicle_id, config_entry=config_entry, warn_on_missing=False,
+        )
+        sample = hass.states.get(entity) if entity else None
+        value = ev_soc_from_state(sample)
+        if value is not None and value > 0:
+            observed = getattr(sample, "last_reported", None) or getattr(sample, "last_updated", None)
+            limits.append((observed, value))
+
+    if vehicle_id.startswith("ble_") or (
+        _is_explicit_tesla_vin(vehicle_id) and config.get(CONF_EV_PROVIDER) == EV_PROVIDER_BOTH
+    ):
+        prefix = _resolve_ble_prefix_for_vehicle(hass, config_entry, vehicle_id)
+        if prefix:
+            sample = hass.states.get(TESLA_BLE_SENSOR_CHARGE_LIMIT.format(prefix=prefix))
+            value = ev_soc_from_state(sample)
+            if value is not None and value > 0:
+                limits.append((get_tesla_ble_observed_at(hass, sample), value))
+
+    if not limits:
+        return None
+    # If equally recent providers disagree, respect the lower limit.
+    return max(limits, key=lambda item: (
+        item[0].timestamp() if isinstance(item[0], datetime) else 0, -item[1]
+    ))[1]
+
+
 async def _dynamic_ev_full_soc_reason(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
@@ -2252,9 +2289,39 @@ async def _dynamic_ev_full_soc_reason(
         vehicle_id,
         params,
     )
-    if ev_soc is None or ev_soc < FULL_EV_SOC:
+    if ev_soc is not None and ev_soc >= FULL_EV_SOC:
+        return f"EV {ev_soc}% >= {FULL_EV_SOC}%, already full"
+
+    mode = params.get("owner_mode") or params.get("dynamic_mode", "solar_surplus")
+    if mode != "solar_surplus":
         return None
-    return f"EV {ev_soc}% >= {FULL_EV_SOC}%, already full"
+
+    executor = hass.data.get(DOMAIN, {}).get(config_entry.entry_id, {}).get("auto_schedule_executor")
+    target = executor.enabled_target_soc(vehicle_id) if executor is not None else None
+    if params.get("charger_type", "tesla") == "tesla":
+        vehicle = _dynamic_ev_soc_vehicle_vin(vehicle_id, params)
+        if vehicle:
+            if ev_soc is None and _is_explicit_tesla_vin(vehicle):
+                config = {**config_entry.data, **config_entry.options}
+                if config.get(CONF_EV_PROVIDER) == EV_PROVIDER_BOTH:
+                    from ..tesla_ble import get_tesla_ble_battery_state, get_tesla_ble_observed_at
+                    from .generic_charger_soc import ev_soc_from_state
+
+                    prefix = _resolve_ble_prefix_for_vehicle(hass, config_entry, vehicle)
+                    if prefix:
+                        sample = get_tesla_ble_battery_state(hass, prefix)
+                        if is_current_ev_power_observation(get_tesla_ble_observed_at(hass, sample)):
+                            ev_soc = ev_soc_from_state(sample)
+            limit = await _solar_surplus_tesla_charge_limit(hass, config_entry, vehicle)
+            if limit is not None:
+                target = min(target, limit) if target is not None else limit
+    if target is None:
+        return None
+    if ev_soc is None:
+        return f"EV battery level unavailable for Solar Surplus ceiling {target:g}%"
+    if ev_soc >= target:
+        return f"EV {ev_soc:g}% reached Solar Surplus ceiling {target:g}%"
+    return None
 
 
 async def _get_observed_ev_power_reading_kw(
@@ -10408,6 +10475,13 @@ async def _action_start_ev_charging(
                 )
                 return False
 
+    if owner_mode == "solar_surplus":
+        vehicle_id = params.get("vehicle_vin") or params.get("vehicle_id") or DEFAULT_VEHICLE_ID
+        reason = await _dynamic_ev_full_soc_reason(hass, config_entry, vehicle_id, params)
+        if reason:
+            _LOGGER.info("Solar Surplus start blocked for %s: %s", vehicle_id, reason)
+            return False
+
     # OCPP charger: use HA switch entity
     if charger_type == "ocpp":
         ocpp_charger_id = params.get("ocpp_charger_id")
@@ -13101,21 +13175,15 @@ async def _solar_surplus_switch_to_next_vehicle(
             _LOGGER.debug(f"Solar surplus fallback: {name} ({vin[:8]}...) not plugged in, skipping")
             continue
 
-        # Check if charge is already complete
+        new_params = {**current_params, "vehicle_vin": vin, "vehicle_id": vin, "vehicle_name": name}
         if await _is_vehicle_charge_complete(hass, vin):
-            _LOGGER.debug(f"Solar surplus fallback: {name} ({vin[:8]}...) already complete, skipping")
+            continue
+        if await _dynamic_ev_full_soc_reason(hass, config_entry, vin, new_params):
             continue
 
-        # Found a candidate — start surplus charging with same params but new VIN
-        _LOGGER.info(
-            f"⚡ Solar surplus EV: Switching from {completed_name} to {name} ({vin[:8]}...)"
-        )
-        new_params = dict(current_params)
-        new_params["vehicle_vin"] = vin
-        new_params["vehicle_name"] = name
-
         try:
-            await _action_start_ev_charging_dynamic(hass, config_entry, new_params, context=None)
+            if not await _action_start_ev_charging_dynamic(hass, config_entry, new_params, context=None):
+                continue
             await _send_expo_push(
                 hass, "EV Charging",
                 f"Solar surplus switching to {name}"
@@ -15491,6 +15559,12 @@ async def _dynamic_ev_update_surplus(
     if _session_was_replaced("charge-limit check"):
         return
     if full_soc_reason:
+        from .ev_ownership import get_ev_ownership
+
+        _, lease = get_ev_ownership(hass, config_entry, vehicle_id)
+        if state.get("external_manual_override") or (lease and lease.get("owner") != "powersync"):
+            state["reason"] = full_soc_reason
+            return
         _LOGGER.info("⚡ Solar surplus EV: Stopping - %s", full_soc_reason)
         await _action_stop_ev_charging_dynamic(
             hass,
@@ -15498,7 +15572,10 @@ async def _dynamic_ev_update_surplus(
             {
                 "vehicle_id": vehicle_id,
                 "stop_charging": True,
-                "stop_reason": "already full",
+                "_expected_state": state,
+                "_expected_lease": lease,
+                "_solar_ceiling_stop": True,
+                "stop_reason": "already full" if full_soc_reason.endswith("already full") else full_soc_reason,
             },
         )
         return
@@ -21383,7 +21460,8 @@ async def _action_stop_ev_charging_dynamic(
             if (
                 stop_charging and vid not in passive_vehicle_ids and state_owner == "solar_surplus"
                 and (params.get("_automatic_solar_disable") is True
-                     or params.get("_smart_schedule_waiting_solar_handoff") is True)
+                     or params.get("_smart_schedule_waiting_solar_handoff") is True
+                     or params.get("_solar_ceiling_stop") is True)
                 and session_matches(vid, state, ble_waiting_lease)
             ):
                 # Ending session history can await telemetry. Decide whether

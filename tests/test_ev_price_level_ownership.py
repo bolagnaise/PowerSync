@@ -2751,7 +2751,7 @@ def fake_actions(monkeypatch):
     actions._is_vehicle_charge_complete = AsyncMock(return_value=False)
     actions._release_stopped_scheduled_tesla = AsyncMock(return_value=False)
 
-    actions._is_vehicle_charge_complete = AsyncMock(return_value=False)
+    actions._dynamic_ev_full_soc_reason = AsyncMock(return_value=None)
     monkeypatch.setitem(sys.modules, "power_sync.automations.actions", actions)
     monkeypatch.setattr(
         sys.modules["power_sync.automations"],
@@ -9598,8 +9598,23 @@ def test_solar_surplus_skips_unplugged_priority_vehicle(monkeypatch):
     assert [config["vehicle_id"] for config in selected] == [plugged_vin]
 
 
+def test_solar_ceiling_lookup_ignores_disabled_and_unconfigured_vehicles():
+    vin = "5YJTEST0000000001"
+    absent_vin = "5YJTEST0000000002"
+    executor = ev_planner.AutoScheduleExecutor(_FakeHass(), _FakeConfigEntry(), planner=None)
+    settings = ev_planner.AutoScheduleSettings(vehicle_id=vin, enabled=False, target_soc=70)
+    executor._settings[vin] = settings
+
+    assert executor.enabled_target_soc(vin) is None
+    settings.enabled = True
+    assert executor.enabled_target_soc(vin) == 70
+    assert executor.enabled_target_soc(absent_vin) is None
+    assert list(executor._settings) == [vin]
+
+
+@pytest.mark.parametrize("at_charge_ceiling", [False, True], ids=["tesla-complete", "soc-ceiling"])
 def test_solar_surplus_skips_complete_tesla_before_opening_a_session(
-    monkeypatch, fake_actions
+    monkeypatch, fake_actions, at_charge_ceiling,
 ):
     complete_vin = "LRWYHCEKXTC687964"
     eligible_vin = "XP7YGCEL7NB001704"
@@ -9608,7 +9623,12 @@ def test_solar_surplus_skips_complete_tesla_before_opening_a_session(
         return vehicle_vin in {complete_vin, eligible_vin}
 
     fake_actions._is_vehicle_charge_complete = AsyncMock(
-        side_effect=lambda _hass, vin: vin == complete_vin
+        side_effect=lambda _hass, vin: not at_charge_ceiling and vin == complete_vin
+    )
+    fake_actions._dynamic_ev_full_soc_reason = AsyncMock(
+        side_effect=lambda _hass, _entry, vin, params: (
+            "EV reached target 70%" if at_charge_ceiling and vin == complete_vin else None
+        )
     )
     monkeypatch.setattr(ev_planner, "is_ev_plugged_in", plugged_in)
 

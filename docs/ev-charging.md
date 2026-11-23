@@ -36,6 +36,10 @@ Re-enable it with the same action and `enabled: true`. Check battery charge both
 
 These actions change the mode's saved eligibility, not the physical charger directly. Scheduled Charging, Price Level and Smart Schedule apply changes on the normal EV evaluation cycle. Solar Surplus also uses its existing disable cleanup. Enabling a mode does not force a charging start, and disabling one mode does not disable other eligible charging modes. A successful action confirms the setting was saved, not that the charger physically stopped. Monitoring Mode and existing ownership and provider safeguards still apply.
 
+## Solar Surplus charge limits
+
+When Smart Schedule is enabled for a vehicle, standalone Solar Surplus stops at that vehicle’s Smart Schedule target. For a Tesla, the lower of that target and the charge limit reported by the car applies. With Smart Schedule off, Solar Surplus uses the Tesla charge limit. A vehicle at its ceiling is skipped so another eligible vehicle can use the surplus.
+
 ## Using EV charging with or without Smart Optimization
 
 Scheduled Charging and Price Level can use the current retail rate from EPEX, Octopus or Localvolts with the battery optimizer switched off. A price-limited session waits when its provider has no valid rate covering the current time. Smart Schedule still needs live site power before increasing charging. Disabling Smart Schedule lets it clean up its own session if site telemetry goes offline.

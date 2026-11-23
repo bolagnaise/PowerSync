@@ -5632,6 +5632,11 @@ class AutoScheduleExecutor:
             vehicle_id, getattr(self, "_fleet_vins", ()), getattr(self, "_resolved_ble_prefixes", ()),
         )
 
+    def enabled_target_soc(self, vehicle_id: str) -> int | None:
+        """Return the existing target for this vehicle without creating settings."""
+        settings = self._settings.get(self._settings_vehicle_id(vehicle_id))
+        return settings.target_soc if settings is not None and settings.enabled else None
+
     def get_settings(self, vehicle_id: str) -> AutoScheduleSettings:
         """Get settings for a vehicle, creating defaults if needed."""
         vehicle_id = self._settings_vehicle_id(vehicle_id)
@@ -9809,6 +9814,11 @@ async def get_solar_surplus_start_configs(
                     "Solar surplus skipping %s because charging is complete",
                     config.get("display_name") or vehicle_id,
                 )
+                continue
+        if vehicle_id:
+            from .actions import _dynamic_ev_full_soc_reason
+
+            if await _dynamic_ev_full_soc_reason(hass, config_entry, vehicle_id, config):
                 continue
         configs_to_start.append(config)
         if not allow_parallel:
