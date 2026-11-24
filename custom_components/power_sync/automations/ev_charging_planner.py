@@ -6753,6 +6753,9 @@ class AutoScheduleExecutor:
             if state.is_charging:
                 # Stop any active charging session tracking
                 state.is_charging = False
+            # The car left: hand back this vehicle's export-rule override, as
+            # _stop_charging would, instead of leaving it held while away.
+            await self._restore_curtailment(state)
             state.last_decision = "away"
             state.last_decision_reason = f"Vehicle not at home (location: {location})"
             self._sync_active_charging_preserve_intent(
@@ -6769,6 +6772,7 @@ class AutoScheduleExecutor:
         if not plugged_in:
             if state.is_charging:
                 state.is_charging = False
+            await self._restore_curtailment(state)
             state.last_decision = "unplugged"
             state.last_decision_reason = "Vehicle not plugged in"
             self._sync_active_charging_preserve_intent(

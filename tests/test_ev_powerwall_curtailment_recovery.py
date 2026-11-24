@@ -648,3 +648,23 @@ async def test_staged_handshake_timeout_cancels_a_task_that_never_signals():
     with pytest.raises(AssertionError, match="expected test handshake"):
         await wait_for_task_event(asyncio.Event(), task, timeout=0.01)
     assert task.cancelled()
+
+
+@pytest.mark.parametrize("decision", ["away", "unplugged"])
+def test_smart_schedule_releases_export_override_when_car_leaves(decision):
+    """Away/unplugged return early; they must still hand back the override
+    exactly like _stop_charging, instead of holding pv_only while away."""
+    method = load_source_node(PLANNER, "_evaluate_vehicle")
+    branch = next(
+        node for node in ast.walk(method)
+        if isinstance(node, ast.If)
+        and any(
+            isinstance(stmt, ast.Assign)
+            and ast.unparse(stmt.targets[0]) == "state.last_decision"
+            and isinstance(stmt.value, ast.Constant) and stmt.value.value == decision
+            for stmt in node.body
+        )
+    )
+    body = [ast.unparse(stmt) for stmt in branch.body]
+    restore = body.index("await self._restore_curtailment(state)")
+    assert restore < next(i for i, line in enumerate(body) if line == "return")
