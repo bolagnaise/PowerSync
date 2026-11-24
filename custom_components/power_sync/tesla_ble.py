@@ -227,12 +227,12 @@ def get_tesla_ble_status_state(hass: Any, prefix: str) -> Any | None:
 def get_tesla_ble_connected_charge_sample_time(
     hass: Any, prefix: str, charge_state: Any, power_state: Any, *,
     require_paired_charge_state: bool = True,
+    require_paired_measurement: bool = True,
 ) -> datetime | None:
     """Find contemporaneous samples from the currently connected bridge.
 
-    The measurement always requires the native paired packet. Recovery Start
-    can also use the matching ESPHome state report on bridges that publish a
-    paired power packet but no paired charging-state packet.
+    By default the measurement requires the native paired packet. Callers
+    can explicitly accept contemporaneous, producer-bound ESPHome reports.
     """
     if charge_state is None or power_state is None:
         return None
@@ -260,7 +260,7 @@ def get_tesla_ble_connected_charge_sample_time(
     if bridge is None or binding(connection.entity_id) != bridge:
         return None
     stamps = []
-    for state, required in ((charge_state, require_paired_charge_state), (power_state, True)):
+    for state, required in ((charge_state, require_paired_charge_state), (power_state, require_paired_measurement)):
         if binding(state.entity_id) != bridge:
             return None
         sample = get_tesla_ble_companion_state(hass, state.entity_id, "_sample")

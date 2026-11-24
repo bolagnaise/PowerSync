@@ -442,6 +442,31 @@ async def test_ble_stop_hold_does_not_create_another_boost_recovery_obligation(r
 
 
 @pytest.mark.asyncio
+async def test_blocked_solar_handoff_does_not_retain_a_boost_start_hold():
+    h = BoostHarness()
+    h.fail_start.add(VIN_A)
+
+    def refuse_before_start(_vin, params):
+        params["_boost_start_result"]["not_submitted"] = "Solar Surplus handoff blocked"
+
+    h.start_hook = refuse_before_start
+    reply = await h.start(VIN_A, 60)
+    assert reply["success"] is False and reply["recovery_pending"] is True
+    assert reply["error"] == "Solar Surplus handoff blocked"
+    assert h.store.saved["ev_runtime_state"]["boost_sessions"][VIN_A]["dispatch_started"] is False
+
+    h.now += timedelta(seconds=30)
+    await h.due()
+    assert VIN_A not in h.runtime["ev_boost_sessions"]
+    assert VIN_A not in h.store.saved["ev_runtime_state"]["boost_sessions"]
+    assert not h.stops()
+
+    h.start_hook = None
+    h.fail_start.clear()
+    assert (await h.start(VIN_A, 60))["success"] is True
+
+
+@pytest.mark.asyncio
 async def test_recovering_boost_keeps_deadline_and_does_not_report_physical_start():
     h = BoostHarness()
     healthy = await h.start(VIN_B, 3)

@@ -21411,13 +21411,26 @@ class ChargingBoostView(HomeAssistantView):
                 await self._save_boost_state(record)
                 return {"success": False, "error": "Boost expired or was superseded before start",
                         "recovery_pending": True}
+            start_result = {}
+            start_actions = [{**action, "parameters": {
+                **action["parameters"], "_boost_start_result": start_result,
+            }} for action in actions]
             provider_started = True
-            success = await execute_actions(self._hass, self._config_entry, actions)
+            success = await execute_actions(self._hass, self._config_entry, start_actions)
             if not current():
                 return {"success": False, "error": "Boost was superseded"}
             record["start_in_flight"] = False
             record["last_start_result"] = success if success is True or success is False else None
             if success is not True:
+                if reason := start_result.get("not_submitted"):
+                    # The Stop has its own transport journal. No charging Start
+                    # reached a writer, so there is no finite Start to contain.
+                    record.update(dispatch_started=False, status="not_submitted")
+                    if prior is not None and prior.get("pending_intent") is record:
+                        prior.pop("pending_intent")
+                    await self._save_boost_state(record)
+                    arm_pending(retry=True)
+                    return recovery_pending(reason)
                 record.update(unknown_start_outcome=True, status="pending_start_readback")
                 await self._save_boost_state(record)
                 return {"success": False, "message": "Failed to start boost charge",

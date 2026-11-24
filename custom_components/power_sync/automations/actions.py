@@ -15711,15 +15711,23 @@ async def _dynamic_ev_update_surplus(
             )
             one_amp_kw = v_voltage * v_phases / 1000
             if (
-                charging_state == "stopped" and not waiting_for_start_readback
-                and observed_power_available
+                not waiting_for_start_readback and observed_power_available
                 and _ACTIVE_EV_POWER_EPSILON_KW < observed_power_kw < one_amp_kw
-                and _exact_wall_connector_confirms_standby(
-                    hass, config_entry, vin, v_params, one_amp_kw,
+                and (
+                    (
+                        v_params.get("owner_mode") == "solar_surplus"
+                        and (charging_state is None or charging_state in _TESLA_NON_CHARGING_STATES)
+                        and _solar_controller_waited_without_start(v_state)
+                    ) or (
+                        charging_state == "stopped"
+                        and _exact_wall_connector_confirms_standby(
+                            hass, config_entry, vin, v_params, one_amp_kw,
+                        )
+                    )
                 )
             ):
-                # Standby metering behind an open contactor cannot satisfy an
-                # EV Start or be reused as controllable charging load.
+                # Sub-amp standby draw cannot become a controllable amp for
+                # a waiting Tesla or one with a confirmed open contactor.
                 observed_power_kw = 0.0
         if vid == vehicle_id:
             observed_current_power_kw = observed_power_kw
@@ -20073,19 +20081,21 @@ async def _action_start_ev_charging_dynamic_locked(
         # matching teardown succeeds.
         "_preserve_quick_control_obligation": True,
     }
+    waiting_solar_handoff = (
+        owner_mode == "smart_schedule" and allow_takeover
+        and params.get("require_physical_start_confirmation") and not params.get("quick_control")
+    ) or (owner_mode == "boost" and params.get("_user_initiated") is True)
     if (
         charger_type == "tesla" and dynamic_mode == "battery_target"
-        and owner_mode == "smart_schedule" and allow_takeover
-        and params.get("require_physical_start_confirmation") and not params.get("quick_control")
+        and waiting_solar_handoff
         and solar_update_lock is not None and not solar_update_lock.locked()
         and _lease_id == vehicle_id and (_lease or {}).get("owner_mode") == "solar_surplus"
         and solar_state.get("charging_started") is False
         and solar_state.get("current_amps") == solar_state.get("target_amps") == 0
     ):
-        # Keep the waiting Solar timer from starting the vehicle while its
-        # exact native stopped report is checked and the controller is retired.
+        # Hold the waiting Solar timer across the stopped check and teardown.
         teardown_params.update(
-            _smart_schedule_waiting_solar_handoff=True,
+            _waiting_solar_handoff=owner_mode,
             _expected_state=solar_state, _expected_lease=_lease,
         )
         async with solar_update_lock:
@@ -20096,6 +20106,15 @@ async def _action_start_ev_charging_dynamic_locked(
             not teardown_success or solar_state.get("active")
             or get_ev_ownership(hass, config_entry, vehicle_id)[1] is not None
         ):
+            if owner_mode == "boost":
+                reason = "Solar Surplus handoff did not complete before Start"
+                if isinstance(result := params.get("_boost_start_result"), dict):
+                    result["not_submitted"] = reason
+                else:
+                    record_ev_command(
+                        hass, config_entry, vehicle_id, command="start_boost",
+                        success=False, reason=reason,
+                    )
             return False
     elif handoff_observation is None:
         teardown_success = await _action_stop_ev_charging_dynamic(
@@ -21188,7 +21207,41 @@ def _waiting_smart_schedule_ble_is_stopped(hass, entry, vehicle_id, state) -> bo
     )
 
 
-async def _waiting_solar_tesla_is_stopped(hass, entry, vehicle_id, state, params, *, smart_handoff=False):
+def _waiting_boost_bridge_is_stopped(hass, entry, vehicle_id, params) -> bool:
+    """Check the connected bridge that an unbound Both-mode Stop would use."""
+    from ..tesla_ble import (
+        get_tesla_ble_charge_current_state, get_tesla_ble_charge_power_state,
+        get_tesla_ble_charging_state, get_tesla_ble_connected_charge_sample_time,
+    )
+
+    prefix = _resolve_ble_prefix_for_vehicle(hass, entry, vehicle_id)
+    if not prefix or not _is_ble_available(hass, prefix):
+        return False
+    target = TESLA_BLE_SWITCH_CHARGER.format(prefix=prefix)
+    if not _tesla_ble_radio_matches_target(hass, prefix, target):
+        return False
+    charging = get_tesla_ble_charging_state(hass, prefix)
+    if getattr(charging, "state", "").lower() != "stopped":
+        return False
+    power = get_tesla_ble_charge_power_state(hass, prefix)
+    current = get_tesla_ble_charge_current_state(hass, prefix)
+    # Stock ESPHome can report contemporaneous values without extra packets.
+    samples = []
+    for measured in (power, current):
+        stamp = get_tesla_ble_connected_charge_sample_time(
+            hass, prefix, charging, measured,
+            require_paired_charge_state=False, require_paired_measurement=False,
+        )
+        if not is_current_ev_power_observation(stamp) or float(measured.state) != 0:
+            return False
+        samples.append(stamp)
+    physical = _tesla_physical_charging_snapshot(
+        hass, entry, vehicle_id, params, updated_after=min(samples),
+    )
+    return not physical["charging"] and not physical["fresh_measurements"]
+
+
+async def _waiting_solar_tesla_is_stopped(hass, entry, vehicle_id, state, params, *, handoff=None):
     """Prove that a waiting Solar Surplus session has no Tesla charge to stop."""
     from ..tesla_ev_observation import MAX_SOURCE_AGE_SECONDS, get_tesla_vehicle_observation
     from ..tesla_ev_recovery import ev_recovery_status, get_vehicle_route
@@ -21197,12 +21250,19 @@ async def _waiting_solar_tesla_is_stopped(hass, entry, vehicle_id, state, params
         return False
     route = get_vehicle_route(hass, entry, vehicle_id)
     provider = _get_ev_config(entry)["ev_provider"]
-    unbound_both = route is None and smart_handoff and provider == EV_PROVIDER_BOTH
+    unbound_both = route is None and handoff in ("smart_schedule", "boost") and provider == EV_PROVIDER_BOTH
     if route is None:
         if provider != EV_PROVIDER_FLEET_API and not unbound_both:
             return False
     elif route.get("kind") != "ha" or route.get("cleanup_only"):
         return False
+
+    if (
+        unbound_both and handoff == "boost" and not params.get("_tesla_command_entity_id")
+        and ev_recovery_status(hass, entry, vehicle_id).get("recovery_required") is False
+        and _waiting_boost_bridge_is_stopped(hass, entry, vehicle_id, params)
+    ):
+        return True
 
     entity = await _tesla_ha_command_entity(hass, entry, {**params, "vehicle_vin": vehicle_id}, "stop")
     if not entity or not _solar_controller_waited_without_start(state) or get_vehicle_route(hass, entry, vehicle_id) != route:
@@ -21213,7 +21273,7 @@ async def _waiting_solar_tesla_is_stopped(hass, entry, vehicle_id, state, params
     identity = _tesla_native_binding_identity(binding)
     if not identity or identity["platform"] != "tesla_fleet":
         return False
-    if smart_handoff and route is not None and route.get("entity_id") != entity:
+    if handoff and route is not None and route.get("entity_id") != entity:
         return False
     if unbound_both:
         # An exact native mutation anchor selects Fleet for Stop. Without one,
@@ -21472,16 +21532,16 @@ async def _action_stop_ev_charging_dynamic(
             if (
                 stop_charging and vid not in passive_vehicle_ids and state_owner == "solar_surplus"
                 and (params.get("_automatic_solar_disable") is True
-                     or params.get("_smart_schedule_waiting_solar_handoff") is True
+                     or params.get("_waiting_solar_handoff") in ("smart_schedule", "boost")
                      or params.get("_solar_ceiling_stop") is True)
                 and session_matches(vid, state, ble_waiting_lease)
             ):
                 # Ending session history can await telemetry. Decide whether
                 # to omit Stop only after that await, immediately before release.
                 try:
-                    smart_handoff = params.get("_smart_schedule_waiting_solar_handoff") is True
                     if await _waiting_solar_tesla_is_stopped(
-                        hass, config_entry, vid, state, state_params, smart_handoff=smart_handoff,
+                        hass, config_entry, vid, state, state_params,
+                        handoff=params.get("_waiting_solar_handoff"),
                     ):
                         headroom = hass.data.get(DOMAIN, {}).get(entry_id, {}).get("solar_ev_headroom")
                         if (
