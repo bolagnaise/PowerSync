@@ -3292,6 +3292,7 @@ class BatteryOptimizer:
             deadline_slot = self.pre_window_slot
             requested_deadline_target: float | None = None
             projected_deadline_soc_limit: float | None = None
+            deadline_limit_plan: OptimizerResult | None = None
             for iteration in range(MODE_PROJECTION_MAX_ITERATIONS):
                 result = self._solve_lp_inner(
                     n, import_prices, export_prices, solar, load, soc_0,
@@ -3373,6 +3374,7 @@ class BatteryOptimizer:
                                 last_result.schedule.actions[deadline_slot - 1].soc
                                 - MODE_PROJECTION_DEADLINE_TOLERANCE_SOC,
                             )
+                            deadline_limit_plan = last_result
                             continue
                         _LOGGER.warning(
                             "Optimizer command-mode projection failed on pass %d "
@@ -3437,6 +3439,34 @@ class BatteryOptimizer:
                             result.schedule, result.lp_stats
                         )
                     ):
+                        if deadline_limit_plan is not None:
+                            # HiGHS accepted the reduced deadline under these
+                            # command modes, but the base-slot projection can
+                            # land fractionally below the period-level limit.
+                            # Re-anchoring would only chase that gap downward.
+                            # Keep the physically projected plan that defined
+                            # the limit (it meets it by construction) instead
+                            # of a hold that abandons Charge By Time entirely.
+                            retained = deadline_limit_plan
+                            retained.lp_stats = {
+                                **retained.lp_stats,
+                                "mode_iterations": iteration + 1,
+                                "mode_converged": False,
+                                "fallback_reason": (
+                                    "mode_projection_deadline_retry_projected_highs"
+                                ),
+                                "pre_window_requested_effective_target": (
+                                    requested_deadline_target
+                                ),
+                                "pre_window_projected_deadline_soc_limit": (
+                                    projected_deadline_soc_limit
+                                ),
+                                "deadline_retry_projected_soc": float(
+                                    result.schedule.actions[deadline_slot - 1].soc
+                                ),
+                                "deadline_unmet_after_mode_projection": True,
+                            }
+                            return retained
                         result.feasible = False
                         result.reserve_recommendation = {}
                     return result
