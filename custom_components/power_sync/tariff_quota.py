@@ -73,6 +73,32 @@ def custom_tariff_import_quota_rule(
     return rule
 
 
+def custom_tariff_import_cost(
+    rule: QuotaRule,
+    *,
+    observed_at: datetime,
+    import_kwh: float,
+    eligible_kwh: float,
+    tariff_import_price: float,
+) -> float:
+    """Return one interval's import cost ($) under a capped import allowance.
+
+    Inside the window every imported kWh costs the window rate and the
+    ledger-accepted kWh are discounted by the bonus. Outside the window the
+    tariff's own rate for the slot applies; any eligible energy still pending
+    from the window keeps its discount.
+    """
+    base_price = (
+        rule.base_price_c_per_kwh / 100.0
+        if rule.contains(observed_at)
+        else tariff_import_price
+    )
+    return (
+        max(0.0, import_kwh) * base_price
+        - max(0.0, eligible_kwh) * (rule.bonus_price_c_per_kwh / 100.0)
+    )
+
+
 def custom_tariff_quota_hash(
     tariff: dict[str, Any],
     rule: QuotaRule,
