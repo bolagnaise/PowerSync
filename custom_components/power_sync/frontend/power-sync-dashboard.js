@@ -2080,8 +2080,10 @@ class PsNowCard extends PsCardBase {
     // Self-consumption allows solar charging as well as supplying the home.
     // Describe the measured flow rather than treating this control as discharge.
     const solarHome = Number.isFinite(solar) && Number.isFinite(home) && home > 0.1 && solar >= home && Number.isFinite(grid) && Math.abs(grid) <= 0.1;
+    const gridExporting = Number.isFinite(grid) && grid < -0.1;
     const selfHeadline = !Number.isFinite(battery) ? 'Self-consumption is enabled.'
       : battery < -0.1 ? (solarHome ? 'Solar is powering the home and charging the battery.' : 'The battery is charging.')
+      : battery > 0.1 && gridExporting ? 'The battery is discharging and the site is exporting.'
       : battery > 0.1 ? 'The battery is powering the home.'
       : solarHome ? 'Solar is powering the home.' : 'The battery is idle.';
     let headline;

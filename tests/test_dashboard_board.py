@@ -1359,20 +1359,22 @@ def test_self_consumption_heading_follows_measured_battery_flow():
   const st = (state, attributes = {}) => ({state: String(state), attributes});
   for (const mode of ['normal', 'self_consumption']) {
     for (const unit of ['W', 'kW']) {
-    for (const power of [-10000, -100, 0, 100, 1900, 'unavailable']) {
-      const card = new T.PsNowCard();
-      card._config = {entities: {battery: 'sensor.battery', mode: 'sensor.mode', solar: 'sensor.solar', home: 'sensor.home', grid: 'sensor.grid'}};
-      card._hass = {states: {
-        'sensor.battery': st(typeof power === 'number' && unit === 'kW' ? power / 1000 : power, {unit_of_measurement: unit}),
-        'sensor.mode': st(mode),
-        'sensor.solar': st(11.5, {unit_of_measurement: 'kW'}),
-        'sensor.home': st(0.4, {unit_of_measurement: 'kW'}),
-        'sensor.grid': st(-1.1, {unit_of_measurement: 'kW'}),
-      }, locale: {}, config: {}};
-      card._api = () => ({enabled: true, current_action: 'self_consumption'});
-      card._render();
-      samples.push({mode, power, unit, headline: card.innerHTML.split('<h1>')[1].split('</h1>')[0]});
-    }
+      for (const gridPower of [-1.1, 1.1, 'unavailable']) {
+        for (const power of [-10000, -100, 0, 100, 1900, 'unavailable']) {
+          const card = new T.PsNowCard();
+          card._config = {entities: {battery: 'sensor.battery', mode: 'sensor.mode', solar: 'sensor.solar', home: 'sensor.home', grid: 'sensor.grid'}};
+          card._hass = {states: {
+            'sensor.battery': st(typeof power === 'number' && unit === 'kW' ? power / 1000 : power, {unit_of_measurement: unit}),
+            'sensor.mode': st(mode),
+            'sensor.solar': st(11.5, {unit_of_measurement: 'kW'}),
+            'sensor.home': st(0.4, {unit_of_measurement: 'kW'}),
+            'sensor.grid': st(gridPower, {unit_of_measurement: 'kW'}),
+          }, locale: {}, config: {}};
+          card._api = () => ({enabled: true, current_action: 'self_consumption'});
+          card._render();
+          samples.push({mode, power, unit, gridPower, headline: card.innerHTML.split('<h1>')[1].split('</h1>')[0]});
+        }
+      }
     }
   }
   console.log(JSON.stringify({samples}));
@@ -1382,6 +1384,8 @@ def test_self_consumption_heading_follows_measured_battery_flow():
         expected = (
             "Self-consumption is enabled." if power == "unavailable" else
             "The battery is charging." if power < -100 else
+            "The battery is discharging and the site is exporting."
+            if power > 100 and sample["gridPower"] == -1.1 else
             "The battery is powering the home." if power > 100 else
             "The battery is idle."
         )
