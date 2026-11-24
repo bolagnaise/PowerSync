@@ -1527,12 +1527,19 @@ const PS_SETTING_EDITORS = {
 };
 
 // Car inputs only make sense once a vehicle or charger exists. The vehicles
-// API lists both, including generic and OCPP chargers. An unknown answer
-// keeps the inputs, so a failed request never hides a saved setting.
+// API lists provider vehicles; loadpoint status also lists standalone OCPP
+// and Zaptec chargers. An unknown answer keeps the inputs, so a failed
+// request never hides a saved setting.
 function psHasVehicleOrCharger(hass) {
-  return psApi(hass, 'power_sync/ev/vehicles').then(data => (
-    !data || data.success === false || !Array.isArray(data.vehicles) ? true : data.vehicles.length > 0
-  ));
+  const list = (data, key) => (data && data.success !== false && Array.isArray(data[key]) ? data[key] : null);
+  return Promise.all([
+    psApi(hass, 'power_sync/ev/vehicles'),
+    psApi(hass, 'power_sync/ev/loadpoints/status'),
+  ]).then(([vehicleData, loadpointData]) => {
+    const vehicles = list(vehicleData, 'vehicles'), loadpoints = list(loadpointData, 'loadpoints');
+    if (vehicles?.length || loadpoints?.length) return true;
+    return vehicles === null || loadpoints === null;
+  });
 }
 
 class PsSettingsDialog extends HTMLElement {
@@ -1831,8 +1838,8 @@ const PS_PROFIT_MAX_REQ = {
 // Cost Neutral progress for today, from the latest plan.
 const PS_COST_NEUTRAL_STATUS = {
   pending_solve: 'Waiting for the next plan.',
-  covered: 'Today’s costs are covered. The battery is kept for the home.',
-  already_covered_by_measured_or_natural_export: 'Solar export already covers today’s costs.',
+  covered: 'Planned battery exports cover the rest of today’s costs.',
+  already_covered_by_measured_or_natural_export: 'Today’s costs are already covered, so no battery export is needed.',
   no_eligible_export_slots_before_midnight: 'No export windows are left today.',
   site_or_network_export_limit: 'The site export limit leaves no room for battery export.',
   battery_or_reserve_limit: 'The battery is at its reserve floor.',
@@ -1848,15 +1855,29 @@ function psOptimizerGoal(hass, en, data) {
   return 'standard';
 }
 
-// One plain sentence saying what the optimiser is doing.
+// A switch's own state, or null when it can't say (missing or unavailable).
+function psSwitchOn(hass, entity) {
+  const state = psState(hass, entity)?.state;
+  return state === 'on' ? true : state === 'off' ? false : null;
+}
+
+// Whether Smart Optimization is on. The switch updates as soon as it is
+// changed; the cached optimiser payload can lag by up to a minute.
+function psOptimizerOn(hass, en, data) {
+  return psSwitchOn(hass, en.enabled) ?? (data?.enabled === true);
+}
+
+// One plain sentence saying what the optimiser is doing. Live switch states
+// win over the cached payload, which can lag a change by up to a minute.
 function psOptimizerStatus(hass, en, data) {
   const enabledState = psState(hass, en.enabled);
   if (!data && !enabledState) return 'Checking optimiser status…';
   const access = psOptimizerAccess(data?.licensing);
-  const enabled = data ? data.enabled === true : enabledState?.state === 'on';
-  const monitoring = data ? !!data.monitoring_mode : psState(hass, en.monitoring)?.state === 'on';
-  if (access.paused && (enabled || enabledState?.state === 'on')) return `Smart Optimization is paused, ${access.paused}.`;
-  if (!enabled && enabledState?.state !== 'on') return 'Smart Optimization is off. The battery follows its own settings.';
+  const enabled = psOptimizerOn(hass, en, data);
+  const monitoring = psSwitchOn(hass, en.monitoring) ?? !!data?.monitoring_mode;
+  // The switch reads off while access is paused, but the saved setting is on.
+  if (access.paused && (enabled || data?.enabled === true)) return `Smart Optimization is paused, ${access.paused}.`;
+  if (!enabled) return 'Smart Optimization is off. The battery follows its own settings.';
   if (monitoring) return 'Smart Optimization is planning only. Monitoring mode is on, so no battery commands are sent.';
   const goal = PS_OPT_GOALS.find(g => g.id === psOptimizerGoal(hass, en, data));
   const stale = data?.is_stale || data?.optimization_status === 'stale' ? ' The plan is out of date.' : '';
@@ -1898,7 +1919,7 @@ class PsOptimizerCard extends PsSettingsCard {
     const goalRows = group('goal').map(r => this._rowHtml(r, r.entity === en.chargeByTime ? { note: this._chargeByTimeNote(data) } : {})).join('');
     const tuning = this._rowsHtml(group('tuning'));
     const updates = this._rowsHtml(group('updates'));
-    const optimiserOn = data ? data.enabled === true : psState(hass, en.enabled)?.state === 'on';
+    const optimiserOn = psOptimizerOn(hass, en, data);
     const section = (key, title, body, hint = '') => (body
       ? `<section class="opt-section" aria-labelledby="opt-${this._settingsId}-${key}"><h3 class="opt-h" id="opt-${this._settingsId}-${key}">${title}</h3>${hint ? `<p class="hint">${hint}</p>` : ''}${body}</section>`
       : '');
@@ -1925,7 +1946,7 @@ class PsOptimizerCard extends PsSettingsCard {
       const on = g.id === current;
       let detail = '';
       if (on && g.id === 'profit') detail = PS_PROFIT_MAX_REQ[data?.profit_max_solar_export?.capability?.reason] || '';
-      if (on && g.id === 'neutral' && data?.enabled) detail = PS_COST_NEUTRAL_STATUS[data?.cost_neutral?.reason] || '';
+      if (on && g.id === 'neutral' && psOptimizerOn(hass, en, data)) detail = PS_COST_NEUTRAL_STATUS[data?.cost_neutral?.reason] || '';
       const detailClass = g.id === 'profit' ? 'req' : 'note';
       return `<button type="button" class="opt-goal" aria-pressed="${on}" data-goal="${g.id}" ${disabled ? 'disabled' : ''}>`
         + `<span class="opt-goal-t">${psEsc(g.title)}${on ? '<span class="pill on">On</span>' : ''}</span>`

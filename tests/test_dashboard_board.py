@@ -2841,6 +2841,10 @@ def test_optimizer_card_states_what_it_is_doing_in_one_line():
     stale: status(render(base, { enabled: true, is_stale: true, licensing: ok }).innerHTML),
     expired: status(render(base, { enabled: true, licensing: { access_state: 'expired', can_optimize: false } }).innerHTML),
     loading: T.psOptimizerStatus({ states: {} }, ent, null),
+    // Switches were just changed; the cached payload still has the old values.
+    monitoringJustOff: status(render(base, { enabled: true, monitoring_mode: true, licensing: ok }).innerHTML),
+    optimiserJustOff: status(render({ ...base, enabled: 'off' }, { enabled: true, licensing: ok }).innerHTML),
+    unavailableUsesCache: status(render({ ...base, monitoring: 'unavailable' }, { enabled: true, monitoring_mode: true, licensing: ok }).innerHTML),
     empty: render({}, null).innerHTML,
   }));
 """)
@@ -2852,6 +2856,9 @@ def test_optimizer_card_states_what_it_is_doing_in_one_line():
     assert out["stale"].endswith("aiming for Standard. The plan is out of date.")
     assert out["expired"] == "Smart Optimization is paused, waiting for HA optimiser access."
     assert out["loading"] == "Checking optimiser status…"
+    assert out["monitoringJustOff"] == "Smart Optimization is controlling the battery, aiming for Standard."
+    assert out["optimiserJustOff"] == "Smart Optimization is off. The battery follows its own settings."
+    assert out["unavailableUsesCache"].startswith("Smart Optimization is planning only.")
     assert out["empty"] == '<p class="empty">None of these settings are available right now.</p>'
 
 
@@ -2881,7 +2888,9 @@ def test_optimizer_card_offers_one_goal_with_its_description_and_requirement():
     assert "Exports only until today’s costs are covered" in profit
     # The backend's own capability refusal, shown on the goal that is on.
     assert "Solar export stays off until you set a maximum grid export" in profit
-    assert "Today’s costs are covered." in out["neutral"]
+    # "covered" means planned exports cover the target, not that exports stopped.
+    assert "Planned battery exports cover the rest of today’s costs." in out["neutral"]
+    assert "kept for the home" not in out["neutral"]
     assert "Solar export stays off" not in out["neutral"]
     # Unavailable switches are visibly disabled; a saved goal still explains
     # that it only applies once Smart Optimization is on.
@@ -2965,9 +2974,14 @@ def test_optimizer_settings_hide_car_inputs_until_a_vehicle_or_charger_exists():
     out = _run_board(r"""
   (async () => {
     const fields = T.PS_SETTING_EDITORS.optimizer.fields;
-    const gate = async (vehicles, values = {}) => {
-      if (vehicles === undefined) T.psApiCache.delete('power_sync/ev/vehicles');
-      else T.psApiCache.set('power_sync/ev/vehicles', { at: Date.now(), data: vehicles, promise: null });
+    const seed = (path, data) => {
+      if (data === undefined) T.psApiCache.delete(path);
+      else T.psApiCache.set(path, { at: Date.now(), data, promise: null });
+    };
+    const noLoadpoints = { success: true, loadpoints: [] };
+    const gate = async (vehicles, values = {}, loadpoints = noLoadpoints) => {
+      seed('power_sync/ev/vehicles', vehicles);
+      seed('power_sync/ev/loadpoints/status', loadpoints);
       const dialog = new T.PsSettingsDialog();
       dialog._hass = {};
       dialog._values = values;
@@ -2979,6 +2993,9 @@ def test_optimizer_settings_hide_car_inputs_until_a_vehicle_or_charger_exists():
       savedOn: await gate({ success: true, vehicles: [] }, { ev_integration: true }),
       unknown: await gate(undefined),
       failed: await gate({ success: false, error: 'boom' }),
+      // A standalone OCPP or Zaptec charger appears only in loadpoint status.
+      standaloneCharger: await gate({ success: true, vehicles: [] }, {}, { success: true, loadpoints: [{ id: 'zaptec_1' }] }),
+      loadpointsFailed: await gate({ success: true, vehicles: [] }, {}, { success: false, error: 'boom' }),
     }));
   })().catch(err => { console.error(err); process.exit(1); });
 """)
@@ -2989,7 +3006,7 @@ def test_optimizer_settings_hide_car_inputs_until_a_vehicle_or_charger_exists():
     assert car <= set(out["charger"]["fields"])
     assert "ev_integration" in out["savedOn"]["fields"]
     assert "use_historical_ev_data" not in out["savedOn"]["fields"]
-    for case in ("unknown", "failed"):
+    for case in ("unknown", "failed", "standaloneCharger", "loadpointsFailed"):
         assert car <= set(out[case]["fields"]), case
         assert out[case]["hidden"] is False
 
