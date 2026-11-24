@@ -1212,3 +1212,33 @@ def test_historical_jobs_are_displayed_but_never_published_as_ev_directives():
     assert coordinator._last_ev_charge_by_vehicle_w == {'home-car': [1000, 0]}
     assert coordinator._last_planned_ev_load_forecast_w == [1000, 7000]
     assert coordinator._last_ev_charge_schedule_updated is updated
+
+
+@pytest.mark.parametrize(("stored", "expected_kw"), [
+    (None, 2.5),  # defaults: 0.5 kW household buffer, no parallel reserve
+    ({"household_buffer_kw": 1.0}, 2.0),
+    ({"allow_parallel_charging": True, "max_battery_charge_rate_kw": 2.0}, 0.5),
+    ({"allow_parallel_charging": True, "max_battery_charge_rate_kw": 9.0}, 0.0),
+])
+def test_forecast_surplus_withholds_what_live_solar_surplus_withholds(stored, expected_kw):
+    """The Smart Schedule forecast uses the stored Solar Surplus reserves, not a fixed 1 kW."""
+    entry_data = {"solar_surplus_config": stored} if stored else {}
+    forecaster = object.__new__(ev_planner.SurplusForecaster)
+    forecaster.hass = SimpleNamespace(data={"power_sync": {"entry-1": entry_data}})
+    forecaster.config_entry = SimpleNamespace(entry_id="entry-1")
+
+    async def no_history():
+        return None
+
+    async def solar(hours):
+        return [{"pv_estimate_kw": 4.0, "confidence": 1.0}] * hours
+
+    forecaster.load_estimator = SimpleNamespace(
+        update_from_history=no_history,
+        estimate_load_at_hour=lambda _hour: (1.0, 1.0),
+    )
+    forecaster.solar_forecaster = SimpleNamespace(get_solar_forecast=solar)
+
+    forecasts = _run(forecaster.forecast_surplus(2))
+
+    assert [f.surplus_kw for f in forecasts] == [expected_kw, expected_kw]

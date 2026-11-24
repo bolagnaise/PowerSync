@@ -8,6 +8,7 @@ against the whole limit and the car silently ate into it at runtime.
 from __future__ import annotations
 
 import importlib
+import importlib.util
 import sys
 import types
 from datetime import datetime, timedelta, timezone
@@ -724,6 +725,12 @@ def build_ev_charge_plan():
     solar_config.get_stored_solar_surplus_config = (
         lambda _entry: holder["solar_config"]
     )
+    real_spec = importlib.util.spec_from_file_location(
+        "_real_solar_surplus_config", COMPONENT_ROOT / "solar_surplus_config.py"
+    )
+    real_solar_config = importlib.util.module_from_spec(real_spec)
+    real_spec.loader.exec_module(real_solar_config)
+    solar_config.get_parallel_charge_rate_kw = real_solar_config.get_parallel_charge_rate_kw
     sys.modules.update(
         {
             "power_sync": package,

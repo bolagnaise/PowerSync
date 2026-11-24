@@ -2181,18 +2181,25 @@ class SurplusForecaster:
     async def forecast_surplus(
         self,
         hours: int = 24,
-        battery_reserve_kw: float = 1.0,
     ) -> List[SurplusForecast]:
         """
         Forecast available solar surplus for each hour.
 
+        Withholds the same household buffer and parallel-charge battery reserve
+        as live Solar Surplus control, from the stored Solar Surplus settings.
+
         Args:
             hours: Number of hours to forecast
-            battery_reserve_kw: Power to reserve for battery charging
 
         Returns:
             List of SurplusForecast objects
         """
+        from ..solar_surplus_config import forecast_ev_surplus_kw
+
+        entry_id = getattr(self.config_entry, "entry_id", None)
+        surplus_config = get_stored_solar_surplus_config(
+            self.hass.data.get(DOMAIN, {}).get(entry_id, {}) if entry_id else None
+        )
         # Update load profiles if needed
         await self.load_estimator.update_from_history()
 
@@ -2213,8 +2220,7 @@ class SurplusForecaster:
             # Get load estimate
             load_kw, load_confidence = self.load_estimator.estimate_load_at_hour(hour_dt)
 
-            # Calculate surplus (available for EV after battery reserve)
-            surplus_kw = max(0, pv_kw - load_kw - battery_reserve_kw)
+            surplus_kw = forecast_ev_surplus_kw(pv_kw, load_kw, surplus_config)
 
             # Combined confidence
             confidence = (solar_confidence + load_confidence) / 2

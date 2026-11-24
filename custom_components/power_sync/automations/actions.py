@@ -11828,7 +11828,7 @@ _smart_schedule_effective_authorizations: Dict[
     str, Dict[str, Dict[str, Any]]
 ] = {}
 _SMART_SCHEDULE_AUTHORIZATION_MAX_AGE_SECONDS = 90
-_BATTERY_FULL_RESERVE_BYPASS_SOC = 99.0
+from ..solar_surplus_config import BATTERY_FULL_RESERVE_BYPASS_SOC as _BATTERY_FULL_RESERVE_BYPASS_SOC  # noqa: E402
 _BATTERY_TAPER_BYPASS_SOC = 95.0
 _BATTERY_TARGET_SHORTFALL_KW = 0.2
 _SITE_HEADROOM_EPSILON_KW = 0.1
@@ -12697,34 +12697,11 @@ def _parallel_battery_reserve_kw(
     battery_charge_kw: float,
 ) -> float:
     """Return the extra battery charge reserve to withhold from EV surplus."""
-    if not config.get("allow_parallel_charging", False):
-        return 0.0
+    from ..solar_surplus_config import parallel_battery_reserve_kw
 
-    try:
-        max_charge_kw = max(0.0, float(config.get("max_battery_charge_rate_kw", 5.0) or 0.0))
-    except (TypeError, ValueError):
-        max_charge_kw = 5.0
-    if max_charge_kw <= 0:
-        return 0.0
-
-    battery_soc = live_status.get("battery_soc")
-    try:
-        battery_soc = float(battery_soc) if battery_soc is not None else None
-    except (TypeError, ValueError):
-        battery_soc = None
-
-    if battery_soc is not None and battery_soc >= _BATTERY_FULL_RESERVE_BYPASS_SOC:
-        return 0.0
-
-    min_soc = get_solar_surplus_min_battery_soc(config)
-    battery_below_min = battery_soc is not None and battery_soc < min_soc
-    battery_currently_charging = battery_charge_kw > 0.05
-    if not battery_below_min and not battery_currently_charging:
-        return 0.0
-
-    if method == "direct":
-        return max(0.0, max_charge_kw - battery_charge_kw)
-    return max_charge_kw
+    return parallel_battery_reserve_kw(
+        config, live_status.get("battery_soc"), battery_charge_kw, method,
+    )
 
 
 def _curtailed_full_battery_active_ev(
@@ -12831,7 +12808,9 @@ def _calculate_solar_surplus(
     solar_kw = (live_status.get("solar_power") or 0) / 1000
     grid_kw = (live_status.get("grid_power") or 0) / 1000  # Positive = import, Negative = export
     battery_kw = (live_status.get("battery_power") or 0) / 1000  # Positive = discharge, Negative = charge
-    buffer_kw = config.get("household_buffer_kw", 0.5)
+    from ..solar_surplus_config import get_household_buffer_kw
+
+    buffer_kw = get_household_buffer_kw(config)
     if _curtailed_full_battery_active_ev(live_status, current_ev_power_kw):
         buffer_kw = 0.0
 
