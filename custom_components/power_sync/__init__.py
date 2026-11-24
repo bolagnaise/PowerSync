@@ -19197,7 +19197,6 @@ class SolarSurplusStatusView(HomeAssistantView):
                 "battery_soc": battery_soc,
             }
             solar_config = get_stored_solar_surplus_config(entry_data)
-            surplus_kw = _calculate_solar_surplus(live_status, 0, solar_config)
 
             # Get per-vehicle states
             vehicles_state = []
@@ -19228,6 +19227,12 @@ class SolarSurplusStatusView(HomeAssistantView):
             ev_soc = ev_status["ev_soc"]
             if ev_power_kw <= 0 and tesla_coordinator and tesla_coordinator.data:
                 ev_power_kw = tesla_coordinator.data.get("ev_power", 0)
+
+            # Grid-based surplus adds the car's own draw back; passing 0 kW
+            # under-reported available solar whenever a car was charging.
+            surplus_kw = _calculate_solar_surplus(
+                live_status, max(0.0, float(ev_power_kw or 0.0)), solar_config,
+            )
 
             # If no dynamic vehicles but EV is charging, include it
             if not vehicles_state and ev_power_kw > 0.05:
@@ -22830,7 +22835,13 @@ class PriceRecommendationView(HomeAssistantView):
                 "battery_soc": battery_soc,
             }
 
-            surplus_kw = _calculate_solar_surplus(live_status, 0, solar_config)
+            try:
+                current_ev_power_kw = max(0.0, float(
+                    _get_ev_vehicle_status(self._hass, self._config_entry)["ev_power_kw"] or 0.0
+                ))
+            except Exception:  # noqa: BLE001 - a recommendation must still render
+                current_ev_power_kw = 0.0
+            surplus_kw = _calculate_solar_surplus(live_status, current_ev_power_kw, solar_config)
 
             # Get current prices based on electricity provider
             import_price_cents = 30.0  # Default
