@@ -6,6 +6,7 @@ import ast
 import asyncio
 import logging
 from pathlib import Path
+from runpy import run_path
 from types import SimpleNamespace
 
 import pytest
@@ -23,7 +24,13 @@ def _methods():
         method.decorator_list = []
     module = ast.Module(body=[ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0), ast.ClassDef(name="Startup", bases=[], keywords=[], body=methods, decorator_list=[])], type_ignores=[])
     ast.fix_missing_locations(module)
-    namespace = {"asyncio": asyncio, "_LOGGER": logging.getLogger(__name__)}
+    planning = run_path(str(SOURCE.with_name("planning_run.py")))
+    namespace = {
+        "asyncio": asyncio,
+        "_LOGGER": logging.getLogger(__name__),
+        "OptimizationRun": planning["OptimizationRun"],
+        "OptimizerPlanSuperseded": planning["OptimizerPlanSuperseded"],
+    }
     exec(compile(module, str(SOURCE), "exec"), namespace)
     return namespace["Startup"]
 

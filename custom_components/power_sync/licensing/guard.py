@@ -9,10 +9,38 @@ from .runtime import DATA_KEY
 _scope = ContextVar("powersync_optimizer_scope", default=None)
 _held_command = ContextVar("powersync_held_command", default=None)
 _recovering = ContextVar("powersync_optimizer_recovery", default=False)
+_plan_current = ContextVar("powersync_optimizer_plan_current", default=None)
 
 
 class OptimizerAccessLost(asyncio.CancelledError):
     """Unwind a dispatch before it can publish an action that was not admitted."""
+
+
+class OptimizerDispatchSuperseded(OptimizerAccessLost):
+    """The economic mode changed before the planned command was sent."""
+
+
+def optimizer_plan_dispatch(function):
+    """Keep the mode revision with a dispatched action through awaited checks."""
+    @wraps(function)
+    async def guarded(self, *args, **kwargs):
+        revision = getattr(self, "_economic_mode_revision", 0)
+        token = _plan_current.set(
+            lambda: getattr(self, "_economic_mode_revision", 0) == revision
+        )
+        try:
+            return await function(self, *args, **kwargs)
+        except OptimizerDispatchSuperseded:
+            return None
+        finally:
+            _plan_current.reset(token)
+    return guarded
+
+
+def require_current_optimizer_plan():
+    current = _plan_current.get()
+    if current is not None and not _recovering.get() and not current():
+        raise OptimizerDispatchSuperseded
 
 
 @contextmanager
@@ -43,9 +71,11 @@ def background_work(function):
     async def fresh(self, *args, **kwargs):
         token = _scope.set(None)
         recovery = _recovering.set(False)
+        plan = _plan_current.set(None)
         try:
             return await function(self, *args, **kwargs)
         finally:
+            _plan_current.reset(plan)
             _recovering.reset(recovery)
             _scope.reset(token)
     return fresh
@@ -86,11 +116,13 @@ async def command_scope(owner):
     entry_id, _ = scope_for(owner)
     marker = (id(manager), entry_id, asyncio.current_task())
     if not manager or _recovering.get() or _held_command.get() == marker:
+        require_current_optimizer_plan()
         yield
         return
     async with manager.control_lock(entry_id):
         token = _held_command.set(marker)
         try:
+            require_current_optimizer_plan()
             if not manager.permits(entry_id, control_generation(), control_entry_generation()):
                 raise OptimizerAccessLost("optimizer_access_required")
             yield
@@ -102,6 +134,7 @@ def optimizer_command(function):
     @wraps(function)
     @optimizer_work
     async def guarded(self, *args, **kwargs):
+        require_current_optimizer_plan()
         if _recovering.get():
             name = function.__name__
             if name.startswith("force_") or name == "_start_charging":
@@ -156,6 +189,10 @@ def service_allowed(hass, data, operation=None):
     manager = hass.data.get(DATA_KEY)
     if _recovering.get() and operation in ("handle_force_charge", "handle_force_discharge"):
         return False
+    if data.get("source") == "optimizer":
+        current = _plan_current.get()
+        if current is not None and not _recovering.get() and not current():
+            return False
     if not manager or _recovering.get() or data.get("source") != "optimizer":
         return True
     generation = data.get("_licensing_generation", control_generation())
@@ -167,6 +204,7 @@ def service_allowed(hass, data, operation=None):
 
 
 async def fenced_call(owner, factory, operation=None):
+    require_current_optimizer_plan()
     manager = manager_for(owner)
     if _recovering.get():
         if operation and operation.startswith("force_"):

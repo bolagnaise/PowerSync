@@ -530,6 +530,38 @@ def test_superseded_solve_cannot_leave_a_cached_schedule_for_later_dispatch():
     asyncio.run(run())
 
 
+def test_mode_change_fences_the_next_command_and_allows_owned_restoration():
+    async def exercise():
+        owner = types.SimpleNamespace(_economic_mode_revision=0)
+        admitted = []
+        entered = asyncio.Event()
+        mode_changed = asyncio.Event()
+
+        @guard.optimizer_plan_dispatch
+        async def dispatch(self):
+            async def write():
+                admitted.append("dispatch")
+                entered.set()
+                await mode_changed.wait()
+
+            await guard.fenced_call(self, write, "force_charge")
+            with guard.recovery_scope():
+                await guard.fenced_call(self, restore, "restore_normal")
+            await guard.fenced_call(self, write, "force_discharge")
+
+        async def restore():
+            admitted.append("restore")
+
+        task = asyncio.create_task(dispatch(owner))
+        await entered.wait()
+        owner._economic_mode_revision += 1
+        mode_changed.set()
+        await task
+        assert admitted == ["dispatch", "restore"]
+
+    asyncio.run(exercise())
+
+
 def test_shadow_subscription_denial_does_not_invent_a_future_resume_requirement():
     async def run():
         h=Harness();h.policy=rollout(rollout_mode='shadow',activation_at=None,legacy_access_until=None);h.denied=True

@@ -20,7 +20,7 @@ import logging
 import math
 import time
 from collections import deque
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from functools import wraps
 from dataclasses import dataclass, field, replace
@@ -42,6 +42,12 @@ from .ev_load_plan import (
     expected_ev_load_kw,
     expected_ev_policy_profile,
     normalize_ev_charge_plan,
+)
+from .planning_run import (
+    FREE_PREFERENCE_DEADLINE,
+    OPTIMIZATION_RUN,
+    OptimizationRun,
+    OptimizerPlanSuperseded,
 )
 from .schedule_reader import ScheduleAction, OptimizationSchedule
 
@@ -576,9 +582,13 @@ def _record_optimizer_cycle(method):
     def run(self, *args, **kwargs):
         trace = {"chains": [], "passes": [], "solves": []}
         token = _SOLVER_CYCLE.set(trace)
+        work = OPTIMIZATION_RUN.get() or OptimizationRun()
+        work_token = OPTIMIZATION_RUN.set(work)
         started = time.monotonic()
         try:
+            work.check_current()
             result = method(self, *args, **kwargs)
+            work.check_current()
             cycle = {key: trace[key] for key in ("chains", "passes", "solves")}
             cycle["stages"] = trace.get("stages", {})
             cycle.update({
@@ -597,10 +607,12 @@ def _record_optimizer_cycle(method):
                                      for s in trace["solves"]),
                 "selected_solver": result.solver_used,
                 "fallback_reason": result.lp_stats.get("fallback_reason"),
+                "cost_neutral_free_preference": work.preference_stats(),
             })
             result.lp_stats["cycle"] = cycle
             return result
         finally:
+            OPTIMIZATION_RUN.reset(work_token)
             _SOLVER_CYCLE.reset(token)
     return run
 
@@ -627,6 +639,8 @@ def _record_lp_chain(method):
 def _record_lp_pass(method):
     @wraps(method)
     def run(self, *args, **kwargs):
+        if work := OPTIMIZATION_RUN.get():
+            work.check_current()
         trace = _SOLVER_CYCLE.get()
         if trace is None:
             return method(self, *args, **kwargs)
@@ -803,6 +817,10 @@ def _solve_lp_highs(
     *, solve_role="primary", initial_solution=None,
 ):
     """Solve the complete model, accepting feasible limited incumbents too."""
+    work = OPTIMIZATION_RUN.get()
+    if work is not None:
+        work.check_current()
+    deadline = FREE_PREFERENCE_DEADLINE.get()
     integers = set(integer_indices or ())
     stats = {"role": solve_role, "integer_columns": len(integers),
              "fixed_integer_columns": sum(bounds[i][0] == bounds[i][1] for i in integers)}
@@ -813,6 +831,8 @@ def _solve_lp_highs(
         trace["solves"].append(stats)
     started = time.monotonic()
     try:
+        if deadline is not None and started >= deadline:
+            return _HighsResult(None, False, "Preference time expired", None, None, stats)
         h = highspy.Highs()
         for name, value in (("output_flag", False), ("log_to_console", False),
                             ("time_limit", float(time_limit))):
@@ -864,11 +884,21 @@ def _solve_lp_highs(
                     return _solve_lp_highs(c, A_ub, b_ub, A_eq, b_eq, bounds,
                         time_limit, integer_indices=integer_indices,
                         solve_role=solve_role)
+        if work is not None:
+            work.check_current()
         native_started = time.monotonic()
+        if deadline is not None:
+            remaining = deadline - native_started
+            if remaining <= 0:
+                return _HighsResult(None, False, "Preference time expired", None, None, stats)
+            time_limit = min(time_limit, remaining)
+            _check_highs_status(h.setOptionValue("time_limit", float(time_limit)))
         try:
             _check_highs_status(h.run())
         finally:
             stats["native_time_s"] = time.monotonic() - native_started
+        if work is not None:
+            work.check_current()
         model_status = h.getModelStatus()
         message = h.modelStatusToString(model_status)
         info = h.getInfo()
@@ -1901,6 +1931,8 @@ class BatteryOptimizer:
                     ):
                         result = _native_fallback(result.lp_stats)
                     return _finish(result)
+                except OptimizerPlanSuperseded:
+                    raise
                 except Exception as e:
                     _LOGGER.error("Battery optimizer solver failed: %s", e)
                     fallback_details = {
@@ -6636,44 +6668,53 @@ class BatteryOptimizer:
             remaining_time = LP_SOLVER_TIME_LIMIT_SECONDS - (
                 time.monotonic() - solver_start
             )
-            if remaining_time > 0.0:
-                # Keep the economic optimum as a hard bound in the preference
-                # solve, for either free charging or fewer export modes.
-                economic_limit = float(result.fun) + 1e-6
-                tiebreak_constraints = A_ub.with_row(c)
-                preferred = None
-                try:
-                    preferred = _solve_lp_highs(
-                        charging_tiebreak_objective,
-                        tiebreak_constraints,
-                        [*b_ub, economic_limit],
-                        A_eq,
-                        b_eq,
-                        bounds,
-                        time_limit=remaining_time,
-                        integer_indices=integer_indices,
-                        solve_role="tiebreak",
-                        initial_solution=result.x,
-                    )
-                    charging_tiebreak_stats = dict(getattr(preferred, "stats", {}))
-                except Exception as error:
-                    # The optional preference must not discard the valid
-                    # primary economic result when its solver operation fails.
-                    charging_tiebreak_stats = {"error": type(error).__name__}
-                    _LOGGER.warning("Optimizer preference failed; using the primary plan: %s", error)
-                if preferred is not None and preferred.success and _solver_point_is_feasible(
-                    preferred.x, tiebreak_constraints, [*b_ub, economic_limit],
-                    A_eq, b_eq, bounds, integer_indices,
-                    charging_tiebreak_stats.get("feasibility_tolerance", 1e-7),
-                ):
-                    preferred_economic_cost = math.fsum(
-                        coefficient * value
-                        for coefficient, value in zip(c, preferred.x)
-                    )
-                    if preferred_economic_cost <= economic_limit + 1e-7:
-                        preferred.fun = preferred_economic_cost
-                        result = preferred
-                        charging_tiebreak_used = True
+            work = OPTIMIZATION_RUN.get()
+            preference_scope = (
+                work.free_preference(remaining_time)
+                if cost_neutral_free_charge_tiebreak and work is not None
+                else nullcontext(remaining_time)
+            )
+            with preference_scope as preference_limit:
+                if preference_limit > 0.0:
+                    # Keep the economic optimum as a hard bound in the preference
+                    # solve, for either free charging or fewer export modes.
+                    economic_limit = float(result.fun) + 1e-6
+                    tiebreak_constraints = A_ub.with_row(c)
+                    preferred = None
+                    try:
+                        preferred = _solve_lp_highs(
+                            charging_tiebreak_objective,
+                            tiebreak_constraints,
+                            [*b_ub, economic_limit],
+                            A_eq,
+                            b_eq,
+                            bounds,
+                            time_limit=preference_limit,
+                            integer_indices=integer_indices,
+                            solve_role="tiebreak",
+                            initial_solution=result.x,
+                        )
+                        charging_tiebreak_stats = dict(getattr(preferred, "stats", {}))
+                    except OptimizerPlanSuperseded:
+                        raise
+                    except Exception as error:
+                        # The optional preference must not discard the valid
+                        # primary economic result when its solver operation fails.
+                        charging_tiebreak_stats = {"error": type(error).__name__}
+                        _LOGGER.warning("Optimizer preference failed; using the primary plan: %s", error)
+                    if preferred is not None and preferred.success and _solver_point_is_feasible(
+                        preferred.x, tiebreak_constraints, [*b_ub, economic_limit],
+                        A_eq, b_eq, bounds, integer_indices,
+                        charging_tiebreak_stats.get("feasibility_tolerance", 1e-7),
+                    ):
+                        preferred_economic_cost = math.fsum(
+                            coefficient * value
+                            for coefficient, value in zip(c, preferred.x)
+                        )
+                        if preferred_economic_cost <= economic_limit + 1e-7:
+                            preferred.fun = preferred_economic_cost
+                            result = preferred
+                            charging_tiebreak_used = True
             if export_tiebreak_active:
                 export_tiebreak_stats = charging_tiebreak_stats
                 export_tiebreak_used = charging_tiebreak_used

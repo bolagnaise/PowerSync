@@ -9,7 +9,7 @@ for accurate schedules.
 
 ## Plan updates
 
-The dashboard keeps the last completed plan while a new calculation is running. Reserve adjustments and other planning stages finish before the replacement plan appears, so a temporary first-pass export is not shown as the final schedule. A planned export still depends on execution safety checks; it is not proof of an accepted command or measured grid export.
+The dashboard keeps the last completed plan during a routine refresh. When you select Standard, Profit Max, or Cost Neutral, the dashboard shows the replacement plan as queued or calculating. Actions for the newly selected mode appear after the full calculation finishes, including any reserve adjustment. The current battery control remains visible while the replacement is calculated.
 
 For Tesla Powerwall, changing the control method first restores the previous session. Once cleanup succeeds, its optimizer commitment and current-control status are cleared before replanning. If restoration cannot be confirmed, PowerSync retains the pending session and refuses the method change.
 
@@ -189,7 +189,7 @@ optimization mode.
 
 ## Solver timing and EV charging
 
-Each inner HiGHS solve has a 30-second allowance. Command-mode checks and Cost
+Each primary HiGHS solve has a 30-second allowance. Command-mode checks and Cost
 Neutral budget reconciliation can run additional solves, so a complete cycle
 can take longer. Reaching the allowance does not automatically select the
 backup planner: a feasible incumbent can still be used after the normal
@@ -197,8 +197,10 @@ schedule checks.
 
 Cost Neutral planning alongside EV charging keeps the limits from available
 solar, battery charging power and remaining battery capacity separate.
-Free-charge preferences keep the primary economic plan if the optional
-preference solve fails or returns an invalid result.
+The optional search for preferred free charging slots has up to three seconds
+per attempt and shares a twelve-second allowance across the planning cycle.
+When that search has no usable result, the optimizer keeps the primary
+economic result and runs the normal schedule checks.
 
 Cycle diagnostics include all solve attempts, including discarded passes, and
 identify the selected result and fallback reason.

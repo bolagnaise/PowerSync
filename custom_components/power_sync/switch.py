@@ -1539,15 +1539,13 @@ class ProfitMaxModeSwitch(SwitchEntity):
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Enable profit maximisation mode."""
         self._attr_is_on = True
-        changed = self._coordinator.set_profit_max_mode(True)
-        await _reoptimize_if_enabled(self._coordinator, changed)
+        self._coordinator.set_profit_max_mode(True)
         self.async_write_ha_state()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Disable profit maximisation mode."""
         self._attr_is_on = False
-        changed = self._coordinator.set_profit_max_mode(False)
-        await _reoptimize_if_enabled(self._coordinator, changed)
+        self._coordinator.set_profit_max_mode(False)
         self.async_write_ha_state()
 
 
@@ -1588,13 +1586,11 @@ class CostNeutralSwitch(SwitchEntity):
         return self._coordinator.cost_neutral_enabled
 
     async def async_turn_on(self, **kwargs: Any) -> None:
-        changed = self._coordinator.set_cost_neutral_enabled(True)
-        await _reoptimize_if_enabled(self._coordinator, changed)
+        self._coordinator.set_cost_neutral_enabled(True)
         self.async_write_ha_state()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
-        changed = self._coordinator.set_cost_neutral_enabled(False)
-        await _reoptimize_if_enabled(self._coordinator, changed)
+        self._coordinator.set_cost_neutral_enabled(False)
         self.async_write_ha_state()
 
 

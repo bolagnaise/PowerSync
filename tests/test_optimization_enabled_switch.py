@@ -132,8 +132,8 @@ def test_optimizer_mode_switches_reoptimize_after_change():
     assert "async def _reoptimize_if_enabled(coordinator: Any, changed: bool) -> None:" in switch_source
     assert 'and bool(getattr(coordinator, "enabled", False))' in switch_source
     assert "await coordinator.force_reoptimize()" in switch_source
-    assert "changed = self._coordinator.set_profit_max_mode(True)" in switch_source
-    assert "changed = self._coordinator.set_profit_max_mode(False)" in switch_source
+    assert "self._coordinator.set_profit_max_mode(True)" in switch_source
+    assert "self._coordinator.set_profit_max_mode(False)" in switch_source
     assert "changed = self._coordinator.set_charge_by_time_enabled(True)" in switch_source
     assert "changed = self._coordinator.set_charge_by_time_enabled(False)" in switch_source
     assert "changed = self._coordinator.set_disable_idle_enabled(True)" in switch_source
@@ -329,10 +329,10 @@ def test_auto_apply_reserve_recommendation_uses_manual_reference_floor():
     ) in coordinator_source
     assert "used_reference_override = solve_reserve_override is not None" in coordinator_source
     assert (
-        '(reserve_changed or used_reference_override)\n'
+        '(proposed_reserve_floor is not None or used_reference_override)\n'
         '                and not getattr(result, "degraded", False)'
     ) in coordinator_source
-    assert "result = await _run_optimizer_once()" in coordinator_source
+    assert "result = await _run_optimizer_once(proposed_reserve_floor)" in coordinator_source
     assert "result = self._optimizer.reconcile_result_with_schedule(" in coordinator_source
     assert "self._set_active_export_reserve_floor_slots(None, None)" in coordinator_source
 

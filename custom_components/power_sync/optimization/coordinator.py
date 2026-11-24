@@ -7,6 +7,7 @@ to produce a schedule, which the execution layer then applies.
 from __future__ import annotations
 
 from ..licensing.guard import optimizer_work, optimizer_command, fenced_call, restoration_work, background_work, manager_for, OptimizerAccessLost
+from ..licensing.guard import optimizer_plan_dispatch, require_current_optimizer_plan
 from ..regression.temporal_capture import observe_reserve_restore, monitoring as _temporal_monitoring, boundary as _temporal_boundary, boundary_exception as _temporal_exception, command_argument as _temporal_argument
 
 import asyncio
@@ -63,6 +64,7 @@ from .external_energy_resource import (
     reduce_external_energy_ledger,
     resolve_external_energy_sessions,
 )
+from .planning_run import OptimizationRun, OptimizerPlanSuperseded
 from .schedule_reader import OptimizationSchedule, ScheduleAction
 from .executor import ScheduleExecutor, ExecutionStatus, BatteryAction
 from .load_estimator import LoadEstimator, SolcastForecaster
@@ -996,6 +998,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._deferred_restore_task: asyncio.Task | None = None
         self._settings_reoptimize_task: asyncio.Task | None = None
         self._settings_reoptimize_requested = False
+        self._economic_mode_revision = 0
+        self._economic_replan_pending = False
+        self._active_optimization_run: OptimizationRun | None = None
+        self._planning_started_at: datetime | None = None
         # Price-triggered re-optimization spawned by _on_price_update. Must be
         # tracked and cancelled on disable() like the other background tasks —
         # otherwise a price-triggered LP solve in flight during disable() can
@@ -1045,6 +1051,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self, method_name: str, *args: Any
     ) -> Any:
         """Call a direct energy control method for an optimizer action."""
+        require_current_optimizer_plan()
         method = getattr(self.energy_coordinator, method_name)
         if self.battery_system == "solaredge":
             return await method(*args, automatic=True)
@@ -1830,8 +1837,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._config.profit_max_enabled = enabled
         if cost_neutral_changed:
             self._config.cost_neutral_enabled = False
-        if self._optimizer:
-            self._optimizer.terminal_weight = self._profit_max_terminal_weight()
+        self._economic_mode_changed()
         if self._load_estimator:
             self._load_estimator.invalidate_cache()
         _LOGGER.info("Profit Maximisation mode %s", "ENABLED" if enabled else "DISABLED")
@@ -1870,8 +1876,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._config.cost_neutral_enabled = enabled
         if profit_changed:
             self._config.profit_max_enabled = False
-            if self._optimizer:
-                self._optimizer.terminal_weight = self._profit_max_terminal_weight()
+        self._economic_mode_changed()
         if self._load_estimator:
             self._load_estimator.invalidate_cache()
         _LOGGER.info("Cost Neutral mode %s", "ENABLED" if enabled else "DISABLED")
@@ -2073,6 +2078,24 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             await self._run_optimization()
         return changed
 
+    def _economic_mode_changed(self) -> None:
+        """Invalidate the previous plan before the next control boundary."""
+        self._economic_mode_revision = getattr(self, "_economic_mode_revision", 0) + 1
+        if run := getattr(self, "_active_optimization_run", None):
+            run.superseded.set()
+        self._current_schedule = None
+        self._last_optimizer_result = None
+        self._last_update_time = None
+        self._last_published_optimizer_parameters = None
+        self._last_ev_charge_by_vehicle_w = None
+        self._last_ev_source_by_vehicle_w = None
+        self._last_ev_charge_schedule_updated = None
+        self._last_ev_optimizer_policy = None
+        self.__dict__.pop("_cost_neutral_status", None)
+        if getattr(self, "_enabled", False):
+            self._economic_replan_pending = True
+            self._schedule_settings_reoptimization()
+
     async def _run_settings_reoptimization(self) -> None:
         """Run settings-triggered optimizer refreshes after the API response."""
         try:
@@ -2082,6 +2105,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._settings_reoptimize_requested = False
                 await self._run_optimization(force=True)
         finally:
+            self._economic_replan_pending = False
             self._settings_reoptimize_task = None
 
     def _schedule_settings_reoptimization(self) -> None:
@@ -3044,17 +3068,33 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         result: OptimizerResult,
     ) -> bool:
         """Apply one forecast optimizer reserve update after a solve."""
-        if not bool(getattr(self, "_auto_apply_reserve_enabled", False)):
+        target_ratio = self._stage_auto_reserve_recommendation(result)
+        if target_ratio is None:
             return False
+        # This forecast floor is transient and is never saved to the entry.
+        self.update_config(backup_reserve=target_ratio)
+        _LOGGER.info(
+            "Auto-Apply Optimizer Reserve: applied forecast floor %.0f%%",
+            target_ratio * 100,
+        )
+        return True
+
+    def _stage_auto_reserve_recommendation(
+        self,
+        result: OptimizerResult,
+    ) -> float | None:
+        """Annotate a solve and return a proposed floor without applying it."""
+        if not bool(getattr(self, "_auto_apply_reserve_enabled", False)):
+            return None
         # Never act on an infeasible safety fallback. It deliberately returns
         # no economic reserve recommendation, so Auto-Apply must wait for the
         # next successful solve rather than ratcheting from a degraded plan.
         if not bool(getattr(result, "feasible", True)):
-            return False
+            return None
         recommendation = getattr(result, "reserve_recommendation", {}) or {}
         target_ratio = self._recommended_auto_reserve_ratio(recommendation)
         if target_ratio is None:
-            return False
+            return None
         current_ratio = self._reserve_ratio(self._config.backup_reserve, 0.0) or 0.0
         recommendation["auto_apply_enabled"] = True
         manual_reserve = getattr(self, "_manual_backup_reserve", None)
@@ -3068,26 +3108,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             round(current_ratio * 100)
         )
         if math.isclose(target_ratio, current_ratio, abs_tol=0.0001):
-            return False
+            return None
 
-        # Apply the forecast floor to the running optimiser ONLY. This value is
-        # recomputed every solve, so it must not be written to the config entry:
-        # persisting it each cycle fired HA's config-entry-updated event every
-        # ~5 minutes, refreshing the dashboard (and risking reload churn) for a
-        # purely transient value. The live reserve is still surfaced to sensors
-        # and the mobile app via get_api_data (self._config.backup_reserve), and
-        # it is recomputed from the manual baseline within one solve of a restart.
-        self.update_config(backup_reserve=target_ratio)
         recommendation["applied_optimizer_reserve_percent"] = int(
             round(target_ratio * 100)
         )
-        _LOGGER.info(
-            "Auto-Apply Optimizer Reserve: applied forecast floor %.0f%% "
-            "(was %.0f%%)",
-            target_ratio * 100,
-            current_ratio * 100,
-        )
-        return True
+        return target_ratio
 
     @staticmethod
     def _reserve_percent(value: Any) -> int | None:
@@ -6416,6 +6442,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._pending_shutdown_licensing = licensing
         self._enabled = False
         self._lifecycle_generation = getattr(self, "_lifecycle_generation", 0) + 1
+        self._economic_replan_pending = False
+        if run := getattr(self, "_active_optimization_run", None):
+            run.superseded.set()
         self._stop_cost_tracking_listeners()
         # Drain this producer before restoration, so a queued EV transition
         # cannot race shutdown cleanup or reapply a hold after it completes.
@@ -7641,6 +7670,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """
         if not self._optimizer or not self._enabled:
             return False
+        if not force and getattr(self, "_economic_replan_pending", False):
+            return False
         lifecycle_generation = getattr(self, "_lifecycle_generation", 0)
         if not self._energy_telemetry_ready():
             _LOGGER.info(
@@ -7681,11 +7712,18 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             _LOGGER.debug("Optimization in progress — queuing forced re-optimization")
         await self._optimization_lock.acquire()
         regression_recorder = getattr(self, "_regression_recorder", None)
+        run = OptimizationRun()
         try:
             if not self._enabled or lifecycle_generation != getattr(
                 self, "_lifecycle_generation", 0
             ):
                 return False
+            self._active_optimization_run = run
+            if asyncio.current_task() is getattr(self, "_settings_reoptimize_task", None):
+                self._settings_reoptimize_requested = False
+            self._economic_replan_pending = False
+            self._planning_started_at = dt_util.now()
+            self._optimizer.terminal_weight = self._profit_max_terminal_weight()
             octopus_revision = (
                 (self.price_coordinator.data or {}).get("revision")
                 if type(getattr(self, "price_coordinator", None)).__name__ == "OctopusPriceCoordinator" else None
@@ -7756,6 +7794,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # Smart EV charging is disabled or has never been configured.
             await self._refresh_ev_forecast_inputs()
             await self._refresh_historical_ev_forecasts()
+            run.check_current()
             historical_ev_generation = getattr(self, "_historical_ev_generation", 0)
 
             # Collect forecast data
@@ -7782,6 +7821,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # native-home import, never EV charging or battery charging.
             native_home_load_w = list(load or [])
             soc, capacity = await self._get_battery_state()
+            run.check_current()
             # Settle the measured interval before comparing inventory with SOC.
             # Even a short price-triggered solve must account for its charge
             # first, or the SOC rise is added as unknown and counted again when
@@ -8261,7 +8301,6 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     current_soc=soc,
                 )
             )
-            self._cost_neutral_status = cost_neutral_status
             current_cost_neutral_day = (
                 cost_neutral_plan.current_day
                 if cost_neutral_plan is not None
@@ -8348,10 +8387,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 solar_export_slots: list[bool] | None = None,
                 grid_charge_slots: list[bool] | None = None,
             ) -> OptimizerResult:
+                run.check_current()
                 if reserve_floor is not None:
                     self._optimizer.update_config(backup_reserve=reserve_floor)
                 try:
-                    return await self.hass.async_add_executor_job(
+                    job = asyncio.ensure_future(self.hass.async_add_executor_job(
+                        run.solve,
                         self._optimizer.optimize,
                         import_prices,
                         export_prices,
@@ -8399,7 +8440,17 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             if self._battery_provenance_is_usable()
                             else 0.0
                         ),
-                    )
+                    ))
+                    try:
+                        solved = await asyncio.shield(job)
+                    except asyncio.CancelledError:
+                        # Keep the solve lock until the worker stops reading
+                        # the shared optimizer, even if its HTTP caller left.
+                        run.superseded.set()
+                        await asyncio.gather(job, return_exceptions=True)
+                        raise
+                    run.check_current()
+                    return solved
                 finally:
                     if reserve_floor is not None:
                         self._optimizer.update_config(
@@ -8732,16 +8783,23 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # Keep the reference plan private: Auto-Apply may replace it after
             # another slow solve. Coordinator refreshes must keep seeing the
             # previously committed plan until every planning stage completes.
-            reserve_changed = self._apply_auto_reserve_recommendation(result)
+            reference_result = result
+            proposed_reserve_floor = self._stage_auto_reserve_recommendation(result)
             if (
-                (reserve_changed or used_reference_override)
+                (proposed_reserve_floor is not None or used_reference_override)
                 and not getattr(result, "degraded", False)
             ):
-                result = await _run_optimizer_once()
-                applied_reserve_floor = (
-                    self._reserve_ratio(self._config.backup_reserve, 0.0) or 0.0
-                )
-                result, _ = _prepare_schedule(result, applied_reserve_floor)
+                result = await _run_optimizer_once(proposed_reserve_floor)
+                current_reserve_floor = self._config.backup_reserve
+                applied_reserve_floor = proposed_reserve_floor
+                if applied_reserve_floor is None:
+                    applied_reserve_floor = self._reserve_ratio(current_reserve_floor, 0.0) or 0.0
+                # Reconcile against the rerun floor before committing it.
+                self._optimizer.update_config(backup_reserve=applied_reserve_floor)
+                try:
+                    result, _ = _prepare_schedule(result, applied_reserve_floor)
+                finally:
+                    self._optimizer.update_config(backup_reserve=current_reserve_floor)
                 if not getattr(result, "degraded", False):
                     final_recommendation = dict(
                         getattr(result, "reserve_recommendation", {}) or {}
@@ -8758,6 +8816,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     result.reserve_recommendation = final_recommendation
             if not self._enabled:
                 return False
+            run.check_current()
             result = await self._apply_external_energy_plan(
                 result,
                 timestamps=schedule_timestamps,
@@ -8770,13 +8829,18 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # A failed/cancelled rerun leaves the previous committed plan intact.
             if not self._enabled:
                 return False
+            run.check_current()
             if historical_ev_generation != getattr(self, "_historical_ev_generation", 0):
                 # A return, SOC update or setting change during the solve must
                 # not publish a plan based on the previous expected visit.
                 self._schedule_settings_reoptimization()
                 return False
+            if proposed_reserve_floor is not None and result.feasible:
+                self._apply_auto_reserve_recommendation(reference_result)
             self._current_schedule = result.schedule
             self._last_optimizer_result = result
+            self._cost_neutral_status = cost_neutral_status
+            self._planning_started_at = None
             self._last_published_optimizer_parameters = resolved_parameters
             self._octopus_schedule_revision = octopus_revision
             self._adopt_solved_ev_series(result)
@@ -9038,10 +9102,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             return True
 
+        except OptimizerPlanSuperseded:
+            return False
         except Exception as e:
             _LOGGER.error("Optimization failed: %s", e, exc_info=True)
             return False
         finally:
+            if getattr(self, "_active_optimization_run", None) is run:
+                self._active_optimization_run = None
+                self._planning_started_at = None
             if regression_recorder is not None:
                 try:
                     regression_recorder.finish_cycle("aborted")
@@ -9060,6 +9129,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         execution_trigger: str | None = None,
     ) -> None:
         """Execute a solved action and publish its effective hardware status."""
+        revision = getattr(self, "_economic_mode_revision", 0)
         try:
             if current_action and self._executor and self._enabled:
                 # Serialise against _execute_cached_current_action_if_changed
@@ -9071,10 +9141,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 # it here cannot deadlock — _execute_cached_current_action_if_changed
                 # never acquires _optimization_lock.
                 async with self._execute_lock:
-                    await self._execute_optimizer_action(
-                        current_action,
-                        execution_trigger=execution_trigger,
-                    )
+                    if revision == getattr(self, "_economic_mode_revision", 0):
+                        await self._execute_optimizer_action(
+                            current_action,
+                            execution_trigger=execution_trigger,
+                        )
         finally:
             # Publish after the execution attempt so effective-action metadata
             # includes the hardware target just accepted. The finally preserves
@@ -9177,6 +9248,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return
         if not getattr(self, "_executor", None):
             return
+        revision = getattr(self, "_economic_mode_revision", 0)
 
         optimization_lock = getattr(self, "_optimization_lock", None)
         if optimization_lock is not None and optimization_lock.locked():
@@ -9237,6 +9309,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._execute_lock = execute_lock
 
         async with execute_lock:
+            if revision != getattr(self, "_economic_mode_revision", 0):
+                return
             if (
                 action_name == getattr(self, "_last_executed_action", None)
                 and (
@@ -11806,6 +11880,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return latest.charge_kw, latest.import_kw, latest.soc_pct
 
     @optimizer_work
+    @optimizer_plan_dispatch
     async def _execute_optimizer_action(
         self,
         action: Any,
@@ -13353,6 +13428,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         if isinstance(timestamp, datetime)
                         else str(timestamp or "current")
                     )
+                    require_current_optimizer_plan()
                     applied = await solar_export_hold.apply(
                         self.entry_id,
                         generation,
@@ -21372,7 +21448,6 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 grid_charge_soc_cap=self._config.grid_charge_soc_cap,
                 horizon_hours=self._config.horizon_hours,
             )
-            self._optimizer.terminal_weight = self._profit_max_terminal_weight()
         if (
             "backup_reserve" in kwargs
             and self.energy_coordinator
@@ -21692,7 +21767,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def force_reoptimize(self) -> Any:
         """Force immediate re-optimization."""
+        revision = getattr(self, "_economic_mode_revision", 0)
         await self._run_optimization(force=True)
+        if revision != getattr(self, "_economic_mode_revision", 0):
+            pending = getattr(self, "_settings_reoptimize_task", None)
+            if pending is not None and pending is not asyncio.current_task():
+                await asyncio.shield(pending)
         return self._current_schedule
 
     @staticmethod
@@ -21933,6 +22013,23 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "forecast_quality": forecast_quality,
         }
 
+    def _get_planning_status(self) -> dict[str, Any] | None:
+        if not self._enabled:
+            return None
+        started_at = getattr(self, "_planning_started_at", None)
+        queued = getattr(self, "_economic_replan_pending", False)
+        if not queued and started_at is None:
+            return None
+        if self.cost_neutral_enabled:
+            mode = "cost_neutral"
+        else:
+            mode = "profit_max" if self.profit_max_mode else "standard"
+        return {
+            "state": "queued" if queued else "solving",
+            "mode": mode,
+            "started_at": started_at.isoformat() if not queued else None,
+        }
+
     def get_api_data(self) -> dict[str, Any]:
         """Get data for HTTP API and mobile app."""
         optimizer_available = self._optimizer is not None
@@ -21949,6 +22046,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             and schedule_age_s > stale_after_s
         )
 
+        planning = self._get_planning_status()
+
         # Determine status message
         degraded = getattr(getattr(self, "_last_optimizer_result", None), "degraded", False)
         if degraded and self._enabled:
@@ -21963,6 +22062,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         else:
             status_message = "Optimizer not initialized"
             optimization_status = "not_available"
+        if planning is not None:
+            status_message = (
+                "Optimizer plan queued"
+                if planning["state"] == "queued"
+                else "Optimizer is calculating a plan"
+            )
 
         # Get current action info
         default_action = (
@@ -21990,6 +22095,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             effective_current_action = "self_consumption"
             current_action = effective_current_action
             current_power_w = actual_battery_power_w
+        elif planning is not None and force_type in ("charge", "discharge"):
+            # The accepted command can still own the battery while the new
+            # mode has no committed plan.
+            effective_current_action = force_type
+            current_action = force_type
 
         if self._current_schedule and self._current_schedule.actions:
             ca = self._get_current_action()
@@ -22175,6 +22285,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "engine_available": optimizer_available,
             "engine": "built-in",
             "status_message": status_message,
+            "planning": planning,
             "cost_function": self._cost_function.value,
             "amber_forecast_confidence_enabled": self.amber_forecast_confidence_enabled,
             "amber_forecast_confidence": dict(getattr(self, "_last_amber_forecast_confidence", {})),
@@ -22190,7 +22301,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "cost_neutral": dict(getattr(self, "_cost_neutral_status", {
                 "enabled": self.cost_neutral_enabled,
                 "effective_mode": (
-                    "cost_neutral" if self.cost_neutral_enabled else "standard"
+                    "cost_neutral" if self.cost_neutral_enabled
+                    else "profit_max" if self.profit_max_mode else "standard"
                 ),
                 "reason": "disabled" if not self.cost_neutral_enabled else "pending_solve",
             })),
@@ -23381,7 +23493,6 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             changed = self.set_profit_max_mode(new_val)
             if changed:
                 response["changes"].append(f"profit_max_enabled: {settings['profit_max_enabled']}")
-                rerun_after_settings = True
 
         if "cost_neutral_enabled" in settings:
             new_val = bool(settings["cost_neutral_enabled"])
@@ -23390,7 +23501,6 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 response["changes"].append(
                     f"cost_neutral_enabled: {settings['cost_neutral_enabled']}"
                 )
-                rerun_after_settings = True
 
         if "daily_supply_charge" in settings:
             daily_supply_charge = settings["daily_supply_charge"]

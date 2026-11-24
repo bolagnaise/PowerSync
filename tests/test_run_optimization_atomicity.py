@@ -168,7 +168,7 @@ def _publication_pipeline(*, rerun=True):
                and isinstance(node.test.func, ast.Attribute)
                and node.test.func.attr == "isEnabledFor")
     function = ast.parse(
-        "async def pipeline(self, result, _run_optimizer_once, resolved_parameters): pass"
+        "async def pipeline(self, result, _run_optimizer_once, resolved_parameters, run): pass"
     ).body[0]
     generation_capture = next(node for node in body if isinstance(node, ast.Assign)
                               and any(isinstance(target, ast.Name) and target.id == 'historical_ev_generation'
@@ -185,6 +185,7 @@ def _publication_pipeline(*, rerun=True):
                      manual_control_projection=None, octopus_revision=None,
                      cost_neutral_cap=None, cost_neutral_forecast_import_cost=None,
                      cost_neutral_fixed_cost_allowance=None, cost_neutral_plan=None,
+                     cost_neutral_status={},
                      solve_timestamp=None,
                      dt_util=SimpleNamespace(now=lambda: datetime(2026, 1, 1, tzinfo=timezone.utc)))
     exec(compile(ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[])),
@@ -195,6 +196,7 @@ def _publication_pipeline(*, rerun=True):
 @pytest.mark.parametrize(("rerun", "failure_stage"), [
     (True, None), (True, "reserve"), (True, "external"), (True, "cancel"),
     (False, None), (False, "external"), (True, "disabled"), (False, "disabled"),
+    (True, "superseded"),
 ])
 def test_slow_reserve_rerun_never_exposes_an_uncommitted_export(rerun, failure_stage):
     """A refresh during either await must keep the previously committed plan."""
@@ -205,20 +207,25 @@ def test_slow_reserve_rerun_never_exposes_an_uncommitted_export(rerun, failure_s
         resolved_parameters = object()
         reference = SimpleNamespace(schedule=SimpleNamespace(actions=["export"]),
                                     future_export_protection_floor_slots=[], lp_stats={},
-                                    reserve_recommendation={})
+                                    reserve_recommendation={}, feasible=True)
         final = SimpleNamespace(schedule=SimpleNamespace(actions=["self_consumption", "export"]),
                                 future_export_protection_floor_slots=[], lp_stats={},
-                                reserve_recommendation={})
+                                reserve_recommendation={}, feasible=True)
         old_time = datetime(2025, 12, 31, tzinfo=timezone.utc)
         adopted = []
         committed_prices = []
+        committed_reserves = []
+        superseded = False
         subject = SimpleNamespace(
             _enabled=True,
             _current_schedule=old_schedule, _last_optimizer_result=old_result,
             _last_published_optimizer_parameters=old_parameters,
             _last_update_time=old_time, _octopus_schedule_revision="old",
             _config=SimpleNamespace(backup_reserve=0.2), auto_apply_reserve_enabled=True,
-            _optimizer=SimpleNamespace(reconcile_result_with_schedule=lambda result, schedule, **kw: result),
+            _optimizer=SimpleNamespace(
+                reconcile_result_with_schedule=lambda result, schedule, **kw: result,
+                update_config=lambda **kwargs: None,
+            ),
             _should_spread_import_schedule=lambda: False,
             _should_spread_export_schedule=lambda: False,
             _reference_export_bridge_windows=lambda *args: [],
@@ -230,7 +237,8 @@ def test_slow_reserve_rerun_never_exposes_an_uncommitted_export(rerun, failure_s
             _set_forecast_bridge_reserve_recommendation=lambda *args: None,
             _adopt_solved_ev_series=adopted.append,
             _commit_price_forecast_cache=lambda *args: committed_prices.append(args),
-            _apply_auto_reserve_recommendation=lambda result: rerun,
+            _stage_auto_reserve_recommendation=lambda result: 0.3 if rerun else None,
+            _apply_auto_reserve_recommendation=committed_reserves.append,
             _reserve_ratio=lambda value, default: value,
             _last_zerohero_bonus_prices=[], _last_zerohero_bonus_cap_kwh=None,
             _last_zerocharge_bonus_prices=[], _last_zerocharge_bonus_cap_kwh=None,
@@ -244,9 +252,10 @@ def test_slow_reserve_rerun_never_exposes_an_uncommitted_export(rerun, failure_s
             assert subject._octopus_schedule_revision == "old"
             assert adopted == []
             assert committed_prices == []
+            assert committed_reserves == []
 
-        async def solve_again():
-            assert rerun
+        async def solve_again(reserve):
+            assert rerun and reserve == 0.3
             await asyncio.sleep(0)
             assert_previous_plan()
             if failure_stage == "reserve":
@@ -256,26 +265,34 @@ def test_slow_reserve_rerun_never_exposes_an_uncommitted_export(rerun, failure_s
             return final
 
         async def external(result, **kwargs):
+            nonlocal superseded
             await asyncio.sleep(0)
             assert_previous_plan()
             if failure_stage == "external":
                 raise RuntimeError("external plan failed")
             if failure_stage == "disabled":
                 subject._enabled = False
+            if failure_stage == "superseded":
+                superseded = True
             return result
 
+        def check_current():
+            if superseded:
+                raise RuntimeError("mode changed")
+
+        work = SimpleNamespace(check_current=check_current)
         subject._apply_external_energy_plan = external
         publish = _publication_pipeline(rerun=rerun)
         if failure_stage == "disabled":
-            assert await publish(subject, reference, solve_again, resolved_parameters) is False
+            assert await publish(subject, reference, solve_again, resolved_parameters, work) is False
             assert_previous_plan()
         elif failure_stage:
             error = asyncio.CancelledError if failure_stage == "cancel" else RuntimeError
             with pytest.raises(error):
-                await publish(subject, reference, solve_again, resolved_parameters)
+                await publish(subject, reference, solve_again, resolved_parameters, work)
             assert_previous_plan()
         else:
-            await publish(subject, reference, solve_again, resolved_parameters)
+            await publish(subject, reference, solve_again, resolved_parameters, work)
             expected = final if rerun else reference
             assert subject._current_schedule is expected.schedule
             assert subject._last_optimizer_result is expected
@@ -284,5 +301,6 @@ def test_slow_reserve_rerun_never_exposes_an_uncommitted_export(rerun, failure_s
             assert subject._octopus_schedule_revision is None
             assert adopted == [expected]
             assert len(committed_prices) == 1
+            assert committed_reserves == ([reference] if rerun else [])
 
     asyncio.run(run())

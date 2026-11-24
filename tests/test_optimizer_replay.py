@@ -826,6 +826,8 @@ def test_changed_files_are_discovered_without_manual_coverage_flags(tmp_path):
 
 @pytest.mark.asyncio
 async def test_real_coordinator_closure_records_override_and_restores_on_error(api):
+    import asyncio
+
     module, capture, _ = api
     tree = ast.parse((COMPONENT / "optimization/coordinator.py").read_text())
     method = next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef) and n.name == "_run_optimizer_once")
@@ -841,6 +843,7 @@ async def test_real_coordinator_closure_records_override_and_restores_on_error(a
         _should_disable_idle_schedule=lambda: False, _battery_provenance_is_usable=lambda: False)
     values = inputs()
     namespace = {"OptimizerResult": module.OptimizerResult, "self": owner,
+        "asyncio": asyncio, "run": module.OptimizationRun(),
         "import_prices": values["import_prices"], "export_prices": values["export_prices"],
         "solar_forecast": values["solar_forecast"], "load_forecast": values["load_forecast"],
         "soc": 0.5, "acq_cost": 0.0, "battery_export_allowed": False,

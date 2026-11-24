@@ -475,6 +475,110 @@ def test_rejected_start_uses_a_fresh_cold_solver(optimizer_module, monkeypatch):
     assert result.stats["start"] == "not_requested"
 
 
+def test_rejected_preference_start_keeps_its_original_deadline(optimizer_module, monkeypatch):
+    module = optimizer_module
+    constructor = module.highspy.Highs
+    clock = 0.0
+    native_allowances = []
+
+    class RejectStart:
+        def __init__(self):
+            self.native = constructor()
+
+        def __getattr__(self, name):
+            return getattr(self.native, name)
+
+        def setSolution(self, solution):
+            nonlocal clock
+            clock += 2.75
+            raise RuntimeError("unsupported start")
+
+        def run(self):
+            native_allowances.append(self.native.getOptionValue("time_limit")[1])
+            return self.native.run()
+
+    fake_time = types.SimpleNamespace(monotonic=lambda: clock)
+    monkeypatch.setattr(module, "time", fake_time)
+    monkeypatch.setattr(sys.modules[module.OptimizationRun.__module__], "time", fake_time)
+    monkeypatch.setattr(module.highspy, "Highs", RejectStart)
+    work = module.OptimizationRun()
+    with work.free_preference(30.0) as limit:
+        result = module._solve_lp_highs(
+            [1.0], module._LpMatrix((0, 1)), [], module._LpMatrix((0, 1)), [],
+            [(1.0, 2.0)], limit, initial_solution=[1.0], solve_role="tiebreak",
+        )
+    assert result.success
+    assert native_allowances == [pytest.approx(0.25)]
+    assert work.preference_elapsed_s == pytest.approx(2.75)
+
+
+def test_free_preference_budget_is_shared_across_full_solves(optimizer_module, monkeypatch):
+    module = optimizer_module
+    solve = module._solve_lp_highs
+    clock = 0.0
+    preference_limits = []
+    primary_limits = []
+
+    def observe(*args, **kwargs):
+        nonlocal clock
+        if kwargs.get("solve_role") == "tiebreak":
+            limit = kwargs["time_limit"]
+            preference_limits.append(limit)
+            clock += limit + 0.25  # HiGHS can overrun its requested limit.
+            return module._HighsResult(
+                list(kwargs["initial_solution"]), True, "Time limit reached",
+                int(module.highspy.HighsModelStatus.kTimeLimit), 0.0,
+            )
+        primary_limits.append(kwargs["time_limit"])
+        return solve(*args, **kwargs)
+
+    fake_time = types.SimpleNamespace(monotonic=lambda: clock)
+    monkeypatch.setattr(module, "time", fake_time)
+    monkeypatch.setattr(sys.modules[module.OptimizationRun.__module__], "time", fake_time)
+    monkeypatch.setattr(module, "_solve_lp_highs", observe)
+    work = module.OptimizationRun()
+    for _ in range(5):
+        result = work.solve(lambda: _optimizer(module).optimize(
+            import_prices=[0.31, 0.31, 0.0, 0.0], export_prices=[0.0]*4,
+            solar_forecast=[0.0]*4, load_forecast=[0.5]*4,
+            current_soc=0.2, allow_battery_export=False, disable_idle=True,
+            schedule_timestamps=_timestamps(4), cost_neutral_earnings_cap=0.2,
+            cost_neutral_slots=[True]*4,
+        ))
+        assert result.solver_used == "highs" and result.feasible
+        assert all(action.action != "idle" for action in result.schedule.actions)
+    assert preference_limits == pytest.approx([3.0, 3.0, 3.0, 2.25])
+    assert all(limit == 30.0 for limit in primary_limits)
+    stats = result.lp_stats["cycle"]["cost_neutral_free_preference"]
+    assert stats["attempts"] == 4
+    assert stats["elapsed_s"] == pytest.approx(12.25)
+    assert stats["skips"] > 0
+
+
+def test_superseding_a_primary_solve_stops_before_the_next_pass(optimizer_module, monkeypatch):
+    module = optimizer_module
+    solve = module._solve_lp_highs
+    work = module.OptimizationRun()
+    calls = []
+
+    def supersede(*args, **kwargs):
+        calls.append(kwargs.get("solve_role", "primary"))
+        result = solve(*args, **kwargs)
+        work.superseded.set()
+        return result
+
+    monkeypatch.setattr(module, "_solve_lp_highs", supersede)
+    with pytest.raises(module.OptimizerPlanSuperseded):
+        work.solve(lambda: _optimizer(module).optimize(
+            import_prices=[0.31, 0.31, 0.0, 0.0], export_prices=[0.0]*4,
+            solar_forecast=[0.0]*4, load_forecast=[0.5]*4,
+            current_soc=0.2, allow_battery_export=False,
+            schedule_timestamps=_timestamps(4), cost_neutral_earnings_cap=0.2,
+            cost_neutral_slots=[True]*4,
+        ))
+    assert calls == ["primary"]
+
+
 @pytest.mark.parametrize("failure", ["exception", "invalid_point"])
 def test_optional_tiebreak_failure_keeps_primary_plan(optimizer_module, monkeypatch, failure):
     module = optimizer_module

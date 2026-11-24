@@ -2564,8 +2564,7 @@ def test_optional_second_pass_failure_keeps_previous_completed_schedule_price_pa
         if isinstance(node, ast.If) and any(
             isinstance(child, ast.BoolOp)
             and isinstance(child.op, ast.Or)
-            and {value.id for value in child.values if isinstance(value, ast.Name)}
-            == {"reserve_changed", "used_reference_override"}
+            and ast.unparse(child) == "proposed_reserve_floor is not None or used_reference_override"
             for child in ast.walk(node.test)
         ):
             # Keep the production guard and awaited solve. The injected
@@ -2588,7 +2587,7 @@ def test_optional_second_pass_failure_keeps_previous_completed_schedule_price_pa
     ) == 1
     function = ast.parse(
         "async def publish(self, result, _run_optimizer_once, import_prices, export_prices):\n"
-        "    reserve_changed = True\n"
+        "    proposed_reserve_floor = 0.3\n"
         "    used_reference_override = False\n"
     ).body[0]
     function.body.extend(boundaries)
@@ -2613,7 +2612,8 @@ def test_optional_second_pass_failure_keeps_previous_completed_schedule_price_pa
         new_origin, new_origin + timedelta(minutes=5)
     ]
 
-    async def fail_second_solve():
+    async def fail_second_solve(reserve_floor):
+        assert reserve_floor == 0.3
         await asyncio.sleep(0)
         assert coordinator._current_schedule is old_schedule
         assert coordinator._last_optimizer_result is old_result
@@ -2908,7 +2908,7 @@ def test_current_action_execution_failure_still_publishes_new_plan(opt_module):
     assert published == [{"planned_current_power_w": 8347}]
 
 
-@pytest.mark.parametrize("runtime_state", ["absent", "disabled"])
+@pytest.mark.parametrize("runtime_state", ["absent", "disabled", "economic_mode_changed"])
 def test_configured_optimizer_builds_and_publishes_without_solar_runtime(
     opt_module,
     monkeypatch,
@@ -3006,8 +3006,18 @@ def test_configured_optimizer_builds_and_publishes_without_solar_runtime(
             result.schedule = schedule
             return result
 
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    observed_planning = []
+
     async def executor_job(function, *args):
-        return function(*args)
+        result = function(*args)
+        if runtime_state == "economic_mode_changed":
+            observed_planning.append(coordinator._get_planning_status())
+            if len(solve_calls) == 1:
+                entered.set()
+                await release.wait()
+        return result
 
     entry_data = {}
     if runtime_state == "disabled":
@@ -3024,6 +3034,7 @@ def test_configured_optimizer_builds_and_publishes_without_solar_runtime(
     hass = SimpleNamespace(
         data={"power_sync": {"entry-1": entry_data}},
         async_add_executor_job=executor_job,
+        async_create_background_task=lambda coro, name: asyncio.create_task(coro, name=name),
     )
     coordinator = object.__new__(opt_module.OptimizationCoordinator)
     coordinator.hass = hass
@@ -3153,7 +3164,7 @@ def test_configured_optimizer_builds_and_publishes_without_solar_runtime(
     coordinator._set_forecast_bridge_reserve_recommendation = lambda *args: None
     coordinator._adopt_solved_ev_series = lambda *args: None
     coordinator._commit_price_forecast_cache = lambda *args: None
-    coordinator._apply_auto_reserve_recommendation = lambda *args: False
+    coordinator._stage_auto_reserve_recommendation = lambda *args: None
     coordinator._apply_external_energy_plan = (
         result_async
     )
@@ -3171,8 +3182,58 @@ def test_configured_optimizer_builds_and_publishes_without_solar_runtime(
     run_optimization = inspect.unwrap(
         opt_module.OptimizationCoordinator._run_optimization
     )
-    result = asyncio.run(run_optimization(coordinator))
+    if runtime_state == "economic_mode_changed":
+        def update_entry(entry, **changes):
+            for key, value in changes.items():
+                setattr(entry, key, value)
 
+        hass.config_entries = SimpleNamespace(async_update_entry=update_entry)
+        coordinator._load_estimator = None
+        dispatcher = types.ModuleType("homeassistant.helpers.dispatcher")
+        dispatcher.async_dispatcher_send = lambda *args: None
+        monkeypatch.setitem(sys.modules, dispatcher.__name__, dispatcher)
+        monkeypatch.setattr(sys.modules["power_sync.const"], "CONF_PROFIT_MAX_ENABLED", "profit_max_enabled", raising=False)
+        coordinator._last_ev_charge_by_vehicle_w = {"car": [1550.0]}
+        coordinator._last_ev_charge_schedule_updated = origin
+        coordinator._last_ev_source_by_vehicle_w = {"car": {"grid": [1550.0]}}
+        source = ast.parse((COMPONENT_ROOT / "switch.py").read_text())
+        profit_switch = next(n for n in source.body if isinstance(n, ast.ClassDef) and n.name == "ProfitMaxModeSwitch")
+        turn_on = next(n for n in profit_switch.body if isinstance(n, ast.AsyncFunctionDef) and n.name == "async_turn_on")
+        namespace = {}
+        exec(compile(ast.Module(body=[turn_on], type_ignores=[]), "<optimizer switch>", "exec"), namespace)
+        switch = SimpleNamespace(_coordinator=coordinator, async_write_ha_state=lambda: None)
+
+        async def change_modes():
+            initial = asyncio.create_task(run_optimization(coordinator))
+            await asyncio.wait_for(entered.wait(), timeout=1)
+            assert observed_planning[0]["state"] == "solving"
+            await namespace["async_turn_on"](switch)
+            assert coordinator._get_planning_status() == {
+                "state": "queued", "mode": "profit_max", "started_at": None,
+            }
+            pending = coordinator._settings_reoptimize_task
+            await asyncio.sleep(0)
+            response = await coordinator.set_settings({"cost_neutral_enabled": True})
+            assert response["success"]
+            assert coordinator._settings_reoptimize_task is pending
+            assert coordinator._get_planning_status()["mode"] == "cost_neutral"
+            assert coordinator._current_schedule is None
+            assert coordinator._last_ev_charge_by_vehicle_w is None
+            assert published == []
+            release.set()
+            assert await initial is False
+            await asyncio.wait_for(pending, timeout=1)
+            assert coordinator._get_planning_status() is None
+
+        asyncio.run(change_modes())
+        assert not errors
+        assert len(solve_calls) == 2
+        assert observed_planning[-1]["mode"] == "cost_neutral"
+        assert observed_planning[-1]["state"] == "solving"
+        assert published == [{"has_plan": True}]
+        return
+
+    result = asyncio.run(run_optimization(coordinator))
     assert result is True, errors
     assert len(solve_calls) == 1
     assert solar_calls == [False]
