@@ -2942,10 +2942,20 @@ def test_optimizer_goal_choice_uses_the_existing_switch_services():
     standardFromNeutral: click({ ...base, costNeutral: 'on' }, 'standard', d),
     profit: click(base, 'profit', d),
     neutral: click({ ...base, profitMax: 'on' }, 'neutral', d),
+    // Profit Max was just chosen but HA has not reported it on yet.
+    standardWhilePending: click(base, 'standard', d),
+    standardSkipsUnavailable: click({ ...base, costNeutral: 'unavailable' }, 'standard', d),
   }));
 """)
-    assert out["standardFromProfit"] == [["homeassistant", "turn_off", {"entity_id": "switch.power_sync_profit_max_mode"}]]
-    assert out["standardFromNeutral"] == [["homeassistant", "turn_off", {"entity_id": "switch.power_sync_cost_neutral"}]]
+    both_off = [
+        ["homeassistant", "turn_off", {"entity_id": "switch.power_sync_profit_max_mode"}],
+        ["homeassistant", "turn_off", {"entity_id": "switch.power_sync_cost_neutral"}],
+    ]
+    # Standard never trusts possibly stale switch states.
+    assert out["standardFromProfit"] == both_off
+    assert out["standardFromNeutral"] == both_off
+    assert out["standardWhilePending"] == both_off
+    assert out["standardSkipsUnavailable"] == both_off[:1]
     assert out["profit"] == [["homeassistant", "turn_on", {"entity_id": "switch.power_sync_profit_max_mode"}]]
     # The backend turns Profit Max off itself when Cost Neutral starts.
     assert out["neutral"] == [["homeassistant", "turn_on", {"entity_id": "switch.power_sync_cost_neutral"}]]
@@ -3029,3 +3039,20 @@ def test_classic_optimiser_status_says_when_it_only_plans():
     assert out["monitoring"] == "Monitoring only, no commands sent. Plan: Self consumption"
     assert out["controlling"] == "Self consumption"
     assert out["legacy"] == "Self consumption"
+
+
+
+def test_optimizer_card_refetches_access_without_other_cards():
+    out = _run_board(_OPT_CARD_SETUP + r"""
+  const card = render(base, { enabled: true, licensing: ok });
+  const realNow = Date.now, start = Math.floor(realNow() / 60_000) * 60_000 + 1_000;
+  Date.now = () => start;
+  const first = card._signature();
+  Date.now = () => start + 30_000;
+  const same = card._signature();
+  Date.now = () => start + 61_000;
+  const later = card._signature();
+  Date.now = realNow;
+  console.log(JSON.stringify({ stable: first === same, refreshes: first !== later }));
+""")
+    assert out == {"stable": True, "refreshes": True}

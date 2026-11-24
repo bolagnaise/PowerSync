@@ -1880,7 +1880,10 @@ class PsOptimizerCard extends PsSettingsCard {
     return [super._signature(), ids, data?.enabled, data?.monitoring_mode, data?.profit_max_mode, data?.cost_neutral_enabled,
       data?.cost_neutral?.reason, data?.profit_max_solar_export?.capability?.reason, data?.is_stale, data?.optimization_status,
       data?.config?.charge_by_time_target_soc, data?.config?.charge_by_time_target_time,
-      l.can_optimize, l.access_state, l.requires_resume, l.recovery_pending, l.would_allow, l.enforcement_mode].join('|');
+      l.can_optimize, l.access_state, l.requires_resume, l.recovery_pending, l.would_allow, l.enforcement_mode,
+      // Re-render once per cache lifetime so _api() refetches access and goal
+      // status even when no other card on the board reads the optimiser API.
+      Math.floor(Date.now() / PS_API_TTL_MS)].join('|');
   }
 
   _render() {
@@ -1951,8 +1954,12 @@ class PsOptimizerCard extends PsSettingsCard {
     if (id === 'profit') this._call('homeassistant', 'turn_on', { entity_id: en.profitMax });
     else if (id === 'neutral') this._call('homeassistant', 'turn_on', { entity_id: en.costNeutral });
     else {
+      // Turn off every goal switch, not only those HA reports as on: a goal
+      // chosen a moment ago may not have reported its new state yet. Turning
+      // off a goal that is already off changes nothing in the backend.
       for (const entity of [en.profitMax, en.costNeutral]) {
-        if (psState(this._hass, entity)?.state === 'on') this._call('homeassistant', 'turn_off', { entity_id: entity });
+        const state = psState(this._hass, entity)?.state;
+        if (state && state !== 'unavailable') this._call('homeassistant', 'turn_off', { entity_id: entity });
       }
     }
   }
