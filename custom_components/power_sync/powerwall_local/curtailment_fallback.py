@@ -228,6 +228,7 @@ class PowerwallCurtailmentFallback:
                 "⚡ Powerwall Off-Grid",
                 f"Disconnected from grid to block excess export "
                 f"({pretty_reason}). SOC {soc_val:.0f}%.",
+                notification_type="powerwall_off_grid",
             )
         except Exception as err:
             _LOGGER.debug("Off-grid activation push failed: %s", err)
@@ -311,6 +312,7 @@ class PowerwallCurtailmentFallback:
                 self._hass,
                 "⚡ Powerwall Back On-Grid",
                 f"Reconnected after {minutes}m off-grid curtailment.",
+                notification_type="powerwall_on_grid",
             )
         except Exception as err:
             _LOGGER.debug("Off-grid release push failed: %s", err)

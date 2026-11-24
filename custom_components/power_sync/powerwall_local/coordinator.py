@@ -490,7 +490,7 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
         try:
             from ..automations.actions import _send_expo_push
 
-            await _send_expo_push(self.hass, title, message)
+            await _send_expo_push(self.hass, title, message, notification_type=("battery_calibration_started" if started else "battery_calibration_completed"))
         except Exception as err:
             _LOGGER.debug("Calibration mobile push failed: %s", err)
 
@@ -641,6 +641,7 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
                 "Your Powerwall gateway no longer recognises PowerSync's "
                 "local control key. Open Battery Setup and tap Pair Gateway "
                 "to restore direct LAN control.",
+                notification_type="powerwall_repair_required",
             )
         except Exception as push_err:
             _LOGGER.debug("Re-pair push notification failed: %s", push_err)

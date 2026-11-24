@@ -14812,7 +14812,8 @@ def test_dynamic_stop_notification_requires_physical_confirmation(
         events.append("physical_stop")
         return stop_result
 
-    async def push(_hass, _title, message):
+    async def push(_hass, _title, message, *, notification_type):
+        assert notification_type == "ev_charge_stopped"
         events.append(("push", message))
 
     monkeypatch.setattr(actions, "_action_stop_ev_charging", physical_stop)

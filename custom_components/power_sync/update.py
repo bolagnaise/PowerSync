@@ -135,7 +135,9 @@ class PowerSyncUpdateEntity(CoordinatorEntity, UpdateEntity):
 
     def _check_and_notify(self) -> None:
         """Create persistent notification if a newer version is available."""
-        if not self.coordinator.data or not self.hass:
+        from .notification_preferences import update_alerts_enabled
+
+        if not self.coordinator.data or not self.hass or not update_alerts_enabled(self.hass):
             return
         latest = self.coordinator.data.get("latest_version")
         if not latest or latest == self._installed or latest == self._notified_version:

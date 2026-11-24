@@ -112,7 +112,7 @@ def _update_native_alert(hass, entry_id, direction, message, reason):
             return
         try:
             from ..automations.actions import _send_expo_push
-            await asyncio.wait_for(_send_expo_push(hass, title, record['message']), timeout=20)
+            await asyncio.wait_for(_send_expo_push(hass, title, record['message'], notification_type=f"powerwall_{direction}_blocked"), timeout=20)
         except Exception:
             _LOGGER.exception('Could not send Powerwall %s push notification', direction)
 

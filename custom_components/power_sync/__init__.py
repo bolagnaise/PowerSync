@@ -5411,6 +5411,7 @@ class GenericAEMOSpikeManager:
                     self.hass,
                     "Price Spike",
                     f"${current_price:.0f}/MWh - discharging battery",
+                    notification_type="price_spike",
                 )
             except Exception as notify_err:
                 _LOGGER.debug("Could not send spike start notification: %s", notify_err)
@@ -5463,6 +5464,7 @@ class GenericAEMOSpikeManager:
                     self.hass,
                     "Price Normal",
                     f"${current_price:.0f}/MWh - spike ended ({spike_duration_minutes}min)",
+                    notification_type="price_normal",
                 )
             except Exception as notify_err:
                 _LOGGER.debug("Could not send spike end notification: %s", notify_err)
@@ -5868,6 +5870,7 @@ class SavingSessionTariffManager:
                     self.hass,
                     "Saving Session",
                     f"Active: {rate_p:.0f}p/kWh - exporting battery",
+                    notification_type="saving_session",
                 )
             except Exception:
                 pass
@@ -6038,6 +6041,7 @@ class SavingSessionTariffManager:
                     self.hass,
                     "Session Ended",
                     "Saving session complete - normal operation restored",
+                    notification_type="saving_session_ended",
                 )
             except Exception:
                 pass
@@ -6146,6 +6150,7 @@ class GenericSavingSessionManager:
                     self.hass,
                     "Saving Session",
                     f"Active: {rate_p:.0f}p/kWh - discharging battery",
+                    notification_type="saving_session",
                 )
             except Exception:
                 pass
@@ -6171,6 +6176,7 @@ class GenericSavingSessionManager:
                     self.hass,
                     "Session Ended",
                     "Saving session complete - normal operation restored",
+                    notification_type="saving_session_ended",
                 )
             except Exception:
                 pass
@@ -15467,19 +15473,28 @@ class PushTokenRegisterView(HomeAssistantView):
 
         try:
             data = await request.json()
+            if not isinstance(data, dict):
+                return web.json_response({"success": False, "error": "Expected a JSON object."}, status=400)
             push_token = data.get("push_token")
+            if not isinstance(push_token, str) or not push_token:
+                return web.json_response({"success": False, "error": "push_token is required"}, status=400)
+            from .notification_preferences import (
+                async_get_notification_preferences,
+                normalize_disabled_notification_types,
+            )
+
+            if "disabled_notification_types" in data:
+                try:
+                    disabled = normalize_disabled_notification_types(data["disabled_notification_types"])
+                except ValueError as err:
+                    return web.json_response({"success": False, "error": str(err)}, status=400)
+                preferences = await async_get_notification_preferences(self._hass)
+                await preferences.async_set_device_types(push_token, disabled)
             platform = data.get("platform", "unknown")
             device_name = data.get("device_name", "Unknown device")
 
             _LOGGER.info(f"📱 PUSH REGISTER: platform={platform}, device={device_name}")
             _LOGGER.debug(f"📱 PUSH REGISTER: token={'[%d chars]' % len(push_token) if push_token else 'None'}")
-
-            if not push_token:
-                _LOGGER.error("📱 PUSH REGISTER: No push_token in request body")
-                return web.json_response(
-                    {"success": False, "error": "push_token is required"},
-                    status=400
-                )
 
             # Store push token in hass.data for quick access
             if DOMAIN not in self._hass.data:
@@ -15520,7 +15535,7 @@ class PushTokenRegisterView(HomeAssistantView):
             token_count = len(self._hass.data[DOMAIN].get("push_tokens", {}))
             _LOGGER.info(f"📱 PUSH REGISTER: Total registered tokens now: {token_count}")
 
-            return web.json_response({"success": True})
+            return web.json_response({"success": True, "notification_preferences_supported": True})
 
         except Exception as e:
             _LOGGER.error(f"📱 PUSH REGISTER: Error - {e}", exc_info=True)
@@ -23927,6 +23942,11 @@ async def _ensure_powersync_dashboard(hass: HomeAssistant) -> None:
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     """Set up the PowerSync integration (global, runs once)."""
+    from .notification_preferences import NotificationSettingsView, async_get_notification_preferences
+
+    await async_get_notification_preferences(hass)
+    hass.http.register_view(NotificationSettingsView(hass))
+
     # Register static path for the dashboard strategy JS
     frontend_dir = str(pathlib.Path(__file__).parent / "frontend")
     try:
@@ -23980,7 +24000,7 @@ async def _notify_api_error(hass, title: str, message: str) -> None:
 
     try:
         from .automations.actions import _send_expo_push
-        await _send_expo_push(hass, f"⚠️ {title}", message)
+        await _send_expo_push(hass, f"⚠️ {title}", message, notification_type="connection_error")
         _last_api_error_notification[title] = now
     except Exception:
         pass  # Don't let notification failures cascade
@@ -27400,7 +27420,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     await _send_expo_push(
                         hass,
                         "Powerwall Update",
-                        f"Firmware updated: {current_fw}"
+                        f"Firmware updated: {current_fw}",
+                        notification_type="powerwall_firmware_update",
                     )
                 except Exception:
                     pass
@@ -27886,6 +27907,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         hass,
                         "Battery Alert",
                         f"Charge kick ({reason}): failed — auto-restoring normal operation",
+                        notification_type="battery_charge_failed",
                     )
                 except Exception:
                     pass
@@ -27971,6 +27993,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         hass,
                         "Battery Alert",
                         f"Charge kick ({reason}): Powerwall did not start charging within 5 minutes",
+                        notification_type="battery_charge_failed",
                     )
                 except Exception:
                     pass
@@ -30107,6 +30130,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         hass,
                         "Amber Forecast Confidence",
                         notif_body,
+                        notification_type="amber_forecast_confidence",
                     )
                 except Exception as notify_err:
                     _LOGGER.debug(f"Could not send forecast discrepancy notification: {notify_err}")
@@ -30171,6 +30195,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         hass,
                         f"High {direction.title()} Price Forecast",
                         f"${price / 100:.2f}/kWh forecast for {spike_time}",
+                        notification_type=f"high_{direction}_price_forecast",
                     )
                     if _aemo_dispatch_entry_data() is not entry_data:
                         return
@@ -31057,6 +31082,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                             hass,
                                             "Battery Alert",
                                             "Powerwall may be calibrating — battery control paused until complete",
+                                            notification_type="battery_calibration_started",
                                         )
                                     except Exception:
                                         pass
@@ -31146,6 +31172,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                                                     hass,
                                                                     "Battery",
                                                                     "Calibration complete — resuming normal battery control",
+                                                                    notification_type="battery_calibration_completed",
                                                                 )
                                                             except Exception:
                                                                 pass
@@ -31245,7 +31272,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                             await _send_expo_push(
                                                 hass,
                                                 "Battery Alert",
-                                                "Failed to restore normal mode after multiple retries - check Tesla app"
+                                                "Failed to restore normal mode after multiple retries - check Tesla app",
+                                                notification_type="battery_restore_failed",
                                             )
                                             if _aemo_dispatch_entry_data() is ed:
                                                 ed["_mode_restore_notified"] = True
@@ -39516,7 +39544,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                             await _send_expo_push(
                                                 hass,
                                                 "Battery Warning",
-                                                "Tariff not saved - may need reconfiguration"
+                                                "Tariff not saved - may need reconfiguration",
+                                                notification_type="tariff_save_failed",
                                             )
                                         except Exception as notify_err:
                                             _LOGGER.debug(f"Could not send notification: {notify_err}")
@@ -41471,7 +41500,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                             await _send_expo_push(
                                                 hass,
                                                 "Battery Warning",
-                                                "Tariff not saved - may need reconfiguration"
+                                                "Tariff not saved - may need reconfiguration",
+                                                notification_type="tariff_save_failed",
                                             )
                                         except Exception as notify_err:
                                             _LOGGER.debug(f"Could not send notification: {notify_err}")
@@ -42638,7 +42668,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         await _send_expo_push(
                             hass,
                             "Battery",
-                            "Normal operation restored"
+                            "Normal operation restored",
+                            notification_type="battery_restored",
                         )
                     except Exception as notify_err:
                         _LOGGER.debug(f"Could not send success notification: {notify_err}")
@@ -42705,7 +42736,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 if not suppress_notification:
                     try:
                         from .automations.actions import _send_expo_push
-                        await _send_expo_push(hass, "Battery", "Normal operation restored")
+                        await _send_expo_push(hass, "Battery", "Normal operation restored", notification_type="battery_restored")
                     except Exception as notify_err:
                         _LOGGER.debug(f"Could not send success notification: {notify_err}")
 
@@ -42773,7 +42804,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             if entity_restore_unverified
                             else "Normal operation restored"
                         )
-                        await _send_expo_push(hass, "Battery", notification)
+                        await _send_expo_push(hass, "Battery", notification, notification_type="battery_restored")
                     except Exception as notify_err:
                         _LOGGER.debug(f"Could not send success notification: {notify_err}")
 
@@ -42821,7 +42852,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 if not suppress_notification:
                     try:
                         from .automations.actions import _send_expo_push
-                        await _send_expo_push(hass, "Battery", "Normal operation restored")
+                        await _send_expo_push(hass, "Battery", "Normal operation restored", notification_type="battery_restored")
                     except Exception as notify_err:
                         _LOGGER.debug(f"Could not send success notification: {notify_err}")
 
@@ -42862,7 +42893,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 if not suppress_notification:
                     try:
                         from .automations.actions import _send_expo_push
-                        await _send_expo_push(hass, "Battery", "Normal operation restored")
+                        await _send_expo_push(hass, "Battery", "Normal operation restored", notification_type="battery_restored")
                     except Exception as notify_err:
                         _LOGGER.debug(f"Could not send success notification: {notify_err}")
 
@@ -42908,7 +42939,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 if not suppress_notification:
                     try:
                         from .automations.actions import _send_expo_push
-                        await _send_expo_push(hass, "Battery", "Normal operation restored")
+                        await _send_expo_push(hass, "Battery", "Normal operation restored", notification_type="battery_restored")
                     except Exception as notify_err:
                         _LOGGER.debug(f"Could not send success notification: {notify_err}")
 
@@ -42956,7 +42987,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 if not suppress_notification:
                     try:
                         from .automations.actions import _send_expo_push
-                        await _send_expo_push(hass, "Battery", "Normal operation restored")
+                        await _send_expo_push(hass, "Battery", "Normal operation restored", notification_type="battery_restored")
                     except Exception as notify_err:
                         _LOGGER.debug(f"Could not send success notification: {notify_err}")
 
@@ -42998,7 +43029,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 if not suppress_notification:
                     try:
                         from .automations.actions import _send_expo_push
-                        await _send_expo_push(hass, "Battery", "Normal operation restored")
+                        await _send_expo_push(hass, "Battery", "Normal operation restored", notification_type="battery_restored")
                     except Exception as notify_err:
                         _LOGGER.debug(f"Could not send success notification: {notify_err}")
 
@@ -43040,7 +43071,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 if not suppress_notification:
                     try:
                         from .automations.actions import _send_expo_push
-                        await _send_expo_push(hass, "Battery", "Normal operation restored")
+                        await _send_expo_push(hass, "Battery", "Normal operation restored", notification_type="battery_restored")
                     except Exception as notify_err:
                         _LOGGER.debug(f"Could not send success notification: {notify_err}")
 
@@ -43124,7 +43155,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 if not suppress_notification:
                     try:
                         from .automations.actions import _send_expo_push
-                        await _send_expo_push(hass, "Battery", "Normal operation restored")
+                        await _send_expo_push(hass, "Battery", "Normal operation restored", notification_type="battery_restored")
                     except Exception as notify_err:
                         _LOGGER.debug(f"Could not send success notification: {notify_err}")
 
@@ -43166,7 +43197,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 if not suppress_notification:
                     try:
                         from .automations.actions import _send_expo_push
-                        await _send_expo_push(hass, "Battery", "Normal operation restored")
+                        await _send_expo_push(hass, "Battery", "Normal operation restored", notification_type="battery_restored")
                     except Exception as notify_err:
                         _LOGGER.debug(f"Could not send success notification: {notify_err}")
 
@@ -43231,7 +43262,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 if not suppress_notification:
                     try:
                         from .automations.actions import _send_expo_push
-                        await _send_expo_push(hass, "Battery", "Normal operation restored")
+                        await _send_expo_push(hass, "Battery", "Normal operation restored", notification_type="battery_restored")
                     except Exception as notify_err:
                         _LOGGER.debug(f"Could not send success notification: {notify_err}")
 
@@ -43545,7 +43576,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         await _send_expo_push(
                             hass,
                             "Battery Alert",
-                            "Tariff not restored - check TOU schedule"
+                            "Tariff not restored - check TOU schedule",
+                            notification_type="battery_restore_failed",
                         )
                     except Exception as notify_err:
                         _LOGGER.debug(f"Could not send notification: {notify_err}")
@@ -43619,7 +43651,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         await _send_expo_push(
                             hass,
                             "Battery Alert",
-                            "Mode restore failed - check settings"
+                            "Mode restore failed - check settings",
+                            notification_type="battery_restore_failed",
                         )
                     except Exception as notify_err:
                         _LOGGER.debug(f"Could not send notification: {notify_err}")
@@ -43664,7 +43697,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                         await _send_expo_push(
                                             hass,
                                             "Battery",
-                                            f"Reserve at 0% (battery {current_soc:.0f}%) - set manually"
+                                            f"Reserve at 0% (battery {current_soc:.0f}%) - set manually",
+                                            notification_type="battery_reserve_warning",
                                         )
                                     except Exception as notify_err:
                                         _LOGGER.debug(f"Could not send notification: {notify_err}")
@@ -43863,6 +43897,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             hass,
                             "Battery Alert",
                             f"Reserve restore failed ({target_reserve}%)",
+                            notification_type="battery_restore_failed",
                         )
                     except Exception as notify_err:
                         _LOGGER.debug(
@@ -43948,7 +43983,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     await _send_expo_push(
                         hass,
                         "Battery",
-                        "Normal operation restored"
+                        "Normal operation restored",
+                        notification_type="battery_restored",
                     )
                 except Exception as notify_err:
                     _LOGGER.debug(f"Could not send success notification: {notify_err}")
@@ -51485,6 +51521,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                             hass,
                                             "VPP Spike",
                                             f"${region_price:.0f}/MWh - discharging battery",
+                                            notification_type="vpp_spike",
                                         )
                                     except Exception as notify_err:
                                         _LOGGER.debug(f"VPP: Could not send spike notification: {notify_err}")
@@ -51515,6 +51552,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                         hass,
                                         "VPP Spike Ended",
                                         f"Price normalized to ${region_price:.0f}/MWh",
+                                        notification_type="vpp_spike_ended",
                                     )
                                 except Exception as notify_err:
                                     _LOGGER.debug(f"VPP: Could not send spike end notification: {notify_err}")

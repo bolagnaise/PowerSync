@@ -525,7 +525,8 @@ class AutomationEngine:
                     from .actions import _send_expo_push
                     await _send_expo_push(
                         self._hass, "⚠️ Automation Error",
-                        f"'{automation.get('name', 'Unknown')}' failed to evaluate: {e}"
+                        f"'{automation.get('name', 'Unknown')}' failed to evaluate: {e}",
+                        notification_type="automation_error",
                     )
                 except Exception:
                     pass
@@ -1092,62 +1093,9 @@ class AutomationEngine:
         )
 
         # Send push notification to PowerSync mobile app via Expo Push API
-        await self._async_send_expo_push(message)
+        from .actions import _send_expo_push
 
-    async def _async_send_expo_push(self, message: str, title: str = "PowerSync") -> None:
-        """Send push notification via Expo Push API."""
-        from ..const import DOMAIN
-        import aiohttp
-
-        # Get registered push tokens
-        push_tokens = self._hass.data.get(DOMAIN, {}).get("push_tokens", {})
-        if not push_tokens:
-            _LOGGER.warning("📱 No push tokens registered, skipping push notification")
-            return
-
-        _LOGGER.info(f"📱 Found {len(push_tokens)} registered push token(s)")
-
-        # Prepare messages for Expo Push API
-        messages = []
-        skipped_tokens = 0
-        for token_data in push_tokens.values():
-            token = token_data.get("token")
-            platform = token_data.get("platform", "unknown")
-            device = token_data.get("device_name", "unknown")
-            if token and token.startswith("ExponentPushToken"):
-                messages.append({
-                    "to": token,
-                    "title": title,
-                    "body": message,
-                    "sound": "default",
-                    "priority": "high",
-                })
-                _LOGGER.debug(f"📱 Including token for {device} ({platform})")
-            else:
-                skipped_tokens += 1
-                _LOGGER.warning(f"📱 Skipping non-Expo token for {device} ({platform}): {token[:30] if token else 'None'}...")
-
-        if not messages:
-            _LOGGER.warning(f"📱 No valid Expo push tokens found (skipped {skipped_tokens} invalid tokens)")
-            return
-
-        # Send to Expo Push API
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    "https://exp.host/--/api/v2/push/send",
-                    json=messages,
-                    headers={"Content-Type": "application/json"},
-                ) as response:
-                    if response.status == 200:
-                        result = await response.json()
-                        _LOGGER.info(f"📱 Push notification sent to {len(messages)} device(s)")
-                        _LOGGER.debug(f"Expo Push response: {result}")
-                    else:
-                        text = await response.text()
-                        _LOGGER.error(f"Expo Push API error: {response.status} - {text}")
-        except Exception as e:
-            _LOGGER.error(f"Failed to send Expo push notification: {e}")
+        await _send_expo_push(self._hass, "PowerSync", message, notification_type="automation")
 
     async def _async_get_ev_state(self) -> Dict[str, Any]:
         """Get EV state from Tesla Fleet or other EV integrations."""

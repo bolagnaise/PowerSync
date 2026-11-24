@@ -8281,7 +8281,7 @@ async def execute_actions(
             else:
                 _LOGGER.warning(f"Action '{action_type}' returned False")
                 try:
-                    await _send_expo_push(hass, "⚠️ Automation Action Failed", f"Action '{action_type}' did not complete successfully")
+                    await _send_expo_push(hass, "⚠️ Automation Action Failed", f"Action '{action_type}' did not complete successfully", notification_type="automation_error")
                 except Exception:
                     pass
         except Exception as e:
@@ -8289,7 +8289,7 @@ async def execute_actions(
                 advanced_success = False
             _LOGGER.error(f"Error executing action '{action.get('action_type')}': {e}")
             try:
-                await _send_expo_push(hass, "⚠️ Automation Error", f"Action '{action.get('action_type')}' failed: {e}")
+                await _send_expo_push(hass, "⚠️ Automation Error", f"Action '{action.get('action_type')}' failed: {e}", notification_type="automation_error")
             except Exception:
                 pass
 
@@ -9342,16 +9342,23 @@ async def _action_send_notification(
 
     try:
         # Send push notification to PowerSync app via Expo Push API
-        await _send_expo_push(hass, title, message)
+        await _send_expo_push(hass, title, message, notification_type="automation")
         return True
     except Exception as e:
         _LOGGER.error(f"Failed to send notification: {e}")
         return False
 
 
-async def _send_expo_push(hass: HomeAssistant, title: str, message: str) -> None:
-    """Send push notification via Expo Push API."""
+async def _send_expo_push(
+    hass: HomeAssistant,
+    title: str,
+    message: str,
+    *,
+    notification_type: str | None = None,
+) -> None:
+    """Send an Expo push to devices that accept this notification type."""
     from ..const import DOMAIN
+    from ..notification_preferences import push_notification_enabled
     import aiohttp
 
     _LOGGER.info(f"📱 PUSH DEBUG: Attempting to send notification - Title: '{title}', Message: '{message}'")
@@ -9369,6 +9376,8 @@ async def _send_expo_push(hass: HomeAssistant, title: str, message: str) -> None
     skipped_tokens = 0
     for _device_id, token_data in push_tokens.items():
         token = token_data.get("token")
+        if token and not push_notification_enabled(hass, token, notification_type):
+            continue
         platform = token_data.get("platform", "unknown")
         device = token_data.get("device_name", "unknown")
         registered_at = token_data.get("registered_at", "unknown")
@@ -9398,7 +9407,7 @@ async def _send_expo_push(hass: HomeAssistant, title: str, message: str) -> None
             )
 
     if not messages:
-        _LOGGER.warning(f"📱 PUSH DEBUG: No valid Expo push tokens found (skipped {skipped_tokens} invalid tokens)")
+        _LOGGER.debug("No eligible push devices (skipped %d invalid tokens)", skipped_tokens)
         return
 
     _LOGGER.info(f"📱 PUSH DEBUG: Sending {len(messages)} message(s) to Expo Push API")
@@ -10861,7 +10870,8 @@ async def _action_start_ev_charging(
                     )
                 if stop_success:
                     await _send_expo_push(
-                        hass, "EV Charging", "Stopped - time window ended"
+                        hass, "EV Charging", "Stopped - time window ended",
+                        notification_type="ev_charge_stopped",
                     )
                 else:
                     # This path uses the non-dynamic stop action, so it does
@@ -13161,7 +13171,8 @@ async def _solar_surplus_switch_to_next_vehicle(
     try:
         await _send_expo_push(
             hass, "EV Charging",
-            f"{completed_name} charge complete — checking other vehicles"
+            f"{completed_name} charge complete — checking other vehicles",
+            notification_type="ev_charge_completed",
         )
     except Exception:
         pass
@@ -13198,7 +13209,8 @@ async def _solar_surplus_switch_to_next_vehicle(
                 continue
             await _send_expo_push(
                 hass, "EV Charging",
-                f"Solar surplus switching to {name}"
+                f"Solar surplus switching to {name}",
+                notification_type="ev_vehicle_switched",
             )
         except Exception as e:
             _LOGGER.error(f"Solar surplus fallback: Failed to start {name}: {e}")
@@ -16401,7 +16413,12 @@ async def _dynamic_ev_update_surplus(
                             hass,
                             "EV Charging",
                             f"{vehicle_name} {'stop pending' if state.get('stop_outcome') else 'paused'} "
-                            f"- battery low ({battery_soc:.0f}%)"
+                            f"- battery low ({battery_soc:.0f}%)",
+                            notification_type=(
+                                "ev_charge_stop_pending"
+                                if state.get("stop_outcome")
+                                else "ev_charge_paused"
+                            ),
                         )
                     except Exception as e:
                         _LOGGER.debug(f"Could not send pause notification: {e}")
@@ -16455,7 +16472,8 @@ async def _dynamic_ev_update_surplus(
                         await _send_expo_push(
                             hass,
                             "EV Charging",
-                            f"{vehicle_name} resumed"
+                            f"{vehicle_name} resumed",
+                            notification_type="ev_charge_resumed",
                         )
                     except Exception as e:
                         _LOGGER.debug(f"Could not send resume notification: {e}")
@@ -16774,7 +16792,12 @@ async def _dynamic_ev_update_surplus(
                             hass,
                             "EV Charging",
                             (f"{vehicle_name}: solar availability trial started"
-                             if load_probe_amps else f"{vehicle_name} started - {surplus_kw:.1f}kW solar")
+                             if load_probe_amps else f"{vehicle_name} started - {surplus_kw:.1f}kW solar"),
+                            notification_type=(
+                                "ev_solar_trial_started"
+                                if load_probe_amps
+                                else "ev_charge_started"
+                            ),
                         )
                     except Exception as e:
                         _LOGGER.debug(f"Could not send solar start notification: {e}")
@@ -18630,7 +18653,8 @@ async def _dynamic_ev_update(
                 )
                 if stop_success:
                     await _send_expo_push(
-                        hass, "EV Charging", "Stopped - time window ended"
+                        hass, "EV Charging", "Stopped - time window ended",
+                        notification_type="ev_charge_stopped",
                     )
                 return
 
@@ -21152,7 +21176,8 @@ async def _action_start_ev_charging_dynamic_locked(
             await _send_expo_push(
                 hass,
                 "EV Charging",
-                f"{vehicle_name} started"
+                f"{vehicle_name} started",
+                notification_type="ev_charge_started",
             )
         except Exception as e:
             _LOGGER.debug(f"Could not send start notification: {e}")
@@ -21703,6 +21728,7 @@ async def _action_stop_ev_charging_dynamic(
                         hass,
                         "EV Charging",
                         f"{vehicle_name} {reason}",
+                        notification_type="ev_charge_stopped",
                     )
                 except Exception as e:
                     _LOGGER.debug(f"Could not send stop notification: {e}")

@@ -3873,6 +3873,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
                             self.hass,
                             "Grid Outage Detected",
                             "Your Powerwall is running off-grid. Grid power is unavailable.",
+                            notification_type="grid_outage",
                         )
                     else:
                         _LOGGER.info(
@@ -3883,6 +3884,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
                             self.hass,
                             "Grid Power Restored",
                             "Grid power has been restored. Your Powerwall is back on-grid.",
+                            notification_type="grid_restored",
                         )
                 except Exception:
                     pass
@@ -4040,6 +4042,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
                         self.hass,
                         "Tesla Server Recovered",
                         f"Tesla API is back online after {outage_mins} min outage",
+                        notification_type="tesla_api_recovered",
                     )
                 except Exception:
                     pass
@@ -4076,6 +4079,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
                         "PowerSync Connection Expired",
                         "Re-authenticate in Home Assistant Settings > Repairs. "
                         "Automations and battery control may be unavailable.",
+                        notification_type="connection_expired",
                     )
                 except Exception as notify_err:
                     _LOGGER.debug(
@@ -4106,6 +4110,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
                         self.hass,
                         "Tesla Server Outage",
                         f"Tesla API unreachable — optimization paused. Error: {err}",
+                        notification_type="tesla_api_outage",
                     )
                 except Exception:
                     pass
@@ -4119,6 +4124,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
                         self.hass,
                         "Tesla Server Outage",
                         f"Tesla API still unreachable after {outage_mins} min",
+                        notification_type="tesla_api_outage",
                     )
                 except Exception:
                     pass

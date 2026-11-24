@@ -54,7 +54,7 @@ def update_storm_watch_alert(hass, entry_id: str, site_id: str, active: object) 
         try:
             from .automations.actions import _send_expo_push
 
-            await asyncio.wait_for(_send_expo_push(hass, _TITLE, _MESSAGE), timeout=20)
+            await asyncio.wait_for(_send_expo_push(hass, _TITLE, _MESSAGE, notification_type="storm_watch"), timeout=20)
         except Exception:
             _LOGGER.exception("Could not send Storm Watch push notification")
 
