@@ -1157,8 +1157,8 @@ async def async_read_independent_tesla_vehicle(
 
 
 async def async_read_stopped_tesla_cleanup(hass, entry, vehicle_id, after, *, authorize,
-                                         preferred_entity_id=None):
-    """Return a source fence for one cleanup-only native stopped read."""
+                                         preferred_entity_id=None, cached_only=False):
+    """Return a source fence for a cleanup-only native stopped report."""
     from datetime import datetime
     from .const import DOMAIN, CONF_EV_PROVIDER, EV_PROVIDER_BOTH, EV_PROVIDER_FLEET_API
     from .tesla_ev_recovery import get_vehicle_route, _compatible
@@ -1219,11 +1219,17 @@ async def async_read_stopped_tesla_cleanup(hass, entry, vehicle_id, after, *, au
     try:
         if not allowed():
             return None
-        observation = await async_read_independent_tesla_vehicle(
-            hass, vehicle_id, preferred_entity_id=preferred, timeout=5,
-            updated_after=cutoff, allow_paid_refresh=binding.get("domain") == "teslemetry",
-            authorize=allowed)
-        if not allowed() or observation is None or observation.origin != "native_cloud":
+        if cached_only:
+            observation = get_tesla_vehicle_observation(
+                hass, vehicle_id, preferred_entity_id=preferred, updated_after=cutoff)
+            origin = "native_coordinator"
+        else:
+            observation = await async_read_independent_tesla_vehicle(
+                hass, vehicle_id, preferred_entity_id=preferred, timeout=5,
+                updated_after=cutoff, allow_paid_refresh=binding.get("domain") == "teslemetry",
+                authorize=allowed)
+            origin = "native_cloud"
+        if not allowed() or observation is None or observation.origin != origin:
             return None
         if any(getattr(observation, key) != binding.get(key) for key in (
                 "vin", "domain", "config_entry_id", "device_id", "producer_identity")):
@@ -1238,6 +1244,13 @@ async def async_read_stopped_tesla_cleanup(hass, entry, vehicle_id, after, *, au
                     observation.charger_actual_current, observation.charger_power))):
             return None
         proof_at = stamp
+        if cached_only:
+            def cached_report_current():
+                return (source_current() and get_tesla_vehicle_observation(
+                    hass, vehicle_id, preferred_entity_id=preferred, updated_after=cutoff,
+                ) == observation)
+
+            return cached_report_current
         return source_current
     except asyncio.CancelledError:
         raise

@@ -47,6 +47,7 @@ from homeassistant.util import dt as dt_util
 
 from ..teslemetry_solar import guard_ev_control
 from ..native_rate_admission import (
+    SiteImportAdmissionDenied,
     prepare_ev_submission,
     validate_ev_submission,
     bind_vehicle,
@@ -10779,7 +10780,17 @@ async def _action_start_ev_charging(
                 return None
             if await _tesla_ha_command_entity(hass, config_entry, params, "start") != charge_switch_entity:
                 return False
-            if not await prepare_ev_submission(hass, charge_switch_entity, operation="start"):
+            try:
+                admitted = await prepare_ev_submission(hass, charge_switch_entity, operation="start")
+            except SiteImportAdmissionDenied as error:
+                # A Fleet-only route has no earlier local Start to reconcile.
+                # This exact admission check runs before the Fleet writer.
+                boost_result = params.get("_boost_start_result")
+                if ev_provider != EV_PROVIDER_FLEET_API or not isinstance(boost_result, dict):
+                    raise
+                boost_result["not_submitted"] = str(error)
+                return False
+            if not admitted:
                 return False
             if not request_authority():
                 return None

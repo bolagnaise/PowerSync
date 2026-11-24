@@ -135,6 +135,9 @@ class BoostHarness:
         self.ev_actions = SimpleNamespace(
             _dynamic_ev_state=self.states,
             _canonical_dynamic_tesla_vehicle_id=self.canonical,
+            _solar_controller_waited_without_start=compile_node(
+                source_node(ROOT / "automations/actions.py", "_solar_controller_waited_without_start"), {},
+            ),
         )
         # Model the real action boundaries: the gate grants the separate
         # cleanup lane only to explicitly named Stop entry points.

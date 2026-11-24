@@ -18802,6 +18802,42 @@ def test_manual_tesla_fleet_key_rejection_is_request_scoped_and_safe(monkeypatch
 
 
 
+def test_boost_fleet_admission_denial_proves_start_was_not_submitted(monkeypatch):
+    from power_sync.native_rate_admission import SiteImportAdmissionDenied
+
+    vin = "LRW3F7FS1NC484342"
+    entity = "switch.car_charge"
+    hass = _Hass([_State(entity, "off")])
+    entry = _tesla_entry()
+    entry.options = {"ev_provider": "both"}
+    _install_native_ha_writer(hass, vin, entity)
+    route = {"kind": "ha", "entity_id": entity}
+    monkeypatch.setattr(actions, "_tesla_transport_route", AsyncMock(return_value=route))
+    monkeypatch.setattr(actions, "_tesla_transport_authority", lambda *_args, **_kwargs: lambda: True)
+    monkeypatch.setattr(actions, "_tesla_ha_command_entity", AsyncMock(return_value=entity))
+    monkeypatch.setattr(actions, "_is_api_credit_available", lambda *_: True)
+    monkeypatch.setattr(actions, "_wake_tesla_ev_for_command", AsyncMock(return_value=True))
+    monkeypatch.setattr(actions, "_fresh_tesla_command_observation", AsyncMock(
+        return_value=SimpleNamespace(charge_state="Stopped", charger_actual_current=0, charger_power=0),
+    ))
+    denial = SiteImportAdmissionDenied("Native Max coexistence authority is unavailable")
+    prepare = AsyncMock(side_effect=denial)
+    send = AsyncMock()
+    monkeypatch.setattr(actions, "prepare_ev_submission", prepare)
+    monkeypatch.setattr(actions, "_run_native_tesla_service_command", send)
+    proof = {}
+    params = {"vehicle_vin": vin, "owner_mode": "boost", "_user_initiated": True,
+              "_boost_start_result": proof}
+
+    try:
+        result = asyncio.run(actions._action_start_ev_charging(hass, entry, params))
+    finally:
+        prepare.assert_awaited_once_with(hass, entity, operation="start")
+        send.assert_not_awaited()
+        assert hass.services.calls == []
+    assert result is False and proof == {"not_submitted": str(denial)}
+
+
 def test_legacy_teslemetry_bt_unavailable_switch_cannot_dispatch():
     """An unavailable native switch is not a usable legacy BT producer."""
     vin = "LRW3F7FS1NC484342"

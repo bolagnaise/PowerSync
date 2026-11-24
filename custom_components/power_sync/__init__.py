@@ -20919,11 +20919,12 @@ class ChargingBoostView(HomeAssistantView):
     def _boost_observation(self, vehicle_id: str, after: str | None = None) -> str | None:
         return _passive_ev_cleanup_observation(self._hass, self._config_entry, vehicle_id, after)
 
-    async def _independent_boost_stopped(self, vehicle_id, after, *, authorize):
+    async def _independent_boost_stopped(self, vehicle_id, after, *, authorize, cached_only=False):
         from .tesla_ev_observation import async_read_stopped_tesla_cleanup
 
         return await async_read_stopped_tesla_cleanup(
-            self._hass, self._config_entry, vehicle_id, after, authorize=authorize)
+            self._hass, self._config_entry, vehicle_id, after,
+            authorize=authorize, cached_only=cached_only)
 
     async def _save_boost_state(self, record: dict) -> bool:
         from .automations.ev_ownership import persist_ev_runtime_state
@@ -20997,8 +20998,7 @@ class ChargingBoostView(HomeAssistantView):
             if (not current() or self._boost_pairing_identity() != original_pairing
                     or ev_actions._dynamic_ev_state.get(self._config_entry.entry_id, {}).get(vehicle_id) is not state
                     or get_ev_ownership(self._hass, self._config_entry, vehicle_id)[1] is not lease
-                    or (evidence_current is not None and (
-                        record.get("superseded") or not evidence_current()))):
+                    or (evidence_current is not None and not evidence_current())):
                 retry(state, lease if lease is boost_ownership else None)
                 return
             # This is the retirement commit point: the stopped proof and its
@@ -21131,24 +21131,37 @@ class ChargingBoostView(HomeAssistantView):
             if observation == "stopped":
                 await retire(state, lease)
                 return
-            if (observation is None and not record.get("superseded")
-                    and not record.get("start_in_flight")
-                    and (dt_util.utcnow() >= deadline or record.get("stop_required"))
-                    and (boost_state is None or state is boost_state)
-                    and (lease is None or lease is boost_ownership)):
-                def read_current():
-                    return (current() and self._boost_pairing_identity() == original_pairing
-                            and not record.get("superseded") and not record.get("start_in_flight")
-                            and ev_actions._dynamic_ev_state.get(config_entry.entry_id, {}).get(vehicle_id) is state
-                            and get_ev_ownership(hass, config_entry, vehicle_id)[1] is lease)
+            superseded = bool(record.get("superseded"))
 
+            def read_current():
+                if (not current() or self._boost_pairing_identity() != original_pairing
+                        or bool(record.get("superseded")) != superseded or record.get("start_in_flight")
+                        or ev_actions._dynamic_ev_state.get(config_entry.entry_id, {}).get(vehicle_id) is not state
+                        or get_ev_ownership(hass, config_entry, vehicle_id)[1] is not lease):
+                    return False
+                if superseded:
+                    # A new waiting Solar Surplus owner may coexist with the
+                    # old receipt. Use only existing reports, with no Stop or
+                    # paid refresh under the replacement owner.
+                    return (record.get("unknown_start_outcome") is True
+                            and dt_util.utcnow() >= deadline
+                            and lease is not None and lease.get("owner_mode") == "solar_surplus"
+                            and state is not None and state.get("ownership") is lease
+                            and ev_actions._solar_controller_waited_without_start(state)
+                            and self._boost_observation(vehicle_id, observation_after) != "charging")
+                return ((boost_state is None or state is boost_state)
+                        and (lease is None or lease is boost_ownership))
+
+            if (observation is None and (dt_util.utcnow() >= deadline or record.get("stop_required"))
+                    and read_current()):
                 stopped_fence = await self._independent_boost_stopped(
                     vehicle_id, max(deadline, datetime.fromisoformat(observation_after)).isoformat()
-                    if observation_after else deadline.isoformat(), authorize=read_current)
+                    if observation_after else deadline.isoformat(),
+                    authorize=read_current, cached_only=superseded)
                 if not read_current():
                     return
                 if stopped_fence is not None:
-                    await retire(state, lease, evidence_current=stopped_fence)
+                    await retire(state, lease, evidence_current=lambda: read_current() and stopped_fence())
                     return
             if record.get("superseded"):
                 record["status"] = "superseded"

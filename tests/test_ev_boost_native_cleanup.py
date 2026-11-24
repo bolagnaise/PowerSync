@@ -140,6 +140,59 @@ async def test_native_cleanup_does_not_read_without_eligible_expired_scope(cloud
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("case", [
+    "fresh", "stale", "positive", "started", "other_owner", "changed_during_save", "positive_during_save",
+])
+async def test_superseded_failed_boost_accepts_fresh_cached_native_idle_under_waiting_solar(cloud_boost, case):
+    from power_sync.automations import ev_ownership
+
+    p = cloud_boost()
+    h = p.h
+    await h.start(VIN_A)
+    record = h.runtime["ev_boost_sessions"][VIN_A]
+    owner = ev_ownership.claim_ev_ownership(
+        h.hass, h.entry, VIN_A, owner_mode="manual" if case == "other_owner" else "solar_surplus",
+    )
+    assert record["superseded"] and record["unknown_start_outcome"]
+    state = {"active": True, "charging_started": False, "current_amps": 0,
+             "target_amps": 0, "ownership": owner}
+    if case == "started":
+        state["last_physical_restart_attempt_at"] = h.now
+    h.states["entry"][VIN_A] = state
+    deadline = datetime.fromisoformat(record["expires_at"])
+    h.now = deadline + timedelta(seconds=2)
+    p.coordinator.data = {"vin": VIN_A, **_charge(
+        deadline.timestamp() if case == "stale" else h.now.timestamp(),
+        state="Charging" if case == "positive" else "Stopped",
+        current=10 if case == "positive" else 0,
+        power=2 if case == "positive" else 0,
+    )}
+    if case in {"changed_during_save", "positive_during_save"}:
+        entered, release = asyncio.Event(), asyncio.Event()
+        h.store.pause, h.store.pause_after = (entered, release), h.store.saves+1
+        task = asyncio.create_task(h.due())
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        if case == "changed_during_save":
+            state["last_physical_restart_attempt_at"] = h.now
+        else:
+            h.now += timedelta(seconds=1)
+            p.coordinator.data = {"vin": VIN_A, **_charge(
+                h.now.timestamp(), state="Charging", current=10, power=2,
+            )}
+        release.set()
+        await asyncio.wait_for(task, timeout=1)
+    else:
+        await h.due()
+
+    assert (VIN_A in h.runtime["ev_boost_sessions"]) is (case != "fresh")
+    assert (VIN_A in h.store.saved["ev_runtime_state"]["boost_sessions"]) is (case != "fresh")
+    assert h.owner(VIN_A) is owner
+    assert h.states["entry"][VIN_A] is state
+    assert p.coordinator.api.calls == p.coordinator.api.refresh_calls == p.coordinator.api.wake_calls == []
+    assert h.stops() == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize('change', ['source', 'pairing', 'owner', 'generation'])
 async def test_native_cleanup_retirement_rechecks_proof_after_store_await(cloud_boost, change):
     p = cloud_boost()
