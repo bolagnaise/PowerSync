@@ -10,4 +10,8 @@ Boost can take over from a waiting Solar Surplus controller once fresh readings 
 
 Solar Surplus now keeps standby draw from triggering repeated Stop commands for an idle Tesla.
 
+## Tesla Bluetooth command recovery
+
+An old charging attempt could block Bluetooth recovery for a different car. When PowerSync can verify that the old commands were never sent and recovery never began, it closes that entry so recovery can continue for the affected car.
+
 Update through HACS and restart Home Assistant.
