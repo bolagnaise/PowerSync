@@ -149,3 +149,13 @@ def test_smart_schedule_logs_decision_changes_and_throttles_repeats(caplog):
 
 def test_ev_decision_logger_is_visible_on_a_default_warning_install():
     assert ev_ownership.EV_DECISION_LOGGER.getEffectiveLevel() <= logging.INFO
+
+
+def test_ev_decision_lines_mask_vins(caplog):
+    hass = _Hass()
+    caplog.set_level(logging.INFO, logger=ev_ownership.EV_DECISION_LOGGER.name)
+    ev_ownership.record_ev_refusal(
+        hass, _Entry(), "LRWYHCEK8TC828420", command="start_x", reason="busy",
+    )
+    assert "LRWYHCEK8TC828420" not in caplog.text
+    assert "LRWY*********8420" in caplog.text

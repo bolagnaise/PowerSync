@@ -48,6 +48,9 @@ EV_DECISION_LOGGER = logging.getLogger(
 )
 if EV_DECISION_LOGGER.level == logging.NOTSET or EV_DECISION_LOGGER.level > logging.INFO:
     EV_DECISION_LOGGER.setLevel(logging.INFO)
+from ..sensitive_logging import install_vin_log_filter  # noqa: E402
+
+install_vin_log_filter(EV_DECISION_LOGGER)  # these lines are shared in support threads
 _EV_QUICK_PARAM_KEYS = frozenset(
     {
         "charger_type",

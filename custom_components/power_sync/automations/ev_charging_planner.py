@@ -164,6 +164,9 @@ _EV_DECISION_LOGGER = logging.getLogger(
 )
 if _EV_DECISION_LOGGER.level == logging.NOTSET or _EV_DECISION_LOGGER.level > logging.INFO:
     _EV_DECISION_LOGGER.setLevel(logging.INFO)
+from ..sensitive_logging import install_vin_log_filter  # noqa: E402
+
+install_vin_log_filter(_EV_DECISION_LOGGER)
 AUTO_SCHEDULE_START_RETRY_MAX_SECONDS = 15 * 60
 PRICE_LEVEL_START_RETRY_BASE_SECONDS = 30
 PRICE_LEVEL_START_RETRY_MAX_SECONDS = 15 * 60
