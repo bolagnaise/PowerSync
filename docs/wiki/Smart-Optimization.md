@@ -602,9 +602,10 @@ For every electricity provider, No Idle mode replaces optimizer idle hold action
 with self-consumption. No Idle takes precedence over Charge By Time, so PowerSync
 does not retain an IDLE hold solely to keep the target SOC reachable. As a result,
 the battery may miss the configured Charge By Time target when serving forecast
-home load leaves too little charging time or headroom. The 24-hour Action Plan and
-battery-power graph show those periods as self-consumption and battery-to-home
-power.
+home load leaves too little charging time or headroom. PowerSync can keep a
+usable plan for the rest of the day when the solver verifies that plan at a
+lower reachable charge level. The 24-hour Action Plan and battery-power graph
+show those periods as self-consumption and battery-to-home power.
 
 ## EV charging in the plan
 

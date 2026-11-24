@@ -1334,6 +1334,72 @@ def test_disable_idle_reports_deadline_missed_after_last_charge(
     )
 
 
+@pytest.mark.parametrize("retry_fails", [False, True])
+def test_live_disable_idle_keeps_plan_when_full_deadline_is_unreachable(
+    battery_optimizer_module,
+    monkeypatch,
+    retry_fails,
+):
+    module = battery_optimizer_module
+    _select_backend(module, monkeypatch, "highs")
+    optimizer = _optimizer(
+        module,
+        backup_reserve=0.28,
+        hardware_reserve=0.10,
+        max_charge_w=4000,
+        horizon_hours=4,
+    )
+    optimizer.allow_greedy_fallback = False
+    optimizer.pre_window_slot = 3
+    optimizer.pre_window_soc_target = 0.60
+
+    if retry_fails:
+        solve = module._solve_lp_highs
+        calls = 0
+
+        def fail_recovery(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 3:
+                return module._HighsResult(None, False, "Infeasible", 8, None)
+            return solve(*args, **kwargs)
+
+        monkeypatch.setattr(module, "_solve_lp_highs", fail_recovery)
+
+    result = optimizer.optimize(
+        import_prices=[0.10, 0.40, 0.50, 0.55],
+        export_prices=[0.0, 0.0, 0.0, 0.60],
+        solar_forecast=[0.0] * 4,
+        load_forecast=[0.0, 0.0, 1.0, 0.0],
+        current_soc=0.20,
+        allow_battery_export=[False, False, False, True],
+        allow_grid_charge=True,
+        grid_charge_allowed=[True, False, False, False],
+        disable_idle=True,
+    )
+
+    if retry_fails:
+        assert calls == 3
+        assert result.solver_used == "self_consumption_hold"
+        assert result.degraded and not result.feasible
+        assert all(action.action == "self_consumption" for action in result.schedule.actions)
+        return
+
+    assert result.solver_used == "highs"
+    assert result.feasible and not result.degraded
+    assert result.lp_stats["deadline_unmet_after_mode_projection"] is True
+    assert result.lp_stats["pre_window_requested_effective_target"] > 0.59
+    first, _, household, export = result.schedule.actions
+    assert first.action == "charge"
+    assert household.action == "self_consumption"
+    assert household.battery_discharge_w == pytest.approx(1000)
+    assert household.soc == pytest.approx(0.50, abs=0.001)
+    assert export.action == "export"
+    assert export.soc >= 0.28 - 0.0001
+    assert all(action.action != "idle" for action in result.schedule.actions)
+    assert all(action.battery_charge_w == 0 for action in result.schedule.actions[1:])
+
+
 @pytest.mark.parametrize("cost_neutral_enabled", [False, True])
 def test_disable_idle_deadline_projection_uses_effective_runtime_action(
     battery_optimizer_module,

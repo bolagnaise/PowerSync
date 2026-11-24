@@ -63,6 +63,7 @@ PRE_WINDOW_REACHABILITY_MARGIN_SOC = 1e-6
 # can need six as the natural self-use boundary advances across adjacent base
 # slots, so keep a small bounded allowance before using the projected plan.
 MODE_PROJECTION_MAX_ITERATIONS = 8
+MODE_PROJECTION_DEADLINE_TOLERANCE_SOC = 0.0001
 MODE_PROJECTION_SELF_USE_REL_TOL = 1e-4
 # Coarse-period floor projection can move less than 20 Wh per contiguous
 # self-use run between otherwise identical command-mode passes. Keep the bound
@@ -3130,7 +3131,7 @@ class BatteryOptimizer:
             target_soc = float(target)
         except (AttributeError, TypeError, ValueError):
             return False
-        return projected_soc >= target_soc - 0.0001
+        return projected_soc >= target_soc - MODE_PROJECTION_DEADLINE_TOLERANCE_SOC
 
     @_record_lp_chain
     def _solve_lp(
@@ -3237,6 +3238,9 @@ class BatteryOptimizer:
             )
             required_self_use_kw: list[float] | None = None
             last_result: OptimizerResult | None = None
+            deadline_slot = self.pre_window_slot
+            requested_deadline_target: float | None = None
+            projected_deadline_soc_limit: float | None = None
             for iteration in range(MODE_PROJECTION_MAX_ITERATIONS):
                 result = self._solve_lp_inner(
                     n, import_prices, export_prices, solar, load, soc_0,
@@ -3274,6 +3278,7 @@ class BatteryOptimizer:
                     required_discharge_kw=fixed_manual_discharge,
                     ev_plan=ev_plan,
                     price_valid_slots=price_valid_slots,
+                    projected_deadline_soc_limit=projected_deadline_soc_limit,
                 )
                 result.lp_stats["mode_iterations"] = iteration + 1
                 if result.solver_used != "highs":
@@ -3291,6 +3296,30 @@ class BatteryOptimizer:
                             failure_reason = "iteration_limit"
                         else:
                             failure_reason = "failed"
+                        if (
+                            disable_idle
+                            and not self.allow_greedy_fallback
+                            and failure_status == int(highspy.HighsModelStatus.kInfeasible)
+                            and projected_deadline_soc_limit is None
+                            and iteration + 1 < MODE_PROJECTION_MAX_ITERATIONS
+                            and deadline_slot is not None
+                            and 0 < deadline_slot <= len(last_result.schedule.actions)
+                            and not self._schedule_meets_effective_deadline(
+                                last_result.schedule, last_result.lp_stats
+                            )
+                        ):
+                            # No Idle takes precedence over holding energy for
+                            # Charge By Time. Ask HiGHS to validate the deadline
+                            # SOC the previous commands actually projected.
+                            requested_deadline_target = last_result.lp_stats[
+                                "pre_window_effective_target"
+                            ]
+                            projected_deadline_soc_limit = max(
+                                0.0,
+                                last_result.schedule.actions[deadline_slot - 1].soc
+                                - MODE_PROJECTION_DEADLINE_TOLERANCE_SOC,
+                            )
+                            continue
                         _LOGGER.warning(
                             "Optimizer command-mode projection failed on pass %d "
                             "(%s); using the previous physically projected HiGHS plan",
@@ -3324,6 +3353,16 @@ class BatteryOptimizer:
                         return last_result
                     return result
 
+                if requested_deadline_target is not None:
+                    result.lp_stats["pre_window_requested_effective_target"] = (
+                        requested_deadline_target
+                    )
+                    result.lp_stats["deadline_unmet_after_mode_projection"] = (
+                        not self._schedule_meets_effective_deadline(
+                            result.schedule,
+                            {"pre_window_effective_target": requested_deadline_target},
+                        )
+                    )
                 next_modes, next_required = self._schedule_mode_constraints(
                     result.schedule,
                     n,
@@ -3339,6 +3378,13 @@ class BatteryOptimizer:
                     self.dt_hours,
                 ):
                     result.lp_stats["mode_converged"] = True
+                    if projected_deadline_soc_limit is not None and not (
+                        self._schedule_meets_effective_deadline(
+                            result.schedule, result.lp_stats
+                        )
+                    ):
+                        result.feasible = False
+                        result.reserve_recommendation = {}
                     return result
 
                 mode_slots = next_modes
@@ -3585,6 +3631,7 @@ class BatteryOptimizer:
         required_discharge_kw: list[float] | None = None,
         ev_plan: EVChargePlan | None = None,
         price_valid_slots: list[bool] | None = None,
+        projected_deadline_soc_limit: float | None = None,
     ) -> OptimizerResult:
         """Inner LP solver (separated for SOC-below-reserve guard in _solve_lp)."""
         formulation_start = time.monotonic()
@@ -5052,6 +5099,10 @@ class BatteryOptimizer:
                     self.pre_window_soc_target,
                     max_reachable - reachability_margin,
                 )
+                if projected_deadline_soc_limit is not None:
+                    pre_window_effective_target = min(
+                        pre_window_effective_target, projected_deadline_soc_limit
+                    )
                 A_ub_rows += 1
 
         if ev_charge_active:
