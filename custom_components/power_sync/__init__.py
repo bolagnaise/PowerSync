@@ -51186,6 +51186,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
             async def _network_envelope_changed(old, new) -> None:
                 """Apply downward controls immediately; authorize rises after solve."""
+                if old.mode == new.mode == "off":
+                    # Disabled envelopes do not contribute constraints to the plan.
+                    return
                 guard = hass.data[DOMAIN][entry.entry_id].get("network_export_guard")
                 if guard is None:
                     return

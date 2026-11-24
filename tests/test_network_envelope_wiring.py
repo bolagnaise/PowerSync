@@ -265,3 +265,53 @@ def test_telemetry_retry_is_background_and_deduplicated():
             await asyncio.gather(*created, return_exceptions=True)
 
     asyncio.run(exercise())
+
+
+def test_off_network_envelope_startup_keeps_optimizer_lifecycle_in_charge():
+    """Changes to unused envelope metadata must not start a solve."""
+    import asyncio
+    from datetime import datetime, timedelta, timezone
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, Mock
+
+    tree = ast.parse(_source("__init__.py"))
+    listener = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef)
+        and node.name == "_network_envelope_changed"
+    )
+    reoptimize = AsyncMock()
+    stop_export = AsyncMock()
+    guard = SimpleNamespace(approved_limit_w=0, reset_reoptimization_approval=Mock())
+    entry_data = {"network_export_guard": guard}
+    namespace = {
+        "DOMAIN": "power_sync",
+        "hass": SimpleNamespace(data={"power_sync": {"entry": entry_data}}),
+        "entry": SimpleNamespace(entry_id="entry"),
+        "network_envelope_semantic_fields": ("mode", "scope"),
+        "dt_util": SimpleNamespace(utcnow=lambda: datetime.now(timezone.utc)),
+        "timedelta": timedelta,
+        "optimization_coordinator": SimpleNamespace(_energy_telemetry_ready=lambda: True),
+        "_complete_network_envelope_reoptimization": reoptimize,
+        "_stop_guarded_network_export": stop_export,
+    }
+    module = ast.fix_missing_locations(ast.Module(body=[listener], type_ignores=[]))
+    exec(compile(module, "network_envelope_listener", "exec"), namespace)
+    changed = namespace["_network_envelope_changed"]
+    initial = SimpleNamespace(mode="off", scope=None)
+    off = SimpleNamespace(
+        mode="off", scope="aggregate_pcc", fault=None,
+        limit_for_interval=lambda *_: None,
+    )
+
+    asyncio.run(changed(initial, off))
+
+    reoptimize.assert_not_awaited()
+    stop_export.assert_not_awaited()
+    guard.reset_reoptimization_approval.assert_not_called()
+
+    asyncio.run(changed(SimpleNamespace(mode="monitoring", scope="aggregate_pcc"), off))
+
+    reoptimize.assert_awaited_once_with(off)
+    stop_export.assert_not_awaited()
+    guard.reset_reoptimization_approval.assert_called_once_with()
