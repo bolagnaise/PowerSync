@@ -2314,7 +2314,8 @@ def test_optimization_options_use_one_grouped_form_without_stale_replay():
     ):
         assert f'"{section}": {{' in implementation_source
     assert "if marker.schema in allowed_fields" in implementation_source
-    assert "marker.schema for marker in schema_fields" in implementation_source
+    assert "visible_fields.update(marker.schema for marker in section_schema)" in implementation_source
+    assert "self._optimization_visible_fields = visible_fields" in implementation_source
     assert "section(" in implementation_source
     assert (
         "self._optimization_submitted_fields = set(visible_fields)"
