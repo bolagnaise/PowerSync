@@ -3408,10 +3408,10 @@ class PsTodayCard extends PsCardBase {
     if (en.importCost) stats.push(stat('Grid cost', psEsc(psMoney(hass, money(en.importCost))), Number.isFinite(imported) ? `${psFix(imported)} kWh imported` : ''));
     if (en.exportEarnings) stats.push(stat('Export earnings', psEsc(psMoney(hass, money(en.exportEarnings))), Number.isFinite(exported) ? (exported < 0.05 ? 'Nothing exported' : `${psFix(exported)} kWh exported`) : ''));
     if (en.avgCost) {
-      const mtd = psNum(hass, en.mtdAvgCost);
-      const avg = psNum(hass, en.avgCost);
-      const avgMinor = Number.isFinite(avg) && avg < 5 ? avg * 100 : avg;
-      const mtdMinor = Number.isFinite(mtd) && mtd < 5 ? mtd * 100 : mtd;
+      // Convert by the sensor's unit, never by magnitude: a high major-unit
+      // average (for example a misconfigured supply charge) must stay visible.
+      const avgMinor = psMinor(hass, en.avgCost);
+      const mtdMinor = psMinor(hass, en.mtdAvgCost);
       stats.push(stat('Average net energy cost', `${psFix(avgMinor)}<small>${unit}/kWh</small>`, `Net cost per kWh used at home${Number.isFinite(mtdMinor) ? ` · Month to date ${mtdMinor.toFixed(1)} ${unit}` : ''}`));
     }
     if (en.netCost) {
