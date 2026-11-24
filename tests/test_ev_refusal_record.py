@@ -112,3 +112,36 @@ def test_dynamic_start_wrapper_records_a_fallback_reason():
     body = ast.unparse(wrapper)
     assert "ev_refusal_sequence(hass, config_entry) == refusal_seq" in body
     assert "record_ev_refusal(" in body
+
+
+def _decision_logger():
+    from conftest import load_source_node
+
+    planner = ROOT / "automations" / "ev_charging_planner.py"
+    node = load_source_node(planner, "_log_decision_change")
+    ns = {"time": __import__("time"), "_LOGGER": logging.getLogger("planner-test")}
+    exec(compile(ast.Module(body=[node], type_ignores=[]), str(planner), "exec",
+                 flags=__import__("__future__").annotations.compiler_flag), ns)
+    return ns["_log_decision_change"]
+
+
+class _ScheduleState:
+    def __init__(self, decision, reason, charging=False):
+        self.last_decision, self.last_decision_reason, self.is_charging = decision, reason, charging
+
+
+def test_smart_schedule_logs_decision_changes_and_throttles_repeats(caplog):
+    log_change = _decision_logger()
+    executor = types.SimpleNamespace(_state={VIN: _ScheduleState("waiting", "Home Load unavailable")})
+    caplog.set_level(logging.INFO, logger="planner-test")
+
+    log_change(executor, VIN, now=0.0)
+    log_change(executor, VIN, now=30.0)  # unchanged: suppressed
+    executor._state[VIN] = _ScheduleState("charging", "In planned solar window", True)
+    log_change(executor, VIN, now=60.0)  # changed: logged
+    log_change(executor, VIN, now=60.0 + 900)  # unchanged but due again
+
+    lines = [r.getMessage() for r in caplog.records if "EV decision: Smart Schedule" in r.getMessage()]
+    assert len(lines) == 3
+    assert "Home Load unavailable" in lines[0]
+    assert "-> charging (charging=True)" in lines[1]

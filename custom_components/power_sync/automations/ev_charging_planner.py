@@ -6389,6 +6389,7 @@ class AutoScheduleExecutor:
                 await self._evaluate_vehicle(vehicle_id, settings, live_status, current_price_cents)
             except Exception as e:
                 _LOGGER.error(f"Auto-schedule evaluation failed for {vehicle_id}: {e}")
+            self._log_decision_change(vehicle_id)
 
         await self._retry_curtailment_restoration()
         self._sync_inactive_smart_schedule_preserve_intent()
@@ -6405,6 +6406,31 @@ class AutoScheduleExecutor:
                 await sm.cleanup_stale_sessions(timeout_minutes=30)
         except Exception as cleanup_err:
             _LOGGER.warning("Stale EV session cleanup failed: %s", cleanup_err)
+
+    def _log_decision_change(self, vehicle_id: str, *, now: float | None = None) -> None:
+        """Log Smart Schedule's per-vehicle decision when it changes.
+
+        The reason (e.g. "Home Load unavailable", "No charging plan") otherwise
+        lives only in memory, so a car that never starts left no trace. An
+        unchanged decision is repeated at most every 15 minutes.
+        """
+        state = self._state.get(vehicle_id)
+        if state is None:
+            return
+        log = self.__dict__.setdefault("_decision_log", {})
+        key = (state.last_decision, bool(state.is_charging))
+        now = time.monotonic() if now is None else now
+        previous = log.get(vehicle_id)
+        if previous is not None and previous[0] == key and now - previous[1] < 900:
+            return
+        log[vehicle_id] = (key, now)
+        _LOGGER.info(
+            "EV decision: Smart Schedule %s -> %s (charging=%s): %s",
+            vehicle_id,
+            state.last_decision,
+            bool(state.is_charging),
+            state.last_decision_reason,
+        )
 
     def _is_effective_shared_loadpoint_profile(self, vehicle_id: str) -> bool:
         """Return whether this executor identity may automate its charger."""
