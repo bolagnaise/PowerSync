@@ -21237,8 +21237,8 @@ def _waiting_smart_schedule_ble_is_stopped(hass, entry, vehicle_id, state) -> bo
     )
 
 
-def _waiting_boost_bridge_is_stopped(hass, entry, vehicle_id, params) -> bool:
-    """Check the connected bridge that an unbound Both-mode Stop would use."""
+def _waiting_solar_bridge_is_stopped(hass, entry, vehicle_id, params) -> bool:
+    """Check whether the waiting Tesla's connected bridge proves it is idle."""
     from ..tesla_ble import (
         get_tesla_ble_charge_current_state, get_tesla_ble_charge_power_state,
         get_tesla_ble_charging_state, get_tesla_ble_connected_charge_sample_time,
@@ -21271,7 +21271,9 @@ def _waiting_boost_bridge_is_stopped(hass, entry, vehicle_id, params) -> bool:
     return not physical["charging"] and not physical["fresh_measurements"]
 
 
-async def _waiting_solar_tesla_is_stopped(hass, entry, vehicle_id, state, params, *, handoff=None):
+async def _waiting_solar_tesla_is_stopped(
+    hass, entry, vehicle_id, state, params, *, handoff=None, solar_ceiling=False,
+):
     """Prove that a waiting Solar Surplus session has no Tesla charge to stop."""
     from ..tesla_ev_observation import MAX_SOURCE_AGE_SECONDS, get_tesla_vehicle_observation
     from ..tesla_ev_recovery import ev_recovery_status, get_vehicle_route
@@ -21281,18 +21283,32 @@ async def _waiting_solar_tesla_is_stopped(hass, entry, vehicle_id, state, params
     route = get_vehicle_route(hass, entry, vehicle_id)
     provider = _get_ev_config(entry)["ev_provider"]
     unbound_both = route is None and handoff in ("smart_schedule", "boost") and provider == EV_PROVIDER_BOTH
-    if route is None:
-        if provider != EV_PROVIDER_FLEET_API and not unbound_both:
-            return False
-    elif route.get("kind") != "ha" or route.get("cleanup_only"):
+    if route is not None and (route.get("kind") != "ha" or route.get("cleanup_only")):
         return False
 
+    bridge_allowed = (
+        provider == EV_PROVIDER_BOTH and (handoff == "boost" or solar_ceiling)
+        and not params.get("_tesla_command_entity_id")
+    )
+    if bridge_allowed and route is not None:
+        # Fleet may retain the command route while the matched bridge has the
+        # newer reading. Require both routes to identify the same vehicle.
+        entity = route.get("entity_id")
+        binding = _tesla_native_binding(hass, entity, vehicle_id) if entity else None
+        identity = _tesla_native_binding_identity(binding)
+        bridge_allowed = (
+            identity is not None and identity["platform"] == "tesla_fleet"
+            and identity == route.get("entity_identity")
+            and route.get("vehicle_id") == vehicle_id
+        )
     if (
-        unbound_both and handoff == "boost" and not params.get("_tesla_command_entity_id")
+        bridge_allowed
         and ev_recovery_status(hass, entry, vehicle_id).get("recovery_required") is False
-        and _waiting_boost_bridge_is_stopped(hass, entry, vehicle_id, params)
+        and _waiting_solar_bridge_is_stopped(hass, entry, vehicle_id, params)
     ):
         return True
+    if route is None and provider != EV_PROVIDER_FLEET_API and not unbound_both:
+        return False
 
     entity = await _tesla_ha_command_entity(hass, entry, {**params, "vehicle_vin": vehicle_id}, "stop")
     if not entity or not _solar_controller_waited_without_start(state) or get_vehicle_route(hass, entry, vehicle_id) != route:
@@ -21572,6 +21588,7 @@ async def _action_stop_ev_charging_dynamic(
                     if await _waiting_solar_tesla_is_stopped(
                         hass, config_entry, vid, state, state_params,
                         handoff=params.get("_waiting_solar_handoff"),
+                        solar_ceiling=params.get("_solar_ceiling_stop") is True,
                     ):
                         headroom = hass.data.get(DOMAIN, {}).get(entry_id, {}).get("solar_ev_headroom")
                         if (

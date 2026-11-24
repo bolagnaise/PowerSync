@@ -7349,6 +7349,10 @@ def test_solar_surplus_disable_preserves_manual_solar_policy(monkeypatch):
         ("both_native_anchor", False),
         ("both_stale_anchor", True),
         ("both_stock_idle", True),
+        ("both_stock_idle_bound_fleet", True),
+        ("both_stock_foreign_fleet", True),
+        ("both_stock_bound_recovery_required", True),
+        ("both_stock_bound_newer_draw", True),
         ("both_stock_stale", True),
         ("both_stock_wrong_producer", True),
         ("both_stock_positive_current", True),
@@ -7393,7 +7397,9 @@ def test_solar_surplus_releases_only_verified_idle_tesla(
                     reading.last_updated -= timedelta(minutes=10)
         current = "5" if scenario == "both_stock_positive_current" else "0"
         states.append(_State("sensor.car_charge_current", current, last_updated=stamp))
-        if transition == "boost" and scenario == "both_stock_idle":
+        if transition in {"boost", "charge_ceiling"} and scenario in {
+            "both_stock_idle", "both_stock_idle_bound_fleet",
+        }:
             expect_physical_stop = False
     hass = _Hass(states)
     if scenario == "both_stock_wrong_producer":
@@ -7428,7 +7434,7 @@ def test_solar_surplus_releases_only_verified_idle_tesla(
         state["last_physical_restart_attempt_at"] = now - timedelta(seconds=5)
     monkeypatch.setitem(actions._dynamic_ev_state, entry.entry_id, {vehicle_id: state})
     ev_ownership.claim_ev_ownership(hass, entry, vehicle_id, owner_mode="solar_surplus")
-    if scenario in {"newer_exact_draw", "older_exact_draw", "other_vehicle_draw"}:
+    if scenario in {"newer_exact_draw", "older_exact_draw", "other_vehicle_draw", "both_stock_bound_newer_draw"}:
         observed_vehicle = "LRW3F7FS1NC484343" if scenario == "other_vehicle_draw" else vehicle_id
         measured_at = now - timedelta(seconds=3) if scenario == "older_exact_draw" else now
         hass.data["power_sync"][entry.entry_id]["tesla_coordinator"] = SimpleNamespace(data={
@@ -7436,14 +7442,19 @@ def test_solar_surplus_releases_only_verified_idle_tesla(
             "last_update": measured_at,
         })
 
-    route = {"kind": "ha", "entity_id": charge_switch, "entity_identity": binding}
-    if scenario.startswith("both_"):
+    route = {"kind": "ha", "entity_id": charge_switch, "entity_identity": binding, "vehicle_id": vehicle_id}
+    if scenario.startswith("both_") and scenario not in {
+        "both_stock_idle_bound_fleet", "both_stock_foreign_fleet",
+        "both_stock_bound_recovery_required", "both_stock_bound_newer_draw",
+    }:
         route = None
+    if scenario == "both_stock_foreign_fleet":
+        route = {**route, "entity_identity": {**binding, "device_id": "other-fleet-device"}}
     if scenario == "unknown_route":
         route = {**route, "kind": "blocked", "reason": "native_recovery"}
     monkeypatch.setattr(tesla_ev_recovery, "get_vehicle_route", Mock(return_value=route))
     monkeypatch.setattr(tesla_ev_recovery, "ev_recovery_status", Mock(return_value={
-        "recovery_required": scenario == "unresolved_history",
+        "recovery_required": scenario in {"unresolved_history", "both_stock_bound_recovery_required"},
     }))
     monkeypatch.setattr(actions, "_tesla_ha_command_entity", AsyncMock(return_value=charge_switch))
     monkeypatch.setattr(actions, "_tesla_vehicle_away_location", AsyncMock(return_value=None))
@@ -7518,7 +7529,7 @@ def test_solar_surplus_releases_only_verified_idle_tesla(
         assert physical_stop.await_args.args[2]["vehicle_vin"] == vehicle_id
     else:
         physical_stop.assert_not_awaited()
-        if scenario == "both_stock_idle":
+        if scenario in {"both_stock_idle", "both_stock_idle_bound_fleet"}:
             observe.assert_not_called()
         else:
             assert observe.call_args.args == (hass, vehicle_id)
