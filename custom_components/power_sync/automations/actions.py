@@ -15571,6 +15571,30 @@ async def _refresh_dynamic_tesla_charger_capability(
     return True
 
 
+
+# Without a measured draw, an external manual override cannot outlive this.
+EXTERNAL_MANUAL_OVERRIDE_STALE_SECONDS = 30 * 60
+
+
+def _external_manual_override_stale(
+    state: Dict[str, Any],
+    *,
+    power_available: bool,
+    power_kw: float,
+    now: float | None = None,
+) -> bool:
+    """Whether a suspended Solar Surplus session lost its evidence of charging."""
+    now = time.time() if now is None else now
+    since = state.get("external_manual_override_since")
+    if not isinstance(since, (int, float)) or not math.isfinite(since):
+        # Restored/legacy state: start the window now rather than never.
+        state["external_manual_override_since"] = now
+        return False
+    if power_available and power_kw > _ACTIVE_EV_POWER_EPSILON_KW:
+        return False
+    return now - since >= EXTERNAL_MANUAL_OVERRIDE_STALE_SECONDS
+
+
 async def _dynamic_ev_update_surplus(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
@@ -15999,6 +16023,21 @@ async def _dynamic_ev_update_surplus(
                 and observed_current_power_kw <= _ACTIVE_EV_POWER_EPSILON_KW
             )
         )
+        if not external_manual_charge_ended and _external_manual_override_stale(
+            state,
+            power_available=current_vehicle_power_available,
+            power_kw=observed_current_power_kw,
+        ):
+            # A sleeping car sends no charge-end telemetry. Past the window,
+            # only a measured draw keeps Solar Surplus suspended; if the
+            # external session is real, the yield path re-detects it.
+            _LOGGER.info(
+                "Solar surplus EV: external manual override for %s has no "
+                "measured draw after %d min; resuming automated control",
+                vehicle_id,
+                EXTERNAL_MANUAL_OVERRIDE_STALE_SECONDS // 60,
+            )
+            external_manual_charge_ended = True
         if not external_manual_charge_ended:
             state["reason"] = (
                 "External manual charging active; Solar Surplus rate control suspended"
@@ -16061,6 +16100,7 @@ async def _dynamic_ev_update_surplus(
             vehicle_id,
         )[1]
         state["external_manual_override"] = True
+        state["external_manual_override_since"] = time.time()
         state["external_start_detection_armed"] = False
         state["reason"] = (
             "External manual charging active; Solar Surplus rate control suspended"
@@ -16110,6 +16150,7 @@ async def _dynamic_ev_update_surplus(
                 )
                 return
             state["external_manual_override"] = True
+            state["external_manual_override_since"] = time.time()
             state["external_start_detection_armed"] = False
             state["reason"] = (
                 "External manual charging active; Solar Surplus rate control suspended"
