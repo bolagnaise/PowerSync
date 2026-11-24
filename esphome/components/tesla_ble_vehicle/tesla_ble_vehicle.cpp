@@ -52,6 +52,7 @@ namespace esphome
       this->loadSessionInfo();
       if (recovery_proof_ != nullptr) setup_stop_recovery();
       publish_charge_on_solar();
+      publish_cos_pairing();
     }
 
     void TeslaBLEVehicle::initializeFlash()
@@ -827,6 +828,7 @@ namespace esphome
           // A correlated Charge on Solar reply is consumed here; the generic
           // handler would otherwise retry it or treat it as a polled read.
           if (handle_charge_on_solar_response(static_carserver_response_)) return;
+          if (handle_cos_pairing_response(static_carserver_response_)) return;
           log_carserver_response(TAG, &static_carserver_response_);
           if (static_carserver_response_.has_actionStatus && !command_queue_.empty())
           {
@@ -924,6 +926,7 @@ namespace esphome
     void TeslaBLEVehicle::loop()
     {
       tick_charge_on_solar();
+      tick_cos_pairing();
       if (recovery_proof_ && stop_recovery_.locked()) {
         if (!stop_recovery_.reading()) return;
         if (uint32_t(millis() - recovery_read_started_) >= 300000U) {
@@ -1176,6 +1179,7 @@ namespace esphome
 
       auto session = tesla_ble_client_->getPeer(domain);
       session->updateSession(session_info);
+      remember_vehicle_key(domain, *session_info);
 
       return 0;
     }
@@ -1709,6 +1713,7 @@ namespace esphome
         ESP_LOGE(TAG, "Failed to update session info");
         return return_code;
       }
+      remember_vehicle_key(domain, session_info);
       // save session info to NVS
       return_code = nvs_save_session_info(session_info, domain);
       if (return_code != 0)

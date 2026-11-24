@@ -3139,6 +3139,10 @@
       "name": "Read native Tesla Charge on Solar",
       "description": "Read settings through this car's PowerSync BLE bridge, PowerSync Fleet or Teslemetry. Cloud requests may cost credits; Teslemetry and BLE reads may wake the car. Turn off PowerSync EV sessions first."
     },
+    "get_charge_on_solar_pairing_status": {
+      "name": "Read Tesla Charge on Solar pairing status",
+      "description": "Read-only check of the four Charge on Solar pairing steps through local Powerwall access and this car's PowerSync BLE bridge. Changes nothing; the BLE read may wake the car."
+    },
     "set_teslemetry_charge_on_solar": {
       "name": "Set native Tesla Charge on Solar",
       "description": "Manage Tesla native solar charging and read back settings. Requires eligible Powerwall setup and a BLE bridge with the Charge on Solar package, PowerSync Fleet or Teslemetry. Cloud requests may cost credits; the car may wake."

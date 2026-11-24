@@ -1046,6 +1046,28 @@ get_teslemetry_charge_on_solar:
       selector:
         text:
 
+get_charge_on_solar_pairing_status:
+  name: Read Tesla Charge on Solar pairing status
+  description: >-
+    Read-only check of the four Tesla Charge on Solar pairing steps for one
+    car: the gateway's key and authorized clients over the LAN, and the car's
+    keys and managed charging sites through its PowerSync BLE bridge. Needs
+    local Powerwall signed access and the bridge's Charge on Solar package.
+    Changes nothing and does not read the Charge on Solar preference; the
+    BLE read may wake the car.
+  fields:
+    entry_id:
+      name: PowerSync integration
+      required: true
+      selector:
+        config_entry:
+          integration: power_sync
+    vin:
+      name: Vehicle VIN
+      required: true
+      selector:
+        text:
+
 set_teslemetry_charge_on_solar:
   name: Set native Tesla Charge on Solar
   description: >-

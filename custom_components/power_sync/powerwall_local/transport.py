@@ -1228,3 +1228,32 @@ class TEDAPIv1rTransport:
         except Exception as err:
             _LOGGER.debug("list_authorized_clients parse error: %s", err)
             return None
+
+    async def get_signed_commands_public_key(self, din: str) -> bytes | None:
+        """Read the gateway's own ECC key for signed commands over LAN.
+
+        This is the key a vehicle trusts for Charge on Solar (its
+        ROLE_CHARGING_MANAGER key and its managed charging site key). It is
+        a read and changes nothing on the gateway.
+        """
+        env = transport_pb2.MessageEnvelope()
+        env.delivery_channel = transport_pb2.DELIVERY_CHANNEL_HERMES_COMMAND
+        env.sender.authorized_client = 1
+        env.recipient.din = din
+        env.authorization.get_signed_commands_public_key_request.SetInParent()
+
+        resp = await self.post_v1r(env.SerializeToString(), din)
+        if not resp.ok or not resp.inner_bytes:
+            return None
+        try:
+            reply = transport_pb2.MessageEnvelope()
+            reply.ParseFromString(resp.inner_bytes)
+            if not reply.HasField("authorization") or not reply.authorization.HasField(
+                "get_signed_commands_public_key_response"
+            ):
+                return None
+            key = reply.authorization.get_signed_commands_public_key_response.pub_key_ecc
+            return bytes(key) or None
+        except Exception as err:
+            _LOGGER.debug("get_signed_commands_public_key parse error: %s", err)
+            return None

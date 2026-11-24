@@ -44,6 +44,7 @@ void TeslaBLEVehicle::request_charge_on_solar(const std::string &text) {
   const char *refusal = nullptr;
   if (recovery_proof_ && stop_recovery_.locked()) refusal = "recovery_locked";
   else if (this->node_state != espbt::ClientState::ESTABLISHED) refusal = "ble_disconnected";
+  else if (pair_.busy()) refusal = "pairing_busy";
   if (refusal != nullptr) {
     if (cos_.refuse(request, refusal)) publish_charge_on_solar();
     return;

@@ -11,6 +11,13 @@ text_sensor:
     name: "PowerSync Charge on Solar"
     entity_category: diagnostic
     update_interval: never
+  # Read-only pairing evidence: the car's managed charging sites and the
+  # vehicle keys this bridge learned from session info. Never writes.
+  - platform: template
+    id: powersync_cos_pairing
+    name: "PowerSync Charge on Solar Pairing"
+    entity_category: diagnostic
+    update_interval: never
 
 text:
   - platform: template
@@ -24,6 +31,18 @@ text:
     set_action:
       - lambda: |-
           id(tesla_ble_vehicle_id)->request_charge_on_solar(x);
+  - platform: template
+    name: "PowerSync Charge on Solar Pairing Request"
+    entity_category: config
+    mode: text
+    min_length: 0
+    max_length: 40
+    optimistic: true
+    restore_value: false
+    set_action:
+      - lambda: |-
+          id(tesla_ble_vehicle_id)->request_cos_pairing(x);
 
 tesla_ble_vehicle:
   charge_on_solar_state: powersync_charge_on_solar
+  cos_pairing_state: powersync_cos_pairing

@@ -53,7 +53,21 @@ PowerSync uses the BLE provider only for the one configured bridge whose firmwar
 
 Results follow the existing ownership rules. A confirmed enabled readback holds PowerSync EV control for that VIN, and also for the bridge's `ble_<prefix>` vehicle identity used by standalone BLE charging. A failed or unconfirmed write keeps the hold. Only a confirmed disabled readback releases it. The bridge refuses requests while a stop-recovery lock is active or BLE is disconnected, and it never retries, polls or re-enables on its own.
 
-Protocol encoding is checked byte-for-byte against `protoc` output for Teslemetry's extended CarServer schema, and the firmware compiles on ESPHome 2026.11. This does not establish vehicle firmware acceptance or physical solar charging.
+Protocol encoding is checked byte-for-byte against a reference encoding of Teslemetry's extended CarServer schema, and the firmware compiles on ESPHome 2026.11. This does not establish vehicle firmware acceptance or physical solar charging.
+
+#### Pairing status (read-only)
+
+Charge on Solar works only when four things are in place: the gateway's signed-commands key is on the car as a charging-manager key; the car's key is a verified vehicle client on the gateway; the car has a managed charging site naming the gateway's key and DIN; and the preference is enabled. The Tesla app normally sets up the first three. `power_sync.get_charge_on_solar_pairing_status` checks them without changing anything.
+
+It needs local Powerwall signed access for the entry and the Charge on Solar package on this car's bridge. The package adds `sensor.<prefix>_powersync_charge_on_solar_pairing` and `text.<prefix>_powersync_charge_on_solar_pairing_request`, which must be on the same ESPHome device as the Charge on Solar entities. The service:
+
+- reads the gateway's signed-commands key and authorized clients over the LAN;
+- asks the bridge for the car's public keys, which it learned from vehicle security and infotainment session info (no BLE traffic);
+- asks the car over BLE for its managed charging sites, which may wake it.
+
+Each step is reported separately. `vehicle_on_gateway` shows whether a vehicle client for this VIN is verified, and which of the car's keys it matches. `managed_charging_site` shows whether a site uses this gateway's key, which text encoding the car stores it in, whether the DIN matches and whether the site is near HA's home location. The bridge reports each site key as a format and a short SHA-256 fingerprint, so the full key never has to fit in a Home Assistant state. If the bridge cannot fit every site, an absent match is reported as `unknown`, not `missing`. `gateway_key_on_vehicle` is `not_checked` for now. The preference is not read; use `power_sync.get_teslemetry_charge_on_solar` for that.
+
+The service does not add keys, clients or sites, and it does not touch EV control holds. Repairing missing steps from PowerSync is planned but not yet available.
 
 ### Vehicle schedules in battery optimization
 

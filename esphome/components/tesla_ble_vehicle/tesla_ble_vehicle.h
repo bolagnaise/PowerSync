@@ -7,6 +7,7 @@
 #include <queue>
 #include "stop_recovery.h"
 #include "charge_on_solar.h"
+#include "cos_pairing.h"
 #include "powersync_client.h"
 #include <array>
 #include <unordered_map>
@@ -337,6 +338,20 @@ namespace esphome
             void tick_charge_on_solar();
             cos::Protocol cos_;
             text_sensor::TextSensor *cos_state_{nullptr};
+            // Optional read-only Charge on Solar pairing evidence (cos_pairing.cpp).
+            void set_cos_pairing_state(text_sensor::TextSensor *sensor) { pair_state_ = sensor; }
+            void request_cos_pairing(const std::string &request);
+            void publish_cos_pairing();
+            void enqueue_cos_pairing_sites();
+            bool handle_cos_pairing_response(const CarServer_Response &response);
+            void tick_cos_pairing();
+            void remember_vehicle_key(UniversalMessage_Domain domain, const Signatures_SessionInfo &info);
+            cos::Protocol pair_;
+            cos_pairing::Request pair_request_{};
+            cos_pairing::Sites pair_sites_{};
+            text_sensor::TextSensor *pair_state_{nullptr};
+            uint8_t vehicle_key_[2][65]{};
+            size_t vehicle_key_length_[2]{0, 0};
             void setup() override;
             void loop() override;
             void update() override;

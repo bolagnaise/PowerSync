@@ -608,6 +608,10 @@ class PowerwallLocalClient:
         """Read authorized clients directly from the local gateway."""
         return await self._transport.list_authorized_clients(self._din)
 
+    async def get_signed_commands_public_key(self) -> bytes | None:
+        """Read the gateway's signed-commands ECC key directly over LAN."""
+        return await self._transport.get_signed_commands_public_key(self._din)
+
     async def trigger_islanding(self) -> bool:
         """Send the explicit local black-start/islanding trigger."""
         return await self._transport.trigger_islanding(self._din)
