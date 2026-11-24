@@ -127,11 +127,13 @@ class FroniusController(InverterController):
         async with self._request_lock:
             return await self._has_pending_simple_restore_locked()
 
-    async def _has_pending_simple_restore_locked(self) -> bool:
+    async def _has_pending_simple_restore_locked(self, *, for_status=False) -> bool:
         if self._simple_restore is None:
             return False
         saved = await self._simple_restore.load()
-        return bool(saved) and await self._simple_restore.validate(self, saved) == 0
+        return bool(saved) and await self._simple_restore.validate(
+            self, saved, for_status=for_status
+        ) == 0
 
     async def connect(self) -> bool:
         """Connect to the Fronius inverter via Modbus TCP."""
@@ -759,7 +761,7 @@ class FroniusController(InverterController):
             state_regs = await self._read_register(self.REG_STATUS, 1)
             status = InverterStatus.ONLINE
             is_curtailed = False
-            if await self._has_pending_simple_restore_locked():
+            if await self._has_pending_simple_restore_locked(for_status=True):
                 is_curtailed = True
                 if status == InverterStatus.ONLINE:
                     status = InverterStatus.CURTAILED

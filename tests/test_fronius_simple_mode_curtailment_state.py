@@ -205,6 +205,56 @@ def simple_site(monkeypatch):
                            make=make_controller)
 
 
+def test_simple_status_during_native_production_stop_preserves_restore(simple_site):
+    from power_sync.solar_production import ProductionStopManager
+    from power_sync.solar_production_native import NativeProductionTarget
+
+    site = simple_site
+
+    async def scenario():
+        controller = site.make()
+        assert await controller.curtail() is True
+        identity = {"brand": "fronius", "host": controller.host,
+                    "port": controller.port, "slave_id": controller.slave_id}
+        manager = ProductionStopManager(
+            type(controller._simple_restore.store)(site.hass, 1, "production"),
+            lambda target: NativeProductionTarget(controller, target),
+            lambda: True,
+        )
+        site.hass.data["power_sync"]["entry-id"]["solar_production_runtime"] = (
+            SimpleNamespace(manager=manager)
+        )
+        await manager.update(-4.5, [identity])
+        assert manager.owns_control
+        assert site.registers[40236] == 1 and site.registers[40232] == 0
+        site.writes.clear()
+
+        state = await controller.get_status()
+        assert state.error_message is None
+        assert state.is_curtailed is True
+        manager.suspended = True
+        assert "device or controls changed" in (await controller.get_status()).error_message
+        manager.suspended = False
+        site.serial[0] += 1
+        assert "device or controls changed" in (await controller.get_status()).error_message
+        site.serial[0] -= 1
+        manager.records[0]["identity"]["slave_id"] += 1
+        assert "device or controls changed" in (await controller.get_status()).error_message
+        manager.records[0]["identity"]["slave_id"] -= 1
+        assert await controller.restore() is False
+        assert not site.writes
+        assert await controller._simple_restore.load()
+
+        await manager.update(1.0, [identity])
+        assert not manager.owns_control
+        assert await controller.has_pending_simple_restore() is True
+        assert await controller.restore() is True
+        assert site.registers[40236] == 1 and site.registers[40232] == 10000
+        assert await controller._simple_restore.load() is None
+
+    asyncio.run(scenario())
+
+
 def test_simple_mode_restart_retains_restore_obligation(simple_site):
     """Ticket #157: a new controller/runtime must not forget its own Ena=0."""
     site = simple_site

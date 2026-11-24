@@ -70,6 +70,25 @@ class FroniusSimpleRestore:
         ):
             raise ValueError("Fronius simple-mode controller belongs to an unloaded entry")
 
+    def production_stop_owns_endpoint(self):
+        """Check the active production journal for this exact Modbus target."""
+        self.check_current()
+        production = self.runtime.get("solar_production_runtime")
+        if production is None or production.manager.suspended:
+            return False
+        for record in production.manager.records:
+            identity = record["identity"]
+            if identity.get("brand") != "fronius":
+                continue
+            endpoint = [
+                str(identity.get("host", "")).strip().lower(),
+                identity.get("port"),
+                identity.get("slave_id"),
+            ]
+            if endpoint == self.endpoint:
+                return True
+        return False
+
     async def load(self):
         self.check_current()
         saved = await self.store.async_load()
@@ -101,11 +120,16 @@ class FroniusSimpleRestore:
             raise ValueError("Fronius simple-mode recovery readback unavailable")
         return serial, enabled[0], limit[0]
 
-    async def validate(self, controller, saved):
+    async def validate(self, controller, saved, *, for_status=False):
         serial, enabled, limit = await self.read(controller)
-        if serial != saved["serial"] or enabled not in (0, 1) or limit != 10000:
-            raise ValueError("Fronius simple-mode device or controls changed; restore deferred")
-        return enabled
+        if serial == saved["serial"] and enabled in (0, 1):
+            if limit == 10000:
+                return enabled
+            if for_status and enabled == 1 and limit == 0 and self.production_stop_owns_endpoint():
+                # Report the measured production limit while this separate
+                # controller owns it. It grants no simple-mode write authority.
+                return None
+        raise ValueError("Fronius simple-mode device or controls changed; restore deferred")
 
     async def prepare(self, controller):
         saved = await self.load()
