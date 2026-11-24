@@ -11516,3 +11516,33 @@ def test_scheduled_pending_stop_expires_without_a_measured_draw(
     assert asyncio.run(
         f.scheduled._pending_stop_observed(f.vins[0], {"at": at, "params": {}})
     ) is expected
+
+
+@pytest.mark.parametrize("active,expected", [(False, False), (True, True)])
+def test_opportunistic_solar_threshold_gates_starts_not_running_sessions(monkeypatch, active, expected):
+    """A dip below 1.5 kW must not stop a running solar session immediately;
+    the Solar Surplus controller applies stop_delay_minutes instead."""
+    brisbane_tz = timezone(timedelta(hours=10))
+    monkeypatch.setattr(
+        ev_planner.dt_util, "now", lambda: datetime(2026, 8, 16, 11, 0, tzinfo=brisbane_tz),
+    )
+    planner = ev_planner.ChargingPlanner(_FakeHass(), _FakeConfigEntry())
+    plan = SimpleNamespace(windows=[], target_time="2026-08-17T07:00:00", can_meet_target=True)
+
+    should_charge, _reason, source = asyncio.run(
+        planner.should_charge_now(
+            vehicle_id=VIN,
+            plan=plan,
+            current_surplus_kw=0.6,
+            current_price_cents=35.0,
+            current_export_price_cents=5.0,
+            battery_soc=90.0,
+            min_battery_soc=0,
+            priority=ev_planner.ChargingPriority.SOLAR_PREFERRED,
+            solar_session_active=active,
+        )
+    )
+
+    assert should_charge is expected
+    if expected:
+        assert source == "solar_surplus"

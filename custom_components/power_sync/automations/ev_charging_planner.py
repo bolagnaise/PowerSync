@@ -4265,6 +4265,7 @@ class ChargingPlanner:
         min_battery_soc: int = DEFAULT_SOLAR_SURPLUS_MIN_BATTERY_SOC,
         is_time_critical: bool = False,
         priority: ChargingPriority = ChargingPriority.COST_OPTIMIZED,
+        solar_session_active: bool = False,
     ) -> Tuple[bool, str, str]:
         """
         Real-time decision: should we charge right now?
@@ -4412,7 +4413,12 @@ class ChargingPlanner:
             ChargingPriority.SOLAR_ONLY.value,
             ChargingPriority.SOLAR_PREFERRED.value,
         }
-        if opportunistic_solar_enabled and current_surplus_kw >= 1.5:
+        # 1.5 kW gates a *start*. A running Solar Surplus session keeps going
+        # here and its own controller stops it after stop_delay_minutes, so a
+        # passing cloud does not stop the car immediately.
+        if opportunistic_solar_enabled and (
+            current_surplus_kw >= 1.5 or solar_session_active
+        ):
             solar_allowed, solar_reason = _solar_export_gate()
             if not solar_allowed:
                 return False, solar_reason, "waiting"
@@ -6978,6 +6984,18 @@ class AutoScheduleExecutor:
             self.hass,
             self.config_entry.entry_id,
         )
+        solar_session_active = False
+        if state.is_charging:
+            from .ev_ownership import get_ev_ownership
+
+            _lease_id, _lease = get_ev_ownership(
+                self.hass,
+                self.config_entry,
+                self._resolve_vehicle_vin(vehicle_id) or vehicle_id,
+            )
+            solar_session_active = bool(
+                _lease and _lease.get("owner_mode") == "smart_schedule_solar_surplus"
+            )
         should_charge, reason, source = await self.planner.should_charge_now(
             vehicle_id=vehicle_id,
             plan=state.current_plan,
@@ -6988,6 +7006,7 @@ class AutoScheduleExecutor:
             min_battery_soc=effective_home_min,
             is_time_critical=is_time_critical,
             priority=effective_priority,
+            solar_session_active=solar_session_active,
         )
 
         if (
