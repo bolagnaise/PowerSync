@@ -21371,8 +21371,13 @@ def _solar_controller_waited_without_start(state: dict) -> bool:
     )
 
 
-def _waiting_smart_schedule_ble_is_stopped(hass, entry, vehicle_id, state) -> bool:
-    """Prove that an idle Smart Schedule solar controller needs no BLE Stop."""
+def _waiting_ble_tesla_is_stopped(hass, entry, vehicle_id, state) -> bool:
+    """Prove that a waiting BLE-only solar controller needs no BLE Stop.
+
+    Used by Solar Surplus and Smart Schedule's solar priority. The proof needs a
+    fresh native power packet from the vehicle's own bridge pairing Stopped with
+    0 kW, so a stale or unpaired "Stopped" still gets a real Stop.
+    """
     from ..tesla_ble_recovery_status import ble_recovery_status
     from ..tesla_ev_recovery import (
         current_vehicle_generation, get_vehicle_route, recovery_control_allowed,
@@ -21448,8 +21453,11 @@ async def _waiting_solar_tesla_is_stopped(
 
     if params.get("charger_type", "tesla") != "tesla" or not _solar_controller_waited_without_start(state):
         return False
-    route = get_vehicle_route(hass, entry, vehicle_id)
     provider = _get_ev_config(entry)["ev_provider"]
+    if provider == EV_PROVIDER_TESLA_BLE:
+        # No Fleet observation exists; only the bridge's paired packet can prove it.
+        return _waiting_ble_tesla_is_stopped(hass, entry, vehicle_id, state)
+    route = get_vehicle_route(hass, entry, vehicle_id)
     unbound_both = route is None and handoff in ("smart_schedule", "boost") and provider == EV_PROVIDER_BOTH
     if route is not None and (route.get("kind") != "ha" or route.get("cleanup_only")):
         return False
@@ -21765,6 +21773,10 @@ async def _action_stop_ev_charging_dynamic(
                                 and get_ev_quick_control_obligation(hass, config_entry, vid) is None)
                         ):
                             passive_vehicle_ids.add(vid)
+                            _LOGGER.info(
+                                "Releasing waiting Solar Surplus for %s without Stop: "
+                                "the car reports a fresh, verified stop", vid,
+                            )
                 except Exception:
                     _LOGGER.debug("Could not verify the waiting Tesla is stopped", exc_info=True)
 
@@ -21789,7 +21801,7 @@ async def _action_stop_ev_charging_dynamic(
                 and get_ev_quick_control_obligation(hass, config_entry, vid) is None
             ):
                 try:
-                    if _waiting_smart_schedule_ble_is_stopped(hass, config_entry, vid, state):
+                    if _waiting_ble_tesla_is_stopped(hass, config_entry, vid, state):
                         passive_vehicle_ids.add(vid)
                         _LOGGER.info("Releasing waiting Smart Schedule for %s without a BLE Stop", vid)
                 except Exception:
