@@ -643,8 +643,8 @@ def test_tesla_auth_expiry_sends_one_actionable_mobile_alert(monkeypatch, revoke
 
     alerts = []
 
-    async def capture_push(hass_arg, title, message):
-        alerts.append((hass_arg, title, message))
+    async def capture_push(hass_arg, title, message, *, notification_type):
+        alerts.append((hass_arg, title, message, notification_type))
 
     automations_package = types.ModuleType("power_sync.automations")
     automations_package.__path__ = []
@@ -671,6 +671,7 @@ def test_tesla_auth_expiry_sends_one_actionable_mobile_alert(monkeypatch, revoke
             "PowerSync Connection Expired",
             "Re-authenticate in Home Assistant Settings > Repairs. "
             "Automations and battery control may be unavailable.",
+            "connection_expired",
         )
     ]
 

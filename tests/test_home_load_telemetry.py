@@ -1153,6 +1153,7 @@ def test_tesla_coordinator_notifies_only_terminal_class_changes(monkeypatch):
         coordinator.hass,
         "Grid Power Restored",
         "Grid power has been restored. Your Powerwall is back on-grid.",
+        notification_type="grid_restored",
     )
 
     asyncio.run(

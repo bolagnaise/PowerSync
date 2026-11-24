@@ -146,6 +146,8 @@ async def test_spike_push_labels_forecast_and_pairs_each_interval(monkeypatch, l
         await namespace["run"]()
 
     assert push.await_args_list == [
-        call(hass, "High Import Price Forecast", f"$2.13/kWh forecast for Today {time_label}"),
-        call(hass, "High Export Price Forecast", f"$1.80/kWh forecast for Today {time_label}"),
+        call(hass, "High Import Price Forecast", f"$2.13/kWh forecast for Today {time_label}",
+             notification_type="high_import_price_forecast"),
+        call(hass, "High Export Price Forecast", f"$1.80/kWh forecast for Today {time_label}",
+             notification_type="high_export_price_forecast"),
     ]

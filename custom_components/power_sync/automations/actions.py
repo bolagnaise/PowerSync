@@ -9358,7 +9358,6 @@ async def _send_expo_push(
 ) -> None:
     """Send an Expo push to devices that accept this notification type."""
     from ..const import DOMAIN
-    from ..notification_preferences import push_notification_enabled
     import aiohttp
 
     _LOGGER.info(f"📱 PUSH DEBUG: Attempting to send notification - Title: '{title}', Message: '{message}'")
@@ -9371,12 +9370,18 @@ async def _send_expo_push(
 
     _LOGGER.info(f"📱 PUSH DEBUG: Found {len(push_tokens)} registered push token(s)")
 
+    if notification_type is not None:
+        from ..notification_preferences import push_notification_enabled
+
     # Prepare messages for Expo Push API
     messages = []
     skipped_tokens = 0
     for _device_id, token_data in push_tokens.items():
         token = token_data.get("token")
-        if token and not push_notification_enabled(hass, token, notification_type):
+        if (
+            notification_type is not None and token
+            and not push_notification_enabled(hass, token, notification_type)
+        ):
             continue
         platform = token_data.get("platform", "unknown")
         device = token_data.get("device_name", "unknown")

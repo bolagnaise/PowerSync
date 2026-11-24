@@ -86,7 +86,8 @@ def kick_harness(monkeypatch):
             force_state['active'] = False
             command_generation[0] += 1
 
-        async def push(*args):
+        async def push(*args, notification_type):
+            assert notification_type == "battery_charge_failed"
             pushes.append(args[-1])
             if supersede == 'notification':
                 command_generation[0] += 1
