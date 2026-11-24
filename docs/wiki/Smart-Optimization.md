@@ -558,6 +558,20 @@ window behavior: battery export is allowed during the configured Happy Hour
 export period when the plan is profitable. Other providers rely on their export
 price signals, export boost, saving session, or plan-specific bonus windows.
 
+### Grid charge blackout windows
+
+In **Smart Optimization → Grid & site constraints**, set **Grid charge
+blackout windows** to the daily times when PowerSync should block forced grid
+charging. Times use the site's local clock. For example, to allow grid charging
+from midnight to 6 am, enable **Allow grid charging** and enter:
+
+```json
+[{"start":"06:00","end":"00:00"}]
+```
+
+Solar can still charge the battery during a blackout. Charge By Time respects
+the blackout when planning how much energy to store before its deadline.
+
 ## Charge By Time
 
 Charge By Time is an independent Smart Optimization control. When enabled,
