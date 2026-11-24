@@ -22297,6 +22297,7 @@ class EVLoadpointStatusView(HomeAssistantView):
                 get_ev_ownership,
                 get_ev_ownerships,
                 get_external_control_policy,
+                latest_ev_refusal,
             )
             from .automations.ev_charging_planner import (
                 get_ev_charging_coordinator,
@@ -22639,6 +22640,9 @@ class EVLoadpointStatusView(HomeAssistantView):
 
             for loadpoint in loadpoints:
                 loadpoint_id = loadpoint.get("loadpoint_id")
+                loadpoint["last_refusal"] = latest_ev_refusal(
+                    self._hass, self._config_entry, loadpoint_id,
+                )
                 if zaptec_cached and zaptec_byd_vehicles and loadpoint_id == "zaptec_standalone":
                     # A missing/ambiguous live BYD reading must not resurrect
                     # another vehicle's SOC cached in a charging session.

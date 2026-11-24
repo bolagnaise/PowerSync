@@ -8637,12 +8637,16 @@ class AutoScheduleExecutor:
                     state.current_plan = None
                     state.current_window = None
                 count, delay = self._record_start_failure(vehicle_id)
+                from .ev_ownership import latest_ev_refusal
+
+                refusal = latest_ev_refusal(self.hass, self.config_entry, vehicle_id)
                 _LOGGER.warning(
                     "Auto-schedule: Failed to start charging for %s "
-                    "(attempt %d; retry in %ds)",
+                    "(attempt %d; retry in %ds): %s",
                     vehicle_id,
                     count,
                     delay,
+                    (refusal or {}).get("reason") or "no reason recorded",
                 )
                 return False
         except Exception as e:

@@ -19268,12 +19268,28 @@ async def _action_start_ev_charging_dynamic(
         profile = selected_profile(shared_data(hass, config_entry))
         params = dict(params)
         params.setdefault("_shared_generic_profile_id", profile["id"] if profile else None)
+    from .ev_ownership import ev_refusal_sequence, record_ev_refusal
+
+    vehicle_id = params.get("vehicle_vin") or params.get("vehicle_id") or DEFAULT_VEHICLE_ID
+    command = f"start_{params.get('owner_mode') or params.get('dynamic_mode', 'battery_target')}"
     async with _start_dynamic_lock:
         if not start_allowed(hass, config_entry, params):
+            record_ev_refusal(
+                hass, config_entry, vehicle_id, command=command,
+                reason="shared charger profile does not allow this start",
+            )
             return False
-        return await _action_start_ev_charging_dynamic_locked(
+        refusal_seq = ev_refusal_sequence(hass, config_entry)
+        result = await _action_start_ev_charging_dynamic_locked(
             hass, config_entry, params, context
         )
+        if not result and ev_refusal_sequence(hass, config_entry) == refusal_seq:
+            # Guard paths that only log still leave a queryable reason.
+            record_ev_refusal(
+                hass, config_entry, vehicle_id, command=command,
+                reason="start guard refused without a specific reason (see preceding Dynamic EV log line)",
+            )
+        return result
 
 
 def _consume_recovered_solar_surplus_continuation_amps(
@@ -19391,6 +19407,19 @@ def _consume_recovered_solar_surplus_continuation_amps(
     return live_amps
 
 
+def _record_dynamic_start_refusal(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    vehicle_id: Any,
+    params: Dict[str, Any],
+    reason: str,
+) -> None:
+    from .ev_ownership import record_ev_refusal
+
+    command = f"start_{params.get('owner_mode') or params.get('dynamic_mode', 'battery_target')}"
+    record_ev_refusal(hass, config_entry, vehicle_id, command=command, reason=reason)
+
+
 async def _action_start_ev_charging_dynamic_locked(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
@@ -19437,6 +19466,10 @@ async def _action_start_ev_charging_dynamic_locked(
                 "Dynamic EV: anonymous Tesla start blocked because the loadpoint "
                 "is not uniquely resolved"
             )
+            _record_dynamic_start_refusal(
+                hass, config_entry, vehicle_id, params,
+                "no single plugged-in Tesla could be identified for this start",
+            )
             return False
         params = {
             **params,
@@ -19464,6 +19497,10 @@ async def _action_start_ev_charging_dynamic_locked(
                 vehicle_id,
                 away_location,
             )
+            _record_dynamic_start_refusal(
+                hass, config_entry, vehicle_id, params,
+                f"vehicle is away ({away_location})",
+            )
             return False
 
     # Determine mode
@@ -19488,6 +19525,10 @@ async def _action_start_ev_charging_dynamic_locked(
             _LOGGER.warning(
                 "Dynamic EV: refusing generic charger start because no positive "
                 "integer current is valid for the configured/entity bounds"
+            )
+            _record_dynamic_start_refusal(
+                hass, config_entry, vehicle_id, params,
+                "no valid charge current within the configured/entity bounds",
             )
             return False
     elif (
