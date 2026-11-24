@@ -122,6 +122,90 @@ async def recover(case):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["exact_proof", "wrong_producer", "recovery_started", "write_failure"])
+async def test_unstarted_inventory_for_unsent_start_does_not_block_other_bridge(
+    inventory, case,
+):
+    c = inventory
+    assert (await recover(c))["success"]
+    c.calls.clear()
+
+    first, second = c.declared
+    first_alias, second_alias = c.aliases[first["prefix"]], c.aliases[second["prefix"]]
+    first_charger = f"switch.{first['prefix']}_charger"
+    first_route = {"kind": "ble", "prefix": first["prefix"], "entity_id": first_charger}
+    pending = await recovery.async_begin_attempt(
+        c.hass, c.entry, first_alias, first_route, "start", first_charger,
+    )
+    assert pending
+    bridge = stop.Bridge(c.hass, c.entry, first["prefix"], first["vin"])
+    incident = await recovery.async_record_evidence_loss(
+        c.hass, c.entry,
+        covered_attempts=stop._live_refs(c.runtime),
+        candidate_producers=[bridge.identity],
+        candidate_vehicles=[first_alias],
+        scope_basis={
+            "kind": "ble_command_inventory_v2",
+            "inventory_digest": recovery._digest([first]),
+            "historical_identity_reconstructed": False,
+            "complete_affected_inventory": [first],
+        },
+    )
+    assert incident and await recovery.async_finish_attempt(pending, "not_sent")
+    sidecar = c.runtime[recovery._SIDECAR_STATE_KEY]
+    if case == "wrong_producer":
+        removals = sidecar["recovery"]["terminal_removals"]
+        removals[first_alias][pending.attempt_id]["route"]["prefix"] = second["prefix"]
+    elif case == "recovery_started":
+        sidecar["incidents"][incident["incident_id"]]["phase_token"] = "interrupted-prepare"
+
+    second_charger = f"switch.{second['prefix']}_charger"
+    second_route = {"kind": "ble", "prefix": second["prefix"], "entity_id": second_charger}
+    retained = await recovery.async_begin_attempt(
+        c.hass, c.entry, second_alias, second_route, "stop", second_charger,
+    )
+    assert retained and await recovery.async_finish_attempt(retained, "sent_unknown")
+
+    async def recover_second():
+        return await stop.async_recover_ble_stops(
+            c.hass, c.entry, [second], confirm_complete_history=True,
+        )
+
+    if case in {"wrong_producer", "recovery_started"}:
+        with pytest.raises(stop.StopRecoveryRefused, match="another_recovery_scope_is_held"):
+            await recover_second()
+        assert c.calls == []
+        assert c.store.value["incidents"][incident["incident_id"]]["phase"] == "held"
+        return
+
+    if case == "write_failure":
+        original_save = c.store.async_save
+
+        async def fail_settlement(value):
+            if value["incidents"][incident["incident_id"]]["phase"] == "released":
+                return False
+            return await original_save(value)
+
+        c.store.async_save = fail_settlement
+        with pytest.raises(stop.StopRecoveryRefused, match="recovery_scope_not_persisted"):
+            await recover_second()
+        assert c.calls == []
+        assert sidecar["incidents"][incident["incident_id"]]["phase"] == "held"
+        assert c.store.value["incidents"][incident["incident_id"]]["phase"] == "held"
+        c.store.async_save = original_save
+
+    assert (await recover_second())["success"]
+    assert [(prefix, action) for prefix, action, _ in c.calls] == [
+        (second["prefix"], "prepare"), (second["prefix"], "commit"),
+    ]
+    settled = c.store.value["incidents"][incident["incident_id"]]
+    assert settled["phase"] == "released"
+    assert settled["historical_outcome"] == "not_sent"
+    assert settled["liability_refs"] == incident["liability_refs"]
+    assert not stop._live_refs(c.runtime)
+
+
+@pytest.mark.asyncio
 async def test_full_two_alias_inventory_retires_exact_unknown_stops_and_survives_reload(inventory):
     c = inventory
     before = deepcopy(c.runtime[recovery.RECOVERY_KEY])

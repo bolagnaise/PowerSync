@@ -102,6 +102,82 @@ def _live_refs(runtime):
     return result
 
 
+def _proven_terminal_attempt(ref, retained_root, terminal_removals, *, allow_confirmed_stop=False):
+    if not isinstance(ref, Mapping):
+        return False
+    route = ref.get("route")
+    operation = ref.get("operation")
+    vehicle_id, attempt_id = ref.get("vehicle_id"), ref.get("attempt_id")
+    if (ref.get("outcome") != "pending" or ref.get("hazard_id") is not None
+            or not isinstance(route, Mapping) or route.get("kind") != "ble"
+            or operation not in {"start", "stop", "rate", "limit"}
+            or not isinstance(vehicle_id, str) or not vehicle_id
+            or not isinstance(attempt_id, str) or not attempt_id
+            or attempt_id in retained_root["vehicles"].get(vehicle_id, {}).get("attempts", {})):
+        return False
+    proof = terminal_removals.get(vehicle_id, {}).get(attempt_id)
+    return (
+        isinstance(proof, Mapping)
+        and (proof.get("outcome") == "not_sent" or (
+            allow_confirmed_stop and operation == "stop" and proof.get("outcome") == "confirmed"
+        ))
+        and proof.get("vehicle_id") == vehicle_id and proof.get("attempt_id") == attempt_id
+        and proof.get("operation") == operation and proof.get("route") == route
+        and proof.get("entity_id") == route.get("entity_id")
+    )
+
+
+async def _settle_unsent_inventory_holds(hass, entry, runtime):
+    """Close an inventory that never started and contained only unsent commands."""
+    from . import tesla_ev_recovery as manager
+
+    async with manager._journal_lock(runtime):
+        state = runtime[manager._SIDECAR_STATE_KEY]
+        if not manager._sidecar_ready(runtime):
+            raise StopRecoveryRefused("recovery_store_unavailable")
+        removals = state["recovery"].get(manager._TERMINAL_REMOVALS_KEY) or {}
+        if not removals:
+            return
+        retained_root = _retained_root(runtime)
+        settled = []
+        for incident_id, incident in state["incidents"].items():
+            basis = incident.get("scope_basis")
+            refs = incident.get("liability_refs")
+            liability = state["liabilities"].get(incident_id)
+            if (incident.get("phase") != "held" or incident.get("kind") != "evidence_lost"
+                    or incident.get("scope_closed") is not False
+                    or incident.get("operator_scope_confirmation") is not None
+                    or incident.get("phase_token") or incident.get("activation_pending")
+                    or incident.get("retirement_evidence") or incident.get("reconciliation_evidence")
+                    or incident_id in state["obligations"]
+                    or not isinstance(basis, Mapping)
+                    or basis.get("kind") not in {"ble_command_inventory_v2", "ble_stop_inventory_v2"}
+                    or not isinstance(refs, list) or not refs or incident.get("covered_attempts") != refs
+                    or not isinstance(liability, dict) or liability.get("state") != "unknown"
+                    or liability.get("references") != refs
+                    or not all(_proven_terminal_attempt(ref, retained_root, removals) for ref in refs)):
+                continue
+            vehicles = incident.get("current_candidate_vehicles")
+            if (not isinstance(vehicles, list) or any(not isinstance(vehicle, str) for vehicle in vehicles)
+                    or {ref["vehicle_id"] for ref in refs} != set(vehicles)):
+                continue
+            settled.append((incident, liability))
+        if not settled:
+            return
+        before = deepcopy(state)
+        for incident, liability in settled:
+            incident.update(phase="released", released_at=time.time(), historical_outcome="not_sent",
+                            release_reason="all_inventory_commands_proven_not_sent")
+            liability.update(state="retained_reconciled", historical_outcome="not_sent")
+        manager._next_revision(state)
+        try:
+            if not await manager._save_sidecar(hass, entry, runtime, state):
+                raise StopRecoveryRefused("recovery_scope_not_persisted")
+        except BaseException:
+            manager._restore_sidecar_state(state, before)
+            raise
+
+
 def _configuration(entry):
     return {**entry.data, **entry.options}
 
@@ -319,6 +395,7 @@ async def async_recover_ble_stops(hass, entry, inventory, *, confirm_complete_hi
         if not _live_refs(runtime):
             return await _resume_released(hass, entry, runtime, bridges, inventory)
         bridges, refs, affected = _resolve_inventory(hass, entry, inventory, bridges, allow_positive=_allow_positive)
+        await _settle_unsent_inventory_holds(hass, entry, runtime)
         config = deepcopy(_configuration(entry))
         owners = {vid: manager._owner_snapshot(hass, entry, vid) for vid in affected.values()}
         scope_digest = manager._digest(refs)
@@ -457,30 +534,6 @@ async def _refresh_held_scope(hass, entry, runtime, incident_id, inventory, brid
         terminal_removals = recovery.get(manager._TERMINAL_REMOVALS_KEY) or {}
         retained_root = _retained_root(runtime)
 
-        def proven_terminal_attempt(ref):
-            route = ref.get("route")
-            operation = ref.get("operation")
-            if (ref.get("outcome") != "pending" or not isinstance(route, Mapping)
-                    or route.get("kind") != "ble"):
-                return False
-            if operation != "stop" and (
-                basis.get("kind") != "ble_command_inventory_v2"
-                or operation not in {"start", "rate", "limit"}
-            ):
-                return False
-            vehicle_id, attempt_id, _ = identity(ref)
-            if attempt_id in retained_root["vehicles"].get(vehicle_id, {}).get("attempts", {}):
-                return False
-            proof = terminal_removals.get(vehicle_id, {}).get(attempt_id)
-            return (
-                isinstance(proof, Mapping)
-                and (proof.get("outcome") == "not_sent"
-                     or (operation == "stop" and proof.get("outcome") == "confirmed"))
-                and proof.get("vehicle_id") == vehicle_id and proof.get("attempt_id") == attempt_id
-                and proof.get("operation") == operation and proof.get("route") == route
-                and proof.get("entity_id") == route.get("entity_id")
-            )
-
         def retained(ref):
             if not isinstance(ref, Mapping):
                 return False
@@ -491,7 +544,12 @@ async def _refresh_held_scope(hass, entry, runtime, incident_id, inventory, brid
             # Confirmed readback can settle a Stop. Remaining history still
             # needs fresh producer proof before recovery can release it.
             if ref.get("hazard_id") is None:
-                return proven_terminal_attempt(ref)
+                return (
+                    (ref.get("operation") == "stop" or basis.get("kind") == "ble_command_inventory_v2")
+                    and _proven_terminal_attempt(
+                        ref, retained_root, terminal_removals, allow_confirmed_stop=True,
+                    )
+                )
             # Containment reuses ble:<prefix>. The durable union moves its
             # previous quarantine to a history key. Require the exact original
             # attempt and complete binding, never adopt the new stable-key row.
@@ -680,6 +738,7 @@ async def _resume_released(hass, entry, runtime, bridges, inventory, *, expected
     state = runtime[manager._SIDECAR_STATE_KEY]
     matches = [item for item in state["incidents"].values()
         if item.get("phase") == "released"
+        and item.get("historical_outcome") != "not_sent"
         and isinstance(item.get("scope_basis"), Mapping)
         and item["scope_basis"].get("kind") in {"ble_stop_inventory_v2", "ble_command_inventory_v2"}
         and item["scope_basis"].get("inventory_digest") == manager._digest(inventory)
