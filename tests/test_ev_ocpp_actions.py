@@ -20212,3 +20212,67 @@ def test_ble_stop_readback_accepts_unchanged_stopped_with_native_zero_power(
         expected_identity=identity, idle_power_proof=idle_proof,
     ))
     assert result is expected
+
+
+# --- Do not send Stop to a car that is already stopped --------------------------
+
+def _waiting_session(**overrides):
+    state = {"active": True, "charging_started": False, "current_amps": 0, "target_amps": 0}
+    state.update(overrides)
+    return state
+
+
+def _stopped_car_hass(charging_state="Stopped", power="0.0"):
+    return _Hass([
+        _State("sensor.car_charging_state", charging_state),
+        _State("sensor.car_charge_power", power, {"unit_of_measurement": "kW"}),
+    ])
+
+
+@pytest.mark.parametrize("fleet", [None, "stopped", "complete"])
+def test_automated_stop_is_skipped_for_a_never_started_session_on_a_stopped_car(monkeypatch, fleet):
+    monkeypatch.setattr(actions, "_resolve_ble_prefix_for_vehicle", lambda *a: "car")
+    monkeypatch.setattr(actions, "_get_tesla_charging_state", lambda *a: fleet)
+    hass = _stopped_car_hass()
+    assert actions._tesla_session_never_started_and_car_stopped(
+        hass, _Entry(), "5YJTEST0000000001", _waiting_session(),
+        {"charger_type": "tesla", "owner_mode": "solar_surplus"},
+    ) is True
+
+
+@pytest.mark.parametrize("case", [
+    "started", "commanded_amps", "start_attempted", "stop_outcome",
+    "ble_charging", "fleet_charging", "drawing_power", "state_unknown",
+    "manual_owner", "boost_owner", "not_tesla",
+])
+def test_stop_is_still_sent_whenever_the_car_might_be_charging(monkeypatch, case):
+    monkeypatch.setattr(actions, "_resolve_ble_prefix_for_vehicle", lambda *a: "car")
+    fleet = "charging" if case == "fleet_charging" else None
+    monkeypatch.setattr(actions, "_get_tesla_charging_state", lambda *a: fleet)
+    hass = _stopped_car_hass(
+        charging_state="Charging" if case == "ble_charging" else (
+            "unavailable" if case == "state_unknown" else "Stopped"),
+        power="1.2" if case == "drawing_power" else "0.0",
+    )
+    state = _waiting_session(**{
+        "started": {"charging_started": True},
+        "commanded_amps": {"current_amps": 6, "target_amps": 6},
+        "start_attempted": {"last_start_command_at": 1.0},
+        "stop_outcome": {"stop_outcome": {"status": "unconfirmed"}},
+    }.get(case, {}))
+    params = {
+        "charger_type": "generic" if case == "not_tesla" else "tesla",
+        "owner_mode": {"manual_owner": "manual", "boost_owner": "boost"}.get(case, "solar_surplus"),
+    }
+    assert actions._tesla_session_never_started_and_car_stopped(
+        hass, _Entry(), "5YJTEST0000000001", state, params,
+    ) is False
+
+
+def test_dynamic_stop_skips_physical_stop_only_through_the_guarded_rule():
+    source = (ROOT / "automations" / "actions.py").read_text()
+    body = source[source.index("async def _action_stop_ev_charging_dynamic("):]
+    block = body[: body.index('state["active"] = False')]
+    assert "_tesla_session_never_started_and_car_stopped(" in block
+    assert 'params.get("_user_initiated")' in block and 'params.get("manual_stop")' in block
+    assert "get_ev_quick_control_obligation(hass, config_entry, vid) is None" in block

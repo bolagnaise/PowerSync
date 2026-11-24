@@ -21518,6 +21518,61 @@ async def _waiting_solar_tesla_is_stopped(
     return not physical["fresh_measurements"]
 
 
+def _tesla_session_never_started_and_car_stopped(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    vehicle_id: str,
+    state: dict,
+    params: dict,
+) -> bool:
+    """Whether an automated Stop would only poke a car that is already stopped.
+
+    PowerSync never started physical charging in this session, and every known
+    charging state for the car is non-charging with no reading showing a draw.
+    Sending Stop then has nothing to stop, yet a BLE bridge cannot confirm an
+    unchanged "Stopped" (ESPHome drops equal values), so the Stop used to end
+    sent_unknown and be held. A real start by anyone changes the reported state
+    to Charging, which HA does receive. Unknown state keeps sending Stop.
+    """
+    if params.get("charger_type", "tesla") != "tesla":
+        return False
+    from .ev_ownership import owner_family
+
+    if owner_family(params.get("owner_mode")) in {"manual", "boost"}:
+        return False
+    if not _solar_controller_waited_without_start(state):
+        return False
+    known: list[str] = []
+    prefix = _resolve_ble_prefix_for_vehicle(hass, config_entry, vehicle_id)
+    if prefix:
+        from ..tesla_ble import get_tesla_ble_charge_power_state, get_tesla_ble_charging_state
+
+        ble_state = get_tesla_ble_charging_state(hass, prefix)
+        if ble_state is not None:
+            known.append(str(ble_state.state))
+        power = get_tesla_ble_charge_power_state(hass, prefix)
+        if power is not None:
+            try:
+                watts = float(power.state)
+            except (TypeError, ValueError):
+                watts = None
+            if watts is not None:
+                if power.attributes.get("unit_of_measurement") != "W":
+                    watts *= 1000
+                if watts > _ACTIVE_EV_POWER_EPSILON_KW * 1000:
+                    return False
+    fleet_state = _get_tesla_charging_state(
+        hass, vehicle_id, params.get("tesla_charging_state_entity"),
+    )
+    if fleet_state:
+        known.append(fleet_state)
+    known = [
+        value.strip().lower() for value in known
+        if value and value.strip().lower() not in {"unknown", "unavailable", "none"}
+    ]
+    return bool(known) and all(value in _TESLA_NON_CHARGING_STATES for value in known)
+
+
 @guard_ev_control
 async def _action_stop_ev_charging_dynamic(
     hass: HomeAssistant,
@@ -21794,6 +21849,26 @@ async def _action_stop_ev_charging_dynamic(
                         _LOGGER.info("Releasing waiting Smart Schedule for %s without a BLE Stop", vid)
                 except Exception:
                     _LOGGER.debug("Could not verify the waiting BLE Tesla is stopped", exc_info=True)
+
+            if (
+                stop_charging
+                and vid not in passive_vehicle_ids
+                and not (
+                    params.get("_user_initiated")
+                    or params.get("manual_stop")
+                    or params.get("quick_control")
+                )
+                and get_ev_quick_control_obligation(hass, config_entry, vid) is None
+                and _tesla_session_never_started_and_car_stopped(
+                    hass, config_entry, vid, state, state_params,
+                )
+            ):
+                passive_vehicle_ids.add(vid)
+                _LOGGER.info(
+                    "Dynamic EV: %s never started charging and already reports "
+                    "stopped; ending the session without sending Stop",
+                    vid,
+                )
 
             state["active"] = False
             from .ev_ownership import release_ev_ownership
