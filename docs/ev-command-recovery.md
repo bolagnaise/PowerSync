@@ -207,6 +207,45 @@ are different firmware families. Use the [yoziru adapter and matching library
 pins](tesla-ble.md#tesla-ble-reliability) for that family; do not
 flash the Pedro component onto yoziru.
 
+### Recover one held Stop after re-adding its ESPHome bridge
+
+Use this procedure if Home Assistant assigned a new ESPHome entry ID to the
+same bridge and the original charger, device and vehicle still match the saved
+Stop. It requires the PowerSync companion firmware, one known vehicle and an
+unchanged encryption key used only by that bridge. Keep charging automations
+paused while you recover.
+
+1. On your computer, keep a Home Assistant backup from before the bridge was
+   re-added. Use the decrypted download from **Settings → System → Backups**
+   with Home Assistant settings included. You do not need to restore it.
+2. As the Home Assistant owner, open **Developer tools → Actions**, select
+   **PowerSync: Recover a Stop on a re-added ESPHome bridge**, and choose
+   **prepare**. Enter one inventory item with the original bridge prefix and
+   the vehicle VIN. Confirm the inventory only if it covers the entire held
+   history. Copy the returned challenge.
+3. Download the [local backup script](../scripts/tesla_ble_continuity_proof.py)
+   and run it on your computer with Python 3.9 or later. Use the path to your
+   downloaded backup and the challenge from step 2.
+
+   ```shell
+   python3 tesla_ble_continuity_proof.py /path/to/backup.tar 'YOUR_CHALLENGE'
+   ```
+
+4. Run the same Home Assistant action with **recover**, the same inventory and
+   the script's response within 20 minutes of preparing the challenge. Keep
+   the backup and encryption key private.
+
+PowerSync authenticates the live bridge with the verified key before it
+restarts the bridge and checks fresh stopped, zero-current and zero-power
+readings. If the archive or live bridge fails verification, the hold remains
+in place. A successful run preserves the original Stop's unknown outcome and
+does not release any separate headroom reservation.
+
+If you need to retry before release, prepare a fresh challenge. If the
+read-only status already reports `bridge_commit_pending`, repeat
+**Recover held BLE Stops** with the same inventory to finish unlocking the
+already released bridge.
+
 <a id="tesla-native-recovery"></a>
 
 ## Recover native Tesla charging after a lost response

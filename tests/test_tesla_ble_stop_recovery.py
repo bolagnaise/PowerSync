@@ -944,3 +944,211 @@ async def test_stop_only_retry_after_general_inventory_proves_pending_start_was_
     saved_stop = durable["vehicles"][alias]["attempts"][unknown_stop.attempt_id]
     assert saved_stop["outcome"] == "sent_unknown"
     assert saved_stop["recovery_retired"]["incident_id"] == result["incident_id"]
+
+
+@pytest_asyncio.fixture
+async def readded_bridge(inventory, monkeypatch):
+    import base64
+
+    case = inventory
+    assert (await recover(case))["success"]
+    case.calls.clear()
+    case.declared = [case.declared[0]]
+    bridge = case.declared[0]
+    prefix, vin = bridge["prefix"], bridge["vin"]
+    case.receipts[prefix]["b"] = "d" * 16
+    charger = f"switch.{prefix}_charger"
+    case.mac = "aabbccddeeff"
+    case.registrations[charger].unique_id = "AA:BB:CC:DD:EE:FF/0/switch/Charger"
+    case.original_identity = recovery._identity(case.hass, charger)
+    route = {"kind": "ble", "prefix": prefix, "entity_id": charger}
+    ticket = await recovery.async_begin_attempt(case.hass, case.entry, vin, route, "stop", charger)
+    assert ticket and await recovery.async_finish_attempt(ticket, "sent_unknown")
+    await _seed_legacy_quarantine(ticket)
+    assert len(stop._live_refs(case.runtime)) == 2
+
+    case.active_key = base64.b64encode(bytes(range(32))).decode()
+    active = case.config_entries.pop(prefix)
+    active.domain = "esphome"
+    active.entry_id = "readded-bridge"
+    active.unique_id = case.mac
+    active.created_at = datetime(2026, 11, 7, 6, tzinfo=timezone.utc)
+    active.data = {"host": "bridge.local", "port": 6053, "noise_psk": case.active_key}
+    case.active = active
+    case.config_entries[active.entry_id] = active
+    case.config_entries["bridge_b"].data = {}
+    case.hass.config_entries.async_entries = lambda domain: list(case.config_entries.values())
+    for registration in case.registrations.values():
+        if registration.config_entry_id == prefix:
+            registration.config_entry_id = active.entry_id
+
+    case.auth_calls = []
+    case.reported_mac = case.mac
+
+    class BridgeApi:
+        def __init__(self, host, port, password, *, noise_psk):
+            assert (host, port, password) == ("bridge.local", 6053, None)
+            assert noise_psk == case.active_key
+
+        async def connect(self, *, login):
+            assert login is True
+            case.auth_calls.append("connect")
+
+        async def device_info(self):
+            case.auth_calls.append("device_info")
+            return types.SimpleNamespace(mac_address=case.reported_mac)
+
+        async def disconnect(self, *, force):
+            assert force is True
+            case.auth_calls.append("disconnect")
+
+    monkeypatch.setitem(sys.modules, "aioesphomeapi", types.SimpleNamespace(
+        APIClient=BridgeApi, APIConnectionError=type("APIConnectionError", (Exception,), {})
+    ))
+    return case
+
+
+async def continuity_action(case, step, response=None):
+    return await stop.async_recover_readded_ble_stop(
+        case.hass, case.entry, case.declared, confirm_complete_history=True,
+        step=step, response=response,
+    )
+
+
+def make_backup_response(case, tmp_path, challenge, *, historical_key=None, shared_key=False, after_readd=False):
+    from io import BytesIO
+    from runpy import run_path
+    import tarfile
+
+    historical_key = historical_key or case.active_key
+
+    def add_file(archive, name, contents):
+        header = tarfile.TarInfo(name)
+        header.size = len(contents)
+        archive.addfile(header, BytesIO(contents))
+
+    def encode(payload):
+        return json.dumps(payload).encode()
+
+    entries = [{"domain": "esphome", "entry_id": case.original_identity["config_entry_id"],
+                "unique_id": case.mac, "data": {"noise_psk": historical_key}}]
+    if shared_key:
+        entries.append({"domain": "esphome", "entry_id": "another-bridge",
+                        "unique_id": "aabbccddee00", "data": {"noise_psk": historical_key}})
+
+    core = BytesIO()
+    with tarfile.open(fileobj=core, mode="w:gz") as archive:
+        add_file(archive, "./data/.storage/core.config_entries", encode({"data": {"entries": entries}}))
+        add_file(archive, "./data/.storage/core.entity_registry",
+                 encode({"data": {"entities": [case.original_identity]}}))
+    snapshot = tmp_path / "historical-ha-backup.tar"
+    with tarfile.open(snapshot, "w") as archive:
+        add_file(archive, "./backup.json", encode({"date": (
+            "2026-11-08T04:00:00+00:00" if after_readd else "2026-11-07T04:00:00+00:00"
+        )}))
+        add_file(archive, "./homeassistant.tar.gz", core.getvalue())
+    tool = run_path(str(Path(__file__).parents[1] / "scripts" / "tesla_ble_continuity_proof.py"))
+    return tool["generate_response"](snapshot, challenge)
+
+
+@pytest.mark.asyncio
+async def test_readded_ble_stop_reuses_durable_recovery_after_authenticated_continuity(readded_bridge, tmp_path):
+    case = readded_bridge
+    with pytest.raises(stop.StopRecoveryRefused, match="non_stop_or_unproven_history"):
+        await recover(case)
+    before = deepcopy(case.store.value)
+    prepared = await continuity_action(case, "prepare")
+    assert prepared["success"] and prepared["controls_issued"] is False
+    assert case.store.value == before and case.auth_calls == case.calls == []
+    proof = make_backup_response(case, tmp_path, prepared["challenge"])
+    result = await continuity_action(case, "recover", proof)
+    assert result["success"]
+    assert case.auth_calls == ["connect", "device_info", "disconnect"]
+    assert [action for _, action, _ in case.calls] == ["prepare", "commit"]
+    assert not stop._live_refs(case.runtime)
+    recovered = next(incident for incident in case.store.value["incidents"].values()
+                     if "producer_continuity" in incident["scope_basis"])
+    assert recovered["historical_outcome"] == "unknown"
+    assert recovered["phase"] == "released" and recovered["activation_pending"] is False
+    assert proof not in repr(case.store.value) and case.active_key not in repr(case.store.value)
+    assert recovered["scope_basis"]["producer_continuity"]["original"] == case.original_identity
+    assert recovered["scope_basis"]["producer_continuity"]["current"]["config_entry_id"] == case.active.entry_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("variant", ("rotated", "wrong_mac", "shared_current", "shared_historical", "newer_backup", "stale_vehicle"))
+async def test_readded_ble_stop_refuses_missing_or_conflicting_evidence(readded_bridge, tmp_path, variant):
+    import base64
+
+    case = readded_bridge
+    before = deepcopy(case.store.value)
+    if variant == "shared_current":
+        case.config_entries["bridge_b"].data["noise_psk"] = case.active_key
+        with pytest.raises(stop.StopRecoveryRefused, match="bridge_requires_unique_encryption_key"):
+            await continuity_action(case, "prepare")
+    else:
+        prepared = await continuity_action(case, "prepare")
+        if variant in {"shared_historical", "newer_backup"}:
+            with pytest.raises(ValueError, match="shared with another bridge|from before the bridge was re-added"):
+                make_backup_response(case, tmp_path, prepared["challenge"],
+                                     shared_key=variant == "shared_historical", after_readd=variant == "newer_backup")
+        else:
+            wrong_key = base64.b64encode(bytes(reversed(range(32)))).decode()
+            proof = make_backup_response(case, tmp_path, prepared["challenge"],
+                                         historical_key=wrong_key if variant == "rotated" else None)
+            if variant == "wrong_mac":
+                case.reported_mac = "aabbccddee01"
+            if variant == "stale_vehicle":
+                case.frozen.add(case.declared[0]["prefix"])
+            reason = {"rotated": "historical_bridge_key_proof_mismatch", "wrong_mac": "authenticated_bridge_mismatch",
+                      "stale_vehicle": "fresh_stopped_vehicle_proof_unavailable"}[variant]
+            with pytest.raises(stop.StopRecoveryRefused, match=reason):
+                await continuity_action(case, "recover", proof)
+    if variant == "stale_vehicle":
+        assert [action for _, action, _ in case.calls] == ["prepare"]
+    else:
+        assert case.calls == [] and case.store.value == before
+    assert len(stop._live_refs(case.runtime)) == 2
+
+
+@pytest.mark.asyncio
+async def test_readded_ble_stop_resume_requires_same_key_and_committed_scope(readded_bridge, tmp_path):
+    import base64
+
+    case = readded_bridge
+    prepared = await continuity_action(case, "prepare")
+    proof = make_backup_response(case, tmp_path, prepared["challenge"])
+
+    async def interrupt_commit(prefix, action):
+        if action == "commit":
+            raise stop.StopRecoveryRefused("connection_lost")
+
+    case.hook["call"] = interrupt_commit
+    with pytest.raises(stop.StopRecoveryRefused, match="connection_lost"):
+        await continuity_action(case, "recover", proof)
+    assert not stop._live_refs(case.runtime)
+    assert any(item["activation_pending"] for item in case.store.value["incidents"].values())
+    case.runtime.pop(recovery.RECOVERY_KEY)
+    case.runtime.pop(recovery._SIDECAR_LOADED_KEY)
+    assert await recovery.async_load_recovery_state(case.hass, case.entry)
+    case.hook["call"] = None
+    case.active.data["noise_psk"] = base64.b64encode(bytes(reversed(range(32)))).decode()
+    with pytest.raises(stop.StopRecoveryRefused, match="completed_recovery_scope_changed"):
+        await recover(case)
+    assert [action for _, action, _ in case.calls] == ["prepare", "commit"]
+    case.active.data["noise_psk"] = case.active_key
+    assert (await recover(case))["success"]
+    assert [action for _, action, _ in case.calls] == ["prepare", "commit", "commit"]
+
+
+@pytest.mark.asyncio
+async def test_readded_ble_stop_rejects_previous_challenge_after_preparing_a_new_one(readded_bridge, tmp_path):
+    case = readded_bridge
+    first = await continuity_action(case, "prepare")
+    response = make_backup_response(case, tmp_path, first["challenge"])
+    second = await continuity_action(case, "prepare")
+    assert second["challenge"] != first["challenge"]
+    with pytest.raises(stop.StopRecoveryRefused, match="historical_bridge_key_proof_mismatch"):
+        await continuity_action(case, "recover", response)
+    assert case.auth_calls == case.calls == []
+    assert len(stop._live_refs(case.runtime)) == 2

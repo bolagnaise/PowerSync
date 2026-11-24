@@ -130,6 +130,44 @@ recover_ble_stop_history:
       selector:
         text:
 
+recover_readded_ble_stop:
+  name: Recover a Stop on a re-added ESPHome bridge
+  description: Home Assistant owner action for one unknown Stop. Prepare a challenge and use a local backup from before the bridge was re-added to verify its original device-specific key.
+  fields:
+    step:
+      name: Step
+      description: Prepare the challenge or recover using the local backup tool's response.
+      required: true
+      selector:
+        select:
+          options:
+            - prepare
+            - recover
+    inventory:
+      name: Affected vehicle
+      description: Supply one prefix and VIN pair for the original bridge and vehicle.
+      required: true
+      selector:
+        object:
+    confirm_complete_history:
+      name: Confirm complete historical inventory
+      description: Confirm this is the only bridge and vehicle involved in the retained history.
+      required: true
+      default: false
+      selector:
+        boolean:
+    response:
+      name: Backup verification response
+      description: Paste the response from the local backup tool for the recover step. Keep the encryption key private.
+      required: false
+      selector:
+        text:
+    entry_id:
+      name: Entry ID
+      required: false
+      selector:
+        text:
+
 recover_ble_command_history:
   name: Recover held BLE charging commands
   description: Reconcile Start, Stop, current and charge-limit history using the PowerSync companion BLE firmware. Restarts every declared bridge and verifies fresh stopped, zero-current and zero-power readings. Read the recovery guide before confirming the complete historical vehicle inventory.

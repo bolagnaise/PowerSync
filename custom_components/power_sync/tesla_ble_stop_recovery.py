@@ -197,6 +197,7 @@ class Bridge:
         from . import tesla_ev_recovery as manager
 
         self.hass, self.entry, self.prefix, self.vin = hass, entry, prefix, vin
+        self.continuity = None
         self.ids = {
             "charger": f"switch.{prefix}_charger",
             "proof": f"sensor.{prefix}_powersync_recovery_proof",
@@ -229,6 +230,7 @@ class Bridge:
             current is self.config_entry and getattr(current, "runtime_data", None) is self.runtime
             and getattr(self.runtime, "client", None) is self.client
             and all(manager._identity(self.hass, self.ids[key]) == value for key, value in self.identities.items())
+            and (self.continuity is None or self.continuity.current())
         )
 
     def proof(self, *, fresh=False):
@@ -330,9 +332,18 @@ def _resolve_inventory(hass, entry, inventory, bridges=None, *, allow_positive=F
         bridge = bridges[prefix]
         ledger = root["vehicles"][ref["vehicle_id"]]
         record = ledger.get("attempts", {}).get(ref.get("attempt_id"))
-        if (not isinstance(record, Mapping) or record.get("operation") not in ({"start", "stop", "rate", "limit"} if allow_positive else {"stop"})
-                or not manager._record_compatible(hass, entry, runtime, ref["vehicle_id"], record)
-                or not manager._liability_matches_stock_scope(ref, bridge.identity)):
+        if not isinstance(record, Mapping) or record.get("operation") not in (
+            {"start", "stop", "rate", "limit"} if allow_positive else {"stop"}
+        ):
+            raise StopRecoveryRefused("non_stop_or_unproven_history")
+        continuity = bridge.continuity
+        if continuity is None:
+            compatible = manager._record_compatible(hass, entry, runtime, ref["vehicle_id"], record)
+            historical_producer = bridge.identity
+        else:
+            compatible = bridge.current() and continuity.record_matches(entry, record)
+            historical_producer = continuity.original
+        if not compatible or not manager._liability_matches_stock_scope(ref, historical_producer):
             raise StopRecoveryRefused("non_stop_or_unproven_history")
         # An authoritative old VIN is a hard boundary, never overridden by an
         # operator's current inventory. Unanchored aliases remain aliases.
@@ -350,14 +361,18 @@ def _resolve_inventory(hass, entry, inventory, bridges=None, *, allow_positive=F
     return bridges, selected, affected
 
 
-def _check_other_entries(hass, runtime, bridges):
+def _check_other_entries(hass, runtime, bridges, original_producer=None):
     from . import tesla_ev_recovery as manager
 
+    identities = [bridge.identity for bridge in bridges.values()]
+    identities.extend(bridge.continuity.original for bridge in bridges.values() if bridge.continuity is not None)
+    if original_producer is not None:
+        identities.append(original_producer)
     for other in hass.data.get(DOMAIN, {}).values():
         if not isinstance(other, dict) or other is runtime or manager.RECOVERY_KEY not in other:
             continue
         for ref in _live_refs(other):
-            if any(manager._liability_matches_stock_scope(ref, b.identity) for b in bridges.values()):
+            if any(manager._liability_matches_stock_scope(ref, identity) for identity in identities):
                 raise StopRecoveryRefused("producer_shared_with_another_entry")
 
 
@@ -372,8 +387,19 @@ async def async_recover_ble_history(hass, entry, inventory, *, confirm_complete_
     )
 
 
+async def async_recover_readded_ble_stop(hass, entry, inventory, *, confirm_complete_history=False,
+                                        step=None, response=None):
+    """Prepare or execute owner-approved recovery for one re-added ESPHome Stop."""
+    if step not in ("prepare", "recover") or (step == "prepare" and response is not None):
+        raise StopRecoveryRefused("invalid_bridge_continuity_step")
+    return await async_recover_ble_stops(
+        hass, entry, inventory, confirm_complete_history=confirm_complete_history,
+        _continuity_step=step, _continuity_response=response,
+    )
+
+
 async def async_recover_ble_stops(hass, entry, inventory, *, confirm_complete_history=False,
-                                  _allow_positive=False):
+                                  _allow_positive=False, _continuity_step=None, _continuity_response=None):
     """Recover the whole operator-confirmed affected inventory, or retain it."""
     from . import tesla_ev_recovery as manager
 
@@ -386,25 +412,47 @@ async def async_recover_ble_stops(hass, entry, inventory, *, confirm_complete_hi
     if lock.locked():
         raise StopRecoveryRefused("recovery_already_running")
     async with lock:
-        async with manager._journal_lock(runtime):
-            # Scope the authoritative union, not just the automation store's
-            # possibly older projection. Never discard durable-only history.
-            runtime[manager.RECOVERY_KEY] = deepcopy(_retained_root(runtime))
-            manager._sync_sidecar_projection(runtime, runtime[manager._SIDECAR_STATE_KEY])
+        if _continuity_step != "prepare":
+            async with manager._journal_lock(runtime):
+                # Scope the authoritative union, not just the automation store's
+                # possibly older projection. Never discard durable-only history.
+                runtime[manager.RECOVERY_KEY] = deepcopy(_retained_root(runtime))
+                manager._sync_sidecar_projection(runtime, runtime[manager._SIDECAR_STATE_KEY])
         bridges = _inventory_bridges(hass, entry, inventory)
-        if not _live_refs(runtime):
+        live_refs = _live_refs(runtime)
+        continuity = None
+        if _continuity_step is not None:
+            from .tesla_ble_continuity import prepare_challenge, resolve_continuity, verify_challenge
+
+            if len(bridges) != 1:
+                raise StopRecoveryRefused("one_retained_ble_stop_required")
+            bridge = next(iter(bridges.values()))
+            continuity = bridge.continuity = resolve_continuity(bridge, live_refs)
+        if not live_refs:
             return await _resume_released(hass, entry, runtime, bridges, inventory)
         bridges, refs, affected = _resolve_inventory(hass, entry, inventory, bridges, allow_positive=_allow_positive)
-        await _settle_unsent_inventory_holds(hass, entry, runtime)
         config = deepcopy(_configuration(entry))
         owners = {vid: manager._owner_snapshot(hass, entry, vid) for vid in affected.values()}
         scope_digest = manager._digest(refs)
+        if continuity is None:
+            await _settle_unsent_inventory_holds(hass, entry, runtime)
+        elif _continuity_step == "prepare":
+            return prepare_challenge(runtime, continuity, scope_digest)
+        else:
+            continuity_proof = await verify_challenge(runtime, continuity, scope_digest, _continuity_response)
+            if (manager._runtime(hass, entry) is not runtime or _configuration(entry) != config
+                    or _live_refs(runtime) != refs
+                    or any(manager._owner_snapshot(hass, entry, vid) != owner for vid, owner in owners.items())):
+                raise StopRecoveryRefused("recovery_scope_changed")
+            _check_other_entries(hass, runtime, bridges)
         scope = {
             "kind": "ble_command_inventory_v2" if _allow_positive else "ble_stop_inventory_v2",
             "inventory_digest": manager._digest(inventory),
             "historical_identity_reconstructed": False,
             "complete_affected_inventory": deepcopy(inventory),
         }
+        if continuity is not None:
+            scope["producer_continuity"] = continuity_proof
         snapshot = manager.recovery_sidecar_snapshot(hass, entry)
         held = [item for item in snapshot["incidents"].values() if item.get("phase") != "released"]
         if len(held) > 1:
@@ -459,10 +507,13 @@ async def _adopt_held_stock_scope(hass, entry, runtime, candidate, revision,
     producer = producers[0]
     prefix = producer.get("prefix")
     bridge = bridges.get(prefix)
-    if (bridge is None or affected.get(prefix) != bridge.vin
+    if bridge is None:
+        raise StopRecoveryRefused("another_recovery_scope_is_held")
+    expected_producer = bridge.continuity.original if bridge.continuity is not None else bridge.identity
+    if (affected.get(prefix) != bridge.vin
             or candidate.get("current_candidate_vehicles") != [bridge.vin]
             or producer.get("vin") != bridge.vin
-            or any(producer.get(field) != value for field, value in bridge.identity.items())
+            or any(producer.get(field) != value for field, value in expected_producer.items())
             or any(ref.get("vehicle_id") != bridge.vin
                    or not manager._liability_matches_stock_scope(ref, producer) for ref in stock_refs)):
         raise StopRecoveryRefused("another_recovery_scope_is_held")
@@ -519,6 +570,14 @@ async def _refresh_held_scope(hass, entry, runtime, incident_id, inventory, brid
         if current_refs != refs or current_affected != affected:
             raise StopRecoveryRefused("recovery_scope_changed")
         previous = selected.get("liability_refs")
+        if basis.get("producer_continuity") is not None or any(b.continuity is not None for b in bridges.values()):
+            from .tesla_ble_continuity import released_binding_matches
+
+            bridge = next(iter(bridges.values()))
+            proof = basis.get("producer_continuity")
+            if (len(bridges) != 1 or bridge.continuity is None or previous != refs
+                    or not released_binding_matches(bridge, proof) or proof.get("original") != bridge.continuity.original):
+                raise StopRecoveryRefused("retained_recovery_scope_changed")
         if previous == refs:
             return
         if not isinstance(previous, list) or not previous:
@@ -755,6 +814,15 @@ async def _resume_released(hass, entry, runtime, bridges, inventory, *, expected
     generations = deepcopy(selected["generation"])
     binding = selected.get("resume_binding", {})
     proofs = selected.get("reconciliation_evidence", {})
+    continuity_proof = selected["scope_basis"].get("producer_continuity")
+    original_producer = None
+    if continuity_proof is not None:
+        from .tesla_ble_continuity import released_binding_matches
+
+        if not isinstance(continuity_proof, dict) or len(bridges) != 1:
+            raise StopRecoveryRefused("completed_recovery_binding_changed")
+        original_producer = continuity_proof.get("original")
+
     if (set(proofs) != set(bridges) or binding.get("config_digest") != manager._digest(_configuration(entry))
             or selected.get("current_candidate_producers") != [b.identity for b in bridges.values()]):
         raise StopRecoveryRefused("completed_recovery_binding_changed")
@@ -766,7 +834,7 @@ async def _resume_released(hass, entry, runtime, bridges, inventory, *, expected
 
     def current():
         try:
-            _check_other_entries(hass, runtime, bridges)
+            _check_other_entries(hass, runtime, bridges, original_producer)
             incident = runtime[manager._SIDECAR_STATE_KEY]["incidents"][incident_id]
             return bool(manager._runtime(hass, entry) is runtime and manager._sidecar_ready(runtime)
                 and not runtime.get(manager._RECOVERY_STOPPING_KEY)
@@ -777,6 +845,7 @@ async def _resume_released(hass, entry, runtime, bridges, inventory, *, expected
                 and incident.get("generation") == generations
                 and manager._digest(_configuration(entry)) == binding.get("config_digest")
                 and all(b.current() for b in bridges.values())
+                and (continuity_proof is None or released_binding_matches(next(iter(bridges.values())), continuity_proof))
                 and all(manager.current_vehicle_generation(hass, entry, vid) == gen for vid, gen in generations.items())
                 and all(manager._owner_snapshot(hass, entry, vid) == owner for vid, owner in binding.get("owners", {}).items()))
         except (KeyError, TypeError, StopRecoveryRefused):

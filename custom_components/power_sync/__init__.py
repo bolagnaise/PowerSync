@@ -47265,6 +47265,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.exception("BLE Stop recovery remains held")
             return {"success": False, "error": "recovery_failed"}
 
+    async def handle_recover_readded_ble_stop(call: ServiceCall) -> dict[str, Any]:
+        """Verify the original ESPHome key and reconcile a single held Stop."""
+        from .tesla_ble_stop_recovery import async_recover_readded_ble_stop, StopRecoveryRefused
+
+        user = await hass.auth.async_get_user(call.context.user_id) if call.context.user_id else None
+        if user is None or not user.is_owner:
+            return {"success": False, "error": "home_assistant_owner_required"}
+        try:
+            return await async_recover_readded_ble_stop(
+                hass, entry, call.data.get("inventory"),
+                confirm_complete_history=call.data.get("confirm_complete_history", False),
+                step=call.data.get("step"), response=call.data.get("response"),
+            )
+        except StopRecoveryRefused as error:
+            return {"success": False, "error": str(error)}
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _LOGGER.exception("Re-added ESPHome bridge recovery remains held")
+            return {"success": False, "error": "recovery_failed"}
+
     from .licensing.entry_routing import register_handlers, routed_handler
     if amber_smartshift_coordinator:
         from .amber_smartshift.controls import handlers as amber_handlers
@@ -47315,6 +47336,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         'recover_ev_transport': handle_recover_ev_transport,
         'recover_ev_headroom': handle_recover_ev_headroom,
         'recover_ble_stop_history': handle_recover_ble_stop_history,
+        'recover_readded_ble_stop': handle_recover_readded_ble_stop,
         'recover_ble_command_history': handle_recover_ble_command_history,
         'get_ble_recovery_status': handle_get_ble_recovery_status,
         'get_ev_recovery_status': handle_get_ev_recovery_status,
@@ -47372,6 +47394,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         DOMAIN, "recover_ble_stop_history",
         routed_handler(hass, entry.entry_id, "recover_ble_stop_history", handle_recover_ble_stop_history),
         supports_response=SupportsResponse.OPTIONAL,
+    )
+    hass.services.async_register(
+        DOMAIN, "recover_readded_ble_stop",
+        routed_handler(hass, entry.entry_id, "recover_readded_ble_stop", handle_recover_readded_ble_stop),
+        supports_response=SupportsResponse.ONLY,
     )
     hass.services.async_register(
         DOMAIN, "recover_max_backup",
