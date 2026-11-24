@@ -40,6 +40,14 @@ POWERSYNC_STOP_CONFIRM_SECONDS = 15 * 60
 EV_QUICK_OBLIGATIONS_KEY = "ev_quick_control_obligations"
 _EV_QUICK_TIMERS_KEY = "_ev_quick_control_timers"
 _LOGGER = logging.getLogger(__name__)
+# Why a car is or is not charging must be visible on a default (WARNING)
+# install, like optimization.coordinator.decisions: pin this one child logger
+# to INFO, only ever raising visibility (a user's DEBUG is kept).
+EV_DECISION_LOGGER = logging.getLogger(
+    "custom_components.power_sync.automations.ev_decisions"
+)
+if EV_DECISION_LOGGER.level == logging.NOTSET or EV_DECISION_LOGGER.level > logging.INFO:
+    EV_DECISION_LOGGER.setLevel(logging.INFO)
 _EV_QUICK_PARAM_KEYS = frozenset(
     {
         "charger_type",
@@ -1886,7 +1894,7 @@ def record_ev_refusal(
     }
     logged_at = _parse_iso_utc(refusal["logged_at"])
     if logged_at is None or (now - logged_at).total_seconds() >= EV_REFUSAL_LOG_REPEAT_SECONDS:
-        _LOGGER.info(
+        EV_DECISION_LOGGER.info(
             "EV decision: %s %s was not carried out: %s (x%d since %s)",
             vid,
             command,

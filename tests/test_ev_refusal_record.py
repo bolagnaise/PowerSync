@@ -42,7 +42,7 @@ class _Hass:
 
 def test_failed_command_survives_a_later_success_and_is_logged(caplog):
     hass = _Hass()
-    caplog.set_level(logging.INFO, logger=ev_ownership.__name__)
+    caplog.set_level(logging.INFO, logger=ev_ownership.EV_DECISION_LOGGER.name)
 
     ev_ownership.record_ev_command(
         hass, _Entry(), VIN, command="start_solar_surplus", success=False,
@@ -61,7 +61,7 @@ def test_failed_command_survives_a_later_success_and_is_logged(caplog):
 
 def test_repeated_identical_refusal_is_counted_but_not_relogged(caplog):
     hass = _Hass()
-    caplog.set_level(logging.INFO, logger=ev_ownership.__name__)
+    caplog.set_level(logging.INFO, logger=ev_ownership.EV_DECISION_LOGGER.name)
     for _ in range(5):
         ev_ownership.record_ev_refusal(
             hass, _Entry(), VIN, command="start_smart_schedule", reason="busy",
@@ -74,7 +74,7 @@ def test_repeated_identical_refusal_is_counted_but_not_relogged(caplog):
 
 def test_unchanged_refusal_relogs_after_repeat_window(caplog):
     hass = _Hass()
-    caplog.set_level(logging.INFO, logger=ev_ownership.__name__)
+    caplog.set_level(logging.INFO, logger=ev_ownership.EV_DECISION_LOGGER.name)
     ev_ownership.record_ev_refusal(
         hass, _Entry(), VIN, command="start_smart_schedule", reason="busy",
     )
@@ -119,7 +119,7 @@ def _decision_logger():
 
     planner = ROOT / "automations" / "ev_charging_planner.py"
     node = load_source_node(planner, "_log_decision_change")
-    ns = {"time": __import__("time"), "_LOGGER": logging.getLogger("planner-test")}
+    ns = {"time": __import__("time"), "_EV_DECISION_LOGGER": ev_ownership.EV_DECISION_LOGGER}
     exec(compile(ast.Module(body=[node], type_ignores=[]), str(planner), "exec",
                  flags=__import__("__future__").annotations.compiler_flag), ns)
     return ns["_log_decision_change"]
@@ -133,7 +133,7 @@ class _ScheduleState:
 def test_smart_schedule_logs_decision_changes_and_throttles_repeats(caplog):
     log_change = _decision_logger()
     executor = types.SimpleNamespace(_state={VIN: _ScheduleState("waiting", "Home Load unavailable")})
-    caplog.set_level(logging.INFO, logger="planner-test")
+    caplog.set_level(logging.INFO, logger=ev_ownership.EV_DECISION_LOGGER.name)
 
     log_change(executor, VIN, now=0.0)
     log_change(executor, VIN, now=30.0)  # unchanged: suppressed
@@ -145,3 +145,7 @@ def test_smart_schedule_logs_decision_changes_and_throttles_repeats(caplog):
     assert len(lines) == 3
     assert "Home Load unavailable" in lines[0]
     assert "-> charging (charging=True)" in lines[1]
+
+
+def test_ev_decision_logger_is_visible_on_a_default_warning_install():
+    assert ev_ownership.EV_DECISION_LOGGER.getEffectiveLevel() <= logging.INFO

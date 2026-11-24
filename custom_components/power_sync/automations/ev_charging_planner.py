@@ -158,6 +158,12 @@ EXTERNAL_SMART_SCHEDULE_STOP_SUPPRESS_SECONDS = 15 * 60
 AUTO_SCHEDULE_START_RETRY_BASE_SECONDS = 30
 # An unconfirmed Scheduled Stop blocks restarts at most this long without a draw.
 SCHEDULED_PENDING_STOP_MAX_SECONDS = 15 * 60
+# Same INFO-pinned logger as ev_ownership.EV_DECISION_LOGGER.
+_EV_DECISION_LOGGER = logging.getLogger(
+    "custom_components.power_sync.automations.ev_decisions"
+)
+if _EV_DECISION_LOGGER.level == logging.NOTSET or _EV_DECISION_LOGGER.level > logging.INFO:
+    _EV_DECISION_LOGGER.setLevel(logging.INFO)
 AUTO_SCHEDULE_START_RETRY_MAX_SECONDS = 15 * 60
 PRICE_LEVEL_START_RETRY_BASE_SECONDS = 30
 PRICE_LEVEL_START_RETRY_MAX_SECONDS = 15 * 60
@@ -6424,7 +6430,7 @@ class AutoScheduleExecutor:
         if previous is not None and previous[0] == key and now - previous[1] < 900:
             return
         log[vehicle_id] = (key, now)
-        _LOGGER.info(
+        _EV_DECISION_LOGGER.info(
             "EV decision: Smart Schedule %s -> %s (charging=%s): %s",
             vehicle_id,
             state.last_decision,

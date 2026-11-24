@@ -45,7 +45,8 @@ def planner_class():
     ns = dict(asyncio=asyncio, time=time, datetime=datetime, timezone=timezone,
               dataclass=dataclass, Mapping=Mapping, DOMAIN="power_sync", _LOGGER=logging.getLogger(__name__),
               aiohttp=HTTP, get_session_manager=lambda: None,
-              REGISTRY_KEY="power_sync_tesla_control")
+              REGISTRY_KEY="power_sync_tesla_control",
+              _EV_DECISION_LOGGER=logging.getLogger("custom_components.power_sync.automations.ev_decisions"))
     load("canonical_site_id", ROOT / "powerwall_control.py", ns)
     load("foreign_site_owner", ROOT / "powerwall_control.py", ns)
     load("_ev_curtailment_battery_owner_present", PLANNER, ns)
