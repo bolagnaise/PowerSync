@@ -55,6 +55,9 @@ def env(monkeypatch):
     ownership = types.ModuleType("power_sync.automations.ev_ownership")
     ownership.get_ev_ownership = lambda *_: ("generic_ev", lease or None)
     ownership.is_solar_surplus_owner_mode = lambda mode: mode == "solar_surplus"
+    refusals = []
+    ownership.ev_refusal_sequence = lambda *_: len(refusals)
+    ownership.record_ev_refusal = lambda *args, **kwargs: refusals.append(kwargs) or kwargs
     monkeypatch.setitem(sys.modules, ownership.__name__, ownership)
 
     class Store:
@@ -275,7 +278,7 @@ async def test_queued_old_start_and_old_stop_are_rejected_at_command_boundary(en
         calls.append(args)
         return True
     namespace = {"__package__": "power_sync.automations", "_start_dynamic_lock": e.actions._start_dynamic_lock,
-                 "_action_start_ev_charging_dynamic_locked": dispatch}
+                 "_action_start_ev_charging_dynamic_locked": dispatch, "DEFAULT_VEHICLE_ID": "_default"}
     unit = ast.Module(body=[ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0), node], type_ignores=[])
     # This wrapper's local DOMAIN import is part of the real production path.
     sys.modules["power_sync.const"].DOMAIN = "power_sync"
