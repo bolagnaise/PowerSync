@@ -23,7 +23,14 @@ lets PowerSync evaluate the next charge session.
 
 When the car reports stopped, an open contactor and fresh readings from the
 same Wall Connector let PowerSync distinguish standby draw from charging.
-Solar Surplus can then start the car when the configured conditions are met.
+For a Tesla waiting to start, draw below one amp is treated as standby when
+there is no charging indication or unresolved Start. Solar Surplus can start
+the car when the configured conditions are met.
+
+If you tap **Boost** while Solar Surplus is waiting, fresh stopped readings
+allow PowerSync to hand over control without sending a Stop first. A handoff
+that fails before Start shows the reason and clears the temporary Boost
+record. A command awaiting vehicle confirmation stays in transport recovery.
 
 While Solar Surplus is waiting for the home battery to reach its minimum, it
 can request a stop if the Tesla starts charging on plug-in. This requires
