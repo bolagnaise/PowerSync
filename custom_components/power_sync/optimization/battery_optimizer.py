@@ -1899,13 +1899,30 @@ class BatteryOptimizer:
                                 earnings_caps_by_day=effective_caps,
                                 forecast_import_costs_by_day=settled_imports,
                             )
-                            result = _run_lp_once(
+                            reconciled_result = _run_lp_once(
                                 seeded_plan,
                                 account_for_planned_imports,
                             )
                             reconciliation_iterations += 1
-                            if not self.allow_greedy_fallback and not result.feasible:
+                            if not self.allow_greedy_fallback and (
+                                not reconciled_result.feasible
+                                or reconciled_result.degraded
+                                or reconciled_result.solver_used != "highs"
+                            ):
+                                # The prior plan passed its original settlement
+                                # limits. Reopening the budget was optional.
+                                failure = reconciled_result.lp_stats
+                                result.lp_stats.update(
+                                    cost_neutral_reconciliation_failure_status=failure.get("status"),
+                                    cost_neutral_reconciliation_failure_reason=failure.get("fallback_reason"),
+                                )
+                                _LOGGER.warning(
+                                    "Cost Neutral budget reconciliation failed (%s); "
+                                    "keeping the previous executable HiGHS plan",
+                                    failure.get("message") or failure.get("fallback_reason"),
+                                )
                                 break
+                            result = reconciled_result
                     if cost_neutral_plan is not None:
                         baseline_caps = {
                             day: round(cap, 6)

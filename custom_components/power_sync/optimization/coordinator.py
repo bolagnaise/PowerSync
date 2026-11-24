@@ -8789,31 +8789,52 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 (proposed_reserve_floor is not None or used_reference_override)
                 and not getattr(result, "degraded", False)
             ):
-                result = await _run_optimizer_once(proposed_reserve_floor)
+                rerun_result = await _run_optimizer_once(proposed_reserve_floor)
                 current_reserve_floor = self._config.backup_reserve
-                applied_reserve_floor = proposed_reserve_floor
-                if applied_reserve_floor is None:
-                    applied_reserve_floor = self._reserve_ratio(current_reserve_floor, 0.0) or 0.0
-                # Reconcile against the rerun floor before committing it.
-                self._optimizer.update_config(backup_reserve=applied_reserve_floor)
-                try:
-                    result, _ = _prepare_schedule(result, applied_reserve_floor)
-                finally:
-                    self._optimizer.update_config(backup_reserve=current_reserve_floor)
-                if not getattr(result, "degraded", False):
-                    final_recommendation = dict(
-                        getattr(result, "reserve_recommendation", {}) or {}
+                if (
+                    not rerun_result.feasible
+                    and reference_result.feasible
+                    and not used_reference_override
+                    and reference_result.modeled_backup_reserve == current_reserve_floor
+                ):
+                    # The reserve change was optional and is still staged.
+                    # The first plan is executable under the active reserve.
+                    proposed_reserve_floor = None
+                    result.reserve_recommendation["applied_optimizer_reserve_percent"] = (
+                        int(round(current_reserve_floor * 100))
                     )
-                    for key in reserve_semantic_keys:
-                        final_recommendation.pop(key, None)
-                    final_recommendation.update(reference_reserve_semantics)
-                    final_recommendation["auto_apply_enabled"] = bool(
-                        self.auto_apply_reserve_enabled
+                    result.lp_stats["reserve_replan_failure_reason"] = (
+                        rerun_result.lp_stats.get("fallback_reason")
                     )
-                    final_recommendation["applied_optimizer_reserve_percent"] = int(
-                        round(applied_reserve_floor * 100)
+                    _LOGGER.warning(
+                        "Optimizer reserve replan failed; keeping the executable "
+                        "plan under the current reserve"
                     )
-                    result.reserve_recommendation = final_recommendation
+                else:
+                    result = rerun_result
+                    applied_reserve_floor = proposed_reserve_floor
+                    if applied_reserve_floor is None:
+                        applied_reserve_floor = self._reserve_ratio(current_reserve_floor, 0.0) or 0.0
+                    # Reconcile against the rerun floor before committing it.
+                    self._optimizer.update_config(backup_reserve=applied_reserve_floor)
+                    try:
+                        result, _ = _prepare_schedule(result, applied_reserve_floor)
+                    finally:
+                        self._optimizer.update_config(backup_reserve=current_reserve_floor)
+                    if not getattr(result, "degraded", False):
+                        final_recommendation = dict(
+                            getattr(result, "reserve_recommendation", {}) or {}
+                        )
+                        for key in reserve_semantic_keys:
+                            final_recommendation.pop(key, None)
+                        final_recommendation.update(reference_reserve_semantics)
+                        final_recommendation["auto_apply_enabled"] = bool(
+                            self.auto_apply_reserve_enabled
+                        )
+                        final_recommendation["applied_optimizer_reserve_percent"] = int(
+                            round(applied_reserve_floor * 100)
+                        )
+                        result.reserve_recommendation = final_recommendation
             if not self._enabled:
                 return False
             run.check_current()

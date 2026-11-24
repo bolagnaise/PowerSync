@@ -1810,6 +1810,65 @@ def test_zero_cap_reoptimizes_from_required_plan_import_with_static_cap(
     assert result.lp_stats["cost_neutral_reconciliation_iterations"] == 1
 
 
+def test_cost_neutral_keeps_executable_charge_when_budget_reconciliation_times_out(
+    optimizer_module, monkeypatch,
+):
+    module = optimizer_module
+    optimizer = _optimizer(module)
+    optimizer.allow_greedy_fallback = False
+    optimizer.update_config(backup_reserve=0.2)
+    optimizer.pre_window_slot = 1
+    optimizer.pre_window_soc_target = 0.4
+    solve = optimizer._solve_lp
+    solve_highs = module._solve_lp_highs
+    solve_signature = inspect.signature(solve)
+    passes = []
+
+    def solve_budget(*args, **kwargs):
+        passes.append(solve_signature.bind(*args, **kwargs).arguments[
+            "cost_neutral_earnings_cap"
+        ])
+        return solve(*args, **kwargs)
+
+    def time_out_on_reconciliation(*args, **kwargs):
+        if len(passes) > 1:
+            status = int(module.highspy.HighsModelStatus.kTimeLimit)
+            return module._HighsResult(None, False, "Time limit reached", status, None)
+        return solve_highs(*args, **kwargs)
+
+    monkeypatch.setattr(optimizer, "_solve_lp", solve_budget)
+    monkeypatch.setattr(module, "_solve_lp_highs", time_out_on_reconciliation)
+    result = optimizer.optimize(
+        import_prices=[0.12, 0.65, 0.65],
+        export_prices=[0.0, 0.0, 0.30],
+        solar_forecast=[0.0] * 3,
+        load_forecast=[1.0, 2.0, 0.0],
+        current_soc=0.2,
+        allow_grid_charge=True,
+        grid_charge_allowed=[True, False, False],
+        allow_battery_export=[False, False, True],
+        schedule_timestamps=_timestamps(3),
+        cost_neutral_earnings_cap=0.0,
+        cost_neutral_slots=[True] * 3,
+        cost_neutral_fixed_cost_allowance=-0.02,
+    )
+
+    assert len(passes) == 2
+    assert passes[0] == 0.0
+    assert passes[1] > 0.0
+    assert result.solver_used == "highs"
+    assert result.feasible
+    assert not result.degraded
+    assert result.schedule.actions[0].action == "charge"
+    assert result.schedule.actions[0].battery_charge_w == pytest.approx(2_000.0, abs=1)
+    assert result.schedule.battery_export_w == pytest.approx([0.0] * 3)
+    assert result.schedule.actions[-1].soc == pytest.approx(0.2, abs=1e-4)
+    assert result.lp_stats["cost_neutral_reconciliation_failure_status"] == int(
+        module.highspy.HighsModelStatus.kTimeLimit
+    )
+    assert result.lp_stats["status"] == int(module.highspy.HighsModelStatus.kOptimal)
+
+
 def test_final_plan_import_reopens_only_uncovered_prior_credit_balance(
     optimizer_module,
 ):
