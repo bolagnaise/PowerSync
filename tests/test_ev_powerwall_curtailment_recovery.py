@@ -24,7 +24,7 @@ METHODS = (
     "_set_export_rule", "_set_tesla_backup_reserve", "_get_current_export_rule", "_curtailment_entry_data", "_curtailment_runtime_current", "_curtailment_site_id", "_curtailment_recovery_allowed", "_curtailment_export_unowned",
     "_load_curtailment_recovery", "_persist_curtailment_recovery",
     "_disable_curtailment_for_ev", "_restore_curtailment",
-    "_retry_curtailment_restoration", "evaluate",
+    "_retry_curtailment_restoration", "_log_decision_change", "evaluate",
 )
 
 

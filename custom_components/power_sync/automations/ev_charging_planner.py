@@ -6387,9 +6387,9 @@ class AutoScheduleExecutor:
 
             try:
                 await self._evaluate_vehicle(vehicle_id, settings, live_status, current_price_cents)
+                self._log_decision_change(vehicle_id)
             except Exception as e:
                 _LOGGER.error(f"Auto-schedule evaluation failed for {vehicle_id}: {e}")
-            self._log_decision_change(vehicle_id)
 
         await self._retry_curtailment_restoration()
         self._sync_inactive_smart_schedule_preserve_intent()
