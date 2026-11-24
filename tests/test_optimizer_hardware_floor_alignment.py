@@ -1400,6 +1400,60 @@ def test_live_disable_idle_keeps_plan_when_full_deadline_is_unreachable(
     assert all(action.battery_charge_w == 0 for action in result.schedule.actions[1:])
 
 
+def test_charge_by_time_keeps_plan_when_command_modes_miss_deadline_without_disable_idle(
+    battery_optimizer_module,
+    monkeypatch,
+):
+    """Charge By Time alone must not discard the plan for a self-use hold.
+
+    The first HiGHS pass reaches the deadline target, but its executable
+    command modes project less energy at the deadline, so the mode-locked
+    pass is infeasible. Disable Idle is off, yet the optimiser must still
+    re-validate the deadline at the projected SOC and keep the export plan.
+    """
+    module = battery_optimizer_module
+    _select_backend(module, monkeypatch, "highs")
+    optimizer = module.BatteryOptimizer(
+        capacity_wh=10_000,
+        max_charge_w=2_000,
+        max_discharge_w=4_000,
+        efficiency=0.92,
+        backup_reserve=0.20,
+        hardware_reserve=0.05,
+        interval_minutes=60,
+        horizon_hours=5,
+        terminal_weight=0.0,
+    )
+    optimizer.allow_greedy_fallback = False
+    optimizer.pre_window_slot = 4
+    optimizer.pre_window_soc_target = 0.60
+
+    result = optimizer.optimize(
+        import_prices=[0.10, 0.45, 0.10, 0.45, 0.10],
+        export_prices=[0.28, 0.03, 0.03, 0.03, 0.60],
+        solar_forecast=[0.0, 2.0, 0.0, 0.0, 4.0],
+        load_forecast=[2.0, 1.0, 0.0, 1.0, 0.3],
+        current_soc=0.50,
+        allow_battery_export=[False, True, False, False, True],
+        allow_grid_charge=True,
+        grid_charge_allowed=[False, True, False, False, False],
+        disable_idle=False,
+    )
+
+    assert result.solver_used == "highs"
+    assert result.feasible and not result.degraded
+    assert result.lp_stats.get("fallback_reason") is None
+    assert result.lp_stats["deadline_unmet_after_mode_projection"] is True
+    assert result.lp_stats["pre_window_requested_effective_target"] == pytest.approx(
+        0.60, abs=0.01
+    )
+    actions = result.schedule.actions
+    assert any(action.battery_charge_w > 0 for action in actions[:4])
+    assert actions[3].soc >= result.lp_stats["pre_window_effective_target"] - 0.0001
+    assert actions[-1].action == "export"
+    assert actions[-1].battery_discharge_w > 0
+
+
 @pytest.mark.parametrize("cost_neutral_enabled", [False, True])
 def test_disable_idle_deadline_projection_uses_effective_runtime_action(
     battery_optimizer_module,
