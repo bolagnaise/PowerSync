@@ -2,11 +2,10 @@
 
 Byte fixtures were produced by protoc from a schema carrying the Teslemetry
 extended CarServer field numbers (Action.vehicleAction=2, VehicleAction 74/75,
-Response 15, ChargeOnSolarFeature 1/2/3). When protoc is installed the fixture
-test re-derives them, so the C++ encoder can never drift from the schema.
+Response 15, ChargeOnSolarFeature 1/2/3). The fixture test re-derives them
+with the protobuf runtime, so the C++ encoder can never drift from the schema.
 """
 from pathlib import Path
-import shutil
 import subprocess
 
 import pytest
@@ -21,30 +20,24 @@ RESPONSE_ON_20_80 = "0a007a0e0a0c0801150000a0411d0000a042"
 RESPONSE_EMPTY_FEATURE = "0a007a020a00"
 RESPONSE_ABSENT = "0a00"
 
-SCHEMA = """
-syntax = "proto3";
-package ref;
-message ChargeOnSolarFeature { bool enabled = 1; float lower_charge_limit = 2; float upper_charge_limit = 3; }
-message UpdateChargeOnSolarFeatureRequest { ChargeOnSolarFeature charge_on_solar = 1; }
-message GetChargeOnSolarFeatureRequest {}
-message GetChargeOnSolarFeatureResponse { ChargeOnSolarFeature charge_on_solar = 1; }
-message VehicleAction { oneof m { UpdateChargeOnSolarFeatureRequest updateChargeOnSolarFeatureRequest = 74;
-  GetChargeOnSolarFeatureRequest getChargeOnSolarFeatureRequest = 75; } }
-message Action { oneof m { VehicleAction vehicleAction = 2; } }
-message ActionStatus { int32 result = 1; }
-message Response { ActionStatus actionStatus = 1;
-  oneof response_msg { GetChargeOnSolarFeatureResponse getChargeOnSolarFeatureResponse = 15; } }
-"""
+SCHEMA = {
+    "ChargeOnSolarFeature": [("enabled", 1, "bool"), ("lower_charge_limit", 2, "float"),
+                             ("upper_charge_limit", 3, "float")],
+    "UpdateChargeOnSolarFeatureRequest": [("charge_on_solar", 1, "ChargeOnSolarFeature")],
+    "GetChargeOnSolarFeatureRequest": [],
+    "GetChargeOnSolarFeatureResponse": [("charge_on_solar", 1, "ChargeOnSolarFeature")],
+    "VehicleAction": [("updateChargeOnSolarFeatureRequest", 74, "UpdateChargeOnSolarFeatureRequest", "m"),
+                      ("getChargeOnSolarFeatureRequest", 75, "GetChargeOnSolarFeatureRequest", "m")],
+    "Action": [("vehicleAction", 2, "VehicleAction", "m")],
+    "ActionStatus": [("result", 1, "int32")],
+    "Response": [("actionStatus", 1, "ActionStatus"),
+                 ("getChargeOnSolarFeatureResponse", 15, "GetChargeOnSolarFeatureResponse", "response_msg")],
+}
 
 
-@pytest.mark.skipif(shutil.which("protoc") is None, reason="protoc not installed")
-def test_fixtures_match_protoc_reference_encoding(tmp_path):
-    (tmp_path / "cos.proto").write_text(SCHEMA)
-
+def test_fixtures_match_reference_encoding(protobuf_reference):
     def encode(message, text):
-        result = subprocess.run(["protoc", f"--encode=ref.{message}", "cos.proto"], cwd=tmp_path,
-                                input=text.encode(), capture_output=True, check=True)
-        return result.stdout.hex()
+        return protobuf_reference(SCHEMA, message, text)
 
     assert encode("Action", "vehicleAction{getChargeOnSolarFeatureRequest{}}") == GET
     assert encode("Action", "vehicleAction{updateChargeOnSolarFeatureRequest{charge_on_solar{"
