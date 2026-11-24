@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 import importlib
@@ -881,6 +882,95 @@ async def test_known_command_uncertainty_selects_real_refs_and_uses_automatic_sc
     assert incident["operator_scope_confirmation"]["confirmed_by"] == "recorded_binding"
     assert calls["recover"]["incident_id"] == incident["incident_id"]
     assert original_recover is not recovery.async_recover_stock
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", [
+    "idle", "charging", "monitoring", "owned", "read_unavailable", "idle_proof_lost", "before_command",
+])
+async def test_worker_recovers_exact_stock_hold_without_a_charge_request(harness, monkeypatch, state):
+    hass, entry = harness
+    bridge = _bridge(hass, entry, VIN_A)
+    runtime = hass.data["power_sync"][entry.entry_id]
+    sidecar = runtime["_tesla_ev_recovery_sidecar"]
+    submitted_at = time.time() - 15
+    sidecar["recovery"]["vehicles"] = {VIN_A: {"attempts": {"stop-1": {
+        "operation": "stop", "outcome": "sent_unknown", "submitted_epoch": submitted_at, "route": {
+            "kind": "ble", "prefix": bridge.prefix, "entity_identity": bridge.identities["charger"],
+        },
+    }}, "hazards": {}, "route": None}}
+    runtime[recovery.RECOVERY_KEY] = deepcopy(sidecar["recovery"])
+    if state == "monitoring":
+        entry.options["monitoring_mode"] = True
+
+    observation = importlib.import_module("power_sync.tesla_ev_observation")
+    binding = {"vin": VIN_A, "domain": "teslemetry", "config_entry_id": "ble-config",
+               "device_id": "native-device", "producer_identity": "native:producer"}
+    resets, reads = [], []
+    cached_reads = 0
+
+    def cached(_hass, vin, *, updated_after=None):
+        nonlocal cached_reads
+        cached_reads += 1
+        assert vin == VIN_A
+        stamp = submitted_at - 1 if state == "before_command" else time.time()
+        if ((updated_after is not None and stamp <= updated_after)
+                or (state == "idle_proof_lost" and cached_reads > 2)):
+            return None
+        sample = _observation(vin, stamp=stamp)
+        if state == "charging":
+            return sample
+        return replace(sample, charge_state="Stopped", charger_actual_current=0, charger_power=0)
+
+    async def restart(transaction):
+        resets.append(transaction.bridge.vin)
+        return True
+
+    async def reset(**kwargs):
+        if not await kwargs["restart"]():
+            from power_sync.tesla_ble_reset import StockResetError
+            raise StockResetError("restart request was refused")
+        return {"qualified_at": time.time(), "profile": {"queue_persistence": "ram_only"}}
+
+    async def read(_hass, vin, **kwargs):
+        reads.append(kwargs["allow_paid_refresh"])
+        assert vin == VIN_A and kwargs["authorize"]()
+        if state == "read_unavailable":
+            return None
+        sample = _observation(vin, stamp=time.time() + len(reads) * 0.1)
+        return replace(sample, charge_state="Stopped", charger_actual_current=0, charger_power=0)
+
+    async def forbidden(*_args, **_kwargs):
+        pytest.fail("Background recovery tried to wake the car")
+
+    monkeypatch.setattr(observation, "independent_tesla_source_binding", lambda *_args: binding)
+    monkeypatch.setattr(observation, "get_tesla_vehicle_observation", cached)
+    monkeypatch.setattr(observation, "async_read_independent_tesla_vehicle", read)
+    monkeypatch.setattr(observation, "async_wake_independent_tesla_vehicle", forbidden)
+    monkeypatch.setattr(stock.StockBridgeTransaction, "restart", restart)
+    ownership = types.ModuleType("power_sync.automations.ev_ownership")
+    ownership.get_ev_ownership = lambda *_args: (VIN_A, {"owner": "external"}) if state == "owned" else (None, None)
+    monkeypatch.setitem(sys.modules, "power_sync.automations.ev_ownership", ownership)
+    reset_module = importlib.import_module("power_sync.tesla_ble_reset")
+    monkeypatch.setattr(reset_module, "async_execute_stock_reset", reset)
+    automatic = importlib.import_module("power_sync.tesla_ev_auto_recovery")
+    worker = automatic.NativeRecoveryWorker(hass, entry, runtime)
+    runtime[automatic.WORKER_KEY] = worker
+    await worker.async_tick()
+
+    store = runtime["_tesla_ev_recovery_sidecar_store"]
+    assert hass.services.calls == []
+    if state == "idle":
+        assert resets == [VIN_A] and reads == [False, False]
+        assert recovery.get_vehicle_route(hass, entry, VIN_A) is None
+        saved = store.value["recovery"]["vehicles"][VIN_A]["attempts"]["stop-1"]
+        assert saved["outcome"] == "sent_unknown" and saved["recovery_retired"]
+    else:
+        assert recovery.get_vehicle_route(hass, entry, VIN_A)["reason"] == "ble_recovery"
+        expected = [VIN_A] if state == "read_unavailable" else []
+        assert resets == expected
+        await worker.async_tick()
+        assert resets == expected
 
 
 @pytest.mark.asyncio

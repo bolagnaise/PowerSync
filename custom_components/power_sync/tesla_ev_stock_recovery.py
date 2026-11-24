@@ -12,7 +12,7 @@ from dataclasses import dataclass
 import logging
 import math
 import time
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 DOMAIN = "power_sync"
 _LOGGER = logging.getLogger(__name__)
@@ -387,6 +387,24 @@ def _covered_records(snapshot: Mapping[str, Any], bridge: StockBridge) -> list[d
     return covered
 
 
+def _background_proof_cutoff(snapshot: Mapping[str, Any], bridge: StockBridge) -> float | None:
+    """Require idle evidence newer than every unresolved command on this bridge."""
+    refs = _covered_records(snapshot, bridge)
+    if not refs or any(ref["vehicle_id"] != bridge.vin for ref in refs):
+        return None
+    ledger = snapshot["recovery"]["vehicles"][bridge.vin]
+    timestamps = []
+    for ref in refs:
+        if "hazard_id" in ref:
+            stamp = ledger["hazards"][ref["hazard_id"]].get("requested_epoch")
+        else:
+            stamp = ledger["attempts"][ref["attempt_id"]].get("submitted_epoch")
+        if type(stamp) not in (int, float) or not math.isfinite(stamp) or stamp <= 0:
+            return None
+        timestamps.append(stamp)
+    return max(timestamps)
+
+
 async def async_register_evidence_loss(
     hass: Any, entry: Any, *, vins: list[str], operator_confirmation: bool,
     provenance: Any, surviving_facts: Any,
@@ -444,28 +462,51 @@ async def async_register_evidence_loss(
 async def async_recover_vehicle_transport(
     hass: Any, entry: Any, vin: str, *, incident_id: str | None = None,
     automatic: bool = False,
+    background_authorize: Callable[[], bool] | None = None,
 ) -> bool:
     """Recover one exact stock producer without changing charging settings."""
     from .const import CONF_EV_PROVIDER, EV_PROVIDER_BOTH, EV_PROVIDER_FLEET_API
     from .tesla_ev_observation import (
         async_read_independent_tesla_vehicle,
         async_wake_independent_tesla_vehicle,
+        get_tesla_vehicle_observation,
         independent_tesla_source_binding,
     )
     from .tesla_ev_recovery import (
         async_confirm_recovery_scope, async_record_evidence_loss, async_recover_stock,
         current_vehicle_generation, recovery_sidecar_snapshot,
     )
-    if not await async_prepare_stock_host_contract(hass):
+    background = background_authorize is not None
+
+    def permitted():
+        return background_authorize is None or background_authorize()
+
+    if not permitted() or not await async_prepare_stock_host_contract(hass) or not permitted():
         return False
     bridge = resolve_stock_bridge(hass, entry, str(vin))
-    snapshot = recovery_sidecar_snapshot(hass, entry)
-    if bridge is None or snapshot is None:
+    if bridge is None:
         return False
     source_binding = independent_tesla_source_binding(hass, str(vin))
     radio_entity = bridge.identities["radio"]["entity_id"]
     radio = hass.states.get(radio_entity)
     if source_binding is None or getattr(radio, "state", None) != "on":
+        return False
+
+    def observation_matches(observation):
+        return observation is not None and all(
+            getattr(observation, key, None) == source_binding.get(key)
+            for key in ("vin", "domain", "config_entry_id", "device_id", "producer_identity")
+        )
+
+    def observed_idle(sample):
+        return (observation_matches(sample)
+                and sample.charge_state.lower() in {"stopped", "complete", "disconnected", "nopower"}
+                and sample.charger_actual_current == 0 and sample.charger_power == 0)
+
+    def idle_observed(after=None):
+        return observed_idle(get_tesla_vehicle_observation(hass, str(vin), updated_after=after))
+
+    if background and not idle_observed():
         return False
     runtime = bridge.runtime_ref
     # Recovery work has its own lane; it never holds the car's Stop lane or
@@ -475,7 +516,14 @@ async def async_recover_vehicle_transport(
     if lock.locked():
         return False
     async with lock:
+        if not permitted():
+            return False
         snapshot = recovery_sidecar_snapshot(hass, entry)
+        if snapshot is None:
+            return False
+        idle_after = _background_proof_cutoff(snapshot, bridge) if background else None
+        if background and (idle_after is None or not idle_observed(idle_after)):
+            return False
         incidents = snapshot.get("incidents", {})
         if incident_id is not None:
             incident = incidents.get(incident_id)
@@ -535,28 +583,36 @@ async def async_recover_vehicle_transport(
         if incident.get("phase") == "released":
             return True
         last_error_at = incident.get("last_error_at")
-        if (automatic and type(last_error_at) in (int, float)
+        if ((automatic or background) and type(last_error_at) in (int, float)
                 and time.time() - last_error_at < AUTOMATIC_RECOVERY_RETRY_SECONDS):
             return False
+        prior_reset_at = incident.get("reset_started_at")
+        if background and prior_reset_at is not None:
+            if (type(prior_reset_at) not in (int, float) or not math.isfinite(prior_reset_at)
+                    or time.time() - prior_reset_at < AUTOMATIC_RECOVERY_RETRY_SECONDS):
+                return False
+            idle_after = max(idle_after, prior_reset_at)
         transaction = StockBridgeTransaction(hass, entry, bridge)
         first_observations: dict[str, Any] = {}
 
         def source_current() -> bool:
-            return (transaction.current()
+            return (permitted() and transaction.current()
                     and getattr(hass.states.get(radio_entity), "state", None) == "on"
                     and independent_tesla_source_binding(hass, str(vin)) == source_binding)
-
-        def observation_matches(observation: Any) -> bool:
-            return bool(observation is not None and all(
-                getattr(observation, key, None) == source_binding.get(key)
-                for key in ("vin", "domain", "config_entry_id", "device_id", "producer_identity")
-            ))
 
         def quiesce(*_args: Any) -> bool:
             transaction.generation = current_vehicle_generation(hass, entry, str(vin))
             return source_current()
 
+        async def restart():
+            # The bridge must still belong to an idle vehicle at the actual reset boundary.
+            if background and (not source_current() or not idle_observed(idle_after)):
+                return False
+            return await transaction.restart()
+
         def cloud_wake_allowed() -> bool:
+            if background:
+                return False
             config = {**getattr(entry, "data", {}), **getattr(entry, "options", {})}
             return config.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API) in (
                 EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH,
@@ -590,7 +646,7 @@ async def async_recover_vehicle_transport(
             if vehicle != str(vin) or not source_current():
                 return None
             observation = await read_observation(vehicle)
-            if observation is None and source_current():
+            if observation is None and source_current() and not background:
                 # Wake is a separate non-charging operation. The old producer
                 # has already been retired; retain the recovery generation
                 # while allowing the ordinary bounded BLE wake/readiness wait.
@@ -619,7 +675,8 @@ async def async_recover_vehicle_transport(
                     observation = await read_observation(
                         vehicle, allow_paid_refresh=True,
                     )
-            if (not source_current() or not observation_matches(observation)):
+            if (not source_current() or not observation_matches(observation)
+                    or (background and not observed_idle(observation))):
                 return None
             evidence = reconciliation_evidence(observation)
             if evidence is not None:
@@ -659,6 +716,7 @@ async def async_recover_vehicle_transport(
                             return False
                         await asyncio.sleep(min(RECONCILE_RETRY_SECONDS, remaining))
                 if (not source_current() or not observation_matches(second)
+                        or (background and not observed_idle(second))
                         or second.origin != "native_cloud" or second.vin != vehicle
                         or second.producer_identity != first.producer_identity
                         or second.domain != first.domain
@@ -687,7 +745,7 @@ async def async_recover_vehicle_transport(
         return await async_recover_stock(
             hass, entry, incident_id=incident["incident_id"],
             profile=bridge.profile, identity=bridge.identity,
-            restart=transaction.restart, wait_disconnected=transaction.disconnected,
+            restart=restart, wait_disconnected=transaction.disconnected,
             wait_connected=transaction.connected, read_identity=transaction.identity,
             read_uptime=transaction.uptime, quiesce=quiesce,
             observe=observe, reconcile=reconcile,

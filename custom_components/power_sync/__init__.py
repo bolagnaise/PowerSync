@@ -21280,6 +21280,7 @@ class ChargingBoostView(HomeAssistantView):
                                   duration_minutes, target_soc, deadline, pairing, warnings):
         """Journal finite authority before dispatch; a replacement retains its prior receipt."""
         from uuid import uuid4
+        from .action_events import publish_ev_command
         from .automations import actions as ev_actions
         from .automations.actions import execute_actions
         from .automations.ev_ownership import claim_ev_ownership, get_ev_ownership
@@ -21292,11 +21293,19 @@ class ChargingBoostView(HomeAssistantView):
         prior = records.get(vehicle_id)
         if prior is not None and not isinstance(prior, dict):
             return {"success": False, "error": "Boost recovery journal is invalid"}
+
+        def recovery_pending(reason):
+            publish_ev_command(self._hass, self._config_entry, vehicle_id, {
+                "command": "start_boost", "at": dt_util.utcnow().isoformat(),
+                "source": "powersync", "success": False, "reason": reason,
+            }, record_type="admission")
+            return {"success": False, "error": reason, "recovery_pending": True}
+
         # A second unknown attempt cannot overwrite the only durable cleanup
         # evidence for a prior in-flight start.
         if prior is not None and (prior.get("pending_intent") or prior.get("start_in_flight")
                                   or prior.get("unknown_start_outcome")):
-            return {"success": False, "error": "Previous Boost start recovery remains pending"}
+            return recovery_pending("Previous Boost start recovery remains pending")
         if action_params.get("charger_type", "tesla") == "tesla":
             from .tesla_ev_recovery import get_vehicle_route
 
@@ -21313,8 +21322,7 @@ class ChargingBoostView(HomeAssistantView):
                     return {"success": False, "error": "Boost expired or was superseded during recovery"}
                 route = get_vehicle_route(self._hass, self._config_entry, vehicle_id)
                 if route and route.get("kind") == "blocked":
-                    return {"success": False, "error": "Tesla Bluetooth charging recovery remains pending",
-                            "recovery_pending": True}
+                    return recovery_pending("Tesla Bluetooth charging recovery remains pending")
                 return {"success": False, "error": "Tesla Bluetooth recovery finished. Try Boost again."}
         _, prior_lease = get_ev_ownership(self._hass, self._config_entry, vehicle_id)
         record = {

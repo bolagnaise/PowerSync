@@ -23,6 +23,17 @@ alone does not clear a held command.
 It does not establish why an earlier Stop went unconfirmed or guarantee that
 the original communication failure will not recur.
 
+PowerSync checks supported stock ESPHome bridge holds automatically when the
+same vehicle has a fresh stopped reading with zero current and zero power.
+It restarts only the matched bridge and checks new readings from the linked
+Tesla provider. The background check leaves a sleeping car asleep and uses
+no paid data refresh. The companion procedure below requires the complete
+affected vehicle and bridge history.
+
+If Boost encounters an existing Bluetooth hold, it tries recovery before
+making any charging or charge-limit request. Tap **Boost** again when PowerSync
+says recovery is finished.
+
 This route covers exact original bridge/device/entity bindings and an explicitly
 confirmed complete vehicle inventory. It refuses unknown operations, conflicting identity, omitted vehicles and changed pairing.
 The compatibility action `recover_ble_stop_history` remains restricted to Stops;

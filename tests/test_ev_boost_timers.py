@@ -91,6 +91,7 @@ class BoostHarness:
         self.states = {"entry": {}}
         self.timers = []
         self.calls = []
+        self.admission_events = []
         self.fail_start = set()
         self.ambiguous_start = set()
         self.start_hook = None
@@ -175,6 +176,8 @@ class BoostHarness:
             "EV_PROVIDER_TESLA_BLE": mapping.EV_PROVIDER_TESLA_BLE,
             "configured_ble_prefixes": mapping.configured_ble_prefixes,
             "persist_ev_runtime_state": own.persist_ev_runtime_state,
+            "publish_ev_command": lambda _hass, _entry, vin, command, *, record_type:
+                self.admission_events.append((vin, command, record_type)),
             "get_vehicle_route": self.get_vehicle_route,
             "async_rebind_native_session_route": recovery.async_rebind_native_session_route,
             "_compatible": recovery._compatible,
@@ -426,6 +429,10 @@ async def test_ble_stop_hold_does_not_create_another_boost_recovery_obligation(r
         assert "Try Boost again" in first["error"]
     else:
         assert first["recovery_pending"] and "Bluetooth" in first["error"]
+        [(event_vin, event, record_type)] = h.admission_events
+        assert (event_vin, event["command"], event["success"], record_type) == (
+            VIN_A, "start_boost", False, "admission")
+        assert h.owner(VIN_A) is None
 
     h.ble_recovery_held.clear()
     h.fail_start.clear()

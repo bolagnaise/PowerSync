@@ -1,4 +1,4 @@
-"""Read-only recovery of native EV uncertainty, independent of charging plans."""
+"""Recover eligible Tesla EV command holds independently of charging plans."""
 from __future__ import annotations
 
 import asyncio
@@ -30,13 +30,14 @@ def _valid_record(record):
 
 
 class NativeRecoveryWorker:
-    """One bounded exact-vehicle attempt per tick; never a command producer."""
+    """One bounded exact-vehicle recovery attempt per tick."""
 
     def __init__(self, hass, entry, runtime):
         self.hass, self.entry, self.runtime = hass, entry, runtime
         self.task = None
         self.cancel_timer = None
         self.closed = False
+        self.stock_checked_at = {}
 
     def current(self):
         return (not self.closed
@@ -110,6 +111,26 @@ class NativeRecoveryWorker:
             elif success:
                 _LOGGER.info("Automatic Tesla EV recovery reconciled retained command history; normal control admission can resume")
 
+    async def _recover_stock(self, vin):
+        from .automations.ev_ownership import get_ev_ownership
+        from .const import CONF_MONITORING_MODE
+        from .tesla_ble_stop_recovery import ACTIVE_KEY as BLE_RECOVERY_ACTIVE
+        from .tesla_ev_stock_recovery import async_recover_vehicle_transport
+
+        def authorized():
+            if (not self.current() or self.runtime.get(BLE_RECOVERY_ACTIVE) is not None
+                    or self.entry.options.get(CONF_MONITORING_MODE,
+                                              self.entry.data.get(CONF_MONITORING_MODE, False))
+                    or not _no_writers(recovery, self.hass, vin)):
+                return False
+            lease_id, owner = get_ev_ownership(self.hass, self.entry, vin)
+            return lease_id is None and owner is None
+
+        if authorized():
+            await async_recover_vehicle_transport(
+                self.hass, self.entry, vin, automatic=True, background_authorize=authorized,
+            )
+
     async def async_tick(self, _now=None):
         if not self.current() or (self.task is not None and not self.task.done()):
             return
@@ -127,11 +148,16 @@ class NativeRecoveryWorker:
             # another car. The ordering survives a Home Assistant restart.
             def attempted(vin):
                 row = records.get(vin)
-                return row["last_attempt_at"] if _valid_record(row) else 0
+                return max(row["last_attempt_at"] if _valid_record(row) else 0,
+                           self.stock_checked_at.get(vin, 0))
             for vin in sorted(root["vehicles"], key=lambda vin: (attempted(vin), vin)):
                 if not self.current():
                     return
                 route = recovery.get_vehicle_route(self.hass, self.entry, vin)
+                if route and route.get("reason") == "ble_recovery":
+                    self.stock_checked_at[vin] = time.time()
+                    await self._recover_stock(vin)
+                    return
                 if not route or route.get("reason") != "native_recovery":
                     continue
                 if (_candidates(recovery, self.hass, self.entry, self.runtime, vin,
