@@ -1922,6 +1922,29 @@ def can_claim_ev_ownership(
     if lease is None:
         return True, None, None, None
 
+    if lease.get("owner") == EXTERNAL_OWNER_MODE and lease.get("stop_settling"):
+        # A stop-settling lease only waits for telemetry to confirm PowerSync's
+        # own Stop. It must never outlive its window (a sleeping car sends no
+        # confirmation, which used to block every start until HA restarted),
+        # and it must never block an explicit user command. Real external
+        # charging seen later re-creates a normal external lease.
+        expires_at = _as_utc_datetime(lease.get("stop_settling_expires_at"))
+        expired = expires_at is None or datetime.now(timezone.utc) >= expires_at
+        if expired or owner_family(owner_mode) in {"manual", "boost"}:
+            release_ev_ownership(
+                hass,
+                config_entry,
+                lease_id,
+                reason=(
+                    "PowerSync stop-settling window expired"
+                    if expired
+                    else f"{owner_mode} overrides PowerSync stop settling"
+                ),
+                command="external_policy_override",
+                source="powersync",
+            )
+            return True, None, None, None
+
     if (
         lease.get("owner") == EXTERNAL_OWNER_MODE
         and get_external_control_policy(hass, config_entry, vehicle_id)

@@ -22,6 +22,8 @@ KEEP=5
 
 local_version() { python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["version"])' "$SRC/manifest.json"; }
 remote_version() { "${SSH[@]}" "grep -o '\"version\": *\"[^\"]*\"' $DEST/manifest.json | cut -d'\"' -f4" 2>/dev/null || true; }
+# Lines since the latest Core boot (HA logs this loader warning once per boot).
+boot_logs() { core_logs 30000 | awk '/We found a custom integration power_sync/{n=0} {buf[++n]=$0} END{for(i=1;i<=n;i++)print buf[i]}'; }
 core_logs() { "${SSH[@]}" "curl -s -H \"Authorization: Bearer \$SUPERVISOR_TOKEN\" 'http://supervisor/core/logs?lines=${1:-20000}'" | sed 's/\x1b\[[0-9;]*m//g'; }
 
 restart_core() {
@@ -41,8 +43,7 @@ restart_core() {
 startup_check() {
   sleep 60
   echo "--- power_sync errors since restart ---"
-  core_logs 4000 | awk '/Home Assistant initialized|Starting Home Assistant/{buf=""} {buf=buf"\n"$0} END{print buf}' \
-    | grep -E 'ERROR.*power_sync|Error setting up entry.*[Pp]ower[Ss]ync|Traceback' | tail -20 || echo "(none)"
+  boot_logs | grep -E 'ERROR.*power_sync|Error setting up entry.*[Pp]ower[Ss]ync|Traceback' | tail -20 || echo "(none)"
 }
 
 cmd="${1:-}"
@@ -76,7 +77,7 @@ case "$cmd" in
     startup_check
     ;;
   ev-log)
-    core_logs 30000 | grep -E 'EV decision:|Auto-schedule: (Failed|Started|Error)|Dynamic EV.*(blocked|refus|Failed)|Solar surplus EV|start_ev_charging_dynamic.*False' \
+    boot_logs | grep -E 'EV decision:|Auto-schedule: (Failed|Started|Error)|Dynamic EV.*(blocked|refus|Failed)|Solar surplus EV|start_ev_charging_dynamic.*False' \
       | tail -n "${2:-60}"
     ;;
   status)
