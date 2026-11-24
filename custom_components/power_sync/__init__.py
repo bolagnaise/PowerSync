@@ -21292,6 +21292,30 @@ class ChargingBoostView(HomeAssistantView):
         prior = records.get(vehicle_id)
         if prior is not None and not isinstance(prior, dict):
             return {"success": False, "error": "Boost recovery journal is invalid"}
+        # A second unknown attempt cannot overwrite the only durable cleanup
+        # evidence for a prior in-flight start.
+        if prior is not None and (prior.get("pending_intent") or prior.get("start_in_flight")
+                                  or prior.get("unknown_start_outcome")):
+            return {"success": False, "error": "Previous Boost start recovery remains pending"}
+        if action_params.get("charger_type", "tesla") == "tesla":
+            from .tesla_ev_recovery import get_vehicle_route
+
+            route = get_vehicle_route(self._hass, self._config_entry, vehicle_id)
+            if route and route.get("reason") == "ble_recovery":
+                # Give the existing transport hold its normal recovery attempt
+                # before journaling a Start or applying a charge limit. A fresh
+                # request must capture authority after recovery changes it.
+                await ev_actions._tesla_transport_route(
+                    self._hass, self._config_entry, dict(action_params), "start")
+                if (self._hass.data.get(DOMAIN, {}).get(self._config_entry.entry_id) is not runtime
+                        or runtime.get("powerwall_local_dispatch_stopping")
+                        or self._boost_pairing_identity() != pairing or dt_util.utcnow() >= deadline):
+                    return {"success": False, "error": "Boost expired or was superseded during recovery"}
+                route = get_vehicle_route(self._hass, self._config_entry, vehicle_id)
+                if route and route.get("kind") == "blocked":
+                    return {"success": False, "error": "Tesla Bluetooth charging recovery remains pending",
+                            "recovery_pending": True}
+                return {"success": False, "error": "Tesla Bluetooth recovery finished. Try Boost again."}
         _, prior_lease = get_ev_ownership(self._hass, self._config_entry, vehicle_id)
         record = {
             "entry_id": self._config_entry.entry_id, "vehicle_id": vehicle_id,
@@ -21334,11 +21358,6 @@ class ChargingBoostView(HomeAssistantView):
                 or runtime.get("powerwall_local_dispatch_stopping")
                 or self._boost_pairing_identity() != pairing or dt_util.utcnow() >= deadline):
             return {"success": False, "error": "Boost expired or was superseded before dispatch"}
-        # A second unknown attempt cannot overwrite the only durable cleanup
-        # evidence for a prior in-flight start.
-        if prior is not None and (prior.get("pending_intent") or prior.get("start_in_flight")
-                                  or prior.get("unknown_start_outcome")):
-            return {"success": False, "error": "Previous Boost start recovery remains pending"}
         if prior is None:
             records[vehicle_id] = record
         else:

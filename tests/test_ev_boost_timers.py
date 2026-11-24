@@ -94,6 +94,7 @@ class BoostHarness:
         self.fail_start = set()
         self.ambiguous_start = set()
         self.start_hook = None
+        self.ble_recovery_held = set()
         self.fail_stop = set()
         self.unknown_stop = set()
         self.default_vin = VIN_A
@@ -174,7 +175,7 @@ class BoostHarness:
             "EV_PROVIDER_TESLA_BLE": mapping.EV_PROVIDER_TESLA_BLE,
             "configured_ble_prefixes": mapping.configured_ble_prefixes,
             "persist_ev_runtime_state": own.persist_ev_runtime_state,
-            "get_vehicle_route": recovery.get_vehicle_route,
+            "get_vehicle_route": self.get_vehicle_route,
             "async_rebind_native_session_route": recovery.async_rebind_native_session_route,
             "_compatible": recovery._compatible,
             "independent_tesla_source_binding": lambda *_args, **_kwargs: None,
@@ -227,6 +228,11 @@ class BoostHarness:
                  "_charging_observed_at": self.now, "site_presence": "home",
                  **self.observation_overrides.get(vin, {})}
                 for vin, charging in self.physical.items()]
+
+    def get_vehicle_route(self, hass, entry, vin):
+        if vin in self.ble_recovery_held:
+            return {"kind": "blocked", "reason": "ble_recovery"}
+        return recovery.get_vehicle_route(hass, entry, vin)
 
     async def reload(self, at=None, fail_stop=(), blocked=()):
         await own.persist_ev_runtime_state(self.hass, self.entry, self.store)
@@ -323,9 +329,9 @@ class BoostHarness:
             None if any(result is None for result in results) else False
         )
 
-    async def start(self, vin, minutes=1):
+    async def start(self, vin, minutes=1, target_soc=None):
         async def payload():
-            return {"vehicle_id": vin, "duration_minutes": minutes}
+            return {"vehicle_id": vin, "duration_minutes": minutes, "target_soc": target_soc}
 
         return (await self.post(self.view, SimpleNamespace(json=payload))).body
 
@@ -389,6 +395,43 @@ async def test_two_vins_keep_original_distinct_deadlines_and_both_expire():
     await h.due()
     assert h.stops() == [VIN_A, VIN_B]
     assert h.states["entry"] == {} and h.runtime["ev_boost_timers"] == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("release_during_request", [False, True])
+async def test_ble_stop_hold_does_not_create_another_boost_recovery_obligation(release_during_request):
+    h = BoostHarness()
+    assert (await h.start(VIN_B, 3))["success"]
+    other_record = h.runtime["ev_boost_sessions"][VIN_B]
+    other_timer = h.runtime["ev_boost_timers"][VIN_B]
+    h.ble_recovery_held.add(VIN_A)
+    h.fail_start.add(VIN_A)
+    calls = []
+
+    async def recover_route(_hass, _entry, params, operation):
+        calls.append((params["vehicle_vin"], operation))
+        if release_during_request:
+            h.ble_recovery_held.remove(VIN_A)
+        return {"kind": "blocked", "reason": "ble_recovery"}
+
+    h.ev_actions._tesla_transport_route = recover_route
+    first = await h.start(VIN_A, 60, target_soc=80)
+    assert not first["success"]
+    assert not any(vin == VIN_A for _, vin, _ in h.calls)
+    assert VIN_A not in h.runtime["ev_boost_sessions"]
+    assert VIN_A not in h.runtime["ev_boost_timers"]
+    assert VIN_A not in h.store.saved["ev_runtime_state"]["boost_sessions"]
+    assert calls == [(VIN_A, "start")]
+    if release_during_request:
+        assert "Try Boost again" in first["error"]
+    else:
+        assert first["recovery_pending"] and "Bluetooth" in first["error"]
+
+    h.ble_recovery_held.clear()
+    h.fail_start.clear()
+    assert (await h.start(VIN_A, 60))["success"]
+    assert h.runtime["ev_boost_sessions"][VIN_B] is other_record
+    assert h.runtime["ev_boost_timers"][VIN_B] is other_timer
 
 
 @pytest.mark.asyncio
