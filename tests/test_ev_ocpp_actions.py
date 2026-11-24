@@ -20113,3 +20113,102 @@ def test_dynamic_ev_history_uses_source_evidence(monkeypatch, grid_w, solar_w, b
         assert session.grid_energy_kwh == 0
         assert session.total_cost_cents == 0
         assert session.end_segment().source == "mixed"
+
+
+def _native_power_states(stale_at, power_kw=0.0, *, with_packet=True):
+    """Awake, stopped Tesla BLE bridge whose equal values HA has suppressed."""
+    states = [
+        _State("button.car_wake_up", "unknown"),
+        _State("switch.car_charger", "off"),
+        _State("button.car_force_data_update", "unknown"),
+        _State("binary_sensor.car_asleep", "off", last_updated=stale_at),
+        _State("sensor.car_charging_state", "Stopped", last_updated=stale_at),
+        _State("sensor.car_charger_power", str(power_kw),
+               {"unit_of_measurement": "kW"}, last_updated=stale_at),
+    ]
+    if with_packet:
+        states.append(_State("sensor.car_charger_power_sample", json.dumps(
+            {"v": 1, "t": stale_at.isoformat(), "x": power_kw}), last_updated=stale_at))
+    return states
+
+
+def _publish_native_power(hass, power_kw):
+    """The bridge stamps a new raw sample; the filtered HA value stays put."""
+    hass.states._states["sensor.car_charger_power_sample"].state = json.dumps(
+        {"v": 1, "t": datetime.now(timezone.utc).isoformat(), "x": power_kw})
+
+
+def test_ble_wake_accepts_paired_native_power_for_awake_stopped_car(monkeypatch):
+    """Discord #463: an awake, Stopped car never refreshes state or asleep."""
+    stale_at = datetime.now(timezone.utc) - timedelta(hours=1)
+    hass = _Hass(_native_power_states(stale_at))
+    elapsed = [0.0]
+
+    async def advance(seconds):
+        elapsed[0] += seconds
+        if elapsed[0] >= 12:
+            _publish_native_power(hass, 0.0)
+
+    monkeypatch.setattr(actions.asyncio, "get_running_loop",
+                        lambda: SimpleNamespace(time=lambda: elapsed[0]))
+    monkeypatch.setattr(actions.asyncio, "sleep", advance)
+
+    assert asyncio.run(actions._wake_tesla_ble(hass, "car")) is True
+    assert elapsed[0] < 20
+    assert hass.services.calls == [
+        ("button", "press", {"entity_id": "button.car_wake_up"})
+    ]
+
+
+def test_ble_wake_does_not_accept_ha_timestamped_power_without_packet(monkeypatch):
+    """Without the paired packet, an HA re-report is not vehicle proof."""
+    stale_at = datetime.now(timezone.utc) - timedelta(hours=1)
+    hass = _Hass(_native_power_states(stale_at, with_packet=False))
+    elapsed = [0.0]
+
+    async def advance(seconds):
+        elapsed[0] += seconds
+        hass.states._states["sensor.car_charger_power"].last_reported = datetime.now(timezone.utc)
+
+    monkeypatch.setattr(actions.asyncio, "get_running_loop",
+                        lambda: SimpleNamespace(time=lambda: elapsed[0]))
+    monkeypatch.setattr(actions.asyncio, "sleep", advance)
+
+    assert asyncio.run(actions._wake_tesla_ble(hass, "car")) is False
+    assert elapsed[0] == 120
+
+
+@pytest.mark.parametrize("power_kw,idle_proof,expected", [
+    (0.0, True, True),
+    (7.2, True, False),
+    (0.0, False, False),
+])
+def test_ble_stop_readback_accepts_unchanged_stopped_with_native_zero_power(
+    monkeypatch, power_kw, idle_proof, expected,
+):
+    """A Stop sent to an already-stopped car confirms from a fresh 0 W packet."""
+    clock = [0.0]
+    stale_at = datetime.now(timezone.utc) - timedelta(minutes=10)
+    hass = _Hass(_native_power_states(stale_at, power_kw))
+    since = datetime.now(timezone.utc) - timedelta(seconds=1)
+    identity = actions._tesla_legacy_entity_identity(hass, ("switch.car_charger",))
+    binding = actions._tesla_ble_charge_data_binding(hass, "car", "switch.car_charger")
+    assert "sensor.car_charger_power_sample" in {item[0] for item in binding}
+
+    async def sleep(seconds):
+        clock[0] += seconds
+        if clock[0] >= 3:
+            _publish_native_power(hass, power_kw)
+
+    monkeypatch.setattr(actions, "asyncio", SimpleNamespace(
+        get_running_loop=lambda: SimpleNamespace(time=lambda: clock[0]),
+        sleep=sleep, timeout=asyncio.timeout,
+    ))
+    result = asyncio.run(actions._wait_for_ble_command_readback(
+        hass, ("sensor.car_charging_state",),
+        ("stopped", "complete", "disconnected", "not charging"), since,
+        charge_binding=binding, charge_binding_target="switch.car_charger",
+        charge_binding_prefix="car", authorize=lambda: True,
+        expected_identity=identity, idle_power_proof=idle_proof,
+    ))
+    assert result is expected

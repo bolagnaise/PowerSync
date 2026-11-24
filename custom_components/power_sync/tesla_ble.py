@@ -160,6 +160,21 @@ def get_tesla_ble_observed_at(hass: Any, state: Any) -> datetime | None:
     return observed.astimezone(timezone.utc)
 
 
+def get_tesla_ble_native_sample_time(hass: Any, state: Any) -> datetime | None:
+    """Return the bridge-stamped time of a paired native ``_sample`` packet.
+
+    Only the paired packet qualifies: its value and timestamp come from one
+    raw vehicle response, so HA's suppression of equal values cannot age it
+    and a reconnect cannot replay it as new. A bare ``_received`` receipt or
+    an HA ``last_reported`` time returns None.
+    """
+    if state is None:
+        return None
+    if get_tesla_ble_companion_state(hass, getattr(state, "entity_id", ""), "_sample") is None:
+        return None
+    return get_tesla_ble_observed_at(hass, state)
+
+
 def _first_available_state(hass: Any, entity_ids: tuple[str, ...]) -> Any | None:
     """Return the first current HA state from compatibility entity names."""
     unavailable_state = None

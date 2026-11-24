@@ -3346,8 +3346,7 @@ class BatteryOptimizer:
                         else:
                             failure_reason = "failed"
                         if (
-                            disable_idle
-                            and not self.allow_greedy_fallback
+                            not self.allow_greedy_fallback
                             and failure_status == int(highspy.HighsModelStatus.kInfeasible)
                             and projected_deadline_soc_limit is None
                             and iteration + 1 < MODE_PROJECTION_MAX_ITERATIONS
@@ -3357,9 +3356,13 @@ class BatteryOptimizer:
                                 last_result.schedule, last_result.lp_stats
                             )
                         ):
-                            # No Idle takes precedence over holding energy for
-                            # Charge By Time. Ask HiGHS to validate the deadline
-                            # SOC the previous commands actually projected.
+                            # The executable command modes (self-use covering
+                            # the whole load, and No Idle when enabled) can
+                            # leave less energy at the Charge By Time deadline
+                            # than the unconstrained LP assumed. Ask HiGHS to
+                            # validate the deadline SOC the previous commands
+                            # actually projected rather than discarding the
+                            # whole plan for a self-consumption hold.
                             requested_deadline_target = last_result.lp_stats[
                                 "pre_window_effective_target"
                             ]

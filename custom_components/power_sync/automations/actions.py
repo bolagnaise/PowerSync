@@ -3713,8 +3713,13 @@ async def _wait_for_ble_command_readback(
     expected_identity: tuple[tuple[Any, ...], ...] | None = None,
     stock_token: Any = None,
     confirmation_deadline: float | None = None,
+    idle_power_proof: bool = False,
 ) -> bool:
-    """Acquire readback without repeating a write or extending its authority."""
+    """Acquire readback without repeating a write or extending its authority.
+
+    ``idle_power_proof`` (Stop only) lets an unchanged expected state confirm
+    when a pinned paired native power packet after the command shows no draw.
+    """
     from ..tesla_ble import get_tesla_ble_charge_current_state, get_tesla_ble_charge_power_state
 
     entity_ids = (entity_id,) if isinstance(entity_id, str) else entity_id
@@ -3755,7 +3760,10 @@ async def _wait_for_ble_command_readback(
                 return False
         for candidate in entity_ids:
             state = hass.states.get(candidate)
-            if state is None or not _ble_state_observed_after(state, command_started_at, hass=hass):
+            if state is None:
+                continue
+            fresh = _ble_state_observed_after(state, command_started_at, hass=hass)
+            if not fresh and not idle_power_proof:
                 continue
             value = str(state.state).strip().lower()
             if isinstance(expected, str):
@@ -3768,6 +3776,15 @@ async def _wait_for_ble_command_readback(
                 except (TypeError, ValueError):
                     matches = False
             if not matches:
+                continue
+            if not fresh:
+                # An unchanged stopped state is suppressed by HA's ESPHome
+                # integration. Accept it only with a pinned, paired native
+                # power packet from after the command showing no draw.
+                if _tesla_ble_idle_power_proof(
+                    hass, charge_binding_prefix, charge_binding, command_started_at
+                ):
+                    return True
                 continue
             if charging_prefix is None:
                 return True
@@ -3841,6 +3858,32 @@ async def _wait_for_ble_command_readback(
 
     _LOGGER.warning("Tesla BLE command not confirmed by fresh vehicle readback from %s", entity_ids)
     return False
+
+
+_TESLA_BLE_IDLE_POWER_MAX_W = 50.0
+
+
+def _tesla_ble_idle_power_proof(
+    hass: HomeAssistant,
+    ble_prefix: str | None,
+    charge_binding: Any,
+    since: datetime,
+) -> bool:
+    """Prove no draw from a paired native packet pinned before the command."""
+    from ..tesla_ble import get_tesla_ble_charge_power_state, get_tesla_ble_companion_state
+
+    if not ble_prefix or not isinstance(charge_binding, tuple) or not charge_binding:
+        return False
+    power = get_tesla_ble_charge_power_state(hass, ble_prefix)
+    packet = (
+        get_tesla_ble_companion_state(hass, power.entity_id, "_sample")
+        if power is not None else None
+    )
+    pinned_ids = {item[0] for item in charge_binding}
+    if packet is None or power.entity_id not in pinned_ids or packet.entity_id not in pinned_ids:
+        return False
+    value = _tesla_ble_native_power_sample_after(hass, ble_prefix, since)
+    return value is not None and value < _TESLA_BLE_IDLE_POWER_MAX_W
 
 
 def _ble_block_report_due(
@@ -4246,7 +4289,38 @@ def _tesla_ble_has_fresh_charge_snapshot(
                     continue
                 if value >= 0:
                     return True
+    # HA's ESPHome integration drops equal values, so an awake car that stays
+    # Stopped never refreshes its charging state (Discord #463). A paired
+    # native power packet stamped after the cutoff is itself a vehicle
+    # charge-state response from this bridge, and the known state is the
+    # latest one the bridge published.
+    if _tesla_ble_native_power_sample_after(hass, ble_prefix, cutoff) is not None:
+        return True
     return False
+
+
+def _tesla_ble_native_power_sample_after(
+    hass: HomeAssistant, ble_prefix: str, cutoff: datetime
+) -> float | None:
+    """Return a paired native power sample (W) stamped at or after ``cutoff``."""
+    from ..tesla_ble import (
+        get_tesla_ble_charge_power_state,
+        get_tesla_ble_native_sample_time,
+    )
+
+    power = get_tesla_ble_charge_power_state(hass, ble_prefix)
+    sampled_at = get_tesla_ble_native_sample_time(hass, power)
+    if sampled_at is None or not cutoff <= sampled_at <= datetime.now(dt_timezone.utc):
+        return None
+    try:
+        value = float(power.state)
+    except (TypeError, ValueError):
+        return None
+    if power.attributes.get("unit_of_measurement") == "kW":
+        value *= 1000
+    if not math.isfinite(value) or value < 0:
+        return None
+    return value
 
 
 def _tesla_ble_force_data_update_binding(
@@ -5201,6 +5275,7 @@ async def _stop_ev_charging_ble(
             authorize=authorize,
             expected_identity=expected_identity,
             confirmation_deadline=confirmation_deadline,
+            idle_power_proof=True,
         )
         if confirmed:
             _LOGGER.info(f"Stopped EV charging via Tesla BLE: {charger_entity}")

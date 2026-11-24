@@ -596,6 +596,14 @@ may refill the battery ahead of the deadline. This exception is solar-only:
 grid-import-to-export passthrough remains blocked, and explicit charge or
 export blocks still take precedence.
 
+The battery runs the plan through command modes, such as self-consumption,
+that can serve more home load from the battery than the raw plan assumed. If
+those modes leave the battery short of the target at the deadline, PowerSync
+checks the plan again at the charge level those modes can reach. When that check
+passes, PowerSync keeps the grid charging and export plan instead of falling back
+to self-consumption for the whole horizon. On the Current Action sensor,
+`lp_stats.deadline_unmet_after_mode_projection` shows when this happened.
+
 ## Spread controls
 
 ### Spread export across window
