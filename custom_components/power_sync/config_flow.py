@@ -13591,6 +13591,7 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
                 CONF_OPTIMIZATION_ALLOW_GRID_CHARGE,
                 CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE,
                 CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP,
+                CONF_OPTIMIZATION_GRID_CHARGE_BLACKOUT_WINDOWS,
                 CONF_OPTIMIZATION_MAX_GRID_EXPORT_W,
                 CONF_OPTIMIZATION_MAX_GRID_IMPORT_W,
                 CONF_OPTIMIZATION_MIN_EXPORT_PRICE,
@@ -13618,6 +13619,7 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
             },
         }
         grouped_schema: dict[Any, Any] = {}
+        visible_fields: set[str] = set()
         for section_name, allowed_fields in section_fields.items():
             section_schema = {
                 marker: selector
@@ -13625,14 +13627,13 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
                 if marker.schema in allowed_fields
             }
             if section_schema:
+                visible_fields.update(marker.schema for marker in section_schema)
                 grouped_schema[vol.Required(section_name)] = section(
                     vol.Schema(section_schema),
                     {"collapsed": section_name != "core_goals"},
                 )
         self._optimization_form_values = current_form_values
-        self._optimization_visible_fields = {
-            marker.schema for marker in schema_fields
-        }
+        self._optimization_visible_fields = visible_fields
 
         from .licensing.presentation import optimizer_settings_description
         from .licensing.runtime import DATA_KEY as _LICENSE_MANAGER_KEY

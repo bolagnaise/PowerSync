@@ -243,3 +243,54 @@ def test_tesla_options_preserve_spread_input_only_with_local_dispatch_capability
         for node in assignments:exec(compile(ast.Module(body=[node],type_ignores=[]),'<spread-input>','exec'),ns)
         assert ns['spread_export_enabled'] is capability
         assert ns['spread_import_enabled'] is capability
+
+
+def test_optimizer_form_renders_blackout_and_preserves_unrendered_fields():
+    import ast
+    from collections import namedtuple
+    from types import SimpleNamespace
+
+    tree = ast.parse(CONFIG_FLOW_PATH.read_text())
+    method = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef)
+        and node.name == "_async_step_optimization"
+    )
+    start = next(
+        i for i, node in enumerate(method.body)
+        if isinstance(node, ast.Assign)
+        and isinstance(node.targets[0], ast.Name)
+        and node.targets[0].id == "section_fields"
+    )
+    end = next(
+        i for i, node in enumerate(method.body)
+        if i > start and isinstance(node, ast.Assign)
+        and isinstance(node.targets[0], ast.Attribute)
+        and node.targets[0].attr == "_optimization_visible_fields"
+    )
+    definition = ast.Module(body=method.body[start:end + 1], type_ignores=[])
+    constants = {
+        node.id: node.id for node in ast.walk(definition)
+        if isinstance(node, ast.Name) and node.id.startswith("CONF_")
+    }
+    blackout = "CONF_OPTIMIZATION_GRID_CHARGE_BLACKOUT_WINDOWS"
+    hidden = "an_unrendered_setting"
+    marker = namedtuple("Marker", "schema")
+    flow = SimpleNamespace()
+    values = {blackout: '[{"start":"06:00","end":"00:00"}]', hidden: "retained"}
+    context = {
+        **constants,
+        "self": flow,
+        "schema_fields": {marker(field): object() for field in values},
+        "current_form_values": values,
+        "vol": SimpleNamespace(Required=str, Schema=dict),
+        "section": lambda schema, _options: schema,
+        "Any": object,
+    }
+    exec(compile(definition, "<optimizer_sections>", "exec"), context)
+
+    assert marker(blackout) in context["grouped_schema"]["grid_site_constraints"]
+    assert flow._optimization_visible_fields == {blackout}
+    merge = _load_module().merge_optimization_section_input
+    assert merge(values, flow._optimization_visible_fields, {blackout: values[blackout]}) == values
+    assert merge(values, flow._optimization_visible_fields, {}) == {hidden: "retained"}
