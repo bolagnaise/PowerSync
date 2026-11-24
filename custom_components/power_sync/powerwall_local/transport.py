@@ -132,7 +132,7 @@ def _mutation_label(envelope_bytes: bytes) -> str | None:
         reads = {
             "filestore": {"read_file_request"},
             "common": {"get_system_info_request", "get_networking_status_request", "check_internet_request"},
-            "authorization": {"list_authorized_clients_request"},
+            "authorization": {"list_authorized_clients_request", "get_signed_commands_public_key_request"},
             "teg": {"get_backup_events_request", "get_delay_battery_calibration_status_request"},
         }
         if descriptor is None or descriptor.name not in reads:
@@ -1228,6 +1228,48 @@ class TEDAPIv1rTransport:
         except Exception as err:
             _LOGGER.debug("list_authorized_clients parse error: %s", err)
             return None
+
+    async def add_vehicle_client(self, din: str, vin: str, vehicle_key: bytes) -> bool | None:
+        """Register a vehicle's key on the gateway for Charge on Solar.
+
+        Sends ``add_authorized_client_by_trusted_signature_request`` signed
+        with this installation's verified RSA key. Returns True when the
+        gateway answered with the added client, False when it refused, and
+        None when the outcome is unknown (the request may have been applied).
+        Callers confirm with ``list_authorized_clients``.
+        """
+        if len(vehicle_key) != 65 or vehicle_key[0] != 0x04:
+            raise ValueError("vehicle key must be an uncompressed P-256 point")
+        env = transport_pb2.MessageEnvelope()
+        env.delivery_channel = transport_pb2.DELIVERY_CHANNEL_HERMES_COMMAND
+        env.sender.authorized_client = 1
+        env.recipient.din = din
+        request = env.authorization.add_authorized_client_by_trusted_signature_request
+        request.type = authorization_types_pb2.AUTHORIZED_CLIENT_TYPE_VEHICLE
+        request.description = "Vehicle"
+        request.key_type = authorization_types_pb2.AUTHORIZED_KEY_TYPE_ECC
+        request.public_key = bytes(vehicle_key)
+        request.roles.append(authorization_types_pb2.AUTHORIZATION_ROLE_VEHICLE)
+        request.identifier = vin
+
+        resp = await self.post_v1r(env.SerializeToString(), din)
+        if not resp.ok:
+            # A signed-message fault is the gateway refusing the request; a
+            # non-200 reply does not say whether it was applied.
+            return False if resp.fault_name else None
+        if not resp.inner_bytes:
+            return None
+        try:
+            reply = transport_pb2.MessageEnvelope()
+            reply.ParseFromString(resp.inner_bytes)
+        except Exception as err:
+            _LOGGER.debug("add_vehicle_client parse error: %s", err)
+            return None
+        if reply.HasField("authorization") and reply.authorization.HasField(
+            "add_authorized_client_by_trusted_signature_response"
+        ):
+            return True
+        return False
 
     async def get_signed_commands_public_key(self, din: str) -> bytes | None:
         """Read the gateway's own ECC key for signed commands over LAN.

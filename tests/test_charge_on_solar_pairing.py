@@ -94,7 +94,7 @@ def test_valid_records_decode(mod, fields):
     {"r": "s", "c": 1, "s": [["h", "0" * 16, DIN, 1.5, 0]]},   # coordinates are integers
     {"r": "k", "d": "x", "k": "04" + "ab" * 64},
     {"r": "k", "d": "v", "k": "03" + "ab" * 32},               # compressed point
-    {"r": "q", "c": 0, "s": []},
+    {"r": "z", "c": 0, "s": []},                               # unknown record kind
     {"m": "f", "r": "s", "err": "bad\nerror"},
 ])
 def test_invalid_records_are_rejected(mod, fields):
@@ -231,7 +231,231 @@ def test_bridge_unavailable_on_another_device(mod):
     assert not mod.PairingBridge(hass, hass.bridge).available()
 
 
-def test_module_never_encodes_a_write():
+def test_status_reads_never_send_a_write_verb(mod):
     source = (ROOT / "charge_on_solar_pairing.py").read_text()
-    for verb in ("set:", "add_authorized_client", "add_managed_charging_site", "WhiteList"):
-        assert verb not in source.split('"""', 2)[2]  # outside the module docstring
+    status = source[source.index("async def pairing_status"):source.index("# ---- repair (writes)")]
+    for call in ("add_gateway_key", "add_site", "remove_site", "add_vehicle_client"):
+        assert call not in status
+
+
+@pytest.mark.parametrize("fields", [
+    {"r": "e", "p": 1, "o": 6}, {"r": "e", "p": 0},
+    {"m": "p", "r": "a"},
+    {"r": "t", "x": 1, "c": 1, "s": [["h", "0" * 16, DIN, -3386880, 15120930]]},
+    {"r": "q", "c": 0, "s": []},
+    {"m": "u", "r": "t", "err": "timeout", "a": 1},
+])
+def test_write_records_decode(mod, fields):
+    assert mod.decode_state(record(**fields))["r"] == fields["r"]
+
+
+@pytest.mark.parametrize("fields", [
+    {"r": "e", "p": 1},                    # present without a role
+    {"r": "e", "p": True, "o": 6},         # boolean is not the integer flag
+    {"m": "k", "r": "a"},                  # a key add is never "confirmed" by the bridge
+    {"m": "u", "r": "s", "err": "x"},      # reads are never uncertain
+    {"m": "p", "r": "t"},                  # only key adds await a tap
+    {"r": "t", "x": 4, "c": 0, "s": []},
+    {"m": "u", "r": "q", "err": "x", "a": 2},
+])
+def test_invalid_write_records_are_rejected(mod, fields):
+    with pytest.raises(mod.SolarError):
+        mod.decode_state(record(**fields))
+
+
+class FakeBridge:
+    def __init__(self, mod, gateway_raw, roles=(), sites=None, keys=None, site_after=None, outcome="added_or_updated"):
+        self.mod, self.calls = mod, []
+        self.roles = list(roles)
+        self.sites = sites or {"count": 0, "complete": True, "sites": []}
+        self.keys = keys or {}
+        self.site_after, self.outcome, self.gateway_raw = site_after, outcome, gateway_raw
+
+    async def whitelist_role(self, key):
+        self.calls.append(("role", key))
+        return self.roles.pop(0) if self.roles else None
+
+    async def add_gateway_key(self, key):
+        self.calls.append(("add_key", key))
+
+    async def vehicle_key(self, domain):
+        if domain not in self.keys:
+            raise self.mod.SolarError("no_session_key")
+        return self.keys[domain]
+
+    async def managed_sites(self):
+        return self.sites
+
+    async def add_site(self, text, din, lat, lon):
+        self.calls.append(("add_site", text, din, lat, lon))
+        return {**(self.site_after or self.sites), "outcome": self.outcome}
+
+    async def remove_site(self, text):
+        self.calls.append(("remove_site", text))
+        return self.site_after
+
+
+def run(coro):
+    return asyncio.run(coro)
+
+
+@pytest.fixture
+def fast(mod, monkeypatch):
+    async def no_sleep(_):
+        return None
+    monkeypatch.setattr(mod.asyncio, "sleep", no_sleep)
+    return mod
+
+
+def test_gateway_key_add_waits_for_the_card_tap(fast):
+    mod = fast
+    _, raw = point()
+    gw = gateway(mod, raw) | {"point": raw}
+    bridge = FakeBridge(mod, raw, roles=[None, None, 6])
+    result = run(mod._repair_gateway_key(bridge, gw))
+    assert result["result"] == "confirmed" and result["status"]["status"] == "present"
+    assert [c[0] for c in bridge.calls] == ["role", "add_key", "role", "role"]
+    assert sum(c[0] == "add_key" for c in bridge.calls) == 1  # sent exactly once
+
+
+def test_gateway_key_already_present_or_wrong_role_sends_nothing(fast):
+    mod = fast
+    _, raw = point()
+    gw = gateway(mod, raw) | {"point": raw}
+    bridge = FakeBridge(mod, raw, roles=[6])
+    assert run(mod._repair_gateway_key(bridge, gw))["result"] == "already_present"
+    bridge = FakeBridge(mod, raw, roles=[3])
+    with pytest.raises(mod.SolarError, match="role 3"):
+        run(mod._repair_gateway_key(bridge, gw))
+    assert all(c[0] != "add_key" for c in bridge.calls)
+
+
+def test_gateway_key_without_tap_is_uncertain(fast, monkeypatch):
+    mod = fast
+    clock = iter(range(0, 1000, 10))
+    monkeypatch.setattr(mod.time, "monotonic", lambda: next(clock))
+    _, raw = point()
+    gw = gateway(mod, raw) | {"point": raw}
+    with pytest.raises(mod.PairingUncertain, match="Tap a key card"):
+        run(mod._repair_gateway_key(FakeBridge(mod, raw), gw))
+
+
+class FakeClient:
+    def __init__(self, before, after, answer=True):
+        self.before, self.after, self.answer, self.added = before, after, answer, []
+        self.reads = 0
+
+    async def list_authorized_clients(self):
+        self.reads += 1
+        return self.before if self.reads == 1 else self.after
+
+    async def add_vehicle_client(self, vin, key):
+        self.added.append((vin, key))
+        return self.answer
+
+
+def vehicle_client(key, state="VERIFIED"):
+    return {"type": "VEHICLE", "identifier": VIN, "state": state, "public_key": base64.b64encode(key).decode()}
+
+
+def test_vehicle_registration_confirms_by_readback(fast):
+    mod = fast
+    _, key = point()
+    bridge = FakeBridge(mod, None, keys={"v": key, "i": key})
+    client = FakeClient({"clients": []}, {"clients": [vehicle_client(key)]})
+    result = run(mod._repair_vehicle_client(client, bridge, VIN, None))
+    assert result["result"] == "confirmed" and client.added == [(VIN, key)]
+
+
+def test_vehicle_registration_refusals(fast):
+    mod = fast
+    _, key = point()
+    _, other = point()
+    # Different keys per domain need an explicit choice.
+    with pytest.raises(mod.SolarError, match="vehicle_key_domain"):
+        run(mod._repair_vehicle_client(FakeClient({"clients": []}, None), FakeBridge(mod, None, keys={"v": key, "i": other}), VIN, None))
+    # An existing record for this car is never overwritten or duplicated.
+    client = FakeClient({"clients": [vehicle_client(other, "PENDING_VERIFICATION")]}, None)
+    with pytest.raises(mod.SolarError, match="Tesla app"):
+        run(mod._repair_vehicle_client(client, FakeBridge(mod, None, keys={"v": key, "i": key}), VIN, None))
+    assert client.added == []
+    # Already verified with this key: nothing is sent.
+    client = FakeClient({"clients": [vehicle_client(key)]}, None)
+    assert run(mod._repair_vehicle_client(client, FakeBridge(mod, None, keys={"v": key, "i": key}), VIN, None))["result"] == "already_present"
+    assert client.added == []
+    # A refusal changed nothing; an unconfirmed answer is uncertain.
+    with pytest.raises(mod.SolarError, match="nothing was changed"):
+        run(mod._repair_vehicle_client(FakeClient({"clients": []}, None, answer=False), FakeBridge(mod, None, keys={"v": key, "i": key}), VIN, None))
+    with pytest.raises(mod.PairingUncertain):
+        run(mod._repair_vehicle_client(FakeClient({"clients": []}, {"clients": []}, answer=None), FakeBridge(mod, None, keys={"v": key, "i": key}), VIN, "i"))
+
+
+def test_site_add_uses_the_chosen_encoding_and_confirms(fast):
+    mod = fast
+    _, raw = point()
+    gw = gateway(mod, raw) | {"point": raw}
+    text = gw["encodings"]["base64_raw"]
+    after = {"count": 1, "complete": True, "sites": [site(mod, text, latitude=-33.8688, longitude=151.2093)]}
+    bridge = FakeBridge(mod, raw, site_after=after)
+    result = run(mod._repair_site(bridge, gw, "base64_raw", (-33.8688, 151.2093)))
+    assert result["result"] == "confirmed" and result["status"]["key_format"] == "base64_raw"
+    assert bridge.calls == [("add_site", text, DIN, -33.8688, 151.2093)]
+
+
+def test_site_add_refusals(fast):
+    mod = fast
+    _, raw = point()
+    gw = gateway(mod, raw) | {"point": raw}
+    with pytest.raises(mod.SolarError, match="key_format"):
+        run(mod._repair_site(FakeBridge(mod, raw), gw, None, (0.0, 0.0)))
+    partial = {"count": 5, "complete": False, "sites": []}
+    with pytest.raises(mod.SolarError, match="every managed site"):
+        run(mod._repair_site(FakeBridge(mod, raw, sites=partial), gw, "hex", (0.0, 0.0)))
+    present = {"count": 1, "complete": True, "sites": [site(mod, raw.hex())]}
+    bridge = FakeBridge(mod, raw, sites=present)
+    assert run(mod._repair_site(bridge, gw, "hex", (0.0, 0.0)))["result"] == "already_present"
+    assert bridge.calls == []
+    nearby = FakeBridge(mod, raw, site_after={"count": 0, "complete": True, "sites": []}, outcome="existing_site_nearby")
+    with pytest.raises(mod.SolarError, match="existing managed site"):
+        run(mod._repair_site(nearby, gw, "hex", (0.0, 0.0)))
+    silent = FakeBridge(mod, raw, site_after={"count": 0, "complete": True, "sites": []})
+    with pytest.raises(mod.PairingUncertain):
+        run(mod._repair_site(silent, gw, "hex", (0.0, 0.0)))
+
+
+def test_site_removal_uses_the_cars_own_encoding(fast):
+    mod = fast
+    _, raw = point()
+    gw = gateway(mod, raw) | {"point": raw}
+    text = gw["encodings"]["hex_upper"]
+    bridge = FakeBridge(mod, raw, sites={"count": 1, "complete": True, "sites": [site(mod, text)]},
+                        site_after={"count": 0, "complete": True, "sites": []})
+    assert run(mod._remove_site(bridge, gw, None))["result"] == "confirmed"
+    assert bridge.calls == [("remove_site", text)]
+    assert run(mod._remove_site(FakeBridge(mod, raw), gw, None))["result"] == "already_absent"
+
+
+def test_bridge_write_requests_are_well_formed(mod):
+    _, key = point()
+    sent = []
+
+    def answer(nonce, text):
+        sent.append(text)
+        verb = text[:3]
+        if verb == "wla":
+            return record(n=nonce, m="p", r="a")
+        if verb == "ste":
+            return record(n=nonce, r="t", x=1, c=0, s=[])
+        return record(n=nonce, m="u", r="q", err="timeout", a=1)
+
+    hass = Hass(mod.recovery, answer)
+    bridge = mod.PairingBridge(hass, hass.bridge)
+    run(bridge.add_gateway_key(key))
+    assert sent[-1].endswith(":" + key.hex())
+    assert run(bridge.add_site("04" + "ab" * 64, DIN, -33.8688, 151.2093))["outcome"] == "added_or_updated"
+    assert sent[-1].split(":")[2:5] == ["-3386880", "15120930", DIN]
+    with pytest.raises(mod.PairingUncertain):
+        run(bridge.remove_site("04" + "ab" * 64))
+    with pytest.raises(mod.SolarError):
+        run(bridge.add_site("bad:key", DIN, 0, 0))
+    assert all(len(text) <= 255 for text in sent)

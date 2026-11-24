@@ -782,12 +782,14 @@ namespace esphome
           case VCSEC_FromVCSECMessage_whitelistEntryInfo_tag:
           {
             ESP_LOGD(TAG, "Received whitelist entry info");
+            handle_cos_pairing_entry(vcsec_message.sub_message.whitelistEntryInfo);
             break;
           }
           case VCSEC_FromVCSECMessage_nominalError_tag:
           {
             ESP_LOGE(TAG, "Received nominal error");
             ESP_LOGE(TAG, "  error: %s", generic_error_to_string(vcsec_message.sub_message.nominalError.genericError));
+            handle_cos_pairing_entry_error(int(vcsec_message.sub_message.nominalError.genericError));
             break;
           }
           default:

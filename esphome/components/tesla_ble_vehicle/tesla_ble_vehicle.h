@@ -338,12 +338,16 @@ namespace esphome
             void tick_charge_on_solar();
             cos::Protocol cos_;
             text_sensor::TextSensor *cos_state_{nullptr};
-            // Optional read-only Charge on Solar pairing evidence (cos_pairing.cpp).
+            // Optional Charge on Solar pairing reads and writes (cos_pairing.cpp).
             void set_cos_pairing_state(text_sensor::TextSensor *sensor) { pair_state_ = sensor; }
             void request_cos_pairing(const std::string &request);
             void publish_cos_pairing();
-            void enqueue_cos_pairing_sites();
+            void enqueue_cos_pairing_carserver(bool write);
             bool handle_cos_pairing_response(const CarServer_Response &response);
+            bool handle_cos_pairing_entry(const VCSEC_WhitelistEntryInfo &info);
+            bool handle_cos_pairing_entry_error(int generic_error);
+            int pair_entry_role_{-1};
+            uint8_t pair_site_outcome_{0};
             void tick_cos_pairing();
             void remember_vehicle_key(UniversalMessage_Domain domain, const Signatures_SessionInfo &info);
             cos::Protocol pair_;

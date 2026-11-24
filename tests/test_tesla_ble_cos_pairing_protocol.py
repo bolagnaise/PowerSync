@@ -34,11 +34,20 @@ SCHEMA = {
                             ("lat_lon", 3, "LatLong")],
     "GetManagedChargingSitesRequest": [],
     "GetManagedChargingSitesResponse": [("sites", 1, "ManagedChargingSite", "repeated")],
-    "VehicleAction": [("getManagedChargingSitesRequest", 73, "GetManagedChargingSitesRequest", "m")],
+    "AddManagedChargingSiteRequest": [("site", 1, "ManagedChargingSite")],
+    "RemoveManagedChargingSiteRequest": [("public_key", 1, "string")],
+    "ManagedChargingSiteAddedOrUpdated": [],
+    "ExistingManagedChargingSiteNearby": [],
+    "AddManagedChargingSiteResponse": [("added_or_updated", 1, "ManagedChargingSiteAddedOrUpdated"),
+                                       ("existing_site_nearby", 2, "ExistingManagedChargingSiteNearby")],
+    "VehicleAction": [("addManagedChargingSiteRequest", 67, "AddManagedChargingSiteRequest", "m"),
+                      ("removeManagedChargingSiteRequest", 68, "RemoveManagedChargingSiteRequest", "m"),
+                      ("getManagedChargingSitesRequest", 73, "GetManagedChargingSitesRequest", "m")],
     "Action": [("vehicleAction", 2, "VehicleAction", "m")],
     "ActionStatus": [("result", 1, "int32")],
     "Response": [("actionStatus", 1, "ActionStatus"),
-                 ("getManagedChargingSitesResponse", 14, "GetManagedChargingSitesResponse", "response_msg")],
+                 ("getManagedChargingSitesResponse", 14, "GetManagedChargingSitesResponse", "response_msg"),
+                 ("addManagedChargingSiteResponse", 16, "AddManagedChargingSiteResponse", "response_msg")],
 }
 
 
@@ -57,7 +66,21 @@ def _cpp_bytes(hex_string):
     return "{" + ",".join(f"0x{hex_string[i:i + 2]}" for i in range(0, len(hex_string), 2)) + "}"
 
 
-def test_pairing_protocol_core(tmp_path):
+SITE_TEXT = (f'public_key:"{KEY_HEX}" manager_type{{site_controller{{din:"{DIN}"}}}} '
+             "lat_lon{latitude:-33.8688 longitude:151.2093}")
+
+
+def write_fixtures(encode):
+    return {
+        "@ADD@": _cpp_bytes(encode("Action", f"vehicleAction{{addManagedChargingSiteRequest{{site{{{SITE_TEXT}}}}}}}")),
+        "@REMOVE@": _cpp_bytes(encode("Action", f'vehicleAction{{removeManagedChargingSiteRequest{{public_key:"{KEY_HEX}"}}}}')),
+        "@ADDED@": _cpp_bytes(encode("Response", "actionStatus{} addManagedChargingSiteResponse{added_or_updated{}}")),
+        "@NEARBY@": _cpp_bytes(encode("Response", "actionStatus{} addManagedChargingSiteResponse{existing_site_nearby{}}")),
+        "@ACKED@": _cpp_bytes(encode("Response", "actionStatus{} addManagedChargingSiteResponse{}")),
+    }
+
+
+def test_pairing_protocol_core(tmp_path, protobuf_reference):
     source = tmp_path / "pairing_test.cpp"
     source.write_text(r'''
 #include "cos_pairing.h"
@@ -69,6 +92,7 @@ using namespace esphome::tesla_ble_vehicle;
 using namespace esphome::tesla_ble_vehicle::cos_pairing;
 static std::vector<uint8_t> bytes(std::initializer_list<uint8_t> b) { return b; }
 static Decode decode(const std::vector<uint8_t> &b, Sites &s) { return decode_sites_response(b.data(), b.size(), s); }
+static Decode decode_add_site_response_v(const std::vector<uint8_t> &b, uint8_t &o) { return decode_add_site_response(b.data(), b.size(), o); }
 int main() {
   uint8_t out[16];
   const auto get = bytes(@GET@);
@@ -118,19 +142,55 @@ int main() {
   assert(classify_key(std::string(87, 'B') + "!") == 'o');
   assert(classify_key("=" + std::string(87, 'B')) == 'o');  // padding only at the end
 
+  // Site writes are byte-identical to the protobuf runtime's encoding.
+  uint8_t big[MAX_ACTION];
+  Site add; add.key = key; add.din = "@DIN@"; add.has_location = true;
+  add.latitude = float(-3386880 / 1e5); add.longitude = float(15120930 / 1e5);
+  const auto add_bytes = bytes(@ADD@), remove_bytes = bytes(@REMOVE@);
+  size_t n_add = encode_add_site(add, big, sizeof(big));
+  assert(n_add == add_bytes.size() && std::memcmp(big, add_bytes.data(), n_add) == 0);
+  size_t n_remove = encode_remove_site(key, big, sizeof(big));
+  assert(n_remove == remove_bytes.size() && std::memcmp(big, remove_bytes.data(), n_remove) == 0);
+  Site bad = add; bad.key = "not a key"; assert(encode_add_site(bad, big, sizeof(big)) == 0);
+  bad = add; bad.din = ""; assert(encode_add_site(bad, big, sizeof(big)) == 0);
+  bad = add; bad.latitude = 91; assert(encode_add_site(bad, big, sizeof(big)) == 0);
+  bad = add; bad.has_location = false; assert(encode_add_site(bad, big, sizeof(big)) == 0);
+  assert(encode_add_site(add, big, 16) == 0 && encode_remove_site("", big, sizeof(big)) == 0);
+  uint8_t outcome = 0;
+  assert(decode_add_site_response_v(bytes(@ADDED@), outcome) == Decode::Ok && outcome == 1);
+  assert(decode_add_site_response_v(bytes(@NEARBY@), outcome) == Decode::Ok && outcome == 2);
+  assert(decode_add_site_response_v(bytes(@ACKED@), outcome) == Decode::Ok && outcome == 3);
+  assert(decode_add_site_response_v(bytes({0x0a, 0x00}), outcome) == Decode::Absent);
+  assert(decode_add_site_response_v(bytes({0x82, 0x01, 0x02, 0x08, 0x01}), outcome) == Decode::Malformed);
+
   Request r;
   const std::string n(32, 'a');
   assert(parse_request("sit:" + n, r) && r.kind == Kind::Sites && r.nonce == n);
   assert(parse_request("key:" + n + ":v", r) && r.kind == Kind::VehicleKey && r.domain == 'v');
   assert(parse_request("key:" + n + ":i", r) && r.domain == 'i');
+  assert(parse_request("ent:" + n + ":" + key, r) && r.kind == Kind::Entry && !r.write() && r.key[0] == 0x04 && r.key[64] == 0xab);
+  assert(parse_request("wla:" + n + ":" + key, r) && r.kind == Kind::AddKey && r.write());
+  assert(parse_request("ste:" + n + ":-3386880:15120930:@DIN@:" + key, r) && r.kind == Kind::AddSite && r.write());
+  assert(r.site.din == "@DIN@" && r.site.key == key && micro5(r.site.latitude) == -3386880 && micro5(r.site.longitude) == 15120930);
+  const std::string b64 = std::string(86, 'B') + "==";
+  assert(parse_request("ste:" + n + ":0:0:@DIN@:" + b64, r) && r.site.key == b64);
+  assert(parse_request("rms:" + n + ":" + key, r) && r.kind == Kind::RemoveSite && r.site.key == key);
   for (const std::string &bad : {"sit:" + std::string(32, 'A'), "sit:" + n + "x", "key:" + n,
-       "key:" + n + ":x", "key:" + n + ":vv", "add:" + n, std::string(""), "sit" + n})
+       "key:" + n + ":x", "key:" + n + ":vv", "add:" + n, std::string(""), "sit" + n,
+       "ent:" + n + ":" + key.substr(2), "ent:" + n + ":03" + key.substr(2), "wla:" + n + ":" + key + "0",
+       "ent:" + n + ":04" + std::string(128, 'A'),
+       "ste:" + n + ":9000001:0:@DIN@:" + key, "ste:" + n + ":0:18000001:@DIN@:" + key,
+       "ste:" + n + ":01:0:@DIN@:" + key, "ste:" + n + ":0:0::" + key, "ste:" + n + ":0:0:@DIN@:nope",
+       "ste:" + n + ":0:0:@DIN@", "ste:" + n + ":0:0:a\"b:" + key, "ste:" + n + ":0:0:@DIN@:" + key + ":x",
+       "rms:" + n + ":", "rms:" + n + ":nope", "rms:" + n + ":" + key + std::string(200, 'a')})
     assert(!parse_request(bad, r));
   return 0;
 }
 '''.replace("@GET@", _cpp_bytes(GET_SITES)).replace("@ONE@", _cpp_bytes(RESPONSE_ONE))
        .replace("@EMPTY@", _cpp_bytes(RESPONSE_EMPTY)).replace("@ABSENT@", _cpp_bytes(RESPONSE_ABSENT))
        .replace("@DIN@", DIN))
+    for marker, value in write_fixtures(lambda m, text: protobuf_reference(SCHEMA, m, text)).items():
+        source.write_text(source.read_text().replace(marker, value))
     binary = tmp_path / "pairing_test"
     build = subprocess.run(["g++", "-std=c++17", "-Wall", "-Wextra", "-Werror", "-I", str(COMPONENT),
                             str(source), "-o", str(binary)], capture_output=True, text=True)
@@ -153,6 +213,12 @@ def test_package_wires_pairing_entities_read_only():
     glue = (COMPONENT / "cos_pairing.cpp").read_text()
     assert 'refusal = "recovery_locked"' in glue
     assert 'refusal = "charge_on_solar_busy"' in glue
-    # Only the read action is ever encoded: no whitelist, site or setting writes.
-    assert "encode_get_sites" in glue and "encode_set" not in glue and "WhiteList" not in glue
+    # No Charge on Solar setting writes, and VCSEC requests never share the queue.
+    assert "encode_set" not in glue
+    assert 'refusal = "command_queue_busy"' in glue
+    # The key add is written exactly once and never queued for retry.
+    add = glue[glue.index("buildWhitelistAddForKey"):glue.index("void TeslaBLEVehicle::enqueue_cos_pairing_carserver")]
+    assert add.count("writeBLE(") == 1 and "placeAtFrontOfQueue" not in add
+    assert "Keys_Role_ROLE_CHARGING_MANAGER" in add and "ROLE_OWNER" not in glue
+    assert "max_length: 255" in package
     assert 'refusal = "pairing_busy"' in (COMPONENT / "charge_on_solar.cpp").read_text()

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Read-only Charge on Solar pairing evidence over BLE. Pure protocol helpers
-// with no ESPHome, BLE, mbedtls or nanopb dependency so they can be
-// host-tested. Nothing here writes to the car.
+// Charge on Solar pairing over BLE: read-only evidence plus explicit,
+// single-shot pairing writes. Pure protocol helpers with no ESPHome, BLE,
+// mbedtls or nanopb dependency so they can be host-tested.
 //
 // Wire layout (tesla_protocol 6.3.0 car_server.proto, absent from the pinned
 // TeslaBLE nanopb headers, so decoded here by field number):
@@ -174,32 +174,162 @@ inline Decode decode_sites_response(const uint8_t *data, size_t len, Sites &out)
 // the record small and avoids float formatting differences.
 inline int32_t micro5(float degrees) { return int32_t(std::lround(double(degrees) * 1e5)); }
 
+// ---- site writes -------------------------------------------------------------
+//   VehicleAction.addManagedChargingSiteRequest    = 67
+//   VehicleAction.removeManagedChargingSiteRequest = 68
+//   AddManagedChargingSiteRequest{ManagedChargingSite site = 1}
+//   RemoveManagedChargingSiteRequest{string public_key = 1}
+//   Response.addManagedChargingSiteResponse = 16
+//     {ManagedChargingSiteAddedOrUpdated added_or_updated = 1;
+//      ExistingManagedChargingSiteNearby existing_site_nearby = 2}
+
+static constexpr size_t MAX_ACTION = 256;
+
+inline size_t wrap(uint32_t field, const uint8_t *member, size_t n, uint8_t *out, size_t cap) {
+  uint8_t inner[MAX_ACTION];
+  cos::Writer w{inner, sizeof(inner)};
+  w.bytes(field, member, n);
+  if (!w.ok) return 0;
+  cos::Writer a{out, cap};
+  a.bytes(2, inner, w.len);
+  return a.ok ? a.len : 0;
+}
+
+inline bool valid_site(const Site &s) {
+  return !s.key.empty() && s.key.size() <= MAX_KEY_TEXT && classify_key(s.key) != 'o'
+         && !s.din.empty() && s.din.size() <= MAX_DIN && printable(s.din) && s.has_location
+         && std::isfinite(s.latitude) && std::isfinite(s.longitude)
+         && std::fabs(s.latitude) <= 90 && std::fabs(s.longitude) <= 180;
+}
+
+inline size_t encode_add_site(const Site &s, uint8_t *out, size_t cap) {
+  if (!valid_site(s)) return 0;
+  uint8_t controller[MAX_DIN + 4], manager[MAX_DIN + 8], location[16], site[MAX_ACTION], request[MAX_ACTION];
+  cos::Writer c{controller, sizeof(controller)};
+  c.bytes(1, reinterpret_cast<const uint8_t *>(s.din.data()), s.din.size());
+  cos::Writer m{manager, sizeof(manager)};
+  m.bytes(1, controller, c.len);
+  cos::Writer l{location, sizeof(location)};
+  if (s.latitude != 0) { l.tag(1, 5); l.fixed32(s.latitude); }
+  if (s.longitude != 0) { l.tag(2, 5); l.fixed32(s.longitude); }
+  cos::Writer w{site, sizeof(site)};
+  w.bytes(1, reinterpret_cast<const uint8_t *>(s.key.data()), s.key.size());
+  w.bytes(2, manager, m.len);
+  w.bytes(3, location, l.len);
+  cos::Writer r{request, sizeof(request)};
+  r.bytes(1, site, w.len);
+  if (!c.ok || !m.ok || !l.ok || !w.ok || !r.ok) return 0;
+  return wrap(67, request, r.len, out, cap);
+}
+
+inline size_t encode_remove_site(const std::string &key, uint8_t *out, size_t cap) {
+  if (key.empty() || key.size() > MAX_KEY_TEXT || classify_key(key) == 'o') return 0;
+  uint8_t request[MAX_KEY_TEXT + 4];
+  cos::Writer r{request, sizeof(request)};
+  r.bytes(1, reinterpret_cast<const uint8_t *>(key.data()), key.size());
+  if (!r.ok) return 0;
+  return wrap(68, request, r.len, out, cap);
+}
+
+// Response.addManagedChargingSiteResponse(16): 1 added or updated, 2 the car
+// kept an existing site nearby instead. Absent means the car did not say.
+inline Decode decode_add_site_response(const uint8_t *data, size_t len, uint8_t &outcome) {
+  Reader r{data, len};
+  uint8_t found = 0;
+  while (!r.done()) {
+    uint32_t number; uint8_t wire; const uint8_t *v; size_t size;
+    if (!r.field(number, wire, v, size)) return Decode::Malformed;
+    if (number != 16) continue;
+    if (wire != 2 || found) return Decode::Malformed;
+    Reader inner{v, size};
+    found = 3;  // present but empty: acknowledged without detail
+    while (!inner.done()) {
+      uint32_t n2; uint8_t w2; const uint8_t *v2; size_t s2;
+      if (!inner.field(n2, w2, v2, s2)) return Decode::Malformed;
+      if ((n2 == 1 || n2 == 2) && w2 != 2) return Decode::Malformed;
+      if (n2 == 1 || n2 == 2) found = uint8_t(n2);
+    }
+  }
+  if (!found) return Decode::Absent;
+  outcome = found;
+  return Decode::Ok;
+}
+
 // ---- requests --------------------------------------------------------------
 
-enum class Kind { Sites, VehicleKey };
+enum class Kind { Sites, VehicleKey, Entry, AddKey, AddSite, RemoveSite };
 
 struct Request {
   Kind kind{Kind::Sites};
   std::string nonce;
-  char domain{0};  // VehicleKey: 'v' vehicle security (VCSEC), 'i' infotainment
+  char domain{0};      // VehicleKey: 'v' vehicle security (VCSEC), 'i' infotainment
+  uint8_t key[65]{};   // Entry / AddKey: the gateway's raw P-256 point
+  Site site{};         // AddSite (all fields) / RemoveSite (key only)
+  bool write() const { return kind == Kind::AddKey || kind == Kind::AddSite || kind == Kind::RemoveSite; }
 };
 
-// "sit:<32 hex>" reads the car's managed charging sites.
-// "key:<32 hex>:<v|i>" publishes the vehicle public key the bridge learned
-// from that domain's session info. It does not contact the car.
+inline bool raw_point(const std::string &hex_text, uint8_t (&out)[65]) {
+  if (!cos::hex(hex_text, 130) || hex_text.compare(0, 2, "04") != 0) return false;
+  for (size_t i = 0; i < 65; ++i) {
+    auto nibble = [](char c) { return uint8_t(c <= '9' ? c - '0' : c - 'a' + 10); };
+    out[i] = uint8_t(nibble(hex_text[2 * i]) << 4 | nibble(hex_text[2 * i + 1]));
+  }
+  return true;
+}
+
+inline bool coordinate(const std::string &s, int32_t limit, float &out) {
+  if (s.empty() || s.size() > 10) return false;
+  size_t i = s[0] == '-' ? 1 : 0;
+  if (i == s.size() || (s.size() - i > 1 && s[i] == '0')) return false;
+  int64_t v = 0;
+  for (; i < s.size(); ++i) { if (s[i] < '0' || s[i] > '9') return false; v = v * 10 + (s[i] - '0'); }
+  if (v > limit) return false;
+  out = float(double(s[0] == '-' ? -v : v) / 1e5);
+  return true;
+}
+
+// Reads:
+//   "sit:<nonce>"               managed charging sites (CarServer 73)
+//   "key:<nonce>:<v|i>"         vehicle key from session info (no BLE traffic)
+//   "ent:<nonce>:<130 hex>"     whitelist entry for a key (VCSEC information request)
+// Writes (each sent once, never retried):
+//   "wla:<nonce>:<130 hex>"     add the key as ROLE_CHARGING_MANAGER; the car
+//                               then waits for a key-card tap
+//   "ste:<nonce>:<lat e5>:<lon e5>:<din>:<key text>"  add a managed site, read back
+//   "rms:<nonce>:<key text>"    remove the site with that key, read back
 inline bool parse_request(const std::string &text, Request &out) {
-  if (text.size() < 36 || text[3] != ':') return false;
+  if (text.size() < 36 || text[3] != ':' || text.size() > 255) return false;
   Request r;
   r.nonce = text.substr(4, 32);
   if (!cos::hex(r.nonce, 32)) return false;
   const std::string action = text.substr(0, 3);
+  const std::string rest = text.size() > 37 ? text.substr(37) : std::string();
+  if (text.size() > 36 && text[36] != ':') return false;
   if (action == "sit") {
     if (text.size() != 36) return false;
     r.kind = Kind::Sites;
   } else if (action == "key") {
-    if (text.size() != 38 || text[36] != ':' || (text[37] != 'v' && text[37] != 'i')) return false;
+    if (rest.size() != 1 || (rest[0] != 'v' && rest[0] != 'i')) return false;
     r.kind = Kind::VehicleKey;
-    r.domain = text[37];
+    r.domain = rest[0];
+  } else if (action == "ent" || action == "wla") {
+    if (!raw_point(rest, r.key)) return false;
+    r.kind = action == "ent" ? Kind::Entry : Kind::AddKey;
+  } else if (action == "ste") {
+    size_t a = rest.find(':'), b = a == std::string::npos ? a : rest.find(':', a + 1);
+    size_t c = b == std::string::npos ? b : rest.find(':', b + 1);
+    if (c == std::string::npos) return false;
+    r.kind = Kind::AddSite;
+    r.site.has_location = true;
+    r.site.din = rest.substr(b + 1, c - b - 1);
+    r.site.key = rest.substr(c + 1);
+    if (!coordinate(rest.substr(0, a), 9000000, r.site.latitude)
+        || !coordinate(rest.substr(a + 1, b - a - 1), 18000000, r.site.longitude)
+        || r.site.key.find(':') != std::string::npos || !valid_site(r.site)) return false;
+  } else if (action == "rms") {
+    r.kind = Kind::RemoveSite;
+    r.site.key = rest;
+    if (rest.empty() || rest.size() > MAX_KEY_TEXT || classify_key(rest) == 'o') return false;
   } else {
     return false;
   }

@@ -11,8 +11,8 @@ text_sensor:
     name: "PowerSync Charge on Solar"
     entity_category: diagnostic
     update_interval: never
-  # Read-only pairing evidence: the car's managed charging sites and the
-  # vehicle keys this bridge learned from session info. Never writes.
+  # Charge on Solar pairing: reads (managed sites, vehicle keys, whitelist
+  # entry) and explicit single-shot writes PowerSync sends only on request.
   - platform: template
     id: powersync_cos_pairing
     name: "PowerSync Charge on Solar Pairing"
@@ -36,7 +36,7 @@ text:
     entity_category: config
     mode: text
     min_length: 0
-    max_length: 40
+    max_length: 255
     optimistic: true
     restore_value: false
     set_action:

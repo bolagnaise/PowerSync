@@ -174,6 +174,7 @@ async def test_cloud_and_local_same_site_serialize_but_local_reads_do_not_wait()
     ("common", "get_networking_status_request"), ("common", "check_internet_request"),
     ("authorization", "list_authorized_clients_request"), ("teg", "get_backup_events_request"),
     ("teg", "get_delay_battery_calibration_status_request"),
+    ("authorization", "get_signed_commands_public_key_request"),
 ])
 def test_only_proven_read_envelopes_are_exempt(group, field):
     raw = envelope(group, field)
@@ -187,6 +188,8 @@ def test_unknown_and_islanding_and_manual_backup_are_mutations():
     island = tp.MessageEnvelope()
     island.teg.setIslandModeRequest.mode = 6
     assert transport._mutation_label(island.SerializeToString()) == "mutation"
+    # Charge on Solar pairing registers a vehicle client: always a write.
+    assert transport._mutation_label(envelope("authorization", "add_authorized_client_by_trusted_signature_request")) == "mutation"
     for field in ("schedule_manual_backup_event_request", "cancel_manual_backup_event_request",
                   "dispatch_battery_power_request", "delay_battery_calibration_request"):
         assert transport._mutation_label(envelope("teg", field)) is not None

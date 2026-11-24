@@ -34,7 +34,7 @@ Deploy the extended gateway before Cloud and HA changes. Compile/protocol fixtur
 
 ### Tesla BLE provider
 
-A Pedro-family BLE bridge running the PowerSync `tesla_ble_vehicle` component can read and set native Charge on Solar locally, with no cloud provider, Teslemetry subscription or request credits. Its BLE key signs the commands; the native protocol messages are the same CarServer actions used by the Fleet provider. Native site pairing must already be complete in the Tesla app. The BLE key cannot create the vehicle-to-Powerwall association.
+A Pedro-family BLE bridge running the PowerSync `tesla_ble_vehicle` component can read and set native Charge on Solar locally, with no cloud provider, Teslemetry subscription or request credits. Its BLE key signs the commands; the native protocol messages are the same CarServer actions used by the Fleet provider. Native site pairing is normally completed in the Tesla app. If it is incomplete, [check and repair it](#pairing-status-read-only) through the same bridge and local Powerwall access.
 
 Install the optional package after the pinned PedroKTFC packages, using the same `tesla_ble_component` substitution as the [stop-recovery package](ev-command-recovery.md):
 
@@ -65,9 +65,20 @@ It needs local Powerwall signed access for the entry and the Charge on Solar pac
 - asks the bridge for the car's public keys, which it learned from vehicle security and infotainment session info (no BLE traffic);
 - asks the car over BLE for its managed charging sites, which may wake it.
 
-Each step is reported separately. `vehicle_on_gateway` shows whether a vehicle client for this VIN is verified, and which of the car's keys it matches. `managed_charging_site` shows whether a site uses this gateway's key, which text encoding the car stores it in, whether the DIN matches and whether the site is near HA's home location. The bridge reports each site key as a format and a short SHA-256 fingerprint, so the full key never has to fit in a Home Assistant state. If the bridge cannot fit every site, an absent match is reported as `unknown`, not `missing`. `gateway_key_on_vehicle` is `not_checked` for now. The preference is not read; use `power_sync.get_teslemetry_charge_on_solar` for that.
+Each step is reported separately. `vehicle_on_gateway` shows whether a vehicle client for this VIN is verified, and which of the car's keys it matches. `managed_charging_site` shows whether a site uses this gateway's key, which text encoding the car stores it in, whether the DIN matches and whether the site is near HA's home location. The bridge reports each site key as a format and a short SHA-256 fingerprint, so the full key never has to fit in a Home Assistant state. If the bridge cannot fit every site, an absent match is reported as `unknown`, not `missing`. `gateway_key_on_vehicle` asks the car for its key-list entry for the gateway's key: `present` means it is a charging-manager key, `wrong_role` means the key is there with another role, and `not_confirmed` means the car returned no entry, which is not proof the key is absent. The preference is not read; use `power_sync.get_teslemetry_charge_on_solar` for that.
 
-The service does not add keys, clients or sites, and it does not touch EV control holds. Repairing missing steps from PowerSync is planned but not yet available.
+The service does not add keys, clients or sites, and it does not touch EV control holds.
+
+#### Repairing pairing steps
+
+`power_sync.repair_charge_on_solar_pairing` performs one step per call and returns its readback. It needs `confirm: true`, is blocked in monitoring mode, and never changes the Charge on Solar preference or PowerSync's EV control holds. Each step first reads the current state and sends nothing if it is already in place. Nothing is retried after a final result. A write that may have landed but could not be confirmed is reported as uncertain; read the pairing status before trying again.
+
+- `gateway_key_on_vehicle` adds the gateway's key to the car as a charging-manager key. Sit in the car and keep a key card ready: the bridge sends one unsigned add request, and the car accepts it only after a key card is tapped on its reader. PowerSync then checks the car's key list every 5 seconds for up to 90 seconds. No owner key is used or stored, and the bridge's own key is unchanged. A key that is already on the car with another role is left alone; remove it from the car's Locks menu first.
+- `vehicle_on_gateway` registers the car's key on the Powerwall over the LAN, signed with PowerSync's verified local gateway key, and confirms it in the gateway's client list. If the car's vehicle-security and infotainment keys differ, choose `vehicle_key_domain` (`v` or `i`). An existing entry for this car with another key or state is never replaced; remove the car's Powerwall pairing in the Tesla app first.
+- `managed_charging_site` adds a site that names the gateway's key, DIN and location, then reads the car's sites back. The location defaults to Home Assistant's home; pass `latitude` and `longitude` for where the car parks. Tesla does not document how the car stores the gateway key in a site. If no existing site shows the encoding, choose `key_format`; read the status first, because a site the Tesla app created shows the format the car expects. If the car keeps an existing site nearby instead, remove that site first.
+- `remove_managed_charging_site` removes the site that uses this gateway's key, in whichever encoding the car stored it, and confirms the removal.
+
+These writes have not yet been tested on a car or Powerwall. A site added with the wrong key encoding is accepted by the car but may not work; remove it and try another encoding.
 
 ### Vehicle schedules in battery optimization
 
