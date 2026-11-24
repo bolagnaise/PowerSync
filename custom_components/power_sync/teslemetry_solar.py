@@ -59,12 +59,20 @@ def validate_settings(value):
     return {key: value[key] for key in ("enabled", "lowerChargeLimit", "upperChargeLimit")}
 
 
-def native_solar_connection(hass, entry):
-    """Prefer the selected Teslemetry provider, otherwise PowerSync's Fleet key.
+def native_solar_connection(hass, entry, vin=None):
+    """Prefer a local BLE companion bridge, then Teslemetry, then PowerSync Fleet.
 
+    The BLE provider applies only to the one bridge whose own firmware reports
+    ``vin`` and carries the optional Charge on Solar package; installing that
+    package is the explicit opt-in. Its "token" is the bridge object.
     HA's separate Tesla Fleet integration cannot sign our custom command.
     PowerSync Fleet uses the existing PowerSync energy-account credentials.
     """
+    if vin:
+        from .tesla_ble_solar import find_bridge
+        bridge = find_bridge(hass, entry, vin)
+        if bridge is not None:
+            return bridge, "ble"
     from . import get_tesla_vehicle_api_token, get_tesla_api_token
     token, provider = get_tesla_vehicle_api_token(hass, entry)
     if token and provider == "teslemetry":
@@ -160,7 +168,14 @@ class SolarOwnership:
         self.holds = remaining
 
     def blocked(self, vin):
-        return bool(self.holds) if not vin or vin == "_default" else vin.upper() in self.holds
+        if not vin or vin == "_default":
+            return bool(self.holds)
+        key = str(vin).upper()
+        # A BLE-provider hold also records the car's ``ble_<prefix>`` identity,
+        # which PowerSync's standalone BLE charging paths use instead of a VIN.
+        return key in self.holds or any(
+            isinstance(value, dict) and key in value.get("aliases", ())
+            for value in self.holds.values())
 
 
 async def ownership(hass, entry_id):
@@ -293,12 +308,12 @@ def register_services(hass):
         if len(entries) != 1:
             raise HomeAssistantError("Select a loaded PowerSync entry")
         entry = entries[0]
-        token, provider = native_solar_connection(hass, entry)
-        if not token:
-            raise HomeAssistantError("Connect PowerSync Fleet or select Teslemetry as the vehicle API provider in PowerSync settings")
         vin = call.data["vin"].upper()
         if not re.fullmatch(r"[A-HJ-NPR-Z0-9]{17}", vin):
             raise HomeAssistantError("A valid vehicle VIN is required")
+        token, provider = native_solar_connection(hass, entry, vin)
+        if not token:
+            raise HomeAssistantError("Connect PowerSync Fleet, select Teslemetry as the vehicle API provider, or install the PowerSync Charge on Solar package on this car's BLE bridge")
         gate = await ownership(hass, entry.entry_id)
         try:
             async with gate.lock:
@@ -326,10 +341,20 @@ def register_services(hass):
                 if time.time() - gate.requests.get(vin, 0) < 15:
                     raise SolarError("Wait 15 seconds before another native solar request")
                 previously_blocked = gate.blocked(vin)
+                # Keep every BLE identity already fenced for this car, even when
+                # this request uses a cloud provider (e.g. the bridge is offline).
+                previous = (gate.holds or {}).get(vin)
+                known = set(previous.get("aliases", ())) if isinstance(previous, dict) else set()
+                if provider == "ble":
+                    known.add(token.alias)
+                aliases = {"aliases": sorted(known)} if known else {}
                 gate.requests[vin] = time.time()
-                await gate.hold(vin, {"status": "unconfirmed"})
+                await gate.hold(vin, {"status": "unconfirmed", **aliases})
                 try:
-                    if provider == "powersync":
+                    if provider == "ble":
+                        # The bridge answers a write with the car's own readback.
+                        observed = await token.request(settings)
+                    elif provider == "powersync":
                         observed = await request_settings(async_get_clientsession(hass), token, vin, settings, provider=provider)
                     else:
                         if settings is not None:
@@ -342,7 +367,7 @@ def register_services(hass):
                         await gate.release(vin)
                     raise
                 if observed["enabled"]:
-                    await gate.hold(vin, observed)
+                    await gate.hold(vin, {**observed, **aliases})
                 else:
                     await gate.release(vin)
                 matches = settings is None or settings == observed

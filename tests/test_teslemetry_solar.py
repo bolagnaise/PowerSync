@@ -293,6 +293,10 @@ async def test_service_provider_monitoring_handover_and_readback(monkeypatch):
     root.get_tesla_api_token = lambda *args: (None, 'none')
     monkeypatch.setitem(sys.modules, root.__name__, root)
     monkeypatch.setattr(m, '__package__', root.__name__)
+    # No BLE companion bridge here; cloud providers are exercised below.
+    ble_solar = types.ModuleType(root.__name__ + '.tesla_ble_solar')
+    ble_solar.find_bridge = lambda *args: None
+    monkeypatch.setitem(sys.modules, ble_solar.__name__, ble_solar)
     const = types.ModuleType(root.__name__ + '.const')
     const.DOMAIN, const.CONF_MONITORING_MODE = 'power_sync', 'monitoring_mode'
     monkeypatch.setitem(sys.modules, const.__name__, const)

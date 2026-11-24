@@ -6,6 +6,8 @@
 #include <vector>
 #include <queue>
 #include "stop_recovery.h"
+#include "charge_on_solar.h"
+#include "powersync_client.h"
 #include <array>
 #include <unordered_map>
 #include <functional>
@@ -326,6 +328,15 @@ namespace esphome
             uint32_t recovery_last_query_{0};
             uint32_t recovery_read_started_{0};
             bool recovery_reads_parked_{false};
+            // Optional explicit Tesla native Charge on Solar (charge_on_solar.cpp).
+            void set_charge_on_solar_state(text_sensor::TextSensor *sensor) { cos_state_ = sensor; }
+            void request_charge_on_solar(const std::string &request);
+            void publish_charge_on_solar();
+            void enqueue_charge_on_solar(bool write);
+            bool handle_charge_on_solar_response(const CarServer_Response &response);
+            void tick_charge_on_solar();
+            cos::Protocol cos_;
+            text_sensor::TextSensor *cos_state_{nullptr};
             void setup() override;
             void loop() override;
             void update() override;
@@ -548,7 +559,7 @@ namespace esphome
             std::queue<BLETXChunk> ble_write_queue_;
             std::queue<BLECommand> command_queue_;
 
-            TeslaBLE::Client *tesla_ble_client_;
+            PowerSyncBLEClient *tesla_ble_client_;
             uint32_t storage_handle_;
             uint16_t handle_;
             uint16_t read_handle_{0};

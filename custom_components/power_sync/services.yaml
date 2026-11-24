@@ -1028,9 +1028,10 @@ preserve_battery:
 get_teslemetry_charge_on_solar:
   name: Read native Tesla Charge on Solar
   description: >-
-    Read native Tesla Charge on Solar through PowerSync Fleet or the selected
-    Teslemetry vehicle provider. Requires provider virtual-key pairing. Provider
-    request costs apply; Teslemetry may wake the car. A confirmed disabled read
+    Read native Tesla Charge on Solar through this car's PowerSync BLE bridge,
+    PowerSync Fleet or the selected Teslemetry vehicle provider. Requires the
+    bridge's Charge on Solar package or provider virtual-key pairing. Cloud
+    request costs apply; Teslemetry and BLE reads may wake the car. A confirmed disabled read
     releases the PowerSync EV control hold.
   fields:
     entry_id:
@@ -1049,8 +1050,8 @@ set_teslemetry_charge_on_solar:
   name: Set native Tesla Charge on Solar
   description: >-
     Enable or disable Tesla-managed solar charging and read back the settings.
-    Requires a compatible Tesla, Powerwall, Tesla app setup and the provider virtual
-    key. Turn off PowerSync EV sessions first. Writes are blocked in monitoring
+    Requires a compatible Tesla, Powerwall, Tesla app setup and the BLE bridge's
+    Charge on Solar package or the provider virtual key. Turn off PowerSync EV sessions first. Writes are blocked in monitoring
     mode. Sends a write followed by settings readback; provider request costs apply.
     Uncertain results retain the PowerSync EV control hold until disabled readback.
   fields:

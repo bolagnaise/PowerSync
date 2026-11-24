@@ -31,7 +31,7 @@ namespace esphome
       ESP_LOGCONFIG(TAG, "Tesla BLE Vehicle:");
       LOG_BINARY_SENSOR("  ", "Asleep Sensor", binary_sensors_[static_cast<size_t>(BinarySensorId::IsAsleep)]);
     }
-    TeslaBLEVehicle::TeslaBLEVehicle() : tesla_ble_client_(new TeslaBLE::Client{})
+    TeslaBLEVehicle::TeslaBLEVehicle() : tesla_ble_client_(new PowerSyncBLEClient{})
     {
       ESP_LOGCONFIG(TAG, "Constructing Tesla BLE Vehicle component");
     }
@@ -51,6 +51,7 @@ namespace esphome
       this->initializePrivateKey();
       this->loadSessionInfo();
       if (recovery_proof_ != nullptr) setup_stop_recovery();
+      publish_charge_on_solar();
     }
 
     void TeslaBLEVehicle::initializeFlash()
@@ -823,6 +824,9 @@ namespace esphome
             ESP_LOGW (TAG, "Parsed CarServer.Response but fault code was %s", message_fault_to_string(fault));
           }
             //log_routable_message(TAG, &message);
+          // A correlated Charge on Solar reply is consumed here; the generic
+          // handler would otherwise retry it or treat it as a polled read.
+          if (handle_charge_on_solar_response(static_carserver_response_)) return;
           log_carserver_response(TAG, &static_carserver_response_);
           if (static_carserver_response_.has_actionStatus && !command_queue_.empty())
           {
@@ -919,6 +923,7 @@ namespace esphome
 
     void TeslaBLEVehicle::loop()
     {
+      tick_charge_on_solar();
       if (recovery_proof_ && stop_recovery_.locked()) {
         if (!stop_recovery_.reading()) return;
         if (uint32_t(millis() - recovery_read_started_) >= 300000U) {

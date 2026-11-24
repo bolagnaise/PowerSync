@@ -1,6 +1,7 @@
 # Tesla EV charging
 
 - [Native Tesla Charge on Solar](#teslemetry-native-solar)
+  - [Tesla BLE provider](#tesla-native-solar-ble)
 - [Rate management inside Tesla charge windows](#tesla-native-window-rate)
 - [Tesla Start confirmation](#tesla-start-confirmation)
 - [Tesla EV transport recovery and native site coexistence](#tesla-transport-recovery)
@@ -9,9 +10,9 @@
 
 ## Native Tesla Charge on Solar
 
-PowerSync adds explicit Home Assistant actions for reading and managing Tesla's native Charge on Solar through PowerSync Fleet or the selected Teslemetry vehicle provider. With the matching mobile app changes, **EVs & Chargers > Vehicles > Tesla Charge on Solar** provides an explicit settings read, enabled setting, lower and upper charge limits, and a confirmed apply action. Developer Tools → Actions remains available. The actions, cost, eligibility and recovery procedure are documented in the wiki [Services Reference](https://github.com/bolagnaise/PowerSync/wiki/Services-Reference#native-tesla-charge-on-solar).
+PowerSync adds explicit Home Assistant actions for reading and managing Tesla's native Charge on Solar through a PowerSync Tesla BLE bridge, PowerSync Fleet or the selected Teslemetry vehicle provider. With the matching mobile app changes, **EVs & Chargers > Vehicles > Tesla Charge on Solar** provides an explicit settings read, enabled setting, lower and upper charge limits, and a confirmed apply action. Developer Tools → Actions remains available. The actions, cost, eligibility and recovery procedure are documented in the wiki [Services Reference](https://github.com/bolagnaise/PowerSync/wiki/Services-Reference#native-tesla-charge-on-solar).
 
-The native controller is distinct from PowerSync Solar Surplus and Smart Schedule. PowerSync Fleet uses its own OAuth connection and paired virtual key through the private signing gateway; Teslemetry uses its documented custom GET/POST route. Both operate the native feature and its two limits. Existing installations make no native requests until explicitly requested. The selected Teslemetry vehicle provider takes precedence; otherwise the configured PowerSync account supplies Fleet credentials. The separate Home Assistant Tesla Fleet integration cannot sign these custom commands.
+The native controller is distinct from PowerSync Solar Surplus and Smart Schedule. PowerSync Fleet uses its own OAuth connection and paired virtual key through the private signing gateway; Teslemetry uses its documented custom GET/POST route. Both operate the native feature and its two limits. Existing installations make no native requests until explicitly requested. A BLE bridge with the Charge on Solar package that reports the requested VIN takes precedence. Otherwise the selected Teslemetry vehicle provider is used, then the configured PowerSync account's Fleet credentials. The separate Home Assistant Tesla Fleet integration cannot sign these custom commands.
 
 PowerSync persists a control hold for the selected VIN while it contacts Tesla. A failed settings read leaves charging available if there was no prior hold. Existing holds and uncertain writes require a complete read showing native mode is disabled before PowerSync releases control. Unresolved commands are blocked while a hold exists, including unidentified charger paths. An explicitly different identified vehicle remains separate. Reads are explicit, incur provider costs and have a 15-second minimum interval. Teslemetry may wake the car; the PowerSync Fleet extension sends no wake command. Writes are blocked in monitoring mode; active PowerSync EV sessions block reads and writes.
 
@@ -28,6 +29,31 @@ HA sends one authenticated transaction to `/v1/vehicles/{vin}/native-solar`. Clo
 The private gateway independently encodes the native protocol messages and uses the official vehicle-command session, key, VIN mutex, counter and response authentication. These commands are absent from Tesla's public command API. The extension builds against checksum-pinned official vehicle-command v0.4.1; protocol fields are documented in the extended [CarServer schema](https://github.com/Teslemetry/tesla-protocol/blob/main/proto/command/car_server.proto). No Teslemetry account or token is needed. Existing service IDs retain `teslemetry` for compatibility.
 
 Deploy the extended gateway before Cloud and HA changes. Compile/protocol fixtures and mocked provider tests do not establish live firmware compatibility or physical solar charging. No vehicle command was sent during implementation verification.
+
+<a id="tesla-native-solar-ble"></a>
+
+### Tesla BLE provider
+
+A Pedro-family BLE bridge running the PowerSync `tesla_ble_vehicle` component can read and set native Charge on Solar locally, with no cloud provider, Teslemetry subscription or request credits. Its BLE key signs the commands; the native protocol messages are the same CarServer actions used by the Fleet provider. Native site pairing must already be complete in the Tesla app. The BLE key cannot create the vehicle-to-Powerwall association.
+
+Install the optional package after the pinned PedroKTFC packages, using the same `tesla_ble_component` substitution as the [stop-recovery package](ev-command-recovery.md):
+
+```yaml
+packages:
+  powersync_charge_on_solar:
+    url: https://github.com/bolagnaise/PowerSync/
+    ref: vX.Y.Z  # the PowerSync release that includes this package
+    files:
+      - esphome/charge-on-solar.yaml
+```
+
+Rebuild and install the bridge, preserving its existing identity, keys and pairing. HA then finds two entities on that ESPHome device: `sensor.<prefix>_powersync_charge_on_solar` and `text.<prefix>_powersync_charge_on_solar_request`. Updating HA alone does not change bridge firmware. The yoziru firmware family is not supported.
+
+PowerSync uses the BLE provider only for the one configured bridge whose firmware reports the requested VIN. If no bridge reports it, or two bridges report the same VIN, the cloud providers apply as before. Each read or write uses a new random request ID. HA accepts only the bridge's answer that echoes that ID and VIN. A write is acknowledged by the car and then read back in the same request, so HA never sends a second read. A BLE read may wake the car. The bridge gives up after 75 seconds and HA after 90 seconds.
+
+Results follow the existing ownership rules. A confirmed enabled readback holds PowerSync EV control for that VIN, and also for the bridge's `ble_<prefix>` vehicle identity used by standalone BLE charging. A failed or unconfirmed write keeps the hold. Only a confirmed disabled readback releases it. The bridge refuses requests while a stop-recovery lock is active or BLE is disconnected, and it never retries, polls or re-enables on its own.
+
+Protocol encoding is checked byte-for-byte against `protoc` output for Teslemetry's extended CarServer schema, and the firmware compiles on ESPHome 2026.11. This does not establish vehicle firmware acceptance or physical solar charging.
 
 ### Vehicle schedules in battery optimization
 

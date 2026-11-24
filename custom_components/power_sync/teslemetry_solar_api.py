@@ -28,7 +28,7 @@ def register_http_view(hass):
                 return self.json({"success": False, "error": "A valid vehicle VIN is required"}, status_code=400)
             entries = []
             for entry in self.entries():
-                token, provider = native_solar_connection(hass, entry)
+                token, provider = native_solar_connection(hass, entry, vin)
                 gate = await ownership(hass, entry.entry_id)
                 async with gate.lock:
                     await gate.load()
@@ -40,7 +40,7 @@ def register_http_view(hass):
                         "monitoring_mode": bool(options.get("monitoring_mode", False)),
                         "no_solar_installed": bool(options.get("no_solar_installed", False)),
                         "powersync_control_blocked": gate.blocked(vin),
-                        "cached_settings": hold if hold and "enabled" in hold else None,
+                        "cached_settings": validate_settings(hold) if hold and "enabled" in hold else None,
                         "status": "unconfirmed" if hold and "enabled" not in hold else "cached" if hold else "unknown",
                         "retry_after_seconds": max(0, int(15 - (time.time() - gate.requests.get(vin, 0))) + 1),
                     })

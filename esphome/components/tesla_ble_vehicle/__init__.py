@@ -155,6 +155,7 @@ schema_dict = {
 }
 
 schema_dict[cv.Optional("recovery_proof")] = cv.use_id(text_sensor.TextSensor)
+schema_dict[cv.Optional("charge_on_solar_state")] = cv.use_id(text_sensor.TextSensor)
 
 schema_dict[cv.Optional(CONF_CHARGER_SWITCH)] = cv.use_id(switch.Switch)
 schema_dict[cv.Optional(CONF_DEFROST_SWITCH)] = cv.use_id(switch.Switch)
@@ -180,6 +181,9 @@ async def to_code(config):
     if "recovery_proof" in config:
         proof = await cg.get_variable(config["recovery_proof"])
         cg.add(var.set_recovery_proof(proof))
+    if "charge_on_solar_state" in config:
+        state = await cg.get_variable(config["charge_on_solar_state"])
+        cg.add(var.set_charge_on_solar_state(state))
 
     cg.add(
         var.load_polling_parameters(
