@@ -112,6 +112,16 @@ declines to restart a vehicle already at its charge limit. Stale completion
 readings still require the normal fresh-data check. This prevention does not
 clear existing retained commands; use the supported recovery action for those.
 
+A car that stays awake and stopped never produces a new charging-state or
+Asleep update, because Home Assistant suppresses equal values. After a Wake,
+PowerSync therefore also accepts a paired `<sensor>_sample` power packet stamped
+after the Wake, alongside a known charging state, as proof that the vehicle
+responded before it sends Start. A Stop sent to a car already reporting a
+stopped state confirms when a paired packet from after the command shows less
+than 50 W and both the power sensor and its `_sample` entity were bound to the
+same bridge before the command. A timestamp-only `_received` receipt or an HA
+`last_reported` time does not qualify for either check.
+
 ### Choose the firmware family
 
 Preserve the existing device name, entity IDs, VIN, BLE address, board,
