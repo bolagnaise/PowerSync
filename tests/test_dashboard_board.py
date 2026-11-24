@@ -2982,3 +2982,50 @@ def test_optimizer_settings_hide_car_inputs_until_a_vehicle_or_charger_exists():
     for case in ("unknown", "failed"):
         assert car <= set(out[case]["fields"]), case
         assert out[case]["hidden"] is False
+
+
+def test_monitoring_row_is_disabled_when_the_connection_is_read_only():
+    out = _run_board(_OPT_CARD_SETUP + r"""
+  const monitoringSwitch = html => (html.match(/<button type="button" class="switch"[^>]*data-i="1"[^>]*>/) || [''])[0];
+  const locked = render({ ...base, monitoring: 'on' }, { enabled: true, monitoring_mode: true, licensing: ok });
+  locked._hass.states[ent.monitoring].attributes = { locked_on: true, locked_reason: 'telemetry_only_connection' };
+  locked._render();
+  const free = render({ ...base, monitoring: 'on' }, { enabled: true, monitoring_mode: true, licensing: ok });
+  console.log(JSON.stringify({ locked: locked.innerHTML, lockedSwitch: monitoringSwitch(locked.innerHTML), freeSwitch: monitoringSwitch(free.innerHTML) }));
+""")
+    assert " disabled" in out["lockedSwitch"]
+    assert "Always on: this battery connection is read-only." in out["locked"]
+    assert "disabled" not in out["freeSwitch"]
+
+
+def test_classic_optimiser_status_says_when_it_only_plans():
+    script = (
+        "const fs = require('fs'); const vm = require('vm');"
+        + BROWSER_STUBS
+        + r"""
+  vm.createContext(context);
+  vm.runInContext(fs.readFileSync(process.argv[1], 'utf8'), context);
+  const make = vm.runInContext('_optimizerStatus', context);
+  const card = make(n => `sensor.power_sync_${n}`, false, false, 'switch.power_sync_monitoring_mode');
+  const first = (card.cards || [card])[0];
+  const body = first.label.replace(/^\[\[\[|\]\]\]$/g, '');
+  const label = new Function('states', body);
+  const states = mon => ({
+    'sensor.power_sync_optimization_status': { state: 'self_consumption', attributes: { power_w: 0 } },
+    'switch.power_sync_monitoring_mode': { state: mon },
+  });
+  const legacy = make(n => `sensor.power_sync_${n}`);
+  console.log(JSON.stringify({
+    name: first.name,
+    monitoring: label(states('on')),
+    controlling: label(states('off')),
+    legacy: new Function('states', (legacy.cards || [legacy])[0].label.replace(/^\[\[\[|\]\]\]$/g, ''))(states('on')),
+  }));
+"""
+    )
+    result = subprocess.run(["node", "-e", script, str(STRATEGY_PATH)], check=True, capture_output=True, text=True, timeout=20)
+    out = json.loads(result.stdout.strip().splitlines()[-1])
+    assert out["name"] == "Optimiser"
+    assert out["monitoring"] == "Monitoring only, no commands sent. Plan: Self consumption"
+    assert out["controlling"] == "Self consumption"
+    assert out["legacy"] == "Self consumption"

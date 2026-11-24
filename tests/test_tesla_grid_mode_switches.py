@@ -832,3 +832,27 @@ def test_force_switch_state_tracks_service_dispatch_payload():
 
     assert force_switch.is_on is False
     assert "expires_at" not in force_switch.extra_state_attributes
+
+
+def test_monitoring_switch_tells_dashboards_when_it_cannot_be_turned_off():
+    """A telemetry-only connection reports the lock the switch enforces."""
+    def make(options):
+        entry = types.SimpleNamespace(entry_id="entry-1", data={}, options=options)
+        return entry, switch.MonitoringModeSwitch(
+            _Hass("SystemGridConnected"),
+            entry,
+            types.SimpleNamespace(key="monitoring_mode", name="Monitoring mode"),
+        )
+
+    entry, locked = make({"sungrow_connection_type": "ihomemanager", "monitoring_mode": True})
+    assert locked.is_on is True
+    assert locked.extra_state_attributes == {
+        "locked_on": True,
+        "locked_reason": "telemetry_only_connection",
+    }
+    asyncio.run(locked.async_turn_off())
+    assert locked.is_on is True
+    assert entry.options["monitoring_mode"] is True
+
+    _, direct = make({"sungrow_connection_type": "direct", "monitoring_mode": True})
+    assert direct.extra_state_attributes == {}

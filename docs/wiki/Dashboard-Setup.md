@@ -66,7 +66,7 @@ The **Planned battery power** graph leaves out time labels that would overlap, i
 
 The **Optimiser settings** card starts with one line saying what the optimiser is doing, for example *Smart Optimization is planning only. Monitoring mode is on, so no battery commands are sent.*
 
-- **Smart Optimization** and **Monitoring only** come first. If HA optimiser access is unavailable, the Smart Optimization switch is greyed out and the card says what to fix. It can always be turned off.
+- **Smart Optimization** and **Monitoring only** come first. If HA optimiser access is unavailable, the Smart Optimization switch is greyed out and the card says what to fix. It can always be turned off. On a read-only battery connection, such as Sungrow iHomeManager, **Monitoring only** is greyed out because it is always on.
 - **Battery goal** is one choice: **Standard**, **Profit Max** or **Cost Neutral**. Each has a one-line description. The goal that is on shows anything stopping it, such as a missing maximum grid export for Profit Max solar export, or today's Cost Neutral progress. A goal chosen while Smart Optimization is off is saved and used when it is turned on.
 - **Charge by time** works with any goal and shows its target.
 - **Fine tuning** and **Updates** hold the remaining switches.

@@ -1702,15 +1702,16 @@ class PsSettingsCard extends PsCardBase {
   _rowsHtml(rows) { return rows.map(r => this._rowHtml(r)).join(''); }
 
   // One entity row. `blocked` names a requirement the backend would refuse
-  // the change over: the switch is disabled and the requirement shown.
-  _rowHtml(r, { blocked = '', note = '' } = {}) {
+  // turning the switch on over; `locked` a reason it refuses any change.
+  // Either way the switch is disabled and the reason shown.
+  _rowHtml(r, { blocked = '', note = '', locked = '' } = {}) {
     const hass = this._hass;
     const i = this._config.rows.indexOf(r);
     const s = psState(hass, r.entity);
     if (!s) return '';
     const unavailable = s.state === 'unavailable';
     const help = r.help ? `<small>${psEsc(r.help)}</small>` : '';
-    const extra = `${blocked ? `<small class="req">${psEsc(blocked)}</small>` : ''}${note ? `<small class="note">${psEsc(note)}</small>` : ''}`;
+    const extra = `${blocked || locked ? `<small class="req">${psEsc(locked || blocked)}</small>` : ''}${note ? `<small class="note">${psEsc(note)}</small>` : ''}`;
     const label = psEsc(r.label || psFriendly(hass, r.entity));
     const labelHtml = r.editor && PS_SETTING_EDITORS[r.editor]
       ? `<button type="button" class="lab settings-open" id="set-${this._settingsId}-${i}" data-editor="${i}" aria-haspopup="dialog">${label}<span class="settings-chevron" aria-hidden="true">›</span>${help}${extra}</button>`
@@ -1720,7 +1721,7 @@ class PsSettingsCard extends PsCardBase {
     if (r.kind === 'switch') {
       const on = s.state === 'on';
       // Turning a control off is never refused, so only block turning it on.
-      const disabled = unavailable || (!!blocked && !on);
+      const disabled = unavailable || !!locked || (!!blocked && !on);
       return `<div class="row2">${labelHtml}<button type="button" class="switch" role="switch" aria-checked="${on}" aria-labelledby="set-${this._settingsId}-${i}" data-i="${i}" ${disabled ? 'disabled' : ''}></button></div>`;
     }
     if (r.kind === 'select') {
@@ -1802,6 +1803,15 @@ function psOptimizerAccess(licensing) {
   return { blocked: `${reason} ${where}`, note: '', paused: 'waiting for HA optimiser access' };
 }
 
+// MonitoringModeSwitch refuses to turn off on a connection that can never
+// accept commands, and says so in its attributes.
+function psMonitoringLock(state) {
+  if (state?.attributes?.locked_on !== true) return '';
+  return state.attributes.locked_reason === 'telemetry_only_connection'
+    ? 'Always on: this battery connection is read-only.'
+    : 'Always on for this battery connection.';
+}
+
 // Battery goals are one choice: the backend keeps Profit Max and Cost Neutral
 // mutually exclusive, and Standard is neither.
 const PS_OPT_GOALS = [
@@ -1879,7 +1889,8 @@ class PsOptimizerCard extends PsSettingsCard {
     const rows = (this._config.rows || []).filter(r => psState(hass, r.entity));
     const group = g => rows.filter(r => (r.group || 'tuning') === g);
     const access = psOptimizerAccess(data?.licensing);
-    const main = group('main').map(r => this._rowHtml(r, r.entity === en.enabled ? { blocked: access.blocked, note: access.note } : {})).join('');
+    const main = group('main').map(r => this._rowHtml(r, r.entity === en.enabled ? { blocked: access.blocked, note: access.note }
+      : r.entity === en.monitoring ? { locked: psMonitoringLock(psState(hass, en.monitoring)) } : {})).join('');
     const goals = this._goalsHtml(data);
     const goalRows = group('goal').map(r => this._rowHtml(r, r.entity === en.chargeByTime ? { note: this._chargeByTimeNote(data) } : {})).join('');
     const tuning = this._rowsHtml(group('tuning'));

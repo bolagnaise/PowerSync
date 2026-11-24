@@ -9038,7 +9038,7 @@ class PowerSyncStrategy {
 
     // --- Left Column: Optimizer Status (requires button-card) ---
     if (hasButton && hasE('optimization_status')) {
-      left.push(_optimizerStatus(e));
+      left.push(_optimizerStatus(e, false, false, findEntity('switch', 'monitoring_mode')));
       center.push(_optimizationPlan(e));
       center.push(_aiPlanExplanation());
     }
@@ -10437,15 +10437,17 @@ function _powerwallStatus(e, hasE) {
   return { type: 'vertical-stack', cards };
 }
 
-function _optimizerStatus(e, showForceChargeWindows = false, showForceDischargeWindows = false) {
+function _optimizerStatus(e, showForceChargeWindows = false, showForceDischargeWindows = false, monitoringEntity = null) {
   const statusEntity = e('optimization_status');
+  // In Monitoring mode the action is only the plan, so say so up front.
+  const monitoringCheck = monitoringEntity ? `states[${JSON.stringify(monitoringEntity)}]?.state === 'on'` : 'false';
   const nextEntity = e('optimization_next_action');
   const forceChargeWindowsEntity = e('optimization_force_charge_windows');
   const forceDischargeWindowsEntity = e('optimization_force_discharge_windows');
   const cards = [{
     type: 'custom:button-card',
     entity: statusEntity,
-    name: 'Optimizer',
+    name: 'Optimiser',
     show_icon: true,
     show_name: true,
     show_label: true,
@@ -10461,6 +10463,7 @@ function _optimizerStatus(e, showForceChargeWindows = false, showForceDischargeW
         : Math.round(powerW) + ' W';
       let line1 = action.charAt(0).toUpperCase() + action.slice(1);
       if (powerW) line1 += ' @ ' + powerStr;
+      if (${monitoringCheck}) line1 = 'Monitoring only, no commands sent. Plan: ' + line1;
       if (current.attributes?.idle_hold_active) {
         const holdPct = Number(current.attributes?.idle_hold_reserve_percent);
         const holdText = Number.isFinite(holdPct)
