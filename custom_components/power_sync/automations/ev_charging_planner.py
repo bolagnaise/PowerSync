@@ -156,6 +156,8 @@ FULL_EV_SOC = 100
 EXTERNAL_SCHEDULED_STOP_SUPPRESS_SECONDS = 15 * 60
 EXTERNAL_SMART_SCHEDULE_STOP_SUPPRESS_SECONDS = 15 * 60
 AUTO_SCHEDULE_START_RETRY_BASE_SECONDS = 30
+# An unconfirmed Scheduled Stop blocks restarts at most this long without a draw.
+SCHEDULED_PENDING_STOP_MAX_SECONDS = 15 * 60
 AUTO_SCHEDULE_START_RETRY_MAX_SECONDS = 15 * 60
 PRICE_LEVEL_START_RETRY_BASE_SECONDS = 30
 PRICE_LEVEL_START_RETRY_MAX_SECONDS = 15 * 60
@@ -12337,6 +12339,10 @@ class PriceLevelChargingExecutor:
                     vin,
                     reason,
                 )
+                # Leaving it alone must not keep a stale "charging" flag: on
+                # return, should_charge and not is_charging would stay False
+                # and Price-Level would never start this car again.
+                vehicle_state.is_charging = False
             elif should_charge and not vehicle_state.is_charging:
                 await self._start_charging(mode, reason, vehicle_vin=vin)
             elif not should_charge:
@@ -12714,15 +12720,32 @@ class ScheduledChargingExecutor:
         )
         params = pending["params"]
         entity = params.get("tesla_charging_state_entity")
+        power, available = await _get_observed_ev_power_reading_kw(
+            self.hass, vin, params, allow_wall_connector_fallback=False,
+        )
+        at = pending.get("at")
+        if (
+            isinstance(at, datetime)
+            and (datetime.now(timezone.utc) - at).total_seconds()
+            >= SCHEDULED_PENDING_STOP_MAX_SECONDS
+            and not (available and power > _ACTIVE_EV_POWER_EPSILON_KW)
+        ):
+            # A car that was already stopped (or fell asleep) never reports a
+            # state change after the Stop. Past the window, only a measured
+            # draw may keep Scheduled from restarting it.
+            _LOGGER.info(
+                "Scheduled charging: no measured draw %d min after an unconfirmed "
+                "Stop for %s; releasing the pending stop",
+                SCHEDULED_PENDING_STOP_MAX_SECONDS // 60,
+                vin,
+            )
+            return True
         if _get_tesla_charging_state(self.hass, vin, entity) not in _TESLA_NON_CHARGING_STATES:
             return False
         if not _datetime_is_after(
             _get_tesla_charging_state_changed_at(self.hass, vin, entity), pending["at"],
         ):
             return False
-        power, available = await _get_observed_ev_power_reading_kw(
-            self.hass, vin, params, allow_wall_connector_fallback=False,
-        )
         return available and power <= _ACTIVE_EV_POWER_EPSILON_KW
 
     async def _start_charging(self, reason: str) -> bool:
