@@ -243,3 +243,93 @@ def test_exhausted_allowance_restores_post_cap_display_price() -> None:
     assert coordinator._last_import_bonus_caps_by_group == {
         "2026-08-01": pytest.approx(24.0),
     }
+
+
+def _window_rule():
+    rule = tariff_quota.custom_tariff_import_quota_rule(
+        {
+            "name": "Test",
+            "import_quota": {
+                "daily_cap_kwh": 24,
+                "base_price_c_per_kwh": 8,
+                "bonus_price_c_per_kwh": 8,
+                "windows": [["11:00", "14:00"]],
+            },
+        },
+        default_timezone="Australia/Brisbane",
+    )
+    assert rule is not None
+    return rule
+
+
+def test_import_cost_uses_tariff_rate_outside_allowance_window() -> None:
+    rule = _window_rule()
+    brisbane = timezone(timedelta(hours=10))
+
+    # Outside the window the tariff's own slot rate applies, not the
+    # allowance window's base rate.
+    evening = tariff_quota.custom_tariff_import_cost(
+        rule,
+        observed_at=datetime(2026, 7, 31, 18, 0, tzinfo=brisbane),
+        import_kwh=2.0,
+        eligible_kwh=0.0,
+        tariff_import_price=0.35,
+    )
+    assert evening == pytest.approx(0.70)
+
+    # Inside the window every kWh costs the window rate and the
+    # ledger-accepted kWh are discounted.
+    midday = tariff_quota.custom_tariff_import_cost(
+        rule,
+        observed_at=datetime(2026, 7, 31, 12, 0, tzinfo=brisbane),
+        import_kwh=2.0,
+        eligible_kwh=1.5,
+        tariff_import_price=0.35,
+    )
+    assert midday == pytest.approx(2.0 * 0.08 - 1.5 * 0.08)
+
+    # Eligible energy still pending from the window keeps its discount
+    # when it is settled after the window closes.
+    after_window = tariff_quota.custom_tariff_import_cost(
+        rule,
+        observed_at=datetime(2026, 7, 31, 14, 5, tzinfo=brisbane),
+        import_kwh=1.0,
+        eligible_kwh=0.5,
+        tariff_import_price=0.35,
+    )
+    assert after_window == pytest.approx(0.35 - 0.5 * 0.08)
+
+    # Negative measurements never produce credits.
+    assert tariff_quota.custom_tariff_import_cost(
+        rule,
+        observed_at=datetime(2026, 7, 31, 18, 0, tzinfo=brisbane),
+        import_kwh=-1.0,
+        eligible_kwh=-1.0,
+        tariff_import_price=0.35,
+    ) == 0
+
+
+def test_cost_tracking_prices_custom_import_from_settlement_series() -> None:
+    source = (COMPONENT_ROOT / "optimization" / "coordinator.py").read_text()
+    module = ast.parse(source)
+    method = next(
+        child
+        for node in module.body
+        if isinstance(node, ast.ClassDef)
+        and node.name == "OptimizationCoordinator"
+        for child in node.body
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and child.name == "_track_actual_cost"
+    )
+    segment = ast.get_source_segment(source, method)
+    assert segment is not None
+    custom_branch = segment[segment.index("custom_runtime = self._ensure_custom"):]
+    custom_branch = custom_branch[: custom_branch.index("zerohero_config =")]
+
+    # The display series is discounted inside the window, so the custom
+    # branch must read the undiscounted settlement series, and must not
+    # price all import at the allowance window's base rate.
+    assert "custom_tariff_import_cost(" in custom_branch
+    assert '"_last_settlement_import_prices", None)' in custom_branch
+    assert "or disp_import" in custom_branch
+    assert "rule.base_price_c_per_kwh" not in custom_branch

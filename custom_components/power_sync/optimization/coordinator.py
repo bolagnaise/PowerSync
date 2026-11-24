@@ -125,6 +125,7 @@ from ..quota import (
 )
 from ..tariff_quota import (
     CUSTOM_TARIFF_IMPORT_RULE_ID,
+    custom_tariff_import_cost,
     custom_tariff_import_quota_rule,
     custom_tariff_quota_contract,
     custom_tariff_quota_hash,
@@ -20631,11 +20632,19 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     grid_import_kw,
                 )
                 self._pending_custom_tariff_quota_settlement = 0.0
-                base_import_price = rule.base_price_c_per_kwh / 100.0
-                actual_import_cost = (
-                    grid_import_kwh * base_import_price
-                    - max(0.0, eligible_import)
-                    * (rule.bonus_price_c_per_kwh / 100.0)
+                # The display series carries the allowance discount inside the
+                # window, so price import outside it from the undiscounted
+                # settlement series (the tariff's own rate for this slot).
+                settlement_import = (
+                    getattr(self, "_last_settlement_import_prices", None)
+                    or disp_import
+                )
+                actual_import_cost = custom_tariff_import_cost(
+                    rule,
+                    observed_at=now,
+                    import_kwh=grid_import_kwh,
+                    eligible_kwh=eligible_import,
+                    tariff_import_price=float(settlement_import[0] or 0.0),
                 )
                 if grid_import_kwh > 1e-9:
                     import_price = actual_import_cost / grid_import_kwh
