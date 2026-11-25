@@ -7401,6 +7401,13 @@ def test_solar_surplus_releases_only_verified_idle_tesla(
             "both_stock_idle", "both_stock_idle_bound_fleet",
         }:
             expect_physical_stop = False
+    # One bridge rule: a native power packet at 0 kW, or a stock bridge reporting
+    # Stopped and 0 kW together, proves the stop. A current sensor is optional.
+    bridge_proved = transition in {"boost", "charge_ceiling"} and scenario in {
+        "both_paired_stopped", "both_missing_packet",
+    }
+    if bridge_proved or (transition == "smart_schedule" and scenario == "both_missing_packet"):
+        expect_physical_stop = False
     hass = _Hass(states)
     if scenario == "both_stock_wrong_producer":
         hass.entity_registry.entities["sensor.car_charger_power"].device_id = "other-bridge"
@@ -7529,7 +7536,7 @@ def test_solar_surplus_releases_only_verified_idle_tesla(
         assert physical_stop.await_args.args[2]["vehicle_vin"] == vehicle_id
     else:
         physical_stop.assert_not_awaited()
-        if scenario in {"both_stock_idle", "both_stock_idle_bound_fleet"}:
+        if bridge_proved or scenario in {"both_stock_idle", "both_stock_idle_bound_fleet"}:
             observe.assert_not_called()
         else:
             assert observe.call_args.args == (hass, vehicle_id)
@@ -7637,7 +7644,9 @@ def test_smart_schedule_stop_releases_only_verified_waiting_ble(monkeypatch, sce
         state["cancel_timer"].assert_not_called()
         stop.assert_not_awaited()
         return
-    if scenario == "idle":
+    if scenario in {"idle", "unpaired_state"}:
+        # A Stopped state fresh since the bridge connected need not share the
+        # power packet: the bridge does not resend an unchanged Stopped.
         assert result is True
         stop.assert_not_awaited()
     else:
@@ -20289,10 +20298,92 @@ def test_ble_only_solar_surplus_releases_only_verified_waiting_car(monkeypatch, 
     }))
 
     assert result is True
-    if scenario == "idle":
+    if scenario in {"idle", "unpaired_state"}:
         stop.assert_not_awaited()
     else:
         stop.assert_awaited_once()
     state["cancel_timer"].assert_called_once_with()
     assert "ble_car" not in actions._dynamic_ev_state.get(entry.entry_id, {})
     assert not ev_ownership.get_ev_ownerships(hass, entry)
+
+
+# --- One bridge rule for "the waiting car is already stopped" -------------------
+
+def _bridge_states(*, native, stamp, connected_at, state="Stopped", power=0,
+                   current=None, current_at=None, state_at=None):
+    states = [
+        _State("switch.car_charger", "off"),
+        _State("switch.car_ble_connection", "on"),
+        _State("binary_sensor.car_ble_status", "on", last_updated=connected_at),
+        _State("sensor.car_charging_state", state, last_updated=state_at or stamp),
+        _State("sensor.car_charge_power", str(power), {"unit_of_measurement": "kW"}, last_updated=stamp),
+    ]
+    if native:
+        states.append(_State("sensor.car_charge_power_sample", json.dumps(
+            {"v": 1, "t": stamp.isoformat(), "x": power}), last_updated=stamp))
+    if current is not None:
+        states.append(_State("sensor.car_charge_current", str(current),
+                             {"unit_of_measurement": "A"}, last_updated=current_at or stamp))
+    return states
+
+
+@pytest.mark.parametrize(("case", "proved"), [
+    ("native", True),
+    ("native_state_older_than_power", True),
+    ("native_state_before_connect", False),
+    ("native_stale_power", False),
+    ("native_drawing", False),
+    ("native_charging_state", False),
+    ("native_newer_positive_current", False),
+    ("stock", True),
+    ("stock_zero_current", True),
+    ("stock_positive_current", False),
+    ("stock_stale_current", False),
+    ("stock_state_not_with_power", False),
+    ("wrong_bridge", False),
+    ("disconnected", False),
+])
+def test_one_bridge_rule_proves_a_waiting_car_stopped(case, proved):
+    now = datetime.now(timezone.utc)
+    stamp = now - timedelta(seconds=2)
+    connected_at = now - timedelta(minutes=5)
+    native = case.startswith("native") or case in {"wrong_bridge", "disconnected"}
+    kwargs = {}
+    if case == "native_state_older_than_power":
+        kwargs["state_at"] = now - timedelta(seconds=60)
+    if case == "native_state_before_connect":
+        kwargs["state_at"] = connected_at - timedelta(seconds=1)
+    if case == "native_stale_power":
+        stamp = now - timedelta(minutes=10)
+        connected_at = now - timedelta(minutes=20)
+    if case == "native_drawing":
+        kwargs["power"] = 1.2
+    if case == "native_charging_state":
+        kwargs["state"] = "Charging"
+    if case == "native_newer_positive_current":
+        kwargs.update(current=8, current_at=now - timedelta(seconds=1))
+    if case == "stock_zero_current":
+        kwargs["current"] = 0
+    if case == "stock_positive_current":
+        kwargs["current"] = 6
+    if case == "stock_stale_current":
+        kwargs.update(current=0, current_at=now - timedelta(minutes=10))
+    if case == "stock_state_not_with_power":
+        kwargs["state_at"] = now - timedelta(seconds=60)
+    hass = _Hass(_bridge_states(native=native, stamp=stamp, connected_at=connected_at, **kwargs))
+    if case == "wrong_bridge":
+        hass.entity_registry.entities["sensor.car_charge_power"].device_id = "other-bridge"
+    if case == "disconnected":
+        hass.states._states["binary_sensor.car_ble_status"].state = "off"
+
+    assert (actions._ble_bridge_proves_stopped(hass, "car") is not None) is proved
+
+
+def test_every_skip_stop_path_uses_the_one_bridge_rule():
+    source = (ROOT / "automations" / "actions.py").read_text()
+    for name in ("_waiting_ble_tesla_is_stopped", "_waiting_solar_bridge_is_stopped",
+                 "_waiting_solar_tesla_is_stopped"):
+        start = source.index(f"def {name}(")
+        body = source[start:source.index("\n\n\n", start)]
+        assert "_ble_bridge_proves_stopped(" in body, name
+        assert "_tesla_ble_recovery_start_state(" not in body, name

@@ -21300,42 +21300,102 @@ def _waiting_ble_tesla_is_stopped(hass, entry, vehicle_id, state) -> bool:
     return (
         history.get("success") is True
         and history.get("recovery", {}).get("required") is False
-        and _tesla_ble_recovery_start_state(
-            hass, prefix, require_paired_charge_state=True,
-        ) == "stopped"
+        and _ble_bridge_proves_stopped(hass, prefix) is not None
     )
+
+
+def _ble_bridge_proves_stopped(hass, prefix: str | None) -> datetime | None:
+    """Return when the car's own bridge proved it Stopped at 0 kW, else None.
+
+    One rule for every path that skips Stop for a waiting car:
+    - Native bridge (power arrives in ``_sample`` packets): a fresh power
+      packet at 0 kW, with the Stopped state fresh since the bridge connected.
+      The state need not share the packet: an unchanged Stopped is not resent.
+    - Stock bridge: Stopped and 0 kW reported together (within a second) by
+      the same bridge since it connected, and 0 A if it has a current sensor.
+    Either way the bridge must be up and bound to this car, and a fresh or
+    newer positive current reading vetoes the proof.
+    """
+    from ..tesla_ble import (
+        get_tesla_ble_charge_current_state, get_tesla_ble_charge_power_state,
+        get_tesla_ble_charging_state, get_tesla_ble_companion_state,
+        get_tesla_ble_connected_at, get_tesla_ble_connected_charge_sample_time,
+        get_tesla_ble_observed_at, tesla_ble_states_share_bridge,
+    )
+
+    if not prefix or not _is_ble_available(hass, prefix):
+        return None
+    if not _tesla_ble_radio_matches_target(hass, prefix, TESLA_BLE_SWITCH_CHARGER.format(prefix=prefix)):
+        return None
+    charging = get_tesla_ble_charging_state(hass, prefix)
+    power = get_tesla_ble_charge_power_state(hass, prefix)
+    current = get_tesla_ble_charge_current_state(hass, prefix)
+    if charging is None or power is None or str(charging.state).strip().lower() != "stopped":
+        return None
+    kw, available = _power_state_kw_reading(power)
+    try:
+        if not available or float(power.state) < 0 or kw > 0:
+            return None
+    except (TypeError, ValueError):
+        return None
+
+    if get_tesla_ble_companion_state(hass, power.entity_id, "_sample") is not None:
+        connected_at = get_tesla_ble_connected_at(hass, prefix)
+        if connected_at is None or not tesla_ble_states_share_bridge(hass, prefix, charging, power):
+            return None
+        power_at = get_tesla_ble_observed_at(hass, power)
+        state_at = get_tesla_ble_observed_at(hass, charging)
+        if any(
+            stamp is None or stamp <= connected_at or not is_current_ev_power_observation(stamp)
+            for stamp in (power_at, state_at)
+        ):
+            return None
+        current_required = False
+    else:
+        power_at = get_tesla_ble_connected_charge_sample_time(
+            hass, prefix, charging, power,
+            require_paired_charge_state=False, require_paired_measurement=False,
+        )
+        if not is_current_ev_power_observation(power_at):
+            return None
+        current_required = current is not None
+
+    if current is not None:
+        current_at = get_tesla_ble_observed_at(hass, current)
+        fresh_current = (
+            is_current_ev_power_observation(current_at)
+            and tesla_ble_states_share_bridge(hass, prefix, current)
+        )
+        try:
+            amps = float(current.state) if fresh_current else None
+        except (TypeError, ValueError):
+            amps = None
+        if amps is not None and (not math.isfinite(amps) or amps != 0):
+            return None
+        if current_required and (
+            amps is None
+            or get_tesla_ble_connected_charge_sample_time(
+                hass, prefix, charging, current,
+                require_paired_charge_state=False, require_paired_measurement=False,
+            ) is None
+        ):
+            return None
+    return power_at
 
 
 def _waiting_solar_bridge_is_stopped(hass, entry, vehicle_id, params) -> bool:
-    """Check whether the waiting Tesla's connected bridge proves it is idle."""
-    from ..tesla_ble import (
-        get_tesla_ble_charge_current_state, get_tesla_ble_charge_power_state,
-        get_tesla_ble_charging_state, get_tesla_ble_connected_charge_sample_time,
-    )
+    """Check whether the waiting Tesla's connected bridge proves it is idle.
 
-    prefix = _resolve_ble_prefix_for_vehicle(hass, entry, vehicle_id)
-    if not prefix or not _is_ble_available(hass, prefix):
+    On a BLE + Fleet install, Fleet must also show nothing newer than the
+    bridge's proof.
+    """
+    proved_at = _ble_bridge_proves_stopped(
+        hass, _resolve_ble_prefix_for_vehicle(hass, entry, vehicle_id),
+    )
+    if proved_at is None:
         return False
-    target = TESLA_BLE_SWITCH_CHARGER.format(prefix=prefix)
-    if not _tesla_ble_radio_matches_target(hass, prefix, target):
-        return False
-    charging = get_tesla_ble_charging_state(hass, prefix)
-    if getattr(charging, "state", "").lower() != "stopped":
-        return False
-    power = get_tesla_ble_charge_power_state(hass, prefix)
-    current = get_tesla_ble_charge_current_state(hass, prefix)
-    # Stock ESPHome can report contemporaneous values without extra packets.
-    samples = []
-    for measured in (power, current):
-        stamp = get_tesla_ble_connected_charge_sample_time(
-            hass, prefix, charging, measured,
-            require_paired_charge_state=False, require_paired_measurement=False,
-        )
-        if not is_current_ev_power_observation(stamp) or float(measured.state) != 0:
-            return False
-        samples.append(stamp)
     physical = _tesla_physical_charging_snapshot(
-        hass, entry, vehicle_id, params, updated_after=min(samples),
+        hass, entry, vehicle_id, params, updated_after=proved_at,
     )
     return not physical["charging"] and not physical["fresh_measurements"]
 
@@ -21401,7 +21461,7 @@ async def _waiting_solar_tesla_is_stopped(
                 return False
         else:
             prefix = _resolve_ble_prefix_for_vehicle(hass, entry, vehicle_id)
-            if not prefix or _tesla_ble_recovery_start_state(hass, prefix) != "stopped":
+            if _ble_bridge_proves_stopped(hass, prefix) is None:
                 return False
     observed = get_tesla_vehicle_observation(hass, vehicle_id, preferred_entity_id=entity)
     if not (

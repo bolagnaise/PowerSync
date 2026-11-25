@@ -239,6 +239,48 @@ def get_tesla_ble_status_state(hass: Any, prefix: str) -> Any | None:
     return connection if connection is not None else node
 
 
+def get_tesla_ble_connected_at(hass: Any, prefix: str) -> datetime | None:
+    """Return when the bridge's BLE link to the car last came up, if it is up."""
+    connection = hass.states.get(TESLA_BLE_BINARY_CONNECTION_STATUS.format(prefix=prefix))
+    if connection is None or connection.state != "on":
+        return None
+    connected_at = getattr(connection, "last_changed", None) or getattr(connection, "last_updated", None)
+    if not isinstance(connected_at, datetime):
+        return None
+    return connected_at if connected_at.tzinfo is not None else connected_at.replace(tzinfo=timezone.utc)
+
+
+def tesla_ble_states_share_bridge(hass: Any, prefix: str, *states: Any) -> bool:
+    """Whether the states (and their companion entities) come from the car's own bridge.
+
+    The bridge is the ESPHome device that owns the charger switch and the
+    connection sensor. A same-named entity from another device proves nothing.
+    """
+    registry = _entity_registry(hass)
+    if registry is None:
+        return False
+
+    def binding(entity_id: str) -> tuple[str, str] | None:
+        entry = registry.async_get(entity_id)
+        if entry is None or entry.platform != "esphome" or entry.disabled_by is not None:
+            return None
+        if not entry.config_entry_id or not entry.device_id:
+            return None
+        return entry.config_entry_id, entry.device_id
+
+    bridge = binding(TESLA_BLE_SWITCH_CHARGER.format(prefix=prefix))
+    if bridge is None or binding(TESLA_BLE_BINARY_CONNECTION_STATUS.format(prefix=prefix)) != bridge:
+        return False
+    for state in states:
+        if state is None or binding(state.entity_id) != bridge:
+            return False
+        for suffix in ("_sample", "_received"):
+            companion = get_tesla_ble_companion_state(hass, state.entity_id, suffix)
+            if companion is not None and binding(companion.entity_id) != bridge:
+                return False
+    return True
+
+
 def get_tesla_ble_connected_charge_sample_time(
     hass: Any, prefix: str, charge_state: Any, power_state: Any, *,
     require_paired_charge_state: bool = True,
@@ -251,41 +293,14 @@ def get_tesla_ble_connected_charge_sample_time(
     """
     if charge_state is None or power_state is None:
         return None
-    connection = hass.states.get(TESLA_BLE_BINARY_CONNECTION_STATUS.format(prefix=prefix))
-    if connection is None or connection.state != "on":
+    connected_at = get_tesla_ble_connected_at(hass, prefix)
+    if connected_at is None:
         return None
-    connected_at = getattr(connection, "last_changed", None) or getattr(connection, "last_updated", None)
-    if not isinstance(connected_at, datetime):
-        return None
-    if connected_at.tzinfo is None:
-        connected_at = connected_at.replace(tzinfo=timezone.utc)
-    registry = _entity_registry(hass)
-    if registry is None:
-        return None
-
-    def binding(entity_id: str) -> tuple[str, str] | None:
-        entry = registry.async_get(entity_id)
-        if entry is None or entry.platform != "esphome" or entry.disabled_by is not None:
-            return None
-        if not entry.config_entry_id or not entry.device_id:
-            return None
-        return entry.config_entry_id, entry.device_id
-
-    bridge = binding(TESLA_BLE_SWITCH_CHARGER.format(prefix=prefix))
-    if bridge is None or binding(connection.entity_id) != bridge:
+    if not tesla_ble_states_share_bridge(hass, prefix, charge_state, power_state):
         return None
     stamps = []
     for state, required in ((charge_state, require_paired_charge_state), (power_state, require_paired_measurement)):
-        if binding(state.entity_id) != bridge:
-            return None
-        sample = get_tesla_ble_companion_state(hass, state.entity_id, "_sample")
-        if sample is None:
-            if required:
-                return None
-            receipt = get_tesla_ble_companion_state(hass, state.entity_id, "_received")
-            if receipt is not None and binding(receipt.entity_id) != bridge:
-                return None
-        elif binding(sample.entity_id) != bridge:
+        if required and get_tesla_ble_companion_state(hass, state.entity_id, "_sample") is None:
             return None
         stamp = get_tesla_ble_observed_at(hass, state)
         if stamp is None or stamp <= connected_at:
