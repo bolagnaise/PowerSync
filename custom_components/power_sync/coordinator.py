@@ -4210,20 +4210,47 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
             else max(0, float(max_age))
         )
 
-        # Return cached value if still fresh.
+        cached = self._fresh_site_info_cache(cache_ttl)
+        if cached is not None:
+            return cached
+        if self._site_info_retry_pending():
+            return None
+
+        # Single flight: Home Assistant updates each platform's Tesla control
+        # entities concurrently, and each refreshes site_info with the same
+        # max_age. Without this, every entity whose window expired on the same
+        # tick sent its own identical GET. Waiters re-check against their own
+        # max_age once the in-flight read settles.
+        lock = getattr(self, "_site_info_lock", None)
+        if lock is None:
+            lock = self._site_info_lock = asyncio.Lock()
+        async with lock:
+            cached = self._fresh_site_info_cache(cache_ttl)
+            if cached is not None:
+                return cached
+            if self._site_info_retry_pending():
+                return None
+            return await self._async_fetch_site_info()
+
+    def _fresh_site_info_cache(self, cache_ttl: float) -> dict[str, Any] | None:
+        """Return the cached site_info when it is inside ``cache_ttl``."""
         if (
             self._site_info_cache
             and (time.monotonic() - self._site_info_last_fetch) <= cache_ttl
         ):
             _LOGGER.debug("Returning cached site_info")
             return self._site_info_cache
+        return None
 
-        # Bound retries after exhausted reads without pinning controls until restart.
-        if self._site_info_fetch_failed and time.monotonic() < getattr(
+    def _site_info_retry_pending(self) -> bool:
+        """Bound retries after exhausted reads without pinning controls until restart."""
+        return bool(self._site_info_fetch_failed) and time.monotonic() < getattr(
             self, "_site_info_retry_at", 0.0
-        ):
-            return None
+        )
 
+    async def _async_fetch_site_info(self) -> dict[str, Any] | None:
+        """Read site_info from Tesla and adopt it unless a write invalidated it meanwhile."""
+        generation = getattr(self, "_site_info_generation", 0)
         current_token = self._get_current_token()
         headers = self._tesla_headers(current_token)
 
@@ -4240,6 +4267,13 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
             )
 
             site_info = data.get("response", {})
+            if getattr(self, "_site_info_generation", 0) != generation:
+                # invalidate_site_info_cache() ran while this read was in
+                # flight, so it may predate a write. Return it to this caller
+                # as before, but never cache or adopt it: a queued or later
+                # caller must read the post-write state.
+                _LOGGER.debug("Discarding site_info read that started before an invalidation")
+                return site_info
 
             # Log timezone info for debugging
             installation_tz = site_info.get("installation_time_zone")
@@ -4339,14 +4373,23 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
 
         except UpdateFailed as err:
             _LOGGER.warning("Failed to fetch site_info: %s (retrying after %ss)", err, TESLA_SITE_INFO_RETRY_SECONDS)
-            self._site_info_fetch_failed = True
-            self._site_info_retry_at = time.monotonic() + TESLA_SITE_INFO_RETRY_SECONDS
+            self._latch_site_info_failure(generation)
             return None
         except Exception as err:
             _LOGGER.warning("Unexpected error fetching site_info: %s (retrying after %ss)", err, TESLA_SITE_INFO_RETRY_SECONDS)
-            self._site_info_fetch_failed = True
-            self._site_info_retry_at = time.monotonic() + TESLA_SITE_INFO_RETRY_SECONDS
+            self._latch_site_info_failure(generation)
             return None
+
+    def _latch_site_info_failure(self, generation: int) -> None:
+        """Back off after a failed read, unless a write invalidated the cache meanwhile.
+
+        A post-write invalidation clears the latch so the confirming read can
+        run at once; a pre-write read failing later must not re-arm it.
+        """
+        if getattr(self, "_site_info_generation", 0) != generation:
+            return
+        self._site_info_fetch_failed = True
+        self._site_info_retry_at = time.monotonic() + TESLA_SITE_INFO_RETRY_SECONDS
 
     def invalidate_site_info_cache(self) -> None:
         """Force the next async_get_site_info() call to re-fetch from Tesla.
@@ -4366,6 +4409,9 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         self._site_info_last_fetch = 0
         self._site_info_fetch_failed = False
         self._site_info_retry_at = 0.0
+        # Fence any read already in flight so it cannot repopulate the cache
+        # with a snapshot that predates the write.
+        self._site_info_generation = getattr(self, "_site_info_generation", 0) + 1
         _LOGGER.debug("Tesla site_info cache invalidated — next read will refetch")
 
     async def set_grid_charging_enabled_outcome(
