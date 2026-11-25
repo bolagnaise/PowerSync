@@ -138,3 +138,57 @@ def test_charge_episode_does_not_cross_unmeasured_boundaries(opt_module, boundar
     # for source attribution using this new episode's measured charge.
     assert c._battery_provenance_unknown_kwh > 2
     assert c._battery_provenance_unknown_kwh <= opening_unknown
+
+
+def _discharge(c, target, discharge):
+    c._record_battery_provenance_interval(
+        solar_charge_kwh=0.0, grid_charge_kwh=0.0, grid_charge_cost=0.0,
+        discharge_kwh=discharge, current_soc=target / 27, capacity_wh=27000,
+        telemetry_gap=False,
+    )
+
+
+@pytest.mark.parametrize("lagging", [False, True])
+def test_stepped_soc_during_discharge_keeps_proportional_origins(opt_module, lagging):
+    """Ticket 201: lagging SOC steps moved measured origin into unknown.
+
+    Self-consumption draws every origin proportionally. Whether SOC follows
+    the measured discharge exactly or arrives in delayed steps, the stored
+    mix must stay the opening mix.
+    """
+    c = _opening(opt_module)
+    level = 10.0
+    for _ in range(40):
+        if lagging:
+            _discharge(c, level - 0.001, 0.05)
+            level -= 0.1
+            _discharge(c, level, 0.05)
+        else:
+            level -= 0.1
+            _discharge(c, level, 0.1)
+    ratio = level / 10.0
+    assert c._battery_provenance_total_kwh() == pytest.approx(level)
+    assert c._battery_provenance_solar_kwh == pytest.approx(1.0 * ratio)
+    assert c._battery_provenance_grid_kwh == pytest.approx(7.0 * ratio)
+    assert c._battery_provenance_unknown_kwh == pytest.approx(2.0 * ratio)
+    assert c._battery_provenance_grid_cost == pytest.approx(0.7 * ratio)
+
+
+@pytest.mark.parametrize("boundary", ["gap", "charge", "rise"])
+def test_discharge_episode_does_not_cross_unmeasured_boundaries(opt_module, boundary):
+    c = _opening(opt_module)
+    _discharge(c, 9.9, 0.1)
+    if boundary == "gap":
+        c._record_battery_provenance_interval(
+            solar_charge_kwh=0, grid_charge_kwh=0, grid_charge_cost=0,
+            discharge_kwh=0, current_soc=9.9 / 27, capacity_wh=27000,
+            telemetry_gap=True,
+        )
+    elif boundary == "charge":
+        _charge(c, 9.91, solar=0.01, grid=0.0)
+    assert c._battery_provenance_discharge_run is None or boundary == "rise"
+    # SOC above the episode opening without measured charge is unknown origin.
+    if boundary == "rise":
+        c._reconcile_battery_provenance(10.2 / 27, 27000, reason="optimizer_run")
+        assert c._battery_provenance_discharge_run is None
+        assert c._battery_provenance_unknown_kwh == pytest.approx(2.0 * 0.99 + 0.3)
