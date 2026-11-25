@@ -273,6 +273,8 @@ async def test_host_contract_prime_uses_executor_once_and_current_is_io_free(
     ("core_version", "api_version", "qualified"),
     (
         ("2026.11.2", "46.25.0", True),
+        ("2026.11.3", "46.25.0", True),
+        ("2026.11.3", "46.6.0", False),
         ("2026.11.2", "46.6.0", False),
         ("2026.10.4", "46.25.0", False),
     ),
