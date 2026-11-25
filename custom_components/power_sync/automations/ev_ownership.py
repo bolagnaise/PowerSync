@@ -40,6 +40,17 @@ POWERSYNC_STOP_CONFIRM_SECONDS = 15 * 60
 EV_QUICK_OBLIGATIONS_KEY = "ev_quick_control_obligations"
 _EV_QUICK_TIMERS_KEY = "_ev_quick_control_timers"
 _LOGGER = logging.getLogger(__name__)
+# Why a car is or is not charging must be visible on a default (WARNING)
+# install, like optimization.coordinator.decisions: pin this one child logger
+# to INFO, only ever raising visibility (a user's DEBUG is kept).
+EV_DECISION_LOGGER = logging.getLogger(
+    "custom_components.power_sync.automations.ev_decisions"
+)
+if EV_DECISION_LOGGER.level == logging.NOTSET or EV_DECISION_LOGGER.level > logging.INFO:
+    EV_DECISION_LOGGER.setLevel(logging.INFO)
+from ..sensitive_logging import install_vin_log_filter  # noqa: E402
+
+install_vin_log_filter(EV_DECISION_LOGGER)  # these lines are shared in support threads
 _EV_QUICK_PARAM_KEYS = frozenset(
     {
         "charger_type",
@@ -1807,6 +1818,10 @@ def record_ev_command(
         "reason": reason,
     }
     get_ev_last_commands(hass, config_entry)[vid] = last_command
+    if not success:
+        record_ev_refusal(
+            hass, config_entry, vid, command=command, reason=reason, source=source,
+        )
 
     lease_id, lease = get_ev_ownership(hass, config_entry, vid)
     if lease_id is not None and lease is not None:
@@ -1817,6 +1832,92 @@ def record_ev_command(
     from ..action_events import publish_ev_command
     publish_ev_command(hass, config_entry, vid, last_command)
     return last_command
+
+
+# Re-log an unchanged refusal at most this often so a 30 s control loop that
+# keeps hitting the same guard stays visible without flooding the log.
+EV_REFUSAL_LOG_REPEAT_SECONDS = 900
+
+
+def get_ev_last_refusals(hass: Any, config_entry: Any) -> dict[str, dict[str, Any]]:
+    """Return the latest refused/failed EV command per loadpoint (memory only).
+
+    Kept apart from ``last_commands`` so a later success cannot hide why the
+    previous attempt was refused.
+    """
+    entry = _entry_data(hass, config_entry.entry_id)
+    refusals = entry.setdefault("ev_last_refusal", {})
+    return refusals if isinstance(refusals, dict) else {}
+
+
+def ev_refusal_sequence(hass: Any, config_entry: Any) -> int:
+    """Return a counter that advances on every recorded EV refusal."""
+    return int(_entry_data(hass, config_entry.entry_id).get("ev_refusal_seq") or 0)
+
+
+def latest_ev_refusal(
+    hass: Any, config_entry: Any, vehicle_id: Any = None,
+) -> dict[str, Any] | None:
+    """Return the latest refusal for a loadpoint, if any."""
+    vid = _ownership_loadpoint_id(hass, config_entry, vehicle_id)
+    refusal = get_ev_last_refusals(hass, config_entry).get(vid)
+    return dict(refusal) if isinstance(refusal, dict) else None
+
+
+def record_ev_refusal(
+    hass: Any,
+    config_entry: Any,
+    vehicle_id: Any = None,
+    *,
+    command: str,
+    reason: str | None,
+    source: str = "powersync",
+) -> dict[str, Any]:
+    """Remember and log why an EV command was refused, without other effects."""
+    vid = _ownership_loadpoint_id(hass, config_entry, vehicle_id)
+    entry = _entry_data(hass, config_entry.entry_id)
+    entry["ev_refusal_seq"] = int(entry.get("ev_refusal_seq") or 0) + 1
+    refusals = get_ev_last_refusals(hass, config_entry)
+    previous = refusals.get(vid) if isinstance(refusals.get(vid), dict) else None
+    now = datetime.now(timezone.utc)
+    reason_text = str(reason) if reason else "no reason recorded"
+    same = (
+        previous is not None
+        and previous.get("command") == command
+        and previous.get("reason") == reason_text
+    )
+    refusal = {
+        "command": command,
+        "reason": reason_text,
+        "source": source,
+        "at": now.isoformat(),
+        "first_at": previous.get("first_at") if same else now.isoformat(),
+        "count": int(previous.get("count") or 0) + 1 if same else 1,
+        "logged_at": previous.get("logged_at") if same else None,
+    }
+    logged_at = _parse_iso_utc(refusal["logged_at"])
+    if logged_at is None or (now - logged_at).total_seconds() >= EV_REFUSAL_LOG_REPEAT_SECONDS:
+        EV_DECISION_LOGGER.info(
+            "EV decision: %s %s was not carried out: %s (x%d since %s)",
+            vid,
+            command,
+            reason_text,
+            refusal["count"],
+            refusal["first_at"],
+        )
+        refusal["logged_at"] = now.isoformat()
+    refusals[vid] = refusal
+    return refusal
+
+
+def _parse_iso_utc(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
 def can_claim_ev_ownership(
@@ -1831,6 +1932,29 @@ def can_claim_ev_ownership(
     lease_id, lease = get_ev_ownership(hass, config_entry, vehicle_id)
     if lease is None:
         return True, None, None, None
+
+    if lease.get("owner") == EXTERNAL_OWNER_MODE and lease.get("stop_settling"):
+        # A stop-settling lease only waits for telemetry to confirm PowerSync's
+        # own Stop. It must never outlive its window (a sleeping car sends no
+        # confirmation, which used to block every start until HA restarted),
+        # and it must never block an explicit user command. Real external
+        # charging seen later re-creates a normal external lease.
+        expires_at = _as_utc_datetime(lease.get("stop_settling_expires_at"))
+        expired = expires_at is None or datetime.now(timezone.utc) >= expires_at
+        if expired or owner_family(owner_mode) in {"manual", "boost"}:
+            release_ev_ownership(
+                hass,
+                config_entry,
+                lease_id,
+                reason=(
+                    "PowerSync stop-settling window expired"
+                    if expired
+                    else f"{owner_mode} overrides PowerSync stop settling"
+                ),
+                command="external_policy_override",
+                source="powersync",
+            )
+            return True, None, None, None
 
     if (
         lease.get("owner") == EXTERNAL_OWNER_MODE

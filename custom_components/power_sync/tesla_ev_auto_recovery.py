@@ -10,6 +10,7 @@ import time
 from uuid import uuid4
 
 from . import tesla_ev_recovery as recovery
+from .sensitive_logging import install_vin_log_filter
 from .tesla_native_recovery import (
     ACTIVE_KEY, _candidates, _no_writers, async_reconcile_native_history,
 )
@@ -18,7 +19,12 @@ WORKER_KEY = "_tesla_ev_auto_recovery"
 STATE_KEY = "automatic_native_recovery"
 INTERVAL_SECONDS = 60
 MAX_RETRY_SECONDS = 3600
+# Repeat an unchanged "still held" reason at most this often.
+HELD_LOG_REPEAT_SECONDS = 1800
+# At most one independent cloud read per held vehicle in this interval.
+EXPIRY_READ_INTERVAL_SECONDS = 15 * 60
 _LOGGER = logging.getLogger(__name__)
+install_vin_log_filter(_LOGGER)
 
 
 def _valid_record(record):
@@ -38,6 +44,8 @@ class NativeRecoveryWorker:
         self.cancel_timer = None
         self.closed = False
         self.stock_checked_at = {}
+        self.held_logged = {}
+        self.expiry_read_at = {}
 
     def current(self):
         return (not self.closed
@@ -111,6 +119,59 @@ class NativeRecoveryWorker:
             elif success:
                 _LOGGER.info("Automatic Tesla EV recovery reconciled retained command history; normal control admission can resume")
 
+    def _owner_free(self, vin):
+        from .automations.ev_ownership import get_ev_ownership
+
+        if not self.current() or not _no_writers(recovery, self.hass, vin):
+            return False
+        lease_id, owner = get_ev_ownership(self.hass, self.entry, vin)
+        return lease_id is None and owner is None
+
+    async def _expire_settled_ble(self, vin):
+        """Retire BLE attempts whose effect an independent cloud report shows."""
+        from .tesla_ev_observation import async_read_independent_tesla_vehicle
+
+        retired, reason = False, None
+        cutoff, reason = recovery.ble_attempt_expiry_due(self.hass, self.entry, vin)
+        now = time.time()
+        if reason is None and not self._owner_free(vin):
+            reason = "a command writer or charging owner is active"
+        elif reason is None and now < cutoff:
+            reason = f"waiting {int(cutoff - now)} s for the unconfirmed command to settle"
+        elif reason is None and now - self.expiry_read_at.get(vin, 0) < EXPIRY_READ_INTERVAL_SECONDS:
+            reason = "waiting before the next independent vehicle read"
+        elif reason is None:
+            # One explicit cloud charge_state read: no wake, no paid refresh,
+            # newer than the settle window, abandoned if authority changes.
+            self.expiry_read_at[vin] = now
+            try:
+                observation = await async_read_independent_tesla_vehicle(
+                    self.hass, vin, updated_after=cutoff, allow_paid_refresh=False,
+                    authorize=lambda: self._owner_free(vin),
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as err:  # the bridge recovery below still runs
+                observation = None
+                reason = f"independent vehicle read failed ({type(err).__name__})"
+            if reason is None:
+                retired, reason = await recovery.async_expire_settled_ble_attempts(
+                    self.hass, self.entry, vin, observation,
+                    authorize=lambda: self._owner_free(vin),
+                )
+        if retired:
+            self.held_logged.pop(vin, None)
+            _LOGGER.info(
+                "Automatic Tesla EV recovery for %s: %s; normal control admission can resume",
+                vin, reason,
+            )
+            return True
+        last = self.held_logged.get(vin)
+        if last is None or last[0] != reason or now - last[1] >= HELD_LOG_REPEAT_SECONDS:
+            self.held_logged[vin] = (reason, now)
+            _LOGGER.info("Tesla EV commands for %s remain held: %s", vin, reason)
+        return False
+
     async def _recover_stock(self, vin):
         from .automations.ev_ownership import get_ev_ownership
         from .const import CONF_MONITORING_MODE
@@ -156,7 +217,8 @@ class NativeRecoveryWorker:
                 route = recovery.get_vehicle_route(self.hass, self.entry, vin)
                 if route and route.get("reason") == "ble_recovery":
                     self.stock_checked_at[vin] = time.time()
-                    await self._recover_stock(vin)
+                    if not await self._expire_settled_ble(vin):
+                        await self._recover_stock(vin)
                     return
                 if not route or route.get("reason") != "native_recovery":
                     continue

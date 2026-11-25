@@ -11462,3 +11462,87 @@ def test_native_ev_forecast_splits_import_at_export_boundaries(monkeypatch, expo
         (now + timedelta(minutes=start), now + timedelta(minutes=end), -2.0, value)
         for start, end, value in expected
     ]
+
+
+def test_price_level_restarts_a_car_that_returns_home_after_charging_away(monkeypatch):
+    """Away is left alone, but must not leave a stale is_charging behind."""
+    hass = _FakeHass(price_settings={"preserve_home_battery": False})
+    entry = SimpleNamespace(entry_id="entry-1", data={}, options={})
+    monkeypatch.setattr(ev_planner, "discover_all_tesla_vehicles", _one_vehicle)
+    executor = ev_planner.PriceLevelChargingExecutor(hass, entry)
+    executor.apply_preserve_home_battery = AsyncMock()
+    executor._start_charging = AsyncMock(return_value=True)
+    executor._stop_charging = AsyncMock(return_value=True)
+    state = executor._get_or_create_vehicle_state(VIN)
+    state.is_charging = True  # was charging when the car drove off
+
+    async def away(vin, price):
+        state.last_decision = "away"
+        return False, "Vehicle not at home (work)", ""
+
+    executor.get_charging_decision_for_vehicle = away
+    asyncio.run(executor.evaluate_all_vehicles(5.0))
+    executor._stop_charging.assert_not_awaited()
+    assert state.is_charging is False
+
+    async def home_cheap(vin, price):
+        state.last_decision = "charging"
+        return True, "Price 5c <= 12c", "opportunity"
+
+    executor.get_charging_decision_for_vehicle = home_cheap
+    asyncio.run(executor.evaluate_all_vehicles(5.0))
+    executor._start_charging.assert_awaited_once()
+
+
+@pytest.mark.parametrize("state,power,available,expected", [
+    ("stopped", 0, True, True),     # already-stopped car never reports a change
+    ("charging", 0, False, True),   # asleep: stale state, no reading
+    ("charging", 7.2, True, False), # a measured draw still blocks the restart
+])
+def test_scheduled_pending_stop_expires_without_a_measured_draw(
+    monkeypatch, scheduled_reconciliation, state, power, available, expected,
+):
+    f = scheduled_reconciliation
+    at = datetime.now(timezone.utc) - timedelta(
+        seconds=ev_planner.SCHEDULED_PENDING_STOP_MAX_SECONDS + 1
+    )
+    f.actions._get_tesla_charging_state = lambda h, vin, entity: state
+    f.actions._get_tesla_charging_state_changed_at = lambda *a: at - timedelta(hours=1)
+    f.actions._datetime_is_after = lambda a, b: a > b
+    f.actions._TESLA_NON_CHARGING_STATES = {"stopped", "complete"}
+    f.actions._ACTIVE_EV_POWER_EPSILON_KW = 0.05
+    f.actions._get_observed_ev_power_reading_kw = AsyncMock(return_value=(power, available))
+
+    assert asyncio.run(
+        f.scheduled._pending_stop_observed(f.vins[0], {"at": at, "params": {}})
+    ) is expected
+
+
+@pytest.mark.parametrize("active,expected", [(False, False), (True, True)])
+def test_opportunistic_solar_threshold_gates_starts_not_running_sessions(monkeypatch, active, expected):
+    """A dip below 1.5 kW must not stop a running solar session immediately;
+    the Solar Surplus controller applies stop_delay_minutes instead."""
+    brisbane_tz = timezone(timedelta(hours=10))
+    monkeypatch.setattr(
+        ev_planner.dt_util, "now", lambda: datetime(2026, 8, 16, 11, 0, tzinfo=brisbane_tz),
+    )
+    planner = ev_planner.ChargingPlanner(_FakeHass(), _FakeConfigEntry())
+    plan = SimpleNamespace(windows=[], target_time="2026-08-17T07:00:00", can_meet_target=True)
+
+    should_charge, _reason, source = asyncio.run(
+        planner.should_charge_now(
+            vehicle_id=VIN,
+            plan=plan,
+            current_surplus_kw=0.6,
+            current_price_cents=35.0,
+            current_export_price_cents=5.0,
+            battery_soc=90.0,
+            min_battery_soc=0,
+            priority=ev_planner.ChargingPriority.SOLAR_PREFERRED,
+            solar_session_active=active,
+        )
+    )
+
+    assert should_charge is expected
+    if expected:
+        assert source == "solar_surplus"

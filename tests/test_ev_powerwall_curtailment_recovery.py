@@ -24,7 +24,7 @@ METHODS = (
     "_set_export_rule", "_set_tesla_backup_reserve", "_get_current_export_rule", "_curtailment_entry_data", "_curtailment_runtime_current", "_curtailment_site_id", "_curtailment_recovery_allowed", "_curtailment_export_unowned",
     "_load_curtailment_recovery", "_persist_curtailment_recovery",
     "_disable_curtailment_for_ev", "_restore_curtailment",
-    "_retry_curtailment_restoration", "evaluate",
+    "_retry_curtailment_restoration", "_log_decision_change", "evaluate",
 )
 
 
@@ -45,7 +45,8 @@ def planner_class():
     ns = dict(asyncio=asyncio, time=time, datetime=datetime, timezone=timezone,
               dataclass=dataclass, Mapping=Mapping, DOMAIN="power_sync", _LOGGER=logging.getLogger(__name__),
               aiohttp=HTTP, get_session_manager=lambda: None,
-              REGISTRY_KEY="power_sync_tesla_control")
+              REGISTRY_KEY="power_sync_tesla_control",
+              _EV_DECISION_LOGGER=logging.getLogger("custom_components.power_sync.automations.ev_decisions"))
     load("canonical_site_id", ROOT / "powerwall_control.py", ns)
     load("foreign_site_owner", ROOT / "powerwall_control.py", ns)
     load("_ev_curtailment_battery_owner_present", PLANNER, ns)
@@ -648,3 +649,23 @@ async def test_staged_handshake_timeout_cancels_a_task_that_never_signals():
     with pytest.raises(AssertionError, match="expected test handshake"):
         await wait_for_task_event(asyncio.Event(), task, timeout=0.01)
     assert task.cancelled()
+
+
+@pytest.mark.parametrize("decision", ["away", "unplugged"])
+def test_smart_schedule_releases_export_override_when_car_leaves(decision):
+    """Away/unplugged return early; they must still hand back the override
+    exactly like _stop_charging, instead of holding pv_only while away."""
+    method = load_source_node(PLANNER, "_evaluate_vehicle")
+    branch = next(
+        node for node in ast.walk(method)
+        if isinstance(node, ast.If)
+        and any(
+            isinstance(stmt, ast.Assign)
+            and ast.unparse(stmt.targets[0]) == "state.last_decision"
+            and isinstance(stmt.value, ast.Constant) and stmt.value.value == decision
+            for stmt in node.body
+        )
+    )
+    body = [ast.unparse(stmt) for stmt in branch.body]
+    restore = body.index("await self._restore_curtailment(state)")
+    assert restore < next(i for i, line in enumerate(body) if line == "return")

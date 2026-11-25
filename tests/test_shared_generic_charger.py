@@ -55,6 +55,9 @@ def env(monkeypatch):
     ownership = types.ModuleType("power_sync.automations.ev_ownership")
     ownership.get_ev_ownership = lambda *_: ("generic_ev", lease or None)
     ownership.is_solar_surplus_owner_mode = lambda mode: mode == "solar_surplus"
+    refusals = []
+    ownership.record_ev_refusal = lambda _hass, _entry, vehicle_id, **kw: refusals.append({"vehicle_id": vehicle_id, **kw})
+    ownership.ev_refusal_sequence = lambda *_: len(refusals)
     monkeypatch.setitem(sys.modules, ownership.__name__, ownership)
 
     class Store:
@@ -87,7 +90,7 @@ def env(monkeypatch):
     initial = planner.AutoScheduleSettings(vehicle_id="generic_ev", charger_type="generic", target_soc=90, departure_times={0: "07:30"}, max_charge_amps=16, voltage=230, phases=3)
     executor = NS(hass=hass, config_entry=entry, _settings={"generic_ev": initial}, _state={}, _cached_soc={}, _current_charge_amps={})
     executor.get_settings = lambda _id: executor._settings[_id]
-    return NS(shared=shared, planner=planner, actions=actions, hass=hass, entry=entry, runtime=runtime, store=store, states=states, executor=executor, lease=lease)
+    return NS(shared=shared, planner=planner, actions=actions, hass=hass, entry=entry, runtime=runtime, store=store, states=states, executor=executor, lease=lease, refusals=refusals)
 
 
 async def add(e, name="BYD", sensor="sensor.byd_soc", capacity=60):
@@ -270,13 +273,17 @@ async def test_queued_old_start_and_old_stop_are_rejected_at_command_boundary(en
     tree = ast.parse((ROOT / "automations/actions.py").read_text())
     node = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == "_action_start_ev_charging_dynamic")
     node.decorator_list = []
+    default_vehicle = next(
+        n for n in tree.body if isinstance(n, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == "DEFAULT_VEHICLE_ID" for t in n.targets)
+    )
     calls = []
     async def dispatch(*args):
         calls.append(args)
         return True
     namespace = {"__package__": "power_sync.automations", "_start_dynamic_lock": e.actions._start_dynamic_lock,
                  "_action_start_ev_charging_dynamic_locked": dispatch}
-    unit = ast.Module(body=[ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0), node], type_ignores=[])
+    unit = ast.Module(body=[ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0), default_vehicle, node], type_ignores=[])
     # This wrapper's local DOMAIN import is part of the real production path.
     sys.modules["power_sync.const"].DOMAIN = "power_sync"
     exec(compile(ast.fix_missing_locations(unit), "real_start_boundary", "exec"), namespace)
@@ -287,6 +294,7 @@ async def test_queued_old_start_and_old_stop_are_rejected_at_command_boundary(en
         e.store._data[e.shared.KEY]["selected_vehicle_id"] = zeekr
     assert await task is False
     assert calls == []
+    assert [r["reason"] for r in e.refusals] == ["shared charger profile does not allow this start"]
     assert not e.shared.stop_allowed(e.hass, e.entry, {"charger_type": "generic", "_shared_generic_profile_id": byd})
     assert e.shared.stop_allowed(e.hass, e.entry, {"charger_type": "generic"})
 

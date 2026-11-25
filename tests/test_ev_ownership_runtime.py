@@ -1024,3 +1024,63 @@ def test_sigenergy_load_collection_reconciles_price_to_solar_handoff():
                      EvMeasurementKind=SimpleNamespace(INTEGRATED_CHARGER='integrated'))
     exec(compile(ast.Module(body=[branch], type_ignores=[]), '<sigenergy collection>', 'exec'), namespace)
     assert ev_ownership.get_ev_ownership(hass, entry, 'sigenergy_charger') == (None, None)
+
+
+def _settling_lease(hass, vehicle_id):
+    command = ev_ownership.record_ev_command(
+        hass, _Entry(), vehicle_id, command="stop_smart_schedule", success=True,
+    )
+    observed_at = datetime.fromisoformat(command["at"]) + timedelta(seconds=1)
+    assert ev_ownership.ensure_external_ev_ownership(
+        hass, _Entry(), vehicle_id, observed_at=observed_at,
+    )
+    lease = ev_ownership.get_ev_ownership(hass, _Entry(), vehicle_id)[1]
+    assert lease["stop_settling"] is True
+    return lease
+
+
+@pytest.mark.parametrize("policy", [None, "yield"])
+def test_expired_stop_settling_lease_no_longer_blocks_automation(policy):
+    """A sleeping car never confirms the Stop; the window must still end."""
+    hass = _Hass()
+    vehicle_id = "5YJTEST0000000001"
+    if policy:
+        _set_external_policy(hass, vehicle_id, policy)
+    lease = _settling_lease(hass, vehicle_id)
+    lease["stop_settling_expires_at"] = (
+        datetime.now(timezone.utc) - timedelta(seconds=1)
+    ).isoformat()
+
+    can_claim, lease_id, _lease, reason = ev_ownership.can_claim_ev_ownership(
+        hass, _Entry(), vehicle_id, owner_mode="solar_surplus",
+    )
+
+    assert (can_claim, lease_id, reason) == (True, None, None)
+    assert ev_ownership.get_ev_ownership(hass, _Entry(), vehicle_id) == (None, None)
+
+
+@pytest.mark.parametrize("owner_mode", ["manual", "boost"])
+def test_user_commands_override_an_active_stop_settling_lease(owner_mode):
+    hass = _Hass()
+    vehicle_id = "5YJTEST0000000001"
+    _settling_lease(hass, vehicle_id)
+
+    can_claim, _lease_id, _lease, _reason = ev_ownership.can_claim_ev_ownership(
+        hass, _Entry(), vehicle_id, owner_mode=owner_mode,
+    )
+
+    assert can_claim is True
+    assert ev_ownership.get_ev_ownership(hass, _Entry(), vehicle_id) == (None, None)
+
+
+def test_active_stop_settling_lease_still_blocks_automation_inside_window():
+    hass = _Hass()
+    vehicle_id = "5YJTEST0000000001"
+    _settling_lease(hass, vehicle_id)
+
+    can_claim, _lease_id, _lease, reason = ev_ownership.can_claim_ev_ownership(
+        hass, _Entry(), vehicle_id, owner_mode="smart_schedule",
+    )
+
+    assert can_claim is False
+    assert reason == "Awaiting telemetry confirmation of PowerSync stop"

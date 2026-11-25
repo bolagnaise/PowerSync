@@ -19151,6 +19151,7 @@ class SolarSurplusStatusView(HomeAssistantView):
             grid_power_kw = 0.0
             battery_power_kw = 0.0
             load_power_kw = 0.0
+            home_load_basis = None
 
             tesla_coordinator = entry_data.get("tesla_coordinator")
             sigenergy_coordinator = entry_data.get("sigenergy_coordinator")
@@ -19163,6 +19164,7 @@ class SolarSurplusStatusView(HomeAssistantView):
                 grid_power_kw = tesla_coordinator.data.get("grid_power", 0)
                 battery_power_kw = tesla_coordinator.data.get("battery_power", 0)
                 load_power_kw = tesla_coordinator.data.get("load_power", 0)
+                home_load_basis = tesla_coordinator.data.get("home_load_basis")
                 battery_soc = tesla_coordinator.data.get("battery_level", 0)
                 _LOGGER.debug(f"Solar surplus status from tesla_coordinator: battery_soc={battery_soc}%")
             elif sigenergy_coordinator and sigenergy_coordinator.data:
@@ -19170,6 +19172,7 @@ class SolarSurplusStatusView(HomeAssistantView):
                 grid_power_kw = sigenergy_coordinator.data.get("grid_power", 0)
                 battery_power_kw = sigenergy_coordinator.data.get("battery_power", 0)
                 load_power_kw = sigenergy_coordinator.data.get("load_power", 0)
+                home_load_basis = sigenergy_coordinator.data.get("home_load_basis")
                 battery_soc = sigenergy_coordinator.data.get("battery_level", 0)
                 _LOGGER.debug(f"Solar surplus status from sigenergy_coordinator: battery_soc={battery_soc}%")
             elif sungrow_coordinator and sungrow_coordinator.data:
@@ -19177,6 +19180,7 @@ class SolarSurplusStatusView(HomeAssistantView):
                 grid_power_kw = sungrow_coordinator.data.get("grid_power", 0)
                 battery_power_kw = sungrow_coordinator.data.get("battery_power", 0)
                 load_power_kw = sungrow_coordinator.data.get("load_power", 0)
+                home_load_basis = sungrow_coordinator.data.get("home_load_basis")
                 battery_soc = sungrow_coordinator.data.get("battery_level", 0)
                 _LOGGER.debug(f"Solar surplus status from sungrow_coordinator: battery_soc={battery_soc}%")
             elif foxess_coordinator and foxess_coordinator.data:
@@ -19184,6 +19188,7 @@ class SolarSurplusStatusView(HomeAssistantView):
                 grid_power_kw = foxess_coordinator.data.get("grid_power", 0)
                 battery_power_kw = foxess_coordinator.data.get("battery_power", 0)
                 load_power_kw = foxess_coordinator.data.get("load_power", 0)
+                home_load_basis = foxess_coordinator.data.get("home_load_basis")
                 battery_soc = foxess_coordinator.data.get("battery_level", 0)
                 _LOGGER.debug(f"Solar surplus status from foxess_coordinator: battery_soc={battery_soc}%")
 
@@ -19195,9 +19200,11 @@ class SolarSurplusStatusView(HomeAssistantView):
                 "battery_power": None if battery_power_kw is None else battery_power_kw * 1000,
                 "load_power": None if load_power_kw is None else load_power_kw * 1000,
                 "battery_soc": battery_soc,
+                # Coordinators that already remove EV draw from load say so;
+                # dropping it made the direct method subtract the car twice.
+                "home_load_basis": home_load_basis or "includes_ev",
             }
             solar_config = get_stored_solar_surplus_config(entry_data)
-            surplus_kw = _calculate_solar_surplus(live_status, 0, solar_config)
 
             # Get per-vehicle states
             vehicles_state = []
@@ -19228,6 +19235,12 @@ class SolarSurplusStatusView(HomeAssistantView):
             ev_soc = ev_status["ev_soc"]
             if ev_power_kw <= 0 and tesla_coordinator and tesla_coordinator.data:
                 ev_power_kw = tesla_coordinator.data.get("ev_power", 0)
+
+            # Grid-based surplus adds the car's own draw back; passing 0 kW
+            # under-reported available solar whenever a car was charging.
+            surplus_kw = _calculate_solar_surplus(
+                live_status, max(0.0, float(ev_power_kw or 0.0)), solar_config,
+            )
 
             # If no dynamic vehicles but EV is charging, include it
             if not vehicles_state and ev_power_kw > 0.05:
@@ -22297,6 +22310,7 @@ class EVLoadpointStatusView(HomeAssistantView):
                 get_ev_ownership,
                 get_ev_ownerships,
                 get_external_control_policy,
+                latest_ev_refusal,
             )
             from .automations.ev_charging_planner import (
                 get_ev_charging_coordinator,
@@ -22641,6 +22655,9 @@ class EVLoadpointStatusView(HomeAssistantView):
 
             for loadpoint in loadpoints:
                 loadpoint_id = loadpoint.get("loadpoint_id")
+                loadpoint["last_refusal"] = latest_ev_refusal(
+                    self._hass, self._config_entry, loadpoint_id,
+                )
                 if zaptec_cached and zaptec_byd_vehicles and loadpoint_id == "zaptec_standalone":
                     # A missing/ambiguous live BYD reading must not resurrect
                     # another vehicle's SOC cached in a charging session.
@@ -22800,6 +22817,7 @@ class PriceRecommendationView(HomeAssistantView):
             grid_power_kw = 0.0
             battery_power_kw = 0.0
             load_power_kw = 0.0
+            home_load_basis = None
             battery_soc = 0.0
 
             tesla_coordinator = entry_data.get("tesla_coordinator")
@@ -22812,24 +22830,28 @@ class PriceRecommendationView(HomeAssistantView):
                 grid_power_kw = tesla_coordinator.data.get("grid_power", 0)
                 battery_power_kw = tesla_coordinator.data.get("battery_power", 0)
                 load_power_kw = tesla_coordinator.data.get("load_power", 0)
+                home_load_basis = tesla_coordinator.data.get("home_load_basis")
                 battery_soc = tesla_coordinator.data.get("battery_level", 0)
             elif sigenergy_coordinator and sigenergy_coordinator.data:
                 solar_power_kw = sigenergy_coordinator.data.get("solar_power", 0)
                 grid_power_kw = sigenergy_coordinator.data.get("grid_power", 0)
                 battery_power_kw = sigenergy_coordinator.data.get("battery_power", 0)
                 load_power_kw = sigenergy_coordinator.data.get("load_power", 0)
+                home_load_basis = sigenergy_coordinator.data.get("home_load_basis")
                 battery_soc = sigenergy_coordinator.data.get("battery_level", 0)
             elif sungrow_coordinator and sungrow_coordinator.data:
                 solar_power_kw = sungrow_coordinator.data.get("solar_power", 0)
                 grid_power_kw = sungrow_coordinator.data.get("grid_power", 0)
                 battery_power_kw = sungrow_coordinator.data.get("battery_power", 0)
                 load_power_kw = sungrow_coordinator.data.get("load_power", 0)
+                home_load_basis = sungrow_coordinator.data.get("home_load_basis")
                 battery_soc = sungrow_coordinator.data.get("battery_level", 0)
             elif foxess_coordinator and foxess_coordinator.data:
                 solar_power_kw = foxess_coordinator.data.get("solar_power", 0)
                 grid_power_kw = foxess_coordinator.data.get("grid_power", 0)
                 battery_power_kw = foxess_coordinator.data.get("battery_power", 0)
                 load_power_kw = foxess_coordinator.data.get("load_power", 0)
+                home_load_basis = foxess_coordinator.data.get("home_load_basis")
                 battery_soc = foxess_coordinator.data.get("battery_level", 0)
 
             solar_config = get_stored_solar_surplus_config(entry_data)
@@ -22842,9 +22864,18 @@ class PriceRecommendationView(HomeAssistantView):
                 "battery_power": battery_power_kw * 1000,
                 "load_power": load_power_kw * 1000,
                 "battery_soc": battery_soc,
+                # Coordinators that already remove EV draw from load say so;
+                # dropping it made the direct method subtract the car twice.
+                "home_load_basis": home_load_basis or "includes_ev",
             }
 
-            surplus_kw = _calculate_solar_surplus(live_status, 0, solar_config)
+            try:
+                current_ev_power_kw = max(0.0, float(
+                    _get_ev_vehicle_status(self._hass, self._config_entry)["ev_power_kw"] or 0.0
+                ))
+            except Exception:  # noqa: BLE001 - a recommendation must still render
+                current_ev_power_kw = 0.0
+            surplus_kw = _calculate_solar_surplus(live_status, current_ev_power_kw, solar_config)
 
             # Get current prices based on electricity provider
             import_price_cents = 30.0  # Default
