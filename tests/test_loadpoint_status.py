@@ -1892,3 +1892,47 @@ def test_surplus_power_sums_loadpoints_and_clamps_negatives():
     assert resolve_loadpoint_surplus_power_kw(loadpoints) == 10.0
     assert resolve_loadpoint_surplus_power_kw(None) == 0.0
     assert resolve_loadpoint_surplus_power_kw([]) == 0.0
+
+
+def test_switch_only_generic_charger_reports_unknown_plug_state_when_off():
+    """A smart-plug charger has no plug sensor; switch off is not "unplugged"."""
+    observation = build_generic_charger_observation(
+        vehicle_name="EV",
+        switch_state="off",
+        status_state=None,
+        power_value="0",
+    )
+
+    loadpoints = build_loadpoint_status({}, [observation])
+
+    assert observation["plug_state_known"] is False
+    assert loadpoints[0]["connected"] is False
+    assert loadpoints[0]["plug_state_known"] is False
+    assert loadpoints[0]["status"] == "idle"
+
+
+def test_generic_charger_with_status_sensor_keeps_known_plug_state():
+    observation = build_generic_charger_observation(
+        vehicle_name="EV",
+        switch_state="off",
+        status_state="disconnected",
+        power_value="0",
+    )
+
+    loadpoints = build_loadpoint_status({}, [observation])
+
+    assert observation["plug_state_known"] is True
+    assert loadpoints[0]["connected"] is False
+    assert "plug_state_known" not in loadpoints[0]
+
+
+def test_duplicate_generic_rows_prefer_known_plug_state():
+    unknown = build_generic_charger_observation(vehicle_name="EV", switch_state="off")
+    known = build_generic_charger_observation(
+        vehicle_name="EV", switch_state="off", status_state="disconnected",
+    )
+
+    loadpoints = build_loadpoint_status({}, [unknown, known])
+
+    assert len(loadpoints) == 1
+    assert "plug_state_known" not in loadpoints[0]

@@ -5577,7 +5577,9 @@ class PowerSyncEVPanel extends HTMLElement {
     // remains authoritative for all safety and availability checks.
     const shared = this._data?.sharedCharger;
     if (loadpoint?.loadpoint_id === 'generic_ev' && shared?.enabled && !shared.selected_vehicle_id) return false;
-    return !!loadpoint && loadpoint.connected && !this._savingKey;
+    // A switch-only generic charger has no plug sensor; its "off" state does
+    // not mean the car is unplugged, so Start stays available.
+    return !!loadpoint && (loadpoint.connected || loadpoint.plug_state_known === false) && !this._savingKey;
   }
 
   _canStop(loadpoint) {
@@ -6302,7 +6304,8 @@ class PowerSyncEVPanel extends HTMLElement {
         ${loadpoints.length === 0 && this._data ? this._noticeHtml('warn', 'No EV loadpoints detected. Configure EV charging in PowerSync options or the mobile app.') : ''}
         ${selected ? this._statusHtml(selected, conflict) : ''}
         ${selected ? this._controlsHtml(loadpoints, selected, canStart, canStop) : ''}
-        ${selected && !selected.connected ? this._noticeHtml('warn', 'EV is disconnected. Start is disabled until the charger reports a connected vehicle.') : ''}
+        ${selected && !selected.connected && selected.plug_state_known !== false ? this._noticeHtml('warn', 'EV is disconnected. Start is disabled until the charger reports a connected vehicle.') : ''}
+        ${selected && !selected.connected && selected.plug_state_known === false ? this._noticeHtml('', 'No connector status sensor is configured, so PowerSync cannot tell whether the car is plugged in. Start turns the charger switch on.') : ''}
         ${conflict ? this._noticeHtml('warn', `${this._ownerLabel(selected.owner_mode)} currently controls this loadpoint. Manual Start will take over.`) : ''}
         ${this._sharedChargerHtml()}
         ${this._bydVehiclesHtml()}
@@ -6329,7 +6332,9 @@ class PowerSyncEVPanel extends HTMLElement {
 
   _statusHtml(loadpoint, conflict) {
     const stateClass = loadpoint.actual_charging ? 'on' : (conflict || loadpoint.blocking_reason ? 'warn' : '');
-    const stateText = loadpoint.actual_charging ? 'Charging' : (loadpoint.connected ? 'Connected' : 'Disconnected');
+    const stateText = loadpoint.actual_charging
+      ? 'Charging'
+      : (loadpoint.connected ? 'Connected' : (loadpoint.plug_state_known === false ? 'Charger off' : 'Disconnected'));
     const countdown = this._countdown(loadpoint.expires_at);
     const owner = this._ownerLabel(loadpoint.owner_mode || loadpoint.owner || 'idle');
     const source = this._sourceLabel(loadpoint);
