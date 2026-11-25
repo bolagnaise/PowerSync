@@ -3681,6 +3681,22 @@ class BatteryOptimizer:
             # the LP reserve floor, which force-charges the battery at the
             # current (often peak) price purely to recover the optimiser
             # reserve — the behaviour this below-reserve path exists to avoid.
+            # A chargeable free/credited import slot refills the battery; the
+            # plan does not export there at the base rate. The credit
+            # fallback would otherwise mark every later credit slot as an
+            # export slot, re-enabling export mid-refill and removing the
+            # headroom that recovers the reserve.
+            credit_charge_slot = (
+                allow_grid_charge
+                and idx < len(grid_charge_allowed)
+                and grid_charge_allowed[idx]
+                and idx < len(import_bonus_prices)
+                and float(import_bonus_prices[idx] or 0.0) > 0.0
+                and remaining_bonus_kwh > 1e-9
+                and not (idx < len(block_battery_charge) and block_battery_charge[idx])
+            )
+            if credit_charge_slot and not priority_export:
+                export_profitable = False
             recovered.append(
                 (export_profitable or priority_export)
                 and reachable_soc >= slot_export_floor - 1e-6
@@ -3926,9 +3942,24 @@ class BatteryOptimizer:
             period.required_discharge_kw for period in periods
         ]
         p_dt = [period.slot_count * self.dt_hours for period in periods]
+        # Energy charged in a capped free/credited import window costs the
+        # net price, not retail. Without this a stored-energy cost above the
+        # export rate blocks every later premium-export slot even when the
+        # plan refills the battery for free beforehand (ticket #469). Like
+        # the helper's cheapest-prior-charge rule, this is volume-agnostic:
+        # the LP objective, not this guard, decides how much to export.
+        acquisition_credit_active = bool(
+            import_bonus_cap_kwh is not None
+            and import_bonus_cap_kwh > 1e-6
+            and any(price > 1e-6 for price in p_import_bonus)
+        )
+        p_acquisition_import = [
+            max(0.0, price - (p_import_bonus[idx] if acquisition_credit_active else 0.0))
+            for idx, price in enumerate(p_import)
+        ]
         p_effective_acquisition = self._effective_export_acquisition_costs(
             p_n,
-            p_import,
+            p_acquisition_import,
             p_block_charge,
             allow_grid_charge,
             acquisition_cost_kwh,
