@@ -48,6 +48,7 @@ from homeassistant.util import dt as dt_util
 from ..teslemetry_solar import guard_ev_control
 from ..native_rate_admission import (
     SiteImportAdmissionDenied,
+    last_ev_submission_refusal,
     prepare_ev_submission,
     validate_ev_submission,
     bind_vehicle,
@@ -11543,7 +11544,11 @@ async def _action_set_ev_charging_amps(
 
     route = await _tesla_transport_route(hass, config_entry, params, "rate")
     if route and route.get("kind") == "blocked":
-        return None
+        return _refuse_rate(
+            params,
+            f"Tesla command route is blocked ({route.get('reason') or 'no reason given'})",
+            None,
+        )
     if route and route.get("kind") == "ha" and ev_provider == EV_PROVIDER_BOTH:
         ev_provider = EV_PROVIDER_FLEET_API
 
@@ -11647,15 +11652,14 @@ async def _action_set_ev_charging_amps(
     if ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH):
         # Check API credits before attempting
         if not _is_api_credit_available("teslemetry"):
-            _LOGGER.debug("Skipping set EV charging amps - API credits exhausted, in cooldown period")
-            return False
+            return _refuse_rate(params, "Tesla API credits exhausted; in cooldown")
 
         # Tesla Fleet uses charge_current, some versions use charging_amps
         charging_amps_entity = await _tesla_ha_command_entity(hass, config_entry, params, "rate")
 
         if not charging_amps_entity:
             _LOGGER.error("Could not find Tesla charge_current/charging_amps number entity")
-            return False
+            return _refuse_rate(params, "no Tesla charge-current entity found for this vehicle")
 
         entity_min = TESLA_UNKNOWN_CHARGER_SAFE_AMPS
         entity_max = 32
@@ -11695,8 +11699,7 @@ async def _action_set_ev_charging_amps(
                 hass, vehicle_vin, charging_amps_entity, config_entry.entry_id
             )
             if not wake_success:
-                _LOGGER.debug("Wake failed (possibly due to API credits), skipping set amps command")
-                return False
+                return _refuse_rate(params, f"could not wake the vehicle for {charging_amps_entity}")
 
             # Waking the vehicle can invalidate the Fleet number entity while
             # HA refreshes its state. Never send a command using the stale
@@ -11715,15 +11718,21 @@ async def _action_set_ev_charging_amps(
                     "refusing to set charging amps",
                     charging_amps_entity,
                 )
-                return False
+                return _refuse_rate(params, f"{charging_amps_entity} is unavailable after wake")
 
-            if (not request_authority() or await _tesla_ha_command_entity(
-                    hass, config_entry, params, "rate") != charging_amps_entity):
-                return False
-            if not await prepare_ev_submission(hass, charging_amps_entity, operation="rate", amps=amps):
-                return False
             if not request_authority():
-                return False
+                return _refuse_rate(params, "command authority changed before the rate was sent")
+            if await _tesla_ha_command_entity(
+                    hass, config_entry, params, "rate") != charging_amps_entity:
+                return _refuse_rate(params, "Tesla charge-current entity changed before the rate was sent")
+            if not await prepare_ev_submission(hass, charging_amps_entity, operation="rate", amps=amps):
+                return _refuse_rate(
+                    params,
+                    "site import admission refused: "
+                    f"{last_ev_submission_refusal() or 'no reason given'}",
+                )
+            if not request_authority():
+                return _refuse_rate(params, "command authority changed before the rate was sent")
             mutation = await _run_native_tesla_service_command(
                 hass,
                 config_entry,
@@ -11741,7 +11750,7 @@ async def _action_set_ev_charging_amps(
             if mutation.outcome == "rejected":
                 if getattr(mutation.error, "site_import_admission_denied", False):
                     raise mutation.error
-                return False
+                return _refuse_rate(params, f"Tesla rejected {amps}A: {mutation.error}")
             if mutation.outcome == "not_sent" and mutation.retryable_range:
                 fallback_amps = _tesla_entity_max_fallback_amps(
                     amps,
@@ -11751,7 +11760,10 @@ async def _action_set_ev_charging_amps(
                     configured_max_amps=configured_max_amps,
                 )
                 if fallback_amps is None:
-                    return False
+                    return _refuse_rate(
+                        params,
+                        f"{amps}A is outside {charging_amps_entity}'s range and no fallback fits",
+                    )
                 if not await prepare_ev_submission(
                     hass,
                     charging_amps_entity,
@@ -11795,7 +11807,10 @@ async def _action_set_ev_charging_amps(
                 )
                 return True
             if mutation.outcome != "accepted_unconfirmed":
-                return False
+                return _refuse_rate(
+                    params,
+                    f"{amps}A was not sent ({mutation.outcome}: {mutation.error or 'no detail'})",
+                )
             params["_tesla_native_submitted_amps"] = amps
             params.pop("_tesla_entity_range_fallback_amps", None)
             if configured_max_amps is not None:
@@ -11812,9 +11827,9 @@ async def _action_set_ev_charging_amps(
             if _is_api_credit_error(str(e)):
                 _mark_api_credits_exhausted("teslemetry")
 
-            return False
+            return _refuse_rate(params, f"rate command failed: {e}")
 
-    return False
+    return _refuse_rate(params, f"no rate-control path for Tesla provider {ev_provider!r}")
 
 
 # =============================================================================
@@ -13310,6 +13325,14 @@ async def _solar_surplus_switch_to_next_vehicle(
     _LOGGER.info(f"⚡ Solar surplus EV: No other vehicles available for charging")
 
 
+def _refuse_rate(params: Any, reason: str, result: Optional[bool] = False) -> Optional[bool]:
+    """Record why a rate command was not sent, so the caller can report it."""
+    if isinstance(params, dict):
+        params["_rate_refusal_reason"] = reason
+    _LOGGER.info("Dynamic EV: rate command not sent: %s", reason)
+    return result
+
+
 @guard_ev_control
 async def _set_vehicle_amps(
     hass: HomeAssistant,
@@ -13323,10 +13346,11 @@ async def _set_vehicle_amps(
     params.pop("_tesla_native_submitted_amps", None)
     params.pop("_tesla_entity_range_fallback_amps", None)
     params.pop("_phase_load_management_applied_amps", None)
+    params.pop("_rate_refusal_reason", None)
     if amps <= 0 and config_entry is not None and not stop_allowed(hass, config_entry, params):
-        return False
+        return _refuse_rate(params, "shared charger profile does not allow this stop")
     if amps > 0 and config_entry is not None and not start_allowed(hass, config_entry, params):
-        return False
+        return _refuse_rate(params, "shared charger profile does not allow this start")
     # A shared physical charger is intentionally inert until the user chooses
     # one connected profile.  Explicit/manual commands retain their historical
     # behavior, but background controllers must never apply one profile's
@@ -13345,11 +13369,9 @@ async def _set_vehicle_amps(
                 if isinstance(item, Mapping)
             ]
             if not profile_is_effective(profiles, stored_data, vehicle_id):
-                _LOGGER.info(
-                    "Skipping automated EV command for unselected shared loadpoint %s",
-                    vehicle_id,
+                return _refuse_rate(
+                    params, f"{vehicle_id} is not the selected shared loadpoint profile"
                 )
-                return False
         except Exception:
             # A missing store cannot prove that this is a shared profile; keep
             # the established command path for partial-startup compatibility.
@@ -13378,11 +13400,9 @@ async def _set_vehicle_amps(
             or 0
         )
         if amps > 0 and applied_amps <= 0 and current_amps <= 0:
-            _LOGGER.info(
-                "EV phase load management blocked the managed start for %s",
-                vehicle_id,
+            return _refuse_rate(
+                params, "phase load management left no headroom for this start"
             )
-            return False
         success = await _set_vehicle_amps_unchecked(
             hass, config_entry, vehicle_id, applied_amps, params
         )
@@ -13470,6 +13490,7 @@ async def _set_vehicle_amps_unchecked(
     charger_type = params.get("charger_type", "tesla")
 
     if charger_type == "tesla":
+        params.pop("_rate_refusal_reason", None)
         owner_mode = params.get("owner_mode") or params.get("dynamic_mode")
         if owner_mode:
             from .ev_ownership import owner_family
@@ -13482,13 +13503,9 @@ async def _set_vehicle_amps_unchecked(
                     params,
                 )
                 if away_location:
-                    _LOGGER.info(
-                        "Automated Tesla rate update blocked for %s because the vehicle "
-                        "is away (%s)",
-                        vehicle_id,
-                        away_location,
+                    return _refuse_rate(
+                        params, f"vehicle is away ({away_location})"
                     )
-                    return False
         if amps == 0:
             return await _action_stop_ev_charging(hass, config_entry, {"vehicle_vin": vehicle_id})
         command_params = {
@@ -13520,7 +13537,11 @@ async def _set_vehicle_amps_unchecked(
             command_params,
         )
         params["max_charge_amps"] = command_params.get("max_charge_amps")
-        for key in ("_tesla_native_submitted_amps", "_tesla_entity_range_fallback_amps"):
+        for key in (
+            "_tesla_native_submitted_amps",
+            "_tesla_entity_range_fallback_amps",
+            "_rate_refusal_reason",
+        ):
             if key in command_params:
                 params[key] = command_params[key]
             else:
@@ -20620,6 +20641,8 @@ async def _action_start_ev_charging_dynamic_locked(
                 transport_pending = True
             else:
                 reason = f"could not pre-set the safe initial rate to {start_amps}A"
+                if params.get("_rate_refusal_reason"):
+                    reason = f"{reason}: {params['_rate_refusal_reason']}"
                 record_ev_command(
                     hass,
                     config_entry,
@@ -21146,12 +21169,22 @@ async def _action_start_ev_charging_dynamic_locked(
         return (_dynamic_ev_state.get(entry_id, {}).get(vehicle_id) is registered_state
                 and registered_state.get("active") and registration_authority())
 
-    def discard_registration():
+    def registration_lost_reason() -> str:
+        if _dynamic_ev_state.get(entry_id, {}).get(vehicle_id) is not registered_state:
+            return "another start or stop replaced this session before it began"
+        if not registered_state.get("active"):
+            return "this session was stopped before it began"
+        return "Tesla command authority for this vehicle changed before the start"
+
+    def discard_registration(*, refused: bool = False):
+        reason = registration_lost_reason() if refused else None
         if callable(cancel_timer):
             cancel_timer()
         if _dynamic_ev_state.get(entry_id, {}).get(vehicle_id) is registered_state:
             registered_state["active"] = False
             _dynamic_ev_state[entry_id].pop(vehicle_id, None)
+        if reason:
+            _record_dynamic_start_refusal(hass, config_entry, vehicle_id, params, reason)
 
     # Start charging session tracking
     session_manager = None
@@ -21161,7 +21194,7 @@ async def _action_start_ev_charging_dynamic_locked(
         if session_manager and not (owner_mode == "scheduled" and transport_pending):
             initial_soc = await _ev_session_soc(hass, config_entry, vehicle_id, params)
             if not registration_is_current():
-                discard_registration()
+                discard_registration(refused=True)
                 return False
 
             session = await session_manager.start_session(
@@ -21170,7 +21203,7 @@ async def _action_start_ev_charging_dynamic_locked(
                 start_soc=initial_soc,
             )
             if not registration_is_current():
-                discard_registration()
+                discard_registration(refused=True)
                 return False
             registered_state["session_id"] = session.id
             _LOGGER.info(f"📊 Started charging session {session.id}")
@@ -21198,7 +21231,7 @@ async def _action_start_ev_charging_dynamic_locked(
             )
 
     if not registration_is_current():
-        discard_registration()
+        discard_registration(refused=True)
         return False
     session_id = registered_state.get("session_id")
     if transport_pending and owner_mode == "scheduled":

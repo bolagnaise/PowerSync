@@ -20212,3 +20212,36 @@ def test_ble_stop_readback_accepts_unchanged_stopped_with_native_zero_power(
         expected_identity=identity, idle_power_proof=idle_proof,
     ))
     assert result is expected
+
+
+def test_tesla_rate_refusal_reason_reaches_the_start_caller(monkeypatch):
+    """The reason a provider gave for not sending a rate survives the params copy."""
+    async def home(*args, **kwargs):
+        return None
+
+    async def refuse(hass, config_entry, command_params):
+        return actions._refuse_rate(command_params, "no fresh charge-current reading")
+
+    monkeypatch.setattr(actions, "_tesla_vehicle_away_location", home)
+    monkeypatch.setattr(actions, "_action_set_ev_charging_amps", refuse)
+    params = {
+        "charger_type": "tesla",
+        "owner_mode": "smart_schedule",
+        "_rate_refusal_reason": "stale reason from an earlier command",
+    }
+
+    result = asyncio.run(
+        actions._set_vehicle_amps_unchecked(_Hass([]), _Entry(), "VIN123", 13, params)
+    )
+
+    assert result is False
+    assert params["_rate_refusal_reason"] == "no fresh charge-current reading"
+
+    async def accept(hass, config_entry, command_params):
+        return True
+
+    monkeypatch.setattr(actions, "_action_set_ev_charging_amps", accept)
+    assert asyncio.run(
+        actions._set_vehicle_amps_unchecked(_Hass([]), _Entry(), "VIN123", 13, params)
+    ) is True
+    assert "_rate_refusal_reason" not in params
