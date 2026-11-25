@@ -10,7 +10,7 @@
   "source_state": {
     "components": {
       "config_flow.py": "b369805a819f90528998b47eff8069fbd530e3809fa58b7a56621615e5e3999f",
-      "const.py": "b21bfec1a3471128a68504f07af80f8fe5bd2645d0b8efd3a12f0ca0fda4d93b",
+      "const.py": "b804079b652a02f78eeafd59ac9b61d6a0cd02c3cefa88c3a556952518627089",
       "battery_backend/profiles.py": "d308ecc78740d8dfc9cd895e4b9750a02859d46e5f0863dd5c098b8aaab2bcc2",
       "battery_backend/discovery.py": "3a8c88c00d6c57f6101d55056968524d7971d1ac3b8e16365923bca978f9489b",
       "settings_metadata.py": "913295806df38f52982803891aae03a9c5493545011d98c2d6ad0631eb24d0a8",
