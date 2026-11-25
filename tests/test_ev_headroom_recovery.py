@@ -507,3 +507,48 @@ async def test_removed_entry_adoption_stays_fail_closed_when_site_or_vin_is_busy
     assert c.reads == c.meters == []
     assert a.budget.managed[VIN]['entry_id'] == 'removed-entry'
     assert a.store.data['managed'][VIN] == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('variant,check,round_number', [
+    ('round_two_read_refused', 'vehicle_read', 2),
+    ('provider_error', 'vehicle_read_error', 1),
+    ('meter_failed', 'meter_refresh_error', 1),
+    ('stale', 'vehicle_report_rejected', 1),
+    ('meter_update_failed', 'meter_update_failed', 1),
+])
+async def test_fresh_readback_failure_reports_failed_check_and_round(recovery_case, monkeypatch, variant, check, round_number):
+    """Ticket 156: an awake, stopped car still returned fresh_readback_unavailable."""
+    c, a = recovery_case, recovery_case.a
+    async def read(number, kwargs):
+        if variant == 'round_two_read_refused' and number == 2:
+            kwargs['failure'].update(reason='older_than_read_start', stage='read',
+                                     refresh_reason='response_not_document', sample_age_seconds=42.0)
+            return None
+        if variant == 'provider_error': raise RuntimeError('unavailable')
+        stamp = c.now[0] - (20 if variant == 'stale' else 0)
+        charge = dict(c.observation.raw_charge_state, timestamp=stamp)
+        return replace(c.observation, source_charge_timestamp=stamp, raw_charge_state=charge,
+                       origin='native_cloud')
+    c.hooks['read'] = read
+    async def meter():
+        if variant == 'meter_failed': raise RuntimeError('meter unavailable')
+        if variant == 'meter_update_failed': a.local.last_update_success = False
+    c.hooks['meter'] = meter
+    if variant == 'round_two_read_refused':
+        # Keep round one from settling so a second explicit read is required.
+        settle = c.r.refresh_managed_records
+        async def first_round_only(*args, **kwargs):
+            if len(c.reads) > 1:
+                return await settle(*args, **kwargs)
+        monkeypatch.setattr(c.r, 'refresh_managed_records', first_round_only)
+    answer = await recover(c)
+    assert answer['success'] is False and answer['error'] == 'fresh_readback_unavailable'
+    assert answer['failed_check'] == check and answer['round'] == round_number
+    assert VIN in a.budget.managed and VIN in a.store.data['managed']
+    if variant == 'round_two_read_refused':
+        assert answer['vehicle_read'] == {'reason': 'older_than_read_start', 'stage': 'read',
+            'refresh_reason': 'response_not_document', 'sample_age_seconds': 42.0}
+    if variant == 'stale':
+        assert answer['sample_age_seconds'] == 20.0
+    assert VIN not in repr({k: v for k, v in answer.items()})

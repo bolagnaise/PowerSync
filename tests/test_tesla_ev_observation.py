@@ -1476,6 +1476,60 @@ async def test_paid_refresh_failure_does_not_retry_or_read_old_cache(independent
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("fault,reason,fields", [
+    ("wrong_vin", "response_vehicle_mismatch", None),
+    ("missing_power", "charge_fields_incomplete", ["charger_power"]),
+    ("same_timestamp", "not_newer_than_coordinator", None),
+])
+async def test_paid_refresh_rejection_reports_nonidentifying_reason(independent_source, fault, reason, fields):
+    """Ticket 156: an awake car still failed; report which freshness check refused."""
+    hass, _entry, _vehicle, coordinator = independent_source("teslemetry")
+    client = coordinator.api
+    document = deepcopy(client.response)
+    if fault == "wrong_vin":
+        document["vin"] = VIN_B
+    elif fault == "same_timestamp":
+        document["charge_state"]["timestamp"] = 1_999_999_990
+    else:
+        document["charge_state"].pop("charger_power")
+    client.refresh_response = {"response": document}
+    client.response = deepcopy(document)
+    failure = {}
+    assert await observation.async_read_independent_tesla_vehicle(
+        hass, VIN_A, allow_paid_refresh=True, authorize=lambda: True, failure=failure) is None
+    assert failure["reason"] == reason and failure["stage"] == "read"
+    assert failure["refresh_reason"] == reason
+    assert failure.get("fields") == fields
+    assert VIN_A not in repr(failure)
+
+
+@pytest.mark.asyncio
+async def test_paid_refresh_cached_fallback_reports_stale_read_and_provider_error(independent_source):
+    hass, _entry, _vehicle, coordinator = independent_source("teslemetry")
+    client = coordinator.api
+    client.refresh_response = {"response": True}
+    client.response["charge_state"]["timestamp"] -= 30
+    failure = {}
+    assert await observation.async_read_independent_tesla_vehicle(
+        hass, VIN_A, allow_paid_refresh=True, authorize=lambda: True, failure=failure) is None
+    assert failure["stage"] == "read" and failure["refresh_reason"] == "response_not_document"
+    assert failure["reason"] in {"not_newer_than_coordinator", "older_than_read_start"}
+    assert isinstance(failure["sample_age_seconds"], float)
+
+    class RateLimited(Exception):
+        pass
+
+    async def refused():
+        raise RateLimited("refresh refused")
+
+    client.before_refresh_return = refused
+    failure = {}
+    assert await observation.async_read_independent_tesla_vehicle(
+        hass, VIN_A, allow_paid_refresh=True, authorize=lambda: True, failure=failure) is None
+    assert failure == {"reason": "provider_error", "stage": "refresh", "error_type": "RateLimited"}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("same_authorization", [False, True])
 async def test_paid_refresh_coalesces_only_matching_authorization_scope(independent_source, same_authorization):
     hass, _entry, _vehicle, coordinator = independent_source("teslemetry")

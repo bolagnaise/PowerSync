@@ -406,7 +406,7 @@ If the action returns `success: false`, keep the reservation and use the returne
 | `local_meter_unavailable` | The configured local Powerwall meter cannot be refreshed. |
 | `site_busy` / `recovery_cooldown` | Let the current operation finish; wait one minute before another recovery attempt. |
 | `recovery_scope_blocked` / `recovery_scope_changed` / `reservation_identity_changed` | Ownership, an unresolved recovery hold, or source/configuration changes prevent settlement. Resolve that cause; do not reset the store. |
-| `fresh_readback_unavailable` | The provider/meter failed, timed out, or did not supply a usable fresh charge report. No wake is attempted. |
+| `fresh_readback_unavailable` | The provider/meter failed, timed out, or did not supply a usable fresh charge report. No wake is attempted. `round` (1 or 2) and `failed_check` (`vehicle_read`, `vehicle_read_error`, `vehicle_report_rejected`, `meter_refresh_timeout`, `meter_refresh_error` or `meter_update_failed`) show which check refused. A `vehicle_read` failure includes a non-identifying `vehicle_read.reason`, such as `timeout`, `provider_error` (with `error_type`), `older_than_read_start` or `not_newer_than_cutoff`, plus the `stage` (`refresh` or `read`) and, where available, the rounded `sample_age_seconds`. |
 | `vehicle_not_stopped` | The charge report does not establish a stopped vehicle with zero current and power. |
 | `settlement_not_confirmed` | The readings did not meet the existing timing/alignment and consistency checks. |
 | `recovery_failed` | Recovery could not finish, including a possible persistence failure; retain the error response for support. |

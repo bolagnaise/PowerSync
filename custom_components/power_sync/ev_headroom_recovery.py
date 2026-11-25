@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
+import math
 import re
 import time
 
@@ -20,6 +21,14 @@ READ_TIMEOUT = 8
 # acquisition-progress proof even when explicit refreshes are debounced.
 SETTLE_SECONDS = 5
 COOLDOWN_SECONDS = 60
+
+
+def _sample_age(observation):
+    """Rounded age of a rejected vehicle sample, without its raw timestamp."""
+    stamp = getattr(observation, "source_charge_timestamp", None)
+    if type(stamp) not in (int, float) or not math.isfinite(stamp):
+        return None
+    return round(time.time() - stamp, 1)
 
 
 def saved_entry_removed(hass, record):
@@ -137,21 +146,39 @@ async def async_recover_ev_headroom(hass, entry, vin, *, allow_provider_refresh=
                 # The qualified reader calls the concrete native cloud API,
                 # bypassing cached stream data and BLE command routers. Paid
                 # Teslemetry refresh is authorized only by this explicit call.
+                read_failure = {}
                 observation, meter_result = await asyncio.gather(
                     async_read_independent_tesla_vehicle(
                         hass, vin, preferred_entity_id=native_entity,
                         timeout=READ_TIMEOUT, updated_after=cutoff,
-                        allow_paid_refresh=source[0] == "teslemetry", authorize=current),
+                        allow_paid_refresh=source[0] == "teslemetry", authorize=current,
+                        failure=read_failure),
                     asyncio.wait_for(refresh_meter(), timeout=READ_TIMEOUT),
                     return_exceptions=True,
                 )
                 if not current():
                     return result("recovery_scope_changed")
-                if isinstance(observation, BaseException) or isinstance(meter_result, BaseException):
-                    return result("fresh_readback_unavailable")
-                native = native_charge_setting(hass, vin, native_entity, observation=observation) if observation else None
-                if native is None or not getattr(local, "last_update_success", False):
-                    return result("fresh_readback_unavailable")
+                # Non-identifying detail tells support which check failed; the
+                # outcome and the retained reservation are unchanged.
+                unavailable = {"round": attempt + 1}
+                if isinstance(observation, BaseException):
+                    return result("fresh_readback_unavailable", failed_check="vehicle_read_error",
+                                  error_type=type(observation).__name__, **unavailable)
+                if observation is None:
+                    return result("fresh_readback_unavailable", failed_check="vehicle_read",
+                                  vehicle_read=dict(read_failure) or {"reason": "unknown"},
+                                  **unavailable)
+                if isinstance(meter_result, BaseException):
+                    return result("fresh_readback_unavailable", failed_check=(
+                        "meter_refresh_timeout" if isinstance(meter_result, asyncio.TimeoutError)
+                        else "meter_refresh_error"), **unavailable)
+                native = native_charge_setting(hass, vin, native_entity, observation=observation)
+                if native is None:
+                    return result("fresh_readback_unavailable", failed_check="vehicle_report_rejected",
+                                  sample_age_seconds=_sample_age(observation), **unavailable)
+                if not getattr(local, "last_update_success", False):
+                    return result("fresh_readback_unavailable", failed_check="meter_update_failed",
+                                  **unavailable)
                 if (native["observation"].charge_state.lower() not in {
                         "stopped", "complete", "disconnected", "nopower", "no_power"}
                         or native["observation"].charger_actual_current != 0
