@@ -263,6 +263,8 @@ Control outcomes describe command returns separately from the guard decision. An
 
 The Home Assistant **Current Action** sensor exposes two additive attributes: `reserve_visibility` contains these separate reserve percentages, hardware-baseline source and quality, Auto-Apply status, and forecast freshness; `export_reserve_decision` contains the current guard status, reason, evaluation and slot times, available SOC and duration evidence, and control outcome. `export_reserve_decision` is `null` when no matching current decision is available, including stale plans, disabled optimization, monitoring mode, or active external controls. These attributes do not change the sensor's current-action state.
 
+When a planned charge or export is not applied because the battery command was refused, the **Current Action** sensor also has a `command_failure` attribute with the refused `command` (`force_charge` or `force_discharge`), a `reason` (`gateway_unreachable`, `ev_headroom_reserved`, `monitoring_mode` or `command_failed`), the error `message`, and the time `at`. It is reported only while the plan still asks for that action, clears after the next successful command, and is `null` otherwise. The dashboard plan card shows the same information as a **Charge blocked** or **Export blocked** chip.
+
 ### Timed manual controls in the Action Plan
 
 When an external PowerSync control is active — Force Charge, Force Discharge,
