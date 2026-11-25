@@ -22650,6 +22650,8 @@ class EVLoadpointStatusView(HomeAssistantView):
             )
 
             from .const import CONF_GENERIC_CHARGER_BATTERY_CAPACITY_KWH
+            from .tesla_ev_observation import _canonical_vin
+            from .tesla_ev_recovery import get_vehicle_route
 
             for loadpoint in loadpoints:
                 loadpoint_id = loadpoint.get("loadpoint_id")
@@ -22693,6 +22695,22 @@ class EVLoadpointStatusView(HomeAssistantView):
                     or vehicle_config.get("charger_type")
                     or ""
                 ).lower()
+                if charger_type == "tesla":
+                    vehicle_id = str(loadpoint.get("vehicle_id") or "")
+                    exact_vehicle = _canonical_vin(vehicle_id) or re.fullmatch(
+                        r"ble_(?!default$)[a-z0-9_]+", vehicle_id
+                    )
+                    route = (
+                        get_vehicle_route(self._hass, self._config_entry, vehicle_id) or {}
+                        if exact_vehicle else {}
+                    )
+                    reason = route.get("reason")
+                    loadpoint["control_blocker"] = (
+                        reason if route.get("kind") == "blocked" and reason in {
+                            "ble_recovery", "native_recovery", "transport_recovery",
+                            "ble_recovery_commit_pending", "malformed_recovery",
+                        } else None
+                    )
                 stable_id = str(loadpoint_id or "").lower()
                 anonymous = (
                     charger_type in ("generic", "ocpp")

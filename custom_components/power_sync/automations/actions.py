@@ -16717,9 +16717,13 @@ async def _dynamic_ev_update_surplus(
     min_amps = _effective_min_charge_amps(params, hass)
     hardware_min_amps = _hardware_min_charge_amps(params, hass)
     max_amps = _effective_max_charge_amps(params, hass)
-    planned_ev_charge_kw = _optimizer_planned_ev_charge_kw(
-        hass, config_entry, vehicle_id
-    )
+    # A timed manual Solar Surplus session owns this vehicle. Its live
+    # surplus limit applies independently of the Smart Schedule allocation.
+    planned_ev_charge_kw = None
+    if params.get("owner_mode") != "manual_solar_surplus":
+        planned_ev_charge_kw = _optimizer_planned_ev_charge_kw(
+            hass, config_entry, vehicle_id
+        )
     optimizer_ceiling_amps = _optimizer_ev_ceiling_amps(
         planned_ev_charge_kw,
         voltage=voltage,

@@ -13734,6 +13734,68 @@ def test_ble_grid_recovery_rejects_stale_or_future_samples(monkeypatch, bad_samp
     assert "physical_restart_required" not in state
 
 
+@pytest.mark.parametrize(
+    ("owner_mode", "export_w", "expected_amps"),
+    [
+        ("manual_solar_surplus", 3840, 16),
+        ("manual_solar_surplus", 0, None),
+        ("smart_schedule_solar_surplus", 3840, None),
+    ],
+)
+def test_solar_start_with_future_smart_schedule(
+    monkeypatch, owner_mode, export_w, expected_amps
+):
+    vehicle_id = "ble_snowflake"
+    now = datetime.now(timezone.utc)
+    hass = _Hass([
+        _State("sensor.snowflake_charging_state", "Stopped", last_updated=now),
+        _State("sensor.snowflake_charge_current", "0", {"unit_of_measurement": "A"}, last_updated=now),
+        _State("binary_sensor.snowflake_charger", "on"),
+    ])
+    entry = _Entry()
+    current_slot = SimpleNamespace()
+    future_slot = SimpleNamespace(timestamp=now + timedelta(days=1))
+    hass.data["power_sync"][entry.entry_id].update(
+        auto_schedule_executor=SimpleNamespace(
+            _settings={vehicle_id: SimpleNamespace(enabled=True)},
+        ),
+        optimization_coordinator=SimpleNamespace(
+            _get_current_action=lambda: current_slot,
+            _current_schedule=SimpleNamespace(
+                actions=[current_slot, future_slot], last_updated=now,
+            ),
+            _last_ev_charge_schedule_updated=now,
+            _last_ev_charge_by_vehicle_w={vehicle_id: [0, 3840]},
+        ),
+    )
+    monkeypatch.setattr(actions.dt_util, "now", lambda: now)
+    assert actions._optimizer_planned_ev_charge_kw(hass, entry, vehicle_id) == 0.0
+
+    state = _solar_surplus_state(current_amps=0)
+    state["charging_started"] = False
+    state["params"].update(
+        vehicle_vin=vehicle_id, owner_mode=owner_mode, household_buffer_kw=0,
+    )
+    state["high_surplus_start"] = datetime.now() - timedelta(minutes=4)
+    monkeypatch.setattr(actions, "_dynamic_ev_state", {entry.entry_id: {vehicle_id: state}})
+    set_calls = _install_solar_surplus_runtime_stubs(monkeypatch, {
+        "battery_soc": 52, "grid_power": -export_w, "battery_power": 0,
+        "solar_power": export_w + 660, "load_power": 660,
+    })
+    start = AsyncMock(return_value=True)
+    monkeypatch.setattr(actions, "_action_start_ev_charging", start)
+
+    asyncio.run(actions._dynamic_ev_update_surplus(hass, entry, entry.entry_id, vehicle_id))
+
+    if expected_amps is None:
+        start.assert_not_awaited()
+        assert set_calls == []
+    else:
+        start.assert_awaited_once()
+        assert start.await_args.args[2]["amps"] == expected_amps
+        assert set_calls == [expected_amps]
+
+
 @pytest.mark.parametrize("block", ["lp_zero", "no_surplus", "start_grace"])
 def test_ble_stopped_recovery_preserves_solar_start_gates(monkeypatch, block):
     now = datetime.now(timezone.utc)

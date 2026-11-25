@@ -156,8 +156,25 @@ class PowerSyncSupportCard extends HTMLElement {
     this.node('p', 'Ongoing access stays approved through Home Assistant restarts until revoked. Review the invitation for the exact diagnostic and private offline testing permissions.', step);
     const setup = details('Ongoing support setup', step);
     this.node('p', 'Share the setup identity in your private ticket so support can prepare an invitation. Creating an identity grants no access.', setup);
-    if (this._diagnostics?.identity) this.node('pre', JSON.stringify(this._diagnostics.identity, null, 2), setup);
-    else {
+    if (this._diagnostics?.identity) {
+      const identity = field('Setup identity', 'textarea', setup);
+      identity.value = JSON.stringify(this._diagnostics.identity, null, 2);
+      identity.readOnly = true;
+      identity.rows = 5;
+      identity.spellcheck = false;
+      button('Copy setup identity', async () => {
+        try {
+          await navigator.clipboard.writeText(identity.value);
+          copyStatus.textContent = 'Setup identity copied.';
+        } catch {
+          identity.focus();
+          identity.select();
+          copyStatus.textContent = 'Setup identity selected. Copy it and paste it into your private ticket.';
+        }
+      }, setup, '', true);
+      const copyStatus = this.node('small', '', setup);
+      copyStatus.setAttribute('role', 'status');
+    } else {
       setup.open = true;
       button('Create setup identity', () => this.run('identity', {}, true), setup, '', true);
     }
@@ -225,13 +242,14 @@ class PowerSyncSupportCard extends HTMLElement {
       .status{display:inline-block;margin:12px 0;padding:4px 10px;border-radius:20px;background:var(--secondary-background-color,#f1f3f4);font-weight:600}
       .step{padding:18px 0;border-top:1px solid var(--divider-color,#dadce0)}
       label{display:block;margin:12px 0}label span{vertical-align:middle}
-      button,input,select{max-width:100%;font:inherit;color:inherit;border:1px solid var(--divider-color,#9aa0a6);border-radius:8px}
-      input:not([type=checkbox]),select{display:block;width:100%;padding:12px;background:var(--card-background-color,#fff);margin-top:6px;min-height:46px}
+      button,input,select,textarea{max-width:100%;font:inherit;color:inherit;border:1px solid var(--divider-color,#9aa0a6);border-radius:8px}
+      input:not([type=checkbox]),select,textarea{display:block;width:100%;padding:12px;background:var(--card-background-color,#fff);margin-top:6px;min-height:46px}
+      textarea{font:12px ui-monospace,monospace;overflow-wrap:anywhere;resize:vertical;user-select:text}
       input[type=checkbox]{width:18px;height:18px;vertical-align:middle;margin:0 10px 0 0;accent-color:var(--primary-color,#03a9f4)}
       button{min-height:44px;padding:10px 16px;background:transparent;cursor:pointer;margin:8px 8px 0 0}
       button.primary{background:var(--primary-color,#03a9f4);color:var(--text-primary-color,#fff);border-color:transparent;font-weight:600}
       button.danger{color:var(--error-color,#b00020)}button:disabled{opacity:.5;cursor:default}
-      button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible{outline:2px solid var(--primary-color,#03a9f4);outline-offset:3px}
+      button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,summary:focus-visible{outline:2px solid var(--primary-color,#03a9f4);outline-offset:3px}
       .code{font:600 clamp(22px,5vw,30px) ui-monospace,monospace;letter-spacing:.06em;text-align:center;user-select:all}
       details{margin:16px 0;border-top:1px solid var(--divider-color,#dadce0);padding-top:14px}summary{cursor:pointer;font-weight:600;min-height:32px}
       dl{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:8px 16px;margin:14px 0}dt{color:var(--secondary-text-color,#616161)}dd{margin:0;overflow-wrap:anywhere}
