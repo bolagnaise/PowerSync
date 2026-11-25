@@ -928,7 +928,7 @@ def test_dashboard_strategy_resource_uses_incremented_cache_buster():
 
     version = re.search(r'DASHBOARD_JS_VERSION = "(\d+)"', const_source)
     assert version is not None
-    assert version.group(1) == "64"
+    assert version.group(1) == "65"
     assert "url = f\"{base_path}?v={POWER_SYNC_VERSION}.{DASHBOARD_JS_VERSION}\"" in source
 
 
@@ -2350,3 +2350,45 @@ def test_battery_controls_show_restore_progress_until_confirmed_normal():
       if (render(restore, 'normal', undefined) !== 'Restore') throw new Error('Restore did not return to idle');
     '''
     subprocess.run(['node', '-e', script], check=True)
+
+
+def test_ev_panel_allows_start_for_switch_only_generic_charger_when_off():
+    """A smart-plug charger with no plug sensor must not block manual Start."""
+    source = STRATEGY_PATH.read_text()
+    start = source.index("class PowerSyncEVPanel extends HTMLElement")
+    end = source.index("if (!customElements.get('power-sync-ev-panel'))", start)
+    script = r"""
+const fs = require('fs');
+const src = fs.readFileSync(process.argv[1], 'utf8');
+const body = src.slice(Number(process.argv[2]), Number(process.argv[3]));
+const Panel = new Function('HTMLElement', body + '\nreturn PowerSyncEVPanel;')(class {});
+const panel = Object.create(Panel.prototype);
+panel._data = {};
+panel._savingKey = null;
+const base = {loadpoint_id: 'generic_ev', connected: false, actual_charging: false, owner_mode: 'idle'};
+const status = lp => panel._statusHtml(lp, false).match(/<div class="pill[^"]*">([^<]*)<\/div>/)[1];
+const unknown = {...base, plug_state_known: false};
+console.log(JSON.stringify({
+  unknownStart: panel._canStart(unknown),
+  unknownPill: status(unknown),
+  disconnectedStart: panel._canStart(base),
+  disconnectedPill: status(base),
+  connectedPill: status({...unknown, connected: true}),
+}));
+"""
+    result = subprocess.run(
+        ["node", "-e", script, str(STRATEGY_PATH), str(start), str(end)],
+        check=True, capture_output=True, text=True, timeout=20,
+    )
+    import json
+    out = json.loads(result.stdout.strip().splitlines()[-1])
+    assert out == {
+        "unknownStart": True,
+        "unknownPill": "Charger off",
+        "disconnectedStart": False,
+        "disconnectedPill": "Disconnected",
+        "connectedPill": "Connected",
+    }
+    panel = source[start:end]
+    assert "selected.plug_state_known !== false ? this._noticeHtml('warn', 'EV is disconnected." in panel
+    assert "No connector status sensor is configured" in panel

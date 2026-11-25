@@ -12324,6 +12324,58 @@ def test_solar_surplus_high_export_value_pauses_before_rate_control(monkeypatch)
     assert state["paused_by_export_price"] is True
     assert state["current_amps"] == 0
     assert set_amps_calls == [0]
+    assert state["paused_reason"] == (
+        "Export value 20.0c/kWh exceeds Solar Surplus limit 15.0c/kWh"
+    )
+
+
+@pytest.mark.parametrize("export_price", [8.0, None])
+def test_solar_surplus_export_pause_at_night_reports_no_solar(
+    monkeypatch, export_price,
+):
+    """At night the export limit is not the reason; don't surface it as one."""
+    hass = _Hass([])
+    vehicle_id = "VIN123"
+    actions._dynamic_ev_state.clear()
+    state = _solar_surplus_state(current_amps=0)
+    state["charging_started"] = False
+    state["params"]["max_export_price_cents"] = 0.0
+    actions._dynamic_ev_state["entry-1"] = {vehicle_id: state}
+    set_amps_calls = _install_solar_surplus_runtime_stubs(
+        monkeypatch,
+        {
+            "battery_soc": 60,
+            "grid_power": 500,
+            "battery_power": 1000,
+            "solar_power": 0,
+            "load_power": 1500,
+        },
+    )
+    monkeypatch.setattr(
+        actions,
+        "_get_current_ev_export_price",
+        lambda *args: export_price,
+    )
+
+    asyncio.run(
+        actions._dynamic_ev_update_surplus(hass, _Entry(), "entry-1", vehicle_id)
+    )
+
+    assert state["paused"] is True
+    assert state["paused_by_export_price"] is True
+    assert state["paused_reason"] == "No solar generation right now"
+    assert state["reason"] == "No solar generation right now"
+    assert set_amps_calls == []
+
+
+@pytest.mark.parametrize(
+    ("solar_power", "expected"),
+    [(0, True), (49.9, True), (50, False), (5000, False), (None, False),
+     ("unknown", False), (float("nan"), False), (True, False)],
+)
+def test_no_solar_generation_requires_a_real_low_reading(solar_power, expected):
+    assert actions._no_solar_generation({"solar_power": solar_power}) is expected
+    assert actions._no_solar_generation(None) is False
 
 
 def test_solar_surplus_missing_export_price_cannot_authorize_start(monkeypatch):

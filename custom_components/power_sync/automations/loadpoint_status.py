@@ -284,6 +284,13 @@ def _telemetry_fields(observation: Mapping[str, Any] | None) -> dict[str, Any]:
     }
 
 
+def _plug_state_fields(observation: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Expose an explicitly unknown plug state without changing ``connected``."""
+    if observation is not None and observation.get("plug_state_known") is False:
+        return {"plug_state_known": False}
+    return {}
+
+
 def _merge_telemetry_state(target: dict[str, Any], source: Mapping[str, Any]) -> None:
     """Keep the freshest telemetry claim for one physical vehicle."""
     if "telemetry_state" not in source and "telemetry_state" not in target:
@@ -610,6 +617,8 @@ def _merge_duplicate_generic_observations(
         ):
             if observation.get(field) not in (None, ""):
                 target[field] = observation[field]
+        if observation.get("plug_state_known") is True:
+            target["plug_state_known"] = True
         merged[generic_index] = target
 
     return merged
@@ -1325,6 +1334,7 @@ def _dynamic_loadpoint(
         "expires_at": expires_at,
         "quick_control": bool((ownership or {}).get("quick_control") or params.get("quick_control")),
         **_telemetry_fields(observation),
+        **_plug_state_fields(observation),
         "load_management": (
             dict(state.get("load_management"))
             if isinstance(state.get("load_management"), Mapping)
@@ -1414,6 +1424,7 @@ def _observed_loadpoint(
         "expires_at": (ownership or {}).get("expires_at") or observation.get("expires_at"),
         "quick_control": bool((ownership or {}).get("quick_control") or observation.get("quick_control")),
         **_telemetry_fields(observation),
+        **_plug_state_fields(observation),
     }
 
 
@@ -1437,6 +1448,11 @@ def build_generic_charger_observation(
 
     status_says_connected = normalized_status in GENERIC_CONNECTED_STATES
     status_says_charging = normalized_status in GENERIC_CHARGING_STATES
+    # Without a connector status sensor (e.g. a smart plug feeding a portable
+    # charger) a switched-off charger cannot report whether a car is plugged
+    # in.  The planner already treats that as "ready"; publish the unknown
+    # plug state so manual controls are not blocked by a guessed disconnect.
+    plug_state_known = status_state is not None
 
     is_connected = switch_on or status_says_connected or power_kw > ACTIVE_POWER_THRESHOLD_KW
     is_charging = status_says_charging or power_kw > ACTIVE_POWER_THRESHOLD_KW
@@ -1457,6 +1473,7 @@ def build_generic_charger_observation(
         "ev_soc": _optional_int(soc_value),
         "is_connected": is_connected,
         "is_charging": is_charging,
+        "plug_state_known": plug_state_known,
         "blocking_reason": blocking_reason,
         "include_idle": True,
     }

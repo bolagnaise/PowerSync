@@ -412,3 +412,16 @@ async def test_historical_sources_follow_selected_profile_without_legacy_fallbac
     assert discover()["generic_ev"].soc == "sensor.zeekr_soc"
     await e.shared.update(e.hass, e.entry, e.executor, {"operation": "select", "vehicle_id": None})
     assert discover() == {}
+
+
+def test_switch_only_charger_explains_status_sensor_needed_for_vehicle_switching(env):
+    e = env
+    e.entry.options["generic_charger_status_entity"] = ""
+
+    reason = e.shared.selection_block_reason(e.hass, e.entry, e.executor)
+
+    assert reason == (
+        "Switching between vehicles needs a connector status sensor in the "
+        "generic charger settings."
+    )
+    assert "Unplug the car" not in reason

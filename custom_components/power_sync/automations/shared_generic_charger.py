@@ -165,6 +165,8 @@ def selection_block_reason(hass: Any, entry: Any, executor: Any = None) -> str |
         if state and (state.is_charging or state.curtailment_override_active):
             return "Stop Smart Schedule charging before changing vehicles."
     opts = {**getattr(entry, "data", {}), **getattr(entry, "options", {})}
+    if not opts.get("generic_charger_status_entity"):
+        return "Switching between vehicles needs a connector status sensor in the generic charger settings."
     state = hass.states.get(opts.get("generic_charger_status_entity"))
     if state is None or str(state.state).lower() not in {"available", "disconnected", "unplugged", "not_plugged_in"}:
         return "Unplug the car and wait for the charger to report disconnected."

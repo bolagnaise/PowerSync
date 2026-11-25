@@ -12758,6 +12758,21 @@ def _ev_power_drift_since_site_sample_kw(live_status: dict) -> float:
         return 0.0
 
 
+_NO_SOLAR_GENERATION_W = 50.0
+
+
+def _no_solar_generation(live_status: Optional[dict]) -> bool:
+    """True only when a solar reading exists and shows no meaningful output."""
+    raw = (live_status or {}).get("solar_power")
+    if raw is None or isinstance(raw, bool):
+        return False
+    try:
+        solar_w = float(raw)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(solar_w) and solar_w < _NO_SOLAR_GENERATION_W
+
+
 def _calculate_solar_surplus(
     live_status: dict,
     current_ev_power_kw: float,
@@ -16169,7 +16184,11 @@ async def _dynamic_ev_update_surplus(
         deadline_override=deadline_override,
     ):
         limit = get_solar_surplus_max_export_price_cents(params)
-        if export_price_cents is None:
+        if _no_solar_generation(live_status):
+            # With nothing generating (night) the export limit is not what
+            # stops solar charging; reporting it reads as a fault.
+            paused_reason = "No solar generation right now"
+        elif export_price_cents is None:
             paused_reason = "Export price unavailable; automatic solar charging paused"
         else:
             paused_reason = (
