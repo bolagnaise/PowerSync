@@ -179,11 +179,18 @@ async def async_recover_ev_headroom(hass, entry, vin, *, allow_provider_refresh=
                 if not getattr(local, "last_update_success", False):
                     return result("fresh_readback_unavailable", failed_check="meter_update_failed",
                                   **unavailable)
-                if (native["observation"].charge_state.lower() not in {
+                report = native["observation"]
+                if (report.charge_state.lower() not in {
                         "stopped", "complete", "disconnected", "nopower", "no_power"}
-                        or native["observation"].charger_actual_current != 0
-                        or native["observation"].charger_power != 0):
-                    return result("vehicle_not_stopped")
+                        or report.charger_actual_current != 0
+                        or report.charger_power != 0):
+                    # Report the vehicle's own stop fields so support can see
+                    # which one refused; the reservation is still retained.
+                    return result("vehicle_not_stopped", **unavailable, vehicle_report={
+                        "charge_state": report.charge_state.lower(),
+                        "charger_actual_current": report.charger_actual_current,
+                        "charger_power": report.charger_power,
+                        "sample_age_seconds": _sample_age(report)})
                 native["explicit_read"] = True
                 cutoff = native["at"]
                 await refresh_managed_records(

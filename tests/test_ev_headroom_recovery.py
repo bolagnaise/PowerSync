@@ -552,3 +552,34 @@ async def test_fresh_readback_failure_reports_failed_check_and_round(recovery_ca
     if variant == 'stale':
         assert answer['sample_age_seconds'] == 20.0
     assert VIN not in repr({k: v for k, v in answer.items()})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('variant, expected', [
+    ('charging', {'charge_state': 'charging', 'charger_actual_current': 0.0, 'charger_power': 0.0}),
+    ('power', {'charge_state': 'stopped', 'charger_actual_current': 0.0, 'charger_power': 1.0}),
+    ('current', {'charge_state': 'stopped', 'charger_actual_current': 2.0, 'charger_power': 0.0}),
+])
+async def test_vehicle_not_stopped_reports_refusing_stop_fields(recovery_case, variant, expected):
+    """Ticket 156: Recover returned vehicle_not_stopped with no detail while
+    the HA charging sensor showed stopped."""
+    c, a = recovery_case, recovery_case.a
+    async def read(number, kwargs):
+        charge = dict(c.observation.raw_charge_state, timestamp=c.now[0] - 3,
+                      charging_state='Charging' if variant == 'charging' else 'Stopped',
+                      charger_actual_current=2 if variant == 'current' else 0,
+                      charger_power=1 if variant == 'power' else 0)
+        return replace(c.observation, source_charge_timestamp=c.now[0] - 3, raw_charge_state=charge,
+                       charge_state=charge['charging_state'],
+                       charger_actual_current=float(charge['charger_actual_current']),
+                       charger_power=float(charge['charger_power']), origin='native_cloud')
+    c.hooks['read'] = read
+    before = deepcopy(a.store.data['managed'][VIN])
+    answer = await recover(c)
+    assert answer['success'] is False and answer['error'] == 'vehicle_not_stopped'
+    assert answer['round'] == 1
+    report = answer['vehicle_report']
+    assert {k: report[k] for k in expected} == expected
+    assert report['sample_age_seconds'] is not None
+    assert a.store.data['managed'][VIN] == before and VIN in a.budget.managed
+    assert VIN not in repr(answer)
