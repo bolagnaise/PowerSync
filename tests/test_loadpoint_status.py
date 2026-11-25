@@ -1892,3 +1892,36 @@ def test_surplus_power_sums_loadpoints_and_clamps_negatives():
     assert resolve_loadpoint_surplus_power_kw(loadpoints) == 10.0
     assert resolve_loadpoint_surplus_power_kw(None) == 0.0
     assert resolve_loadpoint_surplus_power_kw([]) == 0.0
+
+
+def test_surplus_power_counts_the_command_while_a_charging_reading_still_shows_zero():
+    """Same rule as Solar Surplus control: a charging car is never a measured 0 kW."""
+    loadpoints = [
+        {"loadpoint_id": "car", "actual_charging": True,
+         "current_power_kw": 0.0, "commanded_power_kw": 7.68},
+        {"loadpoint_id": "idle", "actual_charging": False,
+         "current_power_kw": 0.0, "commanded_power_kw": 7.68},
+    ]
+
+    assert resolve_loadpoint_surplus_power_kw(loadpoints) == 7.68
+
+
+@pytest.mark.parametrize(
+    ("commanded", "observed", "available", "stopped", "restart", "expected"),
+    [
+        (7.0, 6.0, True, False, False, 6.0),     # a positive reading is the load
+        (7.0, 0.0, True, False, False, 7.0),     # charging, reading has not caught up
+        (7.0, None, False, False, False, 7.0),   # reading missing
+        (7.0, 0.0, True, True, False, 0.0),      # explicit stop with a numeric zero
+        (7.0, 0.0, False, True, False, 7.0),     # stop state without a reading proves nothing
+        (7.0, 3.0, True, False, True, 7.0),      # restart grace keeps the larger value
+        (-1.0, float("nan"), True, False, False, 0.0),
+    ],
+)
+def test_surplus_ev_power_rule(commanded, observed, available, stopped, restart, expected):
+    from power_sync.ev_load import surplus_ev_power_kw
+
+    assert surplus_ev_power_kw(
+        commanded, observed, available,
+        reported_stopped=stopped, restart_telemetry_pending=restart,
+    ) == expected

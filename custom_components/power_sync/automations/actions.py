@@ -158,23 +158,7 @@ API_CREDIT_ERROR_PATTERNS = [
 # Battery energy coordinators expose the same normalized kW telemetry contract.
 # Keep this list explicit so EV control does not accidentally fall back to a
 # provider-specific raw API when a supported inverter coordinator is present.
-EV_LIVE_STATUS_COORDINATOR_KEYS = (
-    "tesla_coordinator",
-    "sigenergy_coordinator",
-    "sungrow_coordinator",
-    "foxess_coordinator",
-    "goodwe_coordinator",
-    "alphaess_coordinator",
-    "esy_sunhome_coordinator",
-    "solax_coordinator",
-    "saj_h2_coordinator",
-    "fronius_reserva_coordinator",
-    "neovolt_coordinator",
-    "solaredge_coordinator",
-    "anker_solix_coordinator",
-    "amber_smartshift_coordinator",
-    "custom_energy_coordinator",
-)
+from .live_status import SITE_LIVE_STATUS_COORDINATOR_KEYS as EV_LIVE_STATUS_COORDINATOR_KEYS  # noqa: E402
 
 
 def _is_api_credit_error(error_message: str) -> bool:
@@ -2134,38 +2118,16 @@ def _effective_ev_power_kw(
     charging_state: Optional[str] = None,
     restart_telemetry_pending: bool = False,
 ) -> float:
-    """Resolve the EV load used for surplus accounting.
+    """Resolve the EV load used for surplus accounting (see ``surplus_ev_power_kw``)."""
+    from ..ev_load import surplus_ev_power_kw
 
-    A usable positive meter reading is the best representation of the load
-    after the short post-restart grace. During that grace, retain the larger
-    of the command and reading while telemetry catches up. A prior command is
-    otherwise only a fallback when the meter has no numeric value. An explicit
-    stopped Tesla with an available numeric zero remains a safe exception.
-    """
-    try:
-        commanded_kw = max(0.0, float(commanded_power_kw))
-    except (TypeError, ValueError):
-        commanded_kw = 0.0
-    try:
-        observed_kw = max(0.0, float(observed_power_kw))
-    except (TypeError, ValueError):
-        observed_kw = 0.0
-
-    if restart_telemetry_pending:
-        return max(commanded_kw, observed_kw)
-
-    if observed_power_available and observed_kw > _ACTIVE_EV_POWER_EPSILON_KW:
-        return observed_kw
-
-    if (
-        observed_power_available
-        and observed_kw <= _ACTIVE_EV_POWER_EPSILON_KW
-        and charging_state in _TESLA_NON_CHARGING_STATES
-        and not restart_telemetry_pending
-    ):
-        return 0.0
-
-    return commanded_kw
+    return surplus_ev_power_kw(
+        commanded_power_kw,
+        observed_power_kw,
+        observed_power_available,
+        reported_stopped=charging_state in _TESLA_NON_CHARGING_STATES,
+        restart_telemetry_pending=restart_telemetry_pending,
+    )
 
 
 async def _is_vehicle_charge_complete(
@@ -14090,43 +14052,9 @@ def _is_inside_time_window(
 
 def _coordinator_has_normalized_ev_live_data(coordinator: Any) -> bool:
     """Return whether a battery coordinator has a usable normalized snapshot."""
-    if getattr(coordinator, "last_update_success", None) is not True:
-        return False
-    data = getattr(coordinator, "data", None)
-    if not isinstance(data, dict) or data.get("telemetry_ready") is False:
-        return False
-    for key in ("grid_power", "solar_power", "battery_power"):
-        value = data.get(key)
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            return False
-        if not math.isfinite(float(value)):
-            return False
+    from .live_status import coordinator_snapshot_is_usable
 
-    last_update = getattr(coordinator, "last_update_success_time", None)
-    if last_update is None:
-        return True
-    try:
-        update_interval = getattr(coordinator, "update_interval", None)
-        stale_after = max(
-            update_interval * 4
-            if update_interval is not None
-            else timedelta(seconds=120),
-            timedelta(seconds=60),
-        )
-        now = dt_util.utcnow()
-        if (
-            getattr(now, "tzinfo", None) is None
-            and getattr(last_update, "tzinfo", None) is not None
-        ):
-            now = now.replace(tzinfo=last_update.tzinfo)
-        elif (
-            getattr(now, "tzinfo", None) is not None
-            and getattr(last_update, "tzinfo", None) is None
-        ):
-            last_update = last_update.replace(tzinfo=now.tzinfo)
-        return (now - last_update) <= stale_after
-    except Exception:
-        return False
+    return coordinator_snapshot_is_usable(coordinator, dt_util.utcnow())
 
 
 async def _get_tesla_live_status(hass: HomeAssistant, config_entry: ConfigEntry) -> Optional[Dict[str, Any]]:
@@ -14138,25 +14066,14 @@ async def _get_tesla_live_status(hass: HomeAssistant, config_entry: ConfigEntry)
         - grid_power: Positive = importing, Negative = exporting
     """
     from ..const import DOMAIN
-    from .live_status import coordinator_data_to_ev_live_status
+    from .live_status import site_live_status
 
     entry_data = hass.data.get(DOMAIN, {}).get(config_entry.entry_id, {})
 
-    # Try normalized coordinator data first (cached, no API call needed).
-    coordinator_found = False
-    for coord_key in EV_LIVE_STATUS_COORDINATOR_KEYS:
-        coordinator = entry_data.get(coord_key)
-        if coordinator is None:
-            continue
-        coordinator_found = True
-        if _coordinator_has_normalized_ev_live_data(coordinator):
-            live_status = coordinator_data_to_ev_live_status(coordinator.data)
-            if entry_data.get("inverter_last_state") == "curtailed":
-                live_status["is_curtailed"] = True
-                live_status["ac_production_curtailed"] = True
-            # A separate AC inverter being normal does not release a native
-            # hybrid's site-export limit. Preserve its coordinator readback.
-            return live_status
+    # Normalized coordinator data first (cached, no API call needed).
+    live_status, coordinator_found = site_live_status(entry_data, dt_util.utcnow())
+    if live_status is not None:
+        return live_status
 
     # A configured but unhealthy coordinator must not be bypassed by a raw
     # provider API call.  The coordinator is the canonical site telemetry path.

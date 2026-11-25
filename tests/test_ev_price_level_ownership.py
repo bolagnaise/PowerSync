@@ -11317,13 +11317,12 @@ def test_standalone_ev_tick_runs_disabled_cleanup_and_supplies_retail_price(monk
             "battery_level": 80, "load_power": 2, "solar_power": 5, "battery_power": 0, "grid_power": -3,
         })
     # Use the production control-side selection and validation with isolated HA modules.
-    nodes = ast.parse((ROOT / "automations" / "actions.py").read_text()).body
-    keys = next(n for n in nodes if isinstance(n, ast.Assign)
-                and any(isinstance(t, ast.Name) and t.id == "EV_LIVE_STATUS_COORDINATOR_KEYS" for t in n.targets))
-    valid = next(n for n in nodes if isinstance(n, ast.FunctionDef) and n.name == "_coordinator_has_normalized_ev_live_data")
+    live_status = importlib.import_module("power_sync.automations.live_status")
     fake_actions = types.ModuleType("power_sync.automations.actions")
-    fake_actions.__dict__.update(Any=object, math=__import__("math"))
-    exec(compile(ast.Module(body=[keys, valid], type_ignores=[]), "<site source>", "exec"), fake_actions.__dict__)
+    fake_actions.EV_LIVE_STATUS_COORDINATOR_KEYS = live_status.SITE_LIVE_STATUS_COORDINATOR_KEYS
+    fake_actions._coordinator_has_normalized_ev_live_data = (
+        lambda coordinator: live_status.coordinator_snapshot_is_usable(coordinator, now)
+    )
     monkeypatch.setitem(sys.modules, fake_actions.__name__, fake_actions)
     auto = ev_planner.AutoScheduleExecutor(hass, entry, None)
     auto.update_settings(VIN, {"enabled": False})

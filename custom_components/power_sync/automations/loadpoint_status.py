@@ -58,15 +58,22 @@ def resolve_loadpoint_surplus_power_kw(
     The grid meter has already netted off whatever the cars are drawing, so an
     active loadpoint whose reading is momentarily unavailable must never be
     counted as a measured 0 kW — that understates surplus by the whole EV draw.
-    Fall back to the loadpoint's own commanded power, mirroring
-    ``_effective_ev_power_kw`` on the Solar Surplus control path.
+    Uses the same rule as Solar Surplus control (``surplus_ev_power_kw``): a
+    charging loadpoint whose reading is missing or still 0 kW counts its own
+    commanded power; one that is not charging counts only its reading.
     """
+    from ..ev_load import surplus_ev_power_kw
+
     total = 0.0
     for loadpoint in loadpoints or ():
-        power_kw = loadpoint.get("current_power_kw")
-        if power_kw is None and loadpoint.get("actual_charging"):
-            power_kw = loadpoint.get("commanded_power_kw")
-        total += max(0.0, _float_value(power_kw, 0.0))
+        reading_kw = loadpoint.get("current_power_kw")
+        charging = bool(loadpoint.get("actual_charging"))
+        total += surplus_ev_power_kw(
+            loadpoint.get("commanded_power_kw") if charging else 0.0,
+            reading_kw,
+            reading_kw is not None,
+            reported_stopped=not charging,
+        )
     return total
 
 

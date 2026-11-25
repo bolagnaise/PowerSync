@@ -2031,6 +2031,40 @@ def _generic_charger_charging_state(observation: dict) -> str:
     return "Disconnected"
 
 
+def _surplus_view_site(hass, entry, entry_data) -> tuple[dict | None, dict, float, int | None]:
+    """Return (live_status, display values, EV add-back kW, EV SoC) for a status view.
+
+    Status views use the same site snapshot as EV control, so a stale or
+    unhealthy coordinator shows no surplus instead of retained values. The EV
+    term is the car's measured draw, falling back to the site's EV reading.
+    """
+    from .automations.live_status import site_live_status
+
+    live_status, _configured = site_live_status(entry_data, dt_util.utcnow())
+
+    def kw(key: str) -> float:
+        value = (live_status or {}).get(key)
+        return 0.0 if value is None else value / 1000
+
+    display = {
+        "solar_power_kw": kw("solar_power"),
+        "grid_power_kw": kw("grid_power"),
+        "battery_power_kw": kw("battery_power"),
+        "load_power_kw": kw("load_power"),
+        "battery_soc": float((live_status or {}).get("battery_soc") or 0.0),
+    }
+    ev_soc = None
+    try:
+        ev_status = _get_ev_vehicle_status(hass, entry)
+        ev_soc = ev_status["ev_soc"]
+        ev_power_kw = max(0.0, float(ev_status["ev_power_kw"] or 0.0))
+    except Exception:  # noqa: BLE001 - a status view must still render
+        ev_power_kw = 0.0
+    if ev_power_kw <= 0:
+        ev_power_kw = max(0.0, kw("ev_power"))
+    return live_status, display, ev_power_kw, ev_soc
+
+
 def _get_ev_vehicle_status(hass, entry) -> dict:
     """Get EV charging status from configured EV sensors.
 
@@ -19145,57 +19179,12 @@ class SolarSurplusStatusView(HomeAssistantView):
             entry_id = entry.entry_id
             entry_data = self._hass.data.get(DOMAIN, {}).get(entry_id, {})
 
-            # Get data from tesla_coordinator (preferred) or sigenergy_coordinator
-            battery_soc = 0.0
-            solar_power_kw = 0.0
-            grid_power_kw = 0.0
-            battery_power_kw = 0.0
-            load_power_kw = 0.0
-
-            tesla_coordinator = entry_data.get("tesla_coordinator")
-            sigenergy_coordinator = entry_data.get("sigenergy_coordinator")
-            sungrow_coordinator = entry_data.get("sungrow_coordinator")
-            foxess_coordinator = entry_data.get("foxess_coordinator")
-
-            if tesla_coordinator and tesla_coordinator.data:
-                # Tesla coordinator stores values in kW
-                solar_power_kw = tesla_coordinator.data.get("solar_power", 0)
-                grid_power_kw = tesla_coordinator.data.get("grid_power", 0)
-                battery_power_kw = tesla_coordinator.data.get("battery_power", 0)
-                load_power_kw = tesla_coordinator.data.get("load_power", 0)
-                battery_soc = tesla_coordinator.data.get("battery_level", 0)
-                _LOGGER.debug(f"Solar surplus status from tesla_coordinator: battery_soc={battery_soc}%")
-            elif sigenergy_coordinator and sigenergy_coordinator.data:
-                solar_power_kw = sigenergy_coordinator.data.get("solar_power", 0)
-                grid_power_kw = sigenergy_coordinator.data.get("grid_power", 0)
-                battery_power_kw = sigenergy_coordinator.data.get("battery_power", 0)
-                load_power_kw = sigenergy_coordinator.data.get("load_power", 0)
-                battery_soc = sigenergy_coordinator.data.get("battery_level", 0)
-                _LOGGER.debug(f"Solar surplus status from sigenergy_coordinator: battery_soc={battery_soc}%")
-            elif sungrow_coordinator and sungrow_coordinator.data:
-                solar_power_kw = sungrow_coordinator.data.get("solar_power", 0)
-                grid_power_kw = sungrow_coordinator.data.get("grid_power", 0)
-                battery_power_kw = sungrow_coordinator.data.get("battery_power", 0)
-                load_power_kw = sungrow_coordinator.data.get("load_power", 0)
-                battery_soc = sungrow_coordinator.data.get("battery_level", 0)
-                _LOGGER.debug(f"Solar surplus status from sungrow_coordinator: battery_soc={battery_soc}%")
-            elif foxess_coordinator and foxess_coordinator.data:
-                solar_power_kw = foxess_coordinator.data.get("solar_power", 0)
-                grid_power_kw = foxess_coordinator.data.get("grid_power", 0)
-                battery_power_kw = foxess_coordinator.data.get("battery_power", 0)
-                load_power_kw = foxess_coordinator.data.get("load_power", 0)
-                battery_soc = foxess_coordinator.data.get("battery_level", 0)
-                _LOGGER.debug(f"Solar surplus status from foxess_coordinator: battery_soc={battery_soc}%")
-
-            # Calculate surplus. Home Load can be deliberately unavailable
-            # while an active EV has no attributable measured power.
-            live_status = {
-                "solar_power": None if solar_power_kw is None else solar_power_kw * 1000,
-                "grid_power": None if grid_power_kw is None else grid_power_kw * 1000,
-                "battery_power": None if battery_power_kw is None else battery_power_kw * 1000,
-                "load_power": None if load_power_kw is None else load_power_kw * 1000,
-                "battery_soc": battery_soc,
-            }
+            live_status, site_kw, ev_power_kw, ev_soc = _surplus_view_site(
+                self._hass, entry, entry_data,
+            )
+            solar_power_kw = site_kw["solar_power_kw"]
+            grid_power_kw = site_kw["grid_power_kw"]
+            battery_soc = site_kw["battery_soc"]
             solar_config = get_stored_solar_surplus_config(entry_data)
 
             # Get per-vehicle states
@@ -19220,18 +19209,10 @@ class SolarSurplusStatusView(HomeAssistantView):
                         "charging_started": state.get("charging_started", False),
                     })
 
-            # Get EV power and SoC — prefer vehicle sensor (e.g. sensor.primary_ev_charger_power),
-            # fall back to Wall Connector data from coordinator
-            ev_status = _get_ev_vehicle_status(self._hass, entry)
-            ev_power_kw = ev_status["ev_power_kw"]
-            ev_soc = ev_status["ev_soc"]
-            if ev_power_kw <= 0 and tesla_coordinator and tesla_coordinator.data:
-                ev_power_kw = tesla_coordinator.data.get("ev_power", 0)
-
-            # Grid-based surplus adds the car's own draw back; passing 0 kW
-            # under-reported available solar whenever a car was charging.
-            surplus_kw = _calculate_solar_surplus(
-                live_status, max(0.0, float(ev_power_kw or 0.0)), solar_config,
+            # Grid-based surplus adds the car's own draw back.
+            surplus_kw = (
+                _calculate_solar_surplus(live_status, ev_power_kw, solar_config)
+                if live_status is not None else 0.0
             )
 
             # If no dynamic vehicles but EV is charging, include it
@@ -22786,62 +22767,18 @@ class PriceRecommendationView(HomeAssistantView):
             entry_id = self._config_entry.entry_id
             entry_data = self._hass.data.get(DOMAIN, {}).get(entry_id, {})
 
-            # Get data from coordinator (preferred over separate API call)
-            solar_power_kw = 0.0
-            grid_power_kw = 0.0
-            battery_power_kw = 0.0
-            load_power_kw = 0.0
-            battery_soc = 0.0
-
-            tesla_coordinator = entry_data.get("tesla_coordinator")
-            sigenergy_coordinator = entry_data.get("sigenergy_coordinator")
-            sungrow_coordinator = entry_data.get("sungrow_coordinator")
-            foxess_coordinator = entry_data.get("foxess_coordinator")
-
-            if tesla_coordinator and tesla_coordinator.data:
-                solar_power_kw = tesla_coordinator.data.get("solar_power", 0)
-                grid_power_kw = tesla_coordinator.data.get("grid_power", 0)
-                battery_power_kw = tesla_coordinator.data.get("battery_power", 0)
-                load_power_kw = tesla_coordinator.data.get("load_power", 0)
-                battery_soc = tesla_coordinator.data.get("battery_level", 0)
-            elif sigenergy_coordinator and sigenergy_coordinator.data:
-                solar_power_kw = sigenergy_coordinator.data.get("solar_power", 0)
-                grid_power_kw = sigenergy_coordinator.data.get("grid_power", 0)
-                battery_power_kw = sigenergy_coordinator.data.get("battery_power", 0)
-                load_power_kw = sigenergy_coordinator.data.get("load_power", 0)
-                battery_soc = sigenergy_coordinator.data.get("battery_level", 0)
-            elif sungrow_coordinator and sungrow_coordinator.data:
-                solar_power_kw = sungrow_coordinator.data.get("solar_power", 0)
-                grid_power_kw = sungrow_coordinator.data.get("grid_power", 0)
-                battery_power_kw = sungrow_coordinator.data.get("battery_power", 0)
-                load_power_kw = sungrow_coordinator.data.get("load_power", 0)
-                battery_soc = sungrow_coordinator.data.get("battery_level", 0)
-            elif foxess_coordinator and foxess_coordinator.data:
-                solar_power_kw = foxess_coordinator.data.get("solar_power", 0)
-                grid_power_kw = foxess_coordinator.data.get("grid_power", 0)
-                battery_power_kw = foxess_coordinator.data.get("battery_power", 0)
-                load_power_kw = foxess_coordinator.data.get("load_power", 0)
-                battery_soc = foxess_coordinator.data.get("battery_level", 0)
+            live_status, site_kw, current_ev_power_kw, _ev_soc = _surplus_view_site(
+                self._hass, self._config_entry, entry_data,
+            )
+            battery_soc = site_kw["battery_soc"]
 
             solar_config = get_stored_solar_surplus_config(entry_data)
             home_battery_minimum = get_solar_surplus_min_battery_soc(solar_config)
 
-            # Build live_status dict for surplus calculation (expects watts)
-            live_status = {
-                "solar_power": solar_power_kw * 1000,
-                "grid_power": grid_power_kw * 1000,
-                "battery_power": battery_power_kw * 1000,
-                "load_power": load_power_kw * 1000,
-                "battery_soc": battery_soc,
-            }
-
-            try:
-                current_ev_power_kw = max(0.0, float(
-                    _get_ev_vehicle_status(self._hass, self._config_entry)["ev_power_kw"] or 0.0
-                ))
-            except Exception:  # noqa: BLE001 - a recommendation must still render
-                current_ev_power_kw = 0.0
-            surplus_kw = _calculate_solar_surplus(live_status, current_ev_power_kw, solar_config)
+            surplus_kw = (
+                _calculate_solar_surplus(live_status, current_ev_power_kw, solar_config)
+                if live_status is not None else 0.0
+            )
 
             # Get current prices based on electricity provider
             import_price_cents = 30.0  # Default
@@ -27516,126 +27453,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
 
     def _get_cached_live_status() -> dict | None:
-        """Get live status from the active site coordinator when available."""
-        def _fronius_snapshot_is_fresh(coordinator: Any, data: Any) -> bool:
-            """Keep Fronius load-following writes behind current site telemetry.
+        """Get live status from the active site coordinator when available.
 
-            The Fronius coordinator deliberately retains its last useful
-            payload when its upstream integration is unavailable.  That is
-            useful for display, but a retained load value must never become a
-            new inverter power-limit target.
-            """
-            if (
-                getattr(coordinator, "last_update_success", False) is not True
-                or not isinstance(data, dict)
-                or data.get("telemetry_ready") is not True
-            ):
-                return False
-
-            last_update = getattr(coordinator, "last_update_success_time", None)
-            update_interval = getattr(coordinator, "update_interval", None)
-            try:
-                stale_after = max(
-                    update_interval * 4
-                    if update_interval is not None
-                    else timedelta(seconds=120),
-                    timedelta(seconds=60),
-                )
-                now = dt_util.utcnow()
-                if (
-                    getattr(now, "tzinfo", None) is None
-                    and getattr(last_update, "tzinfo", None) is not None
-                ):
-                    now = now.replace(tzinfo=last_update.tzinfo)
-                elif (
-                    last_update is not None
-                    and getattr(now, "tzinfo", None) is not None
-                    and getattr(last_update, "tzinfo", None) is None
-                ):
-                    last_update = last_update.replace(tzinfo=now.tzinfo)
-                if last_update is not None and (now - last_update) > stale_after:
-                    return False
-
-                # New Fronius bridge snapshots retain the source entity
-                # observation times. A successful PowerSync refresh must not
-                # renew an unchanged upstream value, and all power fields
-                # used for a target or physical convergence verdict must be
-                # current together. Snapshots from older bridge versions do
-                # not have this field and retain coordinator-only compatibility
-                # behavior until the next bridge refresh.
-                observed_at = data.get("telemetry_observed_at")
-                if observed_at is None:
-                    return True
-                if not isinstance(observed_at, dict):
-                    return False
-
-                for key in ("load_power", "grid_power", "battery_power"):
-                    source_at = observed_at.get(key)
-                    if source_at is None:
-                        return False
-                    source_now = now
-                    if (
-                        getattr(source_now, "tzinfo", None) is None
-                        and getattr(source_at, "tzinfo", None) is not None
-                    ):
-                        source_now = source_now.replace(tzinfo=source_at.tzinfo)
-                    elif (
-                        getattr(source_now, "tzinfo", None) is not None
-                        and getattr(source_at, "tzinfo", None) is None
-                    ):
-                        source_at = source_at.replace(tzinfo=source_now.tzinfo)
-                    source_age = source_now - source_at
-                    if source_age > stale_after or source_age < -timedelta(seconds=5):
-                        return False
-
-                return True
-            except Exception:
-                return False
-
+        Shares EV control's builder, so stale, unsuccessful or not-ready
+        snapshots (and Fronius values retained past their source time) are
+        never used to steer automations.
+        """
         try:
-            from .automations.live_status import coordinator_data_to_ev_live_status
+            from .automations.live_status import site_live_status
 
             entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
-            for coord_key in (
-                "tesla_coordinator",
-                "sigenergy_coordinator",
-                "sungrow_coordinator",
-                "foxess_coordinator",
-                "goodwe_coordinator",
-                "alphaess_coordinator",
-                "solax_coordinator",
-                "saj_h2_coordinator",
-                "fronius_reserva_coordinator",
-                "neovolt_coordinator",
-                "solaredge_coordinator",
-                "anker_solix_coordinator",
-            ):
-                coordinator = entry_data.get(coord_key)
-                data = getattr(coordinator, "data", None)
-                if not data:
-                    continue
-                if (
-                    coord_key == "fronius_reserva_coordinator"
-                    and not _fronius_snapshot_is_fresh(coordinator, data)
-                ):
-                    _LOGGER.warning(
-                        "Skipping Fronius load-following telemetry because "
-                        "the coordinator snapshot is not fresh"
-                    )
-                    return None
-
-                live_status = coordinator_data_to_ev_live_status(data)
-                inverter_last_state = entry_data.get("inverter_last_state")
-                if inverter_last_state == "curtailed":
-                    live_status["is_curtailed"] = True
-                    live_status["ac_production_curtailed"] = True
-                # External AC production and the hybrid's native export limit
-                # are independent; normal AC must not erase native readback.
-                _LOGGER.debug("Live status from %s", coord_key)
-                return live_status
+            live_status, _configured = site_live_status(entry_data, dt_util.utcnow())
+            return live_status
         except Exception as e:
             _LOGGER.debug("Error getting cached coordinator live status: %s", e)
-
         return None
 
     # Helper function to get live status from the active coordinator or Tesla API
