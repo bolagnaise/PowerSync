@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import copy
+import json
 import importlib.util
 import logging
 import sys
@@ -23,7 +24,8 @@ ROOT = Path(__file__).resolve().parents[1]
 def upload_harness(monkeypatch):
     source = (ROOT / "custom_components/power_sync/__init__.py").read_text()
     tree = ast.parse(source)
-    names = {"send_tariff_to_tesla", "_send_tariff_to_tesla", "_tou_retry_after_too_long"}
+    names = {"send_tariff_to_tesla", "_send_tariff_to_tesla", "_tou_retry_after_too_long",
+             "_summarize_tesla_tariff_structure"}
     nodes = [node for node in tree.body if getattr(node, "name", None) in names]
     clock = SimpleNamespace(now=0.0, sleeping=None, resume=None, confirmed=True)
 
@@ -46,7 +48,7 @@ def upload_harness(monkeypatch):
             return False
 
         async def text(self):
-            return "rate_limited"
+            return "rate_limited" if self.status == 429 else '{"error":"Invalid tariff provided"}'
 
         async def json(self):
             return {"response": {}}
@@ -81,6 +83,7 @@ def upload_harness(monkeypatch):
         "get_tesla_api_base_url": lambda provider, region: region or provider,
         "_confirm_tesla_tariff_uploaded": confirm,
         "_LOGGER": logging.getLogger(__name__),
+        "json": __import__("json"),
     }
     module = ast.Module(body=[ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0), *nodes], type_ignores=[])
     exec(compile(ast.fix_missing_locations(module), "<tariff-upload>", "exec"), namespace)
@@ -183,6 +186,44 @@ def test_persisted_sparse_tariff_is_prepared_at_real_upload_boundary(restore_hel
     # A successful POST still cannot clear the restore obligation without readback.
     clock.confirmed = False
     assert asyncio.run(upload(hass, "site-a", prepared, "token")) is False
+
+
+def test_rejected_restore_tariff_logs_price_free_structure(restore_helpers, upload_harness, caplog):
+    """Ticket 171: Tesla 400 'Invalid tariff provided' names no field."""
+    select, _tariff_time, _valid_range = restore_helpers
+    upload, hass, session, _clock = upload_harness
+    session.responses = [400]
+    tariff = select(_sparse_restore_tariff({"toDayOfWeek": 6, "fromHour": 21}))
+    tariff["seasons"]["Summer"]["tou_periods"]["PEAK"] = {"periods": [{"toDayOfWeek": 4}]}
+    with caplog.at_level(logging.ERROR):
+        assert asyncio.run(upload(hass, "site-a", tariff, "token")) is False
+    assert len(session.posts) == 1  # a 4xx is still never retried
+    lines = [r.getMessage() for r in caplog.records
+             if r.getMessage().startswith("Rejected Tesla tariff structure for site site-a: ")]
+    assert len(lines) == 1
+    summary = json.loads(lines[0].split(": ", 1)[1])
+    assert summary["name"] == "Custom"
+    buy = summary["buy"]
+    assert buy["seasons"]["Summer"]["months"] == [1, 12]
+    assert buy["seasons"]["Summer"]["periods"]["OFF_PEAK"] == [[0, 6, 21, 0, 24, 0]]
+    # Absent bounds are visible as "-" rather than silently defaulted.
+    assert buy["seasons"]["Summer"]["periods"]["PEAK"] == [["-", 4, "-", "-", "-", "-"]]
+    assert buy["seasons"]["Winter"] == {"months": ["-", "-"], "days": ["-", "-"], "periods": {}}
+    assert "Summer.PEAK has no rate" in buy["issues"]
+    assert "empty season Winter" in buy["issues"]
+    assert summary["sell"]["energy_charges"]["Summer"] == ["OFF_PEAK"]
+    # Structural only: no buy (.48) or sell (.12) price reaches the log.
+    assert "0.48" not in lines[0] and "0.12" not in lines[0]
+
+
+def test_tariff_structure_summary_never_raises_and_is_bounded(upload_harness):
+    upload, *_ = upload_harness
+    summarize = upload.__globals__["_summarize_tesla_tariff_structure"]
+    assert summarize(None) == "tariff type NoneType"
+    assert summarize({"seasons": [], "energy_charges": 3, "sell_tariff": "x"}).startswith("{")
+    huge = {"seasons": {f"S{i}": {"tou_periods": {"P": {"periods": [{}]}}} for i in range(500)}}
+    text = summarize(huge, limit=200)
+    assert len(text) <= 200 + len("...(truncated)") and text.endswith("...(truncated)")
 
 
 def test_final_429_defers_fresh_call_until_retry_after_even_with_rotated_token(upload_harness):

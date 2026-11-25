@@ -643,6 +643,99 @@ def _tariff_display_name(tariff: Any) -> str:
         return "unknown"
     return str(tariff.get("name") or tariff.get("code") or "unknown")
 
+
+def _summarize_tesla_tariff_structure(tariff: Any, limit: int = 4000) -> str:
+    """Describe a rejected Tesla tariff without prices, for support diagnosis.
+
+    Tesla's 4xx body ("Invalid tariff provided") never names the bad field.
+    Record each side's seasons, period bounds and rate keys, using ``-`` for
+    an absent field, plus simple consistency findings. Never raise.
+    """
+    bound_keys = (
+        "fromDayOfWeek", "toDayOfWeek", "fromHour", "fromMinute", "toHour", "toMinute",
+    )
+
+    def side_summary(side: Any) -> dict[str, Any]:
+        if not isinstance(side, dict):
+            return {"type": type(side).__name__}
+        seasons = side.get("seasons")
+        charges = side.get("energy_charges")
+        result: dict[str, Any] = {"keys": sorted(str(key) for key in side)}
+        issues: list[str] = []
+        season_out: dict[str, Any] = {}
+        if isinstance(seasons, dict):
+            for season_name, season in seasons.items():
+                if not isinstance(season, dict):
+                    season_out[str(season_name)] = type(season).__name__
+                    continue
+                periods_out: dict[str, Any] = {}
+                tou = season.get("tou_periods")
+                if isinstance(tou, dict):
+                    for period_name, container in tou.items():
+                        periods = container.get("periods") if isinstance(container, dict) else container
+                        if not isinstance(periods, list):
+                            periods_out[str(period_name)] = type(container).__name__
+                            continue
+                        periods_out[str(period_name)] = [
+                            [p.get(key, "-") for key in bound_keys]
+                            if isinstance(p, dict) else type(p).__name__
+                            for p in periods
+                        ]
+                elif tou is not None:
+                    periods_out = type(tou).__name__
+                season_out[str(season_name)] = {
+                    "months": [season.get("fromMonth", "-"), season.get("toMonth", "-")],
+                    "days": [season.get("fromDay", "-"), season.get("toDay", "-")],
+                    "periods": periods_out,
+                }
+                if not season:
+                    issues.append(f"empty season {season_name}")
+                season_charges = charges.get(season_name) if isinstance(charges, dict) else None
+                rates = season_charges.get("rates") if isinstance(season_charges, dict) else None
+                rate_keys = set(rates) if isinstance(rates, dict) else set()
+                if isinstance(periods_out, dict):
+                    for missing in sorted(set(periods_out) - rate_keys):
+                        issues.append(f"{season_name}.{missing} has no rate")
+                    for unused in sorted(rate_keys - set(periods_out)):
+                        issues.append(f"{season_name} rate {unused} has no period")
+        elif seasons is not None:
+            season_out = type(seasons).__name__
+        result["seasons"] = season_out
+        if isinstance(charges, dict):
+            result["energy_charges"] = {
+                str(name): (
+                    sorted(str(key) for key in value["rates"])
+                    if isinstance(value, dict) and isinstance(value.get("rates"), dict)
+                    else sorted(str(key) for key in value) if isinstance(value, dict)
+                    else type(value).__name__
+                )
+                for name, value in charges.items()
+            }
+        demand = side.get("demand_charges")
+        if isinstance(demand, dict):
+            result["demand_charges"] = sorted(str(key) for key in demand)
+        if issues:
+            result["issues"] = issues
+        return result
+
+    try:
+        if not isinstance(tariff, dict):
+            return f"tariff type {type(tariff).__name__}"
+        summary: dict[str, Any] = {
+            field: tariff.get(field)
+            for field in ("name", "code", "utility", "currency", "version")
+            if field in tariff
+        }
+        summary["buy"] = side_summary(tariff)
+        if "sell_tariff" in tariff:
+            summary["sell"] = side_summary(tariff.get("sell_tariff"))
+        text = json.dumps(summary, separators=(",", ":"), default=str)
+    except Exception as err:  # diagnostics must never mask the upload result
+        return f"unavailable ({type(err).__name__})"
+    if len(text) > limit:
+        return text[:limit] + "...(truncated)"
+    return text
+
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 import homeassistant.helpers.config_validation as cv
 from homeassistant.const import Platform, CONF_ACCESS_TOKEN, CONF_TOKEN
@@ -7139,6 +7232,11 @@ async def _send_tariff_to_tesla(
                     "Failed to sync TOU schedule: %s - %s (client error, not retrying)",
                     response.status,
                     error_text
+                )
+                _LOGGER.error(
+                    "Rejected Tesla tariff structure for site %s: %s",
+                    site_id,
+                    _summarize_tesla_tariff_structure(tariff_data),
                 )
                 return False
 
