@@ -11,6 +11,23 @@ import time
 from datetime import datetime, timedelta, timezone
 
 
+def ended_session_abort_result(lease, state):
+    """Decide a trial abort once its session is gone or replaced, else None.
+
+    ``state`` is the vehicle's current session, if any. The abort is complete
+    only when the lease names no session, or when EV teardown recorded that it
+    ended the lease's own session (``SolarEVHeadroom.session_ended``); a later
+    session for the vehicle then belongs to its new owner. Otherwise the abort
+    stays unconfirmed, as an unexplained disappearance proves nothing.
+    """
+    candidate = (lease or {}).get("candidate")
+    if state is not None and candidate and state is candidate[1]:
+        return None
+    if state is not None and not candidate:
+        return None
+    return not candidate or bool(lease.get("session_ended"))
+
+
 def candidate_token(state):
     params = state.get("params") or {}
     owner = state.get("ownership") or {}
@@ -200,6 +217,20 @@ class SolarEVHeadroom:
                 return False
             self.lease["released_at"] = self.utcnow()
             return True
+
+    def session_ended(self, vehicle_id, state) -> None:
+        """Record that EV teardown ended the trial's own session.
+
+        Teardown removes the session before it closes the lease, so the abort
+        can no longer find it. Without this record the abort waited forever
+        for a session that would never return, and every later discovery was
+        refused until restart. Teardown's own Stop (or handoff) and the EV
+        recovery journal own any uncertain command from here.
+        """
+        lease = self.lease
+        candidate = (lease or {}).get("candidate")
+        if candidate and candidate[0] == vehicle_id and candidate[1] is state:
+            lease["session_ended"] = True
 
     async def command_started(self, candidate, target_power_kw=None):
         """Persist trial cleanup before the existing EV executor may submit."""

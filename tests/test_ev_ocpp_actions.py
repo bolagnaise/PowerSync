@@ -20443,3 +20443,87 @@ def test_solar_surplus_running_session_pauses_only_on_a_real_low_reading(
     assert bool(state.get("paused")) is pauses
     if not pauses:
         assert not (state.get("stop_outcome") or {}).get("battery_floor")
+
+
+@pytest.mark.parametrize("stop_ok", [True, None, False])
+def test_fresh_stopped_report_settles_an_uncertain_start(monkeypatch, stop_ok):
+    """An uncertain Start must not keep solar discovery refused after a real Stop."""
+    # The car reports Stopped, so its retained command is not counted as surplus.
+    hass = _Hass([_State("sensor.VIN123_charging_state", "stopped",
+                         last_changed=datetime.now(timezone.utc) - timedelta(minutes=2))])
+    vehicle_id = "VIN123"
+    actions._dynamic_ev_state.clear()
+    state = _solar_surplus_state(current_amps=8)
+    state["low_surplus_start"] = datetime.now() - timedelta(minutes=11)
+    state["transport_recovery_pending"] = True
+    state["params"]["notify_on_complete"] = False
+    state["params"]["owner_mode"] = "solar_surplus"
+    actions._dynamic_ev_state["entry-1"] = {vehicle_id: state}
+    _install_solar_surplus_runtime_stubs(monkeypatch, {
+        "battery_soc": 100, "grid_power": 0, "battery_power": 0,
+        "solar_power": 0, "load_power": 500,
+    })
+
+    async def set_amps(hass, config_entry, vid, amps, params):
+        return stop_ok if amps == 0 else True
+
+    monkeypatch.setattr(actions, "_set_vehicle_amps", set_amps)
+
+    async def observed_power(*args, **kwargs):
+        return 0.0, True
+
+    monkeypatch.setattr(actions, "_get_observed_ev_power_reading_kw", observed_power)
+
+    asyncio.run(actions._dynamic_ev_update_surplus(hass, _Entry(), "entry-1", vehicle_id))
+    # The car's fresh Stopped report settles the uncertain Start on its own.
+    assert "transport_recovery_pending" not in state
+    assert state["current_amps"] == 0
+
+
+
+def _uncertain_start_tick(monkeypatch, *, hass, stop_ok=True, observed=(0.0, True), **state_extra):
+    vehicle_id = "VIN123"
+    actions._dynamic_ev_state.clear()
+    state = _solar_surplus_state(current_amps=8)
+    state["low_surplus_start"] = datetime.now() - timedelta(minutes=11)
+    state["transport_recovery_pending"] = True
+    state["params"]["notify_on_complete"] = False
+    state["params"]["owner_mode"] = "solar_surplus"
+    state.update(state_extra)
+    actions._dynamic_ev_state["entry-1"] = {vehicle_id: state}
+    _install_solar_surplus_runtime_stubs(monkeypatch, {
+        "battery_soc": 100, "grid_power": 0, "battery_power": 0,
+        "solar_power": 0, "load_power": 500,
+    })
+    stops = []
+
+    async def set_amps(hass, config_entry, vid, amps, params):
+        stops.append(amps)
+        return stop_ok if amps == 0 else True
+
+    async def observed_power(*args, **kwargs):
+        return observed
+
+    monkeypatch.setattr(actions, "_set_vehicle_amps", set_amps)
+    monkeypatch.setattr(actions, "_get_observed_ev_power_reading_kw", observed_power)
+    asyncio.run(actions._dynamic_ev_update_surplus(hass, _Entry(), "entry-1", vehicle_id))
+    return state, stops
+
+
+def test_uncertain_start_is_kept_during_the_post_command_grace(monkeypatch):
+    hass = _Hass([_State("sensor.VIN123_charging_state", "stopped",
+                         last_changed=datetime.now(timezone.utc))])
+    state, _stops = _uncertain_start_tick(
+        monkeypatch, hass=hass, last_start_command_at=datetime.now(),
+    )
+    assert state.get("transport_recovery_pending") is True
+
+
+@pytest.mark.parametrize(("stop_ok", "settled"), [(True, True), (None, False), (False, False)])
+def test_confirmed_zero_amp_stop_settles_an_uncertain_start(monkeypatch, stop_ok, settled):
+    """Without a Stopped report, only a successful Stop settles the uncertain Start."""
+    state, stops = _uncertain_start_tick(
+        monkeypatch, hass=_Hass([]), stop_ok=stop_ok, observed=(None, False),
+    )
+    assert stops and stops[-1] == 0
+    assert ("transport_recovery_pending" not in state) is settled

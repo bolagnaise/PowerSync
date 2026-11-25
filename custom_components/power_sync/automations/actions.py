@@ -16555,6 +16555,18 @@ async def _dynamic_ev_update_surplus(
             # without attributing that stop to our unsuccessful command.
             state.pop("stop_outcome", None)
             state["low_surplus_start"] = None
+        if state.pop("transport_recovery_pending", None):
+            # Fresh Stopped at 0 kW after the post-command grace settles an
+            # uncertain Start. Keeping the flag reserved draw the car does not
+            # have and kept solar headroom discovery refused, so on a zero-export
+            # site the hidden surplus could never let the session start again.
+            # A later Start follows the normal sustained-surplus path.
+            state["current_amps"] = 0
+            state["target_amps"] = 0
+            _LOGGER.info(
+                "Solar surplus EV: %s reports stopped at 0 kW; the uncertain Start is settled",
+                vehicle_id,
+            )
     elif current_amps <= 0 and observed_current_power_kw > 0.05:
         effective_current_amps = max(1, int(round((observed_current_power_kw * 1000) / (voltage * phases))))
 
@@ -16767,7 +16779,11 @@ async def _dynamic_ev_update_surplus(
                     return
 
                 # Send the actual start-charging command to the vehicle.
-                if state.get("transport_recovery_pending") and not _tesla_dynamic_restart_due(state):
+                if (
+                    state.get("transport_recovery_pending")
+                    or state.get("physical_restart_required")
+                ) and not _tesla_dynamic_restart_due(state):
+                    # Restarts stay bounded after an uncertain Start is settled.
                     return
                 start_params = dict(params)
                 if start_params.get("charger_type") in {"sigenergy", "tesla"}:
@@ -16943,6 +16959,11 @@ async def _dynamic_ev_update_surplus(
                 # mistaking post-stop telemetry lag for a driver override.
                 state["external_start_detection_armed"] = False
                 state["charging_started"] = False
+                # A successful Stop settles an earlier uncertain Start: there is
+                # no possible draw left to reserve. Leaving the flag set kept
+                # solar headroom discovery refused, so on a zero-export site
+                # the hidden surplus could never let the session start again.
+                state.pop("transport_recovery_pending", None)
                 state["last_stop_command_at"] = datetime.now().astimezone()
             if applied_amps != new_amps:
                 state["reason"] = state["reason"].replace(
@@ -21791,6 +21812,9 @@ async def _action_stop_ev_charging_dynamic(
                 success=not (stop_charging and vid not in passive_vehicle_ids),
             )
             released_vehicle_ids.add(vid)
+            headroom_runtime = hass.data.get(DOMAIN, {}).get(entry_id, {}).get("solar_ev_headroom")
+            if headroom_runtime is not None:
+                headroom_runtime.session_ended(vid, state)
             del vehicles[vid]
             if (
                 not stop_charging

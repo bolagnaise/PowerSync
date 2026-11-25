@@ -49209,7 +49209,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Native EV discovery is requested by the EV loop, never by price polling.
     # A retained mutation is reconciled before a new discovery may be admitted.
     if is_sigenergy or is_sungrow:
-        from .solar_ev_headroom import SolarEVHeadroom, candidate_token
+        from .solar_ev_headroom import SolarEVHeadroom, candidate_token, ended_session_abort_result
         from .automations.live_status import _native_zero_export
 
         _headroom_entry = hass.data[DOMAIN][entry.entry_id]
@@ -49320,11 +49320,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 return False
             if _is_monitoring_mode():
                 return False
-            if state is None:
-                # Session teardown retains any uncertain command in its existing
-                # recovery journal. This path never retires that EV evidence.
-                return not lease.get("candidate")
-            if (candidate and state is not candidate[1]) or candidate_token(state) != token:
+            # Session teardown retains any uncertain command in its existing
+            # recovery journal. This path never retires that EV evidence; it
+            # only accepts teardown's record that it ended this session.
+            ended = ended_session_abort_result(lease, state)
+            if ended is not None:
+                return ended
+            if candidate_token(state) != token:
                 return False
             if not state.get("active"):
                 return not state.get("stop_outcome")
