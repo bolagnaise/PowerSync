@@ -15593,7 +15593,7 @@ async def _refresh_dynamic_tesla_charger_capability(
 
 
 
-# Without a measured draw, an external manual override cannot outlive this.
+# An external manual override ends after this long without measured draw.
 EXTERNAL_MANUAL_OVERRIDE_STALE_SECONDS = 30 * 60
 
 
@@ -15604,7 +15604,12 @@ def _external_manual_override_stale(
     power_kw: float,
     now: float | None = None,
 ) -> bool:
-    """Whether a suspended Solar Surplus session lost its evidence of charging."""
+    """Whether a suspended Solar Surplus session lost its evidence of charging.
+
+    ``external_manual_override_since`` marks the latest evidence: the override
+    start, then each measured draw. A telemetry gap therefore only ends the
+    override after a full window without draw, however long it has run.
+    """
     now = time.time() if now is None else now
     since = state.get("external_manual_override_since")
     if not isinstance(since, (int, float)) or not math.isfinite(since):
@@ -15612,6 +15617,7 @@ def _external_manual_override_stale(
         state["external_manual_override_since"] = now
         return False
     if power_available and power_kw > _ACTIVE_EV_POWER_EPSILON_KW:
+        state["external_manual_override_since"] = now
         return False
     return now - since >= EXTERNAL_MANUAL_OVERRIDE_STALE_SECONDS
 

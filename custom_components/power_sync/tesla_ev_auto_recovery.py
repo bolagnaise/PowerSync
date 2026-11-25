@@ -21,6 +21,8 @@ INTERVAL_SECONDS = 60
 MAX_RETRY_SECONDS = 3600
 # Repeat an unchanged "still held" reason at most this often.
 HELD_LOG_REPEAT_SECONDS = 1800
+# At most one independent cloud read per held vehicle in this interval.
+EXPIRY_READ_INTERVAL_SECONDS = 15 * 60
 _LOGGER = logging.getLogger(__name__)
 install_vin_log_filter(_LOGGER)
 
@@ -43,6 +45,7 @@ class NativeRecoveryWorker:
         self.closed = False
         self.stock_checked_at = {}
         self.held_logged = {}
+        self.expiry_read_at = {}
 
     def current(self):
         return (not self.closed
@@ -125,17 +128,37 @@ class NativeRecoveryWorker:
         return lease_id is None and owner is None
 
     async def _expire_settled_ble(self, vin):
-        """Retire BLE attempts whose effect a fresh vehicle report already shows."""
-        from .tesla_ev_observation import get_tesla_vehicle_observation
+        """Retire BLE attempts whose effect an independent cloud report shows."""
+        from .tesla_ev_observation import async_read_independent_tesla_vehicle
 
-        if not self._owner_free(vin):
-            retired, reason = False, "a command writer or charging owner is active"
-        else:
-            retired, reason = await recovery.async_expire_settled_ble_attempts(
-                self.hass, self.entry, vin,
-                get_tesla_vehicle_observation(self.hass, vin),
-                authorize=lambda: self._owner_free(vin),
-            )
+        retired, reason = False, None
+        cutoff, reason = recovery.ble_attempt_expiry_due(self.hass, self.entry, vin)
+        now = time.time()
+        if reason is None and not self._owner_free(vin):
+            reason = "a command writer or charging owner is active"
+        elif reason is None and now < cutoff:
+            reason = f"waiting {int(cutoff - now)} s for the unconfirmed command to settle"
+        elif reason is None and now - self.expiry_read_at.get(vin, 0) < EXPIRY_READ_INTERVAL_SECONDS:
+            reason = "waiting before the next independent vehicle read"
+        elif reason is None:
+            # One explicit cloud charge_state read: no wake, no paid refresh,
+            # newer than the settle window, abandoned if authority changes.
+            self.expiry_read_at[vin] = now
+            try:
+                observation = await async_read_independent_tesla_vehicle(
+                    self.hass, vin, updated_after=cutoff, allow_paid_refresh=False,
+                    authorize=lambda: self._owner_free(vin),
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as err:  # the bridge recovery below still runs
+                observation = None
+                reason = f"independent vehicle read failed ({type(err).__name__})"
+            if reason is None:
+                retired, reason = await recovery.async_expire_settled_ble_attempts(
+                    self.hass, self.entry, vin, observation,
+                    authorize=lambda: self._owner_free(vin),
+                )
         if retired:
             self.held_logged.pop(vin, None)
             _LOGGER.info(
@@ -144,7 +167,6 @@ class NativeRecoveryWorker:
             )
             return True
         last = self.held_logged.get(vin)
-        now = time.time()
         if last is None or last[0] != reason or now - last[1] >= HELD_LOG_REPEAT_SECONDS:
             self.held_logged[vin] = (reason, now)
             _LOGGER.info("Tesla EV commands for %s remain held: %s", vin, reason)

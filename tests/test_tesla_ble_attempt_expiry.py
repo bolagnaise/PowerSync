@@ -121,6 +121,40 @@ async def test_unproven_stop_stays_held(harness, observed, expected):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("weakened,expected", [
+    ({"origin": "native_coordinator"}, "not an independent native cloud report"),
+    ({"field_provenance": {}}, "lacks field provenance"),
+    ({"field_provenance": {"charge_state": "charge_state"}}, "lacks field provenance"),
+])
+async def test_cached_or_unattributed_reports_cannot_retire_a_stop(harness, weakened, expected):
+    """Only an independent cloud document, field by field, proves the effect."""
+    hass, entry = harness
+    runtime, _ = _seed(hass, entry, incident=_held_incident())
+    sidecar_before = deepcopy(runtime["_tesla_ev_recovery_sidecar"])
+
+    retired, reason = await recovery.async_expire_settled_ble_attempts(
+        hass, entry, VIN_A, replace(_stopped(time.time()), **weakened))
+
+    assert not retired and expected in reason
+    assert runtime["_tesla_ev_recovery_sidecar"] == sidecar_before
+    assert not _attempt(runtime).get("recovery_retired")
+
+
+@pytest.mark.asyncio
+async def test_rate_effect_needs_requested_current_provenance(harness):
+    hass, entry = harness
+    _seed(hass, entry, operation="rate", bound={"kind": "rate", "min_amps": 13, "max_amps": 13})
+    sample = _observation(VIN_A, stamp=time.time(), requested=13)
+    sample = replace(sample, field_provenance={
+        name: path for name, path in sample.field_provenance.items()
+        if name != "requested_current"})
+
+    retired, reason = await recovery.async_expire_settled_ble_attempts(hass, entry, VIN_A, sample)
+
+    assert not retired and "lacks field provenance" in reason
+
+
+@pytest.mark.asyncio
 async def test_attempt_inside_the_settle_window_stays_held(harness):
     hass, entry = harness
     _seed(hass, entry, age=60)
@@ -210,7 +244,7 @@ async def test_save_failure_rolls_back_attempt_and_incident(harness, monkeypatch
     async def refuse(*_args, **_kwargs):
         return False
 
-    monkeypatch.setattr(recovery, "_persist", refuse)
+    monkeypatch.setattr(recovery, "_save_sidecar", refuse)
     retired, reason = await recovery.async_expire_settled_ble_attempts(
         hass, entry, VIN_A, _stopped(time.time()))
 
@@ -219,14 +253,19 @@ async def test_save_failure_rolls_back_attempt_and_incident(harness, monkeypatch
     assert runtime[recovery.RECOVERY_KEY] == journal_before
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("owned", [False, True])
-async def test_worker_expires_a_settled_stop_before_any_bridge_restart(harness, monkeypatch, owned):
-    hass, entry = harness
-    runtime, _ = _seed(hass, entry, incident=_held_incident())
+def _worker(hass, entry, runtime, monkeypatch, reads, *, owned=False):
     observation = importlib.import_module("power_sync.tesla_ev_observation")
-    monkeypatch.setattr(observation, "get_tesla_vehicle_observation",
-                        lambda _hass, vin, **_kw: _stopped(time.time()))
+
+    async def independent(_hass, vin, **kwargs):
+        reads.append(kwargs)
+        assert vin == VIN_A and kwargs["allow_paid_refresh"] is False
+        return _stopped(time.time())
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("Expiry must not use the cached coordinator observation")
+
+    monkeypatch.setattr(observation, "async_read_independent_tesla_vehicle", independent)
+    monkeypatch.setattr(observation, "get_tesla_vehicle_observation", forbidden)
     monkeypatch.setitem(sys.modules, "power_sync.automations.ev_ownership",
                         _ownership({"owner": "powersync"} if owned else None))
     automatic = importlib.import_module("power_sync.tesla_ev_auto_recovery")
@@ -238,15 +277,62 @@ async def test_worker_expires_a_settled_stop_before_any_bridge_restart(harness, 
     monkeypatch.setattr(automatic.NativeRecoveryWorker, "_recover_stock", stock_recovery)
     worker = automatic.NativeRecoveryWorker(hass, entry, runtime)
     runtime[automatic.WORKER_KEY] = worker
+    return worker, restarts
+
+
+@pytest.mark.asyncio
+async def test_worker_retires_a_settled_stop_from_one_independent_read(harness, monkeypatch):
+    hass, entry = harness
+    runtime, submitted = _seed(hass, entry, incident=_held_incident())
+    reads = []
+    worker, restarts = _worker(hass, entry, runtime, monkeypatch, reads)
 
     await worker.async_tick()
 
-    if owned:
-        # A live owner may still be acting on this car: keep the hold and
-        # fall back to the existing bridge recovery path.
-        assert recovery.get_vehicle_route(hass, entry, VIN_A)["reason"] == "ble_recovery"
-        assert restarts == [VIN_A]
-        assert worker.held_logged[VIN_A][0] == "a command writer or charging owner is active"
-    else:
-        assert recovery.get_vehicle_route(hass, entry, VIN_A) is None
-        assert restarts == []
+    assert recovery.get_vehicle_route(hass, entry, VIN_A) is None
+    assert restarts == []
+    assert len(reads) == 1
+    # The report must be newer than the settle window, not just recent.
+    assert reads[0]["updated_after"] == submitted + SETTLE
+    assert runtime["_tesla_ev_recovery_sidecar"]["incidents"]["incident-1"]["phase"] == "released"
+
+
+@pytest.mark.asyncio
+async def test_worker_keeps_hold_without_reading_while_owned_or_settling(harness, monkeypatch):
+    hass, entry = harness
+    runtime, _ = _seed(hass, entry, incident=_held_incident())
+    reads = []
+    worker, restarts = _worker(hass, entry, runtime, monkeypatch, reads, owned=True)
+
+    await worker.async_tick()
+
+    assert reads == []
+    assert recovery.get_vehicle_route(hass, entry, VIN_A)["reason"] == "ble_recovery"
+    assert restarts == [VIN_A]
+    assert worker.held_logged[VIN_A][0] == "a command writer or charging owner is active"
+
+    runtime, _ = _seed(hass, entry, age=60)
+    worker, restarts = _worker(hass, entry, runtime, monkeypatch, reads)
+    await worker.async_tick()
+    assert reads == [] and "to settle" in worker.held_logged[VIN_A][0]
+
+
+@pytest.mark.asyncio
+async def test_worker_reads_at_most_once_per_interval(harness, monkeypatch):
+    hass, entry = harness
+    runtime, _ = _seed(hass, entry)
+    reads = []
+    worker, _ = _worker(hass, entry, runtime, monkeypatch, reads)
+    observation = importlib.import_module("power_sync.tesla_ev_observation")
+
+    async def charging(_hass, vin, **kwargs):
+        reads.append(kwargs)
+        return _observation(VIN_A, stamp=time.time())
+
+    monkeypatch.setattr(observation, "async_read_independent_tesla_vehicle", charging)
+    await worker.async_tick()
+    await worker.async_tick()
+
+    assert len(reads) == 1
+    assert recovery.get_vehicle_route(hass, entry, VIN_A)["reason"] == "ble_recovery"
+    assert worker.held_logged[VIN_A][0] == "waiting before the next independent vehicle read"
