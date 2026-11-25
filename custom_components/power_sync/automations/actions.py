@@ -2029,6 +2029,9 @@ def _tesla_physical_charging_snapshot(
 
     return {
         "charging": charging,
+        # Whether any usable charge-state reading existed, so "not charging"
+        # can be told apart from "no telemetry at all".
+        "charging_observed": bool(charging_observations),
         "measurements": frozenset(measurements),
         "fresh_measurements": frozenset(fresh_measurements),
         "direct_measurements": frozenset(direct_measurements),
@@ -2278,6 +2281,59 @@ async def _solar_surplus_tesla_charge_limit(hass, config_entry, vehicle_id: str)
     ))[1]
 
 
+_SOLAR_CEILING_SOC_UNAVAILABLE = "EV battery level unavailable for Solar Surplus ceiling"
+
+
+def _solar_session_held_stopped_without_charge(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    vehicle_id: str,
+    state: Dict[str, Any],
+    params: Dict[str, Any],
+    *,
+    require_confirmed_stop: bool = False,
+) -> bool:
+    """Return whether a Tesla Solar Surplus session is already held stopped.
+
+    True only when this controller's own last command left the car at 0 A
+    (no pending, unconfirmed or recovering command, and no Start since) and
+    the car's VIN-bound telemetry shows a charge state that is not charging,
+    with no positive current or power anywhere. Any doubt returns False.
+    ``require_confirmed_stop`` additionally requires a recorded successful
+    Stop by this controller, excluding sessions that never started.
+    """
+    if params.get("charger_type", "tesla") != "tesla":
+        return False
+    if not (
+        state.get("active") is True
+        and state.get("charging_started") is False
+        and state.get("current_amps") == 0
+        and state.get("target_amps") == 0
+    ):
+        return False
+    if any(state.get(key) for key in (
+        "stop_outcome", "transport_recovery_pending", "external_manual_override",
+        "last_physical_restart_attempt_at",
+    )):
+        return False
+    started_at = state.get("last_start_command_at")
+    stopped_at = state.get("last_stop_command_at")
+    if require_confirmed_stop and stopped_at is None:
+        return False
+    if started_at is not None:
+        try:
+            if stopped_at is None or started_at.timestamp() >= stopped_at.timestamp():
+                return False
+        except (AttributeError, OSError, OverflowError, ValueError):
+            return False
+    snapshot = _tesla_physical_charging_snapshot(hass, config_entry, vehicle_id, params)
+    return bool(
+        snapshot.get("charging_observed")
+        and not snapshot.get("charging")
+        and not snapshot.get("measurements")
+    )
+
+
 async def _dynamic_ev_full_soc_reason(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
@@ -2320,7 +2376,7 @@ async def _dynamic_ev_full_soc_reason(
     if target is None:
         return None
     if ev_soc is None:
-        return f"EV battery level unavailable for Solar Surplus ceiling {target:g}%"
+        return f"{_SOLAR_CEILING_SOC_UNAVAILABLE} {target:g}%"
     if ev_soc >= target:
         return f"EV {ev_soc:g}% reached Solar Surplus ceiling {target:g}%"
     return None
@@ -15746,6 +15802,20 @@ async def _dynamic_ev_update_surplus(
         if state.get("external_manual_override") or (lease and lease.get("owner") != "powersync"):
             state["reason"] = full_soc_reason
             return
+        if full_soc_reason.startswith(_SOLAR_CEILING_SOC_UNAVAILABLE) and (
+            _solar_session_held_stopped_without_charge(
+                hass, config_entry, vehicle_id, state, params,
+            )
+        ):
+            # An unknown SoC cannot show the car crossed its ceiling, and the
+            # car is already stopped at 0 A. A Stop to a sleeping Tesla cannot
+            # be confirmed; its retained recovery history would block every
+            # later command. Keep holding without raising the rate.
+            reason = f"{full_soc_reason}; already stopped at 0 A, no Stop sent"
+            if state.get("reason") != reason:
+                _LOGGER.info("Solar surplus EV %s: %s", vehicle_id, reason)
+            state["reason"] = reason
+            return
         _LOGGER.info("⚡ Solar surplus EV: Stopping - %s", full_soc_reason)
         await _action_stop_ev_charging_dynamic(
             hass,
@@ -21815,10 +21885,23 @@ async def _action_stop_ev_charging_dynamic(
                 # Ending session history can await telemetry. Decide whether
                 # to omit Stop only after that await, immediately before release.
                 try:
+                    handoff = params.get("_waiting_solar_handoff")
                     if await _waiting_solar_tesla_is_stopped(
                         hass, config_entry, vid, state, state_params,
-                        handoff=params.get("_waiting_solar_handoff"),
+                        handoff=handoff,
                         solar_ceiling=params.get("_solar_ceiling_stop") is True,
+                    ) or (
+                        # A Start follows a Smart Schedule/Boost handoff at
+                        # once, so a Stop to a car this controller already
+                        # stopped is redundant; to a sleeping Tesla it cannot
+                        # be confirmed and its retained history blocks that
+                        # Start. Requires our own confirmed Stop as the last
+                        # command, unlike a session that never started.
+                        handoff in ("smart_schedule", "boost")
+                        and _solar_session_held_stopped_without_charge(
+                            hass, config_entry, vid, state, state_params,
+                            require_confirmed_stop=True,
+                        )
                     ):
                         headroom = hass.data.get(DOMAIN, {}).get(entry_id, {}).get("solar_ev_headroom")
                         if (
