@@ -1282,15 +1282,19 @@ class MonitoringModeSwitch(SwitchEntity):
 
         self._attr_is_on = self._current_value()
 
-    def _current_value(self) -> bool:
-        """Read the current config-entry option instead of a startup cache."""
-        if self._entry.options.get(
+    def _telemetry_only(self) -> bool:
+        """Return whether the battery connection can never accept commands."""
+        return self._entry.options.get(
             CONF_SUNGROW_CONNECTION_TYPE,
             self._entry.data.get(
                 CONF_SUNGROW_CONNECTION_TYPE,
                 SUNGROW_CONNECTION_DIRECT,
             ),
-        ) == SUNGROW_CONNECTION_IHOMEMANAGER:
+        ) == SUNGROW_CONNECTION_IHOMEMANAGER
+
+    def _current_value(self) -> bool:
+        """Read the current config-entry option instead of a startup cache."""
+        if self._telemetry_only():
             return True
         return bool(
             self._entry.options.get(
@@ -1307,6 +1311,13 @@ class MonitoringModeSwitch(SwitchEntity):
     def is_on(self) -> bool:
         """Return True if monitoring mode is active."""
         return self._current_value()
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Tell dashboards when turning monitoring off would be refused."""
+        if self._telemetry_only():
+            return {"locked_on": True, "locked_reason": "telemetry_only_connection"}
+        return {}
 
     async def async_added_to_hass(self) -> None:
         """Refresh state when monitoring mode is changed through the API/app."""
@@ -1354,13 +1365,7 @@ class MonitoringModeSwitch(SwitchEntity):
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Disable monitoring mode — resume normal battery/inverter control."""
-        if self._entry.options.get(
-            CONF_SUNGROW_CONNECTION_TYPE,
-            self._entry.data.get(
-                CONF_SUNGROW_CONNECTION_TYPE,
-                SUNGROW_CONNECTION_DIRECT,
-            ),
-        ) == SUNGROW_CONNECTION_IHOMEMANAGER:
+        if self._telemetry_only():
             _LOGGER.warning(
                 "Monitoring mode cannot be disabled for the telemetry-only "
                 "Sungrow iHomeManager connection"

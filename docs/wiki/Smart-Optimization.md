@@ -79,6 +79,10 @@ measurements, independently of the future optimizer plan.
 
 When Monitoring Mode is switched on, PowerSync first releases its active battery control and restores any backup reserve temporarily raised for an IDLE or EV preservation hold. The switch stays off if that cleanup cannot be confirmed, retaining the saved reserve for retry. Successful cleanup enables monitoring and blocks subsequent automatic battery commands; it does not confirm that an EV has stopped charging or restore exhausted provider credits.
 
+While Monitoring Mode is on, the **Live status** line in **Smart Optimization settings** says Smart Optimization is planning only and sends no battery commands, rather than calling it running.
+
+On a read-only battery connection, such as Sungrow iHomeManager, Monitoring Mode is always on and the switch refuses to turn off. The Monitoring Mode switch then reports `locked_on: true` and `locked_reason: telemetry_only_connection`, so dashboards can show it as fixed. Other connections report no lock attributes.
+
 ## Planning after a restart
 
 Smart Optimization waits for startup battery restoration before solving. If that restoration is cancelled by a newer control operation, a later optimization cycle retries it automatically. Cancelling a plan refresh does not cancel the shared restoration; unresolved force cleanup still blocks new control.

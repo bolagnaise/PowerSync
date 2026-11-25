@@ -13664,6 +13664,12 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
                         and license_status
                         and license_status.get("can_optimize")
                     ),
+                    monitoring=bool(
+                        self.config_entry.options.get(
+                            CONF_MONITORING_MODE,
+                            self.config_entry.data.get(CONF_MONITORING_MODE, False),
+                        )
+                    ),
                 ),
                 "ai_summary_key_status": (
                     "Configured" if current_ai_key_configured else "Not configured"
