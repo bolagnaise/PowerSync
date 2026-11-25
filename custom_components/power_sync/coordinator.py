@@ -1868,6 +1868,11 @@ class SensitiveDataFilter(logging.Filter):
 _LOGGER = logging.getLogger(__name__)
 _LOGGER.addFilter(SensitiveDataFilter())
 
+# Highest Sungrow max-charge setting (33046) that is a solar-export hold rather
+# than a normal limit: 0 W, or the 10 W register minimum on firmware that
+# rejects 0 W. Mirrors _SUNGROW_CHARGE_HOLD_MAX_KW in optimization/solar_export.
+SUNGROW_CHARGE_HOLD_MAX_KW = 0.01
+
 
 def _parse_retry_after(response: aiohttp.ClientResponse) -> float | None:
     """Parse Retry-After header from an HTTP response.
@@ -6886,6 +6891,7 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         self._pre_control_charge_limit_kw: float | None = None
         self._pre_control_discharge_limit_kw: float | None = None
         self._zero_discharge_cap_rejected = False
+        self._zero_charge_cap_rejected = False
         self._pre_control_export_limit_w: int | None = None
         self._pre_control_export_limit_captured = False
         # Which subsystem owns the captured export-limit baseline.  Solar
@@ -8429,10 +8435,10 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
             if current_kw is None:
                 _LOGGER.debug("Sungrow solar-export cleanup is waiting for charge-limit register readback")
                 return False
-            if current_kw > 0:
+            if current_kw > SUNGROW_CHARGE_HOLD_MAX_KW:
                 return True
             if baseline_kw is None:
-                _LOGGER.debug("Sungrow charge limit is zero and the saved hold has no verified restore value")
+                _LOGGER.debug("Sungrow charge limit is at its hold value and the saved hold has no verified restore value")
                 return False
             if self._monitoring_mode_active() or not self._native_control_allowed(
                 "Sungrow charge hold restore"
@@ -8455,6 +8461,33 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
             return False
         async with self._modbus_lock, self._controller:
             return await self._controller.set_charge_rate_limit(kw)
+
+    async def apply_solar_export_charge_hold(self) -> bool:
+        """Hold Sungrow charging with the lowest cap the firmware accepts.
+
+        Some Sungrow firmware rejects a 0 W max-charge write (33046, exception
+        code 4) but accepts its 10 W minimum, as it does for the discharge cap.
+        Remember a demonstrated zero rejection so later holds use 10 W directly.
+        """
+        if not self._native_control_allowed("Sungrow solar-export charge hold"):
+            return False
+        async with self._modbus_lock, self._controller:
+            if not getattr(self, "_zero_charge_cap_rejected", False):
+                if await self._controller.set_charge_rate_limit(0.0):
+                    return True
+                limit_ok = await self._controller.set_charge_rate_limit(
+                    SUNGROW_CHARGE_HOLD_MAX_KW
+                )
+                if limit_ok:
+                    self._zero_charge_cap_rejected = True
+                    _LOGGER.info(
+                        "Sungrow rejected a 0 W charge cap but accepted 10 W; "
+                        "later solar-export holds will use 10 W directly"
+                    )
+                return bool(limit_ok)
+            return bool(
+                await self._controller.set_charge_rate_limit(SUNGROW_CHARGE_HOLD_MAX_KW)
+            )
 
     async def set_discharge_rate_limit(self, kw: float) -> bool:
         """Set maximum discharge rate in kW.

@@ -548,7 +548,10 @@ charge-limit readback, SolaX Modbus entities, Fronius Reserva/GEN24 Block
 Charging, and Neovolt No Battery Charge. Availability is checked for the actual
 configured variant on every plan and again before control. A supported family
 therefore remains on normal control when its required entity, device, current
-normal value, or verification readback is unavailable.
+normal value, or verification readback is unavailable. On Sungrow firmware that
+rejects a 0 W charge limit, the hold uses the inverter's 10 W minimum instead;
+PowerSync treats a 10 W readback as its own hold, never as the normal limit to
+restore.
 
 A solar-export hold also requires a known finite site export cap. PowerSync
 auto-detects one only where the battery connection reports its own limit —

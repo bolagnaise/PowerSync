@@ -4156,7 +4156,9 @@ def sungrow_charge_hold_site():
 
     def child(host, raw_limit):
         driver = SungrowSHController(host)
-        device = types.SimpleNamespace(raw=raw_limit, writes=[], ignore_restore=False)
+        device = types.SimpleNamespace(
+            raw=raw_limit, writes=[], ignore_restore=False, reject_zero=False
+        )
         driver.connect = AsyncMock(return_value=True)
         driver.disconnect = AsyncMock()
 
@@ -4167,6 +4169,8 @@ def sungrow_charge_hold_site():
         async def write(address, value):
             assert address == 33046
             device.writes.append(value)
+            if value == 0 and device.reject_zero:
+                return False  # Firmware exception 4: 10 W is the minimum.
             if not (value > 0 and device.ignore_restore):
                 device.raw = value
             return True
@@ -4223,6 +4227,56 @@ def test_sungrow_dual_hold_restores_only_owned_zero_and_verifies_writes(sungrow_
     assert store.data == {}
     assert (first_device.raw, second_device.raw) == (800, 725)
     assert first_device.writes == [0] and second_device.writes == [0, 725, 725]
+
+
+def test_sungrow_hold_uses_10w_minimum_when_firmware_rejects_zero(sungrow_charge_hold_site):
+    """Ticket #191: some Sungrow firmware rejects a 0 W write to 33046.
+
+    The inverter accepts its 10 W minimum. The solar-export hold must use it,
+    treat a 10 W readback as still held, and restore the saved baseline.
+    """
+    child, module = sungrow_charge_hold_site
+    coord, device = child("192.0.2.1", 1000)
+    device.reject_zero = True
+    adapter = module.resolve_solar_export_adapter("sungrow", coord)
+    store = _FakeStore()
+    hold = module.SolarExportHoldController(store, adapter)
+
+    assert asyncio.run(hold.apply("entry", "slot"))
+    assert hold.active and store.data["phase"] == "active"
+    assert device.writes == [0, 1] and device.raw == 1
+    assert store.data["plan"]["targets"][0]["value"] == 10.0
+
+    # The provider poll now observes the 10 W hold; it remains our hold.
+    coord.data["charge_rate_limit_kw"] = 0.01
+    assert hold.capability()["supported"]
+    assert asyncio.run(hold.apply("entry", "next-slot"))
+    assert device.writes == [0, 1]
+
+    # A restart must not mistake the 10 W hold for a cleared limit.
+    restarted = module.SolarExportHoldController(store, adapter)
+    assert asyncio.run(restarted.async_reconcile_startup())
+    assert store.data == {}
+    assert device.raw == 1000 and device.writes == [0, 1, 1000]
+
+    # The next hold uses 10 W directly instead of repeating the rejected zero.
+    coord.data["charge_rate_limit_kw"] = 10.0
+    assert asyncio.run(restarted.apply("entry", "later-slot"))
+    assert device.writes == [0, 1, 1000, 1]
+    assert asyncio.run(restarted.clear("done"))
+    assert device.raw == 1000 and not restarted.active
+
+
+def test_sungrow_hold_does_not_capture_10w_as_restore_baseline(sungrow_charge_hold_site):
+    child, module = sungrow_charge_hold_site
+    coord, device = child("192.0.2.1", 1)
+    coord.data["charge_rate_limit_kw"] = 0.01
+    adapter = module.resolve_solar_export_adapter("sungrow", coord)
+    hold = module.SolarExportHoldController(_FakeStore(), adapter)
+
+    assert not adapter.capability().supported
+    assert not asyncio.run(hold.apply("entry", "slot"))
+    assert device.writes == [] and not hold.active
 
 
 @pytest.mark.parametrize("raw", [None, 0, 0xFFFF, 1000, 2100])
