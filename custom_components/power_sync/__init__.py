@@ -48185,6 +48185,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     _register_ev_charging_services(hass)
     from .teslemetry_solar_api import register_http_view as _register_native_solar_http
     _register_native_solar_http(hass)
+    from .charge_on_solar_pairing import register_http_view as _register_cos_pairing_http
+    _register_cos_pairing_http(hass)
     from .tesla_schedule_planning import register_http_view as _register_tesla_schedule_planning_http
     _register_tesla_schedule_planning_http(hass)
     _LOGGER.info(

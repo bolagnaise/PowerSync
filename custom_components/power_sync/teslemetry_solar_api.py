@@ -6,6 +6,7 @@ import re
 import time
 
 from .teslemetry_solar import SolarError, ownership, validate_settings, native_solar_connection
+from .charge_on_solar_pairing import pairing_supported
 
 
 def register_http_view(hass):
@@ -36,6 +37,8 @@ def register_http_view(hass):
                     options = {**entry.data, **entry.options}
                     entries.append({
                         "entry_id": entry.entry_id, "name": entry.title,
+                        # Local evidence only: no car or gateway request.
+                        "pairing_supported": pairing_supported(hass, entry, vin),
                         "available": bool(token), "provider": provider,
                         "monitoring_mode": bool(options.get("monitoring_mode", False)),
                         "no_solar_installed": bool(options.get("no_solar_installed", False)),

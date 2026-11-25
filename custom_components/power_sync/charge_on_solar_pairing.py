@@ -352,14 +352,13 @@ def vehicle_client_step(clients: dict[str, Any] | None, vin: str,
 
 def local_client(hass, entry):
     """The entry's local Powerwall client, when local signed access is usable."""
-    from .const import DOMAIN
-    from .powerwall_local.client import is_loopback_host
-
-    runtime = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+    runtime = hass.data.get("power_sync", {}).get(entry.entry_id, {})
     local = runtime.get("powerwall_local") or {}
     client = local.get("client") or getattr(local.get("coordinator"), "client", None)
     if client is None or getattr(client, "local_access_enabled", True) is False:
         return None
+    from .powerwall_local.client import is_loopback_host
+
     # A loopback host is a cloud-relay shim, not the gateway on the LAN.
     if is_loopback_host(getattr(client, "host", None)):
         return None
@@ -604,46 +603,80 @@ async def repair_pairing(hass, entry, vin: str, step: str, *, key_format: str | 
     return {"vin": vin, "step": step, **result}
 
 
+def pairing_lock(hass) -> asyncio.Lock:
+    """One pairing request at a time, shared by the services and the mobile API."""
+    return hass.data.setdefault("power_sync_cos_pairing_lock", asyncio.Lock())
+
+
+def pairing_supported(hass, entry, vin: str) -> bool:
+    """Whether status and repair can run, without contacting the car or gateway."""
+    return local_client(hass, entry) is not None and _bridge(hass, entry, vin) is not None
+
+
+def loaded_entry(hass, entry_id):
+    from .const import DOMAIN
+
+    entries = [e for e in hass.config_entries.async_entries(DOMAIN)
+               if e.entry_id == entry_id and e.entry_id in hass.data.get(DOMAIN, {})]
+    if len(entries) != 1:
+        raise SolarError("Select a loaded PowerSync entry")
+    return entries[0]
+
+
+def monitoring_mode(entry) -> bool:
+    from .const import CONF_MONITORING_MODE
+
+    return bool(entry.options.get(CONF_MONITORING_MODE, entry.data.get(CONF_MONITORING_MODE, False)))
+
+
+async def run_request(hass, entry_id, vin, action: str, **options) -> dict[str, Any]:
+    """Validate and run one status read or repair; raises SolarError."""
+    entry = loaded_entry(hass, entry_id)
+    vin = str(vin or "").upper()
+    if not _VIN.fullmatch(vin):
+        raise SolarError("A valid vehicle VIN is required")
+    if action not in ("status", "repair"):
+        raise SolarError("Select status or repair")
+    if action == "repair":
+        if options.get("step") not in REPAIR_STEPS:
+            raise SolarError("Select a pairing step")
+        if options.get("confirm") is not True:
+            raise SolarError("Confirm that PowerSync may change this car's and Powerwall's Charge on Solar pairing")
+        if monitoring_mode(entry):
+            raise SolarError("Pairing changes are blocked in monitoring mode")
+    lock = pairing_lock(hass)
+    if lock.locked():
+        raise SolarError("A Charge on Solar pairing request is already running")
+    async with lock:
+        if action == "status":
+            return await pairing_status(hass, entry, vin)
+        return await repair_pairing(
+            hass, entry, vin, options["step"], key_format=options.get("key_format"),
+            vehicle_key_domain=options.get("vehicle_key_domain"),
+            latitude=options.get("latitude"), longitude=options.get("longitude"))
+
+
+KEY_FORMAT_CHOICES = ("hex", "hex_upper", "base64_raw", "base64_der")
+
+
 def register_services(hass):
     import voluptuous as vol
     from homeassistant.core import SupportsResponse
     from homeassistant.exceptions import HomeAssistantError
-    from .const import CONF_MONITORING_MODE, DOMAIN
-
-    lock = asyncio.Lock()
-
-    def _entry(call):
-        entries = [e for e in hass.config_entries.async_entries(DOMAIN)
-                   if e.entry_id == call.data["entry_id"] and e.entry_id in hass.data.get(DOMAIN, {})]
-        if len(entries) != 1:
-            raise HomeAssistantError("Select a loaded PowerSync entry")
-        vin = call.data["vin"].upper()
-        if not _VIN.fullmatch(vin):
-            raise HomeAssistantError("A valid vehicle VIN is required")
-        if lock.locked():
-            raise HomeAssistantError("A Charge on Solar pairing request is already running")
-        return entries[0], vin
 
     async def status(call):
-        entry, vin = _entry(call)
-        async with lock:
-            return await pairing_status(hass, entry, vin)
+        try:
+            return await run_request(hass, call.data["entry_id"], call.data["vin"], "status")
+        except SolarError as err:
+            raise HomeAssistantError(str(err)) from err
 
     async def repair(call):
-        entry, vin = _entry(call)
-        if not call.data.get("confirm"):
-            raise HomeAssistantError("Confirm that PowerSync may change this car's and Powerwall's "
-                                     "Charge on Solar pairing")
-        if entry.options.get(CONF_MONITORING_MODE, entry.data.get(CONF_MONITORING_MODE, False)):
-            raise HomeAssistantError("Pairing changes are blocked in monitoring mode")
-        async with lock:
-            try:
-                return await repair_pairing(
-                    hass, entry, vin, call.data["step"], key_format=call.data.get("key_format"),
-                    vehicle_key_domain=call.data.get("vehicle_key_domain"),
-                    latitude=call.data.get("latitude"), longitude=call.data.get("longitude"))
-            except SolarError as err:
-                raise HomeAssistantError(str(err)) from err
+        try:
+            return await run_request(hass, call.data["entry_id"], call.data["vin"], "repair", **{
+                key: call.data.get(key) for key in
+                ("step", "confirm", "key_format", "vehicle_key_domain", "latitude", "longitude")})
+        except SolarError as err:
+            raise HomeAssistantError(str(err)) from err
 
     base = {vol.Required("entry_id"): str, vol.Required("vin"): str}
     hass.services.async_register(
@@ -655,9 +688,58 @@ def register_services(hass):
             **base,
             vol.Required("step"): vol.In(REPAIR_STEPS),
             vol.Optional("confirm", default=False): bool,
-            vol.Optional("key_format"): vol.In(("hex", "hex_upper", "base64_raw", "base64_der")),
+            vol.Optional("key_format"): vol.In(KEY_FORMAT_CHOICES),
             vol.Optional("vehicle_key_domain"): vol.In(tuple(DOMAINS)),
             vol.Optional("latitude"): vol.All(vol.Coerce(float), vol.Range(min=-90, max=90)),
             vol.Optional("longitude"): vol.All(vol.Coerce(float), vol.Range(min=-180, max=180)),
         }),
         supports_response=SupportsResponse.OPTIONAL)
+
+
+def _number(value, low, high, name):
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not low <= value <= high:
+        raise SolarError(f"{name} must be a number from {low} to {high}")
+    return float(value)
+
+
+def register_http_view(hass):
+    """Authenticated mobile access; every request is explicit and gated as above."""
+    from homeassistant.components.http import HomeAssistantView
+
+    class PairingView(HomeAssistantView):
+        url = "/api/power_sync/ev/native_solar/pairing"
+        name = "api:power_sync:ev:native_solar:pairing"
+        requires_auth = True
+
+        async def post(self, request):
+            try:
+                body = await request.json()
+            except ValueError:
+                body = None
+            try:
+                if not isinstance(body, dict):
+                    raise SolarError("A request object is required")
+                options = {}
+                if body.get("action") == "repair":
+                    key_format = body.get("key_format")
+                    if key_format is not None and key_format not in KEY_FORMAT_CHOICES:
+                        raise SolarError("Unknown key_format")
+                    domain = body.get("vehicle_key_domain")
+                    if domain is not None and domain not in DOMAINS:
+                        raise SolarError("Unknown vehicle_key_domain")
+                    options = {"step": body.get("step"), "confirm": body.get("confirm"),
+                               "key_format": key_format, "vehicle_key_domain": domain,
+                               "latitude": _number(body.get("latitude"), -90, 90, "latitude"),
+                               "longitude": _number(body.get("longitude"), -180, 180, "longitude")}
+                result = await run_request(hass, body.get("entry_id"), body.get("vin"),
+                                           body.get("action"), **options)
+                return self.json({"success": True, **result})
+            except SolarError as err:
+                # Answered with 200: these messages carry instructions the app
+                # must show whole, and its client truncates non-2xx bodies.
+                code = "pairing_uncertain" if isinstance(err, PairingUncertain) else "pairing_refused"
+                return self.json({"success": False, "error": str(err), "code": code})
+
+    hass.http.register_view(PairingView())

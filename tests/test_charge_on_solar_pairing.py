@@ -459,3 +459,121 @@ def test_bridge_write_requests_are_well_formed(mod):
     with pytest.raises(mod.SolarError):
         run(bridge.add_site("bad:key", DIN, 0, 0))
     assert all(len(text) <= 255 for text in sent)
+
+
+class GateHass:
+    """Just enough Home Assistant for the shared request gate."""
+
+    def __init__(self, entry):
+        self.data = {"power_sync": {entry.entry_id: {}}}
+        self.config_entries = SimpleNamespace(async_entries=lambda domain: [entry])
+
+
+def gate_entry(**options):
+    return SimpleNamespace(entry_id="one", data={}, options=options)
+
+
+@pytest.fixture
+def gate(mod, monkeypatch):
+    const = types.ModuleType(f"{PKG}.const")
+    const.DOMAIN, const.CONF_MONITORING_MODE = "power_sync", "monitoring_mode"
+    monkeypatch.setitem(sys.modules, const.__name__, const)
+    calls = []
+
+    async def status(hass, entry, vin):
+        calls.append(("status", vin))
+        return {"vin": vin}
+
+    async def repair(hass, entry, vin, step, **options):
+        calls.append(("repair", step, options))
+        return {"vin": vin, "step": step, "result": "confirmed"}
+
+    monkeypatch.setattr(mod, "pairing_status", status)
+    monkeypatch.setattr(mod, "repair_pairing", repair)
+    mod.calls = calls
+    return mod
+
+
+@pytest.mark.parametrize("kwargs,message", [
+    ({"action": "repair", "step": "vehicle_on_gateway"}, "Confirm"),
+    ({"action": "repair", "step": "vehicle_on_gateway", "confirm": "yes"}, "Confirm"),
+    ({"action": "repair", "step": "delete_everything", "confirm": True}, "pairing step"),
+    ({"action": "write"}, "status or repair"),
+])
+def test_request_gate_refuses_before_any_io(gate, kwargs, message):
+    hass = GateHass(gate_entry())
+    action = kwargs.pop("action")
+    with pytest.raises(gate.SolarError, match=message):
+        run(gate.run_request(hass, "one", VIN, action, **kwargs))
+    assert gate.calls == []
+
+
+def test_request_gate_blocks_monitoring_mode_bad_vin_and_concurrency(gate):
+    hass = GateHass(gate_entry(monitoring_mode=True))
+    with pytest.raises(gate.SolarError, match="monitoring mode"):
+        run(gate.run_request(hass, "one", VIN, "repair", step="vehicle_on_gateway", confirm=True))
+    # Reads stay available in monitoring mode.
+    assert run(gate.run_request(hass, "one", VIN.lower(), "status")) == {"vin": VIN}
+    with pytest.raises(gate.SolarError, match="VIN"):
+        run(gate.run_request(hass, "one", "nope", "status"))
+    with pytest.raises(gate.SolarError, match="loaded PowerSync entry"):
+        run(gate.run_request(hass, "two", VIN, "status"))
+
+    async def busy():
+        async with gate.pairing_lock(hass):
+            await gate.run_request(hass, "one", VIN, "status")
+    with pytest.raises(gate.SolarError, match="already running"):
+        run(busy())
+
+
+def test_request_gate_passes_repair_options(gate):
+    hass = GateHass(gate_entry())
+    result = run(gate.run_request(hass, "one", VIN, "repair", step="managed_charging_site", confirm=True,
+                                  key_format="hex", latitude=-33.0, longitude=151.0))
+    assert result["result"] == "confirmed"
+    assert gate.calls == [("repair", "managed_charging_site", {
+        "key_format": "hex", "vehicle_key_domain": None, "latitude": -33.0, "longitude": 151.0})]
+
+
+def test_mobile_view_reports_whole_errors_with_a_code(gate, monkeypatch):
+    views = []
+    http = types.ModuleType("homeassistant.components.http")
+
+    class HomeAssistantView:
+        def json(self, data, status_code=200):
+            return status_code, data
+    http.HomeAssistantView = HomeAssistantView
+    for name in ("homeassistant", "homeassistant.components"):
+        monkeypatch.setitem(sys.modules, name, sys.modules.get(name) or types.ModuleType(name))
+    monkeypatch.setitem(sys.modules, "homeassistant.components.http", http)
+    hass = GateHass(gate_entry())
+    hass.http = SimpleNamespace(register_view=views.append)
+    gate.register_http_view(hass)
+    view = views[0]
+    assert view.url == "/api/power_sync/ev/native_solar/pairing" and view.requires_auth
+
+    def post(body):
+        async def body_json():
+            return body
+        return run(view.post(SimpleNamespace(json=body_json)))
+
+    status, data = post({"entry_id": "one", "vin": VIN, "action": "status"})
+    assert status == 200 and data == {"success": True, "vin": VIN}
+    status, data = post({"entry_id": "one", "vin": VIN, "action": "repair", "step": "vehicle_on_gateway"})
+    assert status == 200 and data["success"] is False and data["code"] == "pairing_refused"
+    assert "Confirm" in data["error"]
+    for bad in ({"action": "repair", "step": "vehicle_on_gateway", "confirm": True, "latitude": "1"},
+                {"action": "repair", "step": "vehicle_on_gateway", "confirm": True, "latitude": True},
+                {"action": "repair", "step": "vehicle_on_gateway", "confirm": True, "key_format": "pem"},
+                {"action": "repair", "step": "vehicle_on_gateway", "confirm": True, "vehicle_key_domain": "x"}):
+        status, data = post({"entry_id": "one", "vin": VIN, **bad})
+        assert data["success"] is False
+    assert all(call[0] != "repair" for call in gate.calls)
+
+    async def uncertain(*args, **kwargs):
+        raise gate.PairingUncertain("could not be confirmed")
+    monkeypatch.setattr(gate, "repair_pairing", uncertain)
+    status, data = post({"entry_id": "one", "vin": VIN, "action": "repair", "step": "vehicle_on_gateway", "confirm": True})
+    assert data == {"success": False, "error": "could not be confirmed", "code": "pairing_uncertain"}
+    status, data = post(["not", "an", "object"])
+    assert data["success"] is False

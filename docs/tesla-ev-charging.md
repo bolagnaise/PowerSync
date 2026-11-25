@@ -78,6 +78,8 @@ The service does not add keys, clients or sites, and it does not touch EV contro
 - `managed_charging_site` adds a site that names the gateway's key, DIN and location, then reads the car's sites back. The location defaults to Home Assistant's home; pass `latitude` and `longitude` for where the car parks. Tesla does not document how the car stores the gateway key in a site. If no existing site shows the encoding, choose `key_format`; read the status first, because a site the Tesla app created shows the format the car expects. If the car keeps an existing site nearby instead, remove that site first.
 - `remove_managed_charging_site` removes the site that uses this gateway's key, in whichever encoding the car stored it, and confirms the removal.
 
+The PowerSync mobile app offers the same checks and steps as a guided setup in the Tesla Charge on Solar card, through the authenticated `/api/power_sync/ev/native_solar/pairing` endpoint. Each app action is one explicit status read or repair step with the same confirmation, monitoring-mode and one-at-a-time rules as the services. Opening the card only reads local metadata, including whether this entry has local Powerwall access and a pairing-capable bridge for the car.
+
 These writes have not yet been tested on a car or Powerwall. A site added with the wrong key encoding is accepted by the car but may not work; remove it and try another encoding.
 
 ### Vehicle schedules in battery optimization
