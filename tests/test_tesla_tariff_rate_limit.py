@@ -760,3 +760,55 @@ def test_periodic_upload_keeps_cooldown_after_dropping_long_5xx_retry(upload_har
                 for post in session.posts] == [(0.0, "stale"), (600.0, "fresh")]
 
     asyncio.run(run())
+
+
+def _expanded_minutes(period):
+    """Return the week-minutes covered by a fully explicit Tesla period."""
+    days = range(period["fromDayOfWeek"], period["toDayOfWeek"] + 1)
+    start = period["fromHour"] * 60 + period["fromMinute"]
+    end = period["toHour"] * 60 + period["toMinute"]
+    assert start < end  # this fixture uses no overnight ranges
+    return {day * 1440 + minute for day in days for minute in range(start, end)}
+
+
+def test_sunday_only_readback_restores_without_overlapping_week(restore_helpers, upload_harness):
+    """Ticket 171: a Sunday period reads back with both day fields omitted.
+
+    The reporter's rejected restore showed OFF_PEAK [0,6,6:00-24:00] beside
+    Saturday [6,6,6:00-24:00] and weekday PEAK. PowerSync had uploaded Sunday
+    as 0->0; Tesla's readback dropped those zeros and the restore default
+    widened it to every day, overlapping PEAK, so Tesla returned 400.
+    """
+    select, _tariff_time, valid_range = restore_helpers
+    upload, hass, session, _clock = upload_harness
+    tariff = _sparse_restore_tariff({"toDayOfWeek": 6})
+    tou = tariff["seasons"]["Summer"]["tou_periods"]
+    tou["OFF_PEAK"] = {"periods": [
+        {"fromDayOfWeek": 1, "toDayOfWeek": 5, "fromHour": 6, "toHour": 17},
+        {"fromDayOfWeek": 1, "toDayOfWeek": 5, "fromHour": 20, "toHour": 24},
+        {"fromHour": 6, "toHour": 24},  # Sunday 0->0 with both zeros omitted
+        {"fromDayOfWeek": 6, "toDayOfWeek": 6, "fromHour": 6, "toHour": 24},
+    ]}
+    tou["PEAK"] = {"periods": [{"fromDayOfWeek": 1, "toDayOfWeek": 5, "fromHour": 17, "toHour": 20}]}
+    tou["SUPER_OFF_PEAK"] = {"periods": [{"toDayOfWeek": 6, "toHour": 6}]}
+    tariff["energy_charges"]["Summer"]["rates"].update(PEAK=.6, SUPER_OFF_PEAK=.1)
+    tariff["sell_tariff"] = copy.deepcopy(tariff)
+
+    prepared = select(tariff)
+    session.responses = [200]
+    assert asyncio.run(upload(hass, "site-a", prepared, "token")) is True
+    posted = session.posts[0][2]["tou_settings"]["tariff_content_v2"]
+    for side in (posted, posted["sell_tariff"]):
+        periods = side["seasons"]["Summer"]["tou_periods"]
+        assert periods["OFF_PEAK"]["periods"][2] == {
+            "fromDayOfWeek": 0, "toDayOfWeek": 0, "fromHour": 6,
+            "toHour": 24, "fromMinute": 0, "toMinute": 0,
+        }
+        covered = set()
+        for container in periods.values():
+            for period in container["periods"]:
+                assert valid_range(period)
+                minutes = _expanded_minutes(period)
+                assert not covered & minutes  # no two periods overlap
+                covered |= minutes
+        assert covered == set(range(7 * 1440))  # and the whole week is covered

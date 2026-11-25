@@ -580,8 +580,12 @@ def _select_restorable_tesla_tariff(*tariffs: Any) -> dict[str, Any] | None:
             # absent. Materialize the same defaults tariff_time uses to read
             # these periods, on both buy and sell sides. Never overwrite an
             # explicit value or change the persisted baseline in place.
+            # Tesla drops zero values, so an absent day is Sunday (0). A
+            # Sunday-only period reads back without either day field;
+            # defaulting toDayOfWeek to 6 widened it to the whole week and
+            # Tesla rejected the overlapping replay as "Invalid tariff".
             defaults = {
-                "fromDayOfWeek": 0, "toDayOfWeek": 6,
+                "fromDayOfWeek": 0, "toDayOfWeek": 0,
                 "fromHour": 0, "toHour": 24,
                 "fromMinute": 0, "toMinute": 0,
             }
