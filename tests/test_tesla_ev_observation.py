@@ -1254,6 +1254,53 @@ async def test_independent_read_uses_exact_cloud_payload_not_published_stream(in
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("paid", [False, True])
+async def test_independent_read_admits_provider_hacs_build_coordinator(independent_source, monkeypatch, paid):
+    """Ticket 156: Teslemetry's HACS release overrides core as custom_components.teslemetry."""
+    hass, _entry, _vehicle, coordinator = independent_source("teslemetry")
+    core = types.ModuleType("homeassistant.components.teslemetry.coordinator")
+    core.TeslemetryVehicleDataCoordinator = type("TeslemetryVehicleDataCoordinator", (), {})
+    monkeypatch.setitem(sys.modules, core.__name__, core)
+    custom = types.ModuleType("custom_components.teslemetry.coordinator")
+    custom.TeslemetryVehicleDataCoordinator = type(coordinator)
+    monkeypatch.setitem(sys.modules, custom.__name__, custom)
+    failure = {}
+    if paid:
+        coordinator.api.refresh_response = {"response": {"vin": VIN_A, **_charge(2_000_000_000)}}
+    result = await observation.async_read_independent_tesla_vehicle(
+        hass, VIN_A, allow_paid_refresh=paid, authorize=(lambda: True) if paid else None,
+        failure=failure)
+
+    assert failure == {}
+    assert result is not None
+    assert result.origin == "native_cloud"
+    assert result.domain == "teslemetry"
+    assert bool(coordinator.api.refresh_calls) is paid
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("variant", ["custom_not_loaded", "custom_subclass", "other_domain_custom"])
+async def test_independent_read_refuses_unloaded_or_foreign_custom_coordinator(independent_source, monkeypatch, variant):
+    hass, _entry, _vehicle, coordinator = independent_source("teslemetry")
+    core = types.ModuleType("homeassistant.components.teslemetry.coordinator")
+    core.TeslemetryVehicleDataCoordinator = type("TeslemetryVehicleDataCoordinator", (), {})
+    monkeypatch.setitem(sys.modules, core.__name__, core)
+    monkeypatch.delitem(sys.modules, "custom_components.teslemetry.coordinator", raising=False)
+    if variant != "custom_not_loaded":
+        name = "tessie" if variant == "other_domain_custom" else "teslemetry"
+        custom = types.ModuleType(f"custom_components.{name}.coordinator")
+        custom.TeslemetryVehicleDataCoordinator = (
+            type(coordinator) if variant == "other_domain_custom"
+            else type("Sub", (type(coordinator),), {}))
+        monkeypatch.setitem(sys.modules, custom.__name__, custom)
+    failure = {}
+
+    assert await observation.async_read_independent_tesla_vehicle(hass, VIN_A, failure=failure) is None
+    assert failure["reason"] == "cloud_reader_unavailable"
+    assert coordinator.api.calls == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("fault", ["missing_requested", "actual_only", "missing_limit", "missing_power", "missing_actual", "stale", "wrong_vin"])
 async def test_independent_read_rejects_incomplete_or_wrong_source(independent_source, fault):
     hass, _entry, _vehicle, coordinator = independent_source()
