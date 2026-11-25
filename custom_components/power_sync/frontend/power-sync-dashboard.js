@@ -492,6 +492,10 @@ function psMinorUnit(hass) {
   const currency = String(hass?.config?.currency || 'AUD').toUpperCase();
   return currency === 'GBP' ? 'p' : currency === 'EUR' ? 'ct' : 'c';
 }
+// Major-currency daily charge, matching the integration options (e.g. AUD/day).
+function psDailyUnit(hass) {
+  return `${String(hass?.config?.currency || 'AUD').toUpperCase()}/day`;
+}
 function psMoney(hass, value) {
   const n = Number(value);
   if (!Number.isFinite(n)) return '—';
@@ -1494,7 +1498,7 @@ class PsKvCard extends PsCardBase {
 const PS_SETTING_FIELDS = {
   auto_update_time: { label: 'Scheduled update time', type: 'time', help: 'Home Assistant local time. PowerSync may restart Home Assistant after installing an update.' },
   backup_reserve: { label: 'Manual export floor', unit: '%', min: 0, max: 100, ratio: true, help: 'Used when the recommended reserve is not applied.' },
-  daily_supply_charge: { label: 'Daily supply charge', min: 0, step: '0.01', help: 'Daily fixed charge in your tariff currency, rather than cents.' },
+  daily_supply_charge: { label: 'Daily supply charge', dailyUnit: true, min: 0, step: '0.01', help: 'Daily fixed charge in your tariff currency, not cents. For example, enter 1.67 for 166.67 c/day.' },
   charge_by_time_target_soc: { label: 'Target charge level', unit: '%', min: 0, max: 100, ratio: true },
   charge_by_time_target_time: { label: 'Target time', type: 'time', help: 'Home Assistant local time.' },
   battery_capacity_wh: { label: 'Usable battery capacity', unit: 'Wh', min: 1 },
@@ -1605,7 +1609,7 @@ class PsSettingsDialog extends HTMLElement {
 
   _fieldHtml(key) {
     const f = PS_SETTING_FIELDS[key], value = this._values[key];
-    const unit = f.tariffUnit ? this._tariffUnit : f.unit;
+    const unit = f.tariffUnit ? this._tariffUnit : f.dailyUnit ? psDailyUnit(this._hass) : f.unit;
     const label = psEsc(f.label + (unit ? ` (${unit})` : ''));
     const help = f.help ? `<small>${psEsc(f.help)}</small>` : '';
     const attrs = `name="${key}" id="setting-${key}"`;

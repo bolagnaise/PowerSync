@@ -1511,6 +1511,24 @@ def test_solar_editor_accepts_fractional_tariffs_and_saves_only_edited_fields():
     assert out["patch"] == {"surplus_calculation": "direct", "max_export_price_cents": 14.25}
 
 
+def test_cost_neutral_supply_charge_label_shows_major_currency_per_day():
+    """Ticket 467: the dashboard label must not read as cents."""
+    out = _run_board(r"""
+  const dialog = new T.PsSettingsDialog();
+  dialog._values = { daily_supply_charge: 1.6662 };
+  const html = {};
+  for (const currency of ['AUD', 'GBP', undefined]) {
+    dialog._hass = { config: currency ? { currency } : {} };
+    html[currency || 'default'] = dialog._fieldHtml('daily_supply_charge');
+  }
+  console.log(JSON.stringify(html));
+""")
+    assert "Daily supply charge (AUD/day)" in out["AUD"]
+    assert "Daily supply charge (GBP/day)" in out["GBP"]
+    assert "Daily supply charge (AUD/day)" in out["default"]
+    assert "not cents" in out["AUD"]
+
+
 def test_settings_save_requires_successful_write_and_matching_readback():
     out = _run_board(r"""
   (async () => {

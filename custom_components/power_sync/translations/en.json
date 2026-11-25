@@ -78,7 +78,7 @@
           "overnight_rate_c_per_kwh": "00:00-06:00 import rate",
           "day_rate_c_per_kwh": "Day/shoulder import rate",
           "peak_rate_c_per_kwh": "15:00-21:00 import rate",
-          "supply_c_per_day": "Daily supply charge",
+          "supply_c_per_day": "Daily supply charge (c/day)",
           "export_base_c_per_kwh": "Base export rate",
           "free_import_cap_kwh": "Daily free-import allowance",
           "premium_export_total_c_per_kwh": "Premium export total rate",
