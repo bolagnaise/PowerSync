@@ -22,6 +22,15 @@ SETTLE_SECONDS = 5
 COOLDOWN_SECONDS = 60
 
 
+def saved_entry_removed(hass, record):
+    """Whether demand belongs to a PowerSync entry that is no longer configured."""
+    entry_id = record.get("entry_id")
+    get_entry = getattr(getattr(hass, "config_entries", None), "async_get_entry", None)
+    if not isinstance(entry_id, str) or not entry_id or not callable(get_entry):
+        return False
+    return get_entry(entry_id) is None and entry_id not in hass.data.get("power_sync", {})
+
+
 async def async_recover_ev_headroom(hass, entry, vin, *, allow_provider_refresh=False):
     """Obtain stop proof on demand; never command the car or discard a journal."""
     from homeassistant.helpers import entity_registry as er
@@ -40,8 +49,11 @@ async def async_recover_ev_headroom(hass, entry, vin, *, allow_provider_refresh=
     record = budget.managed.get(vin)
     if record is None:
         return result("reservation_not_found")
+    orphaned = False
     if record.get("entry_id") != entry.entry_id or record.get("site") != site:
-        return result("reservation_scope_mismatch")
+        if record.get("site") != site or not saved_entry_removed(hass, record):
+            return result("reservation_scope_mismatch")
+        orphaned = True
     if allow_provider_refresh is not True:
         return result("provider_refresh_confirmation_required")
 
@@ -87,6 +99,27 @@ async def async_recover_ev_headroom(hass, entry, vin, *, allow_provider_refresh=
     if lock.locked():
         return result("site_busy")
     async with lock:
+        if orphaned:
+            # A removed entry can never settle its own demand. Only the
+            # explicitly selected entry for the same exact site may take
+            # ownership, while the saved entry stays absent. The reservation
+            # envelope and the release proof below are unchanged.
+            if budget.site_armed(site) or budget.native_max_claim(site):
+                return result("site_busy")
+            try:
+                adopted = await budget.adopt_orphaned_managed(
+                    vin, record, entry.entry_id,
+                    lambda: (active and hass.data.get("power_sync", {}).get(entry.entry_id) is runtime
+                             and runtime.get("entry") is entry
+                             and record.get("site") == site_identity(entry) == site
+                             and saved_entry_removed(hass, record)))
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                return result("recovery_failed")
+            if adopted is None:
+                return result("recovery_scope_blocked")
+            record, original = adopted, deepcopy(adopted)
         if not current():
             return result("recovery_scope_blocked")
         attempts = runtime.setdefault("_ev_headroom_recovery_attempts", {})

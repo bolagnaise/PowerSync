@@ -3817,7 +3817,15 @@ def ev_headroom_recovery_status(hass, entry, vin):
     if record is None:
         return {**status, "reason": "reservation_not_found", "reservation_present": False}
     if record.get("entry_id") != entry.entry_id or record.get("site") != site_identity(entry):
-        return {**status, "reason": "reservation_scope_mismatch", "reservation_present": None}
+        from .ev_headroom_recovery import saved_entry_removed
+        site_matches = record.get("site") == site_identity(entry)
+        removed = record.get("entry_id") != entry.entry_id and saved_entry_removed(hass, record)
+        # Report only match flags, never the saved identifiers themselves.
+        return {**status, "reservation_present": None,
+                "saved_entry_matches": record.get("entry_id") == entry.entry_id,
+                "saved_entry_removed": removed, "saved_site_matches": site_matches,
+                "reason": "reservation_entry_removed" if removed and site_matches
+                          else "reservation_scope_mismatch"}
     from homeassistant.helpers import entity_registry as er
     from .native_rate_admission import _identity as managed_identity, _managed_native_entity
     from .native_rate_telemetry import native_charge_source_status
