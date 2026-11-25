@@ -9444,6 +9444,29 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
         return max(1.0, (next_boundary - now).total_seconds())
 
+    def _planned_command_failure(self, planned_action: str | None) -> dict[str, Any] | None:
+        """Explain why the planned battery command is not being applied."""
+        command = {"charge": "force_charge", "export": "force_discharge",
+                   "discharge": "force_discharge"}.get(planned_action or "")
+        executor = getattr(self, "_executor", None)
+        battery = getattr(executor, "battery_controller", None) if executor is not None else None
+        recent = getattr(battery, "recent_command_failure", None) if battery is not None else None
+        if command is None or not callable(recent):
+            return None
+        try:
+            failure = recent()
+        except Exception:  # noqa: BLE001 - diagnostics must never break status
+            return None
+        if not isinstance(failure, dict) or failure.get("command") != command:
+            return None
+        at = failure.get("at")
+        return {
+            "command": command,
+            "reason": failure.get("reason"),
+            "message": failure.get("message"),
+            "at": dt_util.utc_from_timestamp(at).isoformat() if isinstance(at, (int, float)) else None,
+        }
+
     def _get_current_action(self) -> Any | None:
         """Get the current scheduled action based on time."""
         if not self._current_schedule or not self._current_schedule.actions:
@@ -22370,6 +22393,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "grid_import_target_limited": force_state.get("grid_import_target_limited", False) if force_type == "charge" else False,
             "effective_current_action": effective_current_action,
             "effective_current_action_detail": effective_current_action_detail,
+            "command_failure": self._planned_command_failure(planned_current_action),
             "actual_battery_power_w": actual_battery_power_w,
             "current_action_end_time": current_action_end_time,
             "next_action": next_action,

@@ -206,7 +206,7 @@ def _board_script(body: str) -> str:
         + r"""
   vm.createContext(context);
   const src = fs.readFileSync(process.argv[1], 'utf8').replace(/^export \{[^}]*\};?\s*$/m, '');
-  vm.runInContext(src + '\n;globalThis.__t = { PowerSyncBoard, PsSettingsDialog, PS_SETTING_EDITORS, PsSettingsCard, PsTodayCard, PsNowCard, PsTariffCard, psExportOffer, PsPlanCard, PsControlsCard, PsInverterControlsCard, psUntilPreview, psSchedule, psWindows, psActionKey, PS_LAYOUT_KEY, PS_DEFAULT_LAYOUT, psChartValue, psChart, psBars, PsPricesCard, PsEnergyCard, PsLoadForecastCard, PsSolarLoadCard, PsBatteryPlanCard, psApiCache, psPlannedRunEnd, psBatteryControl, PsOptimizerCard, psOptimizerStatus, psOptimizerAccess };', context);
+  vm.runInContext(src + '\n;globalThis.__t = { PowerSyncBoard, PsSettingsDialog, PS_SETTING_EDITORS, PsSettingsCard, PsTodayCard, PsNowCard, PsTariffCard, psExportOffer, PsPlanCard, PsControlsCard, PsInverterControlsCard, psUntilPreview, psSchedule, psWindows, psActionKey, PS_LAYOUT_KEY, PS_DEFAULT_LAYOUT, psChartValue, psChart, psBars, PsPricesCard, PsEnergyCard, PsLoadForecastCard, PsSolarLoadCard, PsBatteryPlanCard, psApiCache, psPlannedRunEnd, psBatteryControl, PsOptimizerCard, psOptimizerStatus, psOptimizerAccess, psCommandFailureChip };', context);
   const T = context.__t;
 """
         + body
@@ -3104,3 +3104,19 @@ def test_optimizer_card_refetches_access_without_other_cards():
   console.log(JSON.stringify({ stable: first === same, refreshes: first !== later }));
 """)
     assert out == {"stable": True, "refreshes": True}
+
+
+def test_plan_chip_explains_blocked_optimizer_command():
+    out = _run_board(r"""
+  console.log(JSON.stringify({
+    gateway: T.psCommandFailureChip({ command: 'force_charge', reason: 'gateway_unreachable', message: 'Timed out <gw>' }),
+    ev: T.psCommandFailureChip({ command: 'force_charge', reason: 'ev_headroom_reserved' }),
+    export: T.psCommandFailureChip({ command: 'force_discharge', reason: 'something_new' }),
+    none: T.psCommandFailureChip(null),
+  }));
+""")
+    assert "Charge blocked" in out["gateway"] and "Gateway unreachable" in out["gateway"]
+    assert 'title="Timed out &lt;gw&gt;"' in out["gateway"]
+    assert "EV reservation held" in out["ev"]
+    assert "Export blocked" in out["export"] and "Command refused" in out["export"]
+    assert out["none"] == ""

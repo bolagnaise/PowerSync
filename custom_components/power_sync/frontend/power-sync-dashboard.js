@@ -1884,6 +1884,19 @@ function psOptimizerStatus(hass, en, data) {
   return `Smart Optimization is controlling the battery, aiming for ${goal.title}.${stale}`;
 }
 
+// Why the planned charge/export is not being applied (gateway, EV reservation...).
+const PS_COMMAND_FAILURE_TEXT = {
+  gateway_unreachable: 'Gateway unreachable',
+  ev_headroom_reserved: 'EV reservation held',
+  monitoring_mode: 'Monitoring mode',
+};
+function psCommandFailureChip(failure) {
+  if (!failure || typeof failure !== 'object') return '';
+  const label = failure.command === 'force_discharge' ? 'Export blocked' : 'Charge blocked';
+  const text = PS_COMMAND_FAILURE_TEXT[failure.reason] || 'Command refused';
+  return `<span class="chip am" title="${psEsc(failure.message || text)}"><span>${label}</span><b>${psEsc(text)}</b></span>`;
+}
+
 // Smart Optimization, Monitoring, battery goal, Charge by time, fine tuning
 // and updates. Config: { entities: { enabled, monitoring, profitMax,
 // costNeutral, chargeByTime }, rows: [settings-card rows, with `group`:
@@ -3074,7 +3087,7 @@ class PsPlanCard extends PsCardBase {
 
   _signature() {
     const data = psApiPeek('power_sync/optimization');
-    return `${super._signature()}|${this._hass?.config?.currency}|${data?.last_optimization || ''}|${data?.monitoring_mode}|${data?.enabled}|${data?.current_action || ''}|${data?.effective_current_action || ''}|${psBatteryEfficiencySummary(data?.battery_efficiency_learning)}|${this._histAt}`;
+    return `${super._signature()}|${this._hass?.config?.currency}|${data?.last_optimization || ''}|${data?.monitoring_mode}|${data?.enabled}|${data?.current_action || ''}|${data?.effective_current_action || ''}|${data?.command_failure?.command || ''}:${data?.command_failure?.reason || ''}|${psBatteryEfficiencySummary(data?.battery_efficiency_learning)}|${this._histAt}`;
   }
 
   _loadHistory() {
@@ -3199,6 +3212,7 @@ class PsPlanCard extends PsCardBase {
     const chips = [
       `<span class="chip ${data.monitoring_mode ? 'cy' : data.enabled ? 'gr' : ''}"><span>Optimiser</span><b>${data.monitoring_mode ? 'Monitoring only' : data.enabled ? psEsc(PS_OPT_GOALS.find(g => g.id === psOptimizerGoal(hass, {}, data)).title) : 'Off'}</b></span>`,
       controlText ? `<span class="chip ${control ? 'am' : actChip(curKey)}"><span>Current control</span><b>${psEsc(controlText)}</b></span>` : '',
+      psCommandFailureChip(data.command_failure),
       nextChange ? `<span class="chip ${actChip(nextChange.key)}"><span>Next control</span><b>${psEsc(PS_ACT[nextChange.key][0])} ${psEsc(psWhen(hass, nextChange.t))}</b></span>` : '',
       data.last_optimization ? `<span class="chip"><span>Optimized</span><b class="num">${psEsc(psTime(hass, data.last_optimization))}</b></span>` : '',
       Number.isFinite(floor) && floor > 0 ? `<span class="chip"><span>Export floor</span><b class="num">${Math.round(floor)}%</b></span>` : '',
