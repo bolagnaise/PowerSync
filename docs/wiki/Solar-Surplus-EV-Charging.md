@@ -13,6 +13,13 @@ immediately requests a stop for Solar Surplus sessions; other charging modes
 keep their own controls. A failed charger stop is logged, so an off switch is
 not confirmation that the physical charger stopped.
 
+Solar Surplus also pauses while the current export value is above your
+Solar Surplus export limit, because exporting is then worth more than charging
+the car. The vehicle status names the export value and the limit. When there is
+no solar generation, such as at night, the status says "No solar generation
+right now" instead. The limit only applies to solar charging; planned grid
+charging and manual charging are not affected.
+
 For a Tesla Wall Connector with a local Home Assistant entry, PowerSync can
 match the connector's serial number to the vehicle reported by Tesla Fleet or
 Teslemetry. A fresh unplugged reading prevents a Solar Surplus start while
