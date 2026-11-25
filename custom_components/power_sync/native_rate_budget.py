@@ -431,6 +431,37 @@ class SharedRateBudget:
                     "battery_generation": evidence.get("battery_generation") if
                         site_enforced and not evidence.get("rate_reduction") else None}
 
+    async def adopt_orphaned_managed(self, vin, record, entry_id, is_orphaned):
+        """Rebind demand left by a removed entry without changing its envelope.
+
+        Only the owner key changes. The reservation, uncertainty and history
+        stay intact until the normal fresh-stop proof settles it.
+        """
+        task = asyncio.create_task(self._adopt_orphaned_managed(vin, record, entry_id, is_orphaned))
+        self.storage_tasks.add(task)
+        task.add_done_callback(self.storage_tasks.discard)
+        return await asyncio.shield(task)
+
+    async def _adopt_orphaned_managed(self, vin, record, entry_id, is_orphaned):
+        async with self.lock:
+            current = self.managed.get(vin)
+            task = self.managed_tasks.get(vin)
+            if (current is not record or not isinstance(entry_id, str) or not entry_id
+                    or current.get("entry_id") == entry_id
+                    or (task is not None and not task.done()) or is_orphaned() is not True):
+                return None
+            managed = deepcopy(self.managed)
+            managed[vin] = {**deepcopy(current), "entry_id": entry_id,
+                            "adopted_from_entry_id": current.get("entry_id")}
+            await self.store.async_save({"entries": self.entries, "managed": managed})
+            if self.managed.get(vin) is not record:
+                await self.store.async_save({"entries": self.entries, "managed": self.managed})
+                return None
+            self.managed = managed
+            self.managed_settle.pop(vin, None)
+            self.revision += 1
+            return managed[vin]
+
     async def abort_managed(self, ticket):
         """Roll back a proven unsent attempt without erasing an older command."""
         task = asyncio.create_task(self._abort_managed(ticket))

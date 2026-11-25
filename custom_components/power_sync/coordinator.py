@@ -129,6 +129,48 @@ def _grid_status_is_off_grid(value: Any) -> bool | None:
     return status in {"Inactive", "Islanded", "Off-Grid", "SystemIslandedActive"}
 
 
+# Tesla's cloud aggregate can lag the BLE/Fleet EV reading by a full refresh
+# interval even when its own timestamp equals the poll time (Discord #463).
+_SITE_AGGREGATE_EV_HISTORY_SECONDS = 120.0
+# Integer-kW EV sources (BLE) can legitimately read up to ~1 kW above the
+# metered draw, so only a larger excess proves the aggregate predates the EV.
+_SITE_AGGREGATE_EV_LOAD_TOLERANCE_KW = 1.0
+
+
+def _ev_power_consistent_with_site_aggregate(
+    ev_power_kw: float,
+    raw_load_kw: float | None,
+    history: list[tuple[float, float]] | tuple[tuple[float, float], ...],
+    now: float,
+) -> float:
+    """Return the EV draw the site aggregate can actually contain.
+
+    The site load includes the EV behind the meter, so an aggregate whose load
+    is well below the current EV reading was measured before the car ramped.
+    Pairing it with the current reading counts the ramp twice.  In that case use
+    the newest recent EV reading that fits inside the aggregate's load, or clamp
+    to that load.  Consistent samples are returned unchanged, so a genuinely
+    fresh aggregate is never under-counted during a ramp.
+    """
+    if raw_load_kw is None:
+        return ev_power_kw
+    try:
+        load_kw = max(0.0, float(raw_load_kw))
+        current_kw = float(ev_power_kw)
+    except (TypeError, ValueError):
+        return ev_power_kw
+    if not (math.isfinite(load_kw) and math.isfinite(current_kw)):
+        return ev_power_kw
+    if current_kw <= load_kw + _SITE_AGGREGATE_EV_LOAD_TOLERANCE_KW:
+        return ev_power_kw
+    for observed_at, value_kw in reversed(tuple(history)):
+        if now - observed_at > _SITE_AGGREGATE_EV_HISTORY_SECONDS:
+            break
+        if 0.0 <= value_kw <= load_kw:
+            return value_kw
+    return load_kw
+
+
 def _mapped_tesla_other_charger_power_kw(
     entry: Any,
     vehicles: list[dict[str, Any]],
@@ -3822,10 +3864,26 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
             # the EV power observed when the aggregate last moved so consumers
             # can keep both terms the same vintage; splicing a newer EV number
             # into an older aggregate breaks its energy balance. Discord #284.
+            # The aggregate can also arrive one refresh late, after the car has
+            # already ramped (Discord #463), so the change-time EV reading is
+            # checked against the aggregate's own load before it is recorded.
+            ev_history_now = time.monotonic()
+            ev_history = [
+                item
+                for item in (getattr(self, "_site_aggregate_ev_history", None) or ())
+                if ev_history_now - item[0] <= _SITE_AGGREGATE_EV_HISTORY_SECONDS
+            ]
             aggregate_sample = (solar_kw, grid_kw, battery_kw, raw_load_kw)
             if aggregate_sample != getattr(self, "_site_aggregate_sample", None):
                 self._site_aggregate_sample = aggregate_sample
-                self._site_aggregate_ev_power_kw = ev_power_kw
+                self._site_aggregate_ev_power_kw = (
+                    _ev_power_consistent_with_site_aggregate(
+                        ev_power_kw, raw_load_kw, ev_history, ev_history_now
+                    )
+                )
+            if _finite_float(ev_power_kw) is not None:
+                ev_history.append((ev_history_now, float(ev_power_kw)))
+            self._site_aggregate_ev_history = ev_history
             aggregate_ev_power_kw = getattr(
                 self, "_site_aggregate_ev_power_kw", ev_power_kw
             )
@@ -4152,20 +4210,47 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
             else max(0, float(max_age))
         )
 
-        # Return cached value if still fresh.
+        cached = self._fresh_site_info_cache(cache_ttl)
+        if cached is not None:
+            return cached
+        if self._site_info_retry_pending():
+            return None
+
+        # Single flight: Home Assistant updates each platform's Tesla control
+        # entities concurrently, and each refreshes site_info with the same
+        # max_age. Without this, every entity whose window expired on the same
+        # tick sent its own identical GET. Waiters re-check against their own
+        # max_age once the in-flight read settles.
+        lock = getattr(self, "_site_info_lock", None)
+        if lock is None:
+            lock = self._site_info_lock = asyncio.Lock()
+        async with lock:
+            cached = self._fresh_site_info_cache(cache_ttl)
+            if cached is not None:
+                return cached
+            if self._site_info_retry_pending():
+                return None
+            return await self._async_fetch_site_info()
+
+    def _fresh_site_info_cache(self, cache_ttl: float) -> dict[str, Any] | None:
+        """Return the cached site_info when it is inside ``cache_ttl``."""
         if (
             self._site_info_cache
             and (time.monotonic() - self._site_info_last_fetch) <= cache_ttl
         ):
             _LOGGER.debug("Returning cached site_info")
             return self._site_info_cache
+        return None
 
-        # Bound retries after exhausted reads without pinning controls until restart.
-        if self._site_info_fetch_failed and time.monotonic() < getattr(
+    def _site_info_retry_pending(self) -> bool:
+        """Bound retries after exhausted reads without pinning controls until restart."""
+        return bool(self._site_info_fetch_failed) and time.monotonic() < getattr(
             self, "_site_info_retry_at", 0.0
-        ):
-            return None
+        )
 
+    async def _async_fetch_site_info(self) -> dict[str, Any] | None:
+        """Read site_info from Tesla and adopt it unless a write invalidated it meanwhile."""
+        generation = getattr(self, "_site_info_generation", 0)
         current_token = self._get_current_token()
         headers = self._tesla_headers(current_token)
 
@@ -4182,6 +4267,13 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
             )
 
             site_info = data.get("response", {})
+            if getattr(self, "_site_info_generation", 0) != generation:
+                # invalidate_site_info_cache() ran while this read was in
+                # flight, so it may predate a write. Return it to this caller
+                # as before, but never cache or adopt it: a queued or later
+                # caller must read the post-write state.
+                _LOGGER.debug("Discarding site_info read that started before an invalidation")
+                return site_info
 
             # Log timezone info for debugging
             installation_tz = site_info.get("installation_time_zone")
@@ -4281,14 +4373,23 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
 
         except UpdateFailed as err:
             _LOGGER.warning("Failed to fetch site_info: %s (retrying after %ss)", err, TESLA_SITE_INFO_RETRY_SECONDS)
-            self._site_info_fetch_failed = True
-            self._site_info_retry_at = time.monotonic() + TESLA_SITE_INFO_RETRY_SECONDS
+            self._latch_site_info_failure(generation)
             return None
         except Exception as err:
             _LOGGER.warning("Unexpected error fetching site_info: %s (retrying after %ss)", err, TESLA_SITE_INFO_RETRY_SECONDS)
-            self._site_info_fetch_failed = True
-            self._site_info_retry_at = time.monotonic() + TESLA_SITE_INFO_RETRY_SECONDS
+            self._latch_site_info_failure(generation)
             return None
+
+    def _latch_site_info_failure(self, generation: int) -> None:
+        """Back off after a failed read, unless a write invalidated the cache meanwhile.
+
+        A post-write invalidation clears the latch so the confirming read can
+        run at once; a pre-write read failing later must not re-arm it.
+        """
+        if getattr(self, "_site_info_generation", 0) != generation:
+            return
+        self._site_info_fetch_failed = True
+        self._site_info_retry_at = time.monotonic() + TESLA_SITE_INFO_RETRY_SECONDS
 
     def invalidate_site_info_cache(self) -> None:
         """Force the next async_get_site_info() call to re-fetch from Tesla.
@@ -4308,6 +4409,9 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         self._site_info_last_fetch = 0
         self._site_info_fetch_failed = False
         self._site_info_retry_at = 0.0
+        # Fence any read already in flight so it cannot repopulate the cache
+        # with a snapshot that predates the write.
+        self._site_info_generation = getattr(self, "_site_info_generation", 0) + 1
         _LOGGER.debug("Tesla site_info cache invalidated — next read will refetch")
 
     async def set_grid_charging_enabled_outcome(

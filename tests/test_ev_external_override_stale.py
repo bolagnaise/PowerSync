@@ -40,6 +40,16 @@ def test_measured_draw_keeps_override_however_old():
     assert stale(state, power_available=True, power_kw=7.2, now=10 * WINDOW) is False
 
 
+def test_telemetry_gap_after_long_draw_does_not_end_the_override():
+    """A 7.2 kW reading at 60 min, then one unavailable reading, is not stale."""
+    stale = _stale_fn()
+    state = {"external_manual_override_since": 0.0}
+    assert stale(state, power_available=True, power_kw=7.2, now=2 * WINDOW) is False
+    assert stale(state, power_available=False, power_kw=0.0, now=2 * WINDOW + 1) is False
+    # A full window with no draw after the last evidence still releases it.
+    assert stale(state, power_available=False, power_kw=0.0, now=3 * WINDOW) is True
+
+
 @pytest.mark.parametrize("since", [None, "bad", float("nan")])
 def test_restored_state_without_timestamp_starts_window_instead_of_never(since):
     stale = _stale_fn()

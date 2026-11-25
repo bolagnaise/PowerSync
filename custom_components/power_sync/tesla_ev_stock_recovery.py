@@ -41,6 +41,7 @@ _HOST_CONTRACT_LOCK_KEY = "_tesla_stock_host_contract_lock"
 STOCK_HOST_PROFILES = {
     ("2026.10.4", "46.6.0"): "homeassistant/core@2026.10.4;aioesphomeapi@46.6.0",
     ("2026.11.2", "46.25.0"): "homeassistant/core@2026.11.2;aioesphomeapi@46.25.0",
+    ("2026.11.3", "46.25.0"): "homeassistant/core@2026.11.3;aioesphomeapi@46.25.0",
 }
 
 

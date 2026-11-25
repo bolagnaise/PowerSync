@@ -9,11 +9,28 @@ import asyncio
 import math
 import re
 import time
+from contextvars import ContextVar
 from functools import wraps
 
 from .native_rate_budget import RUNTIME_KEY, native_max_ev_coexistence, site_identity
 from .native_battery_flexibility import native_battery_flexibility
 from .teslemetry_solar import _EV_SUBMISSION_CONTEXT, ev_owner_snapshot
+
+# Why the latest admission in this task returned False. A plain False from
+# admission used to leave the caller with no reason to report.
+_ADMISSION_REFUSAL: ContextVar[str | None] = ContextVar(
+    "power_sync_ev_admission_refusal", default=None
+)
+
+
+def last_ev_submission_refusal() -> str | None:
+    """Return why the latest prepare_ev_submission in this task said no."""
+    return _ADMISSION_REFUSAL.get()
+
+
+def _refuse(reason: str) -> bool:
+    _ADMISSION_REFUSAL.set(reason)
+    return False
 
 
 class SiteImportAdmissionDenied(RuntimeError):
@@ -588,6 +605,7 @@ async def reconcile_managed_for_native_max(hass, budget, site, *, settle_seconds
 
 async def prepare_ev_submission(hass, entity_id, *, operation, amps=None):
     ticket = []
+    _ADMISSION_REFUSAL.set(None)
     context = _EV_SUBMISSION_CONTEXT.get()
     params = context.get("params", {}) if context is not None else {}
     deadline = params.get("_boost_start_deadline")
@@ -805,10 +823,12 @@ async def _prepare_ev_submission(hass, entity_id, *, operation, amps, committed)
         projected = _number(getattr(state, "state", None))
         current = float(native["amps"]) if native is not None else math.nan
         known_setting = native is not None
-    if (budget.site_armed(site) or budget.native_max_claim(site)) and (identity is None or not known_setting):
-        return False
+    if (budget.site_armed(site) or budget.native_max_claim(site)) and identity is None:
+        return _refuse(f"charge-current entity {entity_id} has no entity-registry identity")
+    if (budget.site_armed(site) or budget.native_max_claim(site)) and not known_setting:
+        return _refuse(f"no fresh charge-current reading from {entity_id}")
     if (budget.site_armed(site) or budget.native_max_claim(site)) and operation == "start" and current <= 0:
-        return False
+        return _refuse(f"{entity_id} reports {current:g}A, so a start has no known positive rate")
     newer_projected = (projected if native is not None and math.isfinite(projected)
                        and projected.is_integer() and 0 <= projected <= 80
                        and _fresh_at(state) > native["at"] else current) if native_entity_id is not None else current
@@ -816,7 +836,7 @@ async def _prepare_ev_submission(hass, entity_id, *, operation, amps, committed)
     if requested is None and not budget.site_armed(site):
         requested = 80  # Unknown legacy start; retain its conservative envelope.
     if isinstance(requested, bool) or not isinstance(requested, (int, float)) or not float(requested).is_integer() or not 0 <= requested <= 80:
-        return False
+        return _refuse(f"requested rate {requested!r} is not a whole number of amps between 0 and 80")
     profile = context.get("params") or {}
     rate_reduction = operation == "rate" and known_setting and requested <= current
     site_limit_revision = runtime.get("native_site_limits_revision", 0)
@@ -840,7 +860,7 @@ async def _prepare_ev_submission(hass, entity_id, *, operation, amps, committed)
     unit = evidence["unit_w"]
     if not unit:
         if budget.site_armed(site):
-            return False
+            return _refuse("no watts-per-amp figure for this vehicle")
         unit = 900  # No authority is gained from this conservative legacy bound.
     evidence["current_amps"] = int(current) if known_setting else None
     record = {"entry_id": entry.entry_id, "site": site, "identity": identity or entity_id,

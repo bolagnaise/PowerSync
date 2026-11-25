@@ -1320,3 +1320,16 @@ async def test_standby_voltage_fallback_keeps_unproven_armed_start_closed(admiss
     elif case == 'negative_voltage': a.charge['charger_voltage'] = -2
     assert not await a.m.prepare_ev_submission(a.hass, 'switch.car_charge', operation='start')
     assert not a.budget.managed
+
+
+@pytest.mark.asyncio
+async def test_plain_refusal_names_its_reason_and_success_clears_it(admission):
+    """A False from admission must say why; the caller reports it to the user."""
+    a = admission
+    assert await a.m.prepare_ev_submission(
+        a.hass, 'number.unregistered_amps', operation='rate', amps=10) is False
+    assert a.m.last_ev_submission_refusal() == (
+        'charge-current entity number.unregistered_amps has no entity-registry identity')
+
+    assert await a.m.prepare_ev_submission(a.hass, a.state.entity_id, operation='rate', amps=5)
+    assert a.m.last_ev_submission_refusal() is None

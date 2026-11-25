@@ -3817,7 +3817,15 @@ def ev_headroom_recovery_status(hass, entry, vin):
     if record is None:
         return {**status, "reason": "reservation_not_found", "reservation_present": False}
     if record.get("entry_id") != entry.entry_id or record.get("site") != site_identity(entry):
-        return {**status, "reason": "reservation_scope_mismatch", "reservation_present": None}
+        from .ev_headroom_recovery import saved_entry_removed
+        site_matches = record.get("site") == site_identity(entry)
+        removed = record.get("entry_id") != entry.entry_id and saved_entry_removed(hass, record)
+        # Report only match flags, never the saved identifiers themselves.
+        return {**status, "reservation_present": None,
+                "saved_entry_matches": record.get("entry_id") == entry.entry_id,
+                "saved_entry_removed": removed, "saved_site_matches": site_matches,
+                "reason": "reservation_entry_removed" if removed and site_matches
+                          else "reservation_scope_mismatch"}
     from homeassistant.helpers import entity_registry as er
     from .native_rate_admission import _identity as managed_identity, _managed_native_entity
     from .native_rate_telemetry import native_charge_source_status
@@ -3939,6 +3947,259 @@ def ev_recovery_status(hass: Any, entry: Any, vehicle_id: Any) -> dict[str, Any]
             "producer_recovery_and_fresh_vehicle_reports" if routes else None
         ),
     }
+
+
+# An unconfirmed BLE command blocks every later command to its vehicle until
+# its effect is known. Without an expiry, one lost readback stopped all
+# charging indefinitely. After this settle window, an independent native cloud
+# report that already shows the command's effect proves a late execution
+# would change nothing, so the attempt can be retired.
+BLE_ATTEMPT_SETTLE_SECONDS = 15 * 60
+_STOPPED_CHARGE_STATES = frozenset({"stopped", "complete", "disconnected", "nopower"})
+_STOPPED_MAX_POWER_KW = 0.05
+_EXPIRABLE_BLE_OPERATIONS = ("stop", "rate")
+
+
+def _unresolved_ble_attempts(ledger: Mapping[str, Any]) -> list[tuple[str, Mapping[str, Any]]]:
+    attempts = ledger.get("attempts", {})
+    return [
+        (str(key), record)
+        for key, record in (attempts.items() if isinstance(attempts, Mapping) else ())
+        if isinstance(record, Mapping)
+        and isinstance(record.get("route"), Mapping)
+        and record["route"].get("kind") == "ble"
+        and not record.get("recovery_retired")
+        and record.get("outcome", "pending") in ("pending", "sent_unknown")
+    ]
+
+
+def _settled_ble_expiry_plan(
+    runtime: dict[str, Any], vid: str,
+) -> tuple[list[tuple[str, Mapping[str, Any]]], list[str], float | None, str | None]:
+    """Return (attempts, releasable incidents, settle cutoff, refusal reason).
+
+    Structural checks only: everything that must hold before a vehicle report
+    could retire this vehicle's unconfirmed BLE attempts.
+    """
+    if _journal_malformed(runtime, vid):
+        return [], [], None, "recovery journal is malformed"
+    if not _sidecar_ready(runtime):
+        return [], [], None, "the durable recovery journal is not loaded"
+    ledger = _ledger(runtime, vid, migrate=False)
+    if not isinstance(ledger, dict):
+        return [], [], None, "no retained attempts"
+    if any(hazard.get("kind") == "ble_quarantine" and not hazard.get("recovery_retired")
+           for hazard in _hazards(ledger)):
+        return [], [], None, "a BLE quarantine needs the bridge recovery"
+    pending = _unresolved_ble_attempts(ledger)
+    if not pending:
+        return [], [], None, "no unresolved BLE attempts"
+    if len(_unresolved_routes(ledger)) != len(pending):
+        return [], [], None, "non-BLE command uncertainty is also retained"
+    cutoff = 0.0
+    for key, record in pending:
+        operation = str(record.get("operation") or "").strip().lower()
+        if operation not in _EXPIRABLE_BLE_OPERATIONS:
+            return [], [], None, (
+                f"{operation or 'unknown'} attempt {key}: "
+                f"{operation or 'unknown'} commands are not expired automatically")
+        submitted = _epoch(record.get("submitted_epoch"))
+        if submitted is None:
+            return [], [], None, f"{operation} attempt {key}: attempt has no submission time"
+        cutoff = max(cutoff, submitted + BLE_ATTEMPT_SETTLE_SECONDS)
+    pending_keys = {key for key, _ in pending}
+    state = runtime[_SIDECAR_STATE_KEY]
+    releasable = []
+    incidents = state.get("incidents", {}) if isinstance(state, Mapping) else {}
+    for incident_id, incident in (incidents.items() if isinstance(incidents, Mapping) else ()):
+        if (not isinstance(incident, Mapping)
+                or (incident.get("phase") == "released" and not incident.get("activation_pending"))
+                or not _incident_covers_vehicle(incident, vid)):
+            continue
+        refs = incident.get("liability_refs")
+        vehicles = _candidate_list(incident.get("current_candidate_vehicles"))
+        if (incident.get("phase") != "held" or incident.get("activation_pending")
+                or incident.get("scope_closed") is not True
+                or [str(item) for item in vehicles] != [vid]
+                or not isinstance(refs, list) or not refs
+                or any(not isinstance(ref, Mapping) or str(ref.get("vehicle_id")) != vid
+                       or ref.get("hazard_id") is not None
+                       or str(ref.get("attempt_id")) not in pending_keys
+                       for ref in refs)):
+            return [], [], None, f"recovery incident {incident_id} still needs the bridge recovery"
+        releasable.append(str(incident_id))
+    return pending, releasable, cutoff, None
+
+
+def ble_attempt_expiry_due(hass: Any, entry: Any, vehicle_id: Any) -> tuple[float | None, str | None]:
+    """Return when a vehicle report could retire its BLE attempts, or why never.
+
+    The caller reads an independent report only once ``time.time()`` reaches
+    the returned cutoff, and requires that report to be newer than it.
+    """
+    runtime = _runtime(hass, entry)
+    if runtime is None or runtime.get(_RECOVERY_STOPPING_KEY) is True:
+        return None, "recovery runtime unavailable"
+    _, _, cutoff, reason = _settled_ble_expiry_plan(runtime, str(vehicle_id or ""))
+    return cutoff, reason
+
+
+def _independent_report_reason(observation: Any, fields: tuple[str, ...]) -> str | None:
+    """Accept only a native cloud charge_state document with field provenance."""
+    if observation is None:
+        return "no fresh independent vehicle reading"
+    if getattr(observation, "origin", None) != "native_cloud":
+        return "vehicle reading is not an independent native cloud report"
+    provenance = getattr(observation, "field_provenance", None)
+    if not isinstance(provenance, Mapping) or any(not provenance.get(name) for name in fields):
+        return "independent vehicle reading lacks field provenance"
+    return None
+
+
+def _settled_ble_attempt_reason(
+    record: Mapping[str, Any], observation: Any, now: float,
+) -> str | None:
+    """Return None when a retained BLE attempt's effect is proven, else why not."""
+    operation = str(record.get("operation") or "").strip().lower()
+    if operation not in _EXPIRABLE_BLE_OPERATIONS:
+        return f"{operation or 'unknown'} commands are not expired automatically"
+    submitted = _epoch(record.get("submitted_epoch"))
+    if submitted is None:
+        return "attempt has no submission time"
+    settle_at = submitted + BLE_ATTEMPT_SETTLE_SECONDS
+    if now < settle_at:
+        return f"settling for {int(settle_at - now)} s more"
+    reason = _independent_report_reason(observation, ("charge_state", "charger_power"))
+    if reason:
+        return reason
+    observed_at = _epoch(getattr(observation, "source_charge_timestamp", None))
+    if observed_at is None or observed_at < settle_at:
+        return "latest independent vehicle reading predates the settle window"
+    state = str(getattr(observation, "charge_state", "") or "").strip().lower()
+    power = getattr(observation, "charger_power", None)
+    stopped = (state in _STOPPED_CHARGE_STATES and power is not None
+               and power <= _STOPPED_MAX_POWER_KW)
+    if operation == "stop":
+        if stopped:
+            return None
+        return f"stop not observed (vehicle reports {state or 'unknown'}, {power} kW)"
+    if stopped:
+        # A late rate write cannot add draw to a stopped car, and every new
+        # start pre-sets its own rate first.
+        return None
+    bound = record["route"].get("effect_bound")
+    if not isinstance(bound, Mapping) or bound.get("kind") != "rate":
+        return "rate attempt has no recorded amp range"
+    low, high = _epoch(bound.get("min_amps")), _epoch(bound.get("max_amps"))
+    if low is None or high is None:
+        return "rate attempt has no recorded amp range"
+    reason = _independent_report_reason(observation, ("requested_current",))
+    if reason:
+        return reason
+    requested = getattr(observation, "requested_current", None)
+    if requested is None:
+        return "vehicle reading has no requested current"
+    # The bound lists the only values the BLE write could have submitted (the
+    # request and, with a stale entity max, its lower fallback), not a range:
+    # a value in between proves neither, so a late write could still land.
+    possible = sorted({low, high})
+    if requested in possible:
+        return None
+    shown = " or ".join(f"{value:g}A" for value in possible)
+    return f"vehicle requests {requested:g}A, not the command's {shown}"
+
+
+async def async_expire_settled_ble_attempts(
+    hass: Any, entry: Any, vehicle_id: Any, observation: Any, *, authorize: Any = None,
+) -> tuple[bool, str]:
+    """Retire unconfirmed BLE attempts whose effect an independent report proves.
+
+    Only stop and rate attempts qualify, and only when no BLE quarantine
+    hazard or non-BLE uncertainty remains. Anything unproven stays held.
+    The durable sidecar is the commit point, as for the bridge recovery.
+    Returns ``(retired, reason)``.
+    """
+    vid = str(vehicle_id or "")
+    runtime = _runtime(hass, entry)
+    if runtime is None or runtime.get(_RECOVERY_STOPPING_KEY) is True:
+        return False, "recovery runtime unavailable"
+    async with _journal_lock(runtime):
+        if authorize is not None and not authorize():
+            return False, "recovery authority changed"
+        pending, releasable, _, reason = _settled_ble_expiry_plan(runtime, vid)
+        if reason:
+            return False, reason
+        ledger = _ledger(runtime, vid, migrate=False)
+        state = runtime[_SIDECAR_STATE_KEY]
+        now = time.time()
+        for key, record in pending:
+            reason = _settled_ble_attempt_reason(record, observation, now)
+            if reason:
+                return False, f"{record.get('operation')} attempt {key}: {reason}"
+        before = _snapshot_recovery(runtime)
+        state_before = deepcopy(state)
+        evidence = {
+            "kind": "settled_ble_attempt_expiry",
+            "vehicle_id": vid,
+            "attempts": [key for key, _ in pending],
+            "origin": getattr(observation, "origin", None),
+            "observed_at": getattr(observation, "source_charge_timestamp", None),
+            "producer_identity": getattr(observation, "producer_identity", None),
+            "charge_state": getattr(observation, "charge_state", None),
+            "charger_power": getattr(observation, "charger_power", None),
+            "requested_current": getattr(observation, "requested_current", None),
+            "provenance": deepcopy(dict(getattr(observation, "field_provenance", {}) or {})),
+        }
+        _retire_recovery_liabilities(
+            runtime,
+            [{"vehicle_id": vid, "attempt_id": key} for key, _ in pending],
+            f"settled:{vid}:{uuid4().hex}",
+            evidence,
+        )
+        history = [*ledger.get("attempts", {}).values(), *_hazards(ledger)]
+        if isinstance(ledger.get("route"), Mapping) and (
+                ledger["route"].get("kind") == "ble"
+                or all(isinstance(item, Mapping) and item.get("recovery_retired")
+                       for item in history)):
+            # The pin only fenced the now-retired liabilities. A retired BLE
+            # producer must not be reselected from it, and with nothing left
+            # unresolved the vehicle returns to its configured route choice.
+            ledger["route"] = None
+        for incident_id in releasable:
+            # Same release the bridge recovery performs, with this proof.
+            incident = state["incidents"][incident_id]
+            incident.setdefault("retirement_evidence", []).append(deepcopy(evidence))
+            incident["phase"] = "released"
+            incident["phase_token"] = uuid4().hex
+            incident["released_at"] = now
+            incident["historical_outcome"] = "unknown"
+            obligation = state.get("obligations", {}).get(incident_id)
+            if isinstance(obligation, dict):
+                obligation["phase"] = "released"
+                obligation["phase_token"] = incident["phase_token"]
+            liability = state.get("liabilities", {}).get(incident_id)
+            if isinstance(liability, dict):
+                liability["state"] = "retained_reconciled"
+                liability["historical_outcome"] = "unknown"
+
+        def rollback() -> None:
+            _restore_recovery(runtime, before)
+            _restore_sidecar_state(state, state_before)
+
+        try:
+            # Sync the projection into the sidecar and save it: one durable
+            # commit. A later legacy-projection write cannot make it disagree.
+            saved = await _persist_recovery_sidecar(hass, entry, runtime)
+        except BaseException:
+            # The shielded save may already have committed; keep memory on
+            # the held side, and the reload resolves to the durable record.
+            rollback()
+            raise
+        if not saved:
+            rollback()
+            return False, "the recovery journal could not be saved"
+        released = f" and released {len(releasable)} recovery incident(s)" if releasable else ""
+        return True, f"retired {len(pending)} settled BLE attempt(s){released}"
 
 
 def get_vehicle_route(hass: Any, entry: Any, vehicle_id: Any) -> dict[str, Any] | None:

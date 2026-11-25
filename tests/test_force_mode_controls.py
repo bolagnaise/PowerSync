@@ -805,16 +805,20 @@ def test_monitoring_switch_preserves_grid_charge_policy_options():
 def test_monitoring_switch_cannot_disable_ihomemanager_telemetry_only_mode():
     source = SWITCH_PATH.read_text()
     tree = ast.parse(source)
+    telemetry_only = _find_class_method(tree, "MonitoringModeSwitch", "_telemetry_only")
     current_value = _find_class_method(tree, "MonitoringModeSwitch", "_current_value")
     turn_off = _find_class_method(tree, "MonitoringModeSwitch", "async_turn_off")
+    telemetry_source = ast.get_source_segment(source, telemetry_only)
     current_source = ast.get_source_segment(source, current_value)
     turn_off_source = ast.get_source_segment(source, turn_off)
 
+    assert telemetry_source is not None
     assert current_source is not None
     assert turn_off_source is not None
-    assert "SUNGROW_CONNECTION_IHOMEMANAGER" in current_source
+    assert "SUNGROW_CONNECTION_IHOMEMANAGER" in telemetry_source
+    assert "self._telemetry_only()" in current_source
     assert "return True" in current_source
-    assert "SUNGROW_CONNECTION_IHOMEMANAGER" in turn_off_source
+    assert "self._telemetry_only()" in turn_off_source
     assert "Monitoring mode cannot be disabled" in turn_off_source
     assert "self._attr_is_on = True" in turn_off_source
     assert turn_off_source.index("return") < turn_off_source.index(

@@ -963,6 +963,7 @@ async def async_read_independent_tesla_vehicle(
     allow_paid_refresh: bool = False,
     authorize: Callable[[], bool] | None = None,
     tessie_start_recovery_after: float | None = None,
+    failure: dict[str, Any] | None = None,
 ) -> TeslaVehicleObservation | None:
     """Read one exact cloud charge-state response using the native HA client.
 
@@ -977,33 +978,39 @@ async def async_read_independent_tesla_vehicle(
     validates that response or reads the refreshed document. The freshness
     boundary precedes the refresh, never its later cache read. Ordinary reads
     do not request this refresh. Neither path wakes, commands, publishes
-    coordinator data, nor changes provider.
+    coordinator data, nor changes provider. A caller-supplied ``failure``
+    mapping receives a non-identifying reason when no observation is returned.
     """
+    def fail(reason: str, **details: Any) -> None:
+        if isinstance(failure, dict) and "reason" not in failure:
+            failure.update(reason=reason, **details)
+        return None
+
     canonical = _canonical_vin(vin)
     cutoff = None if updated_after is None else _timestamp(updated_after)
     if canonical is None or (updated_after is not None and cutoff is None):
-        return None
+        return fail("invalid_request")
     timeout_value = _finite(timeout, minimum=0)
     if timeout_value is None or timeout_value <= 0:
-        return None
+        return fail("invalid_request")
     timeout_value = min(timeout_value, MAX_TIMEOUT_SECONDS)
     source = _select_source(hass, canonical, preferred_entity_id)
     if source is None:
-        return None
+        return fail("source_unavailable")
     tessie_recovery_cutoff = None
     if tessie_start_recovery_after is not None:
         tessie_recovery_cutoff = _timestamp(tessie_start_recovery_after)
         if source.domain != "tessie" or tessie_recovery_cutoff is None or authorize is None:
-            return None
+            return fail("invalid_request")
     contract = _cloud_contract(source)
     identity = _independent_identity(hass, source, preferred_entity_id)
     if contract is None or identity is None:
-        return None
+        return fail("cloud_reader_unavailable")
     api, debouncer, endpoint = contract
     paid_refresh = allow_paid_refresh is True and source.domain == "teslemetry"
     refresh = getattr(type(api), "data_refresh", None) if paid_refresh else None
     if paid_refresh and (not callable(refresh) or not callable(authorize)):
-        return None
+        return fail("cloud_reader_unavailable")
     native_runtime = getattr(source.entry, "runtime_data", None)
     state = _read_state(hass)
     key = (*source.key(), id(api), id(debouncer))
@@ -1033,47 +1040,71 @@ async def async_read_independent_tesla_vehicle(
         )
 
     async def read_cloud() -> TeslaVehicleObservation | None:
+        stage = ["lock"]
+
         async def locked_read() -> TeslaVehicleObservation | None:
             if not current():
-                return None
+                return fail("not_authorized")
             async with debouncer.async_lock():
                 if not current():
-                    return None
+                    return fail("not_authorized")
                 before = _source_charge_timestamp(getattr(source.coordinator, "data", None))
                 previous = state.independent_timestamps.get(key)
                 started = time.time()
 
-                def parse(response: Any) -> TeslaVehicleObservation | None:
+                rejections: dict[str, dict[str, Any]] = {}
+
+                def parse(response: Any, kind: str) -> TeslaVehicleObservation | None:
+                    def reject(reason: str, **details: Any) -> None:
+                        rejections[kind] = {"reason": reason, **details}
+                        return None
+
                     if not isinstance(response, Mapping):
-                        return None
+                        return reject("response_not_document")
                     data = response.get("response")
-                    if not isinstance(data, Mapping) or _canonical_vin(data.get("vin")) != canonical:
-                        return None
+                    if not isinstance(data, Mapping):
+                        return reject("response_not_document")
+                    if _canonical_vin(data.get("vin")) != canonical:
+                        return reject("response_vehicle_mismatch")
                     charge = _charge_state(deepcopy(data))
                     stamp = _timestamp(charge.get("timestamp"))
                     now = time.time()
-                    if (stamp is None
-                            or stamp > now + 5 or now - stamp > MAX_SOURCE_AGE_SECONDS
-                            or (before is not None and stamp <= before)
-                            or (previous is not None and stamp <= previous)
-                            or (cutoff is not None and stamp <= cutoff)):
-                        return None
+                    if stamp is None:
+                        return reject("charge_timestamp_missing")
+                    # Rounded relative ages only; no identifiers or raw values.
+                    age = {"sample_age_seconds": round(now - stamp, 1)}
+                    if stamp > now + 5:
+                        return reject("charge_timestamp_future", **age)
+                    if now - stamp > MAX_SOURCE_AGE_SECONDS:
+                        return reject("charge_timestamp_too_old", **age)
+                    if before is not None and stamp <= before:
+                        return reject("not_newer_than_coordinator", **age)
+                    if previous is not None and stamp <= previous:
+                        return reject("not_newer_than_previous_read", **age)
+                    if cutoff is not None and stamp <= cutoff:
+                        return reject("not_newer_than_cutoff", **age)
                     # Tessie can publish asynchronously on newer vehicles,
                     # even when GET requests bypass the cache. For Start
                     # recovery, require a vehicle sample newer than the
                     # recovery attempt and the coordinator snapshot.
                     if tessie_recovery_cutoff is not None:
                         if not tessie_recovery_cutoff < stamp <= now:
-                            return None
+                            return reject("older_than_read_start", **age)
                     elif stamp < math.floor(started):
-                        return None
+                        return reject("older_than_read_start", **age)
                     result = _observation(source, charge, stamp)
-                    if (result is None or result.charge_state.lower() not in {
-                                "charging", "stopped", "complete", "disconnected", "starting", "nopower"}
-                            or result.requested_current is None
-                            or result.charge_limit_soc is None or result.charge_limit_soc > 100
-                            or result.charger_actual_current is None or result.charger_power is None):
-                        return None
+                    if result is None:
+                        return reject("charge_document_unusable", **age)
+                    if result.charge_state.lower() not in {
+                            "charging", "stopped", "complete", "disconnected", "starting", "nopower"}:
+                        return reject("charge_state_unrecognized", **age)
+                    missing = [name for name, value in (
+                        ("requested_current", result.requested_current),
+                        ("charge_limit_soc", result.charge_limit_soc),
+                        ("charger_actual_current", result.charger_actual_current),
+                        ("charger_power", result.charger_power)) if value is None]
+                    if missing or result.charge_limit_soc > 100:
+                        return reject("charge_fields_incomplete", fields=missing or ["charge_limit_soc"], **age)
                     requested_key = "charge_current_request" if charge.get("charge_current_request") is not None else "charger_current_request"
                     return TeslaVehicleObservation(
                         vin=result.vin, domain=result.domain,
@@ -1095,13 +1126,15 @@ async def async_read_independent_tesla_vehicle(
 
                 result = None
                 if paid_refresh:
+                    stage[0] = "refresh"
                     response = await refresh(api)
                     if not current():
-                        return None
-                    result = parse(response)
+                        return fail("not_authorized", stage="refresh")
+                    result = parse(response, "refresh")
                 if result is None:
                     if not current():
-                        return None
+                        return fail("not_authorized", stage="refresh")
+                    stage[0] = "read"
                     # Call the known cloud class method on the existing client;
                     # an instance command router override is never selected.
                     if source.domain == "tessie":
@@ -1112,21 +1145,30 @@ async def async_read_independent_tesla_vehicle(
                     else:
                         response = await type(api).vehicle_data(api, endpoints=[endpoint])
                     if not current():
-                        return None
-                    result = parse(response)
-                if result is None or not current():
-                    return None
+                        return fail("not_authorized", stage="read")
+                    result = parse(response, "read")
+                if result is None:
+                    rejected = rejections.get("read") or rejections.get("refresh") or {}
+                    details = {"stage": "read" if "read" in rejections else "refresh"}
+                    if "refresh" in rejections and "read" in rejections:
+                        details["refresh_reason"] = rejections["refresh"]["reason"]
+                    details.update({k: v for k, v in rejected.items() if k != "reason"})
+                    return fail(rejected.get("reason", "response_rejected"), **details)
+                if not current():
+                    return fail("not_authorized", stage=stage[0])
                 state.independent_timestamps[key] = result.source_charge_timestamp
                 return result
         try:
             return await asyncio.wait_for(locked_read(), timeout=timeout_value)
         except asyncio.CancelledError:
             raise
-        except Exception:
-            return None
+        except asyncio.TimeoutError:
+            return fail("timeout", stage=stage[0])
+        except Exception as error:
+            return fail("provider_error", stage=stage[0], error_type=type(error).__name__)
         except BaseException as error:
             if _is_tesla_provider_error(error):
-                return None
+                return fail("provider_error", stage=stage[0], error_type=type(error).__name__)
             raise
 
     task = state.independent_in_flight.get(in_flight_key)
@@ -1146,13 +1188,17 @@ async def async_read_independent_tesla_vehicle(
     try:
         result = await asyncio.wait_for(asyncio.shield(task), timeout=timeout_value)
     except asyncio.TimeoutError:
-        return None
+        return fail("timeout")
     except BaseException as error:
         if _is_tesla_provider_error(error):
-            return None
+            return fail("provider_error", error_type=type(error).__name__)
         raise
-    if not current() or result is None or (cutoff is not None and result.source_charge_timestamp <= cutoff):
-        return None
+    if result is None:
+        return fail("response_rejected")
+    if not current():
+        return fail("not_authorized")
+    if cutoff is not None and result.source_charge_timestamp <= cutoff:
+        return fail("not_newer_than_cutoff")
     return result
 
 

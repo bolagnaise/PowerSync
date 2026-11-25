@@ -114,6 +114,7 @@ def _strategy_script(board_missing: bool) -> str:
       natives: [...new Set(cards.map(c => c.native).filter(Boolean))],
       missingRender: cards.filter(c => !c.native && !c.card).map(c => c.key),
       optRows: (cards.find(c => c.key === 'optset')?.config.rows || []).map(r => r.entity),
+      optCard: (({ native, title, config }) => ({ native, title, entities: config.entities, groups: config.rows.map(r => [r.entity, r.group, r.kind]) }))(cards.find(c => c.key === 'optset') || { config: { rows: [] } }),
       evSettings: cards.find(c => c.key === 'evset') || null,
       pwRows: (cards.find(c => c.key === 'pwset')?.config.rows || []).map(r => r.entity),
       controls: cards.find(c => c.key === 'controls')?.config.entities || null,
@@ -144,6 +145,11 @@ def test_generate_hands_every_card_to_the_board():
         assert f"'{tag}':" in board_source, tag
     assert "switch.power_sync_monitoring_mode" in out["optRows"]
     assert "switch.power_sync_optimization_enabled" in out["optRows"]
+    assert out["optCard"]["native"] == "ps-optimizer-card"
+    assert out["optCard"]["title"] == "Optimiser settings"
+    assert out["optCard"]["entities"]["enabled"] == "switch.power_sync_optimization_enabled"
+    assert out["optCard"]["entities"]["monitoring"] == "switch.power_sync_monitoring_mode"
+    assert ["switch.power_sync_monitoring_mode", "main", "switch"] in out["optCard"]["groups"]
     assert "select.power_sync_operation_mode" in out["pwRows"]
     assert out["controls"]["mode"] == "sensor.power_sync_battery_mode"
     assert out["nowEntities"]["exportEarnings"] == "sensor.power_sync_daily_export_earnings"
@@ -200,7 +206,7 @@ def _board_script(body: str) -> str:
         + r"""
   vm.createContext(context);
   const src = fs.readFileSync(process.argv[1], 'utf8').replace(/^export \{[^}]*\};?\s*$/m, '');
-  vm.runInContext(src + '\n;globalThis.__t = { PowerSyncBoard, PsSettingsDialog, PS_SETTING_EDITORS, PsSettingsCard, PsTodayCard, PsNowCard, PsTariffCard, psExportOffer, PsPlanCard, PsControlsCard, PsInverterControlsCard, psUntilPreview, psSchedule, psWindows, psActionKey, PS_LAYOUT_KEY, PS_DEFAULT_LAYOUT, psChartValue, psChart, psBars, PsPricesCard, PsEnergyCard, PsLoadForecastCard, PsSolarLoadCard, PsBatteryPlanCard, psApiCache, psPlannedRunEnd, psBatteryControl };', context);
+  vm.runInContext(src + '\n;globalThis.__t = { PowerSyncBoard, PsSettingsDialog, PS_SETTING_EDITORS, PsSettingsCard, PsTodayCard, PsNowCard, PsTariffCard, psExportOffer, PsPlanCard, PsControlsCard, PsInverterControlsCard, psUntilPreview, psSchedule, psWindows, psActionKey, PS_LAYOUT_KEY, PS_DEFAULT_LAYOUT, psChartValue, psChart, psBars, PsPricesCard, PsEnergyCard, PsLoadForecastCard, PsSolarLoadCard, PsBatteryPlanCard, psApiCache, psPlannedRunEnd, psBatteryControl, PsOptimizerCard, psOptimizerStatus, psOptimizerAccess, psCommandFailureChip };', context);
   const T = context.__t;
 """
         + body
@@ -1505,6 +1511,24 @@ def test_solar_editor_accepts_fractional_tariffs_and_saves_only_edited_fields():
     assert out["patch"] == {"surplus_calculation": "direct", "max_export_price_cents": 14.25}
 
 
+def test_cost_neutral_supply_charge_label_shows_major_currency_per_day():
+    """Ticket 467: the dashboard label must not read as cents."""
+    out = _run_board(r"""
+  const dialog = new T.PsSettingsDialog();
+  dialog._values = { daily_supply_charge: 1.6662 };
+  const html = {};
+  for (const currency of ['AUD', 'GBP', undefined]) {
+    dialog._hass = { config: currency ? { currency } : {} };
+    html[currency || 'default'] = dialog._fieldHtml('daily_supply_charge');
+  }
+  console.log(JSON.stringify(html));
+""")
+    assert "Daily supply charge (AUD/day)" in out["AUD"]
+    assert "Daily supply charge (GBP/day)" in out["GBP"]
+    assert "Daily supply charge (AUD/day)" in out["default"]
+    assert "not cents" in out["AUD"]
+
+
 def test_settings_save_requires_successful_write_and_matching_readback():
     out = _run_board(r"""
   (async () => {
@@ -1985,6 +2009,37 @@ def test_today_average_labels_net_home_energy_cost_not_battery_acquisition():
     assert 'Average import cost' not in out['html']
     assert '9.9' in out['html']
     assert 'Month to date 162.0 c' in out['html']
+
+
+def test_today_average_uses_sensor_unit_not_value_magnitude():
+    """Ticket467: a major-unit average of 5 or more must not be shown as cents."""
+    out = _run_board(r"""
+  const render = (avg, mtd, unit) => {
+    const card = new T.PsTodayCard();
+    const state = (value, attributes = {}) => ({ state: String(value), attributes });
+    card.config = { entities: { avgCost: 'sensor.avg', mtdAvgCost: 'sensor.mtd' } };
+    card.hass = {
+      states: {
+        'sensor.avg': state(avg, { unit_of_measurement: unit }),
+        'sensor.mtd': state(mtd, { unit_of_measurement: unit }),
+      }, config: { currency: 'AUD' }, locale: {}, callApi: async () => null,
+    };
+    card._render();
+    return card.innerHTML;
+  };
+  console.log(JSON.stringify({
+    major: render(5.3797, 3.543, 'AUD/kWh'),
+    minor: render(7.6, 12.3, 'c/kWh'),
+    negative: render(-0.12, -0.05, 'AUD/kWh'),
+  }));
+""")
+    # 5.38 AUD/kWh is 538 c/kWh, never 5.4 c/kWh.
+    assert '538.0<small>c/kWh</small>' in out['major']
+    assert 'Month to date 354.3 c' in out['major']
+    # A sensor already reporting minor units is not scaled again.
+    assert '7.6<small>c/kWh</small>' in out['minor']
+    assert 'Month to date 12.3 c' in out['minor']
+    assert '-12.0<small>c/kWh</small>' in out['negative']
 
 
 @pytest.mark.parametrize("board_missing", [False, True])
@@ -2795,3 +2850,291 @@ def test_ev_smart_policy_editor_prices_strategies_weekdays_and_shared_profile_ch
     assert server["loads"] == 1
 
     assert result["old"] == [{"vehicle_id": "generic_ev", "max_grid_price_cents": 30, "shared_charger_profile_id": "car-a"}]
+
+
+_OPT_CARD_SETUP = r"""
+  const ent = {
+    enabled: 'switch.power_sync_optimization_enabled', monitoring: 'switch.power_sync_monitoring_mode',
+    profitMax: 'switch.power_sync_profit_max_mode', costNeutral: 'switch.power_sync_cost_neutral',
+    chargeByTime: 'switch.power_sync_charge_by_time',
+  };
+  const rows = [
+    { group: 'main', kind: 'switch', entity: ent.enabled, label: 'Smart Optimization', editor: 'optimizer' },
+    { group: 'main', kind: 'switch', entity: ent.monitoring, label: 'Monitoring only' },
+    { group: 'goal', kind: 'link', entity: ent.costNeutral, label: 'Daily supply charge', editor: 'cost_neutral' },
+    { group: 'goal', kind: 'switch', entity: ent.chargeByTime, label: 'Charge by time', editor: 'charge_by_time' },
+    { group: 'tuning', kind: 'switch', entity: 'switch.power_sync_away_mode', label: 'Away mode' },
+  ];
+  const st = v => ({ state: v, attributes: {}, last_updated: '2026-11-24T00:00:00Z' });
+  const render = (states, data) => {
+    if (data) T.psApiCache.set('power_sync/optimization', { at: Date.now(), data, promise: null });
+    else T.psApiCache.delete('power_sync/optimization');
+    const card = new T.PsOptimizerCard();
+    card._config = { entities: ent, rows };
+    card._hass = { states: Object.fromEntries(Object.entries(states).map(([k, v]) => [ent[k] || k, st(v)])) };
+    card._render();
+    return card;
+  };
+  const base = { enabled: 'on', monitoring: 'off', profitMax: 'off', costNeutral: 'off', chargeByTime: 'off', 'switch.power_sync_away_mode': 'off' };
+  const ok = { access_state: 'support', can_optimize: true };
+"""
+
+
+def test_optimizer_card_states_what_it_is_doing_in_one_line():
+    out = _run_board(_OPT_CARD_SETUP + r"""
+  const status = html => (html.match(/<p class="opt-status" role="status">(.*?)<\/p>/) || [])[1];
+  console.log(JSON.stringify({
+    off: status(render({ ...base, enabled: 'off' }, { enabled: false, licensing: ok }).innerHTML),
+    monitoring: status(render({ ...base, monitoring: 'on' }, { enabled: true, monitoring_mode: true, licensing: ok }).innerHTML),
+    neutral: status(render({ ...base, costNeutral: 'on' }, { enabled: true, cost_neutral_enabled: true, licensing: ok }).innerHTML),
+    stale: status(render(base, { enabled: true, is_stale: true, licensing: ok }).innerHTML),
+    expired: status(render(base, { enabled: true, licensing: { access_state: 'expired', can_optimize: false } }).innerHTML),
+    loading: T.psOptimizerStatus({ states: {} }, ent, null),
+    // Switches were just changed; the cached payload still has the old values.
+    monitoringJustOff: status(render(base, { enabled: true, monitoring_mode: true, licensing: ok }).innerHTML),
+    optimiserJustOff: status(render({ ...base, enabled: 'off' }, { enabled: true, licensing: ok }).innerHTML),
+    unavailableUsesCache: status(render({ ...base, monitoring: 'unavailable' }, { enabled: true, monitoring_mode: true, licensing: ok }).innerHTML),
+    empty: render({}, null).innerHTML,
+  }));
+""")
+    assert out["off"] == "Smart Optimization is off. The battery follows its own settings."
+    assert out["monitoring"] == (
+        "Smart Optimization is planning only. Monitoring mode is on, so no battery commands are sent."
+    )
+    assert out["neutral"] == "Smart Optimization is controlling the battery, aiming for Cost Neutral."
+    assert out["stale"].endswith("aiming for Standard. The plan is out of date.")
+    assert out["expired"] == "Smart Optimization is paused, waiting for HA optimiser access."
+    assert out["loading"] == "Checking optimiser status…"
+    assert out["monitoringJustOff"] == "Smart Optimization is controlling the battery, aiming for Standard."
+    assert out["optimiserJustOff"] == "Smart Optimization is off. The battery follows its own settings."
+    assert out["unavailableUsesCache"].startswith("Smart Optimization is planning only.")
+    assert out["empty"] == '<p class="empty">None of these settings are available right now.</p>'
+
+
+def test_optimizer_card_offers_one_goal_with_its_description_and_requirement():
+    out = _run_board(_OPT_CARD_SETUP + r"""
+  const profit = render({ ...base, profitMax: 'on' }, {
+    enabled: true, profit_max_mode: true, licensing: ok,
+    profit_max_solar_export: { capability: { supported: false, reason: 'export_limit_not_configured' } },
+  }).innerHTML;
+  const neutral = render({ ...base, costNeutral: 'on' }, {
+    enabled: true, cost_neutral_enabled: true, cost_neutral: { reason: 'covered' }, licensing: ok,
+  }).innerHTML;
+  const offline = render({ ...base, profitMax: 'unavailable', costNeutral: 'unavailable', enabled: 'off' }, { enabled: false, licensing: ok }).innerHTML;
+  const noGoals = render({ enabled: 'on', monitoring: 'off', chargeByTime: 'on' }, {
+    enabled: true, licensing: ok, config: { charge_by_time_target_soc: 90, charge_by_time_target_time: '17:15' },
+  }).innerHTML;
+  const pressed = html => [...html.matchAll(/data-goal="(\w+)"/g)].map(m => m[1])
+    .filter(id => new RegExp(`aria-pressed="true" data-goal="${id}"`).test(html));
+  console.log(JSON.stringify({ profit, neutral, offline, noGoals, pressedProfit: pressed(profit), pressedNeutral: pressed(neutral) }));
+""")
+    profit = out["profit"]
+    for title in ("Standard", "Profit Max", "Cost Neutral"):
+        assert f"{title}</span>" in profit or f"{title}<span" in profit
+    assert out["pressedProfit"] == ["profit"]
+    assert out["pressedNeutral"] == ["neutral"]
+    assert "Exports whenever it earns more than it costs." in profit
+    assert "Exports only until today’s costs are covered" in profit
+    # The backend's own capability refusal, shown on the goal that is on.
+    assert "Solar export stays off until you set a maximum grid export" in profit
+    # "covered" means planned exports cover the target, not that exports stopped.
+    assert "Planned battery exports cover the rest of today’s costs." in out["neutral"]
+    assert "kept for the home" not in out["neutral"]
+    assert "Solar export stays off" not in out["neutral"]
+    # Unavailable switches are visibly disabled; a saved goal still explains
+    # that it only applies once Smart Optimization is on.
+    assert out["offline"].count("disabled>") >= 3
+    assert "Unavailable right now." in out["offline"]
+    assert "Saved now, used when Smart Optimization is on." in out["offline"]
+    # No goal entities, no goal choice; Charge by time shows its target.
+    assert "data-goal" not in out["noGoals"]
+    assert "Target: 90% by 17:15." in out["noGoals"]
+    assert "Mode:" not in profit
+
+
+def test_optimizer_switch_is_disabled_only_when_the_backend_would_refuse_it():
+    out = _run_board(_OPT_CARD_SETUP + r"""
+  const enabledSwitch = html => (html.match(/<button type="button" class="switch"[^>]*data-i="0"[^>]*>/) || [''])[0];
+  const cases = {
+    expired: { access_state: 'expired', can_optimize: false, requires_resume: true },
+    revoked: { access_state: 'installation_revoked', can_optimize: false },
+    recovery: { access_state: 'support', can_optimize: false, recovery_pending: true, requires_resume: true },
+    resumable: { access_state: 'support', can_optimize: false, would_allow: true, requires_resume: true },
+    checking: { access_state: 'checking', can_optimize: false },
+    ok,
+  };
+  const result = {};
+  for (const [name, licensing] of Object.entries(cases)) {
+    const html = render({ ...base, enabled: 'off' }, { enabled: false, licensing }).innerHTML;
+    result[name] = { html, sw: enabledSwitch(html) };
+  }
+  // Turning it off is never refused.
+  result.onExpired = enabledSwitch(render(base, { enabled: true, licensing: cases.expired }).innerHTML);
+  console.log(JSON.stringify(result));
+""")
+    for name in ("expired", "revoked", "recovery"):
+        assert " disabled" in out[name]["sw"], name
+        assert "HA optimiser access" in out[name]["html"], name
+    assert "HA optimiser access has expired." in out["expired"]["html"]
+    assert "restoring its battery controls" in out["recovery"]["html"]
+    for name in ("resumable", "checking", "ok"):
+        assert "disabled" not in out[name]["sw"], name
+    assert "resumes optimisation after an interruption" in out["resumable"]["html"]
+    assert "Open PowerSync integration options" not in out["ok"]["html"]
+    assert "disabled" not in out["onExpired"]
+
+
+def test_optimizer_goal_choice_uses_the_existing_switch_services():
+    out = _run_board(_OPT_CARD_SETUP + r"""
+  const click = (states, goal, data) => {
+    const card = render(states, data);
+    const calls = [];
+    card._call = (...args) => calls.push(args);
+    const btn = { dataset: { goal }, disabled: false, getAttribute: () => 'false' };
+    card._onClick({ target: { closest: sel => (sel === 'button[data-goal]' ? btn : null) } });
+    return calls;
+  };
+  const d = { enabled: true, licensing: ok };
+  console.log(JSON.stringify({
+    standardFromProfit: click({ ...base, profitMax: 'on' }, 'standard', d),
+    standardFromNeutral: click({ ...base, costNeutral: 'on' }, 'standard', d),
+    profit: click(base, 'profit', d),
+    neutral: click({ ...base, profitMax: 'on' }, 'neutral', d),
+    // Profit Max was just chosen but HA has not reported it on yet.
+    standardWhilePending: click(base, 'standard', d),
+    standardSkipsUnavailable: click({ ...base, costNeutral: 'unavailable' }, 'standard', d),
+  }));
+""")
+    both_off = [
+        ["homeassistant", "turn_off", {"entity_id": "switch.power_sync_profit_max_mode"}],
+        ["homeassistant", "turn_off", {"entity_id": "switch.power_sync_cost_neutral"}],
+    ]
+    # Standard never trusts possibly stale switch states.
+    assert out["standardFromProfit"] == both_off
+    assert out["standardFromNeutral"] == both_off
+    assert out["standardWhilePending"] == both_off
+    assert out["standardSkipsUnavailable"] == both_off[:1]
+    assert out["profit"] == [["homeassistant", "turn_on", {"entity_id": "switch.power_sync_profit_max_mode"}]]
+    # The backend turns Profit Max off itself when Cost Neutral starts.
+    assert out["neutral"] == [["homeassistant", "turn_on", {"entity_id": "switch.power_sync_cost_neutral"}]]
+
+
+def test_optimizer_settings_hide_car_inputs_until_a_vehicle_or_charger_exists():
+    out = _run_board(r"""
+  (async () => {
+    const fields = T.PS_SETTING_EDITORS.optimizer.fields;
+    const seed = (path, data) => {
+      if (data === undefined) T.psApiCache.delete(path);
+      else T.psApiCache.set(path, { at: Date.now(), data, promise: null });
+    };
+    const noLoadpoints = { success: true, loadpoints: [] };
+    const gate = async (vehicles, values = {}, loadpoints = noLoadpoints) => {
+      seed('power_sync/ev/vehicles', vehicles);
+      seed('power_sync/ev/loadpoints/status', loadpoints);
+      const dialog = new T.PsSettingsDialog();
+      dialog._hass = {};
+      dialog._values = values;
+      return dialog._gateFields(fields);
+    };
+    console.log(JSON.stringify({
+      none: await gate({ success: true, vehicles: [] }),
+      charger: await gate({ success: true, vehicles: [{ vehicle_id: 'ocpp_1', brand: 'generic' }] }),
+      savedOn: await gate({ success: true, vehicles: [] }, { ev_integration: true }),
+      unknown: await gate(undefined),
+      failed: await gate({ success: false, error: 'boom' }),
+      // A standalone OCPP or Zaptec charger appears only in loadpoint status.
+      standaloneCharger: await gate({ success: true, vehicles: [] }, {}, { success: true, loadpoints: [{ id: 'zaptec_1' }] }),
+      loadpointsFailed: await gate({ success: true, vehicles: [] }, {}, { success: false, error: 'boom' }),
+    }));
+  })().catch(err => { console.error(err); process.exit(1); });
+""")
+    car = {"ev_integration", "use_historical_ev_data"}
+    assert out["none"]["hidden"] is True
+    assert not car & set(out["none"]["fields"])
+    assert "backup_reserve" in out["none"]["fields"]
+    assert car <= set(out["charger"]["fields"])
+    assert "ev_integration" in out["savedOn"]["fields"]
+    assert "use_historical_ev_data" not in out["savedOn"]["fields"]
+    for case in ("unknown", "failed", "standaloneCharger", "loadpointsFailed"):
+        assert car <= set(out[case]["fields"]), case
+        assert out[case]["hidden"] is False
+
+
+def test_monitoring_row_is_disabled_when_the_connection_is_read_only():
+    out = _run_board(_OPT_CARD_SETUP + r"""
+  const monitoringSwitch = html => (html.match(/<button type="button" class="switch"[^>]*data-i="1"[^>]*>/) || [''])[0];
+  const locked = render({ ...base, monitoring: 'on' }, { enabled: true, monitoring_mode: true, licensing: ok });
+  locked._hass.states[ent.monitoring].attributes = { locked_on: true, locked_reason: 'telemetry_only_connection' };
+  locked._render();
+  const free = render({ ...base, monitoring: 'on' }, { enabled: true, monitoring_mode: true, licensing: ok });
+  console.log(JSON.stringify({ locked: locked.innerHTML, lockedSwitch: monitoringSwitch(locked.innerHTML), freeSwitch: monitoringSwitch(free.innerHTML) }));
+""")
+    assert " disabled" in out["lockedSwitch"]
+    assert "Always on: this battery connection is read-only." in out["locked"]
+    assert "disabled" not in out["freeSwitch"]
+
+
+def test_classic_optimiser_status_says_when_it_only_plans():
+    script = (
+        "const fs = require('fs'); const vm = require('vm');"
+        + BROWSER_STUBS
+        + r"""
+  vm.createContext(context);
+  vm.runInContext(fs.readFileSync(process.argv[1], 'utf8'), context);
+  const make = vm.runInContext('_optimizerStatus', context);
+  const card = make(n => `sensor.power_sync_${n}`, false, false, 'switch.power_sync_monitoring_mode');
+  const first = (card.cards || [card])[0];
+  const body = first.label.replace(/^\[\[\[|\]\]\]$/g, '');
+  const label = new Function('states', body);
+  const states = mon => ({
+    'sensor.power_sync_optimization_status': { state: 'self_consumption', attributes: { power_w: 0 } },
+    'switch.power_sync_monitoring_mode': { state: mon },
+  });
+  const legacy = make(n => `sensor.power_sync_${n}`);
+  console.log(JSON.stringify({
+    name: first.name,
+    monitoring: label(states('on')),
+    controlling: label(states('off')),
+    legacy: new Function('states', (legacy.cards || [legacy])[0].label.replace(/^\[\[\[|\]\]\]$/g, ''))(states('on')),
+  }));
+"""
+    )
+    result = subprocess.run(["node", "-e", script, str(STRATEGY_PATH)], check=True, capture_output=True, text=True, timeout=20)
+    out = json.loads(result.stdout.strip().splitlines()[-1])
+    assert out["name"] == "Optimiser"
+    assert out["monitoring"] == "Monitoring only, no commands sent. Plan: Self consumption"
+    assert out["controlling"] == "Self consumption"
+    assert out["legacy"] == "Self consumption"
+
+
+
+def test_optimizer_card_refetches_access_without_other_cards():
+    out = _run_board(_OPT_CARD_SETUP + r"""
+  const card = render(base, { enabled: true, licensing: ok });
+  const realNow = Date.now, start = Math.floor(realNow() / 60_000) * 60_000 + 1_000;
+  Date.now = () => start;
+  const first = card._signature();
+  Date.now = () => start + 30_000;
+  const same = card._signature();
+  Date.now = () => start + 61_000;
+  const later = card._signature();
+  Date.now = realNow;
+  console.log(JSON.stringify({ stable: first === same, refreshes: first !== later }));
+""")
+    assert out == {"stable": True, "refreshes": True}
+
+
+def test_plan_chip_explains_blocked_optimizer_command():
+    out = _run_board(r"""
+  console.log(JSON.stringify({
+    gateway: T.psCommandFailureChip({ command: 'force_charge', reason: 'gateway_unreachable', message: 'Timed out <gw>' }),
+    ev: T.psCommandFailureChip({ command: 'force_charge', reason: 'ev_headroom_reserved' }),
+    export: T.psCommandFailureChip({ command: 'force_discharge', reason: 'something_new' }),
+    none: T.psCommandFailureChip(null),
+  }));
+""")
+    assert "Charge blocked" in out["gateway"] and "Gateway unreachable" in out["gateway"]
+    assert 'title="Timed out &lt;gw&gt;"' in out["gateway"]
+    assert "EV reservation held" in out["ev"]
+    assert "Export blocked" in out["export"] and "Command refused" in out["export"]
+    assert out["none"] == ""

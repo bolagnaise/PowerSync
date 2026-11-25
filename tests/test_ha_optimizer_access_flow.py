@@ -94,6 +94,16 @@ def test_settings_explain_saved_on_during_access_pause():
     assert presentation.optimizer_settings_description(
         status(), enabled=True, running=True
     ) == "Smart Optimization is running."
+    # Monitoring mode plans without commands, so it is never "running" control.
+    assert presentation.optimizer_settings_description(
+        status(), enabled=True, running=True, monitoring=True
+    ) == (
+        "Smart Optimization is planning only. Monitoring mode is on, "
+        "so no battery commands are sent."
+    )
+    assert presentation.optimizer_settings_description(
+        status(), enabled=False, running=False, monitoring=True
+    ) == "Smart Optimization is off in saved settings."
     assert presentation.optimizer_settings_description(
         status(requires_resume=True, can_optimize=False),
         enabled=False,
