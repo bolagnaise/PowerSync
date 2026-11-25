@@ -837,6 +837,13 @@ def _solve_lp_highs(
         for name, value in (("output_flag", False), ("log_to_console", False),
                             ("time_limit", float(time_limit))):
             _check_highs_status(h.setOptionValue(name, value))
+        if integers and solve_role == "primary":
+            # Stop once the plan is provably within half a cent of the best one.
+            # Proving that last fraction of a cent can take most of the time
+            # limit, and on slow hosts that meant no plan at all (ticket 410).
+            _check_highs_status(
+                h.setOptionValue("mip_abs_gap", PRIMARY_MIP_ABS_GAP_DOLLARS)
+            )
         benchmark = _SOLVER_BENCHMARK.get()
         if benchmark is not None:
             _check_highs_status(h.setOptionValue("random_seed", benchmark["seed"]))
@@ -953,6 +960,9 @@ DEFAULT_EFFICIENCY = DEFAULT_ONE_WAY_EFFICIENCY
 
 # HiGHS can legitimately need more than 10s for 48h/5min plans on HA hardware.
 LP_SOLVER_TIME_LIMIT_SECONDS = 30.0
+# The primary economic solve may stop once its plan is provably within this
+# many currency units of the optimum over the whole horizon.
+PRIMARY_MIP_ABS_GAP_DOLLARS = 0.005
 
 # Internal tiered period aggregation. The public schedule remains fixed at
 # `interval_minutes`; only the LP model coarsens the far horizon.
@@ -2618,13 +2628,23 @@ class BatteryOptimizer:
             )
         periods: list[_LpPeriod] = []
         idx = 0
+        # Only the day being settled now executes against this plan. Later
+        # Cost Neutral days are re-planned at base resolution once they become
+        # the current day, so they can use the normal tiered periods. Keeping
+        # all 48 h at 5-minute resolution made the model too large to solve
+        # within the time limit on Raspberry Pi-class hosts (ticket 410).
+        settlement_day = cost_neutral_day_ids[0] if n else None
 
         while idx < n:
             # Cost Neutral is settled against the executable action, not an
-            # averaged parent period.  Keep those slots at base resolution so
-            # native solar charging can fill the battery chronologically and
-            # a later cap/restore decision cannot be spread across children.
-            if cost_neutral_slots[idx]:
+            # averaged parent period.  Keep the settlement day at base
+            # resolution so native solar charging can fill the battery
+            # chronologically and a later cap/restore decision cannot be
+            # spread across children.
+            if cost_neutral_slots[idx] and (
+                settlement_day is None
+                or cost_neutral_day_ids[idx] == settlement_day
+            ):
                 width = 1
             elif idx < near_slots:
                 width = 1
@@ -6814,9 +6834,13 @@ class BatteryOptimizer:
                 time.monotonic() - solver_start
             )
             work = OPTIMIZATION_RUN.get()
+            # Both optional preferences share the cycle's preference budget.
+            # The export preference usually finds its answer at once and then
+            # spends the rest of each pass proving it, which repeated across
+            # reconciliation passes kept slow hosts busy for minutes.
             preference_scope = (
                 work.free_preference(remaining_time)
-                if cost_neutral_free_charge_tiebreak and work is not None
+                if work is not None
                 else nullcontext(remaining_time)
             )
             with preference_scope as preference_limit:

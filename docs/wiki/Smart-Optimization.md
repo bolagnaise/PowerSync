@@ -193,18 +193,27 @@ optimization mode.
 
 ## Solver timing and EV charging
 
-Each primary HiGHS solve has a 30-second allowance. Command-mode checks and Cost
-Neutral budget reconciliation can run additional solves, so a complete cycle
-can take longer. Reaching the allowance does not automatically select the
-backup planner: a feasible incumbent can still be used after the normal
-schedule checks.
+Each primary HiGHS solve has a 30-second allowance. It stops early once its
+plan is proven to be within half a cent of the best possible plan over the
+whole horizon. Command-mode checks and Cost Neutral budget reconciliation can
+run additional solves, so a complete cycle can take longer. Reaching the
+allowance does not automatically select the backup planner: a feasible
+incumbent can still be used after the normal schedule checks.
+
+Cost Neutral plans the current day in 5-minute steps, because that day is
+settled against the actions PowerSync actually sends. Later days in the
+horizon use the same coarser planning periods as other goals. They are
+re-planned in 5-minute steps once they become the current day. This keeps
+Cost Neutral plans small enough to finish on slower hosts such as a Raspberry
+Pi.
 
 Cost Neutral planning alongside EV charging keeps the limits from available
 solar, battery charging power and remaining battery capacity separate.
-The optional search for preferred free charging slots has up to three seconds
-per attempt and shares a twelve-second allowance across the planning cycle.
-When that search has no usable result, the optimizer keeps the primary
-economic result and runs the normal schedule checks.
+The optional searches for preferred free charging slots, and for fewer separate
+export slots among equal-cost plans, have up to three seconds per attempt and
+share a twelve-second allowance across the planning cycle. When a search has no
+usable result, the optimizer keeps the primary economic result and runs the
+normal schedule checks.
 
 Cycle diagnostics include all solve attempts, including discarded passes, and
 identify the selected result and fallback reason.
