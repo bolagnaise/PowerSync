@@ -41,6 +41,30 @@ def _optional_kw_to_w(value: Any) -> float | None:
         return None
 
 
+def _valid_battery_level(value: Any) -> bool:
+    if value is None or isinstance(value, bool):
+        return False
+    try:
+        level = float(value)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(level) and 0 <= level <= 100
+
+
+def ev_home_battery_soc(live_status: Mapping[str, Any] | None) -> float | None:
+    """Return the home battery level for EV floors, or None when it is unknown.
+
+    Live statuses built before ``battery_soc_known`` existed (or from the Tesla
+    live-status API) carry only ``battery_soc``; a usable number there counts.
+    """
+    if not live_status:
+        return None
+    if live_status.get("battery_soc_known") is False:
+        return None
+    value = live_status.get("battery_soc")
+    return float(value) if _valid_battery_level(value) else None
+
+
 def coordinator_data_to_ev_live_status(data: dict[str, Any]) -> dict[str, Any]:
     """Convert coordinator data into the EV automation live_status shape.
 
@@ -56,6 +80,9 @@ def coordinator_data_to_ev_live_status(data: dict[str, Any]) -> dict[str, Any]:
     native_zero_export = _native_zero_export(data)
     return {
         "battery_soc": data.get("battery_level", 0),
+        # ``battery_soc`` keeps its legacy 0 default for curtailment. EV battery
+        # floors must not read a missing level as 0%: see home_battery_floor.
+        "battery_soc_known": _valid_battery_level(data.get("battery_level")),
         "grid_power": _kw_to_w(data.get("grid_power", 0)),
         "solar_power": (
             None if data.get("solar_power_valid") is False

@@ -6914,7 +6914,11 @@ class AutoScheduleExecutor:
             )
             return
 
+        from ..home_battery_floor import home_battery_floor_reached, home_battery_start_allowed
+        from .live_status import ev_home_battery_soc
+
         battery_soc = live_status.get("battery_soc") or 0
+        known_battery_soc = ev_home_battery_soc(live_status)
         solar_power_kw = solar_power / 1000
         load_power_kw = load_power / 1000
 
@@ -6949,7 +6953,8 @@ class AutoScheduleExecutor:
         # battery is above the consume level. When battery hits the floor:
         # - stop_at_battery_floor=True: block charging entirely
         # - stop_at_battery_floor=False: allow grid charging (planner proceeds normally)
-        if effective_consume_level > 0 and battery_soc <= effective_consume_level:
+        # Only a real reading at or below the floor stops a session.
+        if home_battery_floor_reached(known_battery_soc, effective_consume_level, True):
             if effective_stop_at_floor:
                 reason = (
                     f"Battery {battery_soc:.0f}% at consume floor "
@@ -7075,6 +7080,14 @@ class AutoScheduleExecutor:
                 should_charge = False
                 reason = "In demand peak period - grid charging blocked (toggle 'Allow grid charging during demand windows' to override)"
 
+        # Min battery to start, as the optimizer plans it: no new grid or battery
+        # start below it. Solar applies it below, with its parallel exception.
+        if should_charge and source != "solar_surplus" and not state.is_charging:
+            allowed, floor_reason = home_battery_start_allowed(known_battery_soc, effective_home_min)
+            if not allowed:
+                should_charge = False
+                reason = floor_reason
+
         # For opportunistic grid charging, defer to price-level policy if configured.
         # The plan's cheapest window (e.g. 30c) can make even 12c look "opportunistic",
         # but the user may have a tighter threshold (e.g. 5c) in price-level settings.
@@ -7129,7 +7142,12 @@ class AutoScheduleExecutor:
             max_battery_charge_kw = solar_config.get("max_battery_charge_rate_kw", 5.0)
 
             # Check if battery needs priority (battery below threshold)
-            if battery_soc < min_battery_for_ev:
+            # An unknown level never stops a running solar session.
+            if (
+                known_battery_soc < min_battery_for_ev
+                if known_battery_soc is not None
+                else not state.is_charging and min_battery_for_ev > 0
+            ):
                 # Check if strict solar surplus is available after reserving the
                 # configured battery charge rate.
                 parallel_available = allow_parallel and current_surplus_kw > max_battery_charge_kw
@@ -11667,9 +11685,17 @@ class PriceLevelChargingExecutor:
         # Check minimum home battery SOC
         min_home_battery = settings.get("home_battery_minimum", 20)
         if min_home_battery > 0:
+            from ..home_battery_floor import home_battery_start_allowed
+
             home_battery_soc = await self._get_home_battery_soc()
             if home_battery_soc is not None and home_battery_soc < min_home_battery:
                 reason = f"Home battery {home_battery_soc:.0f}% < {min_home_battery}% minimum"
+                self._state.last_decision = "waiting"
+                self._state.last_decision_reason = reason
+                return False, reason, ""
+            # An unknown level blocks a new start but never stops a running charge.
+            allowed, reason = home_battery_start_allowed(home_battery_soc, min_home_battery)
+            if not allowed and not self._state.is_charging:
                 self._state.last_decision = "waiting"
                 self._state.last_decision_reason = reason
                 return False, reason, ""
@@ -11764,9 +11790,17 @@ class PriceLevelChargingExecutor:
         # Check minimum home battery SOC
         min_home_battery = settings.get("home_battery_minimum", 20)
         if min_home_battery > 0:
+            from ..home_battery_floor import home_battery_start_allowed
+
             home_battery_soc = await self._get_home_battery_soc()
             if home_battery_soc is not None and home_battery_soc < min_home_battery:
                 reason = f"Home battery {home_battery_soc:.0f}% < {min_home_battery}% minimum"
+                vehicle_state.last_decision = "waiting"
+                vehicle_state.last_decision_reason = reason
+                return False, reason, ""
+            # An unknown level blocks a new start but never stops a running charge.
+            allowed, reason = home_battery_start_allowed(home_battery_soc, min_home_battery)
+            if not allowed and not vehicle_state.is_charging:
                 vehicle_state.last_decision = "waiting"
                 vehicle_state.last_decision_reason = reason
                 return False, reason, ""

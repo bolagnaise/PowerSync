@@ -11205,6 +11205,8 @@ def test_sigenergy_price_level_restarts_for_next_ev_after_unplug_cleanup(
     fake_actions._action_stop_ev_charging_dynamic = AsyncMock()
     executor = ev_planner.PriceLevelChargingExecutor(hass, entry)
     executor._get_ev_soc = AsyncMock(return_value=None)
+    # A Sigenergy site reports its home battery; an unknown level blocks a start.
+    executor._get_home_battery_soc = AsyncMock(return_value=60.0)
     state = executor._get_or_create_vehicle_state(loadpoint_id)
     state.is_charging = True
     state.charging_mode = "price_level_opportunity"
@@ -11545,3 +11547,85 @@ def test_opportunistic_solar_threshold_gates_starts_not_running_sessions(monkeyp
     assert should_charge is expected
     if expected:
         assert source == "solar_surplus"
+
+
+@pytest.mark.parametrize("vehicle_specific", [False, True])
+@pytest.mark.parametrize("charging", [False, True])
+def test_price_level_unknown_home_battery_blocks_only_a_new_start(monkeypatch, vehicle_specific, charging):
+    monkeypatch.setattr(ev_planner, "get_ev_location", AsyncMock(return_value="home"))
+    monkeypatch.setattr(ev_planner, "is_ev_plugged_in", AsyncMock(return_value=True))
+    monkeypatch.setattr(ev_planner.PriceLevelChargingExecutor, "_get_ev_soc", AsyncMock(return_value=50))
+    hass = _FakeHass(price_settings={
+        "recovery_soc": 40, "recovery_price_cents": 30,
+        "opportunity_price_cents": 10, "home_battery_minimum": 20,
+    })
+    executor = ev_planner.PriceLevelChargingExecutor(hass, _FakeConfigEntry())
+    executor._get_home_battery_soc = AsyncMock(return_value=None)
+    state = executor._get_or_create_vehicle_state(VIN) if vehicle_specific else executor._state
+    state.is_charging = charging
+
+    decision = asyncio.run(
+        executor.get_charging_decision_for_vehicle(VIN, 5)
+        if vehicle_specific else executor.get_charging_decision(5)
+    )
+
+    if charging:
+        assert decision[0] is True
+    else:
+        assert decision[0] is False
+        assert "Home battery level unknown" in decision[1]
+
+
+def _smart_schedule_floor_case(monkeypatch, *, charging, live_status, min_to_start=20, consume=0):
+    now = datetime(2026, 7, 31, 10, 0, tzinfo=timezone(timedelta(hours=10)))
+    monkeypatch.setattr(ev_planner, "get_ev_location", AsyncMock(return_value="home"))
+    monkeypatch.setattr(ev_planner, "is_ev_plugged_in", AsyncMock(return_value=True))
+    monkeypatch.setattr(ev_planner.AutoScheduleExecutor, "_get_vehicle_soc", AsyncMock(return_value=60))
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda *args, **kwargs: now)
+    planner = SimpleNamespace(
+        should_charge_now=AsyncMock(return_value=(True, "Planned grid window", "grid_planned")),
+        _is_grid_charging_blocked_at=lambda *_: False,
+    )
+    executor = ev_planner.AutoScheduleExecutor(_FakeHass(), _FakeConfigEntry(), planner=planner)
+    vehicle_id = "ble_donkey"
+    executor._start_charging = AsyncMock(return_value=True)
+    executor._stop_charging = AsyncMock(return_value=True)
+    executor._stop_external_charging_if_needed = AsyncMock(return_value=False)
+    settings = ev_planner.AutoScheduleSettings(
+        enabled=True, vehicle_id=vehicle_id, target_soc=80,
+        min_battery_to_start=min_to_start, consume_battery_level=consume,
+        stop_at_battery_floor=True, max_grid_price_cents=50,
+    )
+    state = ev_planner.AutoScheduleState(vehicle_id=vehicle_id)
+    state.is_charging = charging
+    state.current_plan = SimpleNamespace(windows=[])
+    state.last_plan_update = ev_planner._ha_local_now_naive()
+    executor._settings[vehicle_id] = settings
+    executor._state[vehicle_id] = state
+    asyncio.run(executor._evaluate_vehicle(
+        vehicle_id, settings,
+        {"solar_power": 0, "load_power": 1000, "grid_power": 1000, **live_status},
+        current_price_cents=10,
+    ))
+    return executor, state
+
+
+@pytest.mark.parametrize(("live_status", "starts"), [
+    ({"battery_soc": 10, "battery_soc_known": True}, False),
+    ({"battery_soc": 0, "battery_soc_known": False}, False),
+    ({"battery_soc": 40, "battery_soc_known": True}, True),
+])
+def test_smart_schedule_grid_start_respects_min_battery_to_start(monkeypatch, live_status, starts):
+    executor, state = _smart_schedule_floor_case(monkeypatch, charging=False, live_status=live_status)
+    assert executor._start_charging.await_count == int(starts)
+    if not starts:
+        assert "minimum" in state.last_decision_reason
+
+
+def test_smart_schedule_unknown_battery_never_stops_a_running_session(monkeypatch):
+    executor, _state = _smart_schedule_floor_case(
+        monkeypatch, charging=True, consume=30,
+        live_status={"battery_soc": 0, "battery_soc_known": False},
+    )
+    executor._stop_charging.assert_not_awaited()
+    executor._stop_external_charging_if_needed.assert_not_awaited()

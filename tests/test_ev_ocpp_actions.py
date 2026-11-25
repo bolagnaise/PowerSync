@@ -20387,3 +20387,59 @@ def test_every_skip_stop_path_uses_the_one_bridge_rule():
         body = source[start:source.index("\n\n\n", start)]
         assert "_ble_bridge_proves_stopped(" in body, name
         assert "_tesla_ble_recovery_start_state(" not in body, name
+
+
+# --- Home battery floor: an unknown level never stops a running session --------
+
+@pytest.mark.parametrize(("live_battery", "pauses"), [
+    ({"battery_soc": 0, "battery_soc_known": False}, False),  # telemetry gap
+    ({"battery_soc": 5, "battery_soc_known": True}, True),    # real low reading
+])
+def test_solar_surplus_running_session_pauses_only_on_a_real_low_reading(
+    monkeypatch, live_battery, pauses,
+):
+    async def no(*args, **kwargs):
+        return None
+
+    async def fake_live_status(*args, **kwargs):
+        return {"grid_power": -5000, "solar_power": 6000, "battery_power": 0,
+                "load_power": 1000, **live_battery}
+
+    async def fake_set_vehicle_amps(*args, **kwargs):
+        return True
+
+    floor_stops = []
+
+    async def fake_stop(*args, **kwargs):
+        floor_stops.append(args)
+        return True
+
+    monkeypatch.setattr(actions, "_clear_ble_dynamic_session_if_unplugged", AsyncMock(return_value=False))
+    monkeypatch.setattr(actions, "_dynamic_ev_full_soc_reason", no)
+    monkeypatch.setattr(actions, "_get_tesla_live_status", fake_live_status)
+    monkeypatch.setattr(actions, "_set_vehicle_amps", fake_set_vehicle_amps)
+    monkeypatch.setattr(actions, "_action_start_ev_charging", AsyncMock(return_value=True))
+    monkeypatch.setattr(actions, "_action_stop_ev_charging", fake_stop)
+    monkeypatch.setattr(actions, "_get_current_ev_export_price", lambda *args: 8.0)
+    actions._dynamic_ev_state.clear()
+    state = {
+        "active": True, "charging_started": True, "paused": False,
+        "current_amps": 16, "target_amps": 16,
+        "high_surplus_start": datetime.now() - timedelta(minutes=5),
+        "params": {
+            "dynamic_mode": "solar_surplus", "charger_type": "generic",
+            "charger_amps_entity": "number.garage_ev_current",
+            "min_charge_amps": 5, "max_charge_amps": 32,
+            "min_battery_soc": 80, "pause_below_soc": 70, "stop_at_battery_floor": True,
+            "household_buffer_kw": 0, "sustained_surplus_minutes": 2,
+            "stop_delay_minutes": 5, "voltage": 240, "phases": 1,
+        },
+    }
+    actions._dynamic_ev_state["entry-1"] = {"generic_ev": state}
+    hass = _Hass([_State("number.garage_ev_current", "16", {"min": 6, "max": 32})])
+
+    asyncio.run(actions._dynamic_ev_update(hass, _Entry(), "entry-1", "generic_ev"))
+
+    assert bool(state.get("paused")) is pauses
+    if not pauses:
+        assert not (state.get("stop_outcome") or {}).get("battery_floor")

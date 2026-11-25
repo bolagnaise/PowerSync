@@ -36,6 +36,7 @@ def test_coordinator_data_to_ev_live_status_converts_kw_to_watts():
 
     assert live_status == {
         "battery_soc": 72,
+        "battery_soc_known": True,
         "grid_power": 1250.0,
         "solar_power": 5500.0,
         "battery_power": -2000.0,
@@ -230,3 +231,27 @@ def test_status_views_read_the_site_through_the_shared_builder():
         body = source[start:source.index(nxt, start + 1)]
         assert "_surplus_view_site(" in body
         assert 'entry_data.get("tesla_coordinator")' not in body
+
+
+@pytest.mark.parametrize(("data", "expected"), [
+    ({"battery_level": 55}, 55.0),
+    ({"battery_level": 0}, 0.0),
+    ({}, None),
+    ({"battery_level": None}, None),
+    ({"battery_level": "unavailable"}, None),
+    ({"battery_level": 140}, None),
+])
+def test_ev_home_battery_soc_never_reads_a_missing_level_as_zero(data, expected):
+    from power_sync.automations.live_status import ev_home_battery_soc
+
+    live_status = coordinator_data_to_ev_live_status(data)
+    assert ev_home_battery_soc(live_status) == expected
+    # Curtailment keeps its legacy numeric default.
+    assert live_status["battery_soc"] == data.get("battery_level", 0)
+
+
+def test_ev_home_battery_soc_accepts_a_tesla_api_status_without_the_flag():
+    from power_sync.automations.live_status import ev_home_battery_soc
+
+    assert ev_home_battery_soc({"battery_soc": 64}) == 64.0
+    assert ev_home_battery_soc({"battery_soc": None}) is None

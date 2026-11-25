@@ -15656,6 +15656,17 @@ async def _dynamic_ev_update_surplus(
     # Battery priority check
     min_soc = get_solar_surplus_min_battery_soc(params)
     pause_soc = params.get("pause_below_soc", max(0, min_soc - 10))
+    from .live_status import ev_home_battery_soc
+
+    if (
+        ev_home_battery_soc(live_status) is None
+        and state.get("charging_started")
+        and not state.get("paused")
+    ):
+        # An unknown level never stops a running session (home_battery_floor):
+        # hold it at the minimum until a real reading arrives. A new start or a
+        # paused session still waits, as the unknown level reads below minimum.
+        battery_soc = float(min_soc)
 
     # Parallel charging parameters
     allow_parallel = params.get("allow_parallel_charging", False)
