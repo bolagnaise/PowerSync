@@ -2222,6 +2222,63 @@ def test_sungrow_no_discharge_falls_back_to_ten_watts_when_zero_rejected():
     assert fake_controller.discharge_rate_limits == [0, 0.01, 15.0]
 
 
+def test_sungrow_repeated_idle_hold_skips_known_rejected_zero_discharge_cap():
+    """Ticket #191: each optimiser cycle re-sent a 0 W cap the firmware rejects."""
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    async def run_repeated_idle_cycles():
+        fake_controller = _FakeSungrowController()
+        fake_controller.fail_zero_discharge_limit = True
+        fake_controller.battery_data.update(
+            {"charge_rate_limit_kw": 10.0, "discharge_rate_limit_kw": 10.0}
+        )
+        coordinator = _new_sungrow_coordinator(SungrowEnergyCoordinator, fake_controller)
+        coordinator.data = {"battery_max_discharge_power": 10.0}
+
+        hold_results = [await coordinator.set_backup_mode() for _ in range(3)]
+        restore_result = await coordinator.restore_work_mode_from_idle()
+        no_discharge_result = await coordinator.set_no_discharge_mode()
+        return hold_results, restore_result, no_discharge_result, fake_controller
+
+    try:
+        hold_results, restore_result, no_discharge_result, fake_controller = asyncio.run(
+            run_repeated_idle_cycles()
+        )
+    finally:
+        restore()
+
+    assert hold_results == [True, True, True]
+    assert restore_result
+    assert no_discharge_result
+    # One rejected 0 W write proves the 10 W minimum; later holds use it directly
+    # and the normal limit is still restored when the hold ends.
+    assert fake_controller.discharge_rate_limits == [0, 0.01, 0.01, 0.01, 10.0, 0.01]
+
+
+def test_sungrow_idle_hold_keeps_trying_zero_cap_after_unrelated_write_failure():
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    async def run_cycles():
+        fake_controller = _FakeSungrowController()
+        fake_controller.fail_discharge_limit_count = 2
+        coordinator = _new_sungrow_coordinator(SungrowEnergyCoordinator, fake_controller)
+        coordinator.data = {"battery_max_discharge_power": 10.0}
+
+        first = await coordinator.set_backup_mode()
+        second = await coordinator.set_backup_mode()
+        return first, second, fake_controller
+
+    try:
+        first, second, fake_controller = asyncio.run(run_cycles())
+    finally:
+        restore()
+
+    # Both writes failing is not evidence that 0 W specifically is rejected.
+    assert first is False
+    assert second is True
+    assert fake_controller.discharge_rate_limits == [0, 0.01, 0]
+
+
 def test_sungrow_restore_repairs_stale_ten_watt_discharge_cap_without_capture():
     SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
 

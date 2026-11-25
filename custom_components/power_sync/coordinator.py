@@ -6870,6 +6870,7 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         self._baseline_date: str | None = None  # ISO date string
         self._pre_control_charge_limit_kw: float | None = None
         self._pre_control_discharge_limit_kw: float | None = None
+        self._zero_discharge_cap_rejected = False
         self._pre_control_export_limit_w: int | None = None
         self._pre_control_export_limit_captured = False
         # Which subsystem owns the captured export-limit baseline.  Solar
@@ -7853,12 +7854,7 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
             return False
         async with self._modbus_lock, self._controller:
             await self._capture_discharge_limit_for_restore()
-            limit_ok = await self._controller.set_discharge_rate_limit(0)
-            if not limit_ok:
-                # Some Sungrow firmware exposes 10 W as the minimum writable
-                # discharge cap. Use that as a near-zero fallback.
-                limit_ok = await self._controller.set_discharge_rate_limit(0.01)
-            return bool(limit_ok)
+            return await self._apply_near_zero_discharge_cap()
 
     async def set_no_discharge_mode(self) -> bool:
         """Block Sungrow battery discharge while still allowing battery charge."""
@@ -7866,10 +7862,27 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
             return False
         async with self._modbus_lock, self._controller:
             await self._capture_discharge_limit_for_restore()
-            limit_ok = await self._controller.set_discharge_rate_limit(0)
-            if not limit_ok:
-                limit_ok = await self._controller.set_discharge_rate_limit(0.01)
+            return await self._apply_near_zero_discharge_cap()
+
+    async def _apply_near_zero_discharge_cap(self) -> bool:
+        """Block Sungrow discharge with the lowest cap the firmware accepts.
+
+        Some Sungrow firmware rejects a 0 W max-discharge write but accepts its
+        10 W minimum. Holds are re-applied every optimiser cycle, so remember a
+        demonstrated zero rejection instead of repeating the rejected write.
+        """
+        if not getattr(self, "_zero_discharge_cap_rejected", False):
+            if await self._controller.set_discharge_rate_limit(0):
+                return True
+            limit_ok = await self._controller.set_discharge_rate_limit(0.01)
+            if limit_ok:
+                self._zero_discharge_cap_rejected = True
+                _LOGGER.info(
+                    "Sungrow rejected a 0 W discharge cap but accepted 10 W; "
+                    "later discharge holds will use 10 W directly"
+                )
             return bool(limit_ok)
+        return bool(await self._controller.set_discharge_rate_limit(0.01))
 
     async def restore_no_discharge_mode(self) -> bool:
         """Restore Sungrow from scheduled EV no-discharge preserve mode."""
