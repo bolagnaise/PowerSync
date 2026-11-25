@@ -2091,6 +2091,66 @@ def test_manual_solar_policy_acceptance_can_wait_without_positive_commands(monke
     rate.assert_not_awaited()
 
 
+@pytest.mark.parametrize(
+    "outcome, expected",
+    [
+        ("refused", "could not pre-set the safe initial rate to 15A: site import admission refused: "
+                    "Waiting for shared site charging headroom"),
+        ("unconfirmed", "could not pre-set the safe initial rate to 15A: the rate command's outcome is unconfirmed"),
+        ("silent", "could not pre-set the safe initial rate to 15A: no reason was reported by the rate path"),
+    ],
+)
+def test_tesla_start_rate_preset_failure_always_states_why(monkeypatch, outcome, expected):
+    """Field case: free-window Smart Schedule starts failed for two hours as
+    "could not pre-set the safe initial rate to 16A" with nothing after it."""
+    vin = "5YJTEST00000000A1"
+
+    async def active_capability(*args, **kwargs):
+        return {
+            "association_known": True, "capability_known": True, "max_charge_amps": 15,
+            "max_charge_amps_source": "active_charger", "voltage": 230, "phases": 1,
+        }
+
+    async def none_result(*args, **kwargs):
+        return None
+
+    async def failed_preset(_hass, _entry, _vehicle_id, _amps, params):
+        if outcome == "refused":
+            params["_rate_refusal_reason"] = (
+                "site import admission refused: Waiting for shared site charging headroom"
+            )
+            return False
+        return None if outcome == "unconfirmed" else False
+
+    start = AsyncMock(return_value=True)
+    monkeypatch.setattr(actions, "_resolve_tesla_active_charger_capability", active_capability)
+    monkeypatch.setattr(actions, "_resolve_tesla_charge_current_entity", none_result)
+    monkeypatch.setattr(actions, "_tesla_vehicle_away_location", none_result)
+    monkeypatch.setattr(actions, "_action_start_ev_charging", start)
+    monkeypatch.setattr(actions, "_set_vehicle_amps", failed_preset)
+    monkeypatch.setattr(actions, "async_track_time_interval", lambda *args, **kwargs: None)
+    monkeypatch.setattr(actions, "_get_initial_smart_schedule_live_status", AsyncMock(return_value={
+        "grid_power": 1000, "battery_power": -5000, "solar_power": 8000, "load_power": 2000,
+    }))
+    monkeypatch.setattr(actions, "_initial_smart_schedule_battery_target_amps",
+                        lambda *args, **kwargs: 15)
+    hass = _Hass([])
+    params = {
+        "vehicle_id": vin, "vehicle_vin": vin, "dynamic_mode": "battery_target",
+        "owner_mode": "smart_schedule", "charger_type": "tesla",
+        "min_charge_amps": 5, "max_charge_amps": 15,
+        "_rate_refusal_reason": "stale reason from an earlier attempt",
+    }
+
+    assert asyncio.run(actions._action_start_ev_charging_dynamic(hass, _Entry(), params)) is False
+
+    start.assert_not_awaited()
+    command = hass.data["power_sync"]["entry-1"]["ev_last_command"][vin]
+    assert command["command"] == "start_smart_schedule"
+    assert command["success"] is False
+    assert command["reason"] == expected
+
+
 @pytest.mark.parametrize("owner_mode", ["smart_schedule", "scheduled"])
 def test_uncertain_tesla_dynamic_start_keeps_owned_pending_plan(monkeypatch, owner_mode):
     """An unknown BLE start keeps one managed plan for a bounded retry."""

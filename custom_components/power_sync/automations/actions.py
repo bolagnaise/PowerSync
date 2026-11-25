@@ -11826,9 +11826,13 @@ async def _action_set_ev_charging_amps(
                     operation="rate",
                     amps=fallback_amps,
                 ):
-                    return False
+                    return _refuse_rate(
+                        params,
+                        "site import admission refused: "
+                        f"{last_ev_submission_refusal() or 'no reason given'}",
+                    )
                 if not request_authority():
-                    return False
+                    return _refuse_rate(params, "command authority changed before the rate was sent")
                 fallback_mutation = await _run_native_tesla_service_command(
                     hass,
                     config_entry,
@@ -11850,9 +11854,15 @@ async def _action_set_ev_charging_amps(
                 if fallback_mutation.outcome == "rejected":
                     if getattr(fallback_mutation.error, "site_import_admission_denied", False):
                         raise fallback_mutation.error
-                    return False
+                    return _refuse_rate(
+                        params, f"Tesla rejected {fallback_amps}A: {fallback_mutation.error}",
+                    )
                 if fallback_mutation.outcome != "accepted_unconfirmed":
-                    return False
+                    return _refuse_rate(
+                        params,
+                        f"{fallback_amps}A was not sent ({fallback_mutation.outcome}: "
+                        f"{fallback_mutation.error or 'no detail'})",
+                    )
                 params["_tesla_native_submitted_amps"] = fallback_amps
                 params["max_charge_amps"] = fallback_amps
                 params["_tesla_entity_range_fallback_amps"] = fallback_amps
@@ -19515,6 +19525,10 @@ async def _action_start_ev_charging_dynamic(
                 reason="shared charger profile does not allow this start",
             )
             return False
+        if isinstance(params, dict):
+            # Callers can reuse one params dict across retries; report only
+            # this attempt's refusal.
+            params.pop("_rate_refusal_reason", None)
         refusal_seq = ev_refusal_sequence(hass, config_entry)
         result = await _action_start_ev_charging_dynamic_locked(
             hass, config_entry, params, context
@@ -19523,7 +19537,11 @@ async def _action_start_ev_charging_dynamic(
             # Guard paths that only log still leave a queryable reason.
             record_ev_refusal(
                 hass, config_entry, vehicle_id, command=command,
-                reason="start guard refused without a specific reason (see preceding Dynamic EV log line)",
+                reason=(
+                    f"start guard refused: {params['_rate_refusal_reason']}"
+                    if isinstance(params, dict) and params.get("_rate_refusal_reason")
+                    else "start guard refused without a specific reason (see preceding Dynamic EV log line)"
+                ),
             )
         return result
 
@@ -20742,6 +20760,10 @@ async def _action_start_ev_charging_dynamic_locked(
                 reason = f"could not pre-set the safe initial rate to {start_amps}A"
                 if params.get("_rate_refusal_reason"):
                     reason = f"{reason}: {params['_rate_refusal_reason']}"
+                elif initial_amps_pre_set is None:
+                    reason = f"{reason}: the rate command's outcome is unconfirmed"
+                else:
+                    reason = f"{reason}: no reason was reported by the rate path"
                 record_ev_command(
                     hass,
                     config_entry,
