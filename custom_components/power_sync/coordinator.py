@@ -129,6 +129,48 @@ def _grid_status_is_off_grid(value: Any) -> bool | None:
     return status in {"Inactive", "Islanded", "Off-Grid", "SystemIslandedActive"}
 
 
+# Tesla's cloud aggregate can lag the BLE/Fleet EV reading by a full refresh
+# interval even when its own timestamp equals the poll time (Discord #463).
+_SITE_AGGREGATE_EV_HISTORY_SECONDS = 120.0
+# Integer-kW EV sources (BLE) can legitimately read up to ~1 kW above the
+# metered draw, so only a larger excess proves the aggregate predates the EV.
+_SITE_AGGREGATE_EV_LOAD_TOLERANCE_KW = 1.0
+
+
+def _ev_power_consistent_with_site_aggregate(
+    ev_power_kw: float,
+    raw_load_kw: float | None,
+    history: list[tuple[float, float]] | tuple[tuple[float, float], ...],
+    now: float,
+) -> float:
+    """Return the EV draw the site aggregate can actually contain.
+
+    The site load includes the EV behind the meter, so an aggregate whose load
+    is well below the current EV reading was measured before the car ramped.
+    Pairing it with the current reading counts the ramp twice.  In that case use
+    the newest recent EV reading that fits inside the aggregate's load, or clamp
+    to that load.  Consistent samples are returned unchanged, so a genuinely
+    fresh aggregate is never under-counted during a ramp.
+    """
+    if raw_load_kw is None:
+        return ev_power_kw
+    try:
+        load_kw = max(0.0, float(raw_load_kw))
+        current_kw = float(ev_power_kw)
+    except (TypeError, ValueError):
+        return ev_power_kw
+    if not (math.isfinite(load_kw) and math.isfinite(current_kw)):
+        return ev_power_kw
+    if current_kw <= load_kw + _SITE_AGGREGATE_EV_LOAD_TOLERANCE_KW:
+        return ev_power_kw
+    for observed_at, value_kw in reversed(tuple(history)):
+        if now - observed_at > _SITE_AGGREGATE_EV_HISTORY_SECONDS:
+            break
+        if 0.0 <= value_kw <= load_kw:
+            return value_kw
+    return load_kw
+
+
 def _mapped_tesla_other_charger_power_kw(
     entry: Any,
     vehicles: list[dict[str, Any]],
@@ -3822,10 +3864,26 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
             # the EV power observed when the aggregate last moved so consumers
             # can keep both terms the same vintage; splicing a newer EV number
             # into an older aggregate breaks its energy balance. Discord #284.
+            # The aggregate can also arrive one refresh late, after the car has
+            # already ramped (Discord #463), so the change-time EV reading is
+            # checked against the aggregate's own load before it is recorded.
+            ev_history_now = time.monotonic()
+            ev_history = [
+                item
+                for item in (getattr(self, "_site_aggregate_ev_history", None) or ())
+                if ev_history_now - item[0] <= _SITE_AGGREGATE_EV_HISTORY_SECONDS
+            ]
             aggregate_sample = (solar_kw, grid_kw, battery_kw, raw_load_kw)
             if aggregate_sample != getattr(self, "_site_aggregate_sample", None):
                 self._site_aggregate_sample = aggregate_sample
-                self._site_aggregate_ev_power_kw = ev_power_kw
+                self._site_aggregate_ev_power_kw = (
+                    _ev_power_consistent_with_site_aggregate(
+                        ev_power_kw, raw_load_kw, ev_history, ev_history_now
+                    )
+                )
+            if _finite_float(ev_power_kw) is not None:
+                ev_history.append((ev_history_now, float(ev_power_kw)))
+            self._site_aggregate_ev_history = ev_history
             aggregate_ev_power_kw = getattr(
                 self, "_site_aggregate_ev_power_kw", ev_power_kw
             )
