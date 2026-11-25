@@ -186,6 +186,26 @@ async def test_rate_attempt_needs_its_effect_or_a_stopped_car(harness, requested
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("requested,expect_retired", [
+    (32, True),   # the request itself took effect
+    (16, True),   # the stale-entity-max fallback took effect
+    (20, False),  # neither possible write: a late write could still land
+])
+async def test_ranged_rate_attempt_needs_an_exact_possible_value(harness, requested, expect_retired):
+    hass, entry = harness
+    runtime, _ = _seed(hass, entry, operation="rate",
+                       bound={"kind": "rate", "min_amps": 16, "max_amps": 32})
+
+    retired, reason = await recovery.async_expire_settled_ble_attempts(
+        hass, entry, VIN_A, _observation(VIN_A, stamp=time.time(), requested=requested))
+
+    assert retired is expect_retired, reason
+    if not expect_retired:
+        assert "not the command's 16A or 32A" in reason
+    assert bool(_attempt(runtime).get("recovery_retired")) is expect_retired
+
+
+@pytest.mark.asyncio
 async def test_start_attempts_are_never_expired_automatically(harness):
     hass, entry = harness
     _seed(hass, entry, operation="start")

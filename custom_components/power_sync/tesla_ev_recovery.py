@@ -4091,9 +4091,14 @@ def _settled_ble_attempt_reason(
     requested = getattr(observation, "requested_current", None)
     if requested is None:
         return "vehicle reading has no requested current"
-    if low <= requested <= high:
+    # The bound lists the only values the BLE write could have submitted (the
+    # request and, with a stale entity max, its lower fallback), not a range:
+    # a value in between proves neither, so a late write could still land.
+    possible = sorted({low, high})
+    if requested in possible:
         return None
-    return f"vehicle requests {requested:g}A, outside the command's {low:g}-{high:g}A"
+    shown = " or ".join(f"{value:g}A" for value in possible)
+    return f"vehicle requests {requested:g}A, not the command's {shown}"
 
 
 async def async_expire_settled_ble_attempts(
