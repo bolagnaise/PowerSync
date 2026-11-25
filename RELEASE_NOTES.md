@@ -1,7 +1,7 @@
-<!-- release: v2.12.1838 -->
+<!-- release: v2.12.1839 -->
 
-## No more export-price warning for solar EV charging at night
+## EV headroom recovery with the Teslemetry HACS integration
 
-When Solar Surplus EV charging was paused because the export price was above your limit, the car's status showed that reason even at night, for example "Export value 8.0c/kWh exceeds Solar Surplus limit 0.0c/kWh". In the app it looked like a problem. When there is no solar generation, the status now says "No solar generation right now". Charging works the same as before; only the message has changed. During the day, a high export price is still reported as before.
+If you use Teslemetry's own HACS release instead of the built-in Home Assistant Teslemetry integration, **Recover EV charging headroom** always failed with `fresh_readback_unavailable` and `vehicle_read.reason: cloud_reader_unavailable`, even when the car was awake. PowerSync now accepts the car reading from the Teslemetry HACS release in the same way as from the built-in integration. Recovery still releases a reservation only after two fresh readings show the car has stopped.
 
 Update through HACS and restart Home Assistant.

@@ -9,6 +9,7 @@ import inspect
 import hashlib
 import math
 import re
+import sys
 import time
 from typing import Any, Callable, Mapping
 
@@ -734,6 +735,27 @@ async def async_read_tesla_vehicle(
     )
 
 
+def _native_coordinator_class_matches(domain: str, coordinator: Any, name: str) -> bool:
+    """Admit only the provider's exact coordinator class as loaded by HA.
+
+    The provider's HACS build (for example Teslemetry's own release zip)
+    overrides the core integration under ``custom_components.<domain>``.
+    It is the integration HA loaded for this domain, so its coordinator class
+    is admitted by exact identity. A custom package is never imported here;
+    it must already be loaded. Other classes, including subclasses, stay
+    refused.
+    """
+    coordinator_type = type(coordinator)
+    custom = sys.modules.get(f"custom_components.{domain}.coordinator")
+    if custom is not None and getattr(custom, name, None) is coordinator_type:
+        return True
+    try:
+        core = import_module(f"homeassistant.components.{domain}.coordinator")
+    except ImportError:
+        return False
+    return getattr(core, name, None) is coordinator_type
+
+
 def _cloud_contract(source: _Source) -> tuple[Any, Any, Any] | None:
     """Resolve the inspected native cloud reader, separately from command APIs.
 
@@ -752,7 +774,6 @@ def _cloud_contract(source: _Source) -> tuple[Any, Any, Any] | None:
         return None
     try:
         coordinator_name, api_module, api_name = contract
-        coordinator_class = getattr(import_module(f"homeassistant.components.{source.domain}.coordinator"), coordinator_name)
         api_module_object = import_module(api_module)
         api_class = getattr(api_module_object, api_name)
         api_classes = (api_class,)
@@ -773,7 +794,7 @@ def _cloud_contract(source: _Source) -> tuple[Any, Any, Any] | None:
         endpoint = import_module("tesla_fleet_api.const").VehicleDataEndpoint.CHARGE_STATE
         api = source.coordinator.api
         debouncer = source.coordinator._debounced_refresh
-        if (type(source.coordinator) is not coordinator_class
+        if (not _native_coordinator_class_matches(source.domain, source.coordinator, coordinator_name)
                 or type(api) not in api_classes
                 or not callable(getattr(type(api), "state" if source.domain == "tessie" else "vehicle_data", None))
                 or not callable(getattr(debouncer, "async_lock", None))):
