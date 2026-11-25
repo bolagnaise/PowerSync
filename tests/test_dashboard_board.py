@@ -1987,6 +1987,37 @@ def test_today_average_labels_net_home_energy_cost_not_battery_acquisition():
     assert 'Month to date 162.0 c' in out['html']
 
 
+def test_today_average_uses_sensor_unit_not_value_magnitude():
+    """Ticket467: a major-unit average of 5 or more must not be shown as cents."""
+    out = _run_board(r"""
+  const render = (avg, mtd, unit) => {
+    const card = new T.PsTodayCard();
+    const state = (value, attributes = {}) => ({ state: String(value), attributes });
+    card.config = { entities: { avgCost: 'sensor.avg', mtdAvgCost: 'sensor.mtd' } };
+    card.hass = {
+      states: {
+        'sensor.avg': state(avg, { unit_of_measurement: unit }),
+        'sensor.mtd': state(mtd, { unit_of_measurement: unit }),
+      }, config: { currency: 'AUD' }, locale: {}, callApi: async () => null,
+    };
+    card._render();
+    return card.innerHTML;
+  };
+  console.log(JSON.stringify({
+    major: render(5.3797, 3.543, 'AUD/kWh'),
+    minor: render(7.6, 12.3, 'c/kWh'),
+    negative: render(-0.12, -0.05, 'AUD/kWh'),
+  }));
+""")
+    # 5.38 AUD/kWh is 538 c/kWh, never 5.4 c/kWh.
+    assert '538.0<small>c/kWh</small>' in out['major']
+    assert 'Month to date 354.3 c' in out['major']
+    # A sensor already reporting minor units is not scaled again.
+    assert '7.6<small>c/kWh</small>' in out['minor']
+    assert 'Month to date 12.3 c' in out['minor']
+    assert '-12.0<small>c/kWh</small>' in out['negative']
+
+
 @pytest.mark.parametrize("board_missing", [False, True])
 @pytest.mark.parametrize("admin", [False, True])
 def test_dashboard_has_one_admin_support_card(board_missing, admin):

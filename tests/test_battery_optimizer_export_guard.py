@@ -5993,3 +5993,74 @@ def test_home_import_hold_requires_planned_higher_value_discharge(
     )
     expected = "idle" if later_discharge and later_price > 0.1285 else "self_consumption"
     assert schedule.actions[0].action == expected
+
+
+@pytest.mark.parametrize(
+    ("acquisition_cost_kwh", "known_zero"),
+    [(0.0, False), (0.0, True)],
+)
+def test_below_reserve_free_import_window_recovers_later_super_export(
+    battery_optimizer_module,
+    acquisition_cost_kwh,
+    known_zero,
+):
+    """Ticket #469: a morning SOC below the reserve must not cancel the
+    evening ZeroHero Super Export when the free midday window refills it."""
+    if not battery_optimizer_module.HIGHS_AVAILABLE:
+        pytest.skip("Reserve recovery export gating is enforced by the LP optimizer")
+
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=18000,
+        max_charge_w=5000,
+        max_discharge_w=5000,
+        backup_reserve=0.53,
+        interval_minutes=5,
+        horizon_hours=24,
+    )
+    n = 24 * 12
+    free_window = range(12, 48)
+    super_export = range(84, 120)
+    import_prices = [0.385] * n
+    for idx in range(60, 120):
+        import_prices[idx] = 0.463
+    for idx in range(144, n):
+        import_prices[idx] = 0.165
+    import_bonus_prices = [0.0] * n
+    for idx in free_window:
+        import_bonus_prices[idx] = import_prices[idx]
+    export_bonus_prices = [0.0] * n
+    export_slots = [False] * n
+    for idx in super_export:
+        export_bonus_prices[idx] = 0.10
+        export_slots[idx] = True
+
+    result = optimizer.optimize(
+        import_prices=import_prices,
+        export_prices=[0.05] * n,
+        solar_forecast=[0.0] * n,
+        load_forecast=[0.3] * n,
+        current_soc=0.35,
+        acquisition_cost_kwh=acquisition_cost_kwh,
+        acquisition_cost_known_zero=known_zero,
+        allow_battery_export=export_slots,
+        block_battery_charge=export_slots,
+        export_bonus_prices=export_bonus_prices,
+        export_bonus_cap_kwh=10.0,
+        import_bonus_prices=import_bonus_prices,
+        import_bonus_cap_kwh=100.0,
+    )
+
+    window = list(super_export)
+    exported_kwh = sum(result.grid_export_w[idx] / 1000 * optimizer.dt_hours for idx in window)
+    assert result.feasible is True
+    assert any(result.schedule.actions[idx].action == "export" for idx in window)
+    assert exported_kwh > 1.0
+    # Forced export still stops at the optimiser reserve.
+    assert min(result.schedule.actions[idx].soc for idx in window) >= 0.53 - 0.01
+    # Exporting energy refilled by the free window never needs paid grid
+    # import afterwards (pre-window load is held at the observed SOC).
+    paid_import_kwh = sum(
+        result.grid_import_w[idx] / 1000 * optimizer.dt_hours
+        for idx in range(free_window.stop, n)
+    )
+    assert paid_import_kwh <= 1e-3

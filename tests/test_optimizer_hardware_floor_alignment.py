@@ -1454,6 +1454,112 @@ def test_charge_by_time_keeps_plan_when_command_modes_miss_deadline_without_disa
     assert actions[-1].battery_discharge_w > 0
 
 
+def test_disable_idle_deadline_retry_keeps_projected_plan_when_base_slots_drift(
+    battery_optimizer_module,
+    monkeypatch,
+):
+    """Ticket #198: a converged reduced-deadline retry must not become a hold.
+
+    Pass 1 projects ~81% at the 17:00 Charge By Time deadline instead of 98%.
+    HiGHS accepts that reduced limit under the No Idle command modes, but the
+    5-minute projection lands a fraction of a percent below the period-level
+    limit. Discarding the plan for a hold dropped every grid-charge window.
+    """
+    module = battery_optimizer_module
+    _select_backend(module, monkeypatch, "highs")
+    import math
+
+    n = 24 * 12
+    hours = [(23.25 + idx / 12.0) % 24.0 for idx in range(n)]
+
+    def solar(hour):
+        if hour < 6.0 or hour > 19.5:
+            return 0.0
+        return 2.5 * max(0.0, math.sin(math.pi * (hour - 6.0) / 13.5)) ** 1.5
+
+    def load(hour):
+        return (
+            1.0
+            + (1.6 if 17.0 <= hour < 22.0 else 0.0)
+            + (0.6 if 6.0 <= hour < 9.0 else 0.0)
+            - (0.3 if hour < 6.0 else 0.0)
+        )
+
+    optimizer = module.BatteryOptimizer(
+        capacity_wh=54_000,
+        max_charge_w=20_000,
+        max_discharge_w=20_000,
+        efficiency=0.92,
+        backup_reserve=0.15,
+        hardware_reserve=0.05,
+        interval_minutes=5,
+        horizon_hours=24,
+        terminal_weight=0.0,
+    )
+    optimizer.allow_greedy_fallback = False
+    deadline = 213  # 17:00, with grid charging blocked from 15:00 to 21:00
+    optimizer.pre_window_slot = deadline
+    optimizer.pre_window_soc_target = 0.98
+
+    passes = []
+    solve_inner = optimizer._solve_lp_inner
+
+    def record(*args, **kwargs):
+        result = solve_inner(*args, **kwargs)
+        passes.append(
+            (
+                kwargs.get("projected_deadline_soc_limit"),
+                result.solver_used,
+                result.schedule.actions[deadline - 1].soc,
+            )
+        )
+        return result
+
+    monkeypatch.setattr(optimizer, "_solve_lp_inner", record)
+
+    result = optimizer.optimize(
+        import_prices=[
+            0.16 + (0.03 if 17 <= h < 21 else 0.0) - (0.015 if 10 <= h < 15 else 0.0)
+            for h in hours
+        ],
+        export_prices=[0.10 + (0.05 if 17 <= h < 21 else 0.0) for h in hours],
+        solar_forecast=[solar(h) for h in hours],
+        load_forecast=[load(h) for h in hours],
+        current_soc=0.30,
+        allow_battery_export=[True] * n,
+        allow_grid_charge=True,
+        grid_charge_allowed=[not (15 <= h < 21) for h in hours],
+        disable_idle=True,
+        export_reserve_floor=0.15,
+    )
+
+    # The reported variant: the reduced-limit retry solved and converged, yet
+    # its base-slot deadline SOC fell just below that limit.
+    limit = next(limit for limit, _, _ in passes if limit is not None)
+    retry_socs = [soc for lim, solver, soc in passes if lim is not None]
+    assert all(solver == "highs" for lim, solver, _ in passes if lim is not None)
+    assert retry_socs[-1] < limit - module.MODE_PROJECTION_DEADLINE_TOLERANCE_SOC
+
+    assert result.solver_used == "highs"
+    assert result.feasible and not result.degraded
+    assert result.lp_stats["fallback_reason"] == (
+        "mode_projection_deadline_retry_projected_highs"
+    )
+    assert result.lp_stats["deadline_unmet_after_mode_projection"] is True
+    assert result.lp_stats["pre_window_requested_effective_target"] > 0.97
+    actions = result.schedule.actions
+    assert any(action.action == "charge" for action in actions[:deadline])
+    assert all(action.action != "idle" for action in actions)
+    assert actions[deadline - 1].soc >= limit - 1e-9
+    assert actions[deadline - 1].soc > 0.75
+    assert min(action.soc for action in actions) >= 0.05 - 1e-6
+    assert all(
+        action.soc >= 0.15 - 1e-6
+        for action in actions
+        if action.action == "export"
+    )
+
+
 @pytest.mark.parametrize("cost_neutral_enabled", [False, True])
 def test_disable_idle_deadline_projection_uses_effective_runtime_action(
     battery_optimizer_module,

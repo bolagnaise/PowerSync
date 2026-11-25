@@ -584,7 +584,7 @@
           "amber_forecast_confidence_enabled": "Reduce reliance on uncertain future Amber export spikes. Opt-in; may export earlier and miss a later higher price. This changes optimizer valuation only, not tariff prices or safety limits.",
           "profit_max_enabled": "Let Smart Optimization prioritise profitable export opportunities instead of holding battery charge for later by default. Mutually exclusive with Cost Neutral.",
           "cost_neutral_enabled": "Allow discretionary battery export only until today's projected supply and import costs are offset, then preserve the battery for self-consumption. Natural solar export is not capped. Mutually exclusive with Profit Max.",
-          "daily_supply_charge": "Fixed daily electricity supply charge included in the Cost Neutral target and Amber metered totals. Enter 0 when your plan has no fixed daily charge.",
+          "daily_supply_charge": "Fixed daily electricity supply charge per day in your tariff currency, not cents (for example 1.67 for 166.67 c/day). Included in the Cost Neutral target, Amber metered totals and the dashboard net cost. Enter 0 when your plan has no fixed daily charge.",
           "charge_by_time_enabled": "Force Smart Optimization to reach the configured target SOC by the configured time.",
           "charge_by_time_target_time": "HH:MM time for Charge By Time to reach the configured target SOC. Default 17:15.",
           "charge_by_time_target_soc": "Battery SOC Charge By Time should target by the configured time. Default 100%."
@@ -1850,7 +1850,7 @@
               "optimization_enabled": "Turn the LP optimizer on or off without changing the saved Smart Optimization settings.",
               "profit_max_enabled": "Let Smart Optimization prioritise profitable export opportunities instead of holding battery charge for later by default. Mutually exclusive with Cost Neutral.",
               "cost_neutral_enabled": "Allow discretionary battery export only until today's projected supply and import costs are offset, then preserve the battery for self-consumption. Natural solar export is not capped. Mutually exclusive with Profit Max.",
-              "daily_supply_charge": "Fixed daily electricity supply charge included in the Cost Neutral target and Amber metered totals. Enter 0 when your plan has no fixed daily charge.",
+              "daily_supply_charge": "Fixed daily electricity supply charge per day in your tariff currency, not cents (for example 1.67 for 166.67 c/day). Included in the Cost Neutral target, Amber metered totals and the dashboard net cost. Enter 0 when your plan has no fixed daily charge.",
               "charge_by_time_enabled": "Force Smart Optimization to reach the configured target SOC by the configured time.",
               "charge_by_time_target_time": "HH:MM time for Charge By Time to reach the configured target SOC. Default 17:15.",
               "charge_by_time_target_soc": "Battery SOC Charge By Time should target by the configured time. Default 100%."
@@ -2046,7 +2046,7 @@
           "amber_forecast_confidence_enabled": "Reduce reliance on uncertain future Amber export spikes. Opt-in; may export earlier and miss a later higher price. This changes optimizer valuation only, not tariff prices or safety limits.",
           "profit_max_enabled": "Let Smart Optimization prioritise profitable export opportunities instead of holding battery charge for later by default. Mutually exclusive with Cost Neutral.",
           "cost_neutral_enabled": "Allow discretionary battery export only until today's projected supply and import costs are offset, then preserve the battery for self-consumption. Natural solar export is not capped. Mutually exclusive with Profit Max.",
-          "daily_supply_charge": "Fixed daily electricity supply charge included in the Cost Neutral target and Amber metered totals. Enter 0 when your plan has no fixed daily charge.",
+          "daily_supply_charge": "Fixed daily electricity supply charge per day in your tariff currency, not cents (for example 1.67 for 166.67 c/day). Included in the Cost Neutral target, Amber metered totals and the dashboard net cost. Enter 0 when your plan has no fixed daily charge.",
           "charge_by_time_enabled": "Force Smart Optimization to reach the configured target SOC by the configured time.",
           "charge_by_time_target_time": "HH:MM time for Charge By Time to reach the configured target SOC. Default 17:15.",
           "charge_by_time_target_soc": "Battery SOC Charge By Time should target by the configured time. Default 100%."

@@ -3272,6 +3272,8 @@ class BatteryOptimizer:
                 acquisition_cost_kwh,
                 export_bonus_prices or [0.0] * n,
                 priority_export_slots,
+                import_bonus_prices,
+                import_bonus_cap_kwh,
             )
 
         try:
@@ -3290,6 +3292,7 @@ class BatteryOptimizer:
             deadline_slot = self.pre_window_slot
             requested_deadline_target: float | None = None
             projected_deadline_soc_limit: float | None = None
+            deadline_limit_plan: OptimizerResult | None = None
             for iteration in range(MODE_PROJECTION_MAX_ITERATIONS):
                 result = self._solve_lp_inner(
                     n, import_prices, export_prices, solar, load, soc_0,
@@ -3371,6 +3374,7 @@ class BatteryOptimizer:
                                 last_result.schedule.actions[deadline_slot - 1].soc
                                 - MODE_PROJECTION_DEADLINE_TOLERANCE_SOC,
                             )
+                            deadline_limit_plan = last_result
                             continue
                         _LOGGER.warning(
                             "Optimizer command-mode projection failed on pass %d "
@@ -3435,6 +3439,34 @@ class BatteryOptimizer:
                             result.schedule, result.lp_stats
                         )
                     ):
+                        if deadline_limit_plan is not None:
+                            # HiGHS accepted the reduced deadline under these
+                            # command modes, but the base-slot projection can
+                            # land fractionally below the period-level limit.
+                            # Re-anchoring would only chase that gap downward.
+                            # Keep the physically projected plan that defined
+                            # the limit (it meets it by construction) instead
+                            # of a hold that abandons Charge By Time entirely.
+                            retained = deadline_limit_plan
+                            retained.lp_stats = {
+                                **retained.lp_stats,
+                                "mode_iterations": iteration + 1,
+                                "mode_converged": False,
+                                "fallback_reason": (
+                                    "mode_projection_deadline_retry_projected_highs"
+                                ),
+                                "pre_window_requested_effective_target": (
+                                    requested_deadline_target
+                                ),
+                                "pre_window_projected_deadline_soc_limit": (
+                                    projected_deadline_soc_limit
+                                ),
+                                "deadline_retry_projected_soc": float(
+                                    result.schedule.actions[deadline_slot - 1].soc
+                                ),
+                                "deadline_unmet_after_mode_projection": True,
+                            }
+                            return retained
                         result.feasible = False
                         result.reserve_recommendation = {}
                     return result
@@ -3520,20 +3552,77 @@ class BatteryOptimizer:
         acquisition_cost_kwh: float,
         export_bonus_prices: list[float],
         priority_export_slots: list[bool],
+        import_bonus_prices: list[float] | None = None,
+        import_bonus_cap_kwh: float | None = None,
     ) -> list[bool]:
         """Allow export slots only after charge headroom can recover SOC."""
         if soc_0 >= export_floor:
             return allow_battery_export
 
         round_trip_eff = self.economic_round_trip_efficiency
+        # Capped free-import windows (e.g. ZeroHero/ZeroCharge) are modelled as
+        # an import credit on top of the retail price. Recovery headroom and
+        # acquisition cost must use the net price, otherwise a free midday
+        # charge looks like a peak-priced top-up and every later export window
+        # stays blocked whenever the solve starts below the reserve.
+        import_bonus_prices = import_bonus_prices or []
+        # Match the LP: an import credit is only active with a positive cap.
+        remaining_bonus_kwh = max(0.0, float(import_bonus_cap_kwh or 0.0))
+        net_import_prices: list[float] = []
+        for idx, price in enumerate(import_prices):
+            bonus = (
+                max(0.0, float(import_bonus_prices[idx] or 0.0))
+                if idx < len(import_bonus_prices)
+                else 0.0
+            )
+            if bonus > 0.0 and remaining_bonus_kwh > 1e-9:
+                net_import_prices.append(max(0.0, float(price) - bonus))
+            else:
+                net_import_prices.append(price)
         effective_acquisition_costs = self._effective_export_acquisition_costs(
             len(allow_battery_export),
-            import_prices,
+            net_import_prices,
             block_battery_charge,
             allow_grid_charge,
             acquisition_cost_kwh,
             grid_charge_allowed,
         )
+        # Energy charged inside an earlier credit-covered window has a known
+        # net cost even when the stored-energy acquisition cost is unknown.
+        prior_credit_charge_costs: list[float | None] = []
+        cheapest_credit_charge: float | None = None
+        for idx in range(len(allow_battery_export)):
+            prior_credit_charge_costs.append(cheapest_credit_charge)
+            if (
+                allow_grid_charge
+                and idx < len(net_import_prices)
+                and idx < len(import_bonus_prices)
+                and float(import_bonus_prices[idx] or 0.0) > 0.0
+                and remaining_bonus_kwh > 1e-9
+                and not (idx < len(block_battery_charge) and block_battery_charge[idx])
+                and (idx >= len(grid_charge_allowed) or grid_charge_allowed[idx])
+            ):
+                net_price = float(net_import_prices[idx])
+                cheapest_credit_charge = (
+                    net_price
+                    if cheapest_credit_charge is None
+                    else min(cheapest_credit_charge, net_price)
+                )
+
+        def _gate_export_profitable(idx: int, effective_export_price: float) -> bool:
+            if self._is_export_profitable(
+                effective_export_price,
+                import_prices[idx],
+                acquisition_cost_kwh,
+                effective_acquisition_costs[idx],
+            ):
+                return True
+            credit_cost = prior_credit_charge_costs[idx]
+            return (
+                effective_export_price > 0.001
+                and credit_cost is not None
+                and effective_export_price * round_trip_eff >= credit_cost - 1e-9
+            )
         future_recovery_prices = [0.0] * len(allow_battery_export)
         best_future_export = 0.0
         for idx in range(len(allow_battery_export) - 1, -1, -1):
@@ -3546,12 +3635,7 @@ class BatteryOptimizer:
             export_profitable = (
                 bool(allow_battery_export[idx])
                 and idx < len(import_prices)
-                and self._is_export_profitable(
-                    effective_export_price,
-                    import_prices[idx],
-                    acquisition_cost_kwh,
-                    effective_acquisition_costs[idx],
-                )
+                and _gate_export_profitable(idx, effective_export_price)
             )
             priority_export = (
                 bool(allow_battery_export[idx])
@@ -3575,12 +3659,7 @@ class BatteryOptimizer:
             export_profitable = (
                 bool(allowed)
                 and idx < len(import_prices)
-                and self._is_export_profitable(
-                    effective_export_price,
-                    import_prices[idx],
-                    acquisition_cost_kwh,
-                    effective_acquisition_costs[idx],
-                )
+                and _gate_export_profitable(idx, effective_export_price)
             )
             priority_export = (
                 bool(allowed)
@@ -3627,8 +3706,15 @@ class BatteryOptimizer:
                     if idx + 1 < len(future_recovery_prices)
                     else 0.0
                 )
+                bonus_slot = (
+                    idx < len(import_bonus_prices)
+                    and float(import_bonus_prices[idx] or 0.0) > 0.0
+                    and remaining_bonus_kwh > 1e-9
+                )
                 try:
-                    import_price = float(import_prices[idx])
+                    import_price = float(
+                        net_import_prices[idx] if bonus_slot else import_prices[idx]
+                    )
                 except (IndexError, TypeError, ValueError):
                     import_price = None
                 if (
@@ -3636,7 +3722,15 @@ class BatteryOptimizer:
                     and future_export_value > 0.001
                     and import_price <= future_export_value * round_trip_eff + 1e-9
                 ):
-                    charge_kw = self._charge_limit_kw(load[idx], solar[idx], True)
+                    grid_charge_kw = self._charge_limit_kw(load[idx], solar[idx], True)
+                    if bonus_slot:
+                        bonus_kw = max(0.0, grid_charge_kw - solar_only_charge_kw)
+                        bonus_kw = min(bonus_kw, remaining_bonus_kwh / self.dt_hours)
+                        remaining_bonus_kwh = max(
+                            0.0, remaining_bonus_kwh - bonus_kw * self.dt_hours
+                        )
+                        grid_charge_kw = solar_only_charge_kw + bonus_kw
+                    charge_kw = grid_charge_kw
             if charge_kw <= 0:
                 continue
             reachable_soc = min(

@@ -628,7 +628,9 @@ does not retain an IDLE hold solely to keep the target SOC reachable. As a resul
 the battery may miss the configured Charge By Time target when serving forecast
 home load leaves too little charging time or headroom. PowerSync can keep a
 usable plan for the rest of the day when the solver verifies that plan at a
-lower reachable charge level. The 24-hour Action Plan and battery-power graph
+lower reachable charge level. If the 5-minute plan then lands a fraction of a
+percent below that lower level, PowerSync keeps the earlier plan that reached
+it rather than dropping to a self-consumption hold without grid charging. The 24-hour Action Plan and battery-power graph
 show those periods as self-consumption and battery-to-home power.
 
 ## EV charging in the plan
