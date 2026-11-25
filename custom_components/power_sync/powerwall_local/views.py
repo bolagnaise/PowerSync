@@ -222,17 +222,22 @@ def _local_access_status(
             mode = "local_unavailable"
 
     limits = {"charge_input_max_kw": 0.0, "grid_export_max_kw": 0.0}
+    # False means the 0 kW limits above are unknown (no fresh gateway reading),
+    # not that the site has no room. Apps use this to explain the refusal.
+    limits_current = False
     last_success = getattr(coordinator, "last_success_monotonic", None)
     if local_available and last_success is not None and 0 <= time.monotonic() - last_success <= TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS:
         try:
             limits = manual_power_limits_kw(coordinator.data, {**entry.data, **entry.options},
                 getattr(getattr(coordinator, "client", None), "dispatch_discharge_limit_w", None),
                 getattr(getattr(coordinator, "client", None), "dispatch_charge_limit_w", None))
+            limits_current = True
         except (TypeError, ValueError):
             pass
 
     return {
         **(limits if local_battery_dispatch_configured(entry.data) else {}),
+        "local_limits_current": limits_current,
         "cloud_paired": paired,
         "gateway_ip": gateway_ip or None,
         "local_access_configured": configured,

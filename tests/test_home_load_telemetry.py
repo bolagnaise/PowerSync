@@ -133,6 +133,7 @@ from power_sync.coordinator import (  # noqa: E402
     FoxESSCloudEnergyCoordinator,
     TeslaEnergyCoordinator,
     UpdateFailed,
+    _ev_power_consistent_with_site_aggregate,
     _fresh_site_ev_load,
     _mapped_tesla_other_charger_power_kw,
     _update_energy_accumulator_with_ev_load,
@@ -173,6 +174,75 @@ def _pin_frozen_clock():
     ):
         yield
 
+
+
+def _replay_site_aggregate_ev_stamps(polls):
+    """Replay the coordinator's per-poll aggregate EV stamping."""
+    history: list[tuple[float, float]] = []
+    stamped = None
+    last_sample = None
+    stamps = []
+    for at, ev_kw, sample in polls:
+        if sample != last_sample:
+            last_sample = sample
+            stamped = _ev_power_consistent_with_site_aggregate(
+                ev_kw, sample[3], history, at
+            )
+        history.append((at, ev_kw))
+        stamps.append(stamped)
+    return stamps
+
+
+def test_lagged_tesla_aggregate_is_not_paired_with_the_cars_later_ramp():
+    """Discord #463: the 10:16:14 aggregate (load 2.76 kW, battery charging
+    9.32 kW) was measured while the BLE car drew ~1 kW, but arrived after it
+    had ramped to 7 kW.  Pairing them counted the ramp twice (14.8 kW surplus
+    from 12.1 kW of solar)."""
+    a_1014 = (12.282, 0.0, -3.553, 8.729)
+    a_1016 = (12.078, 0.0, -9.317, 2.761)
+    a_1017 = (12.101, 0.0, -2.950, 9.151)
+    polls = [
+        (0, 7.0, a_1014), (15, 7.0, a_1014), (30, 7.0, a_1014),
+        (45, 0.0, a_1014), (60, 1.0, a_1014), (75, 3.0, a_1014),
+        (90, 5.0, a_1014), (105, 7.0, a_1014),
+        (120, 7.0, a_1016), (135, 7.0, a_1016), (210, 7.0, a_1016),
+        (225, 7.0, a_1017),
+    ]
+    stamps = _replay_site_aggregate_ev_stamps(polls)
+
+    assert stamps[0] == 7.0  # consistent aggregate keeps its change-time EV
+    assert stamps[8:11] == [1.0, 1.0, 1.0]
+    assert stamps[11] == 7.0
+    # grid_based surplus: -grid + EV-at-sample + battery charge
+    surplus_1016 = -a_1016[1] + stamps[8] + -a_1016[2]
+    assert surplus_1016 == pytest.approx(10.317)
+    assert surplus_1016 <= a_1016[0]
+
+
+@pytest.mark.parametrize(
+    "ev_kw, load_kw, expected",
+    [
+        (5.0902, 6.316, 5.0902),  # Discord #284 epochs stay untouched
+        (3.1485, 4.366, 3.1485),
+        (7.0, 8.7, 7.0),  # fresh aggregate during a ramp is not under-counted
+        (7.0, 6.5, 7.0),  # integer-kW BLE rounding inside tolerance
+        (0.0, 0.4, 0.0),
+    ],
+)
+def test_consistent_site_aggregate_keeps_change_time_ev(ev_kw, load_kw, expected):
+    history = [(0.0, 1.0), (15.0, 3.0)]
+    assert _ev_power_consistent_with_site_aggregate(
+        ev_kw, load_kw, history, 30.0
+    ) == expected
+
+
+def test_lagged_site_aggregate_without_fitting_history_clamps_to_its_load():
+    # Only stale (>120 s) or too-large readings: bound by what the load contains.
+    history = [(0.0, 0.5), (200.0, 6.0), (215.0, 7.0)]
+    assert _ev_power_consistent_with_site_aggregate(
+        7.0, 2.761, history, 230.0
+    ) == pytest.approx(2.761)
+    assert _ev_power_consistent_with_site_aggregate(7.0, None, history, 230.0) == 7.0
 
 
 def test_fresh_site_ev_load_prefers_complete_provider_neutral_total():

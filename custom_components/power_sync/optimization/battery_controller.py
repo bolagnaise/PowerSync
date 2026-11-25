@@ -27,6 +27,21 @@ TESLA_SITE_INFO_MAX_AGE_SECONDS = 900
 _TESLA_IDLE_RESERVE_TOKEN = object()
 
 
+COMMAND_FAILURE_MAX_AGE_SECONDS = 900
+
+
+def classify_command_failure(message: str | None) -> str:
+    """Map a failed optimiser command to a stable, user-facing reason code."""
+    text = (message or "").lower()
+    if "powerwall gateway" in text or "powerwall unreachable" in text:
+        return "gateway_unreachable"
+    if "ev headroom" in text:
+        return "ev_headroom_reserved"
+    if "monitoring mode" in text:
+        return "monitoring_mode"
+    return "command_failed"
+
+
 class ReserveTrust(enum.Enum):
     """Provenance tag for a backup-reserve reading."""
 
@@ -91,6 +106,33 @@ class BatteryControllerWrapper:
         self.hass = hass
         self.battery_system = battery_system
         self.restore_pending = False
+        self.last_command_failure: dict[str, Any] | None = None
+        self._last_command_failure_monotonic: float | None = None
+
+    def _record_command_result(self, command: str, error: str | None) -> None:
+        """Remember why the latest force command was refused, or clear it."""
+        if error is None:
+            if self.last_command_failure and self.last_command_failure.get("command") == command:
+                self.last_command_failure = None
+                self._last_command_failure_monotonic = None
+            return
+        message = str(error).strip() or "Command was not confirmed"
+        self.last_command_failure = {
+            "command": command,
+            "reason": classify_command_failure(message),
+            "message": message[:300],
+            "at": time.time(),
+        }
+        self._last_command_failure_monotonic = time.monotonic()
+
+    def recent_command_failure(self) -> dict[str, Any] | None:
+        """Return the latest command refusal while it still explains the current state."""
+        at = self._last_command_failure_monotonic
+        if self.last_command_failure is None or at is None:
+            return None
+        if not 0 <= time.monotonic() - at <= COMMAND_FAILURE_MAX_AGE_SECONDS:
+            return None
+        return dict(self.last_command_failure)
 
     @optimizer_command
     async def force_charge(self, duration_minutes: int = 60, power_w: float = 5000, _extend_hardware: bool = False, grid_import_target_w: float | None = None) -> bool:
@@ -129,6 +171,8 @@ class BatteryControllerWrapper:
                         "Optimizer: Tesla force charge was not confirmed%s",
                         f": {error}" if error else "",
                     )
+                    if (record := getattr(self, "_record_command_result", None)) is not None:
+                        record("force_charge", error or "Command was not confirmed")
                     return False
             else:
                 await self.hass.services.async_call(
@@ -137,10 +181,14 @@ class BatteryControllerWrapper:
                     optimizer_service_data(self, service_data),
                     blocking=True,
                 )
+            if (record := getattr(self, "_record_command_result", None)) is not None:
+                record("force_charge", None)
             return True
 
         except Exception as e:
             _LOGGER.error(f"Force charge failed: {e}", exc_info=True)
+            if (record := getattr(self, "_record_command_result", None)) is not None:
+                record("force_charge", str(e) or type(e).__name__)
             return False
 
     @optimizer_command
@@ -192,6 +240,8 @@ class BatteryControllerWrapper:
                         "Optimizer: Tesla force discharge was not confirmed%s",
                         f": {error}" if error else "",
                     )
+                    if (record := getattr(self, "_record_command_result", None)) is not None:
+                        record("force_discharge", error or "Command was not confirmed")
                     return False
             else:
                 await self.hass.services.async_call(
@@ -201,10 +251,14 @@ class BatteryControllerWrapper:
                     blocking=True,
                     return_response=False,
                 )
+            if (record := getattr(self, "_record_command_result", None)) is not None:
+                record("force_discharge", None)
             return True
 
         except Exception as e:
             _LOGGER.error(f"Force discharge failed: {e}", exc_info=True)
+            if (record := getattr(self, "_record_command_result", None)) is not None:
+                record("force_discharge", str(e) or type(e).__name__)
             return False
 
     async def restore_normal(self, *, force_restore: bool = False) -> bool:

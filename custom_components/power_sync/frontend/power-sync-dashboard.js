@@ -316,6 +316,21 @@ details.res .kv { margin-top: 10px; font-size: 13px; }
 .switch[aria-checked="true"]::after { transform: translateX(18px); }
 .switch:disabled { opacity: .45; cursor: not-allowed; }
 .switch-list { display: flex; flex-direction: column; gap: 12px; }
+.row2 .lab small.req, .opt-goal small.req { color: var(--amber); }
+.row2 .lab small.note, .opt-goal small.note { color: var(--fg-2); }
+
+/* Optimiser settings */
+.opt-status { font-size: 14px; font-weight: 600; }
+.opt-section { display: flex; flex-direction: column; gap: 10px; padding-top: 14px; border-top: 1px solid var(--border-subtle); }
+.opt-h { font-size: 13px; font-weight: 600; color: var(--fg-2); }
+.opt-goals { display: grid; gap: 8px; }
+.opt-goal { display: flex; flex-direction: column; gap: 2px; width: 100%; text-align: left; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--r); background: var(--bg-2); color: var(--fg); cursor: pointer; }
+.opt-goal:hover:not(:disabled) { border-color: var(--border-hi); }
+.opt-goal[aria-pressed="true"] { border-color: #00e68a66; background: var(--tint-green); cursor: default; }
+.opt-goal:disabled { opacity: .45; cursor: not-allowed; }
+.opt-goal-t { display: flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 600; }
+.opt-goal-t .pill { font-size: 11.5px; padding: 0 8px; }
+.opt-goal small { display: block; color: var(--muted); font-size: 12.5px; }
 
 
 /* The native dialog stays inside the board shadow root and shares its tokens. */
@@ -476,6 +491,10 @@ function psMinor(hass, id) {
 function psMinorUnit(hass) {
   const currency = String(hass?.config?.currency || 'AUD').toUpperCase();
   return currency === 'GBP' ? 'p' : currency === 'EUR' ? 'ct' : 'c';
+}
+// Major-currency daily charge, matching the integration options (e.g. AUD/day).
+function psDailyUnit(hass) {
+  return `${String(hass?.config?.currency || 'AUD').toUpperCase()}/day`;
 }
 function psMoney(hass, value) {
   const n = Number(value);
@@ -1479,7 +1498,7 @@ class PsKvCard extends PsCardBase {
 const PS_SETTING_FIELDS = {
   auto_update_time: { label: 'Scheduled update time', type: 'time', help: 'Home Assistant local time. PowerSync may restart Home Assistant after installing an update.' },
   backup_reserve: { label: 'Manual export floor', unit: '%', min: 0, max: 100, ratio: true, help: 'Used when the recommended reserve is not applied.' },
-  daily_supply_charge: { label: 'Daily supply charge', min: 0, step: '0.01', help: 'Daily fixed charge in your tariff currency, rather than cents.' },
+  daily_supply_charge: { label: 'Daily supply charge', dailyUnit: true, min: 0, step: '0.01', help: 'Daily fixed charge in your tariff currency, not cents. For example, enter 1.67 for 166.67 c/day.' },
   charge_by_time_target_soc: { label: 'Target charge level', unit: '%', min: 0, max: 100, ratio: true },
   charge_by_time_target_time: { label: 'Target time', type: 'time', help: 'Home Assistant local time.' },
   battery_capacity_wh: { label: 'Usable battery capacity', unit: 'Wh', min: 1 },
@@ -1489,8 +1508,8 @@ const PS_SETTING_FIELDS = {
   max_grid_export_w: { label: 'Maximum grid export', unit: 'W', min: 0, nullable: true, help: 'Leave blank to use the system limit. Zero prevents planned export.' },
   allow_grid_charge: { label: 'Allow grid charging', type: 'checkbox' },
   grid_charge_soc_cap: { label: 'Grid charge ceiling', unit: '%', min: 0, max: 100, ratio: true },
-  use_historical_ev_data: { label: 'Use Historical EV Data', type: 'checkbox', help: 'Anticipate weekday EV demand while away; actual battery data takes over on return.' },
-  ev_integration: { label: 'Include PowerSync EV plans', type: 'checkbox', help: 'Include planned car demand in battery planning.' },
+  use_historical_ev_data: { label: 'Use historical car data', type: 'checkbox', requires: 'vehicle', help: 'Expects weekday car charging while the car is away. Live car data takes over when it returns.' },
+  ev_integration: { label: 'Include PowerSync car charging plans', type: 'checkbox', requires: 'vehicle', help: 'Adds planned car charging to the battery plan.' },
   battery_efficiency_learning_enabled: { label: 'Learn battery efficiency', type: 'checkbox' },
   surplus_calculation: { label: 'Measure spare solar using', type: 'select', options: [['grid_based', 'Grid meter'], ['direct', 'Solar production and household load']] },
   household_buffer_kw: { label: 'Household buffer', unit: 'kW', min: 0, max: 5, step: 'any' },
@@ -1511,6 +1530,22 @@ const PS_SETTING_EDITORS = {
   solar: { path: 'power_sync/ev/solar_surplus_config', fields: ['surplus_calculation', 'home_battery_minimum', 'household_buffer_kw', 'max_export_price_cents', 'sustained_surplus_minutes', 'stop_delay_minutes', 'allow_parallel_charging', 'max_battery_charge_rate_kw', 'dual_vehicle_strategy'] },
 };
 
+// Car inputs only make sense once a vehicle or charger exists. The vehicles
+// API lists provider vehicles; loadpoint status also lists standalone OCPP
+// and Zaptec chargers. An unknown answer keeps the inputs, so a failed
+// request never hides a saved setting.
+function psHasVehicleOrCharger(hass) {
+  const list = (data, key) => (data && data.success !== false && Array.isArray(data[key]) ? data[key] : null);
+  return Promise.all([
+    psApi(hass, 'power_sync/ev/vehicles'),
+    psApi(hass, 'power_sync/ev/loadpoints/status'),
+  ]).then(([vehicleData, loadpointData]) => {
+    const vehicles = list(vehicleData, 'vehicles'), loadpoints = list(loadpointData, 'loadpoints');
+    if (vehicles?.length || loadpoints?.length) return true;
+    return vehicles === null || loadpoints === null;
+  });
+}
+
 class PsSettingsDialog extends HTMLElement {
   async open(hass, row, opener) {
     this._hass = hass;
@@ -1518,7 +1553,7 @@ class PsSettingsDialog extends HTMLElement {
     const editor = PS_SETTING_EDITORS[row.editor];
     this._editor = { ...editor, path: editor.path + (editor.entityScoped ? `?entity_id=${encodeURIComponent(row.entity)}` : '') };
     this._opener = opener;
-    this._owner = opener.closest('ps-settings-card') || opener.getRootNode().host;
+    this._owner = opener.closest('ps-settings-card, ps-optimizer-card') || opener.getRootNode().host;
     this.innerHTML = `<dialog class="settings-dialog" aria-labelledby="settings-title"><header><h2 id="settings-title">${psEsc(row.label)}</h2><button type="button" class="btn quiet" data-close aria-label="Close settings">×</button></header><p class="hint">${psEsc(row.help || '')}</p><div data-body role="status">Loading settings…</div><p class="settings-error" role="alert" hidden></p><footer><button type="button" class="btn quiet" data-close>Cancel</button><button type="submit" form="ps-settings-form" class="btn primary" data-save disabled>Save changes</button></footer></dialog>`;
     const dialog = this.querySelector('dialog');
     this._dialog = dialog;
@@ -1544,13 +1579,26 @@ class PsSettingsDialog extends HTMLElement {
       this._values = { ...data, ...(data.config || {}) };
       const schema = data.settings_schema?.fields;
       this._fields = this._editor.fields.filter(key => key in this._values && (!schema || key in schema));
+      const { fields, hidden } = await this._gateFields(this._fields);
+      if (!this.isConnected) return;
+      this._fields = fields;
+      const carHint = hidden ? '<p class="hint">Car charging settings appear here once a vehicle or charger is set up.</p>' : '';
       this.querySelector('[data-body]').innerHTML = this._fields.length
-        ? `<form id="ps-settings-form" class="settings-fields">${this._fields.map(key => this._fieldHtml(key)).join('')}</form>`
+        ? `<form id="ps-settings-form" class="settings-fields">${this._fields.map(key => this._fieldHtml(key)).join('')}${carHint}</form>`
         : '<p class="hint">No configurable options are available for this system.</p>';
       this.querySelector('[data-body]').removeAttribute('role');
       this.querySelector('form')?.addEventListener('submit', e => { e.preventDefault(); this._save(); });
       this.querySelector('[data-save]').disabled = !this._fields.length;
     } catch (err) { this.querySelector('[data-body]').textContent = ''; this._error(`Could not load settings: ${err?.body?.error || err?.body?.message || err.message || err}`); }
+  }
+
+  // Drop inputs whose prerequisite is missing. A setting that is already on
+  // stays visible so it can still be turned off.
+  async _gateFields(fields) {
+    if (!fields.some(key => PS_SETTING_FIELDS[key]?.requires === 'vehicle')) return { fields, hidden: false };
+    const hasVehicle = await psHasVehicleOrCharger(this._hass);
+    const kept = fields.filter(key => PS_SETTING_FIELDS[key]?.requires !== 'vehicle' || hasVehicle || !!this._values?.[key]);
+    return { fields: kept, hidden: kept.length < fields.length };
   }
 
   async _load() {
@@ -1561,7 +1609,7 @@ class PsSettingsDialog extends HTMLElement {
 
   _fieldHtml(key) {
     const f = PS_SETTING_FIELDS[key], value = this._values[key];
-    const unit = f.tariffUnit ? this._tariffUnit : f.unit;
+    const unit = f.tariffUnit ? this._tariffUnit : f.dailyUnit ? psDailyUnit(this._hass) : f.unit;
     const label = psEsc(f.label + (unit ? ` (${unit})` : ''));
     const help = f.help ? `<small>${psEsc(f.help)}</small>` : '';
     const attrs = `name="${key}" id="setting-${key}"`;
@@ -1651,44 +1699,58 @@ class PsSettingsCard extends PsCardBase {
   }
 
   _render() {
-    const hass = this._hass;
-    const rows = (this._config.rows || []).filter(r => psState(hass, r.entity));
+    const rows = (this._config.rows || []).filter(r => psState(this._hass, r.entity));
     if (!rows.length) {
       this.innerHTML = '<p class="empty">None of these settings are available right now.</p>';
       return;
     }
-    const html = rows.map(r => {
-      const i = this._config.rows.indexOf(r);
-      const s = psState(hass, r.entity);
-      const unavailable = s.state === 'unavailable';
-      const help = r.help ? `<small>${psEsc(r.help)}</small>` : '';
-      const label = psEsc(r.label || psFriendly(hass, r.entity));
-      const labelHtml = r.editor && PS_SETTING_EDITORS[r.editor]
-        ? `<button type="button" class="lab settings-open" id="set-${this._settingsId}-${i}" data-editor="${i}" aria-haspopup="dialog">${label}<span class="settings-chevron" aria-hidden="true">›</span>${help}</button>`
-        : `<span class="lab" id="set-${this._settingsId}-${i}">${label}${help}</span>`;
-      if (r.kind === 'switch') {
-        return `<div class="row2">${labelHtml}<button type="button" class="switch" role="switch" aria-checked="${s.state === 'on'}" aria-labelledby="set-${this._settingsId}-${i}" data-i="${i}" ${unavailable ? 'disabled' : ''}></button></div>`;
-      }
-      if (r.kind === 'select') {
-        const options = Array.isArray(s.attributes?.options) ? s.attributes.options : [];
-        const text = o => psEsc(r.labels?.[o] || o);
-        if (options.length && options.length <= 3) {
-          return `<div class="field"><span class="lab" id="set-${this._settingsId}-${i}">${label}</span><div class="seg" style="--n:${options.length}" role="group" aria-labelledby="set-${this._settingsId}-${i}">${options.map(o => `<button type="button" data-i="${i}" data-opt="${psEsc(o)}" aria-pressed="${o === s.state}" ${unavailable ? 'disabled' : ''}>${text(o)}</button>`).join('')}</div></div>`;
-        }
-        return `<div class="row2"><span class="lab" id="set-${this._settingsId}-${i}">${label}${help}</span><select class="pick" data-i="${i}" aria-labelledby="set-${this._settingsId}-${i}" ${unavailable ? 'disabled' : ''}>${options.map(o => `<option value="${psEsc(o)}" ${o === s.state ? 'selected' : ''}>${text(o)}</option>`).join('')}</select></div>`;
-      }
-      if (r.kind === 'number') {
-        const v = Number(s.state);
-        const min = Number(s.attributes?.min ?? 0), max = Number(s.attributes?.max ?? 100);
-        const unit = r.unit ?? s.attributes?.unit_of_measurement ?? '';
-        const shown = !Number.isFinite(v) ? '—' : (v === 0 && r.zeroLabel) ? r.zeroLabel : `${+v.toFixed(2)}${unit === '%' ? '%' : unit ? ` ${unit}` : ''}`;
-        return `<div class="row2"><span class="lab" id="set-${this._settingsId}-${i}">${label}${help}</span><div class="stepper" role="group" aria-labelledby="set-${this._settingsId}-${i}"><button type="button" data-i="${i}" data-d="-1" aria-label="Lower ${label}" ${unavailable || v <= min ? 'disabled' : ''}>−</button><output class="num">${psEsc(shown)}</output><button type="button" data-i="${i}" data-d="1" aria-label="Raise ${label}" ${unavailable || v >= max ? 'disabled' : ''}>+</button></div></div>`;
-      }
-      return '';
-    }).join('');
+    const html = this._rowsHtml(rows);
     const list = this.querySelector('.switch-list');
     if (list) list.innerHTML = html;
     else this.innerHTML = `<div class="switch-list">${html}</div>`;
+  }
+
+  _rowsHtml(rows) { return rows.map(r => this._rowHtml(r)).join(''); }
+
+  // One entity row. `blocked` names a requirement the backend would refuse
+  // turning the switch on over; `locked` a reason it refuses any change.
+  // Either way the switch is disabled and the reason shown.
+  _rowHtml(r, { blocked = '', note = '', locked = '' } = {}) {
+    const hass = this._hass;
+    const i = this._config.rows.indexOf(r);
+    const s = psState(hass, r.entity);
+    if (!s) return '';
+    const unavailable = s.state === 'unavailable';
+    const help = r.help ? `<small>${psEsc(r.help)}</small>` : '';
+    const extra = `${blocked || locked ? `<small class="req">${psEsc(locked || blocked)}</small>` : ''}${note ? `<small class="note">${psEsc(note)}</small>` : ''}`;
+    const label = psEsc(r.label || psFriendly(hass, r.entity));
+    const labelHtml = r.editor && PS_SETTING_EDITORS[r.editor]
+      ? `<button type="button" class="lab settings-open" id="set-${this._settingsId}-${i}" data-editor="${i}" aria-haspopup="dialog">${label}<span class="settings-chevron" aria-hidden="true">›</span>${help}${extra}</button>`
+      : `<span class="lab" id="set-${this._settingsId}-${i}">${label}${help}${extra}</span>`;
+    // A settings dialog with no control of its own.
+    if (r.kind === 'link') return `<div class="row2">${labelHtml}</div>`;
+    if (r.kind === 'switch') {
+      const on = s.state === 'on';
+      // Turning a control off is never refused, so only block turning it on.
+      const disabled = unavailable || !!locked || (!!blocked && !on);
+      return `<div class="row2">${labelHtml}<button type="button" class="switch" role="switch" aria-checked="${on}" aria-labelledby="set-${this._settingsId}-${i}" data-i="${i}" ${disabled ? 'disabled' : ''}></button></div>`;
+    }
+    if (r.kind === 'select') {
+      const options = Array.isArray(s.attributes?.options) ? s.attributes.options : [];
+      const text = o => psEsc(r.labels?.[o] || o);
+      if (options.length && options.length <= 3) {
+        return `<div class="field"><span class="lab" id="set-${this._settingsId}-${i}">${label}</span><div class="seg" style="--n:${options.length}" role="group" aria-labelledby="set-${this._settingsId}-${i}">${options.map(o => `<button type="button" data-i="${i}" data-opt="${psEsc(o)}" aria-pressed="${o === s.state}" ${unavailable ? 'disabled' : ''}>${text(o)}</button>`).join('')}</div></div>`;
+      }
+      return `<div class="row2"><span class="lab" id="set-${this._settingsId}-${i}">${label}${help}</span><select class="pick" data-i="${i}" aria-labelledby="set-${this._settingsId}-${i}" ${unavailable ? 'disabled' : ''}>${options.map(o => `<option value="${psEsc(o)}" ${o === s.state ? 'selected' : ''}>${text(o)}</option>`).join('')}</select></div>`;
+    }
+    if (r.kind === 'number') {
+      const v = Number(s.state);
+      const min = Number(s.attributes?.min ?? 0), max = Number(s.attributes?.max ?? 100);
+      const unit = r.unit ?? s.attributes?.unit_of_measurement ?? '';
+      const shown = !Number.isFinite(v) ? '—' : (v === 0 && r.zeroLabel) ? r.zeroLabel : `${+v.toFixed(2)}${unit === '%' ? '%' : unit ? ` ${unit}` : ''}`;
+      return `<div class="row2"><span class="lab" id="set-${this._settingsId}-${i}">${label}${help}</span><div class="stepper" role="group" aria-labelledby="set-${this._settingsId}-${i}"><button type="button" data-i="${i}" data-d="-1" aria-label="Lower ${label}" ${unavailable || v <= min ? 'disabled' : ''}>−</button><output class="num">${psEsc(shown)}</output><button type="button" data-i="${i}" data-d="1" aria-label="Raise ${label}" ${unavailable || v >= max ? 'disabled' : ''}>+</button></div></div>`;
+    }
+    return '';
   }
 
   _onClick(e) {
@@ -1724,6 +1786,220 @@ class PsSettingsCard extends PsCardBase {
     if (!sel) return;
     const r = this._config.rows[Number(sel.dataset.i)];
     if (r) this._call('select', 'select_option', { entity_id: r.entity, option: sel.value });
+  }
+}
+
+// What HA optimiser access means for turning Smart Optimization on. Mirrors
+// OptimizationEnabledSwitch.async_turn_on: it re-checks access and resumes a
+// resumable entry itself, and refuses while access is unavailable or controls
+// are still being restored. `blocked` disables the switch; `note` explains a
+// switch that still works.
+function psOptimizerAccess(licensing) {
+  const l = licensing && typeof licensing === 'object' ? licensing : null;
+  if (!l || l.can_optimize !== false) return { blocked: '', note: '', paused: '' };
+  const where = 'Open PowerSync integration options → HA optimiser access.';
+  if (l.recovery_pending) {
+    return { blocked: `PowerSync is restoring its battery controls. ${where}`, note: '', paused: 'restoring its battery controls' };
+  }
+  if (l.requires_resume && (l.would_allow || l.enforcement_mode === 'shadow')) {
+    return { blocked: '', note: 'Turning this on resumes optimisation after an interruption.', paused: 'waiting to resume after an interruption' };
+  }
+  if (l.access_state === 'checking') {
+    return { blocked: '', note: 'Checking HA optimiser access.', paused: 'checking HA optimiser access' };
+  }
+  const reason = l.access_state === 'expired' ? 'HA optimiser access has expired.'
+    : l.access_state === 'installation_revoked' ? 'This HA server’s pairing was revoked.'
+    : l.access_state === 'unpaired' ? 'This HA server isn’t paired with a PowerSync account.'
+    : 'Needs HA optimiser access.';
+  return { blocked: `${reason} ${where}`, note: '', paused: 'waiting for HA optimiser access' };
+}
+
+// MonitoringModeSwitch refuses to turn off on a connection that can never
+// accept commands, and says so in its attributes.
+function psMonitoringLock(state) {
+  if (state?.attributes?.locked_on !== true) return '';
+  return state.attributes.locked_reason === 'telemetry_only_connection'
+    ? 'Always on: this battery connection is read-only.'
+    : 'Always on for this battery connection.';
+}
+
+// Battery goals are one choice: the backend keeps Profit Max and Cost Neutral
+// mutually exclusive, and Standard is neither.
+const PS_OPT_GOALS = [
+  { id: 'standard', title: 'Standard', desc: 'Charges and exports when prices make it worthwhile, keeping charge for later.' },
+  { id: 'profit', title: 'Profit Max', desc: 'Exports whenever it earns more than it costs.' },
+  { id: 'neutral', title: 'Cost Neutral', desc: 'Exports only until today’s costs are covered, then keeps the battery for the home.' },
+];
+
+// Profit Max solar-export refusals from the coordinator's capability check
+// that the owner can fix in settings.
+const PS_PROFIT_MAX_REQ = {
+  export_limit_not_configured: 'Solar export stays off until you set a maximum grid export in Smart Optimization settings.',
+  zero_export_site: 'Your maximum grid export is 0 kW, so solar can’t be exported.',
+  battery_limits_unknown: 'Set battery capacity and charge power in Smart Optimization settings.',
+};
+
+// Cost Neutral progress for today, from the latest plan.
+const PS_COST_NEUTRAL_STATUS = {
+  pending_solve: 'Waiting for the next plan.',
+  covered: 'Planned battery exports cover the rest of today’s costs.',
+  already_covered_by_measured_or_natural_export: 'Today’s costs are already covered, so no battery export is needed.',
+  no_eligible_export_slots_before_midnight: 'No export windows are left today.',
+  site_or_network_export_limit: 'The site export limit leaves no room for battery export.',
+  battery_or_reserve_limit: 'The battery is at its reserve floor.',
+  insufficient_eligible_capacity: 'Not enough spare battery to cover all of today’s costs.',
+};
+
+// Switch states update as soon as a goal changes; the cached optimiser
+// payload is the fallback when a switch entity is missing.
+function psOptimizerGoal(hass, en, data) {
+  const neutral = psState(hass, en.costNeutral)?.state, profit = psState(hass, en.profitMax)?.state;
+  if (neutral === 'on' || (!neutral && data?.cost_neutral_enabled)) return 'neutral';
+  if (profit === 'on' || (!profit && (data?.profit_max_mode || data?.profit_max_enabled))) return 'profit';
+  return 'standard';
+}
+
+// A switch's own state, or null when it can't say (missing or unavailable).
+function psSwitchOn(hass, entity) {
+  const state = psState(hass, entity)?.state;
+  return state === 'on' ? true : state === 'off' ? false : null;
+}
+
+// Whether Smart Optimization is on. The switch updates as soon as it is
+// changed; the cached optimiser payload can lag by up to a minute.
+function psOptimizerOn(hass, en, data) {
+  return psSwitchOn(hass, en.enabled) ?? (data?.enabled === true);
+}
+
+// One plain sentence saying what the optimiser is doing. Live switch states
+// win over the cached payload, which can lag a change by up to a minute.
+function psOptimizerStatus(hass, en, data) {
+  const enabledState = psState(hass, en.enabled);
+  if (!data && !enabledState) return 'Checking optimiser status…';
+  const access = psOptimizerAccess(data?.licensing);
+  const enabled = psOptimizerOn(hass, en, data);
+  const monitoring = psSwitchOn(hass, en.monitoring) ?? !!data?.monitoring_mode;
+  // The switch reads off while access is paused, but the saved setting is on.
+  if (access.paused && (enabled || data?.enabled === true)) return `Smart Optimization is paused, ${access.paused}.`;
+  if (!enabled) return 'Smart Optimization is off. The battery follows its own settings.';
+  if (monitoring) return 'Smart Optimization is planning only. Monitoring mode is on, so no battery commands are sent.';
+  const goal = PS_OPT_GOALS.find(g => g.id === psOptimizerGoal(hass, en, data));
+  const stale = data?.is_stale || data?.optimization_status === 'stale' ? ' The plan is out of date.' : '';
+  return `Smart Optimization is controlling the battery, aiming for ${goal.title}.${stale}`;
+}
+
+// Why the planned charge/export is not being applied (gateway, EV reservation...).
+const PS_COMMAND_FAILURE_TEXT = {
+  gateway_unreachable: 'Gateway unreachable',
+  ev_headroom_reserved: 'EV reservation held',
+  monitoring_mode: 'Monitoring mode',
+};
+function psCommandFailureChip(failure) {
+  if (!failure || typeof failure !== 'object') return '';
+  const label = failure.command === 'force_discharge' ? 'Export blocked' : 'Charge blocked';
+  const text = PS_COMMAND_FAILURE_TEXT[failure.reason] || 'Command refused';
+  return `<span class="chip am" title="${psEsc(failure.message || text)}"><span>${label}</span><b>${psEsc(text)}</b></span>`;
+}
+
+// Smart Optimization, Monitoring, battery goal, Charge by time, fine tuning
+// and updates. Config: { entities: { enabled, monitoring, profitMax,
+// costNeutral, chargeByTime }, rows: [settings-card rows, with `group`:
+// 'main' | 'goal' | 'tuning' | 'updates'] }. Every control calls the same
+// switch services as before; only the presentation is grouped.
+class PsOptimizerCard extends PsSettingsCard {
+  _signature() {
+    const data = psApiPeek('power_sync/optimization');
+    const l = data?.licensing || {};
+    const en = this.ents;
+    const ids = [en.profitMax, en.costNeutral].map(id => {
+      const s = this._hass?.states?.[id];
+      return s ? `${s.state}|${s.last_updated}` : '-';
+    }).join(';');
+    return [super._signature(), ids, data?.enabled, data?.monitoring_mode, data?.profit_max_mode, data?.cost_neutral_enabled,
+      data?.cost_neutral?.reason, data?.profit_max_solar_export?.capability?.reason, data?.is_stale, data?.optimization_status,
+      data?.config?.charge_by_time_target_soc, data?.config?.charge_by_time_target_time,
+      l.can_optimize, l.access_state, l.requires_resume, l.recovery_pending, l.would_allow, l.enforcement_mode,
+      // Re-render once per cache lifetime so _api() refetches access and goal
+      // status even when no other card on the board reads the optimiser API.
+      Math.floor(Date.now() / PS_API_TTL_MS)].join('|');
+  }
+
+  _render() {
+    const hass = this._hass, en = this.ents;
+    const data = this._api('power_sync/optimization');
+    const rows = (this._config.rows || []).filter(r => psState(hass, r.entity));
+    const group = g => rows.filter(r => (r.group || 'tuning') === g);
+    const access = psOptimizerAccess(data?.licensing);
+    const main = group('main').map(r => this._rowHtml(r, r.entity === en.enabled ? { blocked: access.blocked, note: access.note }
+      : r.entity === en.monitoring ? { locked: psMonitoringLock(psState(hass, en.monitoring)) } : {})).join('');
+    const goals = this._goalsHtml(data);
+    const goalRows = group('goal').map(r => this._rowHtml(r, r.entity === en.chargeByTime ? { note: this._chargeByTimeNote(data) } : {})).join('');
+    const tuning = this._rowsHtml(group('tuning'));
+    const updates = this._rowsHtml(group('updates'));
+    const optimiserOn = psOptimizerOn(hass, en, data);
+    const section = (key, title, body, hint = '') => (body
+      ? `<section class="opt-section" aria-labelledby="opt-${this._settingsId}-${key}"><h3 class="opt-h" id="opt-${this._settingsId}-${key}">${title}</h3>${hint ? `<p class="hint">${hint}</p>` : ''}${body}</section>`
+      : '');
+    this.innerHTML = `<p class="opt-status" role="status">${psEsc(psOptimizerStatus(hass, en, data))}</p>`
+      + (main ? `<div class="switch-list">${main}</div>` : '')
+      + section('goal', 'Battery goal', `${goals}${goalRows ? `<div class="switch-list">${goalRows}</div>` : ''}`,
+        optimiserOn ? '' : 'Saved now, used when Smart Optimization is on.')
+      + section('tuning', 'Fine tuning', tuning ? `<div class="switch-list">${tuning}</div>` : '')
+      + section('updates', 'Updates', updates ? `<div class="switch-list">${updates}</div>` : '');
+    if (!main && !goals && !goalRows && !tuning && !updates) this.innerHTML = '<p class="empty">None of these settings are available right now.</p>';
+  }
+
+  _goalsHtml(data) {
+    const hass = this._hass, en = this.ents;
+    const profit = psState(hass, en.profitMax), neutral = psState(hass, en.costNeutral);
+    if (!profit && !neutral) return '';
+    const current = psOptimizerGoal(hass, en, data);
+    const options = PS_OPT_GOALS.filter(g => (g.id === 'profit' ? profit : g.id === 'neutral' ? neutral : true));
+    const html = options.map(g => {
+      const state = g.id === 'profit' ? profit : g.id === 'neutral' ? neutral : null;
+      // Standard turns the other goals off, so it needs one that can change.
+      const disabled = state ? state.state === 'unavailable'
+        : [profit, neutral].filter(Boolean).every(s => s.state === 'unavailable');
+      const on = g.id === current;
+      let detail = '';
+      if (on && g.id === 'profit') detail = PS_PROFIT_MAX_REQ[data?.profit_max_solar_export?.capability?.reason] || '';
+      if (on && g.id === 'neutral' && psOptimizerOn(hass, en, data)) detail = PS_COST_NEUTRAL_STATUS[data?.cost_neutral?.reason] || '';
+      const detailClass = g.id === 'profit' ? 'req' : 'note';
+      return `<button type="button" class="opt-goal" aria-pressed="${on}" data-goal="${g.id}" ${disabled ? 'disabled' : ''}>`
+        + `<span class="opt-goal-t">${psEsc(g.title)}${on ? '<span class="pill on">On</span>' : ''}</span>`
+        + `<small>${psEsc(g.desc)}</small>${detail ? `<small class="${detailClass}">${psEsc(detail)}</small>` : ''}`
+        + `${disabled ? '<small class="req">Unavailable right now.</small>' : ''}</button>`;
+    }).join('');
+    return `<div class="opt-goals" role="group" aria-labelledby="opt-${this._settingsId}-goal">${html}</div>`;
+  }
+
+  _chargeByTimeNote(data) {
+    const soc = Number(data?.config?.charge_by_time_target_soc);
+    const time = data?.config?.charge_by_time_target_time;
+    return Number.isFinite(soc) && time ? `Target: ${Math.round(soc)}% by ${time}.` : '';
+  }
+
+  _onClick(e) {
+    if (e.target.closest('ps-settings-dialog')) return;
+    const goal = e.target.closest('button[data-goal]');
+    if (!goal) { super._onClick(e); return; }
+    if (goal.disabled || goal.getAttribute('aria-pressed') === 'true') return;
+    const en = this.ents;
+    this.querySelectorAll('button[data-goal]').forEach(b => b.setAttribute('aria-pressed', String(b === goal)));
+    const id = goal.dataset.goal;
+    // The backend switches Profit Max and Cost Neutral off together, so a
+    // goal only ever turns one switch on, and Standard turns the others off.
+    if (id === 'profit') this._call('homeassistant', 'turn_on', { entity_id: en.profitMax });
+    else if (id === 'neutral') this._call('homeassistant', 'turn_on', { entity_id: en.costNeutral });
+    else {
+      // Turn off every goal switch, not only those HA reports as on: a goal
+      // chosen a moment ago may not have reported its new state yet. Turning
+      // off a goal that is already off changes nothing in the backend.
+      for (const entity of [en.profitMax, en.costNeutral]) {
+        const state = psState(this._hass, entity)?.state;
+        if (state && state !== 'unavailable') this._call('homeassistant', 'turn_off', { entity_id: entity });
+      }
+    }
   }
 }
 
@@ -2053,13 +2329,13 @@ class PsNowCard extends PsCardBase {
       pill = `<span class="pill ${control?.pill || 'override'}">${psEsc(control?.label || 'Battery control active')}</span>`;
       modeText = Number.isFinite(remaining) ? `Current command: ${psDuration(remaining)} remaining` : 'Current battery command';
     } else if (monitoring) {
-      pill = '<span class="pill mon">Monitoring</span>';
-      modeText = 'The optimizer is planning but not controlling the battery';
+      pill = '<span class="pill mon">Monitoring only</span>';
+      modeText = 'The optimiser plans but doesn’t send battery commands';
     } else if (enabled) {
-      pill = '<span class="pill on">Optimizing</span>';
-      modeText = 'The optimizer is controlling the battery';
+      pill = '<span class="pill on">Optimiser on</span>';
+      modeText = 'The optimiser is controlling the battery';
     } else if (data || en.optimizer) {
-      pill = '<span class="pill off">Optimizer off</span>';
+      pill = '<span class="pill off">Optimiser off</span>';
       modeText = 'The battery follows its own settings';
     }
 
@@ -2815,7 +3091,7 @@ class PsPlanCard extends PsCardBase {
 
   _signature() {
     const data = psApiPeek('power_sync/optimization');
-    return `${super._signature()}|${this._hass?.config?.currency}|${data?.last_optimization || ''}|${data?.monitoring_mode}|${data?.enabled}|${data?.current_action || ''}|${data?.effective_current_action || ''}|${psBatteryEfficiencySummary(data?.battery_efficiency_learning)}|${this._histAt}`;
+    return `${super._signature()}|${this._hass?.config?.currency}|${data?.last_optimization || ''}|${data?.monitoring_mode}|${data?.enabled}|${data?.current_action || ''}|${data?.effective_current_action || ''}|${data?.command_failure?.command || ''}:${data?.command_failure?.reason || ''}|${psBatteryEfficiencySummary(data?.battery_efficiency_learning)}|${this._histAt}`;
   }
 
   _loadHistory() {
@@ -2938,8 +3214,9 @@ class PsPlanCard extends PsCardBase {
     const hasBonusCap = Number.isFinite(bonusCap) && bonusCap >= 0;
     const actChip = key => (key === 'charge' ? 'gr' : key === 'export' ? 'rd' : key === 'self' ? 'pu' : '');
     const chips = [
-      `<span class="chip ${data.monitoring_mode ? 'cy' : data.enabled ? 'gr' : ''}"><span>Mode</span><b>${data.monitoring_mode ? 'Monitoring' : data.enabled ? 'Optimizing' : 'Off'}</b></span>`,
+      `<span class="chip ${data.monitoring_mode ? 'cy' : data.enabled ? 'gr' : ''}"><span>Optimiser</span><b>${data.monitoring_mode ? 'Monitoring only' : data.enabled ? psEsc(PS_OPT_GOALS.find(g => g.id === psOptimizerGoal(hass, {}, data)).title) : 'Off'}</b></span>`,
       controlText ? `<span class="chip ${control ? 'am' : actChip(curKey)}"><span>Current control</span><b>${psEsc(controlText)}</b></span>` : '',
+      psCommandFailureChip(data.command_failure),
       nextChange ? `<span class="chip ${actChip(nextChange.key)}"><span>Next control</span><b>${psEsc(PS_ACT[nextChange.key][0])} ${psEsc(psWhen(hass, nextChange.t))}</b></span>` : '',
       data.last_optimization ? `<span class="chip"><span>Optimized</span><b class="num">${psEsc(psTime(hass, data.last_optimization))}</b></span>` : '',
       Number.isFinite(floor) && floor > 0 ? `<span class="chip"><span>Export floor</span><b class="num">${Math.round(floor)}%</b></span>` : '',
@@ -3408,10 +3685,10 @@ class PsTodayCard extends PsCardBase {
     if (en.importCost) stats.push(stat('Grid cost', psEsc(psMoney(hass, money(en.importCost))), Number.isFinite(imported) ? `${psFix(imported)} kWh imported` : ''));
     if (en.exportEarnings) stats.push(stat('Export earnings', psEsc(psMoney(hass, money(en.exportEarnings))), Number.isFinite(exported) ? (exported < 0.05 ? 'Nothing exported' : `${psFix(exported)} kWh exported`) : ''));
     if (en.avgCost) {
-      const mtd = psNum(hass, en.mtdAvgCost);
-      const avg = psNum(hass, en.avgCost);
-      const avgMinor = Number.isFinite(avg) && avg < 5 ? avg * 100 : avg;
-      const mtdMinor = Number.isFinite(mtd) && mtd < 5 ? mtd * 100 : mtd;
+      // Convert by the sensor's unit, never by magnitude: a high major-unit
+      // average (for example a misconfigured supply charge) must stay visible.
+      const avgMinor = psMinor(hass, en.avgCost);
+      const mtdMinor = psMinor(hass, en.mtdAvgCost);
       stats.push(stat('Average net energy cost', `${psFix(avgMinor)}<small>${unit}/kWh</small>`, `Net cost per kWh used at home${Number.isFinite(mtdMinor) ? ` · Month to date ${mtdMinor.toFixed(1)} ${unit}` : ''}`));
     }
     if (en.netCost) {
@@ -3642,6 +3919,7 @@ const PS_ELEMENTS = {
   'power-sync-board': PowerSyncBoard,
   'ps-kv-card': PsKvCard,
   'ps-settings-card': PsSettingsCard,
+  'ps-optimizer-card': PsOptimizerCard,
   'ps-settings-dialog': PsSettingsDialog,
   'ps-missing-cards': PsMissingCards,
   'ps-now-card': PsNowCard,

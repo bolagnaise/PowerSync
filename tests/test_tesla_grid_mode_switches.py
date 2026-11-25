@@ -467,6 +467,12 @@ def test_grid_charging_switch_keeps_unknown_when_field_and_preference_are_absent
     assert entity.is_on is None
 
 
+SITE_INFO_READER_METHODS = (
+    "async_get_site_info", "_fresh_site_info_cache", "_site_info_retry_pending",
+    "_async_fetch_site_info", "_latch_site_info_failure", "invalidate_site_info_cache",
+)
+
+
 def _cloud_permission_probe(*, cached, error, site_info=None):
     """Exercise the real Site Info reader through the switch without HA/network."""
     source = (ROOT / "coordinator.py").read_text()
@@ -475,7 +481,7 @@ def _cloud_permission_probe(*, cached, error, site_info=None):
                and node.name == "TeslaEnergyCoordinator")
     methods = [node for node in cls.body
                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-               and node.name in {"async_get_site_info", "invalidate_site_info_cache"}]
+               and node.name in SITE_INFO_READER_METHODS]
     clock = [1000.0]
     calls = []
 
@@ -494,6 +500,7 @@ def _cloud_permission_probe(*, cached, error, site_info=None):
 
     namespace = {
         "Any": object,
+        "asyncio": asyncio,
         "time": types.SimpleNamespace(monotonic=lambda: clock[0]),
         "_LOGGER": logging.getLogger(__name__),
         "TESLA_SITE_INFO_CACHE_TTL_SECONDS": 21600,
@@ -516,7 +523,7 @@ def _cloud_permission_probe(*, cached, error, site_info=None):
         api_provider="teslemetry",
         site_id="site-1",
     )
-    for name in ("async_get_site_info", "invalidate_site_info_cache"):
+    for name in SITE_INFO_READER_METHODS:
         setattr(coord, name, types.MethodType(namespace[name], coord))
     hass = _Hass("SystemGridConnected")
     hass.data["power_sync"]["entry-1"]["tesla_coordinator"] = coord
@@ -832,3 +839,27 @@ def test_force_switch_state_tracks_service_dispatch_payload():
 
     assert force_switch.is_on is False
     assert "expires_at" not in force_switch.extra_state_attributes
+
+
+def test_monitoring_switch_tells_dashboards_when_it_cannot_be_turned_off():
+    """A telemetry-only connection reports the lock the switch enforces."""
+    def make(options):
+        entry = types.SimpleNamespace(entry_id="entry-1", data={}, options=options)
+        return entry, switch.MonitoringModeSwitch(
+            _Hass("SystemGridConnected"),
+            entry,
+            types.SimpleNamespace(key="monitoring_mode", name="Monitoring mode"),
+        )
+
+    entry, locked = make({"sungrow_connection_type": "ihomemanager", "monitoring_mode": True})
+    assert locked.is_on is True
+    assert locked.extra_state_attributes == {
+        "locked_on": True,
+        "locked_reason": "telemetry_only_connection",
+    }
+    asyncio.run(locked.async_turn_off())
+    assert locked.is_on is True
+    assert entry.options["monitoring_mode"] is True
+
+    _, direct = make({"sungrow_connection_type": "direct", "monitoring_mode": True})
+    assert direct.extra_state_attributes == {}

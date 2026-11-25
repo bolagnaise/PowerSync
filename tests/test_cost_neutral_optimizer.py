@@ -555,6 +555,101 @@ def test_free_preference_budget_is_shared_across_full_solves(optimizer_module, m
     assert stats["skips"] > 0
 
 
+def test_export_preference_shares_the_cycle_preference_budget(optimizer_module, monkeypatch):
+    """Ticket 410: the fewer-exports preference must not take each pass's rest."""
+    module = optimizer_module
+    solve = module._solve_lp_highs
+    clock = 0.0
+    preference_limits = []
+
+    def observe(*args, **kwargs):
+        nonlocal clock
+        if kwargs.get("solve_role") == "tiebreak":
+            limit = kwargs["time_limit"]
+            preference_limits.append(limit)
+            clock += limit
+            return module._HighsResult(
+                list(kwargs["initial_solution"]), True, "Time limit reached",
+                int(module.highspy.HighsModelStatus.kTimeLimit), 0.0,
+            )
+        return solve(*args, **kwargs)
+
+    fake_time = types.SimpleNamespace(monotonic=lambda: clock)
+    monkeypatch.setattr(module, "time", fake_time)
+    monkeypatch.setattr(sys.modules[module.OptimizationRun.__module__], "time", fake_time)
+    monkeypatch.setattr(module, "_solve_lp_highs", observe)
+    work = module.OptimizationRun()
+    for _ in range(5):
+        result = work.solve(lambda: _optimizer(module).optimize(
+            import_prices=[0.31]*4, export_prices=[0.25, 0.25, 0.05, 0.05],
+            solar_forecast=[0.0]*4, load_forecast=[0.5]*4,
+            current_soc=0.8, allow_battery_export=True,
+            schedule_timestamps=_timestamps(4), cost_neutral_earnings_cap=0.2,
+            cost_neutral_slots=[True]*4,
+        ))
+        assert result.solver_used == "highs" and result.feasible
+    assert preference_limits
+    assert all(limit <= module_attempt_limit(module) for limit in preference_limits)
+    assert sum(preference_limits) == pytest.approx(12.0)
+    stats = result.lp_stats["cycle"]["cost_neutral_free_preference"]
+    assert stats["skips"] > 0
+
+
+def module_attempt_limit(module):
+    return sys.modules[module.OptimizationRun.__module__].COST_NEUTRAL_FREE_PREFERENCE_ATTEMPT_SECONDS
+
+
+def test_primary_mixed_integer_solve_stops_within_half_a_cent(optimizer_module, monkeypatch):
+    """Ticket 410: proving the last fraction of a cent must not cost the plan."""
+    module = optimizer_module
+    options = []
+    real_highs = module.highspy.Highs
+
+    class RecordingHighs(real_highs):
+        def setOptionValue(self, name, value):
+            options.append((name, value))
+            return super().setOptionValue(name, value)
+
+    monkeypatch.setattr(module.highspy, "Highs", RecordingHighs)
+    bounds = [(0.0, 1.0), (0.0, 1.0)]
+    args = ([1.0, 1.0], module._LpMatrix((0, 2)), [], module._LpMatrix((0, 2)), [], bounds)
+    module._solve_lp_highs(*args, time_limit=5.0, integer_indices=[0])
+    assert ("mip_abs_gap", module.PRIMARY_MIP_ABS_GAP_DOLLARS) in options
+    assert module.PRIMARY_MIP_ABS_GAP_DOLLARS == pytest.approx(0.005)
+    options.clear()
+    module._solve_lp_highs(*args, time_limit=5.0, integer_indices=[0], solve_role="tiebreak")
+    module._solve_lp_highs(*args, time_limit=5.0)
+    assert not any(name == "mip_abs_gap" for name, _ in options)
+
+
+def test_cost_neutral_later_days_use_tiered_periods(optimizer_module):
+    """Ticket 410: only today's Cost Neutral settlement stays at 5 minutes."""
+    module = optimizer_module
+    optimizer = module.BatteryOptimizer(interval_minutes=5, horizon_hours=48)
+    n = 576
+    today = 156  # 13 h left today, as in the ticket's 10:56 capture
+    day_ids = (["2026-11-25"] * today + ["2026-11-26"] * 288
+               + ["2026-11-27"] * (n - today - 288))
+    common = dict(
+        import_prices=[0.25] * n, export_prices=[0.08] * n,
+        solar=[0.0] * n, load=[0.7] * n,
+        allow_battery_export=[True] * n, block_battery_charge=[False] * n,
+        cost_neutral_slots=[True] * n,
+    )
+    periods = optimizer._build_lp_periods(n, cost_neutral_day_ids=day_ids, **common)
+
+    assert all(p.slot_count == 1 for p in periods if p.start < today)
+    assert max(p.slot_count for p in periods if p.start >= today) > 1
+    assert len(periods) < 250
+    for period in periods:
+        assert len(set(day_ids[period.start:period.end])) == 1
+    assert {period.end for period in periods} >= {today, today + 288}
+
+    # Without day ids the existing all-base-resolution behaviour is kept.
+    legacy = optimizer._build_lp_periods(n, **common)
+    assert len(legacy) == n
+
+
 def test_superseding_a_primary_solve_stops_before_the_next_pass(optimizer_module, monkeypatch):
     module = optimizer_module
     solve = module._solve_lp_highs

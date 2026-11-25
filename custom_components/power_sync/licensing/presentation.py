@@ -96,9 +96,14 @@ def optimizer_access_description(status: dict, pairing_code: str | None = None) 
 
 
 def optimizer_settings_description(
-    status: dict | None, *, enabled: bool, running: bool
+    status: dict | None, *, enabled: bool, running: bool, monitoring: bool = False
 ) -> str:
-    """Distinguish the saved enable setting from live optimiser admission."""
+    """Distinguish the saved enable setting from live optimiser admission.
+
+    ``monitoring`` says whether Monitoring mode stops the running optimiser
+    from sending battery commands, so a running planner is never described
+    as controlling the battery when it only plans.
+    """
     if not enabled:
         return "Smart Optimization is off in saved settings."
     if status is None:
@@ -117,6 +122,11 @@ def optimizer_settings_description(
         return (
             "Saved setting is on, but HA optimiser access is unavailable. "
             "Open HA optimiser access to check pairing and access."
+        )
+    if running and monitoring:
+        return (
+            "Smart Optimization is planning only. Monitoring mode is on, "
+            "so no battery commands are sent."
         )
     if running:
         return "Smart Optimization is running."
