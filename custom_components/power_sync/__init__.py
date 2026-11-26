@@ -37321,6 +37321,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if budget.native_max_claim(site):
                 raise HomeAssistantError("Previous native Powerwall control still owns this site")
             if direction == "charge" and budget.blocks_cloud_tariff_charge(site):
+                reasons_fn = getattr(budget, "cloud_tariff_charge_block_reasons", None)
+                _LOGGER.info(
+                    "Cloud tariff force charge refused to protect shared EV headroom: %s",
+                    "; ".join(reasons_fn(site)) if callable(reasons_fn) else "EV demand reserved",
+                )
                 raise HomeAssistantError("Cloud tariff charging cannot reserve shared EV headroom")
         if (not _local_powerwall_generation_current()
                 or not _cloud_tariff_control_requested(call)

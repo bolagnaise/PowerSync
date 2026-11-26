@@ -13221,6 +13221,25 @@ def set_scheduled_charging_executor(executor: ScheduledChargingExecutor) -> None
     _scheduled_charging_executor = executor
 
 
+def _scheduled_owner_block_reason(
+    hass: "HomeAssistant",
+    config_entry: "ConfigEntry",
+    vehicle_id: Optional[str],
+    active_mode: str,
+) -> str:
+    """Describe the loadpoint owner, naming PowerSync's own unconfirmed Stop."""
+    try:
+        from .ev_ownership import EXTERNAL_OWNER_MODE, get_ev_ownership
+
+        if active_mode == EXTERNAL_OWNER_MODE:
+            _lease_id, lease = get_ev_ownership(hass, config_entry, vehicle_id)
+            if lease and lease.get("stop_settling"):
+                return "awaiting vehicle confirmation of PowerSync's Stop"
+    except Exception as err:
+        _LOGGER.debug("Scheduled owner description failed: %s", err)
+    return f"{active_mode} owns the active loadpoint"
+
+
 async def _can_stop_external_scheduled_session(
     hass: "HomeAssistant",
     config_entry: "ConfigEntry",
@@ -13244,7 +13263,9 @@ async def _can_stop_external_scheduled_session(
             )
         )
         if active_mode and owner_family(active_mode) != owner_family("scheduled"):
-            return False, f"{active_mode} owns the active loadpoint"
+            return False, _scheduled_owner_block_reason(
+                hass, config_entry, vehicle_id or DEFAULT_VEHICLE_ID, active_mode,
+            )
     except Exception as err:
         _LOGGER.debug("Scheduled external-stop ownership guard failed: %s", err)
 
@@ -13323,7 +13344,9 @@ async def _find_external_scheduled_charging_vehicle(
                 or get_active_ev_owner_mode(hass, config_entry, vehicle_vin)
             )
             if active_mode and owner_family(active_mode) != owner_family("scheduled"):
-                blocked_reason = f"{active_mode} owns the active loadpoint"
+                blocked_reason = _scheduled_owner_block_reason(
+                    hass, config_entry, vehicle_vin, active_mode,
+                )
                 continue
         except Exception as err:
             _LOGGER.debug(

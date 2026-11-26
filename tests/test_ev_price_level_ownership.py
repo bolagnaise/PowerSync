@@ -11612,3 +11612,44 @@ def test_opportunistic_solar_threshold_gates_starts_not_running_sessions(monkeyp
     assert should_charge is expected
     if expected:
         assert source == "solar_surplus"
+
+
+@pytest.mark.parametrize("stop_settling", [True, False])
+def test_scheduled_guard_names_powersync_unconfirmed_stop_not_external(
+    monkeypatch,
+    fake_actions,
+    stop_settling,
+):
+    """Ticket #183: PowerSync's own stop-settling lease is not an external session."""
+    vin = "LRWYHCEKXTC687964"
+    fake_actions._dynamic_ev_state = {}
+    hass = _FakeHass()
+    _set_external_policy(hass, vin)
+    lease = {"owner": "external", "owner_mode": "external", "observed": True}
+    if stop_settling:
+        lease.update(
+            stop_settling=True,
+            stop_command_at=datetime.now(timezone.utc).isoformat(),
+            stop_settling_expires_at=(
+                datetime.now(timezone.utc) + timedelta(minutes=15)
+            ).isoformat(),
+        )
+    hass.data["power_sync"]["entry-1"]["ev_ownership"] = {vin: lease}
+
+    async def one_vehicle(*args, **kwargs):
+        return [{"vin": vin, "name": "Tesla"}]
+
+    monkeypatch.setattr(ev_planner, "discover_all_tesla_vehicles", one_vehicle)
+    monkeypatch.setattr(ev_planner, "is_ev_actively_charging", AsyncMock(return_value=False))
+
+    vehicle_vin, can_stop, reason = asyncio.run(
+        ev_planner._find_external_scheduled_charging_vehicle(hass, _FakeConfigEntry())
+    )
+
+    assert (vehicle_vin, can_stop) == (None, False)
+    assert reason == (
+        "awaiting vehicle confirmation of PowerSync's Stop"
+        if stop_settling
+        else "external owns the active loadpoint"
+    )
+    assert hass.data["power_sync"]["entry-1"]["ev_ownership"][vin] is lease
