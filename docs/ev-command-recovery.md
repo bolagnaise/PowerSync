@@ -3,6 +3,7 @@
 - [Recovering held charging commands on a BLE-only Tesla bridge](#tesla-ble-stop-recovery)
 - [Recover native Tesla charging after a lost response](#tesla-native-recovery)
 - [Recover retained EV charging headroom](#ev-headroom-recovery)
+- [Reset a lost Tesla EV recovery store](#ev-recovery-store-reset)
 
 
 PowerSync leaves the Tesla bridge's Bluetooth connection under your control.
@@ -428,3 +429,37 @@ If the action returns `success: false`, keep the reservation and use the returne
 No additional diagnostic log is required to try this action. If it cannot finish,
 send the response and attempt time first; request further logs only for a specific
 unanswered failure.
+
+
+<a id="ev-recovery-store-reset"></a>
+
+## Reset a lost Tesla EV recovery store
+
+PowerSync keeps its record of uncertain Tesla commands in a recovery store. If
+that store is missing (for example after restoring a partial backup) or cannot
+be read, PowerSync holds every new Tesla charging command, and the hold returns
+after each restart. **PowerSync: Inspect Tesla EV recovery status** shows
+`headroom_recovery.sidecar_hold` as `sidecar_missing` or `sidecar_malformed`.
+
+Because the lost record can no longer show which commands were uncertain, check
+each Tesla on this PowerSync entry first: it should be stopped, or charging in a
+way you expect. Then run:
+
+```yaml
+action: power_sync.reset_ev_recovery_store
+data:
+  confirm_vehicles_checked: true
+```
+
+The action only runs for those two reasons. Other holds, such as a store that
+failed to load or save, can clear after a restart and are refused. An unreadable
+store is copied to `power_sync.ev_transport_recovery.<entry_id>.reset_backup`
+before it is replaced. The new store records when it was reset and why. The
+action sends no vehicle command.
+
+| Response | Meaning |
+|---|---|
+| `success: true` | A fresh store is in use and the hold has cleared. `backup_saved` says whether an unreadable store was kept. |
+| `confirmation_required` | Set `confirm_vehicles_checked: true` after checking each Tesla. |
+| `no_resettable_hold` | No missing or unreadable store is holding commands; `hold` shows any other reason. |
+| `backup_failed` / `save_failed` / `reload_failed` | Nothing was discarded without a backup; the hold remains. Send the response for support. |

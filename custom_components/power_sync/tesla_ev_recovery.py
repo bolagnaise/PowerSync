@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 from copy import deepcopy
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 import hashlib
 import inspect
 import json
@@ -1336,6 +1336,67 @@ async def async_load_recovery_state(
     # liability/incident records live in the sidecar above.
     runtime[RECOVERY_KEY] = deepcopy(state["recovery"])
     return True
+
+
+# Holds where the durable recovery evidence is already gone or unreadable. Every
+# restart reproduces them, so without an explicit reset they block all positive
+# Tesla commands for good. Other holds (load or save failures) can clear on a
+# reload and are never reset here.
+RESETTABLE_SIDECAR_HOLDS = frozenset({"sidecar_missing", "sidecar_malformed"})
+
+
+async def async_reset_recovery_store(
+    hass: Any, entry: Any, *, confirm_vehicles_checked: bool,
+) -> dict[str, Any]:
+    """Start a fresh recovery journal after its stored evidence was lost.
+
+    Only for ``RESETTABLE_SIDECAR_HOLDS`` and only with the user's explicit
+    confirmation that every Tesla on this entry is stopped or in a known
+    state: the lost journal can no longer say which commands were uncertain.
+    An unreadable journal is kept in a backup store before it is replaced.
+    The reset is recorded in the new journal.
+    """
+    runtime = _runtime(hass, entry)
+    if runtime is None:
+        return {"success": False, "error": "entry_unavailable"}
+    hold = runtime.get(_SIDECAR_HOLD_KEY)
+    if hold not in RESETTABLE_SIDECAR_HOLDS:
+        return {"success": False, "error": "no_resettable_hold", "hold": hold}
+    if confirm_vehicles_checked is not True:
+        return {"success": False, "error": "confirmation_required", "hold": hold}
+    store = _sidecar_store(hass, entry, runtime)
+    if store is None or not hasattr(store, "async_save"):
+        return {"success": False, "error": "store_unavailable", "hold": hold}
+    reset_at = datetime.now(timezone.utc).isoformat()
+    backup_saved = False
+    if hold == "sidecar_malformed":
+        try:
+            raw = await store.async_load()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            raw = None
+        try:
+            from homeassistant.helpers.storage import Store
+
+            backup = Store(hass, 1, f"{_sidecar_key(entry)}.reset_backup", atomic_writes=True)
+            await backup.async_save({"reset_at": reset_at, "hold": hold, "data": raw})
+            backup_saved = True
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return {"success": False, "error": "backup_failed", "hold": hold}
+    state = _new_sidecar()
+    state["operator_reset"] = {"at": reset_at, "hold": hold}
+    if not await _save_sidecar(hass, entry, runtime, state):
+        return {"success": False, "error": "save_failed", "hold": hold}
+    loaded = await async_load_recovery_state(hass, entry, enrolled=True)
+    return {
+        "success": loaded,
+        "previous_hold": hold,
+        "backup_saved": backup_saved,
+        **({} if loaded else {"error": "reload_failed", "hold": runtime.get(_SIDECAR_HOLD_KEY)}),
+    }
 
 
 def _sidecar_ready(runtime: dict[str, Any]) -> bool:
@@ -3808,6 +3869,9 @@ def ev_headroom_recovery_status(hass, entry, vin):
 
     status = {
         "sidecar_hold_present": runtime.get("_tesla_ev_recovery_sidecar_hold") is not None,
+        # The reason, so a user can tell a lost store (reset_ev_recovery_store)
+        # from a transient load or save failure.
+        "sidecar_hold": runtime.get("_tesla_ev_recovery_sidecar_hold"),
         "control_route": verdict(route), "settlement_route": verdict(settlement_route),
     }
     budget = hass.data.get(RUNTIME_KEY)

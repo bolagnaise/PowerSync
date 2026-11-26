@@ -2841,3 +2841,73 @@ def test_late_retirement_for_old_hazard_cannot_retire_reused_prefix():
         "legacy-incident", {"operation": "stop"},
     )
     assert "recovery_retired" not in legacy_ref_runtime[recovery.RECOVERY_KEY]["vehicles"][VIN_A]["hazards"]["ble:bridge-a"]
+
+
+# --- Explicit reset when the stored recovery journal is lost -------------------
+
+@pytest.mark.asyncio
+async def test_missing_journal_hold_is_reset_only_with_confirmation(harness):
+    hass, entry, store, _, _ = _sidecar_harness(harness)
+    runtime = hass.data["power_sync"][entry.entry_id]
+    assert not await recovery.async_load_recovery_state(hass, entry, enrolled=True)
+    assert runtime["_tesla_ev_recovery_sidecar_hold"] == "sidecar_missing"
+
+    refused = await recovery.async_reset_recovery_store(hass, entry, confirm_vehicles_checked=False)
+    assert refused == {"success": False, "error": "confirmation_required", "hold": "sidecar_missing"}
+    assert runtime["_tesla_ev_recovery_sidecar_hold"] == "sidecar_missing"
+    assert store.saves == []
+
+    result = await recovery.async_reset_recovery_store(hass, entry, confirm_vehicles_checked=True)
+    assert result == {"success": True, "previous_hold": "sidecar_missing", "backup_saved": False}
+    assert "_tesla_ev_recovery_sidecar_hold" not in runtime
+    assert store.value["operator_reset"]["hold"] == "sidecar_missing"
+    # A restart now loads the fresh journal instead of reproducing the hold.
+    assert await recovery.async_load_recovery_state(hass, entry, enrolled=True)
+    route = _route("bridge_a", "switch.car_a_charger", "switch.fallback")
+    assert await recovery.async_begin_attempt(hass, entry, VIN_A, route, "start", route["entity_id"])
+
+
+@pytest.mark.asyncio
+async def test_unreadable_journal_is_backed_up_before_reset(harness, monkeypatch):
+    import sys
+    import types
+
+    hass, entry, store, _, _ = _sidecar_harness(harness)
+    runtime = hass.data["power_sync"][entry.entry_id]
+    store.value = {"schema_version": "not-a-version"}
+    assert not await recovery.async_load_recovery_state(hass, entry, enrolled=True)
+    assert runtime["_tesla_ev_recovery_sidecar_hold"] == "sidecar_malformed"
+
+    backups = {}
+
+    class BackupStore:
+        def __init__(self, _hass, _version, key, **_kwargs):
+            self.key = key
+
+        async def async_save(self, value):
+            backups[self.key] = deepcopy(value)
+
+    storage = types.ModuleType("homeassistant.helpers.storage")
+    storage.Store = BackupStore
+    monkeypatch.setitem(sys.modules, "homeassistant.helpers.storage", storage)
+
+    result = await recovery.async_reset_recovery_store(hass, entry, confirm_vehicles_checked=True)
+    assert result["success"] is True and result["backup_saved"] is True
+    (key, saved), = backups.items()
+    assert key.endswith(".reset_backup")
+    assert saved["data"] == {"schema_version": "not-a-version"}
+    assert saved["hold"] == "sidecar_malformed"
+
+
+@pytest.mark.asyncio
+async def test_reset_refuses_holds_that_can_clear_on_their_own(harness):
+    hass, entry, store, _, _ = _sidecar_harness(harness)
+    runtime = hass.data["power_sync"][entry.entry_id]
+    runtime["_tesla_ev_recovery_sidecar_hold"] = "sidecar_load_failed"
+    result = await recovery.async_reset_recovery_store(hass, entry, confirm_vehicles_checked=True)
+    assert result == {"success": False, "error": "no_resettable_hold", "hold": "sidecar_load_failed"}
+    assert store.saves == []
+    del runtime["_tesla_ev_recovery_sidecar_hold"]
+    assert (await recovery.async_reset_recovery_store(
+        hass, entry, confirm_vehicles_checked=True,
+    ))["error"] == "no_resettable_hold"

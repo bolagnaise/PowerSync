@@ -47280,6 +47280,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.exception("EV headroom recovery remains held")
             return {"success": False, "error": "recovery_failed"}
 
+    async def handle_reset_ev_recovery_store(call: ServiceCall) -> dict[str, Any]:
+        """Start a fresh Tesla recovery journal after its stored copy was lost."""
+        from .tesla_ev_recovery import async_reset_recovery_store
+
+        try:
+            return await async_reset_recovery_store(
+                hass, entry,
+                confirm_vehicles_checked=call.data.get("confirm_vehicles_checked") is True,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _LOGGER.exception("Tesla EV recovery store reset failed; the hold remains")
+            return {"success": False, "error": "reset_failed"}
+
     async def handle_get_ev_recovery_status(call: ServiceCall) -> dict[str, Any]:
         """Inspect one exact entry/VIN without manual-control finalization."""
         from .tesla_ev_recovery import ev_recovery_status
@@ -47423,6 +47438,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         'recover_max_backup': handle_recover_max_backup,
         'recover_ev_transport': handle_recover_ev_transport,
         'recover_ev_headroom': handle_recover_ev_headroom,
+        'reset_ev_recovery_store': handle_reset_ev_recovery_store,
         'recover_ble_stop_history': handle_recover_ble_stop_history,
         'recover_readded_ble_stop': handle_recover_readded_ble_stop,
         'recover_ble_command_history': handle_recover_ble_command_history,
@@ -47461,6 +47477,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.services.async_register(
         DOMAIN, "recover_ev_headroom",
         routed_handler(hass, entry.entry_id, "recover_ev_headroom", handle_recover_ev_headroom),
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+    hass.services.async_register(
+        DOMAIN, "reset_ev_recovery_store",
+        routed_handler(hass, entry.entry_id, "reset_ev_recovery_store", handle_reset_ev_recovery_store),
         supports_response=SupportsResponse.OPTIONAL,
     )
     hass.services.async_register(

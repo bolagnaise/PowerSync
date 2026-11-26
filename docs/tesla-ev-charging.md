@@ -338,7 +338,10 @@ independent of the automation store's legacy projection. It retains incidents,
 generations, attempts, liabilities and essential finite stop obligations.
 Startup hydrates it before charging callbacks. A durable enrollment marker
 prevents a missing established sidecar from looking like a first installation.
-A malformed store or persistence failure holds new positive control. If an
+A malformed store or persistence failure holds new positive control. A missing
+or unreadable established sidecar holds on every restart; after you have checked
+each Tesla, **PowerSync: Reset Tesla EV recovery store** starts a fresh one (see
+[EV command recovery](ev-command-recovery.md#ev-recovery-store-reset)). If an
 older public build already removed the original journal, recovery records a
 new evidence-loss incident with surviving facts and missing fields; it never
 invents an old attempt ID or numerical target. That incident requires confirmed
