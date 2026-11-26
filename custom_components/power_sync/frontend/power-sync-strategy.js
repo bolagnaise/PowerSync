@@ -9575,7 +9575,9 @@ function _boardCards(ctx) {
     });
   }
 
-  if (hasE('amber_forecast_accuracy')) {
+  // The hit-rate state stays unknown until a forecast spike settles; the
+  // card itself explains that it is still collecting, so gate on existence.
+  if (hasEntityE('amber_forecast_accuracy')) {
     add({
       key: 'fcacc', title: 'Amber forecast accuracy', meta: 'Export price spikes, last 7 days', native: 'ps-forecast-accuracy-card',
       config: { entities: {
