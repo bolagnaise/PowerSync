@@ -21172,3 +21172,25 @@ def test_calibration_drain_still_respects_export_value_limit(monkeypatch):
     assert state["paused"] is True
     assert state["paused_by_export_price"] is True
     assert set_amps_calls[-1] == 0
+
+
+# --- Boost tells "refused before any writer" from "outcome unknown" ----------
+
+def test_boost_start_is_marked_submitted_only_when_a_writer_opens_a_start():
+    result = {}
+    actions._mark_boost_start_submitted({"_boost_start_result": result}, "stop", object())
+    actions._mark_boost_start_submitted({"_boost_start_result": result}, "start", None)
+    assert result == {}
+    actions._mark_boost_start_submitted({"_boost_start_result": result}, "start", object())
+    assert result == {"submitted": True}
+    actions._mark_boost_start_submitted({}, "start", object())  # not a Boost
+
+
+def test_every_tesla_writer_marks_boost_after_opening_its_journal_attempt():
+    source = (ROOT / "automations" / "actions.py").read_text()
+    for name in ("_run_ble_transport_command", "_run_teslemetry_bt_transport_command",
+                 "_run_native_tesla_service_command", "_run_modern_teslemetry_bluetooth"):
+        start = source.index(f"async def {name}(")
+        body = source[start:source.index("\nasync def ", start + 1)]
+        begin = body.index("await async_begin_attempt(")
+        assert body.index("_mark_boost_start_submitted(params, operation, ticket)") > begin, name

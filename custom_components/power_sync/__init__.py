@@ -21644,6 +21644,16 @@ class ChargingBoostView(HomeAssistantView):
             record["start_in_flight"] = False
             record["last_start_result"] = success if success is True or success is False else None
             if success is not True:
+                if (
+                    not start_result.get("not_submitted")
+                    and not start_result.get("submitted")
+                    and action_params.get("charger_type", "tesla") == "tesla"
+                ):
+                    # Every Tesla writer marks the result when it opens a Start.
+                    # A refusal before that (a recovery hold, away, admission)
+                    # sent nothing, so it is not an unknown outcome that should
+                    # block the next Boost for hours.
+                    start_result["not_submitted"] = "Start was refused before reaching the car"
                 if reason := start_result.get("not_submitted"):
                     # The Stop has its own transport journal. No charging Start
                     # reached a writer, so there is no finite Start to contain.

@@ -4702,6 +4702,18 @@ def _tesla_cleanup_persistence_refused(
     )
 
 
+def _mark_boost_start_submitted(params: Dict[str, Any], operation: str, ticket: Any) -> None:
+    """Record on a Boost start result that a Tesla writer opened a Start.
+
+    Every Tesla writer opens a recovery-journal attempt before writing. Boost
+    uses the absence of this mark to tell a Start refused before dispatch (for
+    example by a recovery hold) from one whose outcome is genuinely unknown.
+    """
+    result = params.get("_boost_start_result")
+    if isinstance(result, dict) and operation == "start" and ticket is not None:
+        result["submitted"] = True
+
+
 def _tesla_cleanup_persistence_marker(ticket: Any) -> bool:
     """Return whether recovery classified this ticket as cleanup-only."""
     route = getattr(ticket, "route", None)
@@ -6466,6 +6478,7 @@ async def _run_ble_transport_command(
     entity_identity_unchanged = (
         _tesla_legacy_entity_identity(hass, (entity,)) == pinned_entity_identity
     )
+    _mark_boost_start_submitted(params, operation, ticket)
     if (
         _tesla_cleanup_persistence_marker(ticket)
         and (
@@ -6735,6 +6748,7 @@ async def _run_teslemetry_bt_transport_command(
     entity_identity_unchanged = (
         _tesla_legacy_entity_identity(hass, (entity,)) == pinned_identity
     )
+    _mark_boost_start_submitted(params, operation, ticket)
     if (
         _tesla_cleanup_persistence_marker(ticket)
         and (
@@ -7351,6 +7365,7 @@ async def _run_native_tesla_service_command(
         # The journal admission itself failed before a service write.
         return _TeslaNativeMutationResult("not_sent", err)
 
+    _mark_boost_start_submitted(params, operation, ticket)
     if (
         _tesla_cleanup_persistence_marker(ticket)
         and (
@@ -7856,6 +7871,7 @@ async def _run_modern_teslemetry_bluetooth(hass, entry, params, operation, value
                 cleanup_direct["active"] = True
                 return True
             raise
+        _mark_boost_start_submitted(params, operation, ticket)
         if (
             _tesla_cleanup_persistence_marker(ticket)
             and (
