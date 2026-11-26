@@ -44,6 +44,12 @@ can request a stop if the Tesla starts charging on plug-in. This requires
 PowerSync control of that vehicle and fresh, matching charging state and power.
 The hands-off external charging setting continues to leave those sessions alone.
 
+If the home battery level is unavailable, PowerSync does not treat it as an
+empty battery. A car that is already charging keeps following the surplus, and
+the battery minimum and pause thresholds wait until the level returns. A car
+that has not started yet, or is paused for the battery, waits with the reason
+"Waiting for the home battery level". Smart Schedule follows the same rule.
+
 ### Powerwall calibration
 
 During a Tesla Powerwall calibration the gateway discharges the battery on its

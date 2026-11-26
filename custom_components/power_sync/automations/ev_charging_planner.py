@@ -31,6 +31,7 @@ from homeassistant.util import dt as dt_util
 from ..sensitive_logging import obfuscate_log_arg, obfuscate_vin_tokens
 from ..registry_compat import iter_device_entries
 from ..ev_load import is_current_ev_power_observation
+from .live_status import known_home_battery_soc
 from ..ev_mode_settings import charging_mode_settings, finite_price_cents
 from ..const import (
     CONF_SOLAR_FORECAST_PROVIDER,
@@ -6941,7 +6942,21 @@ class AutoScheduleExecutor:
             )
             return
 
-        battery_soc = live_status.get("battery_soc") or 0
+        battery_soc = known_home_battery_soc(live_status)
+        if battery_soc is None:
+            # Phase 2: an unknown home-battery level is not 0%. A running
+            # charge carries on without the battery-level rules; a start
+            # waits for the level to return.
+            if not state.is_charging:
+                state.last_decision = "waiting"
+                state.last_decision_reason = "Waiting for the home battery level (currently unknown)"
+                self._sync_active_charging_preserve_intent(
+                    vehicle_id, effective_preserve_home_battery, state,
+                    state.last_decision_reason,
+                )
+                return
+            # Above every home-battery floor, so those rules stay out of the way.
+            battery_soc = 100.0
         solar_power_kw = solar_power / 1000
         load_power_kw = load_power / 1000
 

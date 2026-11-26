@@ -20857,3 +20857,67 @@ def test_calibration_drain_still_respects_export_value_limit(monkeypatch):
     assert state["paused"] is True
     assert state["paused_by_export_price"] is True
     assert set_amps_calls[-1] == 0
+
+
+# Phase 2: an unknown home-battery level is not 0%.
+
+
+@pytest.mark.parametrize("missing", ["absent", None, "nan", 140])
+def test_running_solar_surplus_keeps_charging_when_home_battery_level_is_unknown(monkeypatch, missing):
+    hass = _Hass([])
+    vehicle_id = "VIN123"
+    actions._dynamic_ev_state.clear()
+    state = _solar_surplus_state(current_amps=7)
+    state["params"].update({"household_buffer_kw": 1.0, "min_battery_soc": 80, "pause_below_soc": 70})
+    actions._dynamic_ev_state["entry-1"] = {vehicle_id: state}
+    status = {"grid_power": -4000, "battery_power": 0, "solar_power": 0, "load_power": 0}
+    if missing != "absent":
+        status["battery_soc"] = float("nan") if missing == "nan" else missing
+    set_amps_calls = _install_solar_surplus_runtime_stubs(monkeypatch, status)
+    floor_stops = []
+    monkeypatch.setattr(actions, "_request_battery_floor_stop", lambda *a, **k: floor_stops.append(a),
+                        raising=False)
+
+    asyncio.run(actions._dynamic_ev_update_surplus(hass, _Entry(), "entry-1", vehicle_id))
+
+    state = actions._dynamic_ev_state["entry-1"][vehicle_id]
+    # Read as 0% this used to pause the car below the 70% floor.
+    assert state.get("paused") is not True
+    assert state["current_amps"] > 0 and set_amps_calls and set_amps_calls[-1] > 0
+    assert state["home_battery_soc_unknown_logged"] is True
+
+
+def test_waiting_solar_surplus_does_not_start_while_home_battery_level_is_unknown(monkeypatch):
+    start_calls = []
+
+    async def fake_start(*args, **kwargs):
+        start_calls.append(args)
+        return True
+
+    hass = _Hass([])
+    vehicle_id = "VIN123"
+    actions._dynamic_ev_state.clear()
+    state = _solar_surplus_state(current_amps=0)
+    state["charging_started"] = False
+    state["high_surplus_start"] = datetime.now() - timedelta(minutes=4)
+    state["params"].update({"household_buffer_kw": 1.0, "min_battery_soc": 20, "notify_on_start": False})
+    actions._dynamic_ev_state["entry-1"] = {vehicle_id: state}
+    set_amps_calls = _install_solar_surplus_runtime_stubs(
+        monkeypatch, {"grid_power": -6000, "battery_power": 0, "solar_power": 0, "load_power": 0})
+    monkeypatch.setattr(actions, "_action_start_ev_charging", fake_start)
+
+    asyncio.run(actions._dynamic_ev_update_surplus(hass, _Entry(), "entry-1", vehicle_id))
+
+    state = actions._dynamic_ev_state["entry-1"][vehicle_id]
+    assert start_calls == [] and set_amps_calls == []
+    assert state["paused"] is True
+    assert state["paused_reason"] == "Waiting for the home battery level (currently unknown)"
+
+
+def test_known_home_battery_soc_rejects_missing_and_invalid_levels():
+    from power_sync.automations.live_status import known_home_battery_soc as known
+    assert known({"battery_soc": 0}) == 0.0
+    assert known({"battery_soc": 55.5}) == 55.5
+    for bad in ({}, {"battery_soc": None}, {"battery_soc": True}, {"battery_soc": "50"},
+                {"battery_soc": float("inf")}, {"battery_soc": -1}, {"battery_soc": 101}):
+        assert known(bad) is None

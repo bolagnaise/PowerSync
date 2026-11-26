@@ -46,6 +46,7 @@ from datetime import timedelta, datetime, timezone as dt_timezone, time as dt_ti
 from homeassistant.util import dt as dt_util
 
 from ..teslemetry_solar import guard_ev_control
+from .live_status import known_home_battery_soc
 from ..native_rate_admission import (
     SiteImportAdmissionDenied,
     last_ev_submission_refusal,
@@ -15904,11 +15905,32 @@ async def _dynamic_ev_update_surplus(
         )
         return
 
-    battery_soc = live_status.get("battery_soc") or 0
+    battery_soc = known_home_battery_soc(live_status)
 
     # Battery priority check
     min_soc = get_solar_surplus_min_battery_soc(params)
     pause_soc = params.get("pause_below_soc", max(0, min_soc - 10))
+    if battery_soc is None:
+        # Phase 2: an unknown home-battery level is not 0%. It may hold a
+        # start or a battery-floor pause, but must not stop a running charge.
+        if not state.get("charging_started") or state.get("paused"):
+            if not state.get("charging_started"):
+                state["paused"] = True
+            reason = "Waiting for the home battery level (currently unknown)"
+            if state.get("paused_reason") != reason:
+                state["paused_reason"] = reason
+                _LOGGER.info("⚡ Solar surplus EV: %s", reason)
+            return
+        if not state.get("home_battery_soc_unknown_logged"):
+            state["home_battery_soc_unknown_logged"] = True
+            _LOGGER.info(
+                "⚡ Solar surplus EV: home battery level unknown; following surplus "
+                "without the battery-floor rules until it returns"
+            )
+        # Above every floor, so the battery rules below stay out of the way.
+        battery_soc = float(max(min_soc, pause_soc))
+    else:
+        state.pop("home_battery_soc_unknown_logged", None)
 
     # Tesla drains the battery during a calibration whatever PowerSync does, so
     # battery-priority floors cannot protect it. Let the EV absorb the drain

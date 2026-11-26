@@ -11653,3 +11653,30 @@ def test_scheduled_guard_names_powersync_unconfirmed_stop_not_external(
         else "external owns the active loadpoint"
     )
     assert hass.data["power_sync"]["entry-1"]["ev_ownership"][vin] is lease
+
+
+def test_smart_schedule_waits_instead_of_reading_unknown_home_battery_as_empty(monkeypatch, fake_actions):
+    """Phase 2: a missing home-battery level holds a start; it is not 0%."""
+    now = datetime.now()
+    monkeypatch.setattr(ev_planner.AutoScheduleExecutor, "_get_vehicle_soc",
+                        AsyncMock(return_value=55))
+    monkeypatch.setattr(ev_planner, "get_ev_location", AsyncMock(return_value="home"))
+    monkeypatch.setattr(ev_planner, "is_ev_plugged_in", AsyncMock(return_value=True))
+    monkeypatch.setattr(ev_planner, "is_ev_actively_charging", AsyncMock(return_value=False))
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda *a, **k: now.replace(tzinfo=timezone.utc))
+    hass = _FakeHass()
+    planner = SimpleNamespace(should_charge_now=AsyncMock(return_value=(True, "solar", "solar_surplus")))
+    executor = ev_planner.AutoScheduleExecutor(hass, _FakeConfigEntry(), planner)
+    executor._settings[VIN] = ev_planner.AutoScheduleSettings(enabled=True, vehicle_id=VIN, target_soc=80)
+    state = executor.get_state(VIN)
+    state.current_plan = ev_planner.ChargingPlan(
+        vehicle_id=VIN, current_soc=55, target_soc=80, target_time=None,
+        energy_needed_kwh=10.0, windows=[])
+    state.last_plan_update = now
+
+    asyncio.run(executor.evaluate(
+        {"solar_power": 8000, "load_power": 1000, "grid_power": -7000}, current_price_cents=10))
+
+    assert state.last_decision == "waiting"
+    assert state.last_decision_reason == "Waiting for the home battery level (currently unknown)"
+    planner.should_charge_now.assert_not_awaited()
