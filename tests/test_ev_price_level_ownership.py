@@ -9315,6 +9315,9 @@ def test_ocpp_builtin_server_uses_existing_sensor_without_generic_control():
 
 @pytest.mark.parametrize("already_charging", [False, True])
 def test_ocpp_smart_schedule_clears_plan_without_soc(monkeypatch, already_charging):
+    # Keep the car at home and plugged in, so only the car level is missing.
+    monkeypatch.setattr(ev_planner, "get_ev_location", AsyncMock(return_value="home"))
+    monkeypatch.setattr(ev_planner, "is_ev_plugged_in", AsyncMock(return_value=True))
     entry = SimpleNamespace(entry_id="entry-1", data={}, options={"ocpp_enabled": True})
     hass = _FakeHass(entries=[entry])
     hass.entity_registry.entities = {"status": SimpleNamespace(platform="ocpp", entity_id="sensor.beny_status")}
@@ -9327,6 +9330,14 @@ def test_ocpp_smart_schedule_clears_plan_without_soc(monkeypatch, already_chargi
     state.current_plan = SimpleNamespace(windows=[SimpleNamespace()])
     state.is_charging = already_charging
     asyncio.run(executor._evaluate_vehicle("ocpp_beny", settings, {}, 5))
+    if already_charging:
+        # Phase 2: a running charge rides out the gap before the plan is
+        # cleared and the car stopped.
+        assert state.current_plan is not None
+        executor._stop_charging.assert_not_awaited()
+        assert "ev_soc" in state.missing_data["_missing_data_since"]
+        _expire(state.missing_data, "ev_soc")
+        asyncio.run(executor._evaluate_vehicle("ocpp_beny", settings, {}, 5))
     assert state.current_plan is None
     assert state.last_decision == "soc_unavailable"
     executor._start_charging.assert_not_awaited()
@@ -11653,3 +11664,320 @@ def test_scheduled_guard_names_powersync_unconfirmed_stop_not_external(
         else "external owns the active loadpoint"
     )
     assert hass.data["power_sync"]["entry-1"]["ev_ownership"][vin] is lease
+
+
+def test_smart_schedule_waits_instead_of_reading_unknown_home_battery_as_empty(monkeypatch, fake_actions):
+    """Phase 2: a missing home-battery level holds a start; it is not 0%."""
+    now = datetime.now()
+    monkeypatch.setattr(ev_planner.AutoScheduleExecutor, "_get_vehicle_soc",
+                        AsyncMock(return_value=55))
+    monkeypatch.setattr(ev_planner, "get_ev_location", AsyncMock(return_value="home"))
+    monkeypatch.setattr(ev_planner, "is_ev_plugged_in", AsyncMock(return_value=True))
+    monkeypatch.setattr(ev_planner, "is_ev_actively_charging", AsyncMock(return_value=False))
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda *a, **k: now.replace(tzinfo=timezone.utc))
+    hass = _FakeHass()
+    planner = SimpleNamespace(should_charge_now=AsyncMock(return_value=(True, "solar", "solar_surplus")))
+    executor = ev_planner.AutoScheduleExecutor(hass, _FakeConfigEntry(), planner)
+    executor._settings[VIN] = ev_planner.AutoScheduleSettings(enabled=True, vehicle_id=VIN, target_soc=80)
+    state = executor.get_state(VIN)
+    state.current_plan = ev_planner.ChargingPlan(
+        vehicle_id=VIN, current_soc=55, target_soc=80, target_time=None,
+        energy_needed_kwh=10.0, windows=[])
+    state.last_plan_update = now
+
+    asyncio.run(executor.evaluate(
+        {"solar_power": 8000, "load_power": 1000, "grid_power": -7000}, current_price_cents=10))
+
+    assert state.last_decision == "waiting"
+    assert state.last_decision_reason == "Waiting for the home battery level (currently unknown)"
+    planner.should_charge_now.assert_not_awaited()
+
+
+# Phase 2 grace periods in the planner modes.
+
+
+def _expire(holder, key):
+    from power_sync.automations import stale_data
+    holder["_missing_data_since"][key] -= stale_data.STALE_DATA_GRACE_SECONDS
+
+
+def test_price_level_rides_out_a_missing_price_only_while_charging():
+    from power_sync.optimization.price_level_projection import PriceLevelPolicyDecision
+
+    no_price = PriceLevelPolicyDecision(False, "No price data available")
+    waiting = ev_planner.PriceLevelChargingState()
+    assert ev_planner._price_level_ride_out_price_gap(waiting, no_price) is no_price
+
+    charging = ev_planner.PriceLevelChargingState(is_charging=True, charging_mode="opportunity")
+    held = ev_planner._price_level_ride_out_price_gap(charging, no_price)
+    assert held.should_charge is True and held.mode == "opportunity"
+    assert held.reason == "No price data available; continuing for up to 15 min while it returns"
+
+    _expire(charging.missing_data, "price")
+    assert ev_planner._price_level_ride_out_price_gap(charging, no_price) is no_price
+
+    # A real price refusal is never softened, and it resets the clock.
+    too_dear = PriceLevelPolicyDecision(False, "Price 40c > 30c")
+    assert ev_planner._price_level_ride_out_price_gap(charging, too_dear) is too_dear
+    assert "price" not in charging.missing_data["_missing_data_since"]
+
+
+def test_smart_schedule_hold_helper_only_holds_a_running_charge():
+    hold = ev_planner._hold_running_charge_through_gap
+    idle = ev_planner.AutoScheduleState(vehicle_id=VIN)
+    assert hold(idle, "ev_soc", "EV SOC unavailable") is False
+
+    running = ev_planner.AutoScheduleState(vehicle_id=VIN, is_charging=True)
+    assert hold(running, "ev_soc", "EV SOC unavailable") is True
+    assert running.last_decision == "charging"
+    assert running.last_decision_reason == "EV SOC unavailable; continuing for up to 15 min while it returns"
+    _expire(running.missing_data, "ev_soc")
+    assert hold(running, "ev_soc", "EV SOC unavailable") is False
+
+
+def test_scheduled_rides_out_a_missing_retail_price_inside_its_window(monkeypatch):
+    executor = ev_planner.ScheduledChargingExecutor.__new__(ev_planner.ScheduledChargingExecutor)
+    executor.hass = _FakeHass()
+    executor.config_entry = _FakeConfigEntry()
+    executor._state = ev_planner.ScheduledChargingState(is_charging=True)
+    monkeypatch.setattr(executor, "_get_settings", lambda: {"enabled": True, "start_time": "00:00",
+                                                            "end_time": "23:59", "max_price_cents": 30},
+                        raising=False)
+    monkeypatch.setattr(executor, "_is_in_time_window", lambda *a: True, raising=False)
+    ev_pricing = importlib.import_module("power_sync.automations.ev_pricing")
+    monkeypatch.setattr(ev_pricing, "get_current_retail_price", lambda *a: None)
+
+    should, reason, mode = asyncio.run(_scheduled_price_decision(executor, monkeypatch))
+
+    assert (should, mode) == (True, "scheduled")
+    assert reason.endswith("current retail price unavailable; continuing for up to 15 min while it returns")
+    _expire(executor._state.missing_data, "retail_price")
+    should, _, _ = asyncio.run(_scheduled_price_decision(executor, monkeypatch))
+    assert should is False
+
+
+async def _scheduled_price_decision(executor, monkeypatch):
+    monkeypatch.setattr(ev_planner, "get_ev_location", AsyncMock(return_value="home"))
+    monkeypatch.setattr(ev_planner, "is_ev_plugged_in", AsyncMock(return_value=True))
+    return await executor.get_charging_decision(None)
+
+
+@pytest.mark.parametrize("is_charging, location, probe, expected", [
+    (False, None, True, False),           # starts are never overruled
+    (True, None, True, True),             # unplugged reading, car charging
+    (True, "unavailable", True, True),    # offline tracker, car charging
+    (True, "not_home", True, False),      # a real away is never overruled
+    (True, None, False, False),           # no charging seen: trust the reading
+])
+def test_unknown_plug_or_location_overruled_only_by_a_running_charge(
+    monkeypatch, is_charging, location, probe, expected,
+):
+    monkeypatch.setattr(ev_planner, "is_ev_actively_charging", AsyncMock(return_value=probe))
+    result = asyncio.run(ev_planner._unknown_reading_contradicted(
+        _FakeHass(), _FakeConfigEntry(), VIN, is_charging, location=location))
+    assert result is expected
+
+
+def test_every_planner_plug_and_location_gate_uses_the_running_charge_check():
+    """Smart Schedule, Price Level (both paths) and Scheduled all route
+    their unplugged/away gates through _unknown_reading_contradicted."""
+    import ast
+    tree = ast.parse((ROOT / "automations" / "ev_charging_planner.py").read_text())
+    gates = []
+    for cls_name, method in (
+        ("AutoScheduleExecutor", "_evaluate_vehicle"),
+        ("PriceLevelChargingExecutor", "get_charging_decision"),
+        ("PriceLevelChargingExecutor", "get_charging_decision_for_vehicle"),
+        ("ScheduledChargingExecutor", "get_charging_decision"),
+    ):
+        cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == cls_name)
+        fn = next(n for n in cls.body if isinstance(n, ast.AsyncFunctionDef) and n.name == method)
+        for node in ast.walk(fn):
+            if isinstance(node, ast.If):
+                test = ast.unparse(node.test)
+                if test.startswith("not plugged_in") or "location not in ('home', 'unknown')" in test:
+                    gates.append((cls_name, method, "_unknown_reading_contradicted" in test))
+    assert len(gates) == 8, gates
+    assert all(wired for *_, wired in gates), gates
+
+
+# Codex review of #227: the grace periods must not mask other stop rules,
+# leak across gaps, use the wrong state, start other cars, or overrule a
+# confirmed unplug with stale evidence.
+
+
+def _soc_gap_executor(monkeypatch, *, consume=0, stop_at_floor=True):
+    now = datetime.now()
+    monkeypatch.setattr(ev_planner.AutoScheduleExecutor, "_get_vehicle_soc", AsyncMock(return_value=None))
+    monkeypatch.setattr(ev_planner, "get_ev_location", AsyncMock(return_value="home"))
+    monkeypatch.setattr(ev_planner, "is_ev_plugged_in", AsyncMock(return_value=True))
+    monkeypatch.setattr(ev_planner, "is_ev_actively_charging", AsyncMock(return_value=True))
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda *a, **k: now.replace(tzinfo=timezone.utc))
+    planner = SimpleNamespace(should_charge_now=AsyncMock(return_value=(True, "window", "grid_offpeak")))
+    executor = ev_planner.AutoScheduleExecutor(_FakeHass(), _FakeConfigEntry(), planner)
+    executor._stop_charging = AsyncMock(return_value=True)
+    executor._settings[VIN] = ev_planner.AutoScheduleSettings(
+        enabled=True, vehicle_id=VIN, target_soc=80,
+        consume_battery_level=consume, stop_at_battery_floor=stop_at_floor)
+    state = executor.get_state(VIN)
+    state.is_charging = True
+    state.current_plan = ev_planner.ChargingPlan(
+        vehicle_id=VIN, current_soc=55, target_soc=80, target_time=None,
+        energy_needed_kwh=10.0, windows=[])
+    state.last_plan_update = now
+    return executor, state
+
+
+def test_soc_grace_still_applies_the_home_battery_consume_floor(monkeypatch, fake_actions):
+    executor, state = _soc_gap_executor(monkeypatch, consume=40)
+    asyncio.run(executor.evaluate(
+        {"battery_soc": 20, "solar_power": 0, "load_power": 1000, "grid_power": 1000},
+        current_price_cents=10))
+    executor._stop_charging.assert_awaited_once()
+    assert "consume floor" in executor._stop_charging.await_args.kwargs["reason"]
+    assert state.current_plan is not None  # the plan is not dropped for the gap
+
+
+def test_soc_grace_keeps_the_plan_and_reaches_the_charging_policy(monkeypatch, fake_actions):
+    executor, state = _soc_gap_executor(monkeypatch)
+    asyncio.run(executor.evaluate(
+        {"battery_soc": 90, "solar_power": 0, "load_power": 1000, "grid_power": 1000},
+        current_price_cents=10))
+    executor._stop_charging.assert_not_awaited()
+    executor.planner.should_charge_now.assert_awaited_once()
+    assert state.current_plan is not None
+    assert "ev_soc" in state.missing_data["_missing_data_since"]
+
+
+def test_resolved_price_resets_the_grid_price_clock_for_any_source(monkeypatch, fake_actions):
+    executor, state = _soc_gap_executor(monkeypatch)
+    executor.planner.should_charge_now = AsyncMock(return_value=(True, "solar", "solar_surplus"))
+    state.missing_data["_missing_data_since"] = {"grid_price": 1.0}
+    asyncio.run(executor.evaluate(
+        {"battery_soc": 90, "solar_power": 6000, "load_power": 1000, "grid_power": -5000},
+        current_price_cents=10))
+    assert "grid_price" not in state.missing_data["_missing_data_since"]
+
+
+def test_standalone_price_level_grace_uses_the_charging_loadpoint_state(monkeypatch):
+    executor = ev_planner.PriceLevelChargingExecutor.__new__(ev_planner.PriceLevelChargingExecutor)
+    executor.hass = _FakeHass()
+    executor.config_entry = _FakeConfigEntry()
+    executor._domain = "power_sync"
+    executor._state = ev_planner.PriceLevelChargingState()          # unused default
+    executor._vehicle_states = {}
+    loadpoint = executor._get_or_create_vehicle_state("generic_ev")
+    loadpoint.is_charging = True
+    executor.get_charging_decision = AsyncMock(return_value=(False, "No price data available", ""))
+    executor._stop_charging = AsyncMock(return_value=True)
+    executor._start_charging = AsyncMock(return_value=True)
+    executor._has_current_non_tesla_charge = lambda *_: True
+
+    should, reason, _ = asyncio.run(executor._evaluate_non_tesla_loadpoint("generic_ev", None))
+
+    assert should is True and reason.endswith("while it returns")
+    executor._stop_charging.assert_not_awaited()
+    executor._start_charging.assert_not_awaited()
+
+
+def test_scheduled_price_gap_hold_starts_no_other_vehicle(monkeypatch):
+    import ast
+    executor = ev_planner.ScheduledChargingExecutor.__new__(ev_planner.ScheduledChargingExecutor)
+    executor.hass = _FakeHass()
+    executor.config_entry = _FakeConfigEntry()
+    executor._state = ev_planner.ScheduledChargingState(is_charging=True)
+    monkeypatch.setattr(executor, "_get_settings", lambda: {"enabled": True, "max_price_cents": 30},
+                        raising=False)
+    monkeypatch.setattr(executor, "_is_in_time_window", lambda *a: True, raising=False)
+    ev_pricing = importlib.import_module("power_sync.automations.ev_pricing")
+    monkeypatch.setattr(ev_pricing, "get_current_retail_price", lambda *a: None)
+    asyncio.run(_scheduled_price_decision(executor, monkeypatch))
+    assert executor._state.price_gap_hold is True
+    asyncio.run(executor.get_charging_decision(10))
+    assert executor._state.price_gap_hold is False
+
+    # The per-vehicle start loop honours the hold before any new start.
+    tree = ast.parse((ROOT / "automations" / "ev_charging_planner.py").read_text())
+    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "ScheduledChargingExecutor")
+    fn = next(n for n in cls.body if isinstance(n, ast.AsyncFunctionDef)
+              and n.name == "_start_scheduled_tesla_vehicles")
+    source = ast.unparse(fn)
+    assert source.index("self._state.price_gap_hold") < source.index("_start_coordinated_charging(")
+
+
+def test_planner_override_respects_a_fresh_wall_connector_unplug(monkeypatch):
+    actions_module = importlib.import_module("power_sync.automations.actions")
+    monkeypatch.setattr(actions_module, "_fresh_wall_connector_unplugged_at",
+                        lambda *a: datetime.now(timezone.utc), raising=False)
+    probe = AsyncMock(return_value=True)
+    monkeypatch.setattr(ev_planner, "is_ev_actively_charging", probe)
+    assert asyncio.run(ev_planner._unknown_reading_contradicted(
+        _FakeHass(), _FakeConfigEntry(), VIN, True)) is False
+    probe.assert_not_awaited()
+
+
+@pytest.mark.parametrize("age_s, expected", [(30, True), (3600, False)])
+def test_charging_probe_with_max_age_ignores_stale_readings(monkeypatch, age_s, expected):
+    monkeypatch.setattr(ev_planner.dt_util, "utcnow", lambda: datetime.now(timezone.utc), raising=False)
+    hass = _FakeHass(states={"switch.car_charger": "on"})
+    stamp = datetime.now(timezone.utc) - timedelta(seconds=age_s)
+    hass.states._states["switch.car_charger"].last_reported = stamp
+    result = asyncio.run(ev_planner.is_ev_actively_charging(
+        hass, _FakeConfigEntry(), vehicle_vin="ble_car", max_age_s=300))
+    assert result is expected
+    # Without max_age the existing behaviour is unchanged.
+    assert asyncio.run(ev_planner.is_ev_actively_charging(
+        hass, _FakeConfigEntry(), vehicle_vin="ble_car")) is True
+
+
+def test_standalone_loadpoint_grace_restarts_after_the_price_returns(monkeypatch):
+    executor = ev_planner.PriceLevelChargingExecutor.__new__(ev_planner.PriceLevelChargingExecutor)
+    executor.hass = _FakeHass()
+    executor.config_entry = _FakeConfigEntry()
+    executor._domain = "power_sync"
+    executor._state = ev_planner.PriceLevelChargingState()
+    executor._vehicle_states = {}
+    loadpoint = executor._get_or_create_vehicle_state("generic_ev")
+    loadpoint.is_charging = True
+    executor._stop_charging = AsyncMock(return_value=True)
+    executor._start_charging = AsyncMock(return_value=True)
+    executor._has_current_non_tesla_charge = lambda *_: True
+
+    async def decide(reason, should=False):
+        executor.get_charging_decision = AsyncMock(return_value=(should, reason, "opportunity"))
+        return await executor._evaluate_non_tesla_loadpoint("generic_ev", None)
+
+    assert asyncio.run(decide("No price data available"))[0] is True
+    _expire(loadpoint.missing_data, "price")          # the first gap ran long...
+    asyncio.run(decide("Price 8c <= 10c", should=True))  # ...then the price came back
+    assert "price" not in loadpoint.missing_data["_missing_data_since"]
+    # A later gap gets a fresh grace period instead of an immediate stop.
+    assert asyncio.run(decide("No price data available"))[0] is True
+    executor._stop_charging.assert_not_awaited()
+
+
+@pytest.mark.parametrize("reason, key, running_source", [
+    ("Current retail price unavailable", "grid_price", "grid_offpeak"),
+    ("Export price unavailable; automatic solar charging paused", "export_price", "solar_surplus"),
+])
+def test_planner_missing_price_refusal_gets_the_grace_while_charging(
+    monkeypatch, fake_actions, reason, key, running_source,
+):
+    fake_actions._action_start_ev_charging_dynamic = AsyncMock(return_value=True)
+    fake_actions._action_stop_ev_charging_dynamic = AsyncMock(return_value=True)
+    executor, state = _soc_gap_executor(monkeypatch)
+    monkeypatch.setattr(ev_planner.AutoScheduleExecutor, "_get_vehicle_soc", AsyncMock(return_value=55))
+    executor.planner.should_charge_now = AsyncMock(return_value=(False, reason, "waiting"))
+    executor.planner._get_solar_surplus_config = AsyncMock(return_value={})
+    state.charging_source = running_source
+    # Enough solar that only the missing price could stop a solar session.
+    live = {"battery_soc": 90, "solar_power": 8000, "load_power": 1000, "grid_power": -7000}
+
+    asyncio.run(executor.evaluate(dict(live), current_price_cents=None))
+
+    executor._stop_charging.assert_not_awaited()
+    assert key in state.missing_data["_missing_data_since"]
+
+    _expire(state.missing_data, key)
+    asyncio.run(executor.evaluate(dict(live), current_price_cents=None))
+    executor._stop_charging.assert_awaited_once()

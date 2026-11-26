@@ -7,7 +7,7 @@ import copy
 from collections.abc import Mapping
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace as NS
@@ -43,7 +43,7 @@ def load(name, path, ns, *, strip_imports=False):
 
 def planner_class():
     ns = dict(asyncio=asyncio, time=time, datetime=datetime, timezone=timezone,
-              dataclass=dataclass, Mapping=Mapping, DOMAIN="power_sync", _LOGGER=logging.getLogger(__name__),
+              dataclass=dataclass, field=field, Mapping=Mapping, DOMAIN="power_sync", _LOGGER=logging.getLogger(__name__),
               aiohttp=HTTP, get_session_manager=lambda: None,
               REGISTRY_KEY="power_sync_tesla_control",
               _EV_DECISION_LOGGER=logging.getLogger("custom_components.power_sync.automations.ev_decisions"))

@@ -46,6 +46,8 @@ from datetime import timedelta, datetime, timezone as dt_timezone, time as dt_ti
 from homeassistant.util import dt as dt_util
 
 from ..teslemetry_solar import guard_ev_control
+from .live_status import known_home_battery_soc
+from .stale_data import missing_data_grace_expired, missing_data_grace_minutes_left
 from ..native_rate_admission import (
     SiteImportAdmissionDenied,
     last_ev_submission_refusal,
@@ -13242,6 +13244,31 @@ def _dynamic_ev_vehicle_vin(vehicle_id: str, params: Dict[str, Any]) -> Optional
 _DYNAMIC_UNPLUG_DEBOUNCE_CYCLES = 2
 
 
+async def _ev_seen_charging(
+    hass: HomeAssistant, config_entry: ConfigEntry, vehicle_vin: Optional[str],
+) -> bool:
+    """Whether current evidence shows the car charging (contradicts unplugged/unknown-away).
+
+    A fresh Wall Connector disconnect is a confirmed unplug and always wins,
+    and only charging readings from the last few minutes count.
+    """
+    try:
+        from .ev_charging_planner import (
+            CONTRADICTING_CHARGE_MAX_AGE_SECONDS,
+            is_ev_actively_charging,
+        )
+
+        if _fresh_wall_connector_unplugged_at(hass, config_entry, vehicle_vin) is not None:
+            return False
+        return await is_ev_actively_charging(
+            hass, config_entry, vehicle_vin=vehicle_vin,
+            max_age_s=CONTRADICTING_CHARGE_MAX_AGE_SECONDS,
+        ) is True
+    except Exception as err:  # evidence only; never blocks the normal path
+        _LOGGER.debug("Dynamic EV: charging probe failed for %s: %s", vehicle_vin, err)
+        return False
+
+
 async def _clear_ble_dynamic_session_if_unplugged(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
@@ -13316,6 +13343,23 @@ async def _clear_ble_dynamic_session_if_unplugged(
                 _DYNAMIC_UNPLUG_DEBOUNCE_CYCLES,
             )
             return False
+
+    # Phase 2: "not plugged in" is often an offline bridge or unavailable
+    # entity, not a real unplug. A car seen actively charging is plugged in;
+    # releasing it would leave that charge running with nothing in control.
+    if await _ev_seen_charging(hass, config_entry, vehicle_vin):
+        if _dynamic_ev_state.get(config_entry.entry_id, {}).get(vehicle_id) is not state:
+            return False
+        if isinstance(state, dict) and not state.get("plug_reading_contradicted"):
+            state["plug_reading_contradicted"] = True
+            _LOGGER.info(
+                "⚡ Dynamic EV: %s reads as not plugged in but is charging; "
+                "keeping the session until a real unplug",
+                vehicle_id,
+            )
+        return False
+    if isinstance(state, dict):
+        state.pop("plug_reading_contradicted", None)
 
     from .ev_ownership import owner_family
 
@@ -15078,6 +15122,23 @@ async def _release_dynamic_tesla_if_away(
     current_state = _dynamic_ev_state.get(entry_id, {}).get(vehicle_id)
     if not location or current_state is not state or not current_state.get("active"):
         return False
+    if location == "unavailable":
+        # Phase 2: an offline tracker is not "away". A car seen charging keeps
+        # its session; only a real away reading (e.g. not_home) releases it.
+        vehicle_vin = params.get("vehicle_vin") or (
+            vehicle_id if vehicle_id != DEFAULT_VEHICLE_ID else None
+        )
+        if await _ev_seen_charging(hass, config_entry, vehicle_vin):
+            if not state.get("location_reading_contradicted"):
+                state["location_reading_contradicted"] = True
+                _LOGGER.info(
+                    "%s %s location tracker is unavailable but the car is charging; "
+                    "keeping the session",
+                    log_prefix,
+                    vehicle_id,
+                )
+            return False
+    state.pop("location_reading_contradicted", None)
 
     _LOGGER.info(
         "%s leaving %s outside automation scope while away (%s); "
@@ -15832,6 +15893,28 @@ async def _dynamic_ev_update_surplus(
     )
     if _session_was_replaced("charge-limit check"):
         return
+    soc_unknown = bool(full_soc_reason) and full_soc_reason.startswith(
+        _SOLAR_CEILING_SOC_UNAVAILABLE
+    )
+    if (
+        soc_unknown
+        and state.get("charging_started")
+        and not state.get("paused")
+        and not missing_data_grace_expired(state, "ev_soc", missing=True)
+    ):
+        # Phase 2: an unknown car level cannot show the car crossed its
+        # ceiling. Keep charging through a short gap; stop only if it lasts.
+        minutes = missing_data_grace_minutes_left(state, "ev_soc")
+        reason = (
+            f"{full_soc_reason}; continuing for up to {minutes} min "
+            "while it returns"
+        )
+        if not str(state.get("reason") or "").startswith(full_soc_reason):
+            _LOGGER.info("⚡ Solar surplus EV %s: %s", vehicle_id, reason)
+        state["reason"] = reason
+        full_soc_reason = None
+    elif not soc_unknown:
+        missing_data_grace_expired(state, "ev_soc", missing=False)
     if full_soc_reason:
         from .ev_ownership import get_ev_ownership
 
@@ -15904,11 +15987,43 @@ async def _dynamic_ev_update_surplus(
         )
         return
 
-    battery_soc = live_status.get("battery_soc") or 0
+    battery_soc = known_home_battery_soc(live_status)
 
     # Battery priority check
     min_soc = get_solar_surplus_min_battery_soc(params)
     pause_soc = params.get("pause_below_soc", max(0, min_soc - 10))
+    floor_stop_pending = bool(
+        state.get("paused")
+        and (
+            (_coerce_positive_int(state.get("current_amps"), 0) or 0) > 0
+            or state.get("stop_outcome")
+        )
+    )
+    if battery_soc is None and floor_stop_pending:
+        # A battery-floor pause whose stop is not confirmed may still be
+        # charging. An unknown level cannot lift it: keep retrying the stop.
+        battery_soc = float(max(0, pause_soc - 1))
+    if battery_soc is None:
+        # Phase 2: an unknown home-battery level is not 0%. It may hold a
+        # start or a battery-floor pause, but must not stop a running charge.
+        if not state.get("charging_started") or state.get("paused"):
+            if not state.get("charging_started"):
+                state["paused"] = True
+            reason = "Waiting for the home battery level (currently unknown)"
+            if state.get("paused_reason") != reason:
+                state["paused_reason"] = reason
+                _LOGGER.info("⚡ Solar surplus EV: %s", reason)
+            return
+        if not state.get("home_battery_soc_unknown_logged"):
+            state["home_battery_soc_unknown_logged"] = True
+            _LOGGER.info(
+                "⚡ Solar surplus EV: home battery level unknown; following surplus "
+                "without the battery-floor rules until it returns"
+            )
+        # Above every floor, so the battery rules below stay out of the way.
+        battery_soc = float(max(min_soc, pause_soc))
+    else:
+        state.pop("home_battery_soc_unknown_logged", None)
 
     # Tesla drains the battery during a calibration whatever PowerSync does, so
     # battery-priority floors cannot protect it. Let the EV absorb the drain
@@ -16395,11 +16510,32 @@ async def _dynamic_ev_update_surplus(
     deadline_override = bool(
         params.get("solar_export_price_deadline_override", False)
     )
-    if not solar_surplus_price_allows_charging(
+    price_allows_charging = solar_surplus_price_allows_charging(
         export_price_cents,
         params,
         deadline_override=deadline_override,
+    )
+    price_unknown = export_price_cents is None and not price_allows_charging
+    if (
+        price_unknown
+        and current_amps > 0
+        and not state.get("paused")
+        and not missing_data_grace_expired(state, "export_price", missing=True)
     ):
+        # Phase 2: a short gap in the export price must not pause a running
+        # solar charge. Pause only if the price stays missing.
+        minutes = missing_data_grace_minutes_left(state, "export_price")
+        reason = (
+            "Export price unavailable; continuing for up to "
+            f"{minutes} min while it returns"
+        )
+        if not str(state.get("reason") or "").startswith("Export price unavailable; continuing"):
+            _LOGGER.info("⚡ Solar surplus EV %s: %s", vehicle_id, reason)
+        state["reason"] = reason
+        price_allows_charging = True
+    elif not price_unknown:
+        missing_data_grace_expired(state, "export_price", missing=False)
+    if not price_allows_charging:
         limit = get_solar_surplus_max_export_price_cents(params)
         if _no_solar_generation(live_status):
             # With nothing generating (night) the export limit is not what

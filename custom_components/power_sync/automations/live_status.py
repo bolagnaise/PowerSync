@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 import math
 
@@ -53,7 +54,8 @@ def coordinator_data_to_ev_live_status(data: dict[str, Any]) -> dict[str, Any]:
     )
     native_zero_export = _native_zero_export(data)
     return {
-        "battery_soc": data.get("battery_level", 0),
+        # None when unknown: a missing level is not an empty battery.
+        "battery_soc": data.get("battery_level"),
         "grid_power": _kw_to_w(data.get("grid_power", 0)),
         "solar_power": (
             None if data.get("solar_power_valid") is False
@@ -77,3 +79,18 @@ def coordinator_data_to_ev_live_status(data: dict[str, Any]) -> dict[str, Any]:
         "ac_production_curtailed": False,
         "site_observed_at": data.get("last_update"),
     }
+
+
+def known_home_battery_soc(live_status: Any) -> float | None:
+    """Return the home battery level, or None when it is missing or invalid.
+
+    A missing level must not read as 0%: that paused or stopped EV charging
+    as if the home battery were empty.
+    """
+    value = live_status.get("battery_soc") if isinstance(live_status, Mapping) else None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    value = float(value)
+    if not math.isfinite(value) or not 0 <= value <= 100:
+        return None
+    return value
