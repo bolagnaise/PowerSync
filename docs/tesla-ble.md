@@ -2,6 +2,7 @@
 
 - [Tesla BLE charging-power freshness](#tesla-ble-power-freshness)
 - [Tesla BLE charging freshness and confirmation](#tesla-ble-reliability)
+- [Native Tesla Charge on Solar over BLE](tesla-ev-charging.md#tesla-native-solar-ble) (optional Pedro package `esphome/charge-on-solar.yaml`)
 
 <a id="tesla-ble-power-freshness"></a>
 

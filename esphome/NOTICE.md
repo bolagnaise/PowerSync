@@ -7,5 +7,6 @@ see [LICENSE](LICENSE). They are separate from the Home Assistant integration.
 [PedroKTFC/esphome-tesla-ble](https://github.com/PedroKTFC/esphome-tesla-ble/tree/651b4c25dcb24ce8d16d625a51868576e83bf2fe),
 commit `651b4c25dcb24ce8d16d625a51868576e83bf2fe`.
 The original authors' source and license are preserved. PowerSync modifications
-add an optional producer-owned Stop recovery protocol; they do not attest that
+add an optional producer-owned Stop recovery protocol and an optional explicit
+Tesla native Charge on Solar read/set (`charge_on_solar.*`, `powersync_client.h`); they do not attest that
 an existing firmware binary already supports that protocol.

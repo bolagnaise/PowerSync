@@ -258,3 +258,46 @@ def load_power_sync_submodule(relative, package="_power_sync_isolated"):
             module.__path__ = [str(component.joinpath(*parts[:depth]))]
             sys.modules[name] = module
     return importlib.import_module(f"{package}.{relative}")
+
+
+_PROTO_SCALARS = {"bool": 8, "float": 2, "string": 9, "int32": 5}
+
+
+@pytest.fixture
+def protobuf_reference():
+    """Encode text-format messages against a small proto3 reference schema.
+
+    Built with the protobuf runtime instead of protoc, so wire-format
+    fixture checks always run. ``schema`` maps a message name to
+    ``(field, number, type)`` or ``(field, number, type, flag)`` tuples where
+    ``type`` is a scalar name or another message name and ``flag`` is
+    ``"repeated"`` or a oneof name.
+    """
+    from google.protobuf import descriptor_pb2, descriptor_pool, message_factory, text_format
+
+    def encode(schema, message, text):
+        file = descriptor_pb2.FileDescriptorProto(name="ref.proto", package="ref", syntax="proto3")
+        for name, fields in schema.items():
+            proto = file.message_type.add(name=name)
+            oneofs = []
+            for spec in fields:
+                field_name, number, kind = spec[:3]
+                flag = spec[3] if len(spec) > 3 else None
+                field = proto.field.add(name=field_name, number=number, json_name=field_name)
+                field.label = 3 if flag == "repeated" else 1
+                if kind in _PROTO_SCALARS:
+                    field.type = _PROTO_SCALARS[kind]
+                else:
+                    field.type, field.type_name = 11, f".ref.{kind}"
+                if flag not in (None, "repeated"):
+                    if flag not in oneofs:
+                        oneofs.append(flag)
+                        proto.oneof_decl.add(name=flag)
+                    field.oneof_index = oneofs.index(flag)
+        pool = descriptor_pool.DescriptorPool()
+        pool.Add(file)
+        value = message_factory.GetMessageClass(pool.FindMessageTypeByName(f"ref.{message}"))()
+        text_format.Parse(text, value)
+        return value.SerializeToString().hex()
+
+    return encode

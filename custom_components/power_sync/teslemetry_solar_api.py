@@ -6,6 +6,7 @@ import re
 import time
 
 from .teslemetry_solar import SolarError, ownership, validate_settings, native_solar_connection
+from .charge_on_solar_pairing import pairing_supported
 
 
 def register_http_view(hass):
@@ -28,7 +29,7 @@ def register_http_view(hass):
                 return self.json({"success": False, "error": "A valid vehicle VIN is required"}, status_code=400)
             entries = []
             for entry in self.entries():
-                token, provider = native_solar_connection(hass, entry)
+                token, provider = native_solar_connection(hass, entry, vin)
                 gate = await ownership(hass, entry.entry_id)
                 async with gate.lock:
                     await gate.load()
@@ -36,11 +37,13 @@ def register_http_view(hass):
                     options = {**entry.data, **entry.options}
                     entries.append({
                         "entry_id": entry.entry_id, "name": entry.title,
+                        # Local evidence only: no car or gateway request.
+                        "pairing_supported": pairing_supported(hass, entry, vin),
                         "available": bool(token), "provider": provider,
                         "monitoring_mode": bool(options.get("monitoring_mode", False)),
                         "no_solar_installed": bool(options.get("no_solar_installed", False)),
                         "powersync_control_blocked": gate.blocked(vin),
-                        "cached_settings": hold if hold and "enabled" in hold else None,
+                        "cached_settings": validate_settings(hold) if hold and "enabled" in hold else None,
                         "status": "unconfirmed" if hold and "enabled" not in hold else "cached" if hold else "unknown",
                         "retry_after_seconds": max(0, int(15 - (time.time() - gate.requests.get(vin, 0))) + 1),
                     })

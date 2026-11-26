@@ -1030,9 +1030,10 @@ preserve_battery:
 get_teslemetry_charge_on_solar:
   name: Read native Tesla Charge on Solar
   description: >-
-    Read native Tesla Charge on Solar through PowerSync Fleet or the selected
-    Teslemetry vehicle provider. Requires provider virtual-key pairing. Provider
-    request costs apply; Teslemetry may wake the car. A confirmed disabled read
+    Read native Tesla Charge on Solar through this car's PowerSync BLE bridge,
+    PowerSync Fleet or the selected Teslemetry vehicle provider. Requires the
+    bridge's Charge on Solar package or provider virtual-key pairing. Cloud
+    request costs apply; Teslemetry and BLE reads may wake the car. A confirmed disabled read
     releases the PowerSync EV control hold.
   fields:
     entry_id:
@@ -1047,12 +1048,111 @@ get_teslemetry_charge_on_solar:
       selector:
         text:
 
+get_charge_on_solar_pairing_status:
+  name: Read Tesla Charge on Solar pairing status
+  description: >-
+    Read-only check of the four Tesla Charge on Solar pairing steps for one
+    car: the gateway's key and authorized clients over the LAN, and the car's
+    keys and managed charging sites through its PowerSync BLE bridge. Needs
+    local Powerwall signed access and the bridge's Charge on Solar package.
+    Changes nothing and does not read the Charge on Solar preference; the
+    BLE read may wake the car.
+  fields:
+    entry_id:
+      name: PowerSync integration
+      required: true
+      selector:
+        config_entry:
+          integration: power_sync
+    vin:
+      name: Vehicle VIN
+      required: true
+      selector:
+        text:
+
+repair_charge_on_solar_pairing:
+  name: Repair Tesla Charge on Solar pairing
+  description: >-
+    Perform one Tesla Charge on Solar pairing step and read it back. Adding
+    the gateway's key to the car waits up to 90 seconds for a key-card tap on
+    the car's reader. Registering the car on the Powerwall is signed with
+    PowerSync's local gateway key. Adding or removing the managed charging
+    site uses this car's PowerSync BLE bridge and may wake the car. Blocked
+    in monitoring mode; does not change the Charge on Solar preference.
+  fields:
+    entry_id:
+      name: PowerSync integration
+      required: true
+      selector:
+        config_entry:
+          integration: power_sync
+    vin:
+      name: Vehicle VIN
+      required: true
+      selector:
+        text:
+    step:
+      name: Step
+      required: true
+      selector:
+        select:
+          options:
+            - gateway_key_on_vehicle
+            - vehicle_on_gateway
+            - managed_charging_site
+            - remove_managed_charging_site
+    confirm:
+      name: Confirm pairing change
+      description: Allow PowerSync to change this car's and Powerwall's pairing.
+      required: true
+      default: false
+      selector:
+        boolean:
+    key_format:
+      name: Site key encoding
+      description: >-
+        How the car stores the gateway key for a new site. Needed only when
+        no existing site on the car shows it.
+      selector:
+        select:
+          options:
+            - hex
+            - hex_upper
+            - base64_raw
+            - base64_der
+    vehicle_key_domain:
+      name: Vehicle key
+      description: >-
+        Which of the car's keys to register on the Powerwall, needed only when
+        its vehicle-security and infotainment keys differ.
+      selector:
+        select:
+          options:
+            - v
+            - i
+    latitude:
+      name: Site latitude
+      description: Defaults to the Home Assistant home location.
+      selector:
+        number:
+          min: -90
+          max: 90
+          step: any
+    longitude:
+      name: Site longitude
+      description: Defaults to the Home Assistant home location.
+      selector:
+        number:
+          min: -180
+          max: 180
+          step: any
+
 set_teslemetry_charge_on_solar:
   name: Set native Tesla Charge on Solar
   description: >-
     Enable or disable Tesla-managed solar charging and read back the settings.
-    Requires a compatible Tesla, Powerwall, Tesla app setup and the provider virtual
-    key. Turn off PowerSync EV sessions first. Writes are blocked in monitoring
+    Requires a compatible Tesla, Powerwall, Tesla app setup and the BLE bridge's
+    Charge on Solar package or the provider virtual key. Turn off PowerSync EV sessions first. Writes are blocked in monitoring
     mode. Sends a write followed by settings readback; provider request costs apply.
     Uncertain results retain the PowerSync EV control hold until disabled readback.
   fields:

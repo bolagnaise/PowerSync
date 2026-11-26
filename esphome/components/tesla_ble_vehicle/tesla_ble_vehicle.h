@@ -6,6 +6,9 @@
 #include <vector>
 #include <queue>
 #include "stop_recovery.h"
+#include "charge_on_solar.h"
+#include "cos_pairing.h"
+#include "powersync_client.h"
 #include <array>
 #include <unordered_map>
 #include <functional>
@@ -326,6 +329,45 @@ namespace esphome
             uint32_t recovery_last_query_{0};
             uint32_t recovery_read_started_{0};
             bool recovery_reads_parked_{false};
+            // Optional explicit Tesla native Charge on Solar (charge_on_solar.cpp).
+            void set_charge_on_solar_state(text_sensor::TextSensor *sensor) { cos_state_ = sensor; }
+            void request_charge_on_solar(const std::string &request);
+            void publish_charge_on_solar();
+            void enqueue_charge_on_solar(bool write);
+            bool handle_charge_on_solar_response(const CarServer_Response &response);
+            void tick_charge_on_solar();
+            cos::Protocol cos_;
+            text_sensor::TextSensor *cos_state_{nullptr};
+            // Optional Charge on Solar pairing reads and writes (cos_pairing.cpp).
+            void set_cos_pairing_state(text_sensor::TextSensor *sensor) { pair_state_ = sensor; }
+            void request_cos_pairing(const std::string &request);
+            void publish_cos_pairing();
+            void enqueue_cos_pairing_carserver(bool write);
+            bool handle_cos_pairing_response(const CarServer_Response &response);
+            bool handle_cos_pairing_entry(const VCSEC_WhitelistEntryInfo &info);
+            bool handle_cos_pairing_entry_error(int generic_error);
+            int pair_entry_role_{-1};
+            uint8_t pair_site_outcome_{0};
+            // While a charging-manager key add awaits its key-card tap, the car's
+            // eventual VCSEC reply carries nothing the generic handler correlates,
+            // so queued VCSEC commands are held back until the add resolves.
+            uint32_t pair_key_add_until_{0};
+            bool key_add_pending(uint32_t now) const {
+              return pair_key_add_until_ != 0 && int32_t(pair_key_add_until_ - now) > 0;
+            }
+            bool vcsec_command_in_flight() const {
+              return !command_queue_.empty()
+                  && command_queue_.front().domain == UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY
+                  && command_queue_.front().state != BLECommandState::IDLE;
+            }
+            void tick_cos_pairing();
+            void remember_vehicle_key(UniversalMessage_Domain domain, const Signatures_SessionInfo &info);
+            cos::Protocol pair_;
+            cos_pairing::Request pair_request_{};
+            cos_pairing::Sites pair_sites_{};
+            text_sensor::TextSensor *pair_state_{nullptr};
+            uint8_t vehicle_key_[2][65]{};
+            size_t vehicle_key_length_[2]{0, 0};
             void setup() override;
             void loop() override;
             void update() override;
@@ -548,7 +590,7 @@ namespace esphome
             std::queue<BLETXChunk> ble_write_queue_;
             std::queue<BLECommand> command_queue_;
 
-            TeslaBLE::Client *tesla_ble_client_;
+            PowerSyncBLEClient *tesla_ble_client_;
             uint32_t storage_handle_;
             uint16_t handle_;
             uint16_t read_handle_{0};

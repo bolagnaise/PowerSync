@@ -1,0 +1,48 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Optional: explicit Tesla native Charge on Solar read/set over BLE.
+# Requires the PowerSync tesla_ble_vehicle component (the same
+# tesla_ble_component substitution as the stop-recovery package) on Pedro
+# firmware. Add AFTER the pinned PedroKTFC packages. Nothing reaches the car
+# until PowerSync sends an explicit request; there is no polling.
+# See docs/tesla-ev-charging.md#tesla-native-solar-ble.
+text_sensor:
+  - platform: template
+    id: powersync_charge_on_solar
+    name: "PowerSync Charge on Solar"
+    entity_category: diagnostic
+    update_interval: never
+  # Charge on Solar pairing: reads (managed sites, vehicle keys, whitelist
+  # entry) and explicit single-shot writes PowerSync sends only on request.
+  - platform: template
+    id: powersync_cos_pairing
+    name: "PowerSync Charge on Solar Pairing"
+    entity_category: diagnostic
+    update_interval: never
+
+text:
+  - platform: template
+    name: "PowerSync Charge on Solar Request"
+    entity_category: config
+    mode: text
+    min_length: 0
+    max_length: 64
+    optimistic: true
+    restore_value: false
+    set_action:
+      - lambda: |-
+          id(tesla_ble_vehicle_id)->request_charge_on_solar(x);
+  - platform: template
+    name: "PowerSync Charge on Solar Pairing Request"
+    entity_category: config
+    mode: text
+    min_length: 0
+    max_length: 255
+    optimistic: true
+    restore_value: false
+    set_action:
+      - lambda: |-
+          id(tesla_ble_vehicle_id)->request_cos_pairing(x);
+
+tesla_ble_vehicle:
+  charge_on_solar_state: powersync_charge_on_solar
+  cos_pairing_state: powersync_cos_pairing
