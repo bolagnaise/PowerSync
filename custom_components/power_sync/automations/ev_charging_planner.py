@@ -6760,27 +6760,6 @@ class AutoScheduleExecutor:
         settings.battery_capacity_source = resolved.battery_capacity_source
         return resolved
 
-    def _hold_running_charge_through_gap(self, state, key: str, what: str) -> bool:
-        """Phase 2: keep a running charge through a short data gap.
-
-        Returns True while ``state`` is charging and ``key`` has been missing
-        for less than the grace period; the caller then keeps the session as
-        it is. A clock that is not charging, or has run out, returns False so
-        the caller's normal stop or wait applies.
-        """
-        if not state.is_charging:
-            missing_data_grace_expired(state.missing_data, key, missing=False)
-            return False
-        if missing_data_grace_expired(state.missing_data, key, missing=True):
-            return False
-        minutes = missing_data_grace_minutes_left(state.missing_data, key)
-        reason = f"{what}; continuing for up to {minutes} min while it returns"
-        if not state.last_decision_reason.startswith(f"{what}; continuing"):
-            _LOGGER.info("Auto-schedule: %s", reason)
-        state.last_decision = "charging"
-        state.last_decision_reason = reason
-        return True
-
     async def _evaluate_vehicle(
         self,
         vehicle_id: str,
@@ -6793,7 +6772,7 @@ class AutoScheduleExecutor:
         shared = shared_data(getattr(self, "hass", None), getattr(self, "config_entry", None))
         if vehicle_id == "generic_ev" and shared is not None:
             state = self.get_state(vehicle_id)
-            if profile_soc(self.hass, shared) is None and self._hold_running_charge_through_gap(
+            if profile_soc(self.hass, shared) is None and state.is_charging and _hold_running_charge_through_gap(
                 state, "ev_soc", "Selected vehicle SOC unavailable",
             ):
                 return
@@ -6859,7 +6838,7 @@ class AutoScheduleExecutor:
 
         # Keep the plan fresh before checking availability.
         ev_soc = await self._get_vehicle_soc(vehicle_id)
-        if ev_soc is None and self._hold_running_charge_through_gap(
+        if ev_soc is None and state.is_charging and _hold_running_charge_through_gap(
             state, "ev_soc", "EV SOC unavailable",
         ):
             return
@@ -7174,7 +7153,7 @@ class AutoScheduleExecutor:
                 priority=effective_priority,
             )
             price_gap = not price_allowed and current_price_cents is None
-            if price_gap and self._hold_running_charge_through_gap(
+            if price_gap and _hold_running_charge_through_gap(
                 state, "grid_price", "Current grid price unavailable",
             ):
                 # Phase 2: a running grid charge rides out a short price gap.
@@ -10881,6 +10860,28 @@ def _has_current_non_tesla_charge(
             if power_w is not None and math.isfinite(power_w) and power_w > 50:
                 return True
     return False
+
+
+def _hold_running_charge_through_gap(state, key: str, what: str) -> bool:
+    """Phase 2: keep a running charge through a short data gap.
+
+    Returns True while ``state`` is charging and ``key`` has been missing
+    for less than the grace period; the caller then keeps the session as
+    it is. A clock that is not charging, or has run out, returns False so
+    the caller's normal stop or wait applies.
+    """
+    if not state.is_charging:
+        missing_data_grace_expired(state.missing_data, key, missing=False)
+        return False
+    if missing_data_grace_expired(state.missing_data, key, missing=True):
+        return False
+    minutes = missing_data_grace_minutes_left(state.missing_data, key)
+    reason = f"{what}; continuing for up to {minutes} min while it returns"
+    if not state.last_decision_reason.startswith(f"{what}; continuing"):
+        _LOGGER.info("Auto-schedule: %s", reason)
+    state.last_decision = "charging"
+    state.last_decision_reason = reason
+    return True
 
 
 _PRICE_LEVEL_NO_PRICE = "No price data available"

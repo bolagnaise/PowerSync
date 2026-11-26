@@ -11720,16 +11720,16 @@ def test_price_level_rides_out_a_missing_price_only_while_charging():
 
 
 def test_smart_schedule_hold_helper_only_holds_a_running_charge():
-    hold = ev_planner.AutoScheduleExecutor._hold_running_charge_through_gap
+    hold = ev_planner._hold_running_charge_through_gap
     idle = ev_planner.AutoScheduleState(vehicle_id=VIN)
-    assert hold(None, idle, "ev_soc", "EV SOC unavailable") is False
+    assert hold(idle, "ev_soc", "EV SOC unavailable") is False
 
     running = ev_planner.AutoScheduleState(vehicle_id=VIN, is_charging=True)
-    assert hold(None, running, "ev_soc", "EV SOC unavailable") is True
+    assert hold(running, "ev_soc", "EV SOC unavailable") is True
     assert running.last_decision == "charging"
     assert running.last_decision_reason == "EV SOC unavailable; continuing for up to 15 min while it returns"
     _expire(running.missing_data, "ev_soc")
-    assert hold(None, running, "ev_soc", "EV SOC unavailable") is False
+    assert hold(running, "ev_soc", "EV SOC unavailable") is False
 
 
 def test_scheduled_rides_out_a_missing_retail_price_inside_its_window(monkeypatch):
