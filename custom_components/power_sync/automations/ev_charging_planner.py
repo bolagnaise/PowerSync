@@ -12029,6 +12029,9 @@ class PriceLevelChargingExecutor:
             )
             should_charge, reason, mode = held.should_charge, held.reason, held.mode
             decision = (should_charge, reason, mode)
+        elif reason != "No price data available" and isinstance(getattr(state, "missing_data", None), dict):
+            # The price is back: the next gap gets a fresh grace period.
+            state.missing_data.get("_missing_data_since", {}).pop("price", None)
         if self._state.last_decision in AWAY_EV_DECISIONS:
             state.last_decision = self._state.last_decision
             state.last_decision_reason = reason

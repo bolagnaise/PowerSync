@@ -11928,3 +11928,29 @@ def test_charging_probe_with_max_age_ignores_stale_readings(monkeypatch, age_s, 
     # Without max_age the existing behaviour is unchanged.
     assert asyncio.run(ev_planner.is_ev_actively_charging(
         hass, _FakeConfigEntry(), vehicle_vin="ble_car")) is True
+
+
+def test_standalone_loadpoint_grace_restarts_after_the_price_returns(monkeypatch):
+    executor = ev_planner.PriceLevelChargingExecutor.__new__(ev_planner.PriceLevelChargingExecutor)
+    executor.hass = _FakeHass()
+    executor.config_entry = _FakeConfigEntry()
+    executor._domain = "power_sync"
+    executor._state = ev_planner.PriceLevelChargingState()
+    executor._vehicle_states = {}
+    loadpoint = executor._get_or_create_vehicle_state("generic_ev")
+    loadpoint.is_charging = True
+    executor._stop_charging = AsyncMock(return_value=True)
+    executor._start_charging = AsyncMock(return_value=True)
+    executor._has_current_non_tesla_charge = lambda *_: True
+
+    async def decide(reason, should=False):
+        executor.get_charging_decision = AsyncMock(return_value=(should, reason, "opportunity"))
+        return await executor._evaluate_non_tesla_loadpoint("generic_ev", None)
+
+    assert asyncio.run(decide("No price data available"))[0] is True
+    _expire(loadpoint.missing_data, "price")          # the first gap ran long...
+    asyncio.run(decide("Price 8c <= 10c", should=True))  # ...then the price came back
+    assert "price" not in loadpoint.missing_data["_missing_data_since"]
+    # A later gap gets a fresh grace period instead of an immediate stop.
+    assert asyncio.run(decide("No price data available"))[0] is True
+    executor._stop_charging.assert_not_awaited()

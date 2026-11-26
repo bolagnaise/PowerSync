@@ -21081,3 +21081,23 @@ def test_away_release_only_trusts_a_real_away_reading(monkeypatch, location, cha
 
     assert result is released
     assert stop.await_count == int(released)
+
+
+def test_unknown_home_battery_level_keeps_retrying_an_unconfirmed_floor_stop(monkeypatch):
+    """A floor pause whose stop failed may still be charging: keep stopping."""
+    hass = _Hass([])
+    vehicle_id = "VIN123"
+    actions._dynamic_ev_state.clear()
+    state = _solar_surplus_state(current_amps=5)
+    state["paused"] = True
+    state["paused_reason"] = "Battery dropped to 46% (pause threshold: 70%)"
+    state["params"].update({"min_battery_soc": 80, "pause_below_soc": 70})
+    actions._dynamic_ev_state["entry-1"] = {vehicle_id: state}
+    status = dict(_PHASE2_SURPLUS)
+    status.pop("battery_soc")
+    set_amps_calls = _install_solar_surplus_runtime_stubs(monkeypatch, status)
+
+    asyncio.run(actions._dynamic_ev_update_surplus(hass, _Entry(), "entry-1", vehicle_id))
+
+    assert set_amps_calls and set_amps_calls[-1] == 0
+    assert state["paused"] is True

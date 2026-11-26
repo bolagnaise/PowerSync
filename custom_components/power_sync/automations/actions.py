@@ -15992,6 +15992,17 @@ async def _dynamic_ev_update_surplus(
     # Battery priority check
     min_soc = get_solar_surplus_min_battery_soc(params)
     pause_soc = params.get("pause_below_soc", max(0, min_soc - 10))
+    floor_stop_pending = bool(
+        state.get("paused")
+        and (
+            (_coerce_positive_int(state.get("current_amps"), 0) or 0) > 0
+            or state.get("stop_outcome")
+        )
+    )
+    if battery_soc is None and floor_stop_pending:
+        # A battery-floor pause whose stop is not confirmed may still be
+        # charging. An unknown level cannot lift it: keep retrying the stop.
+        battery_soc = float(max(0, pause_soc - 1))
     if battery_soc is None:
         # Phase 2: an unknown home-battery level is not 0%. It may hold a
         # start or a battery-floor pause, but must not stop a running charge.
