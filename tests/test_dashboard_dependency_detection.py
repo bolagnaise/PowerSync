@@ -2392,3 +2392,47 @@ console.log(JSON.stringify({
     panel = source[start:end]
     assert "selected.plug_state_known !== false ? this._noticeHtml('warn', 'EV is disconnected." in panel
     assert "No connector status sensor is configured" in panel
+
+
+def test_powerwall_pack_cards_include_packs_registered_under_new_entity_ids():
+    """Ticket 202: a pack added after the object-id rename must still get a card.
+
+    Older pack sensors keep sensor.power_sync_pwN_*; a fifth pack added later
+    is registered as sensor.powerwall_5_* and is only discoverable by its
+    registry unique_id.
+    """
+    source = STRATEGY_PATH.read_text()
+    start = source.index("function _powerwallHealth")
+    end = source.index("function _aemoSpike", start)
+    runtime = r"""
+      const assert = require('node:assert/strict');
+      const entry = 'entry123';
+      const labels = ['Leader Powerwall', 'Expansion Pack 1', 'Expansion Pack 2',
+        'Follower Powerwall', 'Follower Powerwall 2'];
+      const states = {};
+      const registryRows = [];
+      labels.forEach((label, idx) => {
+        const n = idx + 1;
+        for (const metric of ['soc', 'soh', 'capacity']) {
+          const entityId = n <= 4 ? `sensor.power_sync_pw${n}_${metric}` : `sensor.powerwall_${n}_${metric}`;
+          states[entityId] = { state: '30', attributes: { pack_label: label } };
+          registryRows.push({ entity_id: entityId, platform: 'power_sync',
+            config_entry_id: entry, unique_id: `${entry}_pw${n}_${metric}` });
+        }
+      });
+      // An unrelated integration's similarly named sensor must not be picked up.
+      states['sensor.powerwall_9_soc'] = { state: '50', attributes: {} };
+      registryRows.push({ entity_id: 'sensor.powerwall_9_soc', platform: 'other',
+        config_entry_id: 'x', unique_id: 'x_pw9_soc' });
+      const findEntity = () => null;
+      const card = _powerwallHealth({ states }, findEntity, registryRows);
+      const titles = card.cards.map(c => c.title);
+      assert.deepEqual(titles, labels);
+      const last = card.cards[4].entities.map(row => row.entity);
+      assert.deepEqual(last, ['sensor.powerwall_5_soc', 'sensor.powerwall_5_soh', 'sensor.powerwall_5_capacity']);
+
+      // Legacy-only sites (no registry rows) keep working.
+      const legacy = _powerwallHealth({ states }, findEntity, []);
+      assert.deepEqual(legacy.cards.map(c => c.title), labels.slice(0, 4));
+    """
+    subprocess.run(["node", "-e", source[start:end] + runtime], check=True)
