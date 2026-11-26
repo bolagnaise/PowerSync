@@ -13247,11 +13247,23 @@ _DYNAMIC_UNPLUG_DEBOUNCE_CYCLES = 2
 async def _ev_seen_charging(
     hass: HomeAssistant, config_entry: ConfigEntry, vehicle_vin: Optional[str],
 ) -> bool:
-    """Whether the car is seen actively charging (contradicts unplugged/unknown-away)."""
-    try:
-        from .ev_charging_planner import is_ev_actively_charging
+    """Whether current evidence shows the car charging (contradicts unplugged/unknown-away).
 
-        return await is_ev_actively_charging(hass, config_entry, vehicle_vin=vehicle_vin) is True
+    A fresh Wall Connector disconnect is a confirmed unplug and always wins,
+    and only charging readings from the last few minutes count.
+    """
+    try:
+        from .ev_charging_planner import (
+            CONTRADICTING_CHARGE_MAX_AGE_SECONDS,
+            is_ev_actively_charging,
+        )
+
+        if _fresh_wall_connector_unplugged_at(hass, config_entry, vehicle_vin) is not None:
+            return False
+        return await is_ev_actively_charging(
+            hass, config_entry, vehicle_vin=vehicle_vin,
+            max_age_s=CONTRADICTING_CHARGE_MAX_AGE_SECONDS,
+        ) is True
     except Exception as err:  # evidence only; never blocks the normal path
         _LOGGER.debug("Dynamic EV: charging probe failed for %s: %s", vehicle_vin, err)
         return False

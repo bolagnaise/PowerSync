@@ -21016,6 +21016,7 @@ def _plug_probe_modules(monkeypatch, *, plugged, charging, location="home"):
     planner.is_ev_plugged_in = AsyncMock(return_value=plugged)
     planner.is_ev_actively_charging = AsyncMock(return_value=charging)
     planner.get_ev_location = AsyncMock(return_value=location)
+    planner.CONTRADICTING_CHARGE_MAX_AGE_SECONDS = 300
     monkeypatch.setitem(sys.modules, "power_sync.automations.ev_charging_planner", planner)
     return planner
 
@@ -21038,6 +21039,27 @@ def test_unplugged_reading_keeps_a_session_the_car_is_still_charging(monkeypatch
         assert stop.await_args.args[2]["stop_charging"] is False
     else:
         assert state["plug_reading_contradicted"] is True
+    # Only recent charging evidence may overrule the reading.
+    planner = sys.modules["power_sync.automations.ev_charging_planner"]
+    assert planner.is_ev_actively_charging.await_args.kwargs["max_age_s"] == 300
+
+
+def test_fresh_wall_connector_unplug_is_never_overruled(monkeypatch):
+    actions._dynamic_ev_state.clear()
+    vin = "5YJ3E1EA7NF0000A1"
+    state = {"active": True, "params": {"vehicle_vin": vin, "charger_type": "tesla"}}
+    actions._dynamic_ev_state["entry-1"] = {vin: state}
+    planner = _plug_probe_modules(monkeypatch, plugged=False, charging=True)
+    monkeypatch.setattr(actions, "_fresh_wall_connector_unplugged_at",
+                        lambda *a: datetime.now(timezone.utc))
+    stop = AsyncMock(return_value=True)
+    monkeypatch.setattr(actions, "_action_stop_ev_charging_dynamic", stop)
+    state["consecutive_unplugged"] = actions._DYNAMIC_UNPLUG_DEBOUNCE_CYCLES
+
+    assert asyncio.run(actions._clear_ble_dynamic_session_if_unplugged(
+        _Hass([]), _Entry(), vin, state["params"], expected_state=state)) is True
+    planner.is_ev_actively_charging.assert_not_awaited()
+    stop.assert_awaited_once()
 
 
 @pytest.mark.parametrize("location, charging, released", [

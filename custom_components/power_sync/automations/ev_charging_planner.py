@@ -46,6 +46,7 @@ from ..const import (
 )
 from ..optimization.load_estimator import SolcastForecaster as SharedSolarForecaster
 from ..optimization.price_level_projection import (
+    PriceLevelPolicyDecision,
     PriceLevelVehicleSnapshot,
     classify_price_level_policy,
     manual_force_block_reason,
@@ -1512,6 +1513,9 @@ async def is_ev_plugged_in(
     return False
 
 
+# A charging reading older than this cannot overrule an unplugged/away one.
+CONTRADICTING_CHARGE_MAX_AGE_SECONDS = 5 * 60
+
 # Last time each (vehicle, reading) contradiction was logged, so a stuck
 # reading is reported every 30 min instead of every evaluation.
 _CONTRADICTED_READING_LOGGED: dict[tuple[str, str], float] = {}
@@ -1537,7 +1541,17 @@ async def _unknown_reading_contradicted(
     if location is not None and location != "unavailable":
         return False
     try:
-        charging = await is_ev_actively_charging(hass, config_entry, vehicle_vin=vehicle_vin) is True
+        from .actions import _fresh_wall_connector_unplugged_at
+
+        if location is None and _fresh_wall_connector_unplugged_at(
+            hass, config_entry, vehicle_vin,
+        ) is not None:
+            # A fresh Wall Connector disconnect is a confirmed unplug.
+            return False
+        charging = await is_ev_actively_charging(
+            hass, config_entry, vehicle_vin=vehicle_vin,
+            max_age_s=CONTRADICTING_CHARGE_MAX_AGE_SECONDS,
+        ) is True
     except Exception as err:  # evidence only; never blocks the normal path
         _LOGGER.debug("Charging probe failed for %s: %s", vehicle_vin, err)
         return False
@@ -1559,6 +1573,8 @@ async def is_ev_actively_charging(
     hass: "HomeAssistant",
     config_entry: "ConfigEntry",
     vehicle_vin: Optional[str] = None,
+    *,
+    max_age_s: Optional[float] = None,
 ) -> bool:
     """Probe upstream charger/vehicle state to detect actual charge draw.
 
@@ -1578,6 +1594,19 @@ async def is_ev_actively_charging(
     from .loadpoint_status import charging_state_plugged_status
     import re as _re
 
+    def _fresh(state_obj) -> bool:
+        """With ``max_age_s``, only states HA heard about recently count."""
+        if state_obj is None:
+            return False
+        if max_age_s is None:
+            return True
+        stamp = getattr(state_obj, "last_reported", None) or getattr(state_obj, "last_updated", None)
+        if not isinstance(stamp, datetime):
+            return False
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=timezone.utc)
+        return (dt_util.utcnow() - stamp).total_seconds() <= max_age_s
+
     # Method 0: Teslemetry Bluetooth — sensor.{prefix}_charging_state
     for state in hass.states.async_all():
         match = _re.match(r"sensor\.(\w+)_charging_state$", state.entity_id)
@@ -1590,12 +1619,14 @@ async def is_ev_actively_charging(
             continue
         if vehicle_vin is not None and candidate.upper() != vehicle_vin.upper():
             continue
+        if not _fresh(state):
+            continue
         if state.state and state.state.lower() == "charging":
             return True
         charge_state_known = charging_state_plugged_status(state.state) is not None
         for suffix in ("_charger_power", "_charge_power"):
             power_state = hass.states.get(f"sensor.{candidate}{suffix}")
-            power_w = _state_power_w(power_state)
+            power_w = _state_power_w(power_state) if _fresh(power_state) else None
             if power_w is not None and power_w > 100 and (
                 not charge_state_known
                 or power_w >= MIN_CHARGING_POWER_KW * 1000
@@ -1628,7 +1659,7 @@ async def is_ev_actively_charging(
                 and "charging_" not in eid_lower
             ):
                 s = hass.states.get(eid)
-                if s and charging_state_plugged_status(s.state) is not None:
+                if s and _fresh(s) and charging_state_plugged_status(s.state) is not None:
                     charge_state_known = True
                     if s.state.lower() == "charging":
                         charging_state_active = True
@@ -1641,7 +1672,7 @@ async def is_ev_actively_charging(
                 )
             ):
                 s = hass.states.get(eid)
-                power_w = _state_power_w(s)
+                power_w = _state_power_w(s) if _fresh(s) else None
                 if power_w is not None and power_w > 100:
                     maximum_power_w = max(maximum_power_w, power_w)
         if charging_state_active:
@@ -1684,11 +1715,11 @@ async def is_ev_actively_charging(
         ble_prefixes = _configured_ble_prefixes(config_entry, None, hass=hass)
     for prefix in ble_prefixes:
         s = hass.states.get(f"switch.{prefix}_charger")
-        if s and s.state == "on":
+        if s and _fresh(s) and s.state == "on":
             return True
         for suffix in ("_charge_power", "_charger_power"):
             power_state = hass.states.get(f"sensor.{prefix}{suffix}")
-            power_w = _state_power_w(power_state)
+            power_w = _state_power_w(power_state) if _fresh(power_state) else None
             if power_w is not None and power_w > 100:
                 _LOGGER.debug(
                     "EV active charging inferred from %s=%sW",
@@ -6772,11 +6803,12 @@ class AutoScheduleExecutor:
         shared = shared_data(getattr(self, "hass", None), getattr(self, "config_entry", None))
         if vehicle_id == "generic_ev" and shared is not None:
             state = self.get_state(vehicle_id)
-            if profile_soc(self.hass, shared) is None and state.is_charging and _hold_running_charge_through_gap(
-                state, "ev_soc", "Selected vehicle SOC unavailable",
+            if profile_soc(self.hass, shared) is None and not (
+                state.is_charging
+                and _hold_running_charge_through_gap(
+                    state, "ev_soc", "Selected vehicle SOC unavailable",
+                )
             ):
-                return
-            if profile_soc(self.hass, shared) is None:
                 state.current_plan = None
                 state.current_window = None
                 if state.is_charging:
@@ -6838,11 +6870,13 @@ class AutoScheduleExecutor:
 
         # Keep the plan fresh before checking availability.
         ev_soc = await self._get_vehicle_soc(vehicle_id)
-        if ev_soc is None and state.is_charging and _hold_running_charge_through_gap(
+        # Phase 2: during the grace, keep evaluating every rule whose data is
+        # still available (consume floor, price, window) with the car level
+        # unknown; only the level-based target check and replanning wait.
+        soc_gap_held = ev_soc is None and state.is_charging and _hold_running_charge_through_gap(
             state, "ev_soc", "EV SOC unavailable",
-        ):
-            return
-        if ev_soc is None:
+        )
+        if ev_soc is None and not soc_gap_held:
             state.current_plan = None
             state.current_window = None
             if state.is_charging:
@@ -6850,8 +6884,9 @@ class AutoScheduleExecutor:
             state.last_decision = "soc_unavailable"
             state.last_decision_reason = "EV SOC sensor unavailable or charger association ambiguous"
             return
-        missing_data_grace_expired(state.missing_data, "ev_soc", missing=False)
-        if ev_soc >= settings.target_soc:
+        if ev_soc is not None:
+            missing_data_grace_expired(state.missing_data, "ev_soc", missing=False)
+        if ev_soc is not None and ev_soc >= settings.target_soc:
             # A previously generated plan is no longer needed. Clear it before
             # any availability gate returns, otherwise the optimiser may keep
             # reserving EV load from a stale plan.
@@ -6862,6 +6897,7 @@ class AutoScheduleExecutor:
         # this plan as forecast load, so an away/unplugged EV with a deadline can
         # still protect future charging demand without issuing charger commands.
         if (
+            ev_soc is not None and
             ev_soc < settings.target_soc and
             (
                 state.current_plan is None or
@@ -6922,7 +6958,7 @@ class AutoScheduleExecutor:
             return
 
         # Check if EV has reached target SoC
-        if ev_soc >= settings.target_soc:
+        if ev_soc is not None and ev_soc >= settings.target_soc:
             # Stop charging if still charging
             if state.is_charging:
                 await self._stop_charging(
@@ -7031,6 +7067,9 @@ class AutoScheduleExecutor:
                 current_price_cents = finite_price_cents(current_price_cents, "price_cents")
             except ValueError:
                 current_price_cents = None
+        if current_price_cents is not None:
+            # The price is back: any earlier gap is over, whatever the source.
+            missing_data_grace_expired(state.missing_data, "grid_price", missing=False)
 
         # Note: min_battery_soc affects surplus calculation (prevents discharge),
         # but does NOT block EV charging from solar or grid.
@@ -7159,8 +7198,6 @@ class AutoScheduleExecutor:
                 # Phase 2: a running grid charge rides out a short price gap.
                 price_allowed = True
                 reason = state.last_decision_reason
-            elif not price_gap:
-                missing_data_grace_expired(state.missing_data, "grid_price", missing=False)
             if not price_allowed:
                 should_charge = False
                 reason = (
@@ -11984,6 +12021,14 @@ class PriceLevelChargingExecutor:
         decision = await self.get_charging_decision(current_price_cents)
         should_charge, reason, mode = decision
         state = self._get_or_create_vehicle_state(loadpoint_id)
+        # Phase 2: this loadpoint's own state tracks its charging, so the
+        # missing-price grace is applied here rather than on self._state.
+        if state.is_charging and not should_charge and reason == "No price data available":
+            held = _price_level_ride_out_price_gap(
+                state, PriceLevelPolicyDecision(should_charge, reason, mode),
+            )
+            should_charge, reason, mode = held.should_charge, held.reason, held.mode
+            decision = (should_charge, reason, mode)
         if self._state.last_decision in AWAY_EV_DECISIONS:
             state.last_decision = self._state.last_decision
             state.last_decision_reason = reason
@@ -12784,6 +12829,9 @@ class ScheduledChargingState:
     last_decision_reason: str = ""
     # Phase 2 grace clocks for data that went missing mid-charge.
     missing_data: dict = field(default_factory=dict)
+    # True while a positive decision only rides out a retail-price gap: keep
+    # vehicles already under Scheduled control, start no others.
+    price_gap_hold: bool = False
 
 
 class ScheduledChargingExecutor:
@@ -13088,6 +13136,11 @@ class ScheduledChargingExecutor:
                     if not await self._pending_stop_observed(vin, self._pending_stops[vin]):
                         continue
                     self._pending_stops.pop(vin, None)
+                if self._state.price_gap_hold:
+                    # Phase 2: the grace only keeps existing sessions; a car
+                    # not yet charging waits for the retail price.
+                    results[vin]["reason"] = "Retail price unavailable; not starting another vehicle"
+                    continue
                 success = await _start_coordinated_charging(
                     self.hass, self._domain, self.config_entry,
                     owner_mode="scheduled", reason=reason, vehicle_vin=vin,
@@ -13243,6 +13296,7 @@ class ScheduledChargingExecutor:
             mode is "scheduled"
         """
         settings = self._get_settings()
+        self._state.price_gap_hold = False
 
         # Check if enabled
         if not settings.get("enabled", False):
@@ -13310,6 +13364,7 @@ class ScheduledChargingExecutor:
                         _LOGGER.info("%s", reason)
                     self._state.last_decision = "wants_charge"
                     self._state.last_decision_reason = reason
+                    self._state.price_gap_hold = True
                     return True, reason, "scheduled"
                 self._state.last_decision = "waiting"
                 self._state.last_decision_reason = reason
