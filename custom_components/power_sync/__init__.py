@@ -9998,8 +9998,12 @@ class BatteryHealthView(HomeAssistantView):
         )
         from .powerwall_local.bms_health import (
             assign_pack_roles_from_battery_blocks,
+            build_mixed_site_pw2_packs,
             has_pw3_stack,
+            is_placeholder_expansion_pack,
             known_expansion_dins_from_gateway_config,
+            mixed_site_pw2_dins,
+            pw3_follower_dins,
             reconcile_pack_remaining_with_aggregate,
             resolve_physical_battery_count,
             serial_from_din,
@@ -10245,7 +10249,10 @@ class BatteryHealthView(HomeAssistantView):
             i for i, p in enumerate(individual)
             if p.get("isFollower") and p.get("nominalFullPackEnergyWh") == 0
         ]
-        if is_pw3_stack and follower_indices and current_wh:
+        # Mixed sites: Powerwall 2 units listed in batteryBlocks never appear as
+        # PW3BMS rows, so they must not absorb PW3 follower slots (ticket 202).
+        pw2_dins = mixed_site_pw2_dins(battery_blocks, din) if is_pw3_stack else []
+        if is_pw3_stack and follower_indices and current_wh and not pw2_dins:
             leader_full_wh = sum(
                 p["nominalFullPackEnergyWh"] for p in individual if not p.get("isFollower")
             )
@@ -10255,10 +10262,7 @@ class BatteryHealthView(HomeAssistantView):
             n_followers = len(follower_indices)
             inferred_full_wh = max(0.0, current_wh - leader_full_wh) / n_followers
             inferred_rem_wh = max(0.0, rem_wh - leader_rem_wh) / n_followers
-            follower_dins = [
-                block.get("din") for block in battery_blocks
-                if block.get("din") and block.get("din") != din
-            ]
+            follower_dins = pw3_follower_dins(battery_blocks, din)
             for seq, idx in enumerate(follower_indices):
                 f_din = follower_dins[seq] if seq < len(follower_dins) else None
                 serial = serial_from_din(f_din)
@@ -10288,6 +10292,39 @@ class BatteryHealthView(HomeAssistantView):
             known_expansion_dins_from_gateway_config(gateway_config),
         )
 
+        # Mixed PW3 + Powerwall 2 site: add one follower pack per PW2 unit from
+        # the gateway's PW2 energy readings (or an aggregate share), checked
+        # against the site total. Serial-less placeholder rows are excluded
+        # from the residual first, then the ghost filter below removes them.
+        if pw2_dins and current_wh > 0:
+            pw2_packs: list = []
+            placeholder_sets = [
+                [p for p in individual if not is_placeholder_expansion_pack(p)],
+                individual,
+            ]
+            for pw3_packs in placeholder_sets:
+                pw2_packs = build_mixed_site_pw2_packs(
+                    data,
+                    pw2_dins,
+                    current_wh - sum(p["nominalFullPackEnergyWh"] for p in pw3_packs),
+                    rem_wh - sum(p["nominalEnergyRemainingWh"] for p in pw3_packs),
+                )
+                if pw2_packs:
+                    break
+            if pw2_packs:
+                individual.extend(pw2_packs)
+                bms_module_count += len(pw2_packs)
+                _LOGGER.debug(
+                    "fleet_api_bms: mixed site — added %d Powerwall 2 pack(s) from %s",
+                    len(pw2_packs), pw2_packs[0].get("energySource"),
+                )
+            else:
+                _LOGGER.debug(
+                    "fleet_api_bms: mixed site — %d Powerwall 2 unit(s) not consistent "
+                    "with aggregate; per-unit data omitted",
+                    len(pw2_dins),
+                )
+
         # Ghost expansion pack filter. Phantom packs (registered slots not physically
         # installed) report:
         #   1. plausible full-capacity values (~13.5–14.5 kWh)
@@ -10303,20 +10340,8 @@ class BatteryHealthView(HomeAssistantView):
         # kept). Require BOTH the missing-serial signal AND a near-zero remaining-
         # energy signature before flagging as ghost; cross-validate as before.
         if individual and current_wh > 0:
-            GHOST_REMAINING_ABS_WH = 500
-            GHOST_REMAINING_FRACTION = 0.05
             ghost_candidates = [
-                p for p in individual
-                if p.get("isExpansion")
-                and not p.get("serialNumber")
-                and (
-                    p["nominalEnergyRemainingWh"] < GHOST_REMAINING_ABS_WH
-                    or (
-                        p["nominalFullPackEnergyWh"] > 0
-                        and p["nominalEnergyRemainingWh"] / p["nominalFullPackEnergyWh"]
-                        < GHOST_REMAINING_FRACTION
-                    )
-                )
+                p for p in individual if is_placeholder_expansion_pack(p)
             ]
             if ghost_candidates:
                 kept = [p for p in individual if p not in ghost_candidates]
@@ -10370,6 +10395,16 @@ class BatteryHealthView(HomeAssistantView):
                 )
         except Exception:
             pass
+
+        if current_wh <= 0 and not individual:
+            # An empty relay reply (no aggregate, no packs) must not publish or
+            # cache 0% health for an hour; keep the previous reading instead.
+            _LOGGER.info(
+                "fleet_api_bms: empty BMS response (batteryBlocks=%d, msa=%d) — "
+                "keeping previous battery health",
+                bb_count, len(all_comps),
+            )
+            return None
 
         # Rated capacity: 13.5 kWh per physical Powerwall unit.
         original_wh = 13500 * batt_count

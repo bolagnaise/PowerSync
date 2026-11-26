@@ -486,3 +486,218 @@ def test_does_not_reconcile_when_pack_capacities_do_not_match_aggregate():
 
     assert result[1]["nominalEnergyRemainingWh"] == 200.0
     assert "remainingReconciledFromAggregate" not in result[1]
+
+
+# --- Ticket 202: PW3 leader + 2 expansions + 2 Powerwall 2 units ----------------
+
+def _bms_processing_runner():
+    """Compile the real post-fetch processing of ``_try_fleet_api_bms_fetch``.
+
+    Executes every statement from the ``status = ...`` aggregate read through
+    ``return response`` with the decoded payload injected, so the regression
+    covers the shipped pipeline rather than a re-implementation.
+    """
+    import datetime
+    import logging
+    import types
+
+    tree = ast.parse(INIT_PATH.read_text())
+    method = next(
+        child
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "BatteryHealthView"
+        for child in node.body
+        if isinstance(child, ast.AsyncFunctionDef)
+        and child.name == "_try_fleet_api_bms_fetch"
+    )
+    start = next(
+        idx for idx, stmt in enumerate(method.body)
+        if isinstance(stmt, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == "status" for t in stmt.targets)
+    )
+    func = ast.FunctionDef(
+        name="_process",
+        args=ast.arguments(
+            posonlyargs=[],
+            args=[ast.arg(arg=name) for name in (
+                "self", "entry", "data", "din", "source", "fleet_site_id", "gateway_config",
+            )],
+            kwonlyargs=[], kw_defaults=[], defaults=[],
+        ),
+        body=method.body[start:],
+        decorator_list=[],
+        returns=None,
+        type_params=[],
+    )
+    module = ast.Module(body=[func], type_ignores=[])
+    ast.fix_missing_locations(module)
+    namespace = {
+        name: getattr(bms_health, name)
+        for name in dir(bms_health)
+        if not name.startswith("__")
+    }
+    namespace.update({
+        "_LOGGER": logging.getLogger("test_t202"),
+        "DOMAIN": "power_sync",
+        "CONF_POWERWALL_LOCAL_ENERGY_SITE_ID": "powerwall_local_energy_site_id",
+        "dt_util": types.SimpleNamespace(now=lambda: datetime.datetime(2026, 11, 26, 19, 42)),
+    })
+    exec(compile(module, str(INIT_PATH), "exec"), namespace)
+    return namespace["_process"]
+
+
+def _run_bms_processing(data, din="1707000-30-L--TG126013001MFM"):
+    process = _bms_processing_runner()
+    view = Mock()
+    view._hass.data = {}
+    entry = Mock()
+    entry.entry_id = "entry"
+    entry.data = {}
+    return process(view, entry, data, din, "ha_local_tedapi", None, None)
+
+
+def _msa(part, serial, full=None, remaining=None):
+    signals = []
+    if full is not None or remaining is not None:
+        signals = [
+            {"name": "BMS_nominalFullPackEnergy", "value": full},
+            {"name": "BMS_nominalEnergyRemaining", "value": remaining},
+        ]
+    return {"partNumber": part, "serialNumber": serial, "signals": signals}
+
+
+def _ticket_202_payload(es_can=None):
+    """Reporter's 26 Nov 19:42 DeviceController reply (non-BMS rows trimmed)."""
+    data = {
+        "control": {
+            "systemStatus": {
+                "nominalFullPackEnergyWh": 71689,
+                "nominalEnergyRemainingWh": 59000,
+            },
+            "batteryBlocks": [
+                {"din": "1707000-30-L--TG126013001MFM"},
+                {"din": "3012170-05-C--TG122300000TEF"},
+                {"din": "3012170-45-E--TG124247002H2L"},
+            ],
+        },
+        "components": {
+            "msa": [
+                _msa("1707000-30-L", "TG126013001MFM"),
+                _msa("3012170-05-C", "TG122300000TEF"),
+                _msa("3012170-45-E", "TG124247002H2L"),
+                _msa("00000000000000000000", "TG126013002D5B", 14.34, 11.53),
+                _msa("00000000000000000000", "TG126116001PNE", 14.42, 12.31),
+                _msa("00000000000000000000", "TG126116001PSN", 14.47, 12.61),
+                _msa("", "", 14.47, 0.2),
+            ]
+        },
+    }
+    if es_can is not None:
+        data["esCan"] = es_can
+    return data
+
+
+def _labels(packs):
+    labels = []
+    for idx, pack in enumerate(packs):
+        role = pack["role"]
+        if role == "leader":
+            labels.append("Leader Powerwall")
+        elif role == "follower":
+            n = sum(1 for p in packs[: idx + 1] if p["role"] == "follower")
+            labels.append("Follower Powerwall" if n == 1 else f"Follower Powerwall {n}")
+        else:
+            n = sum(1 for p in packs[: idx + 1] if p["role"] == "expansion")
+            labels.append(f"Expansion Pack {n}")
+    return labels
+
+
+def test_mixed_pw3_pw2_site_uses_pw2_pod_energy_and_drops_placeholder_row():
+    es_can = {"bus": {
+        "THC": [
+            {"packageSerialNumber": "TG124247002H2L"},
+            {"packageSerialNumber": "TG122300000TEF"},
+        ],
+        "POD": [
+            {"POD_EnergyStatus": {"isMIA": False, "POD_nom_full_pack_energy": 14169,
+                                  "POD_nom_energy_remaining": 11300}},
+            {"POD_EnergyStatus": {"isMIA": False, "POD_nom_full_pack_energy": 14270,
+                                  "POD_nom_energy_remaining": 11250}},
+        ],
+    }}
+
+    result = _run_bms_processing(_ticket_202_payload(es_can))
+    packs = result["individual_batteries"]
+
+    assert _labels(packs) == [
+        "Leader Powerwall",
+        "Expansion Pack 1",
+        "Expansion Pack 2",
+        "Follower Powerwall",
+        "Follower Powerwall 2",
+    ]
+    # The serial-less 14.47 kWh / 0.2 kWh placeholder is gone (was "Follower Powerwall 1.4%").
+    assert all(p["nominalEnergyRemainingWh"] > 5000 for p in packs)
+    followers = packs[3:]
+    by_serial = {p["serialNumber"]: p for p in followers}
+    assert by_serial["TG124247002H2L"]["nominalFullPackEnergyWh"] == 14169
+    assert by_serial["TG122300000TEF"]["nominalFullPackEnergyWh"] == 14270
+    assert by_serial["TG122300000TEF"]["physicalDin"] == "3012170-05-C--TG122300000TEF"
+    assert all(p["energySource"] == "pw2_pod" for p in followers)
+    assert result["current_capacity_wh"] == 71689
+
+
+def test_mixed_pw3_pw2_site_without_pod_shares_residual_across_both_pw2s():
+    result = _run_bms_processing(_ticket_202_payload())
+    packs = result["individual_batteries"]
+
+    assert _labels(packs) == [
+        "Leader Powerwall",
+        "Expansion Pack 1",
+        "Expansion Pack 2",
+        "Follower Powerwall",
+        "Follower Powerwall 2",
+    ]
+    followers = packs[3:]
+    assert [p["serialNumber"] for p in followers] == ["TG122300000TEF", "TG124247002H2L"]
+    leader_stack_full = 14340 + 14420 + 14470
+    leader_stack_rem = 11530 + 12310 + 12610
+    for pack in followers:
+        assert round(pack["nominalFullPackEnergyWh"]) == round((71689 - leader_stack_full) / 2)
+        assert round(pack["nominalEnergyRemainingWh"]) == round((59000 - leader_stack_rem) / 2)
+        soc = pack["nominalEnergyRemainingWh"] / pack["nominalFullPackEnergyWh"]
+        assert 0.7 < soc < 0.9
+
+
+def test_mixed_site_ignores_pod_that_disagrees_with_aggregate():
+    es_can = {"bus": {"POD": [
+        {"POD_EnergyStatus": {"POD_nom_full_pack_energy": 5000, "POD_nom_energy_remaining": 100}},
+        {"POD_EnergyStatus": {"POD_nom_full_pack_energy": 5000, "POD_nom_energy_remaining": 100}},
+    ]}}
+
+    packs = _run_bms_processing(_ticket_202_payload(es_can))["individual_batteries"]
+
+    assert [p["energySource"] for p in packs[3:]] == ["aggregate_share", "aggregate_share"]
+
+
+def test_pw2_units_do_not_take_pw3_follower_slots():
+    packs = [
+        {"serialNumber": "L", "bmsSerialNumber": "L", "isFollower": False},
+        {"serialNumber": "E1", "bmsSerialNumber": "E1", "isFollower": False},
+        {"serialNumber": None, "bmsSerialNumber": None, "isFollower": False},
+    ]
+    battery_blocks = [
+        {"din": "1707000-30-L--LEADER"},
+        {"din": "3012170-05-C--PW2A"},
+    ]
+
+    assign_pack_roles_from_battery_blocks(packs, battery_blocks, "1707000-30-L--LEADER", [])
+
+    assert [p["role"] for p in packs] == ["leader", "expansion", "expansion"]
+
+
+def test_empty_bms_reply_does_not_publish_zero_health():
+    data = {"control": {"batteryBlocks": [{"din": "1707000-30-L--TG126013001MFM"}]},
+            "components": {"msa": []}}
+
+    assert _run_bms_processing(data) is None
