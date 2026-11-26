@@ -1326,6 +1326,11 @@ async def async_load_recovery_state(
         if not await _save_sidecar(hass, entry, runtime, state):
             runtime[_SIDECAR_HOLD_KEY] = "recovery_interrupted_save_failed"
             return False
+    if _prune_released_history(state, runtime, time.time()):
+        _next_revision(state)
+        # Housekeeping only: an unsaved prune means the old records come back
+        # at the next load, never a lost obligation, so a failure is ignored.
+        await _save_sidecar(hass, entry, runtime, state)
 
     runtime[_SIDECAR_STATE_KEY] = state
     runtime[_SIDECAR_LOADED_KEY] = True
@@ -1336,6 +1341,63 @@ async def async_load_recovery_state(
     # liability/incident records live in the sidecar above.
     runtime[RECOVERY_KEY] = deepcopy(state["recovery"])
     return True
+
+
+# Released recovery history is kept this long for support, then pruned at load.
+RELEASED_INCIDENT_RETENTION_SECONDS = 7 * 24 * 3600
+FINISHED_SUBMISSION_RETENTION_SECONDS = 24 * 3600
+_FINISHED_SUBMISSION_STATUSES = frozenset({"completed", "not_sent", "error"})
+
+
+def _old_enough(value: Any, now: float, retention: float) -> bool:
+    return (type(value) in (int, float) and math.isfinite(value)
+            and now - value >= retention)
+
+
+def _prune_released_history(state: dict[str, Any], runtime: Mapping[str, Any], now: float) -> int:
+    """Drop recovery history that can no longer affect any command.
+
+    Removes incidents released more than a week ago (never one awaiting
+    activation), with their own released obligation and liability record,
+    and submissions that finished more than a day ago and are no longer
+    tracked as a running provider task. Pending, held and untimestamped
+    records are always kept, as is the per-vehicle ledger. Returns the
+    number of records removed.
+    """
+    removed = 0
+    incidents = state.get("incidents")
+    obligations = state.get("obligations")
+    liabilities = state.get("liabilities")
+    if isinstance(incidents, dict):
+        for incident_id, incident in list(incidents.items()):
+            if (not isinstance(incident, dict) or incident.get("phase") != "released"
+                    or incident.get("activation_pending")
+                    or not _old_enough(incident.get("released_at"), now,
+                                       RELEASED_INCIDENT_RETENTION_SECONDS)):
+                continue
+            obligation = obligations.get(incident_id) if isinstance(obligations, dict) else None
+            if obligation is not None and (
+                not isinstance(obligation, dict) or obligation.get("phase") != "released"
+            ):
+                continue
+            del incidents[incident_id]
+            removed += 1
+            if isinstance(obligations, dict) and obligations.pop(incident_id, None) is not None:
+                removed += 1
+            if isinstance(liabilities, dict) and liabilities.pop(incident_id, None) is not None:
+                removed += 1
+    submissions = state.get("submissions")
+    tracked = runtime.get(_SUBMISSIONS_KEY) or {}
+    if isinstance(submissions, dict):
+        for submission_id, record in list(submissions.items()):
+            if (submission_id in tracked or not isinstance(record, dict)
+                    or record.get("status") not in _FINISHED_SUBMISSION_STATUSES
+                    or not _old_enough(record.get("completed_at"), now,
+                                       FINISHED_SUBMISSION_RETENTION_SECONDS)):
+                continue
+            del submissions[submission_id]
+            removed += 1
+    return removed
 
 
 # Holds where the durable recovery evidence is already gone or unreadable. Every

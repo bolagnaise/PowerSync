@@ -2911,3 +2911,62 @@ async def test_reset_refuses_holds_that_can_clear_on_their_own(harness):
     assert (await recovery.async_reset_recovery_store(
         hass, entry, confirm_vehicles_checked=True,
     ))["error"] == "no_resettable_hold"
+
+
+# --- Pruning released recovery history at load ---------------------------------
+
+@pytest.mark.asyncio
+async def test_load_prunes_only_old_released_history(harness):
+    import time as _time
+
+    hass, entry, store, _, _ = _sidecar_harness(harness)
+    runtime = hass.data["power_sync"][entry.entry_id]
+    now = _time.time()
+    old, recent = now - recovery.RELEASED_INCIDENT_RETENTION_SECONDS - 60, now - 60
+    state = recovery._new_sidecar()
+    state["incidents"] = {
+        "old_released": {"phase": "released", "released_at": old},
+        "recent_released": {"phase": "released", "released_at": recent},
+        "old_activation": {"phase": "released", "released_at": old, "activation_pending": True},
+        "old_no_stamp": {"phase": "released"},
+        "held": {"phase": "held"},
+        "old_open_obligation": {"phase": "released", "released_at": old},
+    }
+    state["obligations"] = {
+        "old_released": {"phase": "released"},
+        "held": {"phase": "held"},
+        "old_open_obligation": {"phase": "held"},
+    }
+    state["liabilities"] = {"old_released": {"state": "retained_reconciled"}, "held": {}}
+    day = recovery.FINISHED_SUBMISSION_RETENTION_SECONDS
+    state["submissions"] = {
+        "old_done": {"status": "completed", "completed_at": now - day - 60},
+        "old_error": {"status": "error", "completed_at": now - day - 60},
+        "recent_done": {"status": "completed", "completed_at": now - 60},
+        "pending": {"status": "pending", "created_at": now - day - 60},
+        "tracked": {"status": "completed", "completed_at": now - day - 60},
+    }
+    store.value = state
+    runtime[recovery._SUBMISSIONS_KEY] = {"tracked": {"vehicle_id": VIN_A}}
+
+    assert await recovery.async_load_recovery_state(hass, entry)
+
+    saved = store.value
+    assert set(saved["incidents"]) == {
+        "recent_released", "old_activation", "old_no_stamp", "held", "old_open_obligation",
+    }
+    assert set(saved["obligations"]) == {"held", "old_open_obligation"}
+    assert set(saved["liabilities"]) == {"held"}
+    assert set(saved["submissions"]) == {"recent_done", "pending", "tracked"}
+    assert saved["revision"] > state["revision"]
+    assert runtime["_tesla_ev_recovery_sidecar"]["incidents"].keys() == saved["incidents"].keys()
+
+
+@pytest.mark.asyncio
+async def test_load_does_not_save_when_nothing_is_old_enough(harness):
+    hass, entry, store, _, _ = _sidecar_harness(harness)
+    state = recovery._new_sidecar()
+    state["incidents"] = {"held": {"phase": "held"}}
+    store.value = state
+    assert await recovery.async_load_recovery_state(hass, entry)
+    assert store.saves == []

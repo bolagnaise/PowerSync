@@ -336,7 +336,10 @@ readers.
 The recovery sidecar (`power_sync.ev_transport_recovery.<entry_id>`) is
 independent of the automation store's legacy projection. It retains incidents,
 generations, attempts, liabilities and essential finite stop obligations.
-Startup hydrates it before charging callbacks. A durable enrollment marker
+Startup hydrates it before charging callbacks, and drops history that can no
+longer affect a command: incidents released more than seven days ago (with their
+released obligation and liability record) and submissions finished more than a
+day ago. Pending and held records, and the per-vehicle ledger, are kept. A durable enrollment marker
 prevents a missing established sidecar from looking like a first installation.
 A malformed store or persistence failure holds new positive control. A missing
 or unreadable established sidecar holds on every restart; after you have checked
