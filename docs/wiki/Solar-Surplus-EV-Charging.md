@@ -44,6 +44,18 @@ can request a stop if the Tesla starts charging on plug-in. This requires
 PowerSync control of that vehicle and fresh, matching charging state and power.
 The hands-off external charging setting continues to leave those sessions alone.
 
+### Powerwall calibration
+
+During a Tesla Powerwall calibration the gateway discharges the battery on its
+own, then recharges it, and ignores charge commands until it finishes. While
+PowerSync's **Calibration Active** sensor is on, Solar Surplus treats that
+discharge as available for the EV instead of exporting it, and the battery
+minimum and pause thresholds do not apply because they cannot protect the
+battery while Tesla drains it. The export limit above still applies: if
+exporting is worth more than your limit, the energy is exported. The EV only
+takes power that is actually being exported, so this never charges the car from
+the grid. Normal battery thresholds return when the calibration alert clears.
+
 If Home Assistant has more than one location tracker for the same Tesla,
 PowerSync uses the latest report for that car when deciding whether it is home.
 
