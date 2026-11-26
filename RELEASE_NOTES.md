@@ -7,3 +7,9 @@ Amber users have a new **Amber forecast accuracy** card on the PowerSync dashboa
 Use it to decide on **Amber Forecast Confidence**. After 2 days and at least 3 forecast spikes, the card says whether the setting suits your results. If most spikes didn't happen, it may suit you; if most did, leaving it off lets the plan hold energy for them. The same figures are in the new **Amber Forecast Accuracy** sensor. Tracking starts when you update, so the card fills in over the first few days. It is information only and does not change how the optimizer plans.
 
 Update through HACS and restart Home Assistant.
+
+## Powerwall restore now repairs tariffs saved by older versions
+
+v2.12.1844 stopped new restores from turning a Sunday-only period, such as weekend off-peak, into an every-day period. A tariff that an older version had already saved could still hold the widened period, so Tesla kept rejecting the restore with `Invalid tariff provided`. Restores now narrow that saved period back to Sunday, but only when it sits next to a matching Saturday period and the result overlaps nothing else.
+
+Update through HACS and restart Home Assistant. If a restore is still pending, press **Restore normal** once after updating.
