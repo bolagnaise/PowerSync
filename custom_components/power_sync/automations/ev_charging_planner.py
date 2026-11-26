@@ -161,6 +161,11 @@ AUTO_SCHEDULE_START_RETRY_BASE_SECONDS = 30
 SMART_SCHEDULE_CLAIM_MAX_AGE_SECONDS = 120.0
 # An unconfirmed Scheduled Stop blocks restarts at most this long without a draw.
 SCHEDULED_PENDING_STOP_MAX_SECONDS = 15 * 60
+# Price-Level waits this long for a Zaptec poll to show its Stop took effect.
+# Afterwards it re-evaluates instead of waiting for ever: a charger still
+# charging is stopped again (or kept, if the price now allows it), and missing
+# telemetry becomes an ordinary wait that clears when telemetry returns.
+ZAPTEC_STOP_READBACK_MAX_SECONDS = 15 * 60
 # Same INFO-pinned logger as ev_ownership.EV_DECISION_LOGGER.
 _EV_DECISION_LOGGER = logging.getLogger(
     "custom_components.power_sync.automations.ev_decisions"
@@ -12074,7 +12079,8 @@ class PriceLevelChargingExecutor:
             stop_readback = self._zaptec_cached_readback_after(
                 vehicle_state.stop_requested_at
             )
-            if stop_readback is not False:
+            waited = time.monotonic() - vehicle_state.stop_requested_at
+            if stop_readback is not False and waited < ZAPTEC_STOP_READBACK_MAX_SECONDS:
                 vehicle_state.is_charging = True
                 vehicle_state.last_decision = "stopping"
                 vehicle_state.last_decision_reason = (
@@ -12082,13 +12088,24 @@ class PriceLevelChargingExecutor:
                 )
                 await self.apply_preserve_home_battery(True, reason)
                 return decision
-            vehicle_state.stop_pending = False
-            vehicle_state.stop_requested_at = 0.0
-            vehicle_state.is_charging = False
-            vehicle_state.charging_mode = ""
-            vehicle_state.zaptec_owned = False
-            vehicle_state.last_decision = "stopped"
-            vehicle_state.last_decision_reason = reason
+            if stop_readback is not False:
+                _LOGGER.warning(
+                    "Price-level charging: Zaptec %s did not report stopped %.0f s "
+                    "after Stop (%s); re-evaluating",
+                    pseudo_vin, waited,
+                    "still charging" if stop_readback else "no fresh telemetry",
+                )
+                vehicle_state.stop_pending = False
+                vehicle_state.stop_requested_at = 0.0
+                vehicle_state.is_charging = stop_readback is True
+            else:
+                vehicle_state.stop_pending = False
+                vehicle_state.stop_requested_at = 0.0
+                vehicle_state.is_charging = False
+                vehicle_state.charging_mode = ""
+                vehicle_state.zaptec_owned = False
+                vehicle_state.last_decision = "stopped"
+                vehicle_state.last_decision_reason = reason
 
         # Several logical VINs may resolve to the same physical charger. A
         # manual/Boost/external owner on any alias must also protect that charger.
