@@ -1,13 +1,14 @@
 """Shared Tesla Powerwall calibration state handling.
 
 Tesla exposes explicit ``BatteryCalibration`` and ``CalibrationRequested``
-alerts through the local DeviceControllerQuery path.  Gateways that raise
-``CalibrationRequested`` take over the battery for the calibration cycle and
-ignore owner charge commands, so both alerts are treated as calibration.  Other
-gateways keep ``CalibrationRequested`` raised for days while still following
-owner commands, so the ``refresh_calibration`` service can acknowledge a
-request-only episode until that alert clears; ``BatteryCalibration`` is never
-acknowledged away.  Older PowerSync releases could only infer a
+alerts through the local DeviceControllerQuery path.  ``BatteryCalibration``
+always pauses automatic control.  ``CalibrationRequested`` is only a request:
+some gateways keep it raised for days while following owner commands, while
+others take over the battery straight away and ignore charge commands.  It
+therefore pauses control only after Tesla is seen discharging against an
+active PowerSync charge or hold, until the alert clears, a drain-and-refill
+cycle completes, 72 hours pass, or the owner runs ``refresh_calibration``
+(which also acknowledges a lingering request until it clears).  Older PowerSync releases could only infer a
 calibration after repeated cloud operation-mode verification failures.  This
 module keeps both signals as independent sources and derives the compatibility
 ``calibration_suspected`` flag used by the optimiser and service guards.
@@ -28,6 +29,18 @@ _CALIBRATION_ALERT_NAMES = frozenset(
     {_ACTIVE_CALIBRATION_ALERT_NAME, _REQUESTED_CALIBRATION_ALERT_NAME}
 )
 CALIBRATION_REQUEST_ACK_KEY = "_calibration_request_acknowledged"
+# CalibrationRequested only pauses control once Tesla is seen overriding an
+# active PowerSync charge/hold.  The latch records that takeover so the pause
+# survives PowerSync releasing its own command, and is bounded below.
+CALIBRATION_TAKEOVER_SINCE_KEY = "_calibration_takeover_since"
+CALIBRATION_TAKEOVER_LATCH_KEY = "_calibration_takeover_latch"
+CALIBRATION_TAKEOVER_MIN_DISCHARGE_W = 1000.0
+CALIBRATION_TAKEOVER_CONFIRM_SECONDS = 180.0
+# Tesla completes a calibration within 72 hours; a requested-only pause never
+# outlives that, nor a completed drain-and-refill cycle.
+CALIBRATION_TAKEOVER_MAX_SECONDS = 72 * 3600
+CALIBRATION_CYCLE_LOW_SOC = 20.0
+CALIBRATION_CYCLE_FULL_SOC = 98.0
 
 
 def _normalized_alert_name(value: Any) -> str:
@@ -151,6 +164,8 @@ def clear_calibration_sources(entry_data: dict[str, Any]) -> CalibrationTransiti
     was_active = bool(calibration_sources(entry_data))
     if was_active:
         entry_data[CALIBRATION_REQUEST_ACK_KEY] = True
+    entry_data.pop(CALIBRATION_TAKEOVER_SINCE_KEY, None)
+    entry_data.pop(CALIBRATION_TAKEOVER_LATCH_KEY, None)
     entry_data["_calibration_sources"] = []
     entry_data["calibration_sources"] = []
     entry_data["calibration_source"] = None

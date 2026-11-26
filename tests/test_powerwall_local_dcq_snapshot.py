@@ -571,6 +571,7 @@ def test_local_battery_calibration_alert_sets_and_stably_clears_guard(active_ale
         notifications.append(started)
 
     coord._schedule_calibration_transition_notification = _notify
+    _arm_takeover(entry_data)
 
     asyncio.run(coord._sync_calibration_alert(_calibration_snapshot(True, active_alerts)))
     asyncio.run(coord._sync_calibration_alert(_calibration_snapshot(True, active_alerts)))
@@ -612,6 +613,16 @@ def _sync(coord, active, alerts=None):
     asyncio.run(coord._sync_calibration_alert(_calibration_snapshot(active, alerts)))
 
 
+def _arm_takeover(entry_data):
+    """Tesla has discharged against an active PowerSync force charge for 3+ minutes."""
+    import time
+
+    entry_data["force_charge_state"] = {"active": True}
+    entry_data[calibration_mod.CALIBRATION_TAKEOVER_SINCE_KEY] = (
+        time.monotonic() - calibration_mod.CALIBRATION_TAKEOVER_CONFIRM_SECONDS - 1
+    )
+
+
 def test_reset_acknowledges_lingering_calibration_requested_until_it_clears():
     # Ticket 202: CalibrationRequested stayed raised for days before and after
     # Tesla's calibration while the gateway still followed owner commands.
@@ -619,6 +630,7 @@ def test_reset_acknowledges_lingering_calibration_requested_until_it_clears():
     entry_data: dict = {}
     coord, notifications = _calibration_coordinator(entry_data)
 
+    _arm_takeover(entry_data)
     _sync(coord, True, _LINGERING_REQUEST_ALERTS)
     assert entry_data["calibration_suspected"] is True
     assert notifications == [True]
@@ -637,8 +649,9 @@ def test_reset_acknowledges_lingering_calibration_requested_until_it_clears():
     _sync(coord, True, _LINGERING_REQUEST_ALERTS)
     assert entry_data["calibration_suspected"] is False
 
-    # Once Tesla clears the request, the next request pauses control again.
+    # Once Tesla clears the request, the next observed takeover pauses again.
     _sync(coord, False)
+    _arm_takeover(entry_data)
     _sync(coord, True, _LINGERING_REQUEST_ALERTS)
     assert entry_data["calibration_suspected"] is True
     assert notifications == [True, True]
@@ -656,6 +669,7 @@ def test_reset_never_acknowledges_battery_calibration(battery_alerts):
     entry_data: dict = {}
     coord, notifications = _calibration_coordinator(entry_data)
 
+    _arm_takeover(entry_data)
     _sync(coord, True, _LINGERING_REQUEST_ALERTS)
     calibration_mod.clear_calibration_sources(entry_data)
     _sync(coord, True, _LINGERING_REQUEST_ALERTS)
@@ -677,8 +691,113 @@ def test_reset_without_active_guard_does_not_suppress_next_request():
     entry_data: dict = {}
     coord, _ = _calibration_coordinator(entry_data)
     calibration_mod.clear_calibration_sources(entry_data)
+    _arm_takeover(entry_data)
     _sync(coord, True, _LINGERING_REQUEST_ALERTS)
     assert entry_data["calibration_suspected"] is True
+
+
+def test_calibration_requested_alone_never_pauses_a_following_gateway():
+    # Ticket 202: the request sat for days while the Powerwall obeyed commands.
+    entry_data: dict = {}
+    coord, notifications = _calibration_coordinator(entry_data)
+
+    # No PowerSync charge/hold: ordinary discharge is not evidence of takeover.
+    for _ in range(5):
+        _sync(coord, True, _LINGERING_REQUEST_ALERTS)
+    assert not entry_data.get("calibration_suspected")
+
+    # A force charge that the gateway follows (battery charging) is not either.
+    entry_data["force_charge_state"] = {"active": True}
+    charging = _calibration_snapshot(True, _LINGERING_REQUEST_ALERTS)
+    charging.battery_w = -9000.0
+    charging.grid_w = 2000.0
+    for _ in range(5):
+        asyncio.run(coord._sync_calibration_alert(charging))
+    assert not entry_data.get("calibration_suspected")
+    assert notifications == []
+
+
+def test_calibration_requested_takeover_needs_sustained_contradiction():
+    import time
+
+    entry_data: dict = {"force_charge_state": {"active": True}}
+    coord, notifications = _calibration_coordinator(entry_data)
+
+    # Discharging against the force charge starts the confirmation timer only.
+    _sync(coord, True, _LINGERING_REQUEST_ALERTS)
+    assert not entry_data.get("calibration_suspected")
+    since = entry_data[calibration_mod.CALIBRATION_TAKEOVER_SINCE_KEY]
+
+    # A grid outage (islanded) breaks the contradiction and restarts the timer.
+    islanded = _calibration_snapshot(True, _LINGERING_REQUEST_ALERTS)
+    islanded.grid_status = "SystemIslandedActive"
+    asyncio.run(coord._sync_calibration_alert(islanded))
+    assert calibration_mod.CALIBRATION_TAKEOVER_SINCE_KEY not in entry_data
+
+    _sync(coord, True, _LINGERING_REQUEST_ALERTS)
+    entry_data[calibration_mod.CALIBRATION_TAKEOVER_SINCE_KEY] = (
+        time.monotonic() - calibration_mod.CALIBRATION_TAKEOVER_CONFIRM_SECONDS - 1
+    )
+    _sync(coord, True, _LINGERING_REQUEST_ALERTS)
+    assert entry_data["calibration_suspected"] is True
+    assert notifications == [True]
+    assert since is not None
+
+    # The pause survives PowerSync releasing its own force charge.
+    entry_data["force_charge_state"] = {"active": False}
+    for _ in range(5):
+        _sync(coord, True, _LINGERING_REQUEST_ALERTS)
+    assert entry_data["calibration_suspected"] is True
+
+
+def test_calibration_requested_takeover_ends_after_drain_and_refill_cycle():
+    entry_data: dict = {}
+    coord, notifications = _calibration_coordinator(entry_data)
+    _arm_takeover(entry_data)
+    _sync(coord, True, _LINGERING_REQUEST_ALERTS)
+    assert entry_data["calibration_suspected"] is True
+
+    low = _calibration_snapshot(True, _LINGERING_REQUEST_ALERTS)
+    low.soc = 6.0
+    asyncio.run(coord._sync_calibration_alert(low))
+    assert entry_data["calibration_suspected"] is True
+
+    # The request lingers after Tesla refilled the battery; control resumes.
+    full = _calibration_snapshot(True, _LINGERING_REQUEST_ALERTS)
+    full.soc = 99.0
+    full.battery_w = -500.0
+    entry_data["force_charge_state"] = {"active": False}
+    asyncio.run(coord._sync_calibration_alert(full))
+    assert entry_data["calibration_suspected"] is False
+    assert notifications == [True, False]
+
+    # It stays resumed while the lingering request is obeyed.
+    for _ in range(5):
+        asyncio.run(coord._sync_calibration_alert(full))
+    assert entry_data["calibration_suspected"] is False
+
+
+def test_calibration_requested_takeover_is_bounded_by_tesla_72_hour_limit():
+    import time
+
+    entry_data: dict = {}
+    coord, notifications = _calibration_coordinator(entry_data)
+    _arm_takeover(entry_data)
+    _sync(coord, True, _LINGERING_REQUEST_ALERTS)
+    entry_data["force_charge_state"] = {"active": False}
+    latch = entry_data[calibration_mod.CALIBRATION_TAKEOVER_LATCH_KEY]
+    latch["since"] = time.time() - calibration_mod.CALIBRATION_TAKEOVER_MAX_SECONDS - 1
+    _sync(coord, True, _LINGERING_REQUEST_ALERTS)
+    assert entry_data["calibration_suspected"] is False
+    assert notifications == [True, False]
+
+
+def test_battery_calibration_pauses_without_takeover_evidence():
+    entry_data: dict = {}
+    coord, notifications = _calibration_coordinator(entry_data)
+    _sync(coord, True, [{"name": "BatteryCalibration"}])
+    assert entry_data["calibration_suspected"] is True
+    assert notifications == [True]
 
 
 def test_request_only_matcher_distinguishes_battery_calibration():

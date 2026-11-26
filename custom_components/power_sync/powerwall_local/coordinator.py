@@ -28,7 +28,14 @@ from ..const import (
 from ..tesla_calibration import (
     CALIBRATION_SOURCE_LOCAL_ALERT,
     CALIBRATION_SOURCE_MODE_STICK,
+    CALIBRATION_CYCLE_FULL_SOC,
+    CALIBRATION_CYCLE_LOW_SOC,
     CALIBRATION_REQUEST_ACK_KEY,
+    CALIBRATION_TAKEOVER_CONFIRM_SECONDS,
+    CALIBRATION_TAKEOVER_LATCH_KEY,
+    CALIBRATION_TAKEOVER_MAX_SECONDS,
+    CALIBRATION_TAKEOVER_MIN_DISCHARGE_W,
+    CALIBRATION_TAKEOVER_SINCE_KEY,
     calibration_sources,
     dispatch_calibration_state,
     powerwall_calibration_alert_active,
@@ -385,6 +392,31 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
             CALIBRATION_SOURCE_LOCAL_ALERT in calibration_sources(entry_data)
         )
 
+        if alert_active and powerwall_calibration_request_only(snap.alerts):
+            latch = entry_data.get(CALIBRATION_TAKEOVER_LATCH_KEY)
+            if source_was_active and isinstance(latch, dict):
+                if self._calibration_takeover_finished(latch, snap):
+                    self._end_calibration_takeover(entry_data)
+                    return
+            elif self._calibration_takeover_observed(entry_data, snap):
+                entry_data[CALIBRATION_TAKEOVER_LATCH_KEY] = {
+                    "since": time.time(),
+                    "min_soc": snap.soc if isinstance(snap.soc, (int, float)) else None,
+                }
+                _LOGGER.warning(
+                    "Tesla is discharging the Powerwall against PowerSync's active "
+                    "charge/hold while CalibrationRequested is raised — treating it "
+                    "as a calibration takeover"
+                )
+            else:
+                # A request alone does not mean Tesla has taken over; some
+                # gateways keep it raised for days while following commands.
+                alert_active = False
+        else:
+            entry_data.pop(CALIBRATION_TAKEOVER_SINCE_KEY, None)
+            if not alert_active:
+                entry_data.pop(CALIBRATION_TAKEOVER_LATCH_KEY, None)
+
         if alert_active:
             entry_data["_calibration_alert_clear_polls"] = 0
             transition = set_calibration_source(
@@ -442,6 +474,63 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
                 "Powerwall calibration alert cleared for %d consecutive "
                 "polls — resuming normal battery control",
                 POWERWALL_CALIBRATION_CLEAR_POLLS,
+            )
+            self._schedule_calibration_transition_notification(started=False)
+
+    def _calibration_takeover_observed(
+        self, entry_data: dict[str, Any], snap: PowerwallSnapshot
+    ) -> bool:
+        """Return True once Tesla has discharged against our charge/hold for a while."""
+        commanded = any(
+            isinstance(entry_data.get(key), dict) and entry_data[key].get("active")
+            for key in ("force_charge_state", "hold_soc_state")
+        )
+        battery_w = snap.battery_w
+        contradicted = (
+            commanded
+            and snap.grid_status == "SystemGridConnected"
+            and isinstance(battery_w, (int, float))
+            and not isinstance(battery_w, bool)
+            and battery_w > CALIBRATION_TAKEOVER_MIN_DISCHARGE_W
+        )
+        if not contradicted:
+            entry_data.pop(CALIBRATION_TAKEOVER_SINCE_KEY, None)
+            return False
+        now = time.monotonic()
+        since = entry_data.setdefault(CALIBRATION_TAKEOVER_SINCE_KEY, now)
+        return now - since >= CALIBRATION_TAKEOVER_CONFIRM_SECONDS
+
+    @staticmethod
+    def _calibration_takeover_finished(latch: dict[str, Any], snap: PowerwallSnapshot) -> bool:
+        """Bound a requested-only pause by a full cycle or Tesla's 72-hour limit."""
+        soc = snap.soc
+        if isinstance(soc, (int, float)) and not isinstance(soc, bool):
+            low = latch.get("min_soc")
+            if not isinstance(low, (int, float)) or soc < low:
+                latch["min_soc"] = low = soc
+            if low <= CALIBRATION_CYCLE_LOW_SOC and soc >= CALIBRATION_CYCLE_FULL_SOC:
+                return True
+        since = latch.get("since")
+        return (
+            isinstance(since, (int, float))
+            and time.time() - since >= CALIBRATION_TAKEOVER_MAX_SECONDS
+        )
+
+    def _end_calibration_takeover(self, entry_data: dict[str, Any]) -> None:
+        """Resume control after a requested-only takeover finished."""
+        entry_data.pop(CALIBRATION_TAKEOVER_LATCH_KEY, None)
+        entry_data.pop(CALIBRATION_TAKEOVER_SINCE_KEY, None)
+        entry_data["_calibration_alert_clear_polls"] = 0
+        transition = set_calibration_source(
+            entry_data,
+            CALIBRATION_SOURCE_LOCAL_ALERT,
+            False,
+        )
+        if transition.completed:
+            dispatch_calibration_state(self.hass, self._entry_id)
+            _LOGGER.info(
+                "Powerwall calibration takeover finished while CalibrationRequested "
+                "remains raised — resuming normal battery control"
             )
             self._schedule_calibration_transition_notification(started=False)
 
