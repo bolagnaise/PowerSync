@@ -21,6 +21,8 @@ namespace esphome { namespace tesla_ble_vehicle {
 static const char *const PAIR_TAG = "tesla_ble_vehicle.cos_pairing";
 static const char *const PAIR_SITES = "powersync_cos_sites";
 static const char *const PAIR_SITE_WRITE = "powersync_cos_site_write";
+// PowerSync waits 90 s for the tap; hold VCSEC commands slightly longer.
+static constexpr uint32_t KEY_ADD_HOLD_MS = 95000;
 
 using cos_pairing::Kind;
 
@@ -143,8 +145,9 @@ void TeslaBLEVehicle::request_cos_pairing(const std::string &text) {
   else if (this->node_state != espbt::ClientState::ESTABLISHED) refusal = "ble_disconnected";
   else if (cos_.busy()) refusal = "charge_on_solar_busy";
   // A VCSEC reply carries no request ID the generic handler checks, so never
-  // send one while a queued command could mistake it for its own answer.
-  else if (vcsec && !command_queue_.empty()) refusal = "command_queue_busy";
+  // send one while a started VCSEC command could mistake it for its own answer.
+  else if (vcsec && vcsec_command_in_flight()) refusal = "command_queue_busy";
+  else if (request.kind == Kind::AddKey && key_add_pending(millis())) refusal = "key_add_pending";
   if (refusal != nullptr) {
     if (pair_.refuse(slot, refusal)) publish_cos_pairing();
     return;
@@ -176,6 +179,9 @@ void TeslaBLEVehicle::request_cos_pairing(const std::string &text) {
   }
   if (request.kind == Kind::AddKey) {
     ESP_LOGI(PAIR_TAG, "Charging-manager key add sent; tap a key card on the car to approve it");
+    // Hold queued VCSEC commands until the add resolves or the tap window ends.
+    pair_key_add_until_ = millis() + KEY_ADD_HOLD_MS;
+    if (pair_key_add_until_ == 0) pair_key_add_until_ = 1;
     pair_.phase = 'p';
     publish_cos_pairing();
   } else {
@@ -278,6 +284,8 @@ bool TeslaBLEVehicle::handle_cos_pairing_entry(const VCSEC_WhitelistEntryInfo &i
   const bool by_id = !info.has_publicKey && info.has_keyId && same_key_id(pair_request_.key, info.keyId);
   if (!by_key && !by_id) return false;  // an entry for some other key
   pair_entry_role_ = int(info.keyRole);
+  // The key is on the car, so the add has resolved.
+  pair_key_add_until_ = 0;
   pair_.phase = 'k';
   ESP_LOGI(PAIR_TAG, "Whitelist entry found with role %d", pair_entry_role_);
   publish_cos_pairing();

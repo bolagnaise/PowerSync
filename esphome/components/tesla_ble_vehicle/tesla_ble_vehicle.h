@@ -348,6 +348,18 @@ namespace esphome
             bool handle_cos_pairing_entry_error(int generic_error);
             int pair_entry_role_{-1};
             uint8_t pair_site_outcome_{0};
+            // While a charging-manager key add awaits its key-card tap, the car's
+            // eventual VCSEC reply carries nothing the generic handler correlates,
+            // so queued VCSEC commands are held back until the add resolves.
+            uint32_t pair_key_add_until_{0};
+            bool key_add_pending(uint32_t now) const {
+              return pair_key_add_until_ != 0 && int32_t(pair_key_add_until_ - now) > 0;
+            }
+            bool vcsec_command_in_flight() const {
+              return !command_queue_.empty()
+                  && command_queue_.front().domain == UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY
+                  && command_queue_.front().state != BLECommandState::IDLE;
+            }
             void tick_cos_pairing();
             void remember_vehicle_key(UniversalMessage_Domain domain, const Signatures_SessionInfo &info);
             cos::Protocol pair_;

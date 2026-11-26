@@ -202,8 +202,14 @@ class PairingBridge:
     async def _request(self, text: str, kind: str, nonce: str, *, write: bool = False,
                        done: frozenset = frozenset({"k"})) -> dict[str, Any]:
         label = "write" if write else "read"
-        await self.hass.services.async_call(
-            "text", "set_value", {"entity_id": self.request_id, "value": text}, blocking=True)
+        try:
+            await self.hass.services.async_call(
+                "text", "set_value", {"entity_id": self.request_id, "value": text}, blocking=True)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:  # noqa: BLE001 - normalised for the request gate
+            # A write the bridge never received changed nothing.
+            raise SolarError(f"Tesla BLE pairing {label} could not be sent to the bridge") from error
         deadline = time.monotonic() + TIMEOUT_SECONDS
         while time.monotonic() < deadline:
             state = self._state()
@@ -542,13 +548,23 @@ async def _repair_vehicle_client(client, bridge, vin: str, domain: str | None) -
                            "before trying again")
 
 
+def site_in_place(status: dict[str, Any]) -> bool:
+    """A site counts only if its key matches and its DIN and location are not known to be wrong."""
+    return (status.get("status") == "present" and status.get("din_matches") is not False
+            and status.get("near_home") is not False)
+
+
 async def _repair_site(bridge, gateway, key_format: str | None, location) -> dict[str, Any]:
     sites = await bridge.managed_sites()
     current = site_step(sites, gateway, location)
-    if current["status"] == "present":
+    if site_in_place(current):
         return {"result": "already_present", "status": current}
     if current["status"] == "unknown":
         raise SolarError("The bridge could not report every managed site; nothing was changed")
+    if current["status"] == "present":
+        # This gateway's site has the wrong DIN or location: send it again
+        # with the requested details, in the encoding the car already stores.
+        key_format = current["key_format"]
     if key_format is None:
         raise SolarError("Choose key_format: the car's expected encoding of the gateway key is undocumented "
                          "and no existing site shows it")
@@ -556,11 +572,14 @@ async def _repair_site(bridge, gateway, key_format: str | None, location) -> dic
     readback = await bridge.add_site(gateway["encodings"][key_format], gateway["din"], *location)
     status = site_step(readback, gateway, location)
     status["outcome"] = readback["outcome"]
-    if status["status"] == "present":
+    if site_in_place(status):
         return {"result": "confirmed", "status": status}
     if readback["outcome"] == "existing_site_nearby":
         raise SolarError("The car kept an existing managed site near this location instead of adding one. "
                          "Remove that site first")
+    if status["status"] == "present":
+        raise PairingUncertain("The car acknowledged the site, but its readback still shows the wrong DIN or "
+                               "location. Remove the site and add it again")
     raise PairingUncertain("The car acknowledged the site but its readback does not show it")
 
 

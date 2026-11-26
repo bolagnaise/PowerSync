@@ -125,9 +125,17 @@ class BleSolarBridge:
             settings = validate_settings(settings)
             text = (f"set:{nonce}:{int(settings['enabled'])}:"
                     f"{settings['lowerChargeLimit']}:{settings['upperChargeLimit']}")
-        await self.hass.services.async_call(
-            "text", "set_value", {"entity_id": self.request_id, "value": text}, blocking=True)
         label = "read" if settings is None else "write"
+        try:
+            await self.hass.services.async_call(
+                "text", "set_value", {"entity_id": self.request_id, "value": text}, blocking=True)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:  # noqa: BLE001 - normalised so ownership cleanup runs
+            # The request never reached the bridge (for example it went
+            # offline after discovery). A failed read must release a hold it
+            # created; callers keep an uncertain write's hold as usual.
+            raise SolarError(f"Tesla BLE Charge on Solar {label} could not be sent to the bridge") from error
         deadline = time.monotonic() + TIMEOUT_SECONDS
         while time.monotonic() < deadline:
             state = self._state()

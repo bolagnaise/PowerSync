@@ -109,6 +109,15 @@ namespace esphome
 
       BLECommand current_command = command_queue_.front();
       uint32_t now = millis();
+      // Hold a not-yet-started VCSEC command while a key add awaits its
+      // key-card tap (see cos_pairing.cpp). Keep it fresh so the wait does
+      // not count against its own timeout.
+      if (key_add_pending(now) && current_command.state == BLECommandState::IDLE
+          && current_command.domain == UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY)
+      {
+        command_queue_.front().started_at = now;
+        return;
+      }
       // Overall timeout check
       if ((now - current_command.started_at) > COMMAND_TIMEOUT)
       {

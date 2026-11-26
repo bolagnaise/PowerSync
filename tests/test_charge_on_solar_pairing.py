@@ -577,3 +577,53 @@ def test_mobile_view_reports_whole_errors_with_a_code(gate, monkeypatch):
     assert data == {"success": False, "error": "could not be confirmed", "code": "pairing_uncertain"}
     status, data = post(["not", "an", "object"])
     assert data["success"] is False
+
+
+def test_site_with_wrong_location_or_din_is_corrected(fast):
+    mod = fast
+    _, raw = point()
+    gw = gateway(mod, raw) | {"point": raw}
+    text = gw["encodings"]["base64_der"]
+    # The car has this gateway's site, but 90 km from where the car parks.
+    misplaced = {"count": 1, "complete": True, "sites": [site(mod, text, latitude=-33.0, longitude=151.2093)]}
+    fixed = {"count": 1, "complete": True, "sites": [site(mod, text, latitude=-33.8688, longitude=151.2093)]}
+    bridge = FakeBridge(mod, raw, sites=misplaced, site_after=fixed)
+    result = run(mod._repair_site(bridge, gw, None, (-33.8688, 151.2093)))
+    # Re-sent in the encoding the car already stores, then confirmed in place.
+    assert result["result"] == "confirmed"
+    assert bridge.calls == [("add_site", text, DIN, -33.8688, 151.2093)]
+    # A wrong DIN is corrected the same way.
+    wrong_din = {"count": 1, "complete": True, "sites": [site(mod, text, din="OTHER-DIN")]}
+    bridge = FakeBridge(mod, raw, sites=wrong_din, site_after={"count": 1, "complete": True, "sites": [site(mod, text)]})
+    assert run(mod._repair_site(bridge, gw, None, (-33.8688, 151.2093)))["result"] == "confirmed"
+    # If the readback still shows the wrong location, the result is uncertain.
+    bridge = FakeBridge(mod, raw, sites=misplaced, site_after=misplaced)
+    with pytest.raises(mod.PairingUncertain, match="wrong DIN or location"):
+        run(mod._repair_site(bridge, gw, None, (-33.8688, 151.2093)))
+
+
+def test_pairing_bridge_dispatch_failure_is_a_solar_error(mod):
+    hass = Hass(mod.recovery, lambda nonce, text: "")
+
+    async def offline(*args, **kwargs):
+        raise RuntimeError("ESPHome device unavailable")
+    hass.services.async_call = offline
+    with pytest.raises(mod.SolarError, match="could not be sent"):
+        run(mod.PairingBridge(hass, hass.bridge).managed_sites())
+    with pytest.raises(mod.SolarError, match="write could not be sent"):
+        run(mod.PairingBridge(hass, hass.bridge).add_gateway_key(point()[1]))
+
+
+def test_firmware_holds_vcsec_commands_during_the_key_card_window():
+    component = Path(__file__).parents[1] / "esphome/components/tesla_ble_vehicle"
+    queue = (component / "tesla_ble_vehicle.cpp").read_text()
+    process = queue[queue.index("void TeslaBLEVehicle::process_command_queue()"):]
+    hold = process.index("key_add_pending(now)")
+    # The hold comes before the timeout check, and refreshes the held command.
+    assert hold < process.index("// Overall timeout check")
+    assert "command_queue_.front().started_at = now;" in process[hold:process.index("// Overall timeout check")]
+    glue = (component / "cos_pairing.cpp").read_text()
+    assert 'refusal = "command_queue_busy"' in glue and "vcsec_command_in_flight()" in glue
+    assert 'refusal = "key_add_pending"' in glue           # never two adds at once
+    assert "pair_key_add_until_ = millis() + KEY_ADD_HOLD_MS;" in glue
+    assert glue.count("pair_key_add_until_ = 0;") == 1     # cleared when the entry shows the key

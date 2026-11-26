@@ -161,6 +161,23 @@ async def test_failed_or_mismatched_answers_are_errors(mods, answer, match):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("settings, label", [(None, "read"),
+    ({"enabled": True, "lowerChargeLimit": 20, "upperChargeLimit": 80}, "write")])
+async def test_bridge_dispatch_failures_become_solar_errors(mods, settings, label):
+    # A bridge that went offline after discovery makes text.set_value raise a
+    # Home Assistant error. It must reach the ownership gate as SolarError so a
+    # failed read releases the hold it created (see the service test below).
+    hass = Hass(mods.recovery)
+    bridge = mods.ble.find_bridge(hass, entry(), VIN)
+
+    async def offline(*args, **kwargs):
+        raise RuntimeError("ESPHome device unavailable")
+    hass.services.async_call = offline
+    with pytest.raises(mods.solar.SolarError, match=f"{label} could not be sent"):
+        await bridge.request(settings)
+
+
+@pytest.mark.asyncio
 async def test_a_stale_answer_is_never_accepted(mods, monkeypatch):
     monkeypatch.setattr(mods.ble, "TIMEOUT_SECONDS", 0.05)
     monkeypatch.setattr(mods.ble, "POLL_SECONDS", 0.01)
