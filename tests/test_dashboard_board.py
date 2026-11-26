@@ -167,10 +167,10 @@ def test_generate_falls_back_to_classic_layout_without_board():
 
 def _run_strategy(
     board_missing: bool, *, solar_entity: str | None = None,
-    optimizer: bool = True, admin: bool = False
+    optimizer: bool = True, admin: bool = False, extra_setup: str = ""
 ) -> dict:
     script = _strategy_script(board_missing)
-    setup = ""
+    setup = extra_setup
     script = script.replace("    states,", f"    user: {{ is_admin: {str(admin).lower()} }}, states,")
     if solar_entity:
         setup += f"states[{json.dumps(solar_entity)}] = s('off');"
@@ -197,6 +197,19 @@ def test_solar_surplus_has_no_duplicate_dashboard_toggle():
         assert out["evSettings"] is None
         assert entity not in out["optRows"]
         assert "ev" in out["keys"]
+
+
+def test_amber_forecast_accuracy_card_shows_while_still_collecting():
+    """Ticket #191: the hit rate is unknown until a forecast spike settles.
+
+    The card must appear straight after updating so it can say it is
+    collecting, rather than staying hidden until the first spike resolves.
+    """
+    entity = "sensor.power_sync_amber_forecast_accuracy"
+    for state, shown in (("unknown", True), ("67", True)):
+        out = _run_strategy(False, extra_setup=f"states[{json.dumps(entity)}] = s({json.dumps(state)});")
+        assert ("fcacc" in out["keys"]) is shown, state
+    assert "fcacc" not in _run_strategy(False)["keys"]
 
 
 def _board_script(body: str) -> str:

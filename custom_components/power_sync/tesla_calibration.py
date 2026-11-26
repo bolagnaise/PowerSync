@@ -1,7 +1,13 @@
 """Shared Tesla Powerwall calibration state handling.
 
-Tesla exposes an explicit ``BatteryCalibration`` alert through the local
-DeviceControllerQuery path.  Older PowerSync releases could only infer a
+Tesla exposes explicit ``BatteryCalibration`` and ``CalibrationRequested``
+alerts through the local DeviceControllerQuery path.  Gateways that raise
+``CalibrationRequested`` take over the battery for the calibration cycle and
+ignore owner charge commands, so both alerts are treated as calibration.  Other
+gateways keep ``CalibrationRequested`` raised for days while still following
+owner commands, so the ``refresh_calibration`` service can acknowledge a
+request-only episode until that alert clears; ``BatteryCalibration`` is never
+acknowledged away.  Older PowerSync releases could only infer a
 calibration after repeated cloud operation-mode verification failures.  This
 module keeps both signals as independent sources and derives the compatibility
 ``calibration_suspected`` flag used by the optimiser and service guards.
@@ -16,7 +22,12 @@ from typing import Any, Iterable
 
 CALIBRATION_SOURCE_LOCAL_ALERT = "local_alert"
 CALIBRATION_SOURCE_MODE_STICK = "mode_stick"
-_CALIBRATION_ALERT_NAME = "batterycalibration"
+_ACTIVE_CALIBRATION_ALERT_NAME = "batterycalibration"
+_REQUESTED_CALIBRATION_ALERT_NAME = "calibrationrequested"
+_CALIBRATION_ALERT_NAMES = frozenset(
+    {_ACTIVE_CALIBRATION_ALERT_NAME, _REQUESTED_CALIBRATION_ALERT_NAME}
+)
+CALIBRATION_REQUEST_ACK_KEY = "_calibration_request_acknowledged"
 
 
 def _normalized_alert_name(value: Any) -> str:
@@ -26,18 +37,32 @@ def _normalized_alert_name(value: Any) -> str:
     return "".join(character for character in str(value).lower() if character.isalnum())
 
 
-def powerwall_calibration_alert_active(alerts: Any) -> bool:
-    """Return True when a local Powerwall alert set reports calibration."""
+def powerwall_calibration_alert_names(alerts: Any) -> frozenset[str]:
+    """Return the normalized calibration alert names in a local alert set."""
     if not isinstance(alerts, Iterable) or isinstance(alerts, (str, bytes, dict)):
-        return False
+        return frozenset()
+    found: set[str] = set()
     for alert in alerts:
         if isinstance(alert, dict):
             name = alert.get("name") or alert.get("alert_name")
         else:
             name = alert
-        if _normalized_alert_name(name) == _CALIBRATION_ALERT_NAME:
-            return True
-    return False
+        normalized = _normalized_alert_name(name)
+        if normalized in _CALIBRATION_ALERT_NAMES:
+            found.add(normalized)
+    return frozenset(found)
+
+
+def powerwall_calibration_alert_active(alerts: Any) -> bool:
+    """Return True when a local Powerwall alert set reports calibration."""
+    return bool(powerwall_calibration_alert_names(alerts))
+
+
+def powerwall_calibration_request_only(alerts: Any) -> bool:
+    """Return True when only ``CalibrationRequested`` reports calibration."""
+    return powerwall_calibration_alert_names(alerts) == frozenset(
+        {_REQUESTED_CALIBRATION_ALERT_NAME}
+    )
 
 
 def calibration_sources(entry_data: dict[str, Any]) -> tuple[str, ...]:
@@ -116,8 +141,16 @@ def set_calibration_source(
 
 
 def clear_calibration_sources(entry_data: dict[str, Any]) -> CalibrationTransition:
-    """Clear every calibration source for the explicit reset service."""
+    """Clear every calibration source for the explicit reset service.
+
+    The reset also acknowledges a ``CalibrationRequested``-only alert so the
+    next local poll does not immediately re-pause control while that alert
+    remains raised.  The acknowledgement ends when a valid poll no longer
+    reports a calibration alert, and never suppresses ``BatteryCalibration``.
+    """
     was_active = bool(calibration_sources(entry_data))
+    if was_active:
+        entry_data[CALIBRATION_REQUEST_ACK_KEY] = True
     entry_data["_calibration_sources"] = []
     entry_data["calibration_sources"] = []
     entry_data["calibration_source"] = None

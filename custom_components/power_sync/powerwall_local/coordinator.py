@@ -28,9 +28,11 @@ from ..const import (
 from ..tesla_calibration import (
     CALIBRATION_SOURCE_LOCAL_ALERT,
     CALIBRATION_SOURCE_MODE_STICK,
+    CALIBRATION_REQUEST_ACK_KEY,
     calibration_sources,
     dispatch_calibration_state,
     powerwall_calibration_alert_active,
+    powerwall_calibration_request_only,
     set_calibration_source,
 )
 from .client import PowerwallLocalClient, PowerwallSnapshot, PowerwallVersion
@@ -364,6 +366,21 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
             return
 
         alert_active = powerwall_calibration_alert_active(snap.alerts)
+        if not alert_active:
+            # A valid poll without any calibration alert ends a reset
+            # acknowledgement; the next CalibrationRequested pauses again.
+            entry_data.pop(CALIBRATION_REQUEST_ACK_KEY, None)
+        elif entry_data.get(CALIBRATION_REQUEST_ACK_KEY):
+            if powerwall_calibration_request_only(snap.alerts):
+                # The owner reset the guard while only CalibrationRequested
+                # was raised.  Some gateways keep that request raised for days
+                # while still following commands, so honour the reset until
+                # the alert clears instead of re-pausing on the next poll.
+                alert_active = False
+            else:
+                # BatteryCalibration is explicit active calibration and is
+                # never acknowledged away.
+                entry_data.pop(CALIBRATION_REQUEST_ACK_KEY, None)
         source_was_active = (
             CALIBRATION_SOURCE_LOCAL_ALERT in calibration_sources(entry_data)
         )
@@ -398,7 +415,7 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
             if transition.started:
                 dispatch_calibration_state(self.hass, self._entry_id)
                 _LOGGER.warning(
-                    "Powerwall calibration detected from local BatteryCalibration "
+                    "Powerwall calibration detected from local Tesla calibration "
                     "alert — pausing automatic battery charge/export control"
                 )
                 self._schedule_calibration_transition_notification(started=True)
@@ -422,7 +439,7 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
         if transition.completed:
             dispatch_calibration_state(self.hass, self._entry_id)
             _LOGGER.info(
-                "Powerwall BatteryCalibration alert cleared for %d consecutive "
+                "Powerwall calibration alert cleared for %d consecutive "
                 "polls — resuming normal battery control",
                 POWERWALL_CALIBRATION_CLEAR_POLLS,
             )
@@ -455,8 +472,18 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
         if started:
             title = "Powerwall Calibration"
             message = (
-                "Tesla reports BatteryCalibration is active. PowerSync has paused "
-                "automatic battery charge and export control until the alert clears."
+                "Tesla is calibrating your Powerwall. During calibration the gateway "
+                "discharges the battery on its own, then recharges it, and ignores "
+                "charge and export commands. PowerSync has paused automatic battery "
+                "charge and export control until Tesla's calibration alert clears.\n\n"
+                "If Solar Surplus EV charging is on, PowerSync can charge your EV from "
+                "the calibration discharge whenever exporting is not worth more than "
+                "your Solar Surplus export limit. To move the calibration, use Delay "
+                "Powerwall Calibration in the Tesla app."
+            )
+            push_message = (
+                "Tesla is calibrating your Powerwall: it discharges the battery, then "
+                "recharges it. PowerSync has paused battery control until it finishes."
             )
             try:
                 await self.hass.services.async_call(
@@ -474,9 +501,10 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
         else:
             title = "Powerwall Calibration Complete"
             message = (
-                "Tesla's BatteryCalibration alert has cleared. PowerSync is "
+                "Tesla's battery calibration alert has cleared. PowerSync is "
                 "resuming normal automatic battery control."
             )
+            push_message = message
             try:
                 await self.hass.services.async_call(
                     "persistent_notification",
@@ -490,7 +518,7 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
         try:
             from ..automations.actions import _send_expo_push
 
-            await _send_expo_push(self.hass, title, message, notification_type=("battery_calibration_started" if started else "battery_calibration_completed"))
+            await _send_expo_push(self.hass, title, push_message, notification_type=("battery_calibration_started" if started else "battery_calibration_completed"))
         except Exception as err:
             _LOGGER.debug("Calibration mobile push failed: %s", err)
 

@@ -812,3 +812,54 @@ def test_sunday_only_readback_restores_without_overlapping_week(restore_helpers,
                 assert not covered & minutes  # no two periods overlap
                 covered |= minutes
         assert covered == set(range(7 * 1440))  # and the whole week is covered
+
+
+def test_legacy_widened_sunday_baseline_is_narrowed_on_restore(restore_helpers, upload_harness):
+    """Ticket 171 follow-up: a baseline saved before v2.12.1844 already holds
+    the widened Sunday period as explicit 0->6 beside Saturday 6->6.
+
+    The reporter's retest still logged OFF_PEAK [0,6,6:00-24:00] next to
+    [6,6,6:00-24:00] and weekday PEAK/SHOULDER. Restore must narrow that
+    persisted copy back to Sunday only, on buy and sell sides.
+    """
+    select, _tariff_time, valid_range = restore_helpers
+    upload, hass, session, _clock = upload_harness
+    tariff = _sparse_restore_tariff({"toDayOfWeek": 6})
+    full = lambda f, t, fh, th: {"fromDayOfWeek": f, "toDayOfWeek": t, "fromHour": fh,
+                                  "fromMinute": 0, "toHour": th, "toMinute": 0}
+    tou = tariff["seasons"]["Summer"]["tou_periods"]
+    tou["OFF_PEAK"] = {"periods": [full(1, 5, 6, 12), full(0, 6, 6, 24), full(6, 6, 6, 24)]}
+    tou["PEAK"] = {"periods": [full(1, 5, 17, 20)]}
+    tou["SHOULDER"] = {"periods": [full(1, 5, 12, 17), full(1, 5, 20, 24)]}
+    tou["SUPER_OFF_PEAK"] = {"periods": [full(0, 6, 0, 6)]}
+    tariff["energy_charges"]["Summer"]["rates"].update(PEAK=.6, SHOULDER=.3, SUPER_OFF_PEAK=.1)
+    tariff["sell_tariff"] = copy.deepcopy(tariff)
+    persisted = copy.deepcopy(tariff)
+
+    prepared = select(tariff)
+    assert tariff == persisted  # persisted baseline is not mutated in place
+    session.responses = [200]
+    assert asyncio.run(upload(hass, "site-a", prepared, "token")) is True
+    posted = session.posts[0][2]["tou_settings"]["tariff_content_v2"]
+    for side in (posted, posted["sell_tariff"]):
+        periods = side["seasons"]["Summer"]["tou_periods"]
+        assert periods["OFF_PEAK"]["periods"][1] == full(0, 0, 6, 24)
+        assert periods["SUPER_OFF_PEAK"]["periods"][0] == full(0, 6, 0, 6)  # genuine all-week kept
+        covered = set()
+        for container in periods.values():
+            for period in container["periods"]:
+                assert valid_range(period)
+                minutes = _expanded_minutes(period)
+                assert not covered & minutes
+                covered |= minutes
+        assert covered == set(range(7 * 1440))
+
+
+def test_all_week_period_without_weekend_signature_is_left_unchanged(restore_helpers):
+    select, _tariff_time, _valid_range = restore_helpers
+    full = lambda f, t, fh, th: {"fromDayOfWeek": f, "toDayOfWeek": t, "fromHour": fh,
+                                  "fromMinute": 0, "toHour": th, "toMinute": 0}
+    tariff = _sparse_restore_tariff(full(0, 6, 6, 24))
+    tariff["seasons"]["Summer"]["tou_periods"]["PEAK"] = {"periods": [full(1, 5, 17, 20)]}
+    prepared = select(tariff)
+    assert prepared["seasons"]["Summer"]["tou_periods"]["OFF_PEAK"]["periods"][0] == full(0, 6, 6, 24)

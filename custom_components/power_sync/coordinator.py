@@ -1868,6 +1868,11 @@ class SensitiveDataFilter(logging.Filter):
 _LOGGER = logging.getLogger(__name__)
 _LOGGER.addFilter(SensitiveDataFilter())
 
+# Highest Sungrow max-charge setting (33046) that is a solar-export hold rather
+# than a normal limit: 0 W, or the 10 W register minimum on firmware that
+# rejects 0 W. Mirrors _SUNGROW_CHARGE_HOLD_MAX_KW in optimization/solar_export.
+SUNGROW_CHARGE_HOLD_MAX_KW = 0.01
+
 
 def _parse_retry_after(response: aiohttp.ClientResponse) -> float | None:
     """Parse Retry-After header from an HTTP response.
@@ -2192,6 +2197,9 @@ class AmberPriceCoordinator(DataUpdateCoordinator):
         self._forecast_5min_fetched_at: datetime | None = None
         self._forecast_30min_cache: list[dict[str, Any]] | None = None
         self._forecast_30min_fetched_at: datetime | None = None
+        # Optional display-only record of forecast vs settled export prices
+        # (amber_forecast_accuracy.py), attached during setup.
+        self.forecast_accuracy = None
 
         super().__init__(
             hass,
@@ -2253,6 +2261,16 @@ class AmberPriceCoordinator(DataUpdateCoordinator):
         setattr(self, cache_attr, forecast or [])
         setattr(self, fetched_at_attr, now)
         return forecast or []
+
+    def _record_forecast_accuracy(self, forecast: list, settled: list) -> None:
+        """Feed the display-only accuracy tracker; never fails a price refresh."""
+        tracker = getattr(self, "forecast_accuracy", None)
+        if tracker is None:
+            return
+        try:
+            tracker.observe(forecast, settled, dt_util.utcnow())
+        except Exception as err:  # noqa: BLE001 - display data only
+            _LOGGER.debug("Could not record Amber forecast accuracy: %s", err)
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data from Amber API with WebSocket-first approach."""
@@ -2326,12 +2344,14 @@ class AmberPriceCoordinator(DataUpdateCoordinator):
                 fetched_at_attr="_forecast_30min_fetched_at",
             )
 
-            return {
+            result = {
                 "current": current_prices,
                 "forecast": _merge_amber_forecasts(forecast_5min, forecast_30min),
                 "forecast_5min": forecast_5min,  # Keep for TOU sync spike detection
                 "last_update": dt_util.utcnow(),
             }
+            self._record_forecast_accuracy(result["forecast"], forecast_5min)
+            return result
 
         except UpdateFailed:
             raise  # Re-raise UpdateFailed exceptions
@@ -6871,6 +6891,7 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         self._pre_control_charge_limit_kw: float | None = None
         self._pre_control_discharge_limit_kw: float | None = None
         self._zero_discharge_cap_rejected = False
+        self._zero_charge_cap_rejected = False
         self._pre_control_export_limit_w: int | None = None
         self._pre_control_export_limit_captured = False
         # Which subsystem owns the captured export-limit baseline.  Solar
@@ -8414,10 +8435,10 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
             if current_kw is None:
                 _LOGGER.debug("Sungrow solar-export cleanup is waiting for charge-limit register readback")
                 return False
-            if current_kw > 0:
+            if current_kw > SUNGROW_CHARGE_HOLD_MAX_KW:
                 return True
             if baseline_kw is None:
-                _LOGGER.debug("Sungrow charge limit is zero and the saved hold has no verified restore value")
+                _LOGGER.debug("Sungrow charge limit is at its hold value and the saved hold has no verified restore value")
                 return False
             if self._monitoring_mode_active() or not self._native_control_allowed(
                 "Sungrow charge hold restore"
@@ -8440,6 +8461,33 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
             return False
         async with self._modbus_lock, self._controller:
             return await self._controller.set_charge_rate_limit(kw)
+
+    async def apply_solar_export_charge_hold(self) -> bool:
+        """Hold Sungrow charging with the lowest cap the firmware accepts.
+
+        Some Sungrow firmware rejects a 0 W max-charge write (33046, exception
+        code 4) but accepts its 10 W minimum, as it does for the discharge cap.
+        Remember a demonstrated zero rejection so later holds use 10 W directly.
+        """
+        if not self._native_control_allowed("Sungrow solar-export charge hold"):
+            return False
+        async with self._modbus_lock, self._controller:
+            if not getattr(self, "_zero_charge_cap_rejected", False):
+                if await self._controller.set_charge_rate_limit(0.0):
+                    return True
+                limit_ok = await self._controller.set_charge_rate_limit(
+                    SUNGROW_CHARGE_HOLD_MAX_KW
+                )
+                if limit_ok:
+                    self._zero_charge_cap_rejected = True
+                    _LOGGER.info(
+                        "Sungrow rejected a 0 W charge cap but accepted 10 W; "
+                        "later solar-export holds will use 10 W directly"
+                    )
+                return bool(limit_ok)
+            return bool(
+                await self._controller.set_charge_rate_limit(SUNGROW_CHARGE_HOLD_MAX_KW)
+            )
 
     async def set_discharge_rate_limit(self, kw: float) -> bool:
         """Set maximum discharge rate in kW.

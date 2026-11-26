@@ -1473,6 +1473,7 @@ SENSOR_TYPE_CURRENT_PRICE = "current_price"  # Legacy - kept for compatibility
 SENSOR_TYPE_CURRENT_IMPORT_PRICE = "current_import_price"
 SENSOR_TYPE_CURRENT_EXPORT_PRICE = "current_export_price"
 SENSOR_TYPE_FORECAST_PRICE = "forecast_price"
+SENSOR_TYPE_AMBER_FORECAST_ACCURACY = "amber_forecast_accuracy"
 SENSOR_TYPE_SOLAR_POWER = "solar_power"
 SENSOR_TYPE_GRID_POWER = "grid_power"
 SENSOR_TYPE_GRID_STATUS = "grid_status"

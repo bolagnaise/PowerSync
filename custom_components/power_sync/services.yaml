@@ -865,8 +865,10 @@ refresh_calibration:
   description: >-
     Clear PowerSync's calibration_suspected flag. Use after a Powerwall
     calibration cycle completes if the optimiser hasn't auto-cleared the flag,
-    or to retry mode toggles immediately. Doesn't touch the Powerwall — purely
-    resets the integration's local guard.
+    or to retry mode toggles immediately. If only CalibrationRequested is
+    still raised, control stays resumed until that alert clears;
+    BatteryCalibration always pauses again. Doesn't touch the Powerwall —
+    purely resets the integration's local guard.
   fields: {}
 
 recover_max_backup:

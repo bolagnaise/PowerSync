@@ -9575,6 +9575,17 @@ function _boardCards(ctx) {
     });
   }
 
+  // The hit-rate state stays unknown until a forecast spike settles; the
+  // card itself explains that it is still collecting, so gate on existence.
+  if (hasEntityE('amber_forecast_accuracy')) {
+    add({
+      key: 'fcacc', title: 'Amber forecast accuracy', meta: 'Export price spikes, last 7 days', native: 'ps-forecast-accuracy-card',
+      config: { entities: {
+        accuracy: e('amber_forecast_accuracy'), confidence: reg('switch', 'amber_forecast_confidence'),
+      } },
+    });
+  }
+
   if (hasEntityE('home_load') || hasEntityE('solar_power')) {
     add({
       key: 'energy', title: 'Energy since midnight', meta: 'kW', native: 'ps-energy-card',

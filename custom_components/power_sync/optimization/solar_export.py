@@ -57,6 +57,26 @@ class SolarExportCapability:
         }
 
 
+# A Sungrow max-charge readback at or below 10 W (one register step) is a
+# solar-export hold: firmware that rejects 0 W accepts its 10 W minimum. It is
+# neither a cleared hold nor a usable restore baseline. Mirrors
+# SUNGROW_CHARGE_HOLD_MAX_KW in coordinator.py.
+_SUNGROW_CHARGE_HOLD_MAX_KW = 0.01
+
+
+def _sungrow_normal_limit(value: Any) -> float | None:
+    parsed = _finite_positive(value)
+    return parsed if parsed is not None and parsed > _SUNGROW_CHARGE_HOLD_MAX_KW else None
+
+
+def _sungrow_hold_limit(value: Any) -> bool:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(parsed) and 0 <= parsed <= _SUNGROW_CHARGE_HOLD_MAX_KW + 1e-9
+
+
 def _finite_positive(value: Any) -> float | None:
     try:
         parsed = float(value)
@@ -272,8 +292,8 @@ class SolarExportChargeHoldAdapter:
                 data.get("charge_rate_limit_source") == "configured_power"
                 and data.get("rate_limit_writable") is not False
                 and (
-                    _finite_positive(data.get("charge_rate_limit_kw")) is not None
-                    or (held and data.get("charge_rate_limit_kw") == 0)
+                    _sungrow_normal_limit(data.get("charge_rate_limit_kw")) is not None
+                    or (held and _sungrow_hold_limit(data.get("charge_rate_limit_kw")))
                 )
             )
 
@@ -326,6 +346,10 @@ class SolarExportChargeHoldAdapter:
             _finite_positive(target.get("value")) is None for target in targets
         ):
             return None
+        if self.system == "sungrow" and any(
+            _sungrow_normal_limit(target.get("value")) is None for target in targets
+        ):
+            return None
         return {
             "schema_version": 1,
             "adapter": self.key,
@@ -363,6 +387,8 @@ class SolarExportChargeHoldAdapter:
             return all(
                 str(t.get("value")) in _NEOVOLT_HOLD_MODES for t in current
             )
+        if self.system == "sungrow":
+            return all(_sungrow_hold_limit(t.get("value")) for t in current)
         return all(abs(float(t.get("value", math.inf))) <= 0.001 for t in current)
 
     async def clear_charge_hold(self, plan: dict[str, Any]) -> bool:
@@ -415,9 +441,12 @@ class SolarExportChargeHoldAdapter:
         current = await self._read_targets()
         expected = plan.get("targets", [])
         if self.system == "sungrow":
-            # A positive direct read proves the zero hold is gone. The operator
-            # may have selected a different normal limit while cleanup was pending.
-            return len(current) == len(expected) and all(target["value"] > 0 for target in current)
+            # A direct read above the 0 W / 10 W hold value proves the hold is
+            # gone. The operator may have selected a different normal limit
+            # while cleanup was pending.
+            return len(current) == len(expected) and all(
+                _sungrow_normal_limit(target["value"]) is not None for target in current
+            )
         if len(current) != len(expected):
             return False
         for actual, baseline in zip(current, expected):
@@ -560,7 +589,12 @@ class SolarExportChargeHoldAdapter:
                 _finite_positive(target.get("value")) if "register_endpoint" in target else None
             )
             if hold:
-                return baseline_kw is not None and bool(await child.set_charge_rate_limit(0.0))
+                if baseline_kw is None:
+                    return False
+                apply_hold = getattr(child, "apply_solar_export_charge_hold", None)
+                if callable(apply_hold):
+                    return bool(await apply_hold())
+                return bool(await child.set_charge_rate_limit(0.0))
             # Old plans could contain a BMS estimate. Only positive live readback
             # can retire them; they never authorize a write to this register.
             return bool(await child.clear_solar_export_charge_limit(baseline_kw))

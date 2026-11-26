@@ -11788,9 +11788,13 @@ async def _action_set_ev_charging_amps(
                     operation="rate",
                     amps=fallback_amps,
                 ):
-                    return False
+                    return _refuse_rate(
+                        params,
+                        "site import admission refused: "
+                        f"{last_ev_submission_refusal() or 'no reason given'}",
+                    )
                 if not request_authority():
-                    return False
+                    return _refuse_rate(params, "command authority changed before the rate was sent")
                 fallback_mutation = await _run_native_tesla_service_command(
                     hass,
                     config_entry,
@@ -11812,9 +11816,15 @@ async def _action_set_ev_charging_amps(
                 if fallback_mutation.outcome == "rejected":
                     if getattr(fallback_mutation.error, "site_import_admission_denied", False):
                         raise fallback_mutation.error
-                    return False
+                    return _refuse_rate(
+                        params, f"Tesla rejected {fallback_amps}A: {fallback_mutation.error}",
+                    )
                 if fallback_mutation.outcome != "accepted_unconfirmed":
-                    return False
+                    return _refuse_rate(
+                        params,
+                        f"{fallback_amps}A was not sent ({fallback_mutation.outcome}: "
+                        f"{fallback_mutation.error or 'no detail'})",
+                    )
                 params["_tesla_native_submitted_amps"] = fallback_amps
                 params["max_charge_amps"] = fallback_amps
                 params["_tesla_entity_range_fallback_amps"] = fallback_amps
@@ -12829,11 +12839,31 @@ def _no_solar_generation(live_status: Optional[dict]) -> bool:
     return math.isfinite(solar_w) and solar_w < _NO_SOLAR_GENERATION_W
 
 
+def _calibration_drain_active(hass: Optional[HomeAssistant], entry_id: str | None) -> bool:
+    """Return True while Tesla's explicit calibration alert owns the battery.
+
+    During a Tesla calibration the gateway discharges the battery on its own
+    and ignores charge commands. That energy is exported unless something on
+    site uses it, so Solar Surplus may treat it as available for the EV. Only
+    the local alert counts; the older operation-mode inference does not.
+    """
+    if hass is None or not entry_id:
+        return False
+    from ..tesla_calibration import CALIBRATION_SOURCE_LOCAL_ALERT, calibration_sources
+
+    entry_data = getattr(hass, "data", {}).get(DOMAIN, {}).get(entry_id)
+    if not isinstance(entry_data, dict):
+        return False
+    return CALIBRATION_SOURCE_LOCAL_ALERT in calibration_sources(entry_data)
+
+
 def _calculate_solar_surplus(
     live_status: dict,
     current_ev_power_kw: float,
     config: dict,
     hass: Optional[HomeAssistant] = None,
+    *,
+    calibration_drain: bool = False,
 ) -> float:
     """
     Calculate available solar surplus for EV charging.
@@ -12894,8 +12924,12 @@ def _calculate_solar_surplus(
         ev_drift_kw = _ev_power_drift_since_site_sample_kw(live_status)
         if ev_drift_kw:
             ev_term_kw = max(0.0, current_ev_power_kw - ev_drift_kw)
-        # Subtract battery discharge: grid export from battery isn't solar surplus
-        surplus = -grid_kw + ev_term_kw + battery_charge_kw - battery_discharge_kw
+        # Subtract battery discharge: grid export from battery isn't solar surplus.
+        # A Tesla calibration discharges the battery regardless of PowerSync, so
+        # that export may go to the EV instead. The grid term still limits the EV
+        # to energy that is actually being exported.
+        discharge_penalty_kw = 0.0 if calibration_drain else battery_discharge_kw
+        surplus = -grid_kw + ev_term_kw + battery_charge_kw - discharge_penalty_kw
         battery_reserve_kw = _parallel_battery_reserve_kw(
             live_status, config, method, battery_charge_kw
         )
@@ -12918,6 +12952,9 @@ def _calculate_solar_surplus(
             else load_kw - current_ev_power_kw
         )
         surplus = solar_kw - real_household_load_kw - battery_charge_kw
+        if calibration_drain and grid_kw <= config.get("grid_import_tolerance_kw", 0.1):
+            # Calibration discharge is otherwise exported; offer it to the EV.
+            surplus += max(0.0, battery_kw)
         battery_reserve_kw = _parallel_battery_reserve_kw(
             live_status, config, method, battery_charge_kw
         )
@@ -15780,6 +15817,23 @@ async def _dynamic_ev_update_surplus(
         # paused session still waits, as the unknown level reads below minimum.
         battery_soc = float(min_soc)
 
+    # Tesla drains the battery during a calibration whatever PowerSync does, so
+    # battery-priority floors cannot protect it. Let the EV absorb the drain
+    # (still subject to the export-value limit) instead of exporting it.
+    calibration_drain = _calibration_drain_active(hass, entry_id)
+    if calibration_drain:
+        min_soc = 0
+        pause_soc = 0
+    if bool(state.get("calibration_drain")) != calibration_drain:
+        state["calibration_drain"] = calibration_drain
+        _LOGGER.info(
+            "Solar surplus EV: Tesla calibration %s - %s",
+            "active" if calibration_drain else "ended",
+            "calibration discharge may charge the EV instead of exporting"
+            if calibration_drain
+            else "normal battery floors restored",
+        )
+
     # Parallel charging parameters
     allow_parallel = params.get("allow_parallel_charging", False)
     max_battery_charge_kw = params.get("max_battery_charge_rate_kw", 5.0)
@@ -16378,6 +16432,7 @@ async def _dynamic_ev_update_surplus(
         total_ev_power_kw,
         params,
         hass,
+        calibration_drain=calibration_drain,
     )
 
     # Check if parallel charging is possible below the battery floor. At this
@@ -19443,6 +19498,10 @@ async def _action_start_ev_charging_dynamic(
                 reason="shared charger profile does not allow this start",
             )
             return False
+        if isinstance(params, dict):
+            # Callers can reuse one params dict across retries; report only
+            # this attempt's refusal.
+            params.pop("_rate_refusal_reason", None)
         refusal_seq = ev_refusal_sequence(hass, config_entry)
         result = await _action_start_ev_charging_dynamic_locked(
             hass, config_entry, params, context
@@ -19451,7 +19510,11 @@ async def _action_start_ev_charging_dynamic(
             # Guard paths that only log still leave a queryable reason.
             record_ev_refusal(
                 hass, config_entry, vehicle_id, command=command,
-                reason="start guard refused without a specific reason (see preceding Dynamic EV log line)",
+                reason=(
+                    f"start guard refused: {params['_rate_refusal_reason']}"
+                    if isinstance(params, dict) and params.get("_rate_refusal_reason")
+                    else "start guard refused without a specific reason (see preceding Dynamic EV log line)"
+                ),
             )
         return result
 
@@ -20313,6 +20376,49 @@ async def _action_start_ev_charging_dynamic_locked(
                 hass, vehicle_id, command_entity, start_amps,
             )
 
+    # A user Boost over a PowerSync session that is already charging the car
+    # keeps that charge running.  Stopping it first and starting again does
+    # not work on a Tesla: the unconfirmed Stop holds the command route, the
+    # Start is refused, and the car is left stopped with the Boost lost.
+    boost_adoption_state = None
+    boost_adoption_evidence = None
+    adoptable_state = entry_vehicles.get(vehicle_id)
+    if (
+        charger_type == "tesla"
+        and dynamic_mode == "battery_target"
+        and owner_mode == "boost"
+        and params.get("_user_initiated") is True
+        and not params.get("quick_control")
+        and handoff_observation is None
+        and _lease_id == vehicle_id
+        and isinstance(_lease, dict)
+        and _lease.get("owner") == "powersync"
+        and owner_family(_lease.get("owner_mode")) in {
+            "smart_schedule", "solar_surplus", "price_level", "scheduled",
+        }
+        and isinstance(adoptable_state, dict)
+        and adoptable_state.get("active")
+        and adoptable_state.get("charging_started") is True
+        and (adoptable_state.get("current_amps") or 0) > 0
+        and not adoptable_state.get("transport_recovery_pending")
+        and not manual_stop_hold_reason(hass, config_entry, vehicle_id)
+        and (solar_update_lock is None or not solar_update_lock.locked())
+    ):
+        from .ev_ownership import get_ev_quick_control_obligation
+
+        adoption_snapshot = _tesla_physical_charging_snapshot(
+            hass, config_entry, vehicle_id, params,
+        )
+        if (
+            get_ev_quick_control_obligation(hass, config_entry, vehicle_id) is None
+            and adoption_snapshot.get("charging")
+            and adoption_snapshot.get("measurements")
+        ):
+            boost_adoption_state = adoptable_state
+            boost_adoption_evidence = ", ".join(
+                sorted(adoption_snapshot["measurements"])
+            )
+
     # Stop any existing dynamic charging for this vehicle.  Record whether that
     # teardown actually commanded the charger off: cloud EV telemetry lags the
     # command by a poll interval, so the not-yet-settled aftermath of our own
@@ -20361,6 +20467,41 @@ async def _action_start_ev_charging_dynamic_locked(
                         success=False, reason=reason,
                     )
             return False
+    elif boost_adoption_state is not None:
+        # End the old session's control only; the car keeps charging.
+        teardown_params.update(
+            stop_charging=False,
+            _expected_state=boost_adoption_state, _expected_lease=_lease,
+        )
+        if solar_update_lock is not None:
+            async with solar_update_lock:
+                teardown_success = await _action_stop_ev_charging_dynamic(
+                    hass, config_entry, teardown_params,
+                )
+        else:
+            teardown_success = await _action_stop_ev_charging_dynamic(
+                hass, config_entry, teardown_params,
+            )
+        if (
+            not teardown_success
+            or boost_adoption_state.get("active")
+            or get_ev_ownership(hass, config_entry, vehicle_id)[1] is not None
+        ):
+            reason = "the running charging session could not be handed to Boost"
+            if isinstance(result := params.get("_boost_start_result"), dict):
+                result["not_submitted"] = reason
+            else:
+                record_ev_command(
+                    hass, config_entry, vehicle_id, command="start_boost",
+                    success=False, reason=reason,
+                )
+            return False
+        _LOGGER.info(
+            "Dynamic EV: Boost is taking over %s while it charges (%s); "
+            "no Stop is sent",
+            vehicle_id,
+            boost_adoption_evidence,
+        )
     elif handoff_observation is None:
         teardown_success = await _action_stop_ev_charging_dynamic(
             hass, config_entry, teardown_params,
@@ -20670,6 +20811,10 @@ async def _action_start_ev_charging_dynamic_locked(
                 reason = f"could not pre-set the safe initial rate to {start_amps}A"
                 if params.get("_rate_refusal_reason"):
                     reason = f"{reason}: {params['_rate_refusal_reason']}"
+                elif initial_amps_pre_set is None:
+                    reason = f"{reason}: the rate command's outcome is unconfirmed"
+                else:
+                    reason = f"{reason}: no reason was reported by the rate path"
                 record_ev_command(
                     hass,
                     config_entry,
@@ -20790,7 +20935,11 @@ async def _action_start_ev_charging_dynamic_locked(
 
             start_params = dict(params)
             start_params["amps"] = start_amps
-            if handoff_observation is not None or already_physically_charging:
+            if (
+                handoff_observation is not None
+                or already_physically_charging
+                or boost_adoption_state is not None
+            ):
                 start_success = True
                 _LOGGER.info(
                     "Dynamic EV: %s was already physically charging; "
@@ -20835,7 +20984,8 @@ async def _action_start_ev_charging_dynamic_locked(
             # register a new session after that late completion; contain the
             # exact vehicle first and leave any unknown outcome fail-closed.
             if not registration_authority():
-                if handoff_observation is None:
+                # An adopted charge sent no Start, so there is none to undo.
+                if handoff_observation is None and boost_adoption_state is None:
                     await _compensate_late_positive_start()
                 record_ev_command(
                     hass,

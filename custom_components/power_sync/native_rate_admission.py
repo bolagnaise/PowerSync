@@ -6,15 +6,18 @@ their outstanding demand remains reserved until fresh observed settlement.
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 import re
 import time
 from contextvars import ContextVar
 from functools import wraps
 
-from .native_rate_budget import RUNTIME_KEY, native_max_ev_coexistence, site_identity
+from .native_rate_budget import RUNTIME_KEY, native_max_ev_coexistence, site_identity, vin_label
 from .native_battery_flexibility import native_battery_flexibility
 from .teslemetry_solar import _EV_SUBMISSION_CONTEXT, ev_owner_snapshot
+
+_LOGGER = logging.getLogger(__name__)
 
 # Why the latest admission in this task returned False. A plain False from
 # admission used to leave the caller with no reason to report.
@@ -426,9 +429,13 @@ async def refresh_managed_records(hass, budget, *, vins=None, site=None, native_
         runtime = hass.data.get("power_sync", {}).get(record.get("entry_id"), {})
         local = (runtime.get("powerwall_local") or {}).get("coordinator")
         if not getattr(local, "last_update_success", False):
+            _LOGGER.debug("EV headroom reservation kept for %s: no current local Powerwall reading",
+                          vin_label(vin))
             continue
         registration = registry.async_get(record.get("entity_id"))
         if _identity(registration) != record["identity"]:
+            _LOGGER.debug("EV headroom reservation kept for %s: reserving charger entity changed",
+                          vin_label(vin))
             continue
         # Legacy starts may reserve demand without a usable current setting.
         # HA's state lookup requires an entity ID; absent readback must remain
@@ -438,6 +445,8 @@ async def refresh_managed_records(hass, budget, *, vins=None, site=None, native_
         from .tesla_ev_recovery import get_headroom_recovery_route
         if (runtime.get("_tesla_ev_recovery_sidecar_hold") is not None
                 or (get_headroom_recovery_route(hass, entry, vin) or {}).get("kind") == "blocked"):
+            _LOGGER.debug("EV headroom reservation kept for %s: EV command recovery is holding it",
+                          vin_label(vin))
             continue
         native_entity_id = _managed_native_entity(hass, entry, runtime, vin, record, registration)
         native_producer = getattr(registration, "platform", None) in {"tesla_fleet", "teslemetry"}
@@ -483,6 +492,12 @@ async def refresh_managed_records(hass, budget, *, vins=None, site=None, native_
         if 0 <= time.time()-at <= 15 and 0 <= time.time()-meter_at <= 15 and abs(at-meter_at) <= 5:
             budget.observe(vin, watts=current*unit, at=at, meter_at=meter_at)
         owner = get_ev_ownership(hass, entry, vin)[1] if entry is not None else None
+        if owner is not None:
+            _LOGGER.debug(
+                "EV headroom reservation for %s cannot release while %s holds the loadpoint",
+                vin_label(vin),
+                "PowerSync's unconfirmed Stop" if owner.get("stop_settling")
+                else str(owner.get("owner_mode") or owner.get("owner")))
         charging_state = str(charge.get("charging_state", "")).lower()
         settled = charging_state in {"stopped", "complete", "disconnected", "nopower", "no_power"}
         if native is not None and owner is None:

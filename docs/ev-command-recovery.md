@@ -394,6 +394,20 @@ the vehicle or meter. `no_retained_history` describes the command journal; it do
 not mean no headroom reservation exists. A `native_source_unavailable` response
 also includes this projection under `preflight`; send that response if refused.
 
+### Timing the automatic release in logs
+
+After a PowerSync Stop, the reservation releases on its own once two fresh,
+aligned vehicle and local Powerwall readings show the car stopped and no
+charging owner holds the loadpoint. Until then, cloud tariff force charge
+refusals log `Cloud tariff force charge refused to protect shared EV headroom:`
+followed by the check that refused it. The release itself logs
+`EV headroom reservation released for ...XXXX` at info level, where `XXXX` is the
+last four VIN characters. With `custom_components.power_sync: debug`, each
+retained cycle also logs `EV headroom reservation kept for ...XXXX:` with the
+reason, such as reading ages or PowerSync's unconfirmed Stop. Scheduled
+Charging reports that Stop as `awaiting vehicle confirmation of PowerSync's Stop`
+instead of an external owner.
+
 If the action returns `success: false`, keep the reservation and use the returned
 `error` to choose the next step:
 

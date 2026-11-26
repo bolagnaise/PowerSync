@@ -617,8 +617,16 @@ def _merge_duplicate_generic_observations(
         ):
             if observation.get(field) not in (None, ""):
                 target[field] = observation[field]
+        # Any row with a connector status sensor makes the plug state known.
+        # Otherwise keep the explicit "unknown" from the switch-only row even
+        # when a summary row without the flag was collected first.
         if observation.get("plug_state_known") is True:
             target["plug_state_known"] = True
+        elif (
+            observation.get("plug_state_known") is False
+            and target.get("plug_state_known") is not True
+        ):
+            target["plug_state_known"] = False
         merged[generic_index] = target
 
     return merged
