@@ -24299,6 +24299,38 @@ def _support_setup_failure_details(error: Exception) -> str:
     return f"{type(error).__name__} at {' > '.join(frames[-8:])}"
 
 
+async def _attach_amber_forecast_accuracy(
+    hass: HomeAssistant, entry: ConfigEntry, amber_coordinator: Any
+) -> None:
+    """Attach the display-only Amber forecast accuracy record to the coordinator.
+
+    Failure leaves pricing untouched; the dashboard card then stays hidden.
+    """
+    from .amber_forecast_accuracy import STORE_VERSION, AmberForecastAccuracyTracker
+
+    try:
+        store = Store(hass, STORE_VERSION, f"{DOMAIN}.amber_forecast_accuracy.{entry.entry_id}")
+        tracker: AmberForecastAccuracyTracker | None = None
+
+        def _forecast_type() -> str:
+            return entry.options.get(
+                CONF_AMBER_FORECAST_TYPE,
+                entry.data.get(CONF_AMBER_FORECAST_TYPE, "predicted"),
+            )
+
+        def _schedule_save() -> None:
+            if tracker is not None:
+                store.async_delay_save(tracker.as_dict, 300)
+
+        tracker = AmberForecastAccuracyTracker(
+            forecast_type=_forecast_type, on_change=_schedule_save,
+        )
+        tracker.load(await store.async_load())
+        amber_coordinator.forecast_accuracy = tracker
+    except Exception as err:  # noqa: BLE001 - display data only
+        _LOGGER.warning("Amber forecast accuracy tracking unavailable: %s", err)
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up PowerSync from a config entry."""
     # Retained HTTP/service callbacks can address this entry during provider
@@ -25276,6 +25308,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             amber_site_id,  # Use the active site ID
             ws_client=ws_client,  # Pass WebSocket client to coordinator
         )
+        await _attach_amber_forecast_accuracy(hass, entry, amber_coordinator)
 
     # Initialize Amber Usage coordinator for actual metered cost data
     amber_usage_coordinator = None

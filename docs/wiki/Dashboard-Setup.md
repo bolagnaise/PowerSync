@@ -92,6 +92,7 @@ Cards appear only when the matching feature or entities exist.
 | Plan explanation | Smart Optimization available |
 | Tariff today | TOU tariff synced |
 | Prices today | Price sensors exist |
+| Amber forecast accuracy | Amber is your price provider |
 | Today so far | Daily energy and cost sensors |
 | Car charging | EV smart charging configured |
 | Powerwall settings | Tesla Powerwall |
@@ -118,6 +119,17 @@ Cards appear only when the matching feature or entities exist.
 | Missing frontend cards | A frontend card that some cards need is not installed |
 
 **Solar Only** selects the source for a charging session started with **Start**. Automatic **Solar Surplus** charging is enabled separately under **Car charging → Modes → Solar Surplus**. Its controls appear only in the EV panel, rather than a duplicate switch in Optimiser settings.
+
+### Amber forecast accuracy
+
+For Amber users, the **Amber forecast accuracy** card shows whether forecast export price spikes actually happened, to help you decide on **Amber Forecast Confidence**.
+
+- **Forecast spikes**, **Happened**, **Didn't happen** and **Hit rate** count the last 7 days. A spike is a forecast export price above your usual export price plus a margin (at least 10c/kWh). It counts as happened when at least half of the forecast rise settled.
+- Choose **1 h before** or **4 h before** to compare the forecast Amber gave that long before each half hour.
+- The chart shows the last 48 hours: the settled export price, the forecast drawn at the time it predicted, and a dot on each forecast spike (green happened, red didn't).
+- After 2 days and at least 3 forecast spikes, the card suggests whether **Amber Forecast Confidence** suits your results. The setting itself stays in **Optimiser settings**.
+
+Tracking starts when you update PowerSync, so the card fills in over the first few days. The same figures are in the `sensor.power_sync_amber_forecast_accuracy` sensor, whose state is the 1-hour hit rate. The card is for information only and does not change the optimiser.
 
 ### Configuring dashboard settings
 

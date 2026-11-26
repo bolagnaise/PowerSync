@@ -9575,6 +9575,15 @@ function _boardCards(ctx) {
     });
   }
 
+  if (hasE('amber_forecast_accuracy')) {
+    add({
+      key: 'fcacc', title: 'Amber forecast accuracy', meta: 'Export price spikes, last 7 days', native: 'ps-forecast-accuracy-card',
+      config: { entities: {
+        accuracy: e('amber_forecast_accuracy'), confidence: reg('switch', 'amber_forecast_confidence'),
+      } },
+    });
+  }
+
   if (hasEntityE('home_load') || hasEntityE('solar_power')) {
     add({
       key: 'energy', title: 'Energy since midnight', meta: 'kW', native: 'ps-energy-card',

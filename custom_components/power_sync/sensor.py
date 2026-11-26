@@ -47,6 +47,7 @@ from .const import (
     SENSOR_TYPE_CURRENT_PRICE,
     SENSOR_TYPE_CURRENT_IMPORT_PRICE,
     SENSOR_TYPE_CURRENT_EXPORT_PRICE,
+    SENSOR_TYPE_AMBER_FORECAST_ACCURACY,
     SENSOR_TYPE_SOLAR_POWER,
     SENSOR_TYPE_GRID_POWER,
     SENSOR_TYPE_GRID_STATUS,
@@ -2012,6 +2013,8 @@ async def async_setup_entry(
                     entry=entry,
                 )
             )
+        if getattr(amber_coordinator, "forecast_accuracy", None) is not None:
+            entities.append(AmberForecastAccuracySensor(amber_coordinator, entry))
     elif localvolts_coordinator:
         _LOGGER.info("Adding Localvolts price sensors (import and export)")
         for description in PRICE_SENSORS:
@@ -7886,6 +7889,82 @@ class BatteryModeSensor(SensorEntity):
                 "Powerwall force request acknowledged; check Battery Power and Grid Power"
             )
         return attributes
+
+
+class AmberForecastAccuracySensor(CoordinatorEntity, SensorEntity):
+    """How often Amber's forecast export spikes actually settled.
+
+    State is the share of forecast spikes (forecast about 1 hour ahead) that
+    happened over the last 7 days. Attributes carry the same figures for the
+    4-hour lead plus recent points for the dashboard's forecast accuracy card.
+    Display only: the optimizer never reads this.
+    """
+
+    _attr_has_entity_name = True
+    _attr_name = "Amber Forecast Accuracy"
+    _attr_icon = "mdi:bullseye-arrow"
+    _attr_native_unit_of_measurement = PERCENTAGE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _unrecorded_attributes = frozenset({"points", "events", "leads"})
+
+    def __init__(self, coordinator: AmberPriceCoordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator)
+        self._entry = entry
+        self._attr_unique_id = f"{entry.entry_id}_{SENSOR_TYPE_AMBER_FORECAST_ACCURACY}"
+        self._attr_suggested_object_id = f"power_sync_{SENSOR_TYPE_AMBER_FORECAST_ACCURACY}"
+
+    @property
+    def device_info(self):
+        return family_device_info(self._entry.entry_id, SENSOR_FAMILY_PRICING)
+
+    def _confidence_enabled(self) -> bool:
+        entry_data = (self.hass.data.get(DOMAIN, {}) if self.hass else {}).get(self._entry.entry_id, {})
+        opt = entry_data.get("optimization_coordinator") if isinstance(entry_data, dict) else None
+        if opt is not None and hasattr(opt, "amber_forecast_confidence_enabled"):
+            return bool(opt.amber_forecast_confidence_enabled)
+        from .const import CONF_AMBER_FORECAST_CONFIDENCE_ENABLED
+        return bool(self._entry.options.get(
+            CONF_AMBER_FORECAST_CONFIDENCE_ENABLED,
+            self._entry.data.get(CONF_AMBER_FORECAST_CONFIDENCE_ENABLED, False),
+        ))
+
+    def _summary(self) -> dict[str, Any] | None:
+        tracker = getattr(self.coordinator, "forecast_accuracy", None)
+        if tracker is None:
+            return None
+        try:
+            return tracker.summary(dt_util.utcnow(), confidence_enabled=self._confidence_enabled())
+        except Exception as err:  # noqa: BLE001 - display data only
+            _LOGGER.debug("Amber forecast accuracy summary failed: %s", err)
+            return None
+
+    @property
+    def available(self) -> bool:
+        return getattr(self.coordinator, "forecast_accuracy", None) is not None
+
+    @property
+    def native_value(self) -> int | None:
+        summary = self._summary() or {}
+        return (summary.get("leads", {}).get("60") or {}).get("hit_rate")
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        summary = self._summary()
+        if not summary:
+            return {}
+        one_hour = summary.get("leads", {}).get("60") or {}
+        return {
+            "predicted_spikes": one_hour.get("predicted_spikes"),
+            "happened": one_hour.get("happened"),
+            "missed": one_hour.get("missed"),
+            "advice": one_hour.get("advice"),
+            "hours_tracked": summary.get("hours_tracked"),
+            "baseline_per_kwh": summary.get("baseline_per_kwh"),
+            "confidence_enabled": summary.get("confidence_enabled"),
+            "leads": summary.get("leads"),
+            "points": summary.get("points"),
+            "events": summary.get("events"),
+        }
 
 
 class AmberUsageSensor(PowerSyncCurrencyMixin, SensorEntity):

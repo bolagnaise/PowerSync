@@ -2192,6 +2192,9 @@ class AmberPriceCoordinator(DataUpdateCoordinator):
         self._forecast_5min_fetched_at: datetime | None = None
         self._forecast_30min_cache: list[dict[str, Any]] | None = None
         self._forecast_30min_fetched_at: datetime | None = None
+        # Optional display-only record of forecast vs settled export prices
+        # (amber_forecast_accuracy.py), attached during setup.
+        self.forecast_accuracy = None
 
         super().__init__(
             hass,
@@ -2253,6 +2256,16 @@ class AmberPriceCoordinator(DataUpdateCoordinator):
         setattr(self, cache_attr, forecast or [])
         setattr(self, fetched_at_attr, now)
         return forecast or []
+
+    def _record_forecast_accuracy(self, forecast: list, settled: list) -> None:
+        """Feed the display-only accuracy tracker; never fails a price refresh."""
+        tracker = getattr(self, "forecast_accuracy", None)
+        if tracker is None:
+            return
+        try:
+            tracker.observe(forecast, settled, dt_util.utcnow())
+        except Exception as err:  # noqa: BLE001 - display data only
+            _LOGGER.debug("Could not record Amber forecast accuracy: %s", err)
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data from Amber API with WebSocket-first approach."""
@@ -2326,12 +2339,14 @@ class AmberPriceCoordinator(DataUpdateCoordinator):
                 fetched_at_attr="_forecast_30min_fetched_at",
             )
 
-            return {
+            result = {
                 "current": current_prices,
                 "forecast": _merge_amber_forecasts(forecast_5min, forecast_30min),
                 "forecast_5min": forecast_5min,  # Keep for TOU sync spike detection
                 "last_update": dt_util.utcnow(),
             }
+            self._record_forecast_accuracy(result["forecast"], forecast_5min)
+            return result
 
         except UpdateFailed:
             raise  # Re-raise UpdateFailed exceptions
