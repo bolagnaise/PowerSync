@@ -173,6 +173,45 @@ def _pw2_pod_readings(data: dict[str, Any] | None) -> list[dict[str, Any]]:
     return readings
 
 
+def battery_block_layout_summary(
+    data: dict[str, Any] | None,
+    battery_blocks: list[dict[str, Any]],
+    leader_din: Any = None,
+) -> dict[str, Any]:
+    """Debug summary of how batteryBlocks DINs are classified (ticket 202).
+
+    Records the raw DINs, which are treated as PW3 followers or Powerwall 2
+    units, and the raw POD energy readings, so a debug log shows why a mixed
+    site did or did not get per-Powerwall 2 packs.
+    """
+    raw_dins = [
+        block.get("din") or block.get("vin") if isinstance(block, dict) else None
+        for block in battery_blocks or []
+    ]
+    es_can = (data or {}).get("esCan") if isinstance(data, dict) else None
+    bus = es_can.get("bus") if isinstance(es_can, dict) else None
+    pods = bus.get("POD") if isinstance(bus, dict) else None
+    pod_summary = None
+    if isinstance(pods, list):
+        pod_summary = [
+            {
+                key: (pod.get("POD_EnergyStatus") or {}).get(key)
+                for key in ("isMIA", "POD_nom_full_pack_energy", "POD_nom_energy_remaining")
+            }
+            if isinstance(pod, dict) and isinstance(pod.get("POD_EnergyStatus"), dict)
+            else None
+            for pod in pods
+        ]
+    return {
+        "leader_din": leader_din,
+        "block_dins": raw_dins,
+        "pw3_follower_dins": pw3_follower_dins(battery_blocks or [], leader_din),
+        "pw2_dins": mixed_site_pw2_dins(battery_blocks or [], leader_din),
+        "pod": pod_summary,
+        "pod_valid": len(_pw2_pod_readings(data)),
+    }
+
+
 def build_mixed_site_pw2_packs(
     data: dict[str, Any] | None,
     pw2_dins: list[str],

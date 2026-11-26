@@ -9964,6 +9964,7 @@ class BatteryHealthView(HomeAssistantView):
         )
         from .powerwall_local.bms_health import (
             assign_pack_roles_from_battery_blocks,
+            battery_block_layout_summary,
             build_mixed_site_pw2_packs,
             has_pw3_stack,
             is_placeholder_expansion_pack,
@@ -10218,6 +10219,12 @@ class BatteryHealthView(HomeAssistantView):
         # Mixed sites: Powerwall 2 units listed in batteryBlocks never appear as
         # PW3BMS rows, so they must not absorb PW3 follower slots (ticket 202).
         pw2_dins = mixed_site_pw2_dins(battery_blocks, din) if is_pw3_stack else []
+        if _LOGGER.isEnabledFor(logging.DEBUG):
+            _LOGGER.debug(
+                "fleet_api_bms: battery block layout pw3_stack=%s %s",
+                is_pw3_stack,
+                battery_block_layout_summary(data, battery_blocks, din),
+            )
         if is_pw3_stack and follower_indices and current_wh and not pw2_dins:
             leader_full_wh = sum(
                 p["nominalFullPackEnergyWh"] for p in individual if not p.get("isFollower")
