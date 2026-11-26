@@ -8767,6 +8767,128 @@ def test_handoff_skips_redundant_stop_only_after_our_confirmed_stop(
         physical_stop.assert_not_awaited()
 
 
+def _charging_smart_schedule_session_for_boost(monkeypatch, *, physically_charging=True,
+                                               charging_started=True, owner_mode="smart_schedule_solar_surplus"):
+    """A Smart Schedule solar session that is charging a Tesla when Boost is pressed."""
+    from power_sync import tesla_ev_recovery
+    from power_sync.automations import ev_ownership
+
+    vehicle_id = "LRWYTEST8TC828420"
+    charging_entity = "sensor.test_tesla_charging"
+    current_entity = "sensor.test_tesla_charger_current"
+    entry = _Entry()
+    hass = _Hass([
+        _State(charging_entity, "charging" if physically_charging else "stopped"),
+        _State(current_entity, "16" if physically_charging else "0"),
+    ])
+    _install_native_ha_writer(hass, vehicle_id, charging_entity, current_entity)
+    cancel_timer = Mock()
+    dynamic_mode = "solar_surplus" if "solar_surplus" in owner_mode else "battery_target"
+    state = {
+        "active": True, "current_amps": 16 if charging_started else 0,
+        "target_amps": 16 if charging_started else 0,
+        "charging_started": charging_started, "cancel_timer": cancel_timer,
+        "params": {
+            "owner_mode": owner_mode, "dynamic_mode": dynamic_mode,
+            "charger_type": "tesla", "vehicle_vin": vehicle_id, "notify_on_complete": False,
+        },
+    }
+    monkeypatch.setitem(actions._dynamic_ev_state, entry.entry_id, {vehicle_id: state})
+    ev_ownership.claim_ev_ownership(hass, entry, vehicle_id, owner_mode=owner_mode)
+    monkeypatch.setattr(tesla_ev_recovery, "get_vehicle_route", Mock(return_value=None))
+    monkeypatch.setattr(tesla_ev_recovery, "ev_recovery_status",
+                        Mock(return_value={"recovery_required": False}))
+    monkeypatch.setattr(actions, "_tesla_vehicle_away_location", AsyncMock(return_value=None))
+    monkeypatch.setattr(actions, "_resolve_tesla_charge_current_entity", AsyncMock(return_value=None))
+    monkeypatch.setattr(actions, "_resolve_tesla_active_charger_capability", AsyncMock(return_value={
+        "association_known": True, "capability_known": True, "max_charge_amps": 32,
+        "max_charge_amps_source": "active_charger", "voltage": 230, "phases": 1,
+    }))
+    monkeypatch.setattr(actions, "async_track_time_interval", lambda *_args, **_kwargs: lambda: None)
+    physical_stop = AsyncMock(return_value=True)
+    physical_start = AsyncMock(return_value=True)
+    set_amps = []
+
+    async def record_amps(_hass, _entry, vid, amps, _params):
+        set_amps.append((vid, amps))
+        return True
+
+    monkeypatch.setattr(actions, "_action_stop_ev_charging", physical_stop)
+    monkeypatch.setattr(actions, "_action_start_ev_charging", physical_start)
+    monkeypatch.setattr(actions, "_set_vehicle_amps", record_amps)
+    return hass, entry, vehicle_id, state, physical_stop, physical_start, set_amps
+
+
+def _boost_params(vehicle_id, *, user_initiated=True):
+    params = {
+        "vehicle_vin": vehicle_id, "charger_type": "tesla",
+        "dynamic_mode": "battery_target", "owner_mode": "boost",
+        "fixed_charge_amps": 32, "start_amps": 32, "max_charge_amps": 32,
+        "phase_requested_amps": 32, "phase_load_management_required": True,
+    }
+    if user_initiated:
+        params["_user_initiated"] = True
+    return params
+
+
+@pytest.mark.parametrize("owner_mode", ["smart_schedule_solar_surplus", "smart_schedule", "solar_surplus"])
+def test_boost_adopts_a_charging_powersync_session_without_stopping_the_car(monkeypatch, owner_mode):
+    """Live 2026-11-26 15:36: Boost on a car Smart Schedule was charging stopped it.
+
+    The takeover teardown sent a physical Stop. That unconfirmed BLE Stop held
+    the bridge, the Boost Start was refused, and the car was left stopped with
+    the Boost lost. Boost must keep the running charge and raise it to 32A.
+    """
+    from power_sync.automations import ev_ownership
+
+    hass, entry, vin, old_state, stop, start, set_amps = (
+        _charging_smart_schedule_session_for_boost(monkeypatch, owner_mode=owner_mode))
+
+    assert asyncio.run(actions._action_start_ev_charging_dynamic(
+        hass, entry, _boost_params(vin))) is True
+
+    stop.assert_not_awaited()
+    start.assert_not_awaited()
+    state = actions._dynamic_ev_state[entry.entry_id][vin]
+    if old_state["params"]["dynamic_mode"] == "solar_surplus":
+        # A different controller replaces the solar session and applies 32A.
+        assert set_amps == [(vin, 32)]
+        old_state["cancel_timer"].assert_called_once_with()
+        assert state is not old_state
+    else:
+        # The same battery-target controller is refreshed in place.
+        assert state is old_state
+    assert state["params"]["owner_mode"] == "boost"
+    assert state["charging_started"] is True
+    _, lease = ev_ownership.get_ev_ownership(hass, entry, vin)
+    assert lease["owner_mode"] == "boost"
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    ["car_not_charging", "session_not_started", "automated_takeover"],
+)
+def test_boost_keeps_the_stop_then_start_takeover_without_proof_of_charging(monkeypatch, scenario):
+    """Adoption needs a user Boost, a started session and live charging evidence."""
+    hass, entry, vin, _old_state, stop, start, _set_amps = (
+        _charging_smart_schedule_session_for_boost(
+            monkeypatch,
+            physically_charging=scenario != "car_not_charging",
+            charging_started=scenario != "session_not_started",
+        ))
+
+    result = asyncio.run(actions._action_start_ev_charging_dynamic(
+        hass, entry, {
+            **_boost_params(vin, user_initiated=scenario != "automated_takeover"),
+            "allow_ownership_takeover": scenario == "automated_takeover",
+        }))
+
+    assert result is True
+    stop.assert_awaited_once()
+    assert stop.await_args.args[2]["vehicle_vin"] == vin
+    start.assert_awaited_once()
+
+
 def test_solar_surplus_completion_handoff_notifies_only_for_eligible_accepted_vehicle(monkeypatch):
     vin_done = "5YJTEST0000000001"
     vin_capped = "5YJTEST0000000002"

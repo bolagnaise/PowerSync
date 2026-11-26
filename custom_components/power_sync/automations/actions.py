@@ -20448,6 +20448,49 @@ async def _action_start_ev_charging_dynamic_locked(
                 hass, vehicle_id, command_entity, start_amps,
             )
 
+    # A user Boost over a PowerSync session that is already charging the car
+    # keeps that charge running.  Stopping it first and starting again does
+    # not work on a Tesla: the unconfirmed Stop holds the command route, the
+    # Start is refused, and the car is left stopped with the Boost lost.
+    boost_adoption_state = None
+    boost_adoption_evidence = None
+    adoptable_state = entry_vehicles.get(vehicle_id)
+    if (
+        charger_type == "tesla"
+        and dynamic_mode == "battery_target"
+        and owner_mode == "boost"
+        and params.get("_user_initiated") is True
+        and not params.get("quick_control")
+        and handoff_observation is None
+        and _lease_id == vehicle_id
+        and isinstance(_lease, dict)
+        and _lease.get("owner") == "powersync"
+        and owner_family(_lease.get("owner_mode")) in {
+            "smart_schedule", "solar_surplus", "price_level", "scheduled",
+        }
+        and isinstance(adoptable_state, dict)
+        and adoptable_state.get("active")
+        and adoptable_state.get("charging_started") is True
+        and (adoptable_state.get("current_amps") or 0) > 0
+        and not adoptable_state.get("transport_recovery_pending")
+        and not manual_stop_hold_reason(hass, config_entry, vehicle_id)
+        and (solar_update_lock is None or not solar_update_lock.locked())
+    ):
+        from .ev_ownership import get_ev_quick_control_obligation
+
+        adoption_snapshot = _tesla_physical_charging_snapshot(
+            hass, config_entry, vehicle_id, params,
+        )
+        if (
+            get_ev_quick_control_obligation(hass, config_entry, vehicle_id) is None
+            and adoption_snapshot.get("charging")
+            and adoption_snapshot.get("measurements")
+        ):
+            boost_adoption_state = adoptable_state
+            boost_adoption_evidence = ", ".join(
+                sorted(adoption_snapshot["measurements"])
+            )
+
     # Stop any existing dynamic charging for this vehicle.  Record whether that
     # teardown actually commanded the charger off: cloud EV telemetry lags the
     # command by a poll interval, so the not-yet-settled aftermath of our own
@@ -20496,6 +20539,41 @@ async def _action_start_ev_charging_dynamic_locked(
                         success=False, reason=reason,
                     )
             return False
+    elif boost_adoption_state is not None:
+        # End the old session's control only; the car keeps charging.
+        teardown_params.update(
+            stop_charging=False,
+            _expected_state=boost_adoption_state, _expected_lease=_lease,
+        )
+        if solar_update_lock is not None:
+            async with solar_update_lock:
+                teardown_success = await _action_stop_ev_charging_dynamic(
+                    hass, config_entry, teardown_params,
+                )
+        else:
+            teardown_success = await _action_stop_ev_charging_dynamic(
+                hass, config_entry, teardown_params,
+            )
+        if (
+            not teardown_success
+            or boost_adoption_state.get("active")
+            or get_ev_ownership(hass, config_entry, vehicle_id)[1] is not None
+        ):
+            reason = "the running charging session could not be handed to Boost"
+            if isinstance(result := params.get("_boost_start_result"), dict):
+                result["not_submitted"] = reason
+            else:
+                record_ev_command(
+                    hass, config_entry, vehicle_id, command="start_boost",
+                    success=False, reason=reason,
+                )
+            return False
+        _LOGGER.info(
+            "Dynamic EV: Boost is taking over %s while it charges (%s); "
+            "no Stop is sent",
+            vehicle_id,
+            boost_adoption_evidence,
+        )
     elif handoff_observation is None:
         teardown_success = await _action_stop_ev_charging_dynamic(
             hass, config_entry, teardown_params,
@@ -20929,7 +21007,11 @@ async def _action_start_ev_charging_dynamic_locked(
 
             start_params = dict(params)
             start_params["amps"] = start_amps
-            if handoff_observation is not None or already_physically_charging:
+            if (
+                handoff_observation is not None
+                or already_physically_charging
+                or boost_adoption_state is not None
+            ):
                 start_success = True
                 _LOGGER.info(
                     "Dynamic EV: %s was already physically charging; "
@@ -20974,7 +21056,8 @@ async def _action_start_ev_charging_dynamic_locked(
             # register a new session after that late completion; contain the
             # exact vehicle first and leave any unknown outcome fail-closed.
             if not registration_authority():
-                if handoff_observation is None:
+                # An adopted charge sent no Start, so there is none to undo.
+                if handoff_observation is None and boost_adoption_state is None:
                     await _compensate_late_positive_start()
                 record_ev_command(
                     hass,
