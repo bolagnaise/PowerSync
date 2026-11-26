@@ -5026,6 +5026,9 @@ class AutoScheduleState:
 
     # Phase 2 grace clocks for data that went missing mid-charge.
     missing_data: dict = field(default_factory=dict)
+    # Source of the latest positive decision, kept across evaluations so a
+    # price gap can hold the charge on the source that was running.
+    charging_source: str = ""
 
     def plan_presentation_snapshot(self, now: Optional[datetime] = None) -> dict:
         """Return a read-only, offset-safe summary for schedule consumers.
@@ -7155,6 +7158,25 @@ class AutoScheduleExecutor:
             priority=effective_priority,
             solar_session_active=solar_session_active,
         )
+        if state.is_charging:
+            # Phase 2: the planner itself refuses on a missing retail or
+            # export price. A running charge rides out that gap on the source
+            # it was using; every later rule still applies.
+            if current_export_price_cents is not None:
+                missing_data_grace_expired(state.missing_data, "export_price", missing=False)
+            missing_price_key = (
+                None if should_charge else _PLANNER_MISSING_PRICE_REASONS.get(reason)
+            )
+            held_source = (
+                "solar_surplus" if missing_price_key == "export_price"
+                else state.charging_source
+            )
+            if (
+                missing_price_key
+                and held_source
+                and _hold_running_charge_through_gap(state, missing_price_key, reason)
+            ):
+                should_charge, reason, source = True, state.last_decision_reason, held_source
 
         if (
             should_charge
@@ -7362,6 +7384,8 @@ class AutoScheduleExecutor:
         state.wants_charge = bool(should_charge)
         state.wants_charge_source = str(source or "")
         state.wants_charge_at = time.monotonic()
+        if should_charge and source:
+            state.charging_source = str(source)
 
         # Publish the effective, post-policy decision separately from the
         # stored optimizer envelope. A bounded exact-VIN free-grid signal is
@@ -10922,6 +10946,11 @@ def _hold_running_charge_through_gap(state, key: str, what: str) -> bool:
 
 
 _PRICE_LEVEL_NO_PRICE = "No price data available"
+# Planner refusals that only mean "a price is missing", and their grace clock.
+_PLANNER_MISSING_PRICE_REASONS = {
+    "Current retail price unavailable": "grid_price",
+    "Export price unavailable; automatic solar charging paused": "export_price",
+}
 
 
 def _price_level_ride_out_price_gap(state: PriceLevelChargingState, decision):

@@ -11954,3 +11954,30 @@ def test_standalone_loadpoint_grace_restarts_after_the_price_returns(monkeypatch
     # A later gap gets a fresh grace period instead of an immediate stop.
     assert asyncio.run(decide("No price data available"))[0] is True
     executor._stop_charging.assert_not_awaited()
+
+
+@pytest.mark.parametrize("reason, key, running_source", [
+    ("Current retail price unavailable", "grid_price", "grid_offpeak"),
+    ("Export price unavailable; automatic solar charging paused", "export_price", "solar_surplus"),
+])
+def test_planner_missing_price_refusal_gets_the_grace_while_charging(
+    monkeypatch, fake_actions, reason, key, running_source,
+):
+    fake_actions._action_start_ev_charging_dynamic = AsyncMock(return_value=True)
+    fake_actions._action_stop_ev_charging_dynamic = AsyncMock(return_value=True)
+    executor, state = _soc_gap_executor(monkeypatch)
+    monkeypatch.setattr(ev_planner.AutoScheduleExecutor, "_get_vehicle_soc", AsyncMock(return_value=55))
+    executor.planner.should_charge_now = AsyncMock(return_value=(False, reason, "waiting"))
+    executor.planner._get_solar_surplus_config = AsyncMock(return_value={})
+    state.charging_source = running_source
+    # Enough solar that only the missing price could stop a solar session.
+    live = {"battery_soc": 90, "solar_power": 8000, "load_power": 1000, "grid_power": -7000}
+
+    asyncio.run(executor.evaluate(dict(live), current_price_cents=None))
+
+    executor._stop_charging.assert_not_awaited()
+    assert key in state.missing_data["_missing_data_since"]
+
+    _expire(state.missing_data, key)
+    asyncio.run(executor.evaluate(dict(live), current_price_cents=None))
+    executor._stop_charging.assert_awaited_once()
