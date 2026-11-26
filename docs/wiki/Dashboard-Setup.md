@@ -54,13 +54,26 @@ The dashboard uses the same look as the PowerSync cloud app: dark navy cards, DM
 Two full-width cards sit at the top:
 
 - **Right now** says in a sentence what the battery is doing and why, with charge level, export floor, backup time, and live solar, home, battery and grid power.
-- **Optimizer plan** shows the last 12 hours as measured and the next 24 hours as planned: import and export prices, the battery's charge level, what the battery will do each interval, and planned car charging. Hover over the chart, or focus it and use the arrow keys, to read any interval. Below the chart are the upcoming charge and export windows and the reserve details. The refresh button fetches the latest plan.
+- **Optimiser plan** shows the last 12 hours as measured and the next 24 hours as planned: import and export prices, the battery's charge level, what the battery will do each interval, and planned car charging. Hover over the chart, or focus it and use the arrow keys, to read any interval. Below the chart are the upcoming charge and export windows and the reserve details. The refresh button fetches the latest plan.
 
 The other cards sit in one to three columns, depending on screen width.
 
 Hover over or tap the **Prices today**, **Energy since midnight**, **Load forecast**, **Planned battery power**, and **Solar and load forecast** graphs to see the time and values. You can also focus a graph and use the left and right arrow keys; press Escape to dismiss the tooltip. Power values use kW, prices use your tariff’s minor currency unit per kWh, and battery power above zero means charging.
 
 The **Planned battery power** graph leaves out time labels that would overlap, including midnight close to the start of the plan. Labels adapt to the card width; hover, tap, or use the arrow keys to see the exact time for any bar.
+
+### Optimiser settings
+
+The **Optimiser settings** card starts with one line saying what the optimiser is doing, for example *Smart Optimization is planning only. Monitoring mode is on, so no battery commands are sent.*
+
+- **Smart Optimization** and **Monitoring only** come first. If HA optimiser access is unavailable, the Smart Optimization switch is greyed out and the card says what to fix. It can always be turned off. On a read-only battery connection, such as Sungrow iHomeManager, **Monitoring only** is greyed out because it is always on.
+- **Battery goal** is one choice: **Standard**, **Profit Max** or **Cost Neutral**. Each has a one-line description. The goal that is on shows anything stopping it, such as a missing maximum grid export for Profit Max solar export, or today's Cost Neutral progress. A goal chosen while Smart Optimization is off is saved and used when it is turned on.
+- **Charge by time** works with any goal and shows its target.
+- **Fine tuning** and **Updates** hold the remaining switches.
+
+The Smart Optimization settings dialog shows car charging inputs only once a vehicle or charger is set up, unless one is already turned on.
+
+The same switch entities still drive every control, so automations and existing dashboards are unchanged.
 
 ### Solar inverter controls
 
@@ -73,7 +86,7 @@ Cards appear only when the matching feature or entities exist.
 | Card | When it appears |
 |------|-----------------|
 | Right now | Core power sensors |
-| Optimizer plan | Smart Optimization enabled |
+| Optimiser plan | Smart Optimization enabled |
 | Battery controls | Battery system configured |
 | Energy flow | Core power sensors |
 | Plan explanation | Smart Optimization available |
@@ -83,7 +96,7 @@ Cards appear only when the matching feature or entities exist.
 | Car charging | EV smart charging configured |
 | Powerwall settings | Tesla Powerwall |
 | Powerwalls | Powerwall local pairing configured |
-| Optimizer settings | Smart Optimization available |
+| Optimiser settings | Smart Optimization available |
 | Energy since midnight | Core power sensors |
 | Load forecast | Load forecast or Smart Optimization available |
 | Planned battery power | Smart Optimization active |
@@ -104,7 +117,7 @@ Cards appear only when the matching feature or entities exist.
 | System details | Your battery integration reports extra sensors (one card per group) |
 | Missing frontend cards | A frontend card that some cards need is not installed |
 
-**Solar Only** selects the source for a charging session started with **Start**. Automatic **Solar Surplus** charging is enabled separately under **Car charging → Modes → Solar Surplus**. Its controls appear only in the EV panel, rather than a duplicate switch in Optimizer settings.
+**Solar Only** selects the source for a charging session started with **Start**. Automatic **Solar Surplus** charging is enabled separately under **Car charging → Modes → Solar Surplus**. Its controls appear only in the EV panel, rather than a duplicate switch in Optimiser settings.
 
 ### Configuring dashboard settings
 

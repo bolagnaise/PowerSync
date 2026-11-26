@@ -2820,8 +2820,9 @@ class PowerSyncOptimizationPlan extends HTMLElement {
     const data = model.raw || {};
     const chips = [];
     const availability = this._optimizerAvailability(data);
-    const status = availability?.label || (data.monitoring_mode ? 'Monitoring' : data.status || 'Active');
-    chips.push(['Mode', this._title(status), !!availability]);
+    // Name what the optimiser is doing; "Mode" read as the battery's own mode.
+    const status = availability?.label || (data.monitoring_mode ? 'Monitoring only' : 'On');
+    chips.push(['Optimiser', status.replace(/^\w/, c => c.toUpperCase()), !!availability]);
     if (availability?.blocking) {
       return `<div class="chips">${chips.map(([name, value, warn]) => `
         <div class="chip${warn ? ' warn' : ''}"><span>${this._escHtml(name)}:</span><span>${this._escHtml(value)}</span></div>
@@ -5576,7 +5577,9 @@ class PowerSyncEVPanel extends HTMLElement {
     // remains authoritative for all safety and availability checks.
     const shared = this._data?.sharedCharger;
     if (loadpoint?.loadpoint_id === 'generic_ev' && shared?.enabled && !shared.selected_vehicle_id) return false;
-    return !!loadpoint && loadpoint.connected && !this._savingKey;
+    // A switch-only generic charger has no plug sensor; its "off" state does
+    // not mean the car is unplugged, so Start stays available.
+    return !!loadpoint && (loadpoint.connected || loadpoint.plug_state_known === false) && !this._savingKey;
   }
 
   _canStop(loadpoint) {
@@ -6301,7 +6304,8 @@ class PowerSyncEVPanel extends HTMLElement {
         ${loadpoints.length === 0 && this._data ? this._noticeHtml('warn', 'No EV loadpoints detected. Configure EV charging in PowerSync options or the mobile app.') : ''}
         ${selected ? this._statusHtml(selected, conflict) : ''}
         ${selected ? this._controlsHtml(loadpoints, selected, canStart, canStop) : ''}
-        ${selected && !selected.connected ? this._noticeHtml('warn', 'EV is disconnected. Start is disabled until the charger reports a connected vehicle.') : ''}
+        ${selected && !selected.connected && selected.plug_state_known !== false ? this._noticeHtml('warn', 'EV is disconnected. Start is disabled until the charger reports a connected vehicle.') : ''}
+        ${selected && !selected.connected && selected.plug_state_known === false ? this._noticeHtml('', 'No connector status sensor is configured, so PowerSync cannot tell whether the car is plugged in. Start turns the charger switch on.') : ''}
         ${conflict ? this._noticeHtml('warn', `${this._ownerLabel(selected.owner_mode)} currently controls this loadpoint. Manual Start will take over.`) : ''}
         ${this._sharedChargerHtml()}
         ${this._bydVehiclesHtml()}
@@ -6328,7 +6332,9 @@ class PowerSyncEVPanel extends HTMLElement {
 
   _statusHtml(loadpoint, conflict) {
     const stateClass = loadpoint.actual_charging ? 'on' : (conflict || loadpoint.blocking_reason ? 'warn' : '');
-    const stateText = loadpoint.actual_charging ? 'Charging' : (loadpoint.connected ? 'Connected' : 'Disconnected');
+    const stateText = loadpoint.actual_charging
+      ? 'Charging'
+      : (loadpoint.connected ? 'Connected' : (loadpoint.plug_state_known === false ? 'Charger off' : 'Disconnected'));
     const countdown = this._countdown(loadpoint.expires_at);
     const owner = this._ownerLabel(loadpoint.owner_mode || loadpoint.owner || 'idle');
     const source = this._sourceLabel(loadpoint);
@@ -9037,7 +9043,7 @@ class PowerSyncStrategy {
 
     // --- Left Column: Optimizer Status (requires button-card) ---
     if (hasButton && hasE('optimization_status')) {
-      left.push(_optimizerStatus(e));
+      left.push(_optimizerStatus(e, false, false, findEntity('switch', 'monitoring_mode')));
       center.push(_optimizationPlan(e));
       center.push(_aiPlanExplanation());
     }
@@ -9450,7 +9456,7 @@ function _boardCards(ctx) {
 
   if (hasOptimizer) {
     add({
-      key: 'plan', title: 'Optimizer plan', size: 'wide', native: 'ps-plan-card', refresh: true,
+      key: 'plan', title: 'Optimiser plan', size: 'wide', native: 'ps-plan-card', refresh: true,
       meta: 'Last 12 hours measured, then the next 24 hours planned',
       config: { entities: {
         soc: se('battery_level'), battery: se('battery_power'), grid: se('grid_power'),
@@ -9537,21 +9543,27 @@ function _boardCards(ctx) {
   }
 
   if (hasOptimizer) {
+    // One status line, then Smart Optimization and Monitoring, one battery
+    // goal (Profit Max and Cost Neutral are exclusive), then fine tuning.
+    const optEntities = {
+      enabled: reg('switch', 'optimization_enabled'), monitoring: reg('switch', 'monitoring_mode'),
+      profitMax: reg('switch', 'profit_max_mode'), costNeutral: reg('switch', 'cost_neutral'),
+      chargeByTime: reg('switch', 'charge_by_time'),
+    };
     add({
-      key: 'optset', title: 'Optimizer settings', native: 'ps-settings-card',
-      config: { rows: [
-        { kind: 'switch', entity: reg('switch', 'optimization_enabled'), label: 'Smart Optimization', editor: 'optimizer', help: 'Plans the battery around prices and forecasts' },
-        { kind: 'switch', entity: reg('switch', 'monitoring_mode'), label: 'Monitoring mode', help: 'Plans and reports only, without sending commands' },
-        { kind: 'switch', entity: reg('switch', 'optimization_auto_apply_reserve'), label: 'Apply recommended reserve', editor: 'reserve', help: 'Sets the export floor from the forecast' },
-        { kind: 'switch', entity: reg('switch', 'cost_neutral'), label: 'Cost neutral', editor: 'cost_neutral', help: 'Aims to cover the daily bill with exports' },
-        { kind: 'switch', entity: reg('switch', 'profit_max_mode'), label: 'Profit max', help: 'Exports whenever it earns more than it costs' },
-        { kind: 'switch', entity: reg('switch', 'charge_by_time'), label: 'Charge by time', editor: 'charge_by_time', help: 'Reaches a target charge by a set time' },
-        { kind: 'switch', entity: reg('switch', 'optimization_disable_idle'), label: 'Disable idle', help: 'Uses the battery instead of holding it' },
-        { kind: 'switch', entity: reg('switch', 'optimization_spread_export'), label: 'Spread export', help: 'Exports across more intervals at lower power' },
-        { kind: 'switch', entity: reg('switch', 'optimization_spread_import'), label: 'Spread import', help: 'Charges across more intervals at lower power' },
-        { kind: 'switch', entity: reg('switch', 'amber_forecast_confidence'), label: 'Amber forecast confidence', help: 'Plans around Amber price uncertainty' },
-        { kind: 'switch', entity: reg('switch', 'away_mode'), label: 'Away mode', help: 'Plans for a lower home load while you are away' },
-        { kind: 'switch', entity: reg('switch', 'auto_update'), label: 'Auto update', editor: 'auto_update', help: 'Installs PowerSync updates automatically' },
+      key: 'optset', title: 'Optimiser settings', native: 'ps-optimizer-card',
+      config: { entities: optEntities, rows: [
+        { group: 'main', kind: 'switch', entity: optEntities.enabled, label: 'Smart Optimization', editor: 'optimizer', help: 'Plans the battery around prices and forecasts' },
+        { group: 'main', kind: 'switch', entity: optEntities.monitoring, label: 'Monitoring only', help: 'Plans and reports without sending battery commands' },
+        { group: 'goal', kind: 'link', entity: optEntities.costNeutral, label: 'Daily supply charge', editor: 'cost_neutral', help: 'Counted in the Cost Neutral target' },
+        { group: 'goal', kind: 'switch', entity: optEntities.chargeByTime, label: 'Charge by time', editor: 'charge_by_time', help: 'Reaches a target charge by a set time, whatever the goal' },
+        { group: 'tuning', kind: 'switch', entity: reg('switch', 'optimization_auto_apply_reserve'), label: 'Apply recommended reserve', editor: 'reserve', help: 'Sets the export floor from the forecast' },
+        { group: 'tuning', kind: 'switch', entity: reg('switch', 'optimization_disable_idle'), label: 'Disable idle', help: 'Uses the battery instead of holding it' },
+        { group: 'tuning', kind: 'switch', entity: reg('switch', 'optimization_spread_export'), label: 'Spread export', help: 'Exports across more intervals at lower power' },
+        { group: 'tuning', kind: 'switch', entity: reg('switch', 'optimization_spread_import'), label: 'Spread import', help: 'Charges across more intervals at lower power' },
+        { group: 'tuning', kind: 'switch', entity: reg('switch', 'amber_forecast_confidence'), label: 'Amber forecast confidence', help: 'Plans around Amber price uncertainty' },
+        { group: 'tuning', kind: 'switch', entity: reg('switch', 'away_mode'), label: 'Away mode', help: 'Plans for a lower home load while you’re away' },
+        { group: 'updates', kind: 'switch', entity: reg('switch', 'auto_update'), label: 'Auto update', editor: 'auto_update', help: 'Installs PowerSync updates automatically' },
       ].filter(r => r.entity) },
     });
   }
@@ -10430,15 +10442,17 @@ function _powerwallStatus(e, hasE) {
   return { type: 'vertical-stack', cards };
 }
 
-function _optimizerStatus(e, showForceChargeWindows = false, showForceDischargeWindows = false) {
+function _optimizerStatus(e, showForceChargeWindows = false, showForceDischargeWindows = false, monitoringEntity = null) {
   const statusEntity = e('optimization_status');
+  // In Monitoring mode the action is only the plan, so say so up front.
+  const monitoringCheck = monitoringEntity ? `states[${JSON.stringify(monitoringEntity)}]?.state === 'on'` : 'false';
   const nextEntity = e('optimization_next_action');
   const forceChargeWindowsEntity = e('optimization_force_charge_windows');
   const forceDischargeWindowsEntity = e('optimization_force_discharge_windows');
   const cards = [{
     type: 'custom:button-card',
     entity: statusEntity,
-    name: 'Optimizer',
+    name: 'Optimiser',
     show_icon: true,
     show_name: true,
     show_label: true,
@@ -10454,6 +10468,7 @@ function _optimizerStatus(e, showForceChargeWindows = false, showForceDischargeW
         : Math.round(powerW) + ' W';
       let line1 = action.charAt(0).toUpperCase() + action.slice(1);
       if (powerW) line1 += ' @ ' + powerStr;
+      if (${monitoringCheck}) line1 = 'Monitoring only, no commands sent. Plan: ' + line1;
       if (current.attributes?.idle_hold_active) {
         const holdPct = Number(current.attributes?.idle_hold_reserve_percent);
         const holdText = Number.isFinite(holdPct)

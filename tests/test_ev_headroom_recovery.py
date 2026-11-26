@@ -409,3 +409,177 @@ async def test_recovery_accepts_healthy_two_second_meter_cadence(recovery_case, 
     assert answer['success'], answer
     assert VIN not in c.a.store.data['managed']
     assert len(c.reads) == 2
+
+
+def removed_entry_case(c, *, site='site', configured=False):
+    """Ticket 156: a reinstall leaves demand bound to the removed entry."""
+    a = c.a
+    record = a.budget.managed[VIN]
+    record.update(entry_id='removed-entry', site=site)
+    a.store.data['managed'][VIN] = deepcopy(record)
+    other = NS(entry_id='removed-entry')
+    a.hass.config_entries.async_get_entry = lambda entry_id: (
+        a.entry if entry_id == 'one' else other if configured and entry_id == 'removed-entry' else None)
+    return importlib.import_module(a.m.__package__ + '.tesla_ev_recovery')
+
+
+@pytest.mark.asyncio
+async def test_removed_entry_reservation_is_reported_and_recovered_by_current_entry(recovery_case):
+    c, a = recovery_case, recovery_case.a
+    ev = removed_entry_case(c)
+    status = ev.ev_headroom_recovery_status(a.hass, a.entry, VIN)
+    assert status['reason'] == 'reservation_entry_removed'
+    assert status['saved_entry_matches'] is False and status['saved_entry_removed'] is True
+    assert status['saved_site_matches'] is True and status['reservation_present'] is None
+    assert 'removed-entry' not in repr(status)
+    assert c.reads == c.meters == []
+    assert await recover(c) == dict(success=True, vin=VIN, reservation_cleared=True)
+    assert len(c.reads) == len(c.meters) == 2
+    assert VIN not in a.budget.managed and VIN not in a.store.data['managed']
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('variant', ['other_site', 'still_configured', 'no_consent', 'loaded_runtime'])
+async def test_removed_entry_adoption_requires_exact_site_absent_entry_and_consent(recovery_case, variant):
+    c, a = recovery_case, recovery_case.a
+    ev = removed_entry_case(c, site='other' if variant == 'other_site' else 'site',
+                            configured=variant == 'still_configured')
+    if variant == 'loaded_runtime':
+        a.hass.data['power_sync']['removed-entry'] = {}
+    before = deepcopy(a.store.data['managed'][VIN])
+    status = ev.ev_headroom_recovery_status(a.hass, a.entry, VIN)
+    assert status['reason'] == ('reservation_entry_removed' if variant == 'no_consent'
+                                else 'reservation_scope_mismatch')
+    assert status['saved_site_matches'] is (variant != 'other_site')
+    if variant == 'no_consent':
+        answer = await c.r.async_recover_ev_headroom(a.hass, a.entry, VIN)
+        assert answer['error'] == 'provider_refresh_confirmation_required'
+    else:
+        assert (await recover(c))['error'] == 'reservation_scope_mismatch'
+    assert c.reads == c.meters == []
+    assert a.budget.managed[VIN]['entry_id'] == 'removed-entry'
+    assert a.store.data['managed'][VIN] == before
+
+
+@pytest.mark.asyncio
+async def test_removed_entry_adoption_keeps_envelope_when_vehicle_is_not_stopped(recovery_case):
+    c, a = recovery_case, recovery_case.a
+    removed_entry_case(c)
+    async def read(number, kwargs):
+        charge = dict(c.observation.raw_charge_state, timestamp=c.now[0], charging_state='Charging')
+        return replace(c.observation, source_charge_timestamp=c.now[0], raw_charge_state=charge,
+                       charge_state='Charging', origin='native_cloud')
+    c.hooks['read'] = read
+    assert (await recover(c))['error'] == 'vehicle_not_stopped'
+    kept = a.store.data['managed'][VIN]
+    assert kept['entry_id'] == 'one' and kept['adopted_from_entry_id'] == 'removed-entry'
+    assert kept['reserved_w'] == 18400 and kept['uncertain'] is True
+    assert a.budget.managed[VIN] == kept
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('variant', ['armed', 'native_max', 'task', 'readded_during_save'])
+async def test_removed_entry_adoption_stays_fail_closed_when_site_or_vin_is_busy(recovery_case, monkeypatch, variant):
+    c, a = recovery_case, recovery_case.a
+    removed_entry_case(c)
+    before = deepcopy(a.store.data['managed'][VIN])
+    if variant == 'armed': a.budget.armed_sites.add('site')
+    if variant == 'native_max': monkeypatch.setattr(a.budget, 'native_max_claim', lambda *_: {'owner': 'battery'})
+    if variant == 'task':
+        task = asyncio.create_task(asyncio.Event().wait())
+        a.budget.managed_tasks[VIN] = task
+    if variant == 'readded_during_save':
+        get_entry = a.hass.config_entries.async_get_entry
+        def readded(entry_id):
+            # The saved entry returns after the pre-check but before the
+            # in-lock ownership check.
+            if entry_id == 'removed-entry' and a.budget.admission_lock('site').locked():
+                return NS(entry_id=entry_id)
+            return get_entry(entry_id)
+        a.hass.config_entries.async_get_entry = readded
+    try:
+        answer = await recover(c)
+    finally:
+        if variant == 'task':
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+    assert answer['error'] == ('site_busy' if variant in ('armed', 'native_max') else 'recovery_scope_blocked')
+    assert c.reads == c.meters == []
+    assert a.budget.managed[VIN]['entry_id'] == 'removed-entry'
+    assert a.store.data['managed'][VIN] == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('variant,check,round_number', [
+    ('round_two_read_refused', 'vehicle_read', 2),
+    ('provider_error', 'vehicle_read_error', 1),
+    ('meter_failed', 'meter_refresh_error', 1),
+    ('stale', 'vehicle_report_rejected', 1),
+    ('meter_update_failed', 'meter_update_failed', 1),
+])
+async def test_fresh_readback_failure_reports_failed_check_and_round(recovery_case, monkeypatch, variant, check, round_number):
+    """Ticket 156: an awake, stopped car still returned fresh_readback_unavailable."""
+    c, a = recovery_case, recovery_case.a
+    async def read(number, kwargs):
+        if variant == 'round_two_read_refused' and number == 2:
+            kwargs['failure'].update(reason='older_than_read_start', stage='read',
+                                     refresh_reason='response_not_document', sample_age_seconds=42.0)
+            return None
+        if variant == 'provider_error': raise RuntimeError('unavailable')
+        stamp = c.now[0] - (20 if variant == 'stale' else 0)
+        charge = dict(c.observation.raw_charge_state, timestamp=stamp)
+        return replace(c.observation, source_charge_timestamp=stamp, raw_charge_state=charge,
+                       origin='native_cloud')
+    c.hooks['read'] = read
+    async def meter():
+        if variant == 'meter_failed': raise RuntimeError('meter unavailable')
+        if variant == 'meter_update_failed': a.local.last_update_success = False
+    c.hooks['meter'] = meter
+    if variant == 'round_two_read_refused':
+        # Keep round one from settling so a second explicit read is required.
+        settle = c.r.refresh_managed_records
+        async def first_round_only(*args, **kwargs):
+            if len(c.reads) > 1:
+                return await settle(*args, **kwargs)
+        monkeypatch.setattr(c.r, 'refresh_managed_records', first_round_only)
+    answer = await recover(c)
+    assert answer['success'] is False and answer['error'] == 'fresh_readback_unavailable'
+    assert answer['failed_check'] == check and answer['round'] == round_number
+    assert VIN in a.budget.managed and VIN in a.store.data['managed']
+    if variant == 'round_two_read_refused':
+        assert answer['vehicle_read'] == {'reason': 'older_than_read_start', 'stage': 'read',
+            'refresh_reason': 'response_not_document', 'sample_age_seconds': 42.0}
+    if variant == 'stale':
+        assert answer['sample_age_seconds'] == 20.0
+    assert VIN not in repr({k: v for k, v in answer.items()})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('variant, expected', [
+    ('charging', {'charge_state': 'charging', 'charger_actual_current': 0.0, 'charger_power': 0.0}),
+    ('power', {'charge_state': 'stopped', 'charger_actual_current': 0.0, 'charger_power': 1.0}),
+    ('current', {'charge_state': 'stopped', 'charger_actual_current': 2.0, 'charger_power': 0.0}),
+])
+async def test_vehicle_not_stopped_reports_refusing_stop_fields(recovery_case, variant, expected):
+    """Ticket 156: Recover returned vehicle_not_stopped with no detail while
+    the HA charging sensor showed stopped."""
+    c, a = recovery_case, recovery_case.a
+    async def read(number, kwargs):
+        charge = dict(c.observation.raw_charge_state, timestamp=c.now[0] - 3,
+                      charging_state='Charging' if variant == 'charging' else 'Stopped',
+                      charger_actual_current=2 if variant == 'current' else 0,
+                      charger_power=1 if variant == 'power' else 0)
+        return replace(c.observation, source_charge_timestamp=c.now[0] - 3, raw_charge_state=charge,
+                       charge_state=charge['charging_state'],
+                       charger_actual_current=float(charge['charger_actual_current']),
+                       charger_power=float(charge['charger_power']), origin='native_cloud')
+    c.hooks['read'] = read
+    before = deepcopy(a.store.data['managed'][VIN])
+    answer = await recover(c)
+    assert answer['success'] is False and answer['error'] == 'vehicle_not_stopped'
+    assert answer['round'] == 1
+    report = answer['vehicle_report']
+    assert {k: report[k] for k in expected} == expected
+    assert report['sample_age_seconds'] is not None
+    assert a.store.data['managed'][VIN] == before and VIN in a.budget.managed
+    assert VIN not in repr(answer)

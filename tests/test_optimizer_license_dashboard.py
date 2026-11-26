@@ -276,7 +276,7 @@ console.log(JSON.stringify(results));
     rendered = json.loads(result.stdout)
     assert rendered["expired"]["availability"]["label"] == "Licence expired"
     assert "HA optimiser access has expired" in rendered["expired"]["notice"]
-    assert "Licence Expired" in rendered["expired"]["chips"]
+    assert "Optimiser:</span><span>Licence expired" in rendered["expired"]["chips"]
     assert rendered["recovery"]["availability"]["label"] == "Recovery pending"
     assert rendered["resume"]["availability"]["label"] == "Resume required"
     assert "Resume optimisation" in rendered["resume"]["notice"]
@@ -285,7 +285,10 @@ console.log(JSON.stringify(results));
     assert rendered["oldDisabled"]["availability"]["label"] == "Disabled in settings"
     assert rendered["active"]["availability"] is None
     assert rendered["shadow"]["availability"] is None
-    assert "Mode:</span><span>Monitoring" in rendered["monitoring"]["chips"]
+    # "Mode: Monitoring" read as the battery's own operating mode.
+    assert "Optimiser:</span><span>Monitoring only" in rendered["monitoring"]["chips"]
+    assert "Optimiser:</span><span>On" in rendered["active"]["chips"]
+    assert "Mode:" not in rendered["monitoring"]["chips"]
     assert rendered["error"]["label"] == "Status unavailable"
     assert rendered["loading"]["label"] == "Checking status"
     assert "24-Hour Action Plan" in rendered["retainedPlan"]

@@ -6794,6 +6794,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def _restore_battery_provenance(self) -> None:
         """Restore the cross-day inventory, rejecting malformed provenance."""
         self._battery_provenance_charge_run = None
+        self._battery_provenance_discharge_run = None
         store = getattr(self, "_battery_provenance_store", None)
         if store is None:
             return
@@ -6869,6 +6870,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         capacity = _positive_finite_number(capacity_wh)
         if soc is None or capacity is None:
             self._battery_provenance_charge_run = None
+            self._battery_provenance_discharge_run = None
             self._battery_provenance_reconciliation = "invalid_soc_or_capacity"
             return
         # Power can advance while SOC retains an already-consumed snapshot.
@@ -6931,6 +6933,38 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             else:
                 self._battery_provenance_charge_run = None
 
+        discharge_run = getattr(self, "_battery_provenance_discharge_run", None)
+        if discharge_run is not None:
+            if (
+                reason in ("measured_interval", "optimizer_run")
+                and capacity == discharge_run["capacity_wh"]
+                and target_kwh <= discharge_run["opening_total"] + 1e-6
+            ):
+                # Discharge draws every origin proportionally, so the whole
+                # continuous discharge is the opening mix scaled to the current
+                # SOC. Reconciling each lagging SOC step separately re-added
+                # measured energy as unknown and then trimmed it again, moving
+                # solar and grid origin into unknown on every step.
+                opening_total = discharge_run["opening_total"]
+                fraction = (
+                    max(0.0, min(1.0, target_kwh / opening_total))
+                    if opening_total > 1e-9 else 0.0
+                )
+                self._battery_provenance_solar_kwh = (
+                    discharge_run["opening_solar"] * fraction
+                )
+                self._battery_provenance_grid_kwh = (
+                    discharge_run["opening_grid"] * fraction
+                )
+                self._battery_provenance_unknown_kwh = (
+                    discharge_run["opening_unknown"] * fraction
+                )
+                self._battery_provenance_grid_cost = (
+                    discharge_run["opening_cost"] * fraction
+                )
+            else:
+                self._battery_provenance_discharge_run = None
+
         total = self._battery_provenance_total_kwh()
         difference = target_kwh - total
         if difference > 1e-6:
@@ -6981,6 +7015,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         discharge = _nonnegative_finite_number(discharge_kwh) or 0.0
         if telemetry_gap or discharge > 1e-9:
             self._battery_provenance_charge_run = None
+        if telemetry_gap:
+            self._battery_provenance_discharge_run = None
         # A solar-backed export must spend its measured source, rather than
         # retaining a proportional solar credit to promise again next solve.
         # Spend it even across a gap; any replacement SOC is then unknown.
@@ -7001,6 +7037,21 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         solar_charge = _nonnegative_finite_number(solar_charge_kwh) or 0.0
         grid_charge = _nonnegative_finite_number(grid_charge_kwh) or 0.0
         grid_cost = _nonnegative_finite_number(grid_charge_cost) or 0.0
+        if solar_export > 1e-9 or solar_charge + grid_charge > 1e-9:
+            # Charging or a solar-specific export changes the origin mix, so
+            # a proportional discharge episode cannot span it.
+            self._battery_provenance_discharge_run = None
+        elif discharge > 1e-9:
+            discharge_run = getattr(self, "_battery_provenance_discharge_run", None)
+            if discharge_run is None or discharge_run["capacity_wh"] != capacity_wh:
+                self._battery_provenance_discharge_run = {
+                    "capacity_wh": capacity_wh,
+                    "opening_total": self._battery_provenance_total_kwh(),
+                    "opening_solar": self._battery_provenance_solar_kwh,
+                    "opening_grid": self._battery_provenance_grid_kwh,
+                    "opening_unknown": self._battery_provenance_unknown_kwh,
+                    "opening_cost": self._battery_provenance_grid_cost,
+                }
         if discharge <= 1e-9 and solar_export <= 1e-9 and solar_charge + grid_charge > 1e-9:
             charge_run = getattr(self, "_battery_provenance_charge_run", None)
             if charge_run is None or charge_run["capacity_wh"] != capacity_wh:
@@ -9443,6 +9494,29 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 minutes=interval - minutes_past_boundary
             )
         return max(1.0, (next_boundary - now).total_seconds())
+
+    def _planned_command_failure(self, planned_action: str | None) -> dict[str, Any] | None:
+        """Explain why the planned battery command is not being applied."""
+        command = {"charge": "force_charge", "export": "force_discharge",
+                   "discharge": "force_discharge"}.get(planned_action or "")
+        executor = getattr(self, "_executor", None)
+        battery = getattr(executor, "battery_controller", None) if executor is not None else None
+        recent = getattr(battery, "recent_command_failure", None) if battery is not None else None
+        if command is None or not callable(recent):
+            return None
+        try:
+            failure = recent()
+        except Exception:  # noqa: BLE001 - diagnostics must never break status
+            return None
+        if not isinstance(failure, dict) or failure.get("command") != command:
+            return None
+        at = failure.get("at")
+        return {
+            "command": command,
+            "reason": failure.get("reason"),
+            "message": failure.get("message"),
+            "at": dt_util.utc_from_timestamp(at).isoformat() if isinstance(at, (int, float)) else None,
+        }
 
     def _get_current_action(self) -> Any | None:
         """Get the current scheduled action based on time."""
@@ -20498,10 +20572,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Need energy coordinator data and cached prices
         if not data:
             self._battery_provenance_charge_run = None
+            self._battery_provenance_discharge_run = None
             _LOGGER.debug("Cost tracking skipped: no energy coordinator data")
             return
         if not self._last_import_prices or not self._last_export_prices:
             self._battery_provenance_charge_run = None
+            self._battery_provenance_discharge_run = None
             _LOGGER.debug("Cost tracking skipped: no cached prices yet")
             return
 
@@ -20515,6 +20591,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         disp_export = self._last_display_export_prices or self._last_export_prices
         if not disp_import or not disp_export:
             self._battery_provenance_charge_run = None
+            self._battery_provenance_discharge_run = None
             _LOGGER.warning("Cost tracking skipped: empty price arrays")
             return
         import_price = disp_import[0]  # $/kWh — safe: arrays verified non-empty
@@ -20736,6 +20813,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
         else:
             self._battery_provenance_charge_run = None
+            self._battery_provenance_discharge_run = None
             self._battery_provenance_reconciliation = "missing_soc_telemetry"
 
         # Baseline cost: what would happen without a battery
@@ -22370,6 +22448,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "grid_import_target_limited": force_state.get("grid_import_target_limited", False) if force_type == "charge" else False,
             "effective_current_action": effective_current_action,
             "effective_current_action_detail": effective_current_action_detail,
+            "command_failure": self._planned_command_failure(planned_current_action),
             "actual_battery_power_w": actual_battery_power_w,
             "current_action_end_time": current_action_end_time,
             "next_action": next_action,

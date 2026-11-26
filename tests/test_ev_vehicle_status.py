@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import json
 import math
 import sys
 import types
@@ -5767,6 +5768,46 @@ def test_two_mapped_vehicles_keep_one_loadpoint_and_power_source_per_car_for_eac
     effective = {**entry.data, **entry.options}
     expected_command_id = vins[0] if provider == "both" else f"ble_{prefixes[0]}"
     assert mapping.canonical_tesla_vehicle_id(effective, f"ble_{prefixes[0]}", vins, prefixes) == expected_command_id
+
+
+@pytest.mark.parametrize("transport", ["ble", "ha"])
+def test_loadpoint_status_uses_live_recovery_for_the_exact_vehicle(monkeypatch, transport):
+    power_sync = _power_sync_module()
+    recovery = importlib.import_module("power_sync.tesla_ev_recovery")
+    monkeypatch.setattr(power_sync, "_configured_sigenergy_charger_state", lambda _entry: None)
+    blocked, other = "5YJTEST0000000001", "5YJTEST0000000002"
+    observations = [
+        {"vehicle_id": vin, "vehicle_name": f"Car {index}", "charger_type": "tesla",
+         "is_connected": False, "is_charging": False, "ev_power_kw": 0, "ev_soc": 60}
+        for index, vin in enumerate((blocked, other))
+    ]
+    monkeypatch.setattr(power_sync, "_get_ev_vehicles_status", lambda *_args, **_kwargs: observations)
+    last_command = {"command": "start_smart_schedule", "success": False, "reason": "blocked"}
+    attempt = {"route": {"kind": transport}, "outcome": "sent_unknown"}
+    journal = {"vehicles": {blocked: {"route": None, "attempts": {"test": attempt}, "hazards": {}}}}
+    hass = _Hass([], entry_data={
+        recovery.RECOVERY_KEY: journal,
+        "ev_last_command": {blocked: last_command, other: last_command},
+    })
+    entry = SimpleNamespace(entry_id="entry-1", data={}, options={})
+    view = power_sync.EVLoadpointStatusView(hass, entry)
+
+    def loadpoints():
+        payload = json.loads(asyncio.run(view._async_build_response(None)).body)
+        assert payload["success"] is True, payload
+        return {row["vehicle_id"]: row for row in payload["loadpoints"]}
+
+    rows = loadpoints()
+    assert rows[blocked]["control_blocker"] == ("ble_recovery" if transport == "ble" else "native_recovery")
+    assert rows[other]["control_blocker"] is None
+    assert rows[blocked]["last_command"] == rows[other]["last_command"] == last_command
+    assert attempt == {"route": {"kind": transport}, "outcome": "sent_unknown"}
+
+    attempt["recovery_retired"] = {"historical_outcome": "unknown"}
+    rows = loadpoints()
+    assert rows[blocked]["control_blocker"] is None
+    assert rows[blocked]["last_command"] == last_command
+    assert attempt["outcome"] == "sent_unknown"
 
 
 def test_fleet_only_mapped_boosts_keep_fresh_fleet_power_over_old_or_unavailable_ble(monkeypatch):

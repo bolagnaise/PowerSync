@@ -14,11 +14,14 @@ class Node {
   all(){return this.children.flatMap(child=>[child,...child.all()]);}
   querySelectorAll(){return this.all();}
   setAttribute(key,value){this.attributes[key]=value;}
+  focus(){this.focused=true;}
+  select(){this.selected=true;}
   attachShadow(){return this.shadowRoot=new Node('shadow');}
   set innerHTML(value){throw Error('unsafe HTML');}
 }
 const registry=new Map(),calls=[];
-const context={HTMLElement:Node,document:{createElement:tag=>new Node(tag)},customElements:{get:key=>registry.get(key),define:(key,value)=>registry.set(key,value)},Date,JSON,Set,Promise,setTimeout,clearTimeout};
+const clipboard={writeText:async text=>{clipboard.text=text;}};
+const context={HTMLElement:Node,document:{createElement:tag=>new Node(tag)},customElements:{get:key=>registry.get(key),define:(key,value)=>registry.set(key,value)},Date,JSON,Set,Promise,setTimeout,clearTimeout,navigator:{clipboard}};
 vm.createContext(context);
 vm.runInContext(fs.readFileSync(process.argv[1]+'/power-sync-support.js','utf8'),context);
 (async()=>{
@@ -26,7 +29,7 @@ vm.runInContext(fs.readFileSync(process.argv[1]+'/power-sync-support.js','utf8')
  card._hass={user:{is_admin:false},callApi:()=>{throw Error('non-admin request');}};
  await card.load();assert.equal(card.shadowRoot.all().filter(node=>node.tag==='button').length,0);
  const scopes=['ha_read','optimizer_contribution'].map(kind=>({kind,processor:'<img onerror=bad()>',actor:'operator'}));
- const state={identity:{root:'root'},grants:[]};
+ const state={identity:{root:'root',public_key:'public-key'},grants:[]};
  let temporary={state:'closed'},failSupport=false,failOngoing=false,reviewFailure;
  card._hass={user:{is_admin:true},callApi:async(method,path,value)=>{
    calls.push({method,path,value});
@@ -57,7 +60,15 @@ vm.runInContext(fs.readFileSync(process.argv[1]+'/power-sync-support.js','utf8')
  assert.ok(!nodes().some(node=>node.textContent==='No live access'),'temporary status cannot misrepresent ongoing access');
  assert.equal(nodes().filter(node=>node.attributes['aria-label']==='Support invitation').length,1);
  assert.ok(field('Support invitation').maxLength>=5500,'combined invitations fit');
- const identity=nodes().find(node=>node.tag==='pre');assert.ok(identity.textContent.includes('root'));
+ const identity=field('Setup identity');
+ assert.ok(identity?.readOnly,'the public setup identity has a read-only text field');
+ assert.deepEqual(JSON.parse(identity.value),state.identity);
+ await button('Copy setup identity').onclick();
+ assert.equal(clipboard.text,identity.value,'the whole setup identity is copied');
+ clipboard.writeText=async()=>{throw Error('clipboard unavailable');};
+ await button('Copy setup identity').onclick();
+ assert.ok(identity.focused&&identity.selected,'clipboard failure selects the setup identity for manual copy');
+ assert.equal(calls.length,before,'copying the identity makes no support requests');
  assert.ok(button('Review invitation').disabled);
  const enterInvitation=()=>{
    field('Support invitation').value='bundle';field('Support invitation').oninput();

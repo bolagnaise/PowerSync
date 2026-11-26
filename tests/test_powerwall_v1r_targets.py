@@ -55,6 +55,35 @@ async def test_zero_uses_real_power_lease_and_owned_resume_without_grid_charge_c
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("target_basis", ["grid_import", "battery_output"])
+async def test_charge_ceiling_on_renewal_completes_lease(monkeypatch, target_basis):
+    sample = fixed_snapshot(soc=99)
+    client = NS(get_snapshot=AsyncMock(side_effect=lambda: sample),
+        dispatch_battery_power=AsyncMock(return_value=True),
+        resume_battery_operation=AsyncMock(return_value=True))
+    stopped = AsyncMock()
+    c = module.LocalBatteryDispatch(client, fixed_config, lambda mode: True, AsyncMock(), stopped)
+    original_sleep = asyncio.sleep
+
+    async def advance(_):
+        nonlocal sample
+        sample = fixed_snapshot(soc=100)
+        await original_sleep(0)
+
+    monkeypatch.setattr(module.asyncio, "sleep", advance)
+    try:
+        await c.start("charge", 3000, 120, target_basis=target_basis)
+        await asyncio.wait_for(c._task, 1)
+        client.dispatch_battery_power.assert_awaited_once()
+        client.resume_battery_operation.assert_awaited_once()
+        stopped.assert_awaited_once()
+        assert not c.pending
+        assert c.completion_reason == "target_reached"
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("power,target,start,end", [(-1800, 80, 60, 81), (1800, 40, 60, 39)])
 async def test_target_reached_on_renewal_releases_without_another_power_command(monkeypatch, power, target, start, end):
     sample = fixed_snapshot(soc=start)

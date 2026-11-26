@@ -580,8 +580,12 @@ def _select_restorable_tesla_tariff(*tariffs: Any) -> dict[str, Any] | None:
             # absent. Materialize the same defaults tariff_time uses to read
             # these periods, on both buy and sell sides. Never overwrite an
             # explicit value or change the persisted baseline in place.
+            # Tesla drops zero values, so an absent day is Sunday (0). A
+            # Sunday-only period reads back without either day field;
+            # defaulting toDayOfWeek to 6 widened it to the whole week and
+            # Tesla rejected the overlapping replay as "Invalid tariff".
             defaults = {
-                "fromDayOfWeek": 0, "toDayOfWeek": 6,
+                "fromDayOfWeek": 0, "toDayOfWeek": 0,
                 "fromHour": 0, "toHour": 24,
                 "fromMinute": 0, "toMinute": 0,
             }
@@ -642,6 +646,99 @@ def _tariff_display_name(tariff: Any) -> str:
     if not isinstance(tariff, dict):
         return "unknown"
     return str(tariff.get("name") or tariff.get("code") or "unknown")
+
+
+def _summarize_tesla_tariff_structure(tariff: Any, limit: int = 4000) -> str:
+    """Describe a rejected Tesla tariff without prices, for support diagnosis.
+
+    Tesla's 4xx body ("Invalid tariff provided") never names the bad field.
+    Record each side's seasons, period bounds and rate keys, using ``-`` for
+    an absent field, plus simple consistency findings. Never raise.
+    """
+    bound_keys = (
+        "fromDayOfWeek", "toDayOfWeek", "fromHour", "fromMinute", "toHour", "toMinute",
+    )
+
+    def side_summary(side: Any) -> dict[str, Any]:
+        if not isinstance(side, dict):
+            return {"type": type(side).__name__}
+        seasons = side.get("seasons")
+        charges = side.get("energy_charges")
+        result: dict[str, Any] = {"keys": sorted(str(key) for key in side)}
+        issues: list[str] = []
+        season_out: dict[str, Any] = {}
+        if isinstance(seasons, dict):
+            for season_name, season in seasons.items():
+                if not isinstance(season, dict):
+                    season_out[str(season_name)] = type(season).__name__
+                    continue
+                periods_out: dict[str, Any] = {}
+                tou = season.get("tou_periods")
+                if isinstance(tou, dict):
+                    for period_name, container in tou.items():
+                        periods = container.get("periods") if isinstance(container, dict) else container
+                        if not isinstance(periods, list):
+                            periods_out[str(period_name)] = type(container).__name__
+                            continue
+                        periods_out[str(period_name)] = [
+                            [p.get(key, "-") for key in bound_keys]
+                            if isinstance(p, dict) else type(p).__name__
+                            for p in periods
+                        ]
+                elif tou is not None:
+                    periods_out = type(tou).__name__
+                season_out[str(season_name)] = {
+                    "months": [season.get("fromMonth", "-"), season.get("toMonth", "-")],
+                    "days": [season.get("fromDay", "-"), season.get("toDay", "-")],
+                    "periods": periods_out,
+                }
+                if not season:
+                    issues.append(f"empty season {season_name}")
+                season_charges = charges.get(season_name) if isinstance(charges, dict) else None
+                rates = season_charges.get("rates") if isinstance(season_charges, dict) else None
+                rate_keys = set(rates) if isinstance(rates, dict) else set()
+                if isinstance(periods_out, dict):
+                    for missing in sorted(set(periods_out) - rate_keys):
+                        issues.append(f"{season_name}.{missing} has no rate")
+                    for unused in sorted(rate_keys - set(periods_out)):
+                        issues.append(f"{season_name} rate {unused} has no period")
+        elif seasons is not None:
+            season_out = type(seasons).__name__
+        result["seasons"] = season_out
+        if isinstance(charges, dict):
+            result["energy_charges"] = {
+                str(name): (
+                    sorted(str(key) for key in value["rates"])
+                    if isinstance(value, dict) and isinstance(value.get("rates"), dict)
+                    else sorted(str(key) for key in value) if isinstance(value, dict)
+                    else type(value).__name__
+                )
+                for name, value in charges.items()
+            }
+        demand = side.get("demand_charges")
+        if isinstance(demand, dict):
+            result["demand_charges"] = sorted(str(key) for key in demand)
+        if issues:
+            result["issues"] = issues
+        return result
+
+    try:
+        if not isinstance(tariff, dict):
+            return f"tariff type {type(tariff).__name__}"
+        summary: dict[str, Any] = {
+            field: tariff.get(field)
+            for field in ("name", "code", "utility", "currency", "version")
+            if field in tariff
+        }
+        summary["buy"] = side_summary(tariff)
+        if "sell_tariff" in tariff:
+            summary["sell"] = side_summary(tariff.get("sell_tariff"))
+        text = json.dumps(summary, separators=(",", ":"), default=str)
+    except Exception as err:  # diagnostics must never mask the upload result
+        return f"unavailable ({type(err).__name__})"
+    if len(text) > limit:
+        return text[:limit] + "...(truncated)"
+    return text
 
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 import homeassistant.helpers.config_validation as cv
@@ -7139,6 +7236,11 @@ async def _send_tariff_to_tesla(
                     "Failed to sync TOU schedule: %s - %s (client error, not retrying)",
                     response.status,
                     error_text
+                )
+                _LOGGER.error(
+                    "Rejected Tesla tariff structure for site %s: %s",
+                    site_id,
+                    _summarize_tesla_tariff_structure(tariff_data),
                 )
                 return False
 
@@ -19151,6 +19253,7 @@ class SolarSurplusStatusView(HomeAssistantView):
             grid_power_kw = 0.0
             battery_power_kw = 0.0
             load_power_kw = 0.0
+            home_load_basis = None
 
             tesla_coordinator = entry_data.get("tesla_coordinator")
             sigenergy_coordinator = entry_data.get("sigenergy_coordinator")
@@ -19163,6 +19266,7 @@ class SolarSurplusStatusView(HomeAssistantView):
                 grid_power_kw = tesla_coordinator.data.get("grid_power", 0)
                 battery_power_kw = tesla_coordinator.data.get("battery_power", 0)
                 load_power_kw = tesla_coordinator.data.get("load_power", 0)
+                home_load_basis = tesla_coordinator.data.get("home_load_basis")
                 battery_soc = tesla_coordinator.data.get("battery_level", 0)
                 _LOGGER.debug(f"Solar surplus status from tesla_coordinator: battery_soc={battery_soc}%")
             elif sigenergy_coordinator and sigenergy_coordinator.data:
@@ -19170,6 +19274,7 @@ class SolarSurplusStatusView(HomeAssistantView):
                 grid_power_kw = sigenergy_coordinator.data.get("grid_power", 0)
                 battery_power_kw = sigenergy_coordinator.data.get("battery_power", 0)
                 load_power_kw = sigenergy_coordinator.data.get("load_power", 0)
+                home_load_basis = sigenergy_coordinator.data.get("home_load_basis")
                 battery_soc = sigenergy_coordinator.data.get("battery_level", 0)
                 _LOGGER.debug(f"Solar surplus status from sigenergy_coordinator: battery_soc={battery_soc}%")
             elif sungrow_coordinator and sungrow_coordinator.data:
@@ -19177,6 +19282,7 @@ class SolarSurplusStatusView(HomeAssistantView):
                 grid_power_kw = sungrow_coordinator.data.get("grid_power", 0)
                 battery_power_kw = sungrow_coordinator.data.get("battery_power", 0)
                 load_power_kw = sungrow_coordinator.data.get("load_power", 0)
+                home_load_basis = sungrow_coordinator.data.get("home_load_basis")
                 battery_soc = sungrow_coordinator.data.get("battery_level", 0)
                 _LOGGER.debug(f"Solar surplus status from sungrow_coordinator: battery_soc={battery_soc}%")
             elif foxess_coordinator and foxess_coordinator.data:
@@ -19184,6 +19290,7 @@ class SolarSurplusStatusView(HomeAssistantView):
                 grid_power_kw = foxess_coordinator.data.get("grid_power", 0)
                 battery_power_kw = foxess_coordinator.data.get("battery_power", 0)
                 load_power_kw = foxess_coordinator.data.get("load_power", 0)
+                home_load_basis = foxess_coordinator.data.get("home_load_basis")
                 battery_soc = foxess_coordinator.data.get("battery_level", 0)
                 _LOGGER.debug(f"Solar surplus status from foxess_coordinator: battery_soc={battery_soc}%")
 
@@ -19195,9 +19302,11 @@ class SolarSurplusStatusView(HomeAssistantView):
                 "battery_power": None if battery_power_kw is None else battery_power_kw * 1000,
                 "load_power": None if load_power_kw is None else load_power_kw * 1000,
                 "battery_soc": battery_soc,
+                # Coordinators that already remove EV draw from load say so;
+                # dropping it made the direct method subtract the car twice.
+                "home_load_basis": home_load_basis or "includes_ev",
             }
             solar_config = get_stored_solar_surplus_config(entry_data)
-            surplus_kw = _calculate_solar_surplus(live_status, 0, solar_config)
 
             # Get per-vehicle states
             vehicles_state = []
@@ -19228,6 +19337,12 @@ class SolarSurplusStatusView(HomeAssistantView):
             ev_soc = ev_status["ev_soc"]
             if ev_power_kw <= 0 and tesla_coordinator and tesla_coordinator.data:
                 ev_power_kw = tesla_coordinator.data.get("ev_power", 0)
+
+            # Grid-based surplus adds the car's own draw back; passing 0 kW
+            # under-reported available solar whenever a car was charging.
+            surplus_kw = _calculate_solar_surplus(
+                live_status, max(0.0, float(ev_power_kw or 0.0)), solar_config,
+            )
 
             # If no dynamic vehicles but EV is charging, include it
             if not vehicles_state and ev_power_kw > 0.05:
@@ -22297,6 +22412,7 @@ class EVLoadpointStatusView(HomeAssistantView):
                 get_ev_ownership,
                 get_ev_ownerships,
                 get_external_control_policy,
+                latest_ev_refusal,
             )
             from .automations.ev_charging_planner import (
                 get_ev_charging_coordinator,
@@ -22636,9 +22752,14 @@ class EVLoadpointStatusView(HomeAssistantView):
             )
 
             from .const import CONF_GENERIC_CHARGER_BATTERY_CAPACITY_KWH
+            from .tesla_ev_observation import _canonical_vin
+            from .tesla_ev_recovery import get_vehicle_route
 
             for loadpoint in loadpoints:
                 loadpoint_id = loadpoint.get("loadpoint_id")
+                loadpoint["last_refusal"] = latest_ev_refusal(
+                    self._hass, self._config_entry, loadpoint_id,
+                )
                 if zaptec_cached and zaptec_byd_vehicles and loadpoint_id == "zaptec_standalone":
                     # A missing/ambiguous live BYD reading must not resurrect
                     # another vehicle's SOC cached in a charging session.
@@ -22676,6 +22797,22 @@ class EVLoadpointStatusView(HomeAssistantView):
                     or vehicle_config.get("charger_type")
                     or ""
                 ).lower()
+                if charger_type == "tesla":
+                    vehicle_id = str(loadpoint.get("vehicle_id") or "")
+                    exact_vehicle = _canonical_vin(vehicle_id) or re.fullmatch(
+                        r"ble_(?!default$)[a-z0-9_]+", vehicle_id
+                    )
+                    route = (
+                        get_vehicle_route(self._hass, self._config_entry, vehicle_id) or {}
+                        if exact_vehicle else {}
+                    )
+                    reason = route.get("reason")
+                    loadpoint["control_blocker"] = (
+                        reason if route.get("kind") == "blocked" and reason in {
+                            "ble_recovery", "native_recovery", "transport_recovery",
+                            "ble_recovery_commit_pending", "malformed_recovery",
+                        } else None
+                    )
                 stable_id = str(loadpoint_id or "").lower()
                 anonymous = (
                     charger_type in ("generic", "ocpp")
@@ -22782,6 +22919,7 @@ class PriceRecommendationView(HomeAssistantView):
             grid_power_kw = 0.0
             battery_power_kw = 0.0
             load_power_kw = 0.0
+            home_load_basis = None
             battery_soc = 0.0
 
             tesla_coordinator = entry_data.get("tesla_coordinator")
@@ -22794,24 +22932,28 @@ class PriceRecommendationView(HomeAssistantView):
                 grid_power_kw = tesla_coordinator.data.get("grid_power", 0)
                 battery_power_kw = tesla_coordinator.data.get("battery_power", 0)
                 load_power_kw = tesla_coordinator.data.get("load_power", 0)
+                home_load_basis = tesla_coordinator.data.get("home_load_basis")
                 battery_soc = tesla_coordinator.data.get("battery_level", 0)
             elif sigenergy_coordinator and sigenergy_coordinator.data:
                 solar_power_kw = sigenergy_coordinator.data.get("solar_power", 0)
                 grid_power_kw = sigenergy_coordinator.data.get("grid_power", 0)
                 battery_power_kw = sigenergy_coordinator.data.get("battery_power", 0)
                 load_power_kw = sigenergy_coordinator.data.get("load_power", 0)
+                home_load_basis = sigenergy_coordinator.data.get("home_load_basis")
                 battery_soc = sigenergy_coordinator.data.get("battery_level", 0)
             elif sungrow_coordinator and sungrow_coordinator.data:
                 solar_power_kw = sungrow_coordinator.data.get("solar_power", 0)
                 grid_power_kw = sungrow_coordinator.data.get("grid_power", 0)
                 battery_power_kw = sungrow_coordinator.data.get("battery_power", 0)
                 load_power_kw = sungrow_coordinator.data.get("load_power", 0)
+                home_load_basis = sungrow_coordinator.data.get("home_load_basis")
                 battery_soc = sungrow_coordinator.data.get("battery_level", 0)
             elif foxess_coordinator and foxess_coordinator.data:
                 solar_power_kw = foxess_coordinator.data.get("solar_power", 0)
                 grid_power_kw = foxess_coordinator.data.get("grid_power", 0)
                 battery_power_kw = foxess_coordinator.data.get("battery_power", 0)
                 load_power_kw = foxess_coordinator.data.get("load_power", 0)
+                home_load_basis = foxess_coordinator.data.get("home_load_basis")
                 battery_soc = foxess_coordinator.data.get("battery_level", 0)
 
             solar_config = get_stored_solar_surplus_config(entry_data)
@@ -22824,9 +22966,18 @@ class PriceRecommendationView(HomeAssistantView):
                 "battery_power": battery_power_kw * 1000,
                 "load_power": load_power_kw * 1000,
                 "battery_soc": battery_soc,
+                # Coordinators that already remove EV draw from load say so;
+                # dropping it made the direct method subtract the car twice.
+                "home_load_basis": home_load_basis or "includes_ev",
             }
 
-            surplus_kw = _calculate_solar_surplus(live_status, 0, solar_config)
+            try:
+                current_ev_power_kw = max(0.0, float(
+                    _get_ev_vehicle_status(self._hass, self._config_entry)["ev_power_kw"] or 0.0
+                ))
+            except Exception:  # noqa: BLE001 - a recommendation must still render
+                current_ev_power_kw = 0.0
+            surplus_kw = _calculate_solar_surplus(live_status, current_ev_power_kw, solar_config)
 
             # Get current prices based on electricity provider
             import_price_cents = 30.0  # Default

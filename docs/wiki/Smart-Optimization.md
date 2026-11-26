@@ -79,6 +79,10 @@ measurements, independently of the future optimizer plan.
 
 When Monitoring Mode is switched on, PowerSync first releases its active battery control and restores any backup reserve temporarily raised for an IDLE or EV preservation hold. The switch stays off if that cleanup cannot be confirmed, retaining the saved reserve for retry. Successful cleanup enables monitoring and blocks subsequent automatic battery commands; it does not confirm that an EV has stopped charging or restore exhausted provider credits.
 
+While Monitoring Mode is on, the **Live status** line in **Smart Optimization settings** says Smart Optimization is planning only and sends no battery commands, rather than calling it running.
+
+On a read-only battery connection, such as Sungrow iHomeManager, Monitoring Mode is always on and the switch refuses to turn off. The Monitoring Mode switch then reports `locked_on: true` and `locked_reason: telemetry_only_connection`, so dashboards can show it as fixed. Other connections report no lock attributes.
+
 ## Planning after a restart
 
 Smart Optimization waits for startup battery restoration before solving. If that restoration is cancelled by a newer control operation, a later optimization cycle retries it automatically. Cancelling a plan refresh does not cancel the shared restoration; unresolved force cleanup still blocks new control.
@@ -189,18 +193,27 @@ optimization mode.
 
 ## Solver timing and EV charging
 
-Each primary HiGHS solve has a 30-second allowance. Command-mode checks and Cost
-Neutral budget reconciliation can run additional solves, so a complete cycle
-can take longer. Reaching the allowance does not automatically select the
-backup planner: a feasible incumbent can still be used after the normal
-schedule checks.
+Each primary HiGHS solve has a 30-second allowance. It stops early once its
+plan is proven to be within half a cent of the best possible plan over the
+whole horizon. Command-mode checks and Cost Neutral budget reconciliation can
+run additional solves, so a complete cycle can take longer. Reaching the
+allowance does not automatically select the backup planner: a feasible
+incumbent can still be used after the normal schedule checks.
+
+Cost Neutral plans the current day in 5-minute steps, because that day is
+settled against the actions PowerSync actually sends. Later days in the
+horizon use the same coarser planning periods as other goals. They are
+re-planned in 5-minute steps once they become the current day. This keeps
+Cost Neutral plans small enough to finish on slower hosts such as a Raspberry
+Pi.
 
 Cost Neutral planning alongside EV charging keeps the limits from available
 solar, battery charging power and remaining battery capacity separate.
-The optional search for preferred free charging slots has up to three seconds
-per attempt and shares a twelve-second allowance across the planning cycle.
-When that search has no usable result, the optimizer keeps the primary
-economic result and runs the normal schedule checks.
+The optional searches for preferred free charging slots, and for fewer separate
+export slots among equal-cost plans, have up to three seconds per attempt and
+share a twelve-second allowance across the planning cycle. When a search has no
+usable result, the optimizer keeps the primary economic result and runs the
+normal schedule checks.
 
 Cycle diagnostics include all solve attempts, including discarded passes, and
 identify the selected result and fallback reason.
@@ -258,6 +271,8 @@ When the controller evaluates a reserve guard for the current plan and slot, the
 Control outcomes describe command returns separately from the guard decision. An accepted self-consumption or shorter export command does not verify the battery's physical mode or power. If restoration is unconfirmed, export may still be active. The explanation uses existing controller evidence without extra hardware readbacks, applies only to the current plan and slot, and disappears when that evidence expires or is superseded. This transient explanation retains no history of reserve stops. An absent explanation establishes no reserve outcome.
 
 The Home Assistant **Current Action** sensor exposes two additive attributes: `reserve_visibility` contains these separate reserve percentages, hardware-baseline source and quality, Auto-Apply status, and forecast freshness; `export_reserve_decision` contains the current guard status, reason, evaluation and slot times, available SOC and duration evidence, and control outcome. `export_reserve_decision` is `null` when no matching current decision is available, including stale plans, disabled optimization, monitoring mode, or active external controls. These attributes do not change the sensor's current-action state.
+
+When a planned charge or export is not applied because the battery command was refused, the **Current Action** sensor also has a `command_failure` attribute with the refused `command` (`force_charge` or `force_discharge`), a `reason` (`gateway_unreachable`, `ev_headroom_reserved`, `monitoring_mode` or `command_failed`), the error `message`, and the time `at`. It is reported only while the plan still asks for that action, clears after the next successful command, and is `null` otherwise. The dashboard plan card shows the same information as a **Charge blocked** or **Export blocked** chip.
 
 ### Timed manual controls in the Action Plan
 

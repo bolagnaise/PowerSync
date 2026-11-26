@@ -200,11 +200,19 @@ def test_mobile_local_status_reports_fresh_direction_limits_and_fails_closed():
     status = scope['_local_access_status'](entry, coord)
     assert status['charge_input_max_kw'] == 3.2
     assert status['grid_export_max_kw'] == 4.2
+    assert status['local_limits_current'] is True
     coord.data = snapshot(raw={'config': None})
     assert scope['_local_access_status'](entry, coord)['grid_export_max_kw'] == 0
+    assert scope['_local_access_status'](entry, coord)['local_limits_current'] is False
     coord.data = site_snapshot()
     coord.last_success_monotonic -= 100
-    assert scope['_local_access_status'](entry, coord)['charge_input_max_kw'] == 0
+    stale = scope['_local_access_status'](entry, coord)
+    assert stale['charge_input_max_kw'] == 0
+    # A stale gateway reading still fails closed, but is labelled unknown.
+    assert stale['local_available'] is True and stale['local_limits_current'] is False
+    coord.reachable = False
+    assert scope['_local_access_status'](entry, coord)['local_limits_current'] is False
+    coord.reachable = True
     scope['local_battery_dispatch_configured'] = lambda data: False
     assert 'charge_input_max_kw' not in scope['_local_access_status'](entry, coord)
 

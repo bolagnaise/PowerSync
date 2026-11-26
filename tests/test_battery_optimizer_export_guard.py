@@ -6064,3 +6064,133 @@ def test_below_reserve_free_import_window_recovers_later_super_export(
         for idx in range(free_window.stop, n)
     )
     assert paid_import_kwh <= 1e-3
+
+
+@pytest.mark.parametrize(
+    ("current_soc", "acquisition_cost_kwh", "known_zero"),
+    [
+        (0.35, 0.0, False),
+        (0.35, 0.0, True),
+        (0.35, 0.385, False),
+    ],
+)
+def test_free_import_window_with_all_slot_export_permission_keeps_premium_export(
+    battery_optimizer_module,
+    current_soc,
+    acquisition_cost_kwh,
+    known_zero,
+):
+    """Ticket #469 follow-up: CovaU-style providers allow base-FiT export in
+    every positive-price slot. The free midday window must still count as
+    recovery headroom, and the free refill must not be priced at retail when
+    deciding whether the evening premium export is profitable."""
+    if not battery_optimizer_module.HIGHS_AVAILABLE:
+        pytest.skip("Reserve recovery export gating is enforced by the LP optimizer")
+
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=18000,
+        max_charge_w=5000,
+        max_discharge_w=5000,
+        backup_reserve=0.53,
+        interval_minutes=5,
+        horizon_hours=24,
+    )
+    n = 24 * 12
+    free_window = range(12, 48)
+    premium_export = range(84, 120)
+    import_prices = [0.385] * n
+    for idx in range(60, 120):
+        import_prices[idx] = 0.463
+    for idx in range(144, n):
+        import_prices[idx] = 0.165
+    import_bonus_prices = [0.0] * n
+    for idx in free_window:
+        import_bonus_prices[idx] = import_prices[idx]
+    export_bonus_prices = [0.0] * n
+    priority_slots = [False] * n
+    for idx in premium_export:
+        export_bonus_prices[idx] = 0.10
+        priority_slots[idx] = True
+    export_prices = [0.05] * n
+
+    result = optimizer.optimize(
+        import_prices=import_prices,
+        export_prices=export_prices,
+        solar_forecast=[0.0] * n,
+        load_forecast=[0.3] * n,
+        current_soc=current_soc,
+        acquisition_cost_kwh=acquisition_cost_kwh,
+        acquisition_cost_known_zero=known_zero,
+        # Coordinator mask: every positive-FiT slot may export.
+        allow_battery_export=[price > 0 for price in export_prices],
+        priority_export_slots=priority_slots,
+        export_bonus_prices=export_bonus_prices,
+        export_bonus_cap_kwh=30.0,
+        import_bonus_prices=import_bonus_prices,
+        import_bonus_cap_kwh=50.0,
+    )
+
+    window = list(premium_export)
+    exported_kwh = sum(
+        result.grid_export_w[idx] / 1000 * optimizer.dt_hours for idx in window
+    )
+    assert result.feasible is True
+    assert exported_kwh > 1.0
+    export_socs = [
+        action.soc for action in result.schedule.actions if action.action == "export"
+    ]
+    assert export_socs
+    assert min(export_socs) >= 0.53 - 0.01
+
+
+def test_free_import_credit_does_not_create_grid_passthrough_on_flat_tariff(
+    battery_optimizer_module,
+):
+    """Ticket #469 follow-up: netting the free-import credit into acquisition
+    cost must not let the plan import and export in the same slot, and must
+    still refill the battery in the free window on a flat retail tariff."""
+    if not battery_optimizer_module.HIGHS_AVAILABLE:
+        pytest.skip("Export acquisition guard is enforced by the LP optimizer")
+
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=18000,
+        max_charge_w=5000,
+        max_discharge_w=5000,
+        backup_reserve=0.53,
+        interval_minutes=5,
+        horizon_hours=24,
+    )
+    n = 24 * 12
+    free_window = range(12, 48)
+    import_prices = [0.385] * n
+    import_bonus_prices = [0.0] * n
+    for idx in free_window:
+        import_bonus_prices[idx] = import_prices[idx]
+    export_bonus_prices = [0.0] * n
+    priority_slots = [False] * n
+    for idx in range(84, 120):
+        export_bonus_prices[idx] = 0.10
+        priority_slots[idx] = True
+    export_prices = [0.05] * n
+
+    result = optimizer.optimize(
+        import_prices=import_prices,
+        export_prices=export_prices,
+        solar_forecast=[0.0] * n,
+        load_forecast=[0.3] * n,
+        current_soc=0.35,
+        acquisition_cost_kwh=0.385,
+        allow_battery_export=[True] * n,
+        priority_export_slots=priority_slots,
+        export_bonus_prices=export_bonus_prices,
+        export_bonus_cap_kwh=30.0,
+        import_bonus_prices=import_bonus_prices,
+        import_bonus_cap_kwh=50.0,
+    )
+
+    assert result.feasible is True
+    assert max(result.schedule.actions[idx].soc for idx in free_window) >= 0.95
+    for idx in range(n):
+        assert not (
+            result.grid_import_w[idx] > 1.0 and result.grid_export_w[idx] > 1.0
+        ), idx

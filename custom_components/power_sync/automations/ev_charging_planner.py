@@ -156,6 +156,17 @@ FULL_EV_SOC = 100
 EXTERNAL_SCHEDULED_STOP_SUPPRESS_SECONDS = 15 * 60
 EXTERNAL_SMART_SCHEDULE_STOP_SUPPRESS_SECONDS = 15 * 60
 AUTO_SCHEDULE_START_RETRY_BASE_SECONDS = 30
+# An unconfirmed Scheduled Stop blocks restarts at most this long without a draw.
+SCHEDULED_PENDING_STOP_MAX_SECONDS = 15 * 60
+# Same INFO-pinned logger as ev_ownership.EV_DECISION_LOGGER.
+_EV_DECISION_LOGGER = logging.getLogger(
+    "custom_components.power_sync.automations.ev_decisions"
+)
+if _EV_DECISION_LOGGER.level == logging.NOTSET or _EV_DECISION_LOGGER.level > logging.INFO:
+    _EV_DECISION_LOGGER.setLevel(logging.INFO)
+from ..sensitive_logging import install_vin_log_filter  # noqa: E402
+
+install_vin_log_filter(_EV_DECISION_LOGGER)
 AUTO_SCHEDULE_START_RETRY_MAX_SECONDS = 15 * 60
 PRICE_LEVEL_START_RETRY_BASE_SECONDS = 30
 PRICE_LEVEL_START_RETRY_MAX_SECONDS = 15 * 60
@@ -4254,6 +4265,7 @@ class ChargingPlanner:
         min_battery_soc: int = DEFAULT_SOLAR_SURPLUS_MIN_BATTERY_SOC,
         is_time_critical: bool = False,
         priority: ChargingPriority = ChargingPriority.COST_OPTIMIZED,
+        solar_session_active: bool = False,
     ) -> Tuple[bool, str, str]:
         """
         Real-time decision: should we charge right now?
@@ -4401,7 +4413,12 @@ class ChargingPlanner:
             ChargingPriority.SOLAR_ONLY.value,
             ChargingPriority.SOLAR_PREFERRED.value,
         }
-        if opportunistic_solar_enabled and current_surplus_kw >= 1.5:
+        # 1.5 kW gates a *start*. A running Solar Surplus session keeps going
+        # here and its own controller stops it after stop_delay_minutes, so a
+        # passing cloud does not stop the car immediately.
+        if opportunistic_solar_enabled and (
+            current_surplus_kw >= 1.5 or solar_session_active
+        ):
             solar_allowed, solar_reason = _solar_export_gate()
             if not solar_allowed:
                 return False, solar_reason, "waiting"
@@ -6385,6 +6402,7 @@ class AutoScheduleExecutor:
 
             try:
                 await self._evaluate_vehicle(vehicle_id, settings, live_status, current_price_cents)
+                self._log_decision_change(vehicle_id)
             except Exception as e:
                 _LOGGER.error(f"Auto-schedule evaluation failed for {vehicle_id}: {e}")
 
@@ -6403,6 +6421,31 @@ class AutoScheduleExecutor:
                 await sm.cleanup_stale_sessions(timeout_minutes=30)
         except Exception as cleanup_err:
             _LOGGER.warning("Stale EV session cleanup failed: %s", cleanup_err)
+
+    def _log_decision_change(self, vehicle_id: str, *, now: float | None = None) -> None:
+        """Log Smart Schedule's per-vehicle decision when it changes.
+
+        The reason (e.g. "Home Load unavailable", "No charging plan") otherwise
+        lives only in memory, so a car that never starts left no trace. An
+        unchanged decision is repeated at most every 15 minutes.
+        """
+        state = self._state.get(vehicle_id)
+        if state is None:
+            return
+        log = self.__dict__.setdefault("_decision_log", {})
+        key = (state.last_decision, bool(state.is_charging))
+        now = time.monotonic() if now is None else now
+        previous = log.get(vehicle_id)
+        if previous is not None and previous[0] == key and now - previous[1] < 900:
+            return
+        log[vehicle_id] = (key, now)
+        _EV_DECISION_LOGGER.info(
+            "EV decision: Smart Schedule %s -> %s (charging=%s): %s",
+            vehicle_id,
+            state.last_decision,
+            bool(state.is_charging),
+            state.last_decision_reason,
+        )
 
     def _is_effective_shared_loadpoint_profile(self, vehicle_id: str) -> bool:
         """Return whether this executor identity may automate its charger."""
@@ -6753,6 +6796,9 @@ class AutoScheduleExecutor:
             if state.is_charging:
                 # Stop any active charging session tracking
                 state.is_charging = False
+            # The car left: hand back this vehicle's export-rule override, as
+            # _stop_charging would, instead of leaving it held while away.
+            await self._restore_curtailment(state)
             state.last_decision = "away"
             state.last_decision_reason = f"Vehicle not at home (location: {location})"
             self._sync_active_charging_preserve_intent(
@@ -6769,6 +6815,7 @@ class AutoScheduleExecutor:
         if not plugged_in:
             if state.is_charging:
                 state.is_charging = False
+            await self._restore_curtailment(state)
             state.last_decision = "unplugged"
             state.last_decision_reason = "Vehicle not plugged in"
             self._sync_active_charging_preserve_intent(
@@ -6937,6 +6984,18 @@ class AutoScheduleExecutor:
             self.hass,
             self.config_entry.entry_id,
         )
+        solar_session_active = False
+        if state.is_charging:
+            from .ev_ownership import get_ev_ownership
+
+            _lease_id, _lease = get_ev_ownership(
+                self.hass,
+                self.config_entry,
+                self._resolve_vehicle_vin(vehicle_id) or vehicle_id,
+            )
+            solar_session_active = bool(
+                _lease and _lease.get("owner_mode") == "smart_schedule_solar_surplus"
+            )
         should_charge, reason, source = await self.planner.should_charge_now(
             vehicle_id=vehicle_id,
             plan=state.current_plan,
@@ -6947,6 +7006,7 @@ class AutoScheduleExecutor:
             min_battery_soc=effective_home_min,
             is_time_critical=is_time_critical,
             priority=effective_priority,
+            solar_session_active=solar_session_active,
         )
 
         if (
@@ -8637,12 +8697,16 @@ class AutoScheduleExecutor:
                     state.current_plan = None
                     state.current_window = None
                 count, delay = self._record_start_failure(vehicle_id)
+                from .ev_ownership import latest_ev_refusal
+
+                refusal = latest_ev_refusal(self.hass, self.config_entry, vehicle_id)
                 _LOGGER.warning(
                     "Auto-schedule: Failed to start charging for %s "
-                    "(attempt %d; retry in %ds)",
+                    "(attempt %d; retry in %ds): %s",
                     vehicle_id,
                     count,
                     delay,
+                    (refusal or {}).get("reason") or "no reason recorded",
                 )
                 return False
         except Exception as e:
@@ -12329,6 +12393,10 @@ class PriceLevelChargingExecutor:
                     vin,
                     reason,
                 )
+                # Leaving it alone must not keep a stale "charging" flag: on
+                # return, should_charge and not is_charging would stay False
+                # and Price-Level would never start this car again.
+                vehicle_state.is_charging = False
             elif should_charge and not vehicle_state.is_charging:
                 await self._start_charging(mode, reason, vehicle_vin=vin)
             elif not should_charge:
@@ -12706,15 +12774,32 @@ class ScheduledChargingExecutor:
         )
         params = pending["params"]
         entity = params.get("tesla_charging_state_entity")
+        power, available = await _get_observed_ev_power_reading_kw(
+            self.hass, vin, params, allow_wall_connector_fallback=False,
+        )
+        at = pending.get("at")
+        if (
+            isinstance(at, datetime)
+            and (datetime.now(timezone.utc) - at).total_seconds()
+            >= SCHEDULED_PENDING_STOP_MAX_SECONDS
+            and not (available and power > _ACTIVE_EV_POWER_EPSILON_KW)
+        ):
+            # A car that was already stopped (or fell asleep) never reports a
+            # state change after the Stop. Past the window, only a measured
+            # draw may keep Scheduled from restarting it.
+            _LOGGER.info(
+                "Scheduled charging: no measured draw %d min after an unconfirmed "
+                "Stop for %s; releasing the pending stop",
+                SCHEDULED_PENDING_STOP_MAX_SECONDS // 60,
+                vin,
+            )
+            return True
         if _get_tesla_charging_state(self.hass, vin, entity) not in _TESLA_NON_CHARGING_STATES:
             return False
         if not _datetime_is_after(
             _get_tesla_charging_state_changed_at(self.hass, vin, entity), pending["at"],
         ):
             return False
-        power, available = await _get_observed_ev_power_reading_kw(
-            self.hass, vin, params, allow_wall_connector_fallback=False,
-        )
         return available and power <= _ACTIVE_EV_POWER_EPSILON_KW
 
     async def _start_charging(self, reason: str) -> bool:

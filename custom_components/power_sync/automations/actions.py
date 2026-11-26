@@ -48,6 +48,7 @@ from homeassistant.util import dt as dt_util
 from ..teslemetry_solar import guard_ev_control
 from ..native_rate_admission import (
     SiteImportAdmissionDenied,
+    last_ev_submission_refusal,
     prepare_ev_submission,
     validate_ev_submission,
     bind_vehicle,
@@ -2028,6 +2029,9 @@ def _tesla_physical_charging_snapshot(
 
     return {
         "charging": charging,
+        # Whether any usable charge-state reading existed, so "not charging"
+        # can be told apart from "no telemetry at all".
+        "charging_observed": bool(charging_observations),
         "measurements": frozenset(measurements),
         "fresh_measurements": frozenset(fresh_measurements),
         "direct_measurements": frozenset(direct_measurements),
@@ -2277,6 +2281,59 @@ async def _solar_surplus_tesla_charge_limit(hass, config_entry, vehicle_id: str)
     ))[1]
 
 
+_SOLAR_CEILING_SOC_UNAVAILABLE = "EV battery level unavailable for Solar Surplus ceiling"
+
+
+def _solar_session_held_stopped_without_charge(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    vehicle_id: str,
+    state: Dict[str, Any],
+    params: Dict[str, Any],
+    *,
+    require_confirmed_stop: bool = False,
+) -> bool:
+    """Return whether a Tesla Solar Surplus session is already held stopped.
+
+    True only when this controller's own last command left the car at 0 A
+    (no pending, unconfirmed or recovering command, and no Start since) and
+    the car's VIN-bound telemetry shows a charge state that is not charging,
+    with no positive current or power anywhere. Any doubt returns False.
+    ``require_confirmed_stop`` additionally requires a recorded successful
+    Stop by this controller, excluding sessions that never started.
+    """
+    if params.get("charger_type", "tesla") != "tesla":
+        return False
+    if not (
+        state.get("active") is True
+        and state.get("charging_started") is False
+        and state.get("current_amps") == 0
+        and state.get("target_amps") == 0
+    ):
+        return False
+    if any(state.get(key) for key in (
+        "stop_outcome", "transport_recovery_pending", "external_manual_override",
+        "last_physical_restart_attempt_at",
+    )):
+        return False
+    started_at = state.get("last_start_command_at")
+    stopped_at = state.get("last_stop_command_at")
+    if require_confirmed_stop and stopped_at is None:
+        return False
+    if started_at is not None:
+        try:
+            if stopped_at is None or started_at.timestamp() >= stopped_at.timestamp():
+                return False
+        except (AttributeError, OSError, OverflowError, ValueError):
+            return False
+    snapshot = _tesla_physical_charging_snapshot(hass, config_entry, vehicle_id, params)
+    return bool(
+        snapshot.get("charging_observed")
+        and not snapshot.get("charging")
+        and not snapshot.get("measurements")
+    )
+
+
 async def _dynamic_ev_full_soc_reason(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
@@ -2319,7 +2376,7 @@ async def _dynamic_ev_full_soc_reason(
     if target is None:
         return None
     if ev_soc is None:
-        return f"EV battery level unavailable for Solar Surplus ceiling {target:g}%"
+        return f"{_SOLAR_CEILING_SOC_UNAVAILABLE} {target:g}%"
     if ev_soc >= target:
         return f"EV {ev_soc:g}% reached Solar Surplus ceiling {target:g}%"
     return None
@@ -11543,7 +11600,11 @@ async def _action_set_ev_charging_amps(
 
     route = await _tesla_transport_route(hass, config_entry, params, "rate")
     if route and route.get("kind") == "blocked":
-        return None
+        return _refuse_rate(
+            params,
+            f"Tesla command route is blocked ({route.get('reason') or 'no reason given'})",
+            None,
+        )
     if route and route.get("kind") == "ha" and ev_provider == EV_PROVIDER_BOTH:
         ev_provider = EV_PROVIDER_FLEET_API
 
@@ -11647,15 +11708,14 @@ async def _action_set_ev_charging_amps(
     if ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH):
         # Check API credits before attempting
         if not _is_api_credit_available("teslemetry"):
-            _LOGGER.debug("Skipping set EV charging amps - API credits exhausted, in cooldown period")
-            return False
+            return _refuse_rate(params, "Tesla API credits exhausted; in cooldown")
 
         # Tesla Fleet uses charge_current, some versions use charging_amps
         charging_amps_entity = await _tesla_ha_command_entity(hass, config_entry, params, "rate")
 
         if not charging_amps_entity:
             _LOGGER.error("Could not find Tesla charge_current/charging_amps number entity")
-            return False
+            return _refuse_rate(params, "no Tesla charge-current entity found for this vehicle")
 
         entity_min = TESLA_UNKNOWN_CHARGER_SAFE_AMPS
         entity_max = 32
@@ -11695,8 +11755,7 @@ async def _action_set_ev_charging_amps(
                 hass, vehicle_vin, charging_amps_entity, config_entry.entry_id
             )
             if not wake_success:
-                _LOGGER.debug("Wake failed (possibly due to API credits), skipping set amps command")
-                return False
+                return _refuse_rate(params, f"could not wake the vehicle for {charging_amps_entity}")
 
             # Waking the vehicle can invalidate the Fleet number entity while
             # HA refreshes its state. Never send a command using the stale
@@ -11715,15 +11774,21 @@ async def _action_set_ev_charging_amps(
                     "refusing to set charging amps",
                     charging_amps_entity,
                 )
-                return False
+                return _refuse_rate(params, f"{charging_amps_entity} is unavailable after wake")
 
-            if (not request_authority() or await _tesla_ha_command_entity(
-                    hass, config_entry, params, "rate") != charging_amps_entity):
-                return False
-            if not await prepare_ev_submission(hass, charging_amps_entity, operation="rate", amps=amps):
-                return False
             if not request_authority():
-                return False
+                return _refuse_rate(params, "command authority changed before the rate was sent")
+            if await _tesla_ha_command_entity(
+                    hass, config_entry, params, "rate") != charging_amps_entity:
+                return _refuse_rate(params, "Tesla charge-current entity changed before the rate was sent")
+            if not await prepare_ev_submission(hass, charging_amps_entity, operation="rate", amps=amps):
+                return _refuse_rate(
+                    params,
+                    "site import admission refused: "
+                    f"{last_ev_submission_refusal() or 'no reason given'}",
+                )
+            if not request_authority():
+                return _refuse_rate(params, "command authority changed before the rate was sent")
             mutation = await _run_native_tesla_service_command(
                 hass,
                 config_entry,
@@ -11741,7 +11806,7 @@ async def _action_set_ev_charging_amps(
             if mutation.outcome == "rejected":
                 if getattr(mutation.error, "site_import_admission_denied", False):
                     raise mutation.error
-                return False
+                return _refuse_rate(params, f"Tesla rejected {amps}A: {mutation.error}")
             if mutation.outcome == "not_sent" and mutation.retryable_range:
                 fallback_amps = _tesla_entity_max_fallback_amps(
                     amps,
@@ -11751,7 +11816,10 @@ async def _action_set_ev_charging_amps(
                     configured_max_amps=configured_max_amps,
                 )
                 if fallback_amps is None:
-                    return False
+                    return _refuse_rate(
+                        params,
+                        f"{amps}A is outside {charging_amps_entity}'s range and no fallback fits",
+                    )
                 if not await prepare_ev_submission(
                     hass,
                     charging_amps_entity,
@@ -11795,7 +11863,10 @@ async def _action_set_ev_charging_amps(
                 )
                 return True
             if mutation.outcome != "accepted_unconfirmed":
-                return False
+                return _refuse_rate(
+                    params,
+                    f"{amps}A was not sent ({mutation.outcome}: {mutation.error or 'no detail'})",
+                )
             params["_tesla_native_submitted_amps"] = amps
             params.pop("_tesla_entity_range_fallback_amps", None)
             if configured_max_amps is not None:
@@ -11812,9 +11883,9 @@ async def _action_set_ev_charging_amps(
             if _is_api_credit_error(str(e)):
                 _mark_api_credits_exhausted("teslemetry")
 
-            return False
+            return _refuse_rate(params, f"rate command failed: {e}")
 
-    return False
+    return _refuse_rate(params, f"no rate-control path for Tesla provider {ev_provider!r}")
 
 
 # =============================================================================
@@ -12804,6 +12875,21 @@ def _ev_power_drift_since_site_sample_kw(live_status: dict) -> float:
         return 0.0
 
 
+_NO_SOLAR_GENERATION_W = 50.0
+
+
+def _no_solar_generation(live_status: Optional[dict]) -> bool:
+    """True only when a solar reading exists and shows no meaningful output."""
+    raw = (live_status or {}).get("solar_power")
+    if raw is None or isinstance(raw, bool):
+        return False
+    try:
+        solar_w = float(raw)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(solar_w) and solar_w < _NO_SOLAR_GENERATION_W
+
+
 def _calculate_solar_surplus(
     live_status: dict,
     current_ev_power_kw: float,
@@ -13310,6 +13396,14 @@ async def _solar_surplus_switch_to_next_vehicle(
     _LOGGER.info(f"⚡ Solar surplus EV: No other vehicles available for charging")
 
 
+def _refuse_rate(params: Any, reason: str, result: Optional[bool] = False) -> Optional[bool]:
+    """Record why a rate command was not sent, so the caller can report it."""
+    if isinstance(params, dict):
+        params["_rate_refusal_reason"] = reason
+    _LOGGER.info("Dynamic EV: rate command not sent: %s", reason)
+    return result
+
+
 @guard_ev_control
 async def _set_vehicle_amps(
     hass: HomeAssistant,
@@ -13323,10 +13417,11 @@ async def _set_vehicle_amps(
     params.pop("_tesla_native_submitted_amps", None)
     params.pop("_tesla_entity_range_fallback_amps", None)
     params.pop("_phase_load_management_applied_amps", None)
+    params.pop("_rate_refusal_reason", None)
     if amps <= 0 and config_entry is not None and not stop_allowed(hass, config_entry, params):
-        return False
+        return _refuse_rate(params, "shared charger profile does not allow this stop")
     if amps > 0 and config_entry is not None and not start_allowed(hass, config_entry, params):
-        return False
+        return _refuse_rate(params, "shared charger profile does not allow this start")
     # A shared physical charger is intentionally inert until the user chooses
     # one connected profile.  Explicit/manual commands retain their historical
     # behavior, but background controllers must never apply one profile's
@@ -13345,11 +13440,9 @@ async def _set_vehicle_amps(
                 if isinstance(item, Mapping)
             ]
             if not profile_is_effective(profiles, stored_data, vehicle_id):
-                _LOGGER.info(
-                    "Skipping automated EV command for unselected shared loadpoint %s",
-                    vehicle_id,
+                return _refuse_rate(
+                    params, f"{vehicle_id} is not the selected shared loadpoint profile"
                 )
-                return False
         except Exception:
             # A missing store cannot prove that this is a shared profile; keep
             # the established command path for partial-startup compatibility.
@@ -13378,11 +13471,9 @@ async def _set_vehicle_amps(
             or 0
         )
         if amps > 0 and applied_amps <= 0 and current_amps <= 0:
-            _LOGGER.info(
-                "EV phase load management blocked the managed start for %s",
-                vehicle_id,
+            return _refuse_rate(
+                params, "phase load management left no headroom for this start"
             )
-            return False
         success = await _set_vehicle_amps_unchecked(
             hass, config_entry, vehicle_id, applied_amps, params
         )
@@ -13470,6 +13561,7 @@ async def _set_vehicle_amps_unchecked(
     charger_type = params.get("charger_type", "tesla")
 
     if charger_type == "tesla":
+        params.pop("_rate_refusal_reason", None)
         owner_mode = params.get("owner_mode") or params.get("dynamic_mode")
         if owner_mode:
             from .ev_ownership import owner_family
@@ -13482,13 +13574,9 @@ async def _set_vehicle_amps_unchecked(
                     params,
                 )
                 if away_location:
-                    _LOGGER.info(
-                        "Automated Tesla rate update blocked for %s because the vehicle "
-                        "is away (%s)",
-                        vehicle_id,
-                        away_location,
+                    return _refuse_rate(
+                        params, f"vehicle is away ({away_location})"
                     )
-                    return False
         if amps == 0:
             return await _action_stop_ev_charging(hass, config_entry, {"vehicle_vin": vehicle_id})
         command_params = {
@@ -13520,7 +13608,11 @@ async def _set_vehicle_amps_unchecked(
             command_params,
         )
         params["max_charge_amps"] = command_params.get("max_charge_amps")
-        for key in ("_tesla_native_submitted_amps", "_tesla_entity_range_fallback_amps"):
+        for key in (
+            "_tesla_native_submitted_amps",
+            "_tesla_entity_range_fallback_amps",
+            "_rate_refusal_reason",
+        ):
             if key in command_params:
                 params[key] = command_params[key]
             else:
@@ -15571,6 +15663,36 @@ async def _refresh_dynamic_tesla_charger_capability(
     return True
 
 
+
+# An external manual override ends after this long without measured draw.
+EXTERNAL_MANUAL_OVERRIDE_STALE_SECONDS = 30 * 60
+
+
+def _external_manual_override_stale(
+    state: Dict[str, Any],
+    *,
+    power_available: bool,
+    power_kw: float,
+    now: float | None = None,
+) -> bool:
+    """Whether a suspended Solar Surplus session lost its evidence of charging.
+
+    ``external_manual_override_since`` marks the latest evidence: the override
+    start, then each measured draw. A telemetry gap therefore only ends the
+    override after a full window without draw, however long it has run.
+    """
+    now = time.time() if now is None else now
+    since = state.get("external_manual_override_since")
+    if not isinstance(since, (int, float)) or not math.isfinite(since):
+        # Restored/legacy state: start the window now rather than never.
+        state["external_manual_override_since"] = now
+        return False
+    if power_available and power_kw > _ACTIVE_EV_POWER_EPSILON_KW:
+        state["external_manual_override_since"] = now
+        return False
+    return now - since >= EXTERNAL_MANUAL_OVERRIDE_STALE_SECONDS
+
+
 async def _dynamic_ev_update_surplus(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
@@ -15679,6 +15801,20 @@ async def _dynamic_ev_update_surplus(
         _, lease = get_ev_ownership(hass, config_entry, vehicle_id)
         if state.get("external_manual_override") or (lease and lease.get("owner") != "powersync"):
             state["reason"] = full_soc_reason
+            return
+        if full_soc_reason.startswith(_SOLAR_CEILING_SOC_UNAVAILABLE) and (
+            _solar_session_held_stopped_without_charge(
+                hass, config_entry, vehicle_id, state, params,
+            )
+        ):
+            # An unknown SoC cannot show the car crossed its ceiling, and the
+            # car is already stopped at 0 A. A Stop to a sleeping Tesla cannot
+            # be confirmed; its retained recovery history would block every
+            # later command. Keep holding without raising the rate.
+            reason = f"{full_soc_reason}; already stopped at 0 A, no Stop sent"
+            if state.get("reason") != reason:
+                _LOGGER.info("Solar surplus EV %s: %s", vehicle_id, reason)
+            state["reason"] = reason
             return
         _LOGGER.info("⚡ Solar surplus EV: Stopping - %s", full_soc_reason)
         await _action_stop_ev_charging_dynamic(
@@ -15999,6 +16135,21 @@ async def _dynamic_ev_update_surplus(
                 and observed_current_power_kw <= _ACTIVE_EV_POWER_EPSILON_KW
             )
         )
+        if not external_manual_charge_ended and _external_manual_override_stale(
+            state,
+            power_available=current_vehicle_power_available,
+            power_kw=observed_current_power_kw,
+        ):
+            # A sleeping car sends no charge-end telemetry. Past the window,
+            # only a measured draw keeps Solar Surplus suspended; if the
+            # external session is real, the yield path re-detects it.
+            _LOGGER.info(
+                "Solar surplus EV: external manual override for %s has no "
+                "measured draw after %d min; resuming automated control",
+                vehicle_id,
+                EXTERNAL_MANUAL_OVERRIDE_STALE_SECONDS // 60,
+            )
+            external_manual_charge_ended = True
         if not external_manual_charge_ended:
             state["reason"] = (
                 "External manual charging active; Solar Surplus rate control suspended"
@@ -16061,6 +16212,7 @@ async def _dynamic_ev_update_surplus(
             vehicle_id,
         )[1]
         state["external_manual_override"] = True
+        state["external_manual_override_since"] = time.time()
         state["external_start_detection_armed"] = False
         state["reason"] = (
             "External manual charging active; Solar Surplus rate control suspended"
@@ -16110,6 +16262,7 @@ async def _dynamic_ev_update_surplus(
                 )
                 return
             state["external_manual_override"] = True
+            state["external_manual_override_since"] = time.time()
             state["external_start_detection_armed"] = False
             state["reason"] = (
                 "External manual charging active; Solar Surplus rate control suspended"
@@ -16194,7 +16347,11 @@ async def _dynamic_ev_update_surplus(
         deadline_override=deadline_override,
     ):
         limit = get_solar_surplus_max_export_price_cents(params)
-        if export_price_cents is None:
+        if _no_solar_generation(live_status):
+            # With nothing generating (night) the export limit is not what
+            # stops solar charging; reporting it reads as a fault.
+            paused_reason = "No solar generation right now"
+        elif export_price_cents is None:
             paused_reason = "Export price unavailable; automatic solar charging paused"
         else:
             paused_reason = (
@@ -16649,9 +16806,13 @@ async def _dynamic_ev_update_surplus(
     min_amps = _effective_min_charge_amps(params, hass)
     hardware_min_amps = _hardware_min_charge_amps(params, hass)
     max_amps = _effective_max_charge_amps(params, hass)
-    planned_ev_charge_kw = _optimizer_planned_ev_charge_kw(
-        hass, config_entry, vehicle_id
-    )
+    # A timed manual Solar Surplus session owns this vehicle. Its live
+    # surplus limit applies independently of the Smart Schedule allocation.
+    planned_ev_charge_kw = None
+    if params.get("owner_mode") != "manual_solar_surplus":
+        planned_ev_charge_kw = _optimizer_planned_ev_charge_kw(
+            hass, config_entry, vehicle_id
+        )
     optimizer_ceiling_amps = _optimizer_ev_ceiling_amps(
         planned_ev_charge_kw,
         voltage=voltage,
@@ -19343,12 +19504,28 @@ async def _action_start_ev_charging_dynamic(
         profile = selected_profile(shared_data(hass, config_entry))
         params = dict(params)
         params.setdefault("_shared_generic_profile_id", profile["id"] if profile else None)
+    from .ev_ownership import ev_refusal_sequence, record_ev_refusal
+
+    vehicle_id = params.get("vehicle_vin") or params.get("vehicle_id") or DEFAULT_VEHICLE_ID
+    command = f"start_{params.get('owner_mode') or params.get('dynamic_mode', 'battery_target')}"
     async with _start_dynamic_lock:
         if not start_allowed(hass, config_entry, params):
+            record_ev_refusal(
+                hass, config_entry, vehicle_id, command=command,
+                reason="shared charger profile does not allow this start",
+            )
             return False
-        return await _action_start_ev_charging_dynamic_locked(
+        refusal_seq = ev_refusal_sequence(hass, config_entry)
+        result = await _action_start_ev_charging_dynamic_locked(
             hass, config_entry, params, context
         )
+        if not result and ev_refusal_sequence(hass, config_entry) == refusal_seq:
+            # Guard paths that only log still leave a queryable reason.
+            record_ev_refusal(
+                hass, config_entry, vehicle_id, command=command,
+                reason="start guard refused without a specific reason (see preceding Dynamic EV log line)",
+            )
+        return result
 
 
 def _consume_recovered_solar_surplus_continuation_amps(
@@ -19466,6 +19643,19 @@ def _consume_recovered_solar_surplus_continuation_amps(
     return live_amps
 
 
+def _record_dynamic_start_refusal(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    vehicle_id: Any,
+    params: Dict[str, Any],
+    reason: str,
+) -> None:
+    from .ev_ownership import record_ev_refusal
+
+    command = f"start_{params.get('owner_mode') or params.get('dynamic_mode', 'battery_target')}"
+    record_ev_refusal(hass, config_entry, vehicle_id, command=command, reason=reason)
+
+
 async def _action_start_ev_charging_dynamic_locked(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
@@ -19512,6 +19702,10 @@ async def _action_start_ev_charging_dynamic_locked(
                 "Dynamic EV: anonymous Tesla start blocked because the loadpoint "
                 "is not uniquely resolved"
             )
+            _record_dynamic_start_refusal(
+                hass, config_entry, vehicle_id, params,
+                "no single plugged-in Tesla could be identified for this start",
+            )
             return False
         params = {
             **params,
@@ -19539,6 +19733,10 @@ async def _action_start_ev_charging_dynamic_locked(
                 vehicle_id,
                 away_location,
             )
+            _record_dynamic_start_refusal(
+                hass, config_entry, vehicle_id, params,
+                f"vehicle is away ({away_location})",
+            )
             return False
 
     # Determine mode
@@ -19563,6 +19761,10 @@ async def _action_start_ev_charging_dynamic_locked(
             _LOGGER.warning(
                 "Dynamic EV: refusing generic charger start because no positive "
                 "integer current is valid for the configured/entity bounds"
+            )
+            _record_dynamic_start_refusal(
+                hass, config_entry, vehicle_id, params,
+                "no valid charge current within the configured/entity bounds",
             )
             return False
     elif (
@@ -20538,6 +20740,8 @@ async def _action_start_ev_charging_dynamic_locked(
                 transport_pending = True
             else:
                 reason = f"could not pre-set the safe initial rate to {start_amps}A"
+                if params.get("_rate_refusal_reason"):
+                    reason = f"{reason}: {params['_rate_refusal_reason']}"
                 record_ev_command(
                     hass,
                     config_entry,
@@ -21064,12 +21268,22 @@ async def _action_start_ev_charging_dynamic_locked(
         return (_dynamic_ev_state.get(entry_id, {}).get(vehicle_id) is registered_state
                 and registered_state.get("active") and registration_authority())
 
-    def discard_registration():
+    def registration_lost_reason() -> str:
+        if _dynamic_ev_state.get(entry_id, {}).get(vehicle_id) is not registered_state:
+            return "another start or stop replaced this session before it began"
+        if not registered_state.get("active"):
+            return "this session was stopped before it began"
+        return "Tesla command authority for this vehicle changed before the start"
+
+    def discard_registration(*, refused: bool = False):
+        reason = registration_lost_reason() if refused else None
         if callable(cancel_timer):
             cancel_timer()
         if _dynamic_ev_state.get(entry_id, {}).get(vehicle_id) is registered_state:
             registered_state["active"] = False
             _dynamic_ev_state[entry_id].pop(vehicle_id, None)
+        if reason:
+            _record_dynamic_start_refusal(hass, config_entry, vehicle_id, params, reason)
 
     # Start charging session tracking
     session_manager = None
@@ -21079,7 +21293,7 @@ async def _action_start_ev_charging_dynamic_locked(
         if session_manager and not (owner_mode == "scheduled" and transport_pending):
             initial_soc = await _ev_session_soc(hass, config_entry, vehicle_id, params)
             if not registration_is_current():
-                discard_registration()
+                discard_registration(refused=True)
                 return False
 
             session = await session_manager.start_session(
@@ -21088,7 +21302,7 @@ async def _action_start_ev_charging_dynamic_locked(
                 start_soc=initial_soc,
             )
             if not registration_is_current():
-                discard_registration()
+                discard_registration(refused=True)
                 return False
             registered_state["session_id"] = session.id
             _LOGGER.info(f"📊 Started charging session {session.id}")
@@ -21116,7 +21330,7 @@ async def _action_start_ev_charging_dynamic_locked(
             )
 
     if not registration_is_current():
-        discard_registration()
+        discard_registration(refused=True)
         return False
     session_id = registered_state.get("session_id")
     if transport_pending and owner_mode == "scheduled":
@@ -21671,10 +21885,23 @@ async def _action_stop_ev_charging_dynamic(
                 # Ending session history can await telemetry. Decide whether
                 # to omit Stop only after that await, immediately before release.
                 try:
+                    handoff = params.get("_waiting_solar_handoff")
                     if await _waiting_solar_tesla_is_stopped(
                         hass, config_entry, vid, state, state_params,
-                        handoff=params.get("_waiting_solar_handoff"),
+                        handoff=handoff,
                         solar_ceiling=params.get("_solar_ceiling_stop") is True,
+                    ) or (
+                        # A Start follows a Smart Schedule/Boost handoff at
+                        # once, so a Stop to a car this controller already
+                        # stopped is redundant; to a sleeping Tesla it cannot
+                        # be confirmed and its retained history blocks that
+                        # Start. Requires our own confirmed Stop as the last
+                        # command, unlike a session that never started.
+                        handoff in ("smart_schedule", "boost")
+                        and _solar_session_held_stopped_without_charge(
+                            hass, config_entry, vid, state, state_params,
+                            require_confirmed_stop=True,
+                        )
                     ):
                         headroom = hass.data.get(DOMAIN, {}).get(entry_id, {}).get("solar_ev_headroom")
                         if (

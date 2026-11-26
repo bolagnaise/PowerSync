@@ -1470,6 +1470,7 @@ OPTIMIZER_ACTION_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
             "grid_import_target_limited": data.get("grid_import_target_limited", False),
             "effective_action": data.get("effective_current_action"),
             "effective_action_detail": data.get("effective_current_action_detail"),
+            "command_failure": data.get("command_failure"),
             "actual_battery_power_w": data.get("actual_battery_power_w"),
             "status": data.get("status"),
             "until": data.get("current_action_end_time"),

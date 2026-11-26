@@ -1254,6 +1254,53 @@ async def test_independent_read_uses_exact_cloud_payload_not_published_stream(in
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("paid", [False, True])
+async def test_independent_read_admits_provider_hacs_build_coordinator(independent_source, monkeypatch, paid):
+    """Ticket 156: Teslemetry's HACS release overrides core as custom_components.teslemetry."""
+    hass, _entry, _vehicle, coordinator = independent_source("teslemetry")
+    core = types.ModuleType("homeassistant.components.teslemetry.coordinator")
+    core.TeslemetryVehicleDataCoordinator = type("TeslemetryVehicleDataCoordinator", (), {})
+    monkeypatch.setitem(sys.modules, core.__name__, core)
+    custom = types.ModuleType("custom_components.teslemetry.coordinator")
+    custom.TeslemetryVehicleDataCoordinator = type(coordinator)
+    monkeypatch.setitem(sys.modules, custom.__name__, custom)
+    failure = {}
+    if paid:
+        coordinator.api.refresh_response = {"response": {"vin": VIN_A, **_charge(2_000_000_000)}}
+    result = await observation.async_read_independent_tesla_vehicle(
+        hass, VIN_A, allow_paid_refresh=paid, authorize=(lambda: True) if paid else None,
+        failure=failure)
+
+    assert failure == {}
+    assert result is not None
+    assert result.origin == "native_cloud"
+    assert result.domain == "teslemetry"
+    assert bool(coordinator.api.refresh_calls) is paid
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("variant", ["custom_not_loaded", "custom_subclass", "other_domain_custom"])
+async def test_independent_read_refuses_unloaded_or_foreign_custom_coordinator(independent_source, monkeypatch, variant):
+    hass, _entry, _vehicle, coordinator = independent_source("teslemetry")
+    core = types.ModuleType("homeassistant.components.teslemetry.coordinator")
+    core.TeslemetryVehicleDataCoordinator = type("TeslemetryVehicleDataCoordinator", (), {})
+    monkeypatch.setitem(sys.modules, core.__name__, core)
+    monkeypatch.delitem(sys.modules, "custom_components.teslemetry.coordinator", raising=False)
+    if variant != "custom_not_loaded":
+        name = "tessie" if variant == "other_domain_custom" else "teslemetry"
+        custom = types.ModuleType(f"custom_components.{name}.coordinator")
+        custom.TeslemetryVehicleDataCoordinator = (
+            type(coordinator) if variant == "other_domain_custom"
+            else type("Sub", (type(coordinator),), {}))
+        monkeypatch.setitem(sys.modules, custom.__name__, custom)
+    failure = {}
+
+    assert await observation.async_read_independent_tesla_vehicle(hass, VIN_A, failure=failure) is None
+    assert failure["reason"] == "cloud_reader_unavailable"
+    assert coordinator.api.calls == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("fault", ["missing_requested", "actual_only", "missing_limit", "missing_power", "missing_actual", "stale", "wrong_vin"])
 async def test_independent_read_rejects_incomplete_or_wrong_source(independent_source, fault):
     hass, _entry, _vehicle, coordinator = independent_source()
@@ -1473,6 +1520,60 @@ async def test_paid_refresh_failure_does_not_retry_or_read_old_cache(independent
         hass, VIN_A, allow_paid_refresh=True, authorize=lambda: True) is None
     assert coordinator.api.refresh_calls == [True]
     assert coordinator.api.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fault,reason,fields", [
+    ("wrong_vin", "response_vehicle_mismatch", None),
+    ("missing_power", "charge_fields_incomplete", ["charger_power"]),
+    ("same_timestamp", "not_newer_than_coordinator", None),
+])
+async def test_paid_refresh_rejection_reports_nonidentifying_reason(independent_source, fault, reason, fields):
+    """Ticket 156: an awake car still failed; report which freshness check refused."""
+    hass, _entry, _vehicle, coordinator = independent_source("teslemetry")
+    client = coordinator.api
+    document = deepcopy(client.response)
+    if fault == "wrong_vin":
+        document["vin"] = VIN_B
+    elif fault == "same_timestamp":
+        document["charge_state"]["timestamp"] = 1_999_999_990
+    else:
+        document["charge_state"].pop("charger_power")
+    client.refresh_response = {"response": document}
+    client.response = deepcopy(document)
+    failure = {}
+    assert await observation.async_read_independent_tesla_vehicle(
+        hass, VIN_A, allow_paid_refresh=True, authorize=lambda: True, failure=failure) is None
+    assert failure["reason"] == reason and failure["stage"] == "read"
+    assert failure["refresh_reason"] == reason
+    assert failure.get("fields") == fields
+    assert VIN_A not in repr(failure)
+
+
+@pytest.mark.asyncio
+async def test_paid_refresh_cached_fallback_reports_stale_read_and_provider_error(independent_source):
+    hass, _entry, _vehicle, coordinator = independent_source("teslemetry")
+    client = coordinator.api
+    client.refresh_response = {"response": True}
+    client.response["charge_state"]["timestamp"] -= 30
+    failure = {}
+    assert await observation.async_read_independent_tesla_vehicle(
+        hass, VIN_A, allow_paid_refresh=True, authorize=lambda: True, failure=failure) is None
+    assert failure["stage"] == "read" and failure["refresh_reason"] == "response_not_document"
+    assert failure["reason"] in {"not_newer_than_coordinator", "older_than_read_start"}
+    assert isinstance(failure["sample_age_seconds"], float)
+
+    class RateLimited(Exception):
+        pass
+
+    async def refused():
+        raise RateLimited("refresh refused")
+
+    client.before_refresh_return = refused
+    failure = {}
+    assert await observation.async_read_independent_tesla_vehicle(
+        hass, VIN_A, allow_paid_refresh=True, authorize=lambda: True, failure=failure) is None
+    assert failure == {"reason": "provider_error", "stage": "refresh", "error_type": "RateLimited"}
 
 
 @pytest.mark.asyncio

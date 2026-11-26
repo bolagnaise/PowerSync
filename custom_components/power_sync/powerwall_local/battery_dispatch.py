@@ -29,6 +29,10 @@ class _DispatchWindowExpired(ValueError):
     """The dispatch window cannot fit another power request."""
 
 
+class _ChargeCeilingReached(ValueError):
+    """Fresh SOC is at or above the configured charge ceiling."""
+
+
 class _StaleRenewalTelemetry(ValueError):
     """Telemetry expired before any watts request was submitted."""
 
@@ -204,7 +208,7 @@ def fixed_battery_watts(mode: str, target_w: float, snapshot: Any, config: dict)
         watts = target_w
     else:
         if soc >= _percent(config.get("optimization_grid_charge_soc_cap", 1), "charge ceiling"):
-            raise ValueError("Battery is at its charge ceiling")
+            raise _ChargeCeilingReached("Battery is at its charge ceiling")
         if getattr(snapshot, "grid_charging_enabled", None) is not True:
             raise ValueError("Grid charging permission is unavailable or disabled")
         watts = -target_w
@@ -285,7 +289,7 @@ def battery_watts(mode: str, target_w: float, snapshot: Any, config: dict, *, ta
         raise ValueError("Unknown dispatch mode")
     ceiling = _percent(config.get("optimization_grid_charge_soc_cap", 1), "charge ceiling")
     if soc >= ceiling:
-        raise ValueError("Battery is at its charge ceiling")
+        raise _ChargeCeilingReached("Battery is at its charge ceiling")
     if config.get("optimization_allow_grid_charge", True) is not True:
         raise GridChargingPermissionError("Grid charging is disabled", "configured_grid_charging_disabled")
     maximum = min(TIMED_DISPATCH_MAX_W, _number(config.get("optimization_max_charge_w", 5000), "charge limit"))
@@ -871,7 +875,8 @@ class LocalBatteryDispatch:
             if isinstance(err, _DispatchWindowExpired):
                 self.completion_reason = "timeout"
                 _LOGGER.info("Powerwall local dispatch window exhausted; releasing lease")
-            elif getattr(err, "code", None) == "battery_target_reached":
+            elif (isinstance(err, _ChargeCeilingReached)
+                  or getattr(err, "code", None) == "battery_target_reached"):
                 self.completion_reason = "target_reached"
                 _LOGGER.info("Powerwall battery target reached; releasing lease")
             else:
