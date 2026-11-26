@@ -30,6 +30,9 @@ from ..tesla_calibration import (
     CALIBRATION_SOURCE_MODE_STICK,
     CALIBRATION_CYCLE_FULL_SOC,
     CALIBRATION_CYCLE_LOW_SOC,
+    CALIBRATION_IGNORED_CHARGE_MAX_SOC,
+    CALIBRATION_IGNORED_CHARGE_MAX_W,
+    CALIBRATION_IGNORED_CHARGE_MIN_TARGET_W,
     CALIBRATION_REQUEST_ACK_KEY,
     CALIBRATION_TAKEOVER_CONFIRM_SECONDS,
     CALIBRATION_TAKEOVER_LATCH_KEY,
@@ -480,25 +483,59 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
     def _calibration_takeover_observed(
         self, entry_data: dict[str, Any], snap: PowerwallSnapshot
     ) -> bool:
-        """Return True once Tesla has discharged against our charge/hold for a while."""
-        commanded = any(
-            isinstance(entry_data.get(key), dict) and entry_data[key].get("active")
-            for key in ("force_charge_state", "hold_soc_state")
+        """Return True once Tesla has overridden our charge/hold for a while.
+
+        Tesla either discharges against an active force charge or Hold SoC,
+        or holds the battery idle ("resting") against a force charge that the
+        gateway would otherwise follow.
+        """
+        force_charge = entry_data.get("force_charge_state")
+        charging_forced = isinstance(force_charge, dict) and bool(force_charge.get("active"))
+        commanded = charging_forced or (
+            isinstance(entry_data.get("hold_soc_state"), dict)
+            and bool(entry_data["hold_soc_state"].get("active"))
         )
         battery_w = snap.battery_w
-        contradicted = (
-            commanded
-            and snap.grid_status == "SystemGridConnected"
+        soc = snap.soc
+        measured = (
+            snap.grid_status == "SystemGridConnected"
             and isinstance(battery_w, (int, float))
             and not isinstance(battery_w, bool)
-            and battery_w > CALIBRATION_TAKEOVER_MIN_DISCHARGE_W
         )
+        discharging_against = (
+            commanded and measured and battery_w > CALIBRATION_TAKEOVER_MIN_DISCHARGE_W
+        )
+        ignored_charge = (
+            charging_forced
+            and measured
+            and snap.grid_charging_enabled is True
+            and isinstance(soc, (int, float))
+            and not isinstance(soc, bool)
+            and soc < CALIBRATION_IGNORED_CHARGE_MAX_SOC
+            and battery_w > -CALIBRATION_IGNORED_CHARGE_MAX_W
+            and not self._force_charge_target_limited(force_charge)
+        )
+        contradicted = discharging_against or ignored_charge
         if not contradicted:
             entry_data.pop(CALIBRATION_TAKEOVER_SINCE_KEY, None)
             return False
         now = time.monotonic()
         since = entry_data.setdefault(CALIBRATION_TAKEOVER_SINCE_KEY, now)
         return now - since >= CALIBRATION_TAKEOVER_CONFIRM_SECONDS
+
+    @staticmethod
+    def _force_charge_target_limited(force_charge: dict[str, Any]) -> bool:
+        """Return True when a deliberately small charge target can look idle."""
+        for key in ("power_w", "grid_import_target_w"):
+            value = force_charge.get(key)
+            if (
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and 0 < value < CALIBRATION_IGNORED_CHARGE_MIN_TARGET_W
+            ):
+                return True
+        target = force_charge.get("grid_import_target_w")
+        return isinstance(target, (int, float)) and not isinstance(target, bool) and target <= 0
 
     @staticmethod
     def _calibration_takeover_finished(latch: dict[str, Any], snap: PowerwallSnapshot) -> bool:

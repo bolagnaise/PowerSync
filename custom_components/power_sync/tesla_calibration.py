@@ -36,6 +36,10 @@ CALIBRATION_TAKEOVER_SINCE_KEY = "_calibration_takeover_since"
 CALIBRATION_TAKEOVER_LATCH_KEY = "_calibration_takeover_latch"
 CALIBRATION_TAKEOVER_MIN_DISCHARGE_W = 1000.0
 CALIBRATION_TAKEOVER_CONFIRM_SECONDS = 180.0
+# Tesla can also hold the battery idle ("resting") against a force charge.
+CALIBRATION_IGNORED_CHARGE_MAX_W = 500.0
+CALIBRATION_IGNORED_CHARGE_MAX_SOC = 95.0
+CALIBRATION_IGNORED_CHARGE_MIN_TARGET_W = 1000.0
 # Tesla completes a calibration within 72 hours; a requested-only pause never
 # outlives that, nor a completed drain-and-refill cycle.
 CALIBRATION_TAKEOVER_MAX_SECONDS = 72 * 3600

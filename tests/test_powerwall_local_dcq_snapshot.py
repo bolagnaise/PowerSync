@@ -750,6 +750,70 @@ def test_calibration_requested_takeover_needs_sustained_contradiction():
     assert entry_data["calibration_suspected"] is True
 
 
+def _resting_snapshot(**changes):
+    snap = _calibration_snapshot(True, _LINGERING_REQUEST_ALERTS)
+    snap.soc = 10.0
+    snap.battery_w = -280.0  # observed 0.28 kW trickle while the house imports
+    snap.grid_w = 2400.0
+    snap.grid_charging_enabled = True
+    for key, value in changes.items():
+        setattr(snap, key, value)
+    return snap
+
+
+def _confirm_after_window(coord, entry_data, snap):
+    import time
+
+    asyncio.run(coord._sync_calibration_alert(snap))
+    if calibration_mod.CALIBRATION_TAKEOVER_SINCE_KEY in entry_data:
+        entry_data[calibration_mod.CALIBRATION_TAKEOVER_SINCE_KEY] = (
+            time.monotonic() - calibration_mod.CALIBRATION_TAKEOVER_CONFIRM_SECONDS - 1
+        )
+    asyncio.run(coord._sync_calibration_alert(snap))
+
+
+def test_calibration_requested_takeover_detects_resting_against_force_charge():
+    # Tesla app: "Powerwall resting to complete calibration" — the battery sits
+    # idle at 10% while a PowerSync force charge is active and grid charging is
+    # allowed.
+    entry_data: dict = {"force_charge_state": {"active": True}}
+    coord, notifications = _calibration_coordinator(entry_data)
+    _confirm_after_window(coord, entry_data, _resting_snapshot())
+    assert entry_data["calibration_suspected"] is True
+    assert notifications == [True]
+
+
+@pytest.mark.parametrize(
+    "force_state, changes",
+    [
+        ({"active": True}, {"grid_charging_enabled": None}),
+        ({"active": True}, {"grid_charging_enabled": False}),
+        ({"active": True}, {"soc": 96.0}),
+        ({"active": True}, {"battery_w": -3000.0}),
+        ({"active": True, "grid_import_target_w": 0}, {}),
+        ({"active": True, "power_w": 500}, {}),
+        ({"active": False}, {}),
+    ],
+    ids=[
+        "grid_charging_unknown", "grid_charging_disallowed", "nearly_full",
+        "charging", "zero_import_target", "small_charge_target", "no_force_charge",
+    ],
+)
+def test_idle_battery_is_not_takeover_when_idle_is_expected(force_state, changes):
+    entry_data: dict = {"force_charge_state": force_state}
+    coord, notifications = _calibration_coordinator(entry_data)
+    _confirm_after_window(coord, entry_data, _resting_snapshot(**changes))
+    assert not entry_data.get("calibration_suspected")
+    assert notifications == []
+
+
+def test_idle_battery_under_hold_soc_is_not_takeover():
+    entry_data: dict = {"hold_soc_state": {"active": True}}
+    coord, notifications = _calibration_coordinator(entry_data)
+    _confirm_after_window(coord, entry_data, _resting_snapshot())
+    assert not entry_data.get("calibration_suspected")
+
+
 def test_calibration_requested_takeover_ends_after_drain_and_refill_cycle():
     entry_data: dict = {}
     coord, notifications = _calibration_coordinator(entry_data)
