@@ -12900,11 +12900,31 @@ def _no_solar_generation(live_status: Optional[dict]) -> bool:
     return math.isfinite(solar_w) and solar_w < _NO_SOLAR_GENERATION_W
 
 
+def _calibration_drain_active(hass: Optional[HomeAssistant], entry_id: str | None) -> bool:
+    """Return True while Tesla's explicit calibration alert owns the battery.
+
+    During a Tesla calibration the gateway discharges the battery on its own
+    and ignores charge commands. That energy is exported unless something on
+    site uses it, so Solar Surplus may treat it as available for the EV. Only
+    the local alert counts; the older operation-mode inference does not.
+    """
+    if hass is None or not entry_id:
+        return False
+    from ..tesla_calibration import CALIBRATION_SOURCE_LOCAL_ALERT, calibration_sources
+
+    entry_data = getattr(hass, "data", {}).get(DOMAIN, {}).get(entry_id)
+    if not isinstance(entry_data, dict):
+        return False
+    return CALIBRATION_SOURCE_LOCAL_ALERT in calibration_sources(entry_data)
+
+
 def _calculate_solar_surplus(
     live_status: dict,
     current_ev_power_kw: float,
     config: dict,
     hass: Optional[HomeAssistant] = None,
+    *,
+    calibration_drain: bool = False,
 ) -> float:
     """
     Calculate available solar surplus for EV charging.
@@ -12963,8 +12983,12 @@ def _calculate_solar_surplus(
         ev_drift_kw = _ev_power_drift_since_site_sample_kw(live_status)
         if ev_drift_kw:
             ev_term_kw = max(0.0, current_ev_power_kw - ev_drift_kw)
-        # Subtract battery discharge: grid export from battery isn't solar surplus
-        surplus = -grid_kw + ev_term_kw + battery_charge_kw - battery_discharge_kw
+        # Subtract battery discharge: grid export from battery isn't solar surplus.
+        # A Tesla calibration discharges the battery regardless of PowerSync, so
+        # that export may go to the EV instead. The grid term still limits the EV
+        # to energy that is actually being exported.
+        discharge_penalty_kw = 0.0 if calibration_drain else battery_discharge_kw
+        surplus = -grid_kw + ev_term_kw + battery_charge_kw - discharge_penalty_kw
         battery_reserve_kw = _parallel_battery_reserve_kw(
             live_status, config, method, battery_charge_kw
         )
@@ -12987,6 +13011,9 @@ def _calculate_solar_surplus(
             else load_kw - current_ev_power_kw
         )
         surplus = solar_kw - real_household_load_kw - battery_charge_kw
+        if calibration_drain and grid_kw <= config.get("grid_import_tolerance_kw", 0.1):
+            # Calibration discharge is otherwise exported; offer it to the EV.
+            surplus += max(0.0, battery_kw)
         battery_reserve_kw = _parallel_battery_reserve_kw(
             live_status, config, method, battery_charge_kw
         )
@@ -15883,6 +15910,23 @@ async def _dynamic_ev_update_surplus(
     min_soc = get_solar_surplus_min_battery_soc(params)
     pause_soc = params.get("pause_below_soc", max(0, min_soc - 10))
 
+    # Tesla drains the battery during a calibration whatever PowerSync does, so
+    # battery-priority floors cannot protect it. Let the EV absorb the drain
+    # (still subject to the export-value limit) instead of exporting it.
+    calibration_drain = _calibration_drain_active(hass, entry_id)
+    if calibration_drain:
+        min_soc = 0
+        pause_soc = 0
+    if bool(state.get("calibration_drain")) != calibration_drain:
+        state["calibration_drain"] = calibration_drain
+        _LOGGER.info(
+            "Solar surplus EV: Tesla calibration %s - %s",
+            "active" if calibration_drain else "ended",
+            "calibration discharge may charge the EV instead of exporting"
+            if calibration_drain
+            else "normal battery floors restored",
+        )
+
     # Parallel charging parameters
     allow_parallel = params.get("allow_parallel_charging", False)
     max_battery_charge_kw = params.get("max_battery_charge_rate_kw", 5.0)
@@ -16481,6 +16525,7 @@ async def _dynamic_ev_update_surplus(
         total_ev_power_kw,
         params,
         hass,
+        calibration_drain=calibration_drain,
     )
 
     # Check if parallel charging is possible below the battery floor. At this

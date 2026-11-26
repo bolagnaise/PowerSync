@@ -20584,3 +20584,154 @@ def test_tesla_rate_refusal_reason_reaches_the_start_caller(monkeypatch):
         actions._set_vehicle_amps_unchecked(_Hass([]), _Entry(), "VIN123", 13, params)
     ) is True
     assert "_rate_refusal_reason" not in params
+
+
+def test_calibration_drain_credits_tesla_discharge_as_ev_surplus():
+    # Night-time Tesla calibration: no solar, the gateway exports its own
+    # discharge. Normally battery export is never EV surplus.
+    live_status = {
+        "battery_soc": 60,
+        "grid_power": -2500,
+        "battery_power": 3000,
+        "solar_power": 0,
+        "load_power": 500,
+    }
+    grid_based = {"surplus_calculation": "grid_based", "household_buffer_kw": 0.5}
+    direct = {"surplus_calculation": "direct", "household_buffer_kw": 0.5}
+
+    assert actions._calculate_solar_surplus(live_status, 0.0, grid_based) == 0
+    assert actions._calculate_solar_surplus(live_status, 0.0, direct) == 0
+    assert actions._calculate_solar_surplus(
+        live_status, 0.0, grid_based, calibration_drain=True
+    ) == pytest.approx(2.0)
+    assert actions._calculate_solar_surplus(
+        live_status, 0.0, direct, calibration_drain=True
+    ) == pytest.approx(2.0)
+
+    # The grid term still caps the EV at energy that is really exported.
+    importing = dict(live_status, grid_power=400)
+    assert actions._calculate_solar_surplus(
+        importing, 0.0, grid_based, calibration_drain=True
+    ) == 0
+    assert actions._calculate_solar_surplus(
+        importing, 0.0, direct, calibration_drain=True
+    ) == 0
+
+
+def test_calibration_drain_requires_explicit_local_alert_source():
+    def hass_with(sources):
+        return types.SimpleNamespace(
+            data={"power_sync": {"entry-1": {"_calibration_sources": sources}}}
+        )
+
+    assert actions._calibration_drain_active(hass_with(["local_alert"]), "entry-1")
+    assert not actions._calibration_drain_active(hass_with(["mode_stick"]), "entry-1")
+    assert not actions._calibration_drain_active(hass_with([]), "entry-1")
+    assert not actions._calibration_drain_active(hass_with(["local_alert"]), "entry-2")
+    assert not actions._calibration_drain_active(None, "entry-1")
+
+
+@pytest.mark.parametrize("calibrating", [False, True])
+def test_solar_surplus_charges_ev_from_calibration_drain_below_battery_floor(
+    monkeypatch, calibrating,
+):
+    hass = _Hass([])
+    entry_data = hass.data["power_sync"]["entry-1"]
+    entry_data["automation_store"] = types.SimpleNamespace(
+        _data={
+            "solar_surplus_config": {
+                "enabled": True,
+                "home_battery_minimum": 80,
+                "allow_parallel_charging": False,
+                "household_buffer_kw": 0.5,
+            }
+        }
+    )
+    if calibrating:
+        entry_data["_calibration_sources"] = ["local_alert"]
+    vehicle_id = "generic_ev"
+    actions._dynamic_ev_state.clear()
+    state = _solar_surplus_state(current_amps=10)
+    state["params"].update(
+        {
+            "charger_type": "generic",
+            "min_battery_soc": 80,
+            "pause_below_soc": 70,
+            "notify_on_error": False,
+        }
+    )
+    actions._dynamic_ev_state["entry-1"] = {vehicle_id: state}
+
+    # Battery well below the floor, Tesla draining it and the EV absorbing
+    # most of the drain; only the remainder still reaches the grid.
+    live_status = {
+        "battery_soc": 40,
+        "grid_power": -500,
+        "battery_power": 3400,
+        "solar_power": 0,
+        "load_power": 500,
+    }
+    set_amps_calls = _install_solar_surplus_runtime_stubs(monkeypatch, live_status)
+
+    async def not_unplugged(*args, **kwargs):
+        return False
+
+    monkeypatch.setattr(actions, "_clear_ble_dynamic_session_if_unplugged", not_unplugged)
+
+    asyncio.run(
+        actions._dynamic_ev_update_surplus(hass, _Entry(), "entry-1", vehicle_id)
+    )
+
+    state = actions._dynamic_ev_state["entry-1"][vehicle_id]
+    if calibrating:
+        assert state.get("paused") is not True
+        assert state["calibration_drain"] is True
+        assert 0 not in set_amps_calls
+    else:
+        assert state["paused"] is True
+        assert set_amps_calls[-1] == 0
+
+
+def test_calibration_drain_still_respects_export_value_limit(monkeypatch):
+    hass = _Hass([])
+    entry_data = hass.data["power_sync"]["entry-1"]
+    entry_data["automation_store"] = types.SimpleNamespace(
+        _data={
+            "solar_surplus_config": {
+                "enabled": True,
+                "household_buffer_kw": 0.5,
+                "max_export_price_cents": 5.0,
+            }
+        }
+    )
+    entry_data["_calibration_sources"] = ["local_alert"]
+    vehicle_id = "generic_ev"
+    actions._dynamic_ev_state.clear()
+    state = _solar_surplus_state(current_amps=10)
+    state["params"].update(
+        {"charger_type": "generic", "notify_on_error": False}
+    )
+    actions._dynamic_ev_state["entry-1"] = {vehicle_id: state}
+    live_status = {
+        "battery_soc": 40,
+        "grid_power": -2500,
+        "battery_power": 3000,
+        "solar_power": 0,
+        "load_power": 500,
+    }
+    set_amps_calls = _install_solar_surplus_runtime_stubs(monkeypatch, live_status)
+    # Exporting at 8c beats the owner's 5c limit, so the drain is exported.
+
+    async def not_unplugged(*args, **kwargs):
+        return False
+
+    monkeypatch.setattr(actions, "_clear_ble_dynamic_session_if_unplugged", not_unplugged)
+
+    asyncio.run(
+        actions._dynamic_ev_update_surplus(hass, _Entry(), "entry-1", vehicle_id)
+    )
+
+    state = actions._dynamic_ev_state["entry-1"][vehicle_id]
+    assert state["paused"] is True
+    assert state["paused_by_export_price"] is True
+    assert set_amps_calls[-1] == 0

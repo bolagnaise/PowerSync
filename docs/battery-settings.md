@@ -105,7 +105,9 @@ A typed acknowledgement is shown separately from gateway status. Acknowledgement
 
 ### Evidence and firmware limits
 
-When Tesla reports a local `BatteryCalibration` or `CalibrationRequested` alert, PowerSync marks **Calibration Active** and pauses automatic battery charge/export control. Some gateways only raise `CalibrationRequested` while they drain the battery for calibration and ignore charge commands. Missing alert data does not confirm that calibration has ended: the pause remains until three consecutive valid alert readings contain neither alert. A gap in the alert data restarts that confirmation count. This does not add a new calibration-detection signal or infer calibration from an SOC jump.
+When Tesla reports a local `BatteryCalibration` or `CalibrationRequested` alert, PowerSync marks **Calibration Active** and pauses automatic battery charge/export control. Some gateways only raise `CalibrationRequested` while they drain the battery for calibration and ignore charge commands. Missing alert data does not confirm that calibration has ended: the pause remains until three consecutive valid alert readings contain neither alert.
+
+During a calibration the gateway discharges the battery on its own and exports whatever the site does not use. When Solar Surplus EV charging is on, PowerSync offers that discharge to the EV instead, lifting the Solar Surplus battery floors because they cannot protect the battery while Tesla drains it. The Solar Surplus export limit still applies: if exporting is worth more than the limit, the discharge is exported. The EV can only take energy that is actually being exported, so this never imports from the grid to charge the car. Normal floors return when the calibration alert clears. A gap in the alert data restarts that confirmation count. This does not add a new calibration-detection signal or infer calibration from an SOC jump.
 
 The native requests are TEG fields 75/77, with typed responses 76/78. Delay is positive integer hours; status reports seconds. Interface details were checked against [Teslemetry aiopowerwall PR 28](https://github.com/Teslemetry/aiopowerwall/pull/28).
 

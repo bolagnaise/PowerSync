@@ -455,8 +455,18 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
         if started:
             title = "Powerwall Calibration"
             message = (
-                "Tesla reports a battery calibration is active. PowerSync has paused "
-                "automatic battery charge and export control until the alert clears."
+                "Tesla is calibrating your Powerwall. During calibration the gateway "
+                "discharges the battery on its own, then recharges it, and ignores "
+                "charge and export commands. PowerSync has paused automatic battery "
+                "charge and export control until Tesla's calibration alert clears.\n\n"
+                "If Solar Surplus EV charging is on, PowerSync can charge your EV from "
+                "the calibration discharge whenever exporting is not worth more than "
+                "your Solar Surplus export limit. To move the calibration, use Delay "
+                "Powerwall Calibration in the Tesla app."
+            )
+            push_message = (
+                "Tesla is calibrating your Powerwall: it discharges the battery, then "
+                "recharges it. PowerSync has paused battery control until it finishes."
             )
             try:
                 await self.hass.services.async_call(
@@ -477,6 +487,7 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
                 "Tesla's battery calibration alert has cleared. PowerSync is "
                 "resuming normal automatic battery control."
             )
+            push_message = message
             try:
                 await self.hass.services.async_call(
                     "persistent_notification",
@@ -490,7 +501,7 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
         try:
             from ..automations.actions import _send_expo_push
 
-            await _send_expo_push(self.hass, title, message, notification_type=("battery_calibration_started" if started else "battery_calibration_completed"))
+            await _send_expo_push(self.hass, title, push_message, notification_type=("battery_calibration_started" if started else "battery_calibration_completed"))
         except Exception as err:
             _LOGGER.debug("Calibration mobile push failed: %s", err)
 
