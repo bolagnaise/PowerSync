@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import copy
+import json
 import importlib.util
 import logging
 import sys
@@ -23,7 +24,8 @@ ROOT = Path(__file__).resolve().parents[1]
 def upload_harness(monkeypatch):
     source = (ROOT / "custom_components/power_sync/__init__.py").read_text()
     tree = ast.parse(source)
-    names = {"send_tariff_to_tesla", "_send_tariff_to_tesla", "_tou_retry_after_too_long"}
+    names = {"send_tariff_to_tesla", "_send_tariff_to_tesla", "_tou_retry_after_too_long",
+             "_summarize_tesla_tariff_structure"}
     nodes = [node for node in tree.body if getattr(node, "name", None) in names]
     clock = SimpleNamespace(now=0.0, sleeping=None, resume=None, confirmed=True)
 
@@ -46,7 +48,7 @@ def upload_harness(monkeypatch):
             return False
 
         async def text(self):
-            return "rate_limited"
+            return "rate_limited" if self.status == 429 else '{"error":"Invalid tariff provided"}'
 
         async def json(self):
             return {"response": {}}
@@ -81,6 +83,7 @@ def upload_harness(monkeypatch):
         "get_tesla_api_base_url": lambda provider, region: region or provider,
         "_confirm_tesla_tariff_uploaded": confirm,
         "_LOGGER": logging.getLogger(__name__),
+        "json": __import__("json"),
     }
     module = ast.Module(body=[ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0), *nodes], type_ignores=[])
     exec(compile(ast.fix_missing_locations(module), "<tariff-upload>", "exec"), namespace)
@@ -183,6 +186,44 @@ def test_persisted_sparse_tariff_is_prepared_at_real_upload_boundary(restore_hel
     # A successful POST still cannot clear the restore obligation without readback.
     clock.confirmed = False
     assert asyncio.run(upload(hass, "site-a", prepared, "token")) is False
+
+
+def test_rejected_restore_tariff_logs_price_free_structure(restore_helpers, upload_harness, caplog):
+    """Ticket 171: Tesla 400 'Invalid tariff provided' names no field."""
+    select, _tariff_time, _valid_range = restore_helpers
+    upload, hass, session, _clock = upload_harness
+    session.responses = [400]
+    tariff = select(_sparse_restore_tariff({"toDayOfWeek": 6, "fromHour": 21}))
+    tariff["seasons"]["Summer"]["tou_periods"]["PEAK"] = {"periods": [{"toDayOfWeek": 4}]}
+    with caplog.at_level(logging.ERROR):
+        assert asyncio.run(upload(hass, "site-a", tariff, "token")) is False
+    assert len(session.posts) == 1  # a 4xx is still never retried
+    lines = [r.getMessage() for r in caplog.records
+             if r.getMessage().startswith("Rejected Tesla tariff structure for site site-a: ")]
+    assert len(lines) == 1
+    summary = json.loads(lines[0].split(": ", 1)[1])
+    assert summary["name"] == "Custom"
+    buy = summary["buy"]
+    assert buy["seasons"]["Summer"]["months"] == [1, 12]
+    assert buy["seasons"]["Summer"]["periods"]["OFF_PEAK"] == [[0, 6, 21, 0, 24, 0]]
+    # Absent bounds are visible as "-" rather than silently defaulted.
+    assert buy["seasons"]["Summer"]["periods"]["PEAK"] == [["-", 4, "-", "-", "-", "-"]]
+    assert buy["seasons"]["Winter"] == {"months": ["-", "-"], "days": ["-", "-"], "periods": {}}
+    assert "Summer.PEAK has no rate" in buy["issues"]
+    assert "empty season Winter" in buy["issues"]
+    assert summary["sell"]["energy_charges"]["Summer"] == ["OFF_PEAK"]
+    # Structural only: no buy (.48) or sell (.12) price reaches the log.
+    assert "0.48" not in lines[0] and "0.12" not in lines[0]
+
+
+def test_tariff_structure_summary_never_raises_and_is_bounded(upload_harness):
+    upload, *_ = upload_harness
+    summarize = upload.__globals__["_summarize_tesla_tariff_structure"]
+    assert summarize(None) == "tariff type NoneType"
+    assert summarize({"seasons": [], "energy_charges": 3, "sell_tariff": "x"}).startswith("{")
+    huge = {"seasons": {f"S{i}": {"tou_periods": {"P": {"periods": [{}]}}} for i in range(500)}}
+    text = summarize(huge, limit=200)
+    assert len(text) <= 200 + len("...(truncated)") and text.endswith("...(truncated)")
 
 
 def test_final_429_defers_fresh_call_until_retry_after_even_with_rotated_token(upload_harness):
@@ -719,3 +760,55 @@ def test_periodic_upload_keeps_cooldown_after_dropping_long_5xx_retry(upload_har
                 for post in session.posts] == [(0.0, "stale"), (600.0, "fresh")]
 
     asyncio.run(run())
+
+
+def _expanded_minutes(period):
+    """Return the week-minutes covered by a fully explicit Tesla period."""
+    days = range(period["fromDayOfWeek"], period["toDayOfWeek"] + 1)
+    start = period["fromHour"] * 60 + period["fromMinute"]
+    end = period["toHour"] * 60 + period["toMinute"]
+    assert start < end  # this fixture uses no overnight ranges
+    return {day * 1440 + minute for day in days for minute in range(start, end)}
+
+
+def test_sunday_only_readback_restores_without_overlapping_week(restore_helpers, upload_harness):
+    """Ticket 171: a Sunday period reads back with both day fields omitted.
+
+    The reporter's rejected restore showed OFF_PEAK [0,6,6:00-24:00] beside
+    Saturday [6,6,6:00-24:00] and weekday PEAK. PowerSync had uploaded Sunday
+    as 0->0; Tesla's readback dropped those zeros and the restore default
+    widened it to every day, overlapping PEAK, so Tesla returned 400.
+    """
+    select, _tariff_time, valid_range = restore_helpers
+    upload, hass, session, _clock = upload_harness
+    tariff = _sparse_restore_tariff({"toDayOfWeek": 6})
+    tou = tariff["seasons"]["Summer"]["tou_periods"]
+    tou["OFF_PEAK"] = {"periods": [
+        {"fromDayOfWeek": 1, "toDayOfWeek": 5, "fromHour": 6, "toHour": 17},
+        {"fromDayOfWeek": 1, "toDayOfWeek": 5, "fromHour": 20, "toHour": 24},
+        {"fromHour": 6, "toHour": 24},  # Sunday 0->0 with both zeros omitted
+        {"fromDayOfWeek": 6, "toDayOfWeek": 6, "fromHour": 6, "toHour": 24},
+    ]}
+    tou["PEAK"] = {"periods": [{"fromDayOfWeek": 1, "toDayOfWeek": 5, "fromHour": 17, "toHour": 20}]}
+    tou["SUPER_OFF_PEAK"] = {"periods": [{"toDayOfWeek": 6, "toHour": 6}]}
+    tariff["energy_charges"]["Summer"]["rates"].update(PEAK=.6, SUPER_OFF_PEAK=.1)
+    tariff["sell_tariff"] = copy.deepcopy(tariff)
+
+    prepared = select(tariff)
+    session.responses = [200]
+    assert asyncio.run(upload(hass, "site-a", prepared, "token")) is True
+    posted = session.posts[0][2]["tou_settings"]["tariff_content_v2"]
+    for side in (posted, posted["sell_tariff"]):
+        periods = side["seasons"]["Summer"]["tou_periods"]
+        assert periods["OFF_PEAK"]["periods"][2] == {
+            "fromDayOfWeek": 0, "toDayOfWeek": 0, "fromHour": 6,
+            "toHour": 24, "fromMinute": 0, "toMinute": 0,
+        }
+        covered = set()
+        for container in periods.values():
+            for period in container["periods"]:
+                assert valid_range(period)
+                minutes = _expanded_minutes(period)
+                assert not covered & minutes  # no two periods overlap
+                covered |= minutes
+        assert covered == set(range(7 * 1440))  # and the whole week is covered
