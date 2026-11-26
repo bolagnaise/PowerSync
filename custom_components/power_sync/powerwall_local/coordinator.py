@@ -398,7 +398,7 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
             if transition.started:
                 dispatch_calibration_state(self.hass, self._entry_id)
                 _LOGGER.warning(
-                    "Powerwall calibration detected from local BatteryCalibration "
+                    "Powerwall calibration detected from local Tesla calibration "
                     "alert — pausing automatic battery charge/export control"
                 )
                 self._schedule_calibration_transition_notification(started=True)
@@ -422,7 +422,7 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
         if transition.completed:
             dispatch_calibration_state(self.hass, self._entry_id)
             _LOGGER.info(
-                "Powerwall BatteryCalibration alert cleared for %d consecutive "
+                "Powerwall calibration alert cleared for %d consecutive "
                 "polls — resuming normal battery control",
                 POWERWALL_CALIBRATION_CLEAR_POLLS,
             )
@@ -455,7 +455,7 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
         if started:
             title = "Powerwall Calibration"
             message = (
-                "Tesla reports BatteryCalibration is active. PowerSync has paused "
+                "Tesla reports a battery calibration is active. PowerSync has paused "
                 "automatic battery charge and export control until the alert clears."
             )
             try:
@@ -474,7 +474,7 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
         else:
             title = "Powerwall Calibration Complete"
             message = (
-                "Tesla's BatteryCalibration alert has cleared. PowerSync is "
+                "Tesla's battery calibration alert has cleared. PowerSync is "
                 "resuming normal automatic battery control."
             )
             try:

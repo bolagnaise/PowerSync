@@ -226,6 +226,12 @@ def test_calibration_alert_matching_is_firmware_tolerant_and_specific():
     assert matches(["BatteryCalibration"])
     assert matches(["battery_calibration"])
     assert matches([{"alert_name": "BATTERY-CALIBRATION"}])
+    # Gateways that queue a calibration raise CalibrationRequested and then
+    # drain the battery against owner force-charge commands.
+    assert matches(["CalibrationRequested"])
+    assert matches(["SiteMinPowerLimited", "CalibrationRequested", "EVSEMIA"])
+    assert matches([{"name": "calibration_requested"}])
+    assert not matches(["EnergyAccumulatorIrrational", "ChargeOnlyFromSolarOverride"])
     assert not matches(["SiteMinPowerLimited"])
     assert not matches({"name": "BatteryCalibration"})
     assert not matches(None)
@@ -521,7 +527,7 @@ async def test_failed_dcq_polls_retry_independent_diagnostics_at_bounded_interva
     assert coord._last_success_ts is None
 
 
-def _calibration_snapshot(active: bool):
+def _calibration_snapshot(active: bool, alerts=None):
     return client_mod.PowerwallSnapshot(
         soc=50.0,
         solar_w=0.0,
@@ -532,11 +538,27 @@ def _calibration_snapshot(active: bool):
         operation_mode="self_consumption",
         backup_reserve_percent=0,
         raw={},
-        alerts=[{"name": "BatteryCalibration"}] if active else [],
+        alerts=(alerts or [{"name": "BatteryCalibration"}]) if active else [],
     )
 
 
-def test_local_battery_calibration_alert_sets_and_stably_clears_guard():
+@pytest.mark.parametrize(
+    "active_alerts",
+    [
+        [{"name": "BatteryCalibration"}],
+        # Observed gateway alert set while Tesla drained the battery against
+        # an active force charge without ever raising BatteryCalibration.
+        [
+            {"name": "SiteMinPowerLimited"},
+            {"name": "SelfConsumptionReservedLimit"},
+            {"name": "ChargeOnlyFromSolarOverride"},
+            {"name": "CalibrationRequested"},
+            {"name": "EVSEMIA"},
+        ],
+    ],
+    ids=["battery_calibration", "calibration_requested"],
+)
+def test_local_battery_calibration_alert_sets_and_stably_clears_guard(active_alerts):
     entry_data: dict = {}
     coord = coordinator_mod.PowerwallLocalCoordinator.__new__(
         coordinator_mod.PowerwallLocalCoordinator
@@ -550,8 +572,8 @@ def test_local_battery_calibration_alert_sets_and_stably_clears_guard():
 
     coord._schedule_calibration_transition_notification = _notify
 
-    asyncio.run(coord._sync_calibration_alert(_calibration_snapshot(True)))
-    asyncio.run(coord._sync_calibration_alert(_calibration_snapshot(True)))
+    asyncio.run(coord._sync_calibration_alert(_calibration_snapshot(True, active_alerts)))
+    asyncio.run(coord._sync_calibration_alert(_calibration_snapshot(True, active_alerts)))
 
     assert entry_data["calibration_suspected"] is True
     assert entry_data["calibration_source"] == "local_alert"

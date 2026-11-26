@@ -105,7 +105,7 @@ A typed acknowledgement is shown separately from gateway status. Acknowledgement
 
 ### Evidence and firmware limits
 
-When Tesla reports a local `BatteryCalibration` alert, PowerSync marks **Calibration Active** and pauses automatic battery charge/export control. Missing alert data does not confirm that calibration has ended: the pause remains until three consecutive valid alert readings no longer contain `BatteryCalibration`. A gap in the alert data restarts that confirmation count. This does not add a new calibration-detection signal or infer calibration from an SOC jump.
+When Tesla reports a local `BatteryCalibration` or `CalibrationRequested` alert, PowerSync marks **Calibration Active** and pauses automatic battery charge/export control. Some gateways only raise `CalibrationRequested` while they drain the battery for calibration and ignore charge commands. Missing alert data does not confirm that calibration has ended: the pause remains until three consecutive valid alert readings contain neither alert. A gap in the alert data restarts that confirmation count. This does not add a new calibration-detection signal or infer calibration from an SOC jump.
 
 The native requests are TEG fields 75/77, with typed responses 76/78. Delay is positive integer hours; status reports seconds. Interface details were checked against [Teslemetry aiopowerwall PR 28](https://github.com/Teslemetry/aiopowerwall/pull/28).
 

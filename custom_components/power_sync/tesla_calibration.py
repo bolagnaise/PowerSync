@@ -1,7 +1,9 @@
 """Shared Tesla Powerwall calibration state handling.
 
-Tesla exposes an explicit ``BatteryCalibration`` alert through the local
-DeviceControllerQuery path.  Older PowerSync releases could only infer a
+Tesla exposes explicit ``BatteryCalibration`` and ``CalibrationRequested``
+alerts through the local DeviceControllerQuery path.  Gateways that raise
+``CalibrationRequested`` take over the battery for the calibration cycle and
+ignore owner charge commands, so both alerts are treated as calibration.  Older PowerSync releases could only infer a
 calibration after repeated cloud operation-mode verification failures.  This
 module keeps both signals as independent sources and derives the compatibility
 ``calibration_suspected`` flag used by the optimiser and service guards.
@@ -16,7 +18,7 @@ from typing import Any, Iterable
 
 CALIBRATION_SOURCE_LOCAL_ALERT = "local_alert"
 CALIBRATION_SOURCE_MODE_STICK = "mode_stick"
-_CALIBRATION_ALERT_NAME = "batterycalibration"
+_CALIBRATION_ALERT_NAMES = frozenset({"batterycalibration", "calibrationrequested"})
 
 
 def _normalized_alert_name(value: Any) -> str:
@@ -35,7 +37,7 @@ def powerwall_calibration_alert_active(alerts: Any) -> bool:
             name = alert.get("name") or alert.get("alert_name")
         else:
             name = alert
-        if _normalized_alert_name(name) == _CALIBRATION_ALERT_NAME:
+        if _normalized_alert_name(name) in _CALIBRATION_ALERT_NAMES:
             return True
     return False
 
