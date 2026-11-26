@@ -1,7 +1,11 @@
-<!-- release: v2.12.1850 -->
+<!-- release: v2.12.1851 -->
 
-## Tesla Bluetooth charging no longer stays paused after an unconfirmed Stop
+## EV charging can use the Powerwall calibration discharge
 
-If a Bluetooth Stop went out but the car never sent a fresh reading to confirm it, PowerSync paused charging control for that car until it could confirm the car had stopped. If a solar surplus or scheduled charging session was running at the time, the pause could last indefinitely. The session kept its hold on the car while it waited, and automatic recovery would not check the car while a session held it. The app showed **Charging control paused**, and planned charging (for example a Meet Deadline schedule) could not start.
+During a Tesla calibration, the Powerwall discharges on its own and anything the home does not use is exported. Solar Surplus never counted battery discharge as available, and its battery floors paused the EV, so the calibration energy was exported even when the feed-in price was low.
 
-Automatic recovery now checks the car even while a charging session holds it, as long as no charging command is in progress. Once Tesla's cloud reports the car stopped, the pause clears and the session carries on. This applies to Tesla vehicles controlled through an ESPHome Bluetooth bridge. Update through HACS and restart Home Assistant.
+While Tesla reports a calibration, Solar Surplus EV charging can now charge your EV from that discharge whenever exporting is not worth more than your Solar Surplus export limit. The EV only takes energy that is already being exported, so the car is never charged from the grid this way. Normal battery floors return once the calibration ends.
+
+## Clearer Powerwall calibration notification
+
+The calibration notification now explains that Tesla discharges and then recharges the battery and ignores charge and export commands until it finishes. It also points to Delay Powerwall Calibration in the Tesla app if you want to move it. Update through HACS and restart Home Assistant.
