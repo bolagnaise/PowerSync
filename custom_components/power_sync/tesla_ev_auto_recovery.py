@@ -119,13 +119,15 @@ class NativeRecoveryWorker:
             elif success:
                 _LOGGER.info("Automatic Tesla EV recovery reconciled retained command history; normal control admission can resume")
 
-    def _owner_free(self, vin):
-        from .automations.ev_ownership import get_ev_ownership
+    def _writers_free(self, vin):
+        """No command for this car is in flight.
 
-        if not self.current() or not _no_writers(recovery, self.hass, vin):
-            return False
-        lease_id, owner = get_ev_ownership(self.hass, self.entry, vin)
-        return lease_id is None and owner is None
+        A charging lease does not matter here. Its commands are refused while
+        the hold lasts, so it cannot change the car under the read. Waiting
+        for the lease to end deadlocked: a blocked solar-surplus or scheduled
+        session keeps its lease until recovery lets it command again.
+        """
+        return self.current() and _no_writers(recovery, self.hass, vin)
 
     async def _expire_settled_ble(self, vin):
         """Retire BLE attempts whose effect an independent cloud report shows."""
@@ -134,8 +136,8 @@ class NativeRecoveryWorker:
         retired, reason = False, None
         cutoff, reason = recovery.ble_attempt_expiry_due(self.hass, self.entry, vin)
         now = time.time()
-        if reason is None and not self._owner_free(vin):
-            reason = "a command writer or charging owner is active"
+        if reason is None and not self._writers_free(vin):
+            reason = "a charging command is in flight"
         elif reason is None and now < cutoff:
             reason = f"waiting {int(cutoff - now)} s for the unconfirmed command to settle"
         elif reason is None and now - self.expiry_read_at.get(vin, 0) < EXPIRY_READ_INTERVAL_SECONDS:
@@ -147,7 +149,7 @@ class NativeRecoveryWorker:
             try:
                 observation = await async_read_independent_tesla_vehicle(
                     self.hass, vin, updated_after=cutoff, allow_paid_refresh=False,
-                    authorize=lambda: self._owner_free(vin),
+                    authorize=lambda: self._writers_free(vin),
                 )
             except asyncio.CancelledError:
                 raise
@@ -157,7 +159,7 @@ class NativeRecoveryWorker:
             if reason is None:
                 retired, reason = await recovery.async_expire_settled_ble_attempts(
                     self.hass, self.entry, vin, observation,
-                    authorize=lambda: self._owner_free(vin),
+                    authorize=lambda: self._writers_free(vin),
                 )
         if retired:
             self.held_logged.pop(vin, None)

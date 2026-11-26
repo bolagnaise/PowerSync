@@ -572,6 +572,75 @@ def _is_powersync_force_tariff(tariff: Any) -> bool:
 
 def _select_restorable_tesla_tariff(*tariffs: Any) -> dict[str, Any] | None:
     """Return the first tariff that is safe to use as a normal restore tariff."""
+
+    def _tou_period_minute_spans(period: dict[str, Any]) -> set[tuple[int, int]] | None:
+        """Return (day, minute-of-day start/end) spans a TOU period covers."""
+        try:
+            from_dow = int(period["fromDayOfWeek"])
+            to_dow = int(period["toDayOfWeek"])
+            start = int(period["fromHour"]) * 60 + int(period["fromMinute"])
+            end = int(period["toHour"]) * 60 + int(period["toMinute"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        days = (
+            range(from_dow, to_dow + 1)
+            if from_dow <= to_dow
+            else [*range(from_dow, 7), *range(0, to_dow + 1)]
+        )
+        windows = [(start, end)] if end > start else [(start, 1440), (0, end)]
+        return {(day, window) for day in days for window in windows if window[1] > window[0]}
+
+
+    def _tou_periods_overlap(first: dict[str, Any], second: dict[str, Any]) -> bool:
+        first_spans = _tou_period_minute_spans(first)
+        second_spans = _tou_period_minute_spans(second)
+        if not first_spans or not second_spans:
+            return False
+        return any(
+            day_a == day_b and win_a[0] < win_b[1] and win_b[0] < win_a[1]
+            for day_a, win_a in first_spans
+            for day_b, win_b in second_spans
+        )
+
+
+    def _repair_widened_sunday_periods(tou_periods: dict[str, Any]) -> None:
+        """Narrow a Sunday-only period that an older restore widened to all week.
+
+        Before v2.12.1844 the restore path filled a missing toDayOfWeek with 6,
+        and that copy was persisted as the saved baseline. A weekend period
+        stored as Sunday 0->0 plus Saturday 6->6 therefore became 0->6 beside
+        the Saturday entry, overlapping weekday periods, and Tesla rejected every
+        restore. Only narrow when the exact weekend signature is present and the
+        Sunday-only result overlaps nothing else in the season.
+        """
+        entries = [
+            (name, period)
+            for name, container in tou_periods.items()
+            if isinstance(container, dict) and isinstance(container.get("periods"), list)
+            for period in container["periods"]
+            if isinstance(period, dict)
+        ]
+        time_fields = ("fromHour", "fromMinute", "toHour", "toMinute")
+        for name, period in entries:
+            if (period.get("fromDayOfWeek"), period.get("toDayOfWeek")) != (0, 6):
+                continue
+            has_saturday_sibling = any(
+                other_name == name
+                and other is not period
+                and (other.get("fromDayOfWeek"), other.get("toDayOfWeek")) == (6, 6)
+                and all(other.get(f) == period.get(f) for f in time_fields)
+                for other_name, other in entries
+            )
+            if not has_saturday_sibling:
+                continue
+            candidate = {**period, "toDayOfWeek": 0}
+            if any(
+                other is not period and _tou_periods_overlap(candidate, other)
+                for _other_name, other in entries
+            ):
+                continue
+            period["toDayOfWeek"] = 0
+
     for tariff in tariffs:
         if isinstance(tariff, dict) and tariff and not _is_powersync_force_tariff(tariff):
             restored = copy.deepcopy(tariff)
@@ -608,8 +677,10 @@ def _select_restorable_tesla_tariff(*tariffs: Any) -> dict[str, Any] | None:
                                 if isinstance(period, dict):
                                     for field, default in defaults.items():
                                         period.setdefault(field, default)
+                    _repair_widened_sunday_periods(season["tou_periods"])
             return restored
     return None
+
 
 
 def _extract_tesla_tariff_content(payload: Any) -> dict[str, Any] | None:
@@ -9893,8 +9964,13 @@ class BatteryHealthView(HomeAssistantView):
         )
         from .powerwall_local.bms_health import (
             assign_pack_roles_from_battery_blocks,
+            battery_block_layout_summary,
+            build_mixed_site_pw2_packs,
             has_pw3_stack,
+            is_placeholder_expansion_pack,
             known_expansion_dins_from_gateway_config,
+            mixed_site_pw2_dins,
+            pw3_follower_dins,
             reconcile_pack_remaining_with_aggregate,
             resolve_physical_battery_count,
             serial_from_din,
@@ -10140,7 +10216,16 @@ class BatteryHealthView(HomeAssistantView):
             i for i, p in enumerate(individual)
             if p.get("isFollower") and p.get("nominalFullPackEnergyWh") == 0
         ]
-        if is_pw3_stack and follower_indices and current_wh:
+        # Mixed sites: Powerwall 2 units listed in batteryBlocks never appear as
+        # PW3BMS rows, so they must not absorb PW3 follower slots (ticket 202).
+        pw2_dins = mixed_site_pw2_dins(battery_blocks, din) if is_pw3_stack else []
+        if _LOGGER.isEnabledFor(logging.DEBUG):
+            _LOGGER.debug(
+                "fleet_api_bms: battery block layout pw3_stack=%s %s",
+                is_pw3_stack,
+                battery_block_layout_summary(data, battery_blocks, din),
+            )
+        if is_pw3_stack and follower_indices and current_wh and not pw2_dins:
             leader_full_wh = sum(
                 p["nominalFullPackEnergyWh"] for p in individual if not p.get("isFollower")
             )
@@ -10150,10 +10235,7 @@ class BatteryHealthView(HomeAssistantView):
             n_followers = len(follower_indices)
             inferred_full_wh = max(0.0, current_wh - leader_full_wh) / n_followers
             inferred_rem_wh = max(0.0, rem_wh - leader_rem_wh) / n_followers
-            follower_dins = [
-                block.get("din") for block in battery_blocks
-                if block.get("din") and block.get("din") != din
-            ]
+            follower_dins = pw3_follower_dins(battery_blocks, din)
             for seq, idx in enumerate(follower_indices):
                 f_din = follower_dins[seq] if seq < len(follower_dins) else None
                 serial = serial_from_din(f_din)
@@ -10183,6 +10265,39 @@ class BatteryHealthView(HomeAssistantView):
             known_expansion_dins_from_gateway_config(gateway_config),
         )
 
+        # Mixed PW3 + Powerwall 2 site: add one follower pack per PW2 unit from
+        # the gateway's PW2 energy readings (or an aggregate share), checked
+        # against the site total. Serial-less placeholder rows are excluded
+        # from the residual first, then the ghost filter below removes them.
+        if pw2_dins and current_wh > 0:
+            pw2_packs: list = []
+            placeholder_sets = [
+                [p for p in individual if not is_placeholder_expansion_pack(p)],
+                individual,
+            ]
+            for pw3_packs in placeholder_sets:
+                pw2_packs = build_mixed_site_pw2_packs(
+                    data,
+                    pw2_dins,
+                    current_wh - sum(p["nominalFullPackEnergyWh"] for p in pw3_packs),
+                    rem_wh - sum(p["nominalEnergyRemainingWh"] for p in pw3_packs),
+                )
+                if pw2_packs:
+                    break
+            if pw2_packs:
+                individual.extend(pw2_packs)
+                bms_module_count += len(pw2_packs)
+                _LOGGER.debug(
+                    "fleet_api_bms: mixed site — added %d Powerwall 2 pack(s) from %s",
+                    len(pw2_packs), pw2_packs[0].get("energySource"),
+                )
+            else:
+                _LOGGER.debug(
+                    "fleet_api_bms: mixed site — %d Powerwall 2 unit(s) not consistent "
+                    "with aggregate; per-unit data omitted",
+                    len(pw2_dins),
+                )
+
         # Ghost expansion pack filter. Phantom packs (registered slots not physically
         # installed) report:
         #   1. plausible full-capacity values (~13.5–14.5 kWh)
@@ -10198,20 +10313,8 @@ class BatteryHealthView(HomeAssistantView):
         # kept). Require BOTH the missing-serial signal AND a near-zero remaining-
         # energy signature before flagging as ghost; cross-validate as before.
         if individual and current_wh > 0:
-            GHOST_REMAINING_ABS_WH = 500
-            GHOST_REMAINING_FRACTION = 0.05
             ghost_candidates = [
-                p for p in individual
-                if p.get("isExpansion")
-                and not p.get("serialNumber")
-                and (
-                    p["nominalEnergyRemainingWh"] < GHOST_REMAINING_ABS_WH
-                    or (
-                        p["nominalFullPackEnergyWh"] > 0
-                        and p["nominalEnergyRemainingWh"] / p["nominalFullPackEnergyWh"]
-                        < GHOST_REMAINING_FRACTION
-                    )
-                )
+                p for p in individual if is_placeholder_expansion_pack(p)
             ]
             if ghost_candidates:
                 kept = [p for p in individual if p not in ghost_candidates]
@@ -10265,6 +10368,16 @@ class BatteryHealthView(HomeAssistantView):
                 )
         except Exception:
             pass
+
+        if current_wh <= 0 and not individual:
+            # An empty relay reply (no aggregate, no packs) must not publish or
+            # cache 0% health for an hour; keep the previous reading instead.
+            _LOGGER.info(
+                "fleet_api_bms: empty BMS response (batteryBlocks=%d, msa=%d) — "
+                "keeping previous battery health",
+                bb_count, len(all_comps),
+            )
+            return None
 
         # Rated capacity: 13.5 kWh per physical Powerwall unit.
         original_wh = 13500 * batt_count
@@ -24299,6 +24412,38 @@ def _support_setup_failure_details(error: Exception) -> str:
     return f"{type(error).__name__} at {' > '.join(frames[-8:])}"
 
 
+async def _attach_amber_forecast_accuracy(
+    hass: HomeAssistant, entry: ConfigEntry, amber_coordinator: Any
+) -> None:
+    """Attach the display-only Amber forecast accuracy record to the coordinator.
+
+    Failure leaves pricing untouched; the dashboard card then stays hidden.
+    """
+    from .amber_forecast_accuracy import STORE_VERSION, AmberForecastAccuracyTracker
+
+    try:
+        store = Store(hass, STORE_VERSION, f"{DOMAIN}.amber_forecast_accuracy.{entry.entry_id}")
+        tracker: AmberForecastAccuracyTracker | None = None
+
+        def _forecast_type() -> str:
+            return entry.options.get(
+                CONF_AMBER_FORECAST_TYPE,
+                entry.data.get(CONF_AMBER_FORECAST_TYPE, "predicted"),
+            )
+
+        def _schedule_save() -> None:
+            if tracker is not None:
+                store.async_delay_save(tracker.as_dict, 300)
+
+        tracker = AmberForecastAccuracyTracker(
+            forecast_type=_forecast_type, on_change=_schedule_save,
+        )
+        tracker.load(await store.async_load())
+        amber_coordinator.forecast_accuracy = tracker
+    except Exception as err:  # noqa: BLE001 - display data only
+        _LOGGER.warning("Amber forecast accuracy tracking unavailable: %s", err)
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up PowerSync from a config entry."""
     # Retained HTTP/service callbacks can address this entry during provider
@@ -25276,6 +25421,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             amber_site_id,  # Use the active site ID
             ws_client=ws_client,  # Pass WebSocket client to coordinator
         )
+        await _attach_amber_forecast_accuracy(hass, entry, amber_coordinator)
 
     # Initialize Amber Usage coordinator for actual metered cost data
     amber_usage_coordinator = None
@@ -37217,6 +37363,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if budget.native_max_claim(site):
                 raise HomeAssistantError("Previous native Powerwall control still owns this site")
             if direction == "charge" and budget.blocks_cloud_tariff_charge(site):
+                reasons_fn = getattr(budget, "cloud_tariff_charge_block_reasons", None)
+                _LOGGER.info(
+                    "Cloud tariff force charge refused to protect shared EV headroom: %s",
+                    "; ".join(reasons_fn(site)) if callable(reasons_fn) else "EV demand reserved",
+                )
                 raise HomeAssistantError("Cloud tariff charging cannot reserve shared EV headroom")
         if (not _local_powerwall_generation_current()
                 or not _cloud_tariff_control_requested(call)

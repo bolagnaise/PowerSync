@@ -630,3 +630,53 @@ async def test_native_max_failed_persistence_never_publishes_or_releases_owner()
         await budget.release_native_max('battery','site','generation')
     assert budget.native_max_claim('site')['token'] == 'generation'
     assert budget.revision == revision
+
+
+@pytest.mark.asyncio
+async def test_retained_reservation_logs_why_it_is_kept_and_when_it_releases(caplog):
+    """Ticket #183: support logs must time the reservation release and name the hold."""
+    import logging
+    caplog.set_level(logging.DEBUG, logger='native_budget_probe')
+    now = [NOW]
+    budget = m.SharedRateBudget(Store(), clock=lambda: now[0])
+    vin = '5YJ3E1EA7KF000183'
+    record = {'site': 'site', 'identity': 'provider:car', 'entry_id': 'one',
+              'target_amps': 20, 'target_w': 4600, 'reserved_w': 4600,
+              'submitted_at': NOW, 'uncertain': False}
+    await budget.admit_managed(vin, record, {}, lambda: True)
+    assert budget.cloud_tariff_charge_block_reasons('site') == [
+        'managed EV reservation retained for ...0183']
+    assert budget.cloud_tariff_charge_block_reasons('other') == []
+    assert budget.blocks_cloud_tariff_charge('site') is True
+
+    def stopped(at, **changes):
+        sample = dict(identity='provider:car', amps=20, vehicle_at=at, meter_at=at,
+                      setting_at=at, actual_w=0, charging=False, owner_active=False)
+        sample.update(changes)
+        return sample
+
+    # A stale vehicle report (Stopped car reporting rarely) keeps it, with ages.
+    now[0] = NOW+900
+    await budget.reconcile_managed(vin, stopped(NOW+900, vehicle_at=NOW+97))
+    assert vin in budget.managed
+    assert 'readings not fresh and aligned' in caplog.text and 'vehicle=803s' in caplog.text
+
+    # PowerSync's own unconfirmed Stop lease keeps it as a narrowed record.
+    caplog.clear()
+    for at in (NOW+901, NOW+905):
+        now[0] = at
+        await budget.reconcile_managed(vin, stopped(at, owner_active=True))
+    assert vin in budget.managed
+    assert 'charging owner still holds the loadpoint' in caplog.text
+    assert vin not in caplog.text
+
+    # Two fresh settled reports with no owner release it with an INFO marker.
+    caplog.clear()
+    for at in (NOW+910, NOW+914):
+        now[0] = at
+        await budget.reconcile_managed(vin, stopped(at))
+    assert vin not in budget.managed
+    assert budget.blocks_cloud_tariff_charge('site') is False
+    released = [r for r in caplog.records if 'reservation released' in r.getMessage()]
+    assert len(released) == 1 and released[0].levelno == logging.INFO
+    assert '...0183' in released[0].getMessage() and vin not in caplog.text

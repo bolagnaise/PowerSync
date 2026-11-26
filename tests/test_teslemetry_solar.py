@@ -442,3 +442,69 @@ def test_native_connection_uses_provider_specific_credentials(monkeypatch):
     assert m.native_solar_connection(None, None) == ('powersync-secret', 'powersync')
     package.get_tesla_api_token = lambda *args: ('other-token', 'fleet_api')
     assert m.native_solar_connection(None, None) == (None, 'none')
+
+
+@pytest.mark.asyncio
+async def test_guard_refusals_leave_a_reason_for_the_caller(monkeypatch):
+    """A guard refusal must not surface as an unexplained rate/start failure.
+
+    Field case: Smart Schedule starts in a free-power window failed for two
+    hours as "could not pre-set the safe initial rate to 16A" with no reason,
+    because guard exits returned a bare False.
+    """
+    gate = m.SolarOwnership(Store())
+    await gate.load()
+    monkeypatch.setattr(m, 'ownership', lambda *args: asyncio.sleep(0, result=gate))
+    entry = SimpleNamespace(entry_id='one')
+    calls = []
+
+    @m.guard_ev_control
+    async def _set_vehicle_amps(hass, config_entry, vehicle_id, amps, params):
+        calls.append(amps)
+        raise SiteDenied('Waiting for shared site charging headroom')
+
+    class SiteDenied(RuntimeError):
+        site_import_admission_denied = True
+
+    params = {'vehicle_vin': VIN, '_rate_refusal_reason': 'stale BLE refusal'}
+    assert await _set_vehicle_amps(None, entry, VIN, 16, params) is False
+    assert calls == [16]
+    assert params['_rate_refusal_reason'] == (
+        'site import admission refused: Waiting for shared site charging headroom'
+    )
+
+    gate.holds = {VIN: {'status': 'unconfirmed'}}
+    params = {'vehicle_vin': VIN}
+    assert await _set_vehicle_amps(None, entry, VIN, 16, params) is False
+    assert calls == [16]
+    assert params['_rate_refusal_reason'] == 'native Tesla solar charging holds this vehicle'
+
+    gate.holds = {}
+    gate.cleanup_active[VIN] = 1
+    params = {'vehicle_vin': VIN, '_rate_refusal_reason': 'inner reason'}
+    assert await _set_vehicle_amps(None, entry, VIN, 16, params) is False
+    assert params['_rate_refusal_reason'] == 'inner reason'
+    params = {'vehicle_vin': VIN}
+    assert await _set_vehicle_amps(None, entry, VIN, 16, params) is False
+    assert params['_rate_refusal_reason'] == 'a cleanup Stop for this vehicle is in progress'
+
+
+@pytest.mark.asyncio
+async def test_nested_guard_refusal_reason_reaches_the_outer_caller(monkeypatch):
+    gate = m.SolarOwnership(Store())
+    await gate.load()
+    monkeypatch.setattr(m, 'ownership', lambda *args: asyncio.sleep(0, result=gate))
+    entry = SimpleNamespace(entry_id='one')
+
+    @m.guard_ev_control
+    async def _action_set_ev_charging_amps(hass, config_entry, params):
+        raise AssertionError('a held vehicle must not reach the rate command')
+
+    @m.guard_ev_control
+    async def _action_start_ev_charging_dynamic(hass, config_entry, params):
+        gate.holds = {VIN: {'status': 'unconfirmed'}}
+        return await _action_set_ev_charging_amps(hass, config_entry, params)
+
+    params = {'vehicle_vin': VIN}
+    assert await _action_start_ev_charging_dynamic(None, entry, params) is False
+    assert params['_rate_refusal_reason'] == 'native Tesla solar charging holds this vehicle'

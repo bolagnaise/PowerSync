@@ -28,9 +28,21 @@ from ..const import (
 from ..tesla_calibration import (
     CALIBRATION_SOURCE_LOCAL_ALERT,
     CALIBRATION_SOURCE_MODE_STICK,
+    CALIBRATION_CYCLE_FULL_SOC,
+    CALIBRATION_CYCLE_LOW_SOC,
+    CALIBRATION_IGNORED_CHARGE_MAX_SOC,
+    CALIBRATION_IGNORED_CHARGE_MAX_W,
+    CALIBRATION_IGNORED_CHARGE_MIN_TARGET_W,
+    CALIBRATION_REQUEST_ACK_KEY,
+    CALIBRATION_TAKEOVER_CONFIRM_SECONDS,
+    CALIBRATION_TAKEOVER_LATCH_KEY,
+    CALIBRATION_TAKEOVER_MAX_SECONDS,
+    CALIBRATION_TAKEOVER_MIN_DISCHARGE_W,
+    CALIBRATION_TAKEOVER_SINCE_KEY,
     calibration_sources,
     dispatch_calibration_state,
     powerwall_calibration_alert_active,
+    powerwall_calibration_request_only,
     set_calibration_source,
 )
 from .client import PowerwallLocalClient, PowerwallSnapshot, PowerwallVersion
@@ -364,9 +376,49 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
             return
 
         alert_active = powerwall_calibration_alert_active(snap.alerts)
+        if not alert_active:
+            # A valid poll without any calibration alert ends a reset
+            # acknowledgement; the next CalibrationRequested pauses again.
+            entry_data.pop(CALIBRATION_REQUEST_ACK_KEY, None)
+        elif entry_data.get(CALIBRATION_REQUEST_ACK_KEY):
+            if powerwall_calibration_request_only(snap.alerts):
+                # The owner reset the guard while only CalibrationRequested
+                # was raised.  Some gateways keep that request raised for days
+                # while still following commands, so honour the reset until
+                # the alert clears instead of re-pausing on the next poll.
+                alert_active = False
+            else:
+                # BatteryCalibration is explicit active calibration and is
+                # never acknowledged away.
+                entry_data.pop(CALIBRATION_REQUEST_ACK_KEY, None)
         source_was_active = (
             CALIBRATION_SOURCE_LOCAL_ALERT in calibration_sources(entry_data)
         )
+
+        if alert_active and powerwall_calibration_request_only(snap.alerts):
+            latch = entry_data.get(CALIBRATION_TAKEOVER_LATCH_KEY)
+            if source_was_active and isinstance(latch, dict):
+                if self._calibration_takeover_finished(latch, snap):
+                    self._end_calibration_takeover(entry_data)
+                    return
+            elif self._calibration_takeover_observed(entry_data, snap):
+                entry_data[CALIBRATION_TAKEOVER_LATCH_KEY] = {
+                    "since": time.time(),
+                    "min_soc": snap.soc if isinstance(snap.soc, (int, float)) else None,
+                }
+                _LOGGER.warning(
+                    "Tesla is discharging the Powerwall against PowerSync's active "
+                    "charge/hold while CalibrationRequested is raised — treating it "
+                    "as a calibration takeover"
+                )
+            else:
+                # A request alone does not mean Tesla has taken over; some
+                # gateways keep it raised for days while following commands.
+                alert_active = False
+        else:
+            entry_data.pop(CALIBRATION_TAKEOVER_SINCE_KEY, None)
+            if not alert_active:
+                entry_data.pop(CALIBRATION_TAKEOVER_LATCH_KEY, None)
 
         if alert_active:
             entry_data["_calibration_alert_clear_polls"] = 0
@@ -398,7 +450,7 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
             if transition.started:
                 dispatch_calibration_state(self.hass, self._entry_id)
                 _LOGGER.warning(
-                    "Powerwall calibration detected from local BatteryCalibration "
+                    "Powerwall calibration detected from local Tesla calibration "
                     "alert — pausing automatic battery charge/export control"
                 )
                 self._schedule_calibration_transition_notification(started=True)
@@ -422,9 +474,100 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
         if transition.completed:
             dispatch_calibration_state(self.hass, self._entry_id)
             _LOGGER.info(
-                "Powerwall BatteryCalibration alert cleared for %d consecutive "
+                "Powerwall calibration alert cleared for %d consecutive "
                 "polls — resuming normal battery control",
                 POWERWALL_CALIBRATION_CLEAR_POLLS,
+            )
+            self._schedule_calibration_transition_notification(started=False)
+
+    def _calibration_takeover_observed(
+        self, entry_data: dict[str, Any], snap: PowerwallSnapshot
+    ) -> bool:
+        """Return True once Tesla has overridden our charge/hold for a while.
+
+        Tesla either discharges against an active force charge or Hold SoC,
+        or holds the battery idle ("resting") against a force charge that the
+        gateway would otherwise follow.
+        """
+        force_charge = entry_data.get("force_charge_state")
+        charging_forced = isinstance(force_charge, dict) and bool(force_charge.get("active"))
+        commanded = charging_forced or (
+            isinstance(entry_data.get("hold_soc_state"), dict)
+            and bool(entry_data["hold_soc_state"].get("active"))
+        )
+        battery_w = snap.battery_w
+        soc = snap.soc
+        measured = (
+            snap.grid_status == "SystemGridConnected"
+            and isinstance(battery_w, (int, float))
+            and not isinstance(battery_w, bool)
+        )
+        discharging_against = (
+            commanded and measured and battery_w > CALIBRATION_TAKEOVER_MIN_DISCHARGE_W
+        )
+        ignored_charge = (
+            charging_forced
+            and measured
+            and snap.grid_charging_enabled is True
+            and isinstance(soc, (int, float))
+            and not isinstance(soc, bool)
+            and soc < CALIBRATION_IGNORED_CHARGE_MAX_SOC
+            and battery_w > -CALIBRATION_IGNORED_CHARGE_MAX_W
+            and not self._force_charge_target_limited(force_charge)
+        )
+        contradicted = discharging_against or ignored_charge
+        if not contradicted:
+            entry_data.pop(CALIBRATION_TAKEOVER_SINCE_KEY, None)
+            return False
+        now = time.monotonic()
+        since = entry_data.setdefault(CALIBRATION_TAKEOVER_SINCE_KEY, now)
+        return now - since >= CALIBRATION_TAKEOVER_CONFIRM_SECONDS
+
+    @staticmethod
+    def _force_charge_target_limited(force_charge: dict[str, Any]) -> bool:
+        """Return True when a deliberately small charge target can look idle."""
+        for key in ("power_w", "grid_import_target_w"):
+            value = force_charge.get(key)
+            if (
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and 0 < value < CALIBRATION_IGNORED_CHARGE_MIN_TARGET_W
+            ):
+                return True
+        target = force_charge.get("grid_import_target_w")
+        return isinstance(target, (int, float)) and not isinstance(target, bool) and target <= 0
+
+    @staticmethod
+    def _calibration_takeover_finished(latch: dict[str, Any], snap: PowerwallSnapshot) -> bool:
+        """Bound a requested-only pause by a full cycle or Tesla's 72-hour limit."""
+        soc = snap.soc
+        if isinstance(soc, (int, float)) and not isinstance(soc, bool):
+            low = latch.get("min_soc")
+            if not isinstance(low, (int, float)) or soc < low:
+                latch["min_soc"] = low = soc
+            if low <= CALIBRATION_CYCLE_LOW_SOC and soc >= CALIBRATION_CYCLE_FULL_SOC:
+                return True
+        since = latch.get("since")
+        return (
+            isinstance(since, (int, float))
+            and time.time() - since >= CALIBRATION_TAKEOVER_MAX_SECONDS
+        )
+
+    def _end_calibration_takeover(self, entry_data: dict[str, Any]) -> None:
+        """Resume control after a requested-only takeover finished."""
+        entry_data.pop(CALIBRATION_TAKEOVER_LATCH_KEY, None)
+        entry_data.pop(CALIBRATION_TAKEOVER_SINCE_KEY, None)
+        entry_data["_calibration_alert_clear_polls"] = 0
+        transition = set_calibration_source(
+            entry_data,
+            CALIBRATION_SOURCE_LOCAL_ALERT,
+            False,
+        )
+        if transition.completed:
+            dispatch_calibration_state(self.hass, self._entry_id)
+            _LOGGER.info(
+                "Powerwall calibration takeover finished while CalibrationRequested "
+                "remains raised — resuming normal battery control"
             )
             self._schedule_calibration_transition_notification(started=False)
 
@@ -455,8 +598,18 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
         if started:
             title = "Powerwall Calibration"
             message = (
-                "Tesla reports BatteryCalibration is active. PowerSync has paused "
-                "automatic battery charge and export control until the alert clears."
+                "Tesla is calibrating your Powerwall. During calibration the gateway "
+                "discharges the battery on its own, then recharges it, and ignores "
+                "charge and export commands. PowerSync has paused automatic battery "
+                "charge and export control until Tesla's calibration alert clears.\n\n"
+                "If Solar Surplus EV charging is on, PowerSync can charge your EV from "
+                "the calibration discharge whenever exporting is not worth more than "
+                "your Solar Surplus export limit. To move the calibration, use Delay "
+                "Powerwall Calibration in the Tesla app."
+            )
+            push_message = (
+                "Tesla is calibrating your Powerwall: it discharges the battery, then "
+                "recharges it. PowerSync has paused battery control until it finishes."
             )
             try:
                 await self.hass.services.async_call(
@@ -474,9 +627,10 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
         else:
             title = "Powerwall Calibration Complete"
             message = (
-                "Tesla's BatteryCalibration alert has cleared. PowerSync is "
+                "Tesla's battery calibration alert has cleared. PowerSync is "
                 "resuming normal automatic battery control."
             )
+            push_message = message
             try:
                 await self.hass.services.async_call(
                     "persistent_notification",
@@ -490,7 +644,7 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
         try:
             from ..automations.actions import _send_expo_push
 
-            await _send_expo_push(self.hass, title, message, notification_type=("battery_calibration_started" if started else "battery_calibration_completed"))
+            await _send_expo_push(self.hass, title, push_message, notification_type=("battery_calibration_started" if started else "battery_calibration_completed"))
         except Exception as err:
             _LOGGER.debug("Calibration mobile push failed: %s", err)
 

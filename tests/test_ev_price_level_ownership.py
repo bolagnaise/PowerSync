@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import importlib
 import sys
 import types
@@ -7197,6 +7198,12 @@ def test_auto_schedule_free_grid_overrides_priority_without_forcing_max_rate(
     ][VIN]
     assert authorization["allowed"] is expected_start
     assert authorization["source"] == "grid_free"
+    # Standalone Solar Surplus reads the same live decision before it may
+    # claim this car (field case: it took the car between Start retries).
+    settings.enabled = True
+    executor._settings[VIN] = settings
+    assert state.wants_charge is expected_start
+    assert executor.smart_schedule_wants_charge(VIN) is expected_start
 
 
 @pytest.mark.parametrize(
@@ -9598,6 +9605,65 @@ def test_solar_surplus_skips_unplugged_priority_vehicle(monkeypatch):
     assert [config["vehicle_id"] for config in selected] == [plugged_vin]
 
 
+def _smart_schedule_claiming(vin, *, enabled=True, wants=True, age_seconds=0.0):
+    executor = ev_planner.AutoScheduleExecutor(_FakeHass(), _FakeConfigEntry(), planner=None)
+    executor._settings[vin] = ev_planner.AutoScheduleSettings(vehicle_id=vin, enabled=enabled, target_soc=70)
+    state = ev_planner.AutoScheduleState(vehicle_id=vin)
+    state.wants_charge = wants
+    state.wants_charge_source = "grid_offpeak"
+    state.wants_charge_at = time.monotonic() - age_seconds
+    executor._state[vin] = state
+    return executor
+
+
+@pytest.mark.parametrize(
+    "enabled, wants, age_seconds, expected",
+    [
+        (True, True, 0.0, True),
+        (True, True, ev_planner.SMART_SCHEDULE_CLAIM_MAX_AGE_SECONDS + 1, False),
+        (True, False, 0.0, False),
+        (False, True, 0.0, False),
+    ],
+    ids=["fresh-decision", "stale-decision", "not-charging", "disabled"],
+)
+def test_smart_schedule_claim_requires_a_fresh_enabled_charge_decision(enabled, wants, age_seconds, expected):
+    vin = "5YJTEST0000000001"
+    executor = _smart_schedule_claiming(vin, enabled=enabled, wants=wants, age_seconds=age_seconds)
+    assert executor.smart_schedule_wants_charge(vin) is expected
+    assert executor.smart_schedule_wants_charge("5YJTEST0000000002") is False
+
+
+def test_solar_surplus_leaves_a_car_smart_schedule_is_charging(monkeypatch, fake_actions):
+    """Field case (2026-11-26 10:00, free grid window): standalone Solar Surplus
+    claimed the car at 0 A between Smart Schedule start retries. Each takeover
+    needed a Stop the sleeping car could not confirm, which then blocked Smart
+    Schedule's Start, so the car never charged in the 0c window."""
+    smart_vin = "LRWYHCEK8TC828420"
+    other_vin = "XP7YGCEL7NB001704"
+
+    async def plugged_in(_hass, _entry, *, vehicle_vin):
+        return True
+
+    monkeypatch.setattr(ev_planner, "is_ev_plugged_in", plugged_in)
+    hass = _FakeHass()
+    configs = [
+        {"vehicle_id": smart_vin, "display_name": "W3RT1E", "priority": 1, "charger_type": "generic"},
+        {"vehicle_id": other_vin, "display_name": "Other", "priority": 2, "charger_type": "generic"},
+    ]
+
+    hass.data["power_sync"]["entry-1"]["auto_schedule_executor"] = _smart_schedule_claiming(smart_vin)
+    selected = asyncio.run(ev_planner.get_solar_surplus_start_configs(
+        hass, _FakeConfigEntry(), configs, set(), allow_parallel=True,
+    ))
+    assert [config["vehicle_id"] for config in selected] == [other_vin]
+
+    hass.data["power_sync"]["entry-1"]["auto_schedule_executor"] = _smart_schedule_claiming(smart_vin, wants=False)
+    selected = asyncio.run(ev_planner.get_solar_surplus_start_configs(
+        hass, _FakeConfigEntry(), configs, set(), allow_parallel=True,
+    ))
+    assert [config["vehicle_id"] for config in selected] == [smart_vin, other_vin]
+
+
 def test_solar_ceiling_lookup_ignores_disabled_and_unconfigured_vehicles():
     vin = "5YJTEST0000000001"
     absent_vin = "5YJTEST0000000002"
@@ -11546,3 +11612,44 @@ def test_opportunistic_solar_threshold_gates_starts_not_running_sessions(monkeyp
     assert should_charge is expected
     if expected:
         assert source == "solar_surplus"
+
+
+@pytest.mark.parametrize("stop_settling", [True, False])
+def test_scheduled_guard_names_powersync_unconfirmed_stop_not_external(
+    monkeypatch,
+    fake_actions,
+    stop_settling,
+):
+    """Ticket #183: PowerSync's own stop-settling lease is not an external session."""
+    vin = "LRWYHCEKXTC687964"
+    fake_actions._dynamic_ev_state = {}
+    hass = _FakeHass()
+    _set_external_policy(hass, vin)
+    lease = {"owner": "external", "owner_mode": "external", "observed": True}
+    if stop_settling:
+        lease.update(
+            stop_settling=True,
+            stop_command_at=datetime.now(timezone.utc).isoformat(),
+            stop_settling_expires_at=(
+                datetime.now(timezone.utc) + timedelta(minutes=15)
+            ).isoformat(),
+        )
+    hass.data["power_sync"]["entry-1"]["ev_ownership"] = {vin: lease}
+
+    async def one_vehicle(*args, **kwargs):
+        return [{"vin": vin, "name": "Tesla"}]
+
+    monkeypatch.setattr(ev_planner, "discover_all_tesla_vehicles", one_vehicle)
+    monkeypatch.setattr(ev_planner, "is_ev_actively_charging", AsyncMock(return_value=False))
+
+    vehicle_vin, can_stop, reason = asyncio.run(
+        ev_planner._find_external_scheduled_charging_vehicle(hass, _FakeConfigEntry())
+    )
+
+    assert (vehicle_vin, can_stop) == (None, False)
+    assert reason == (
+        "awaiting vehicle confirmation of PowerSync's Stop"
+        if stop_settling
+        else "external owns the active loadpoint"
+    )
+    assert hass.data["power_sync"]["entry-1"]["ev_ownership"][vin] is lease

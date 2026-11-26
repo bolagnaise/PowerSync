@@ -156,6 +156,9 @@ FULL_EV_SOC = 100
 EXTERNAL_SCHEDULED_STOP_SUPPRESS_SECONDS = 15 * 60
 EXTERNAL_SMART_SCHEDULE_STOP_SUPPRESS_SECONDS = 15 * 60
 AUTO_SCHEDULE_START_RETRY_BASE_SECONDS = 30
+# Smart Schedule evaluates every 30 s; a should-charge decision older than
+# this no longer stops standalone Solar Surplus from claiming the car.
+SMART_SCHEDULE_CLAIM_MAX_AGE_SECONDS = 120.0
 # An unconfirmed Scheduled Stop blocks restarts at most this long without a draw.
 SCHEDULED_PENDING_STOP_MAX_SECONDS = 15 * 60
 # Same INFO-pinned logger as ev_ownership.EV_DECISION_LOGGER.
@@ -4939,6 +4942,12 @@ class AutoScheduleState:
     last_known_soc: Optional[int] = None
     last_soc_update: Optional[datetime] = None
 
+    # The latest live should-charge decision (monotonic time), so standalone
+    # Solar Surplus does not claim a car Smart Schedule is trying to charge.
+    wants_charge: bool = False
+    wants_charge_source: str = ""
+    wants_charge_at: Optional[float] = None
+
     def plan_presentation_snapshot(self, now: Optional[datetime] = None) -> dict:
         """Return a read-only, offset-safe summary for schedule consumers.
 
@@ -5656,6 +5665,25 @@ class AutoScheduleExecutor:
         return _canonical_auto_schedule_vehicle_id(
             getattr(self, "hass", None), getattr(self, "config_entry", None),
             vehicle_id, getattr(self, "_fleet_vins", ()), getattr(self, "_resolved_ble_prefixes", ()),
+        )
+
+    def smart_schedule_wants_charge(self, vehicle_id: str) -> bool:
+        """Return whether Smart Schedule's fresh live decision is to charge this car.
+
+        Standalone Solar Surplus must not claim the loadpoint then: each
+        takeover needs a Stop, which a sleeping Tesla cannot confirm, and the
+        retained uncertainty blocks Smart Schedule's own Start. A decision
+        older than SMART_SCHEDULE_CLAIM_MAX_AGE_SECONDS no longer counts.
+        """
+        key = self._settings_vehicle_id(vehicle_id)
+        settings = self._settings.get(key)
+        state = self._state.get(key)
+        if settings is None or not settings.enabled or state is None or not state.wants_charge:
+            return False
+        decided_at = state.wants_charge_at
+        return (
+            isinstance(decided_at, (int, float))
+            and 0 <= time.monotonic() - decided_at <= SMART_SCHEDULE_CLAIM_MAX_AGE_SECONDS
         )
 
     def enabled_target_soc(self, vehicle_id: str) -> int | None:
@@ -6711,6 +6739,11 @@ class AutoScheduleExecutor:
         apply_profile(self, vehicle_id, settings)
 
         state = self.get_state(vehicle_id)
+        # Every early exit below (away, unplugged, complete...) is a decision
+        # not to charge; only the final decision can set this again.
+        state.wants_charge = False
+        state.wants_charge_source = ""
+        state.wants_charge_at = time.monotonic()
         now = datetime.now()
         ha_now = dt_util.now()
         weekday = ha_now.weekday() if hasattr(ha_now, "weekday") else now.weekday()
@@ -7203,6 +7236,10 @@ class AutoScheduleExecutor:
                         reason,
                         vehicle_id,
                     )
+
+        state.wants_charge = bool(should_charge)
+        state.wants_charge_source = str(source or "")
+        state.wants_charge_at = time.monotonic()
 
         # Publish the effective, post-policy decision separately from the
         # stored optimizer envelope. A bounded exact-VIN free-grid signal is
@@ -9864,6 +9901,20 @@ async def get_solar_surplus_start_configs(
     ):
         vehicle_id = config.get("vehicle_id")
         if vehicle_id and vehicle_id in active_vehicle_ids:
+            continue
+        smart_schedule = (
+            getattr(hass, "data", {}).get(DOMAIN, {}).get(config_entry.entry_id, {})
+            .get("auto_schedule_executor")
+        )
+        if (
+            vehicle_id
+            and smart_schedule is not None
+            and smart_schedule.smart_schedule_wants_charge(vehicle_id)
+        ):
+            _LOGGER.debug(
+                "Solar surplus leaving %s to Smart Schedule, which is charging it now",
+                config.get("display_name") or vehicle_id,
+            )
             continue
         if vehicle_id and config.get("charger_type", "tesla") == "tesla":
             location = await get_ev_location(
@@ -13170,6 +13221,25 @@ def set_scheduled_charging_executor(executor: ScheduledChargingExecutor) -> None
     _scheduled_charging_executor = executor
 
 
+def _scheduled_owner_block_reason(
+    hass: "HomeAssistant",
+    config_entry: "ConfigEntry",
+    vehicle_id: Optional[str],
+    active_mode: str,
+) -> str:
+    """Describe the loadpoint owner, naming PowerSync's own unconfirmed Stop."""
+    try:
+        from .ev_ownership import EXTERNAL_OWNER_MODE, get_ev_ownership
+
+        if active_mode == EXTERNAL_OWNER_MODE:
+            _lease_id, lease = get_ev_ownership(hass, config_entry, vehicle_id)
+            if lease and lease.get("stop_settling"):
+                return "awaiting vehicle confirmation of PowerSync's Stop"
+    except Exception as err:
+        _LOGGER.debug("Scheduled owner description failed: %s", err)
+    return f"{active_mode} owns the active loadpoint"
+
+
 async def _can_stop_external_scheduled_session(
     hass: "HomeAssistant",
     config_entry: "ConfigEntry",
@@ -13193,7 +13263,9 @@ async def _can_stop_external_scheduled_session(
             )
         )
         if active_mode and owner_family(active_mode) != owner_family("scheduled"):
-            return False, f"{active_mode} owns the active loadpoint"
+            return False, _scheduled_owner_block_reason(
+                hass, config_entry, vehicle_id or DEFAULT_VEHICLE_ID, active_mode,
+            )
     except Exception as err:
         _LOGGER.debug("Scheduled external-stop ownership guard failed: %s", err)
 
@@ -13272,7 +13344,9 @@ async def _find_external_scheduled_charging_vehicle(
                 or get_active_ev_owner_mode(hass, config_entry, vehicle_vin)
             )
             if active_mode and owner_family(active_mode) != owner_family("scheduled"):
-                blocked_reason = f"{active_mode} owns the active loadpoint"
+                blocked_reason = _scheduled_owner_block_reason(
+                    hass, config_entry, vehicle_vin, active_mode,
+                )
                 continue
         except Exception as err:
             _LOGGER.debug(

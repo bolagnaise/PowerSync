@@ -190,6 +190,24 @@ def guard_ev_control(func):
     """Serialize Tesla writes and ownership changes, including nested actions."""
     sig = signature(func)
 
+    def _refused(func, params, reason, *, final=False):
+        """Return False from the guard, leaving the reason for the caller to report.
+
+        The rate and start paths read ``_rate_refusal_reason``; without it a
+        guard refusal surfaced only as an unexplained failure. An inner reason
+        already recorded for this request is kept unless this refusal is the
+        final cause (a raised admission denial ends every later route).
+        Kept inside the decorator so source-extracted copies stay complete.
+        """
+        import logging
+
+        if isinstance(params, dict) and (final or not params.get("_rate_refusal_reason")):
+            params["_rate_refusal_reason"] = reason
+        logging.getLogger(getattr(func, "__module__", None) or "power_sync").info(
+            "EV command %s not run: %s", func.__name__, reason,
+        )
+        return False
+
     @wraps(func)
     async def guarded(*args, **kwargs):
         bound = sig.bind(*args, **kwargs).arguments
@@ -210,14 +228,14 @@ def guard_ev_control(func):
                     # Native rate cleanup must settle before an unsupported
                     # charger can acquire this site's unreserved capacity.
                     # Explicit stop actions remain available throughout.
-                    return False
+                    return _refused(func, params, "native Tesla rate cleanup must settle first")
         gate = await ownership(hass, entry.entry_id)
         params = bound.get("params") or {}
         vin = params.get("vehicle_vin") or params.get("vehicle_id") or bound.get("vehicle_id")
         if params.get("_ev_cleanup_respect_native_hold") and gate.blocked(vin):
             # Automatic finite cleanup retains the native solar ownership
             # fence. An explicit user Stop has separate cleanup authority.
-            return False
+            return _refused(func, params, "native Tesla solar charging holds this vehicle")
         stop_functions = {
             "_action_stop_ev_charging",
             "_action_stop_ev_charging_dynamic",
@@ -251,9 +269,9 @@ def guard_ev_control(func):
                 not cleanup_allowed
                 and gate.cleanup_active.get(cleanup_key, 0) > 0
             ):
-                return False
+                return _refused(func, params, "a cleanup Stop for this vehicle is in progress")
             if gate.blocked(vin) and not cleanup_allowed:
-                return False
+                return _refused(func, params, "native Tesla solar charging holds this vehicle")
             with _ev_submission_scope(hass, entry, vin, params):
                 return await func(*args, **kwargs)
         if cleanup_only:
@@ -278,16 +296,16 @@ def guard_ev_control(func):
                 not cleanup_allowed
                 and gate.cleanup_active.get(cleanup_key, 0) > 0
             ):
-                return False
+                return _refused(func, params, "a cleanup Stop for this vehicle is in progress")
             if gate.blocked(vin) and not legacy_cleanup_only:
-                return False
+                return _refused(func, params, "native Tesla solar charging holds this vehicle")
             gate.owner = asyncio.current_task()
             try:
                 with _ev_submission_scope(hass, entry, vin, params):
                     return await func(*args, **kwargs)
             except Exception as err:
                 if getattr(err, "site_import_admission_denied", False):
-                    return False
+                    return _refused(func, params, f"site import admission refused: {err or 'no reason given'}", final=True)
                 raise
             finally:
                 gate.owner = None

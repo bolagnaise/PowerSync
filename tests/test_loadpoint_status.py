@@ -1936,3 +1936,42 @@ def test_duplicate_generic_rows_prefer_known_plug_state():
 
     assert len(loadpoints) == 1
     assert "plug_state_known" not in loadpoints[0]
+
+
+def test_switch_only_generic_keeps_unknown_plug_state_after_summary_row():
+    """Ticket 203: the status endpoint adds the vehicle-summary generic_ev row
+    (no plug flag) before the configured-charger row.  The merge must keep the
+    switch-only "plug state unknown" so the EV panel leaves Start enabled."""
+    summary_row = {
+        "vehicle_id": "generic_ev",
+        "vehicle_name": "EV",
+        "charger_type": "tesla",
+        "ev_power_kw": 0.0,
+        "ev_soc": None,
+        "is_connected": False,
+        "is_charging": False,
+        "power_available": True,
+        "include_idle": True,
+    }
+    switch_only = build_generic_charger_observation(
+        vehicle_name="EV", switch_state="off", status_state=None, power_value="0",
+    )
+
+    loadpoints = build_loadpoint_status({}, [summary_row, switch_only])
+
+    assert len(loadpoints) == 1
+    assert loadpoints[0]["loadpoint_id"] == "generic_ev"
+    assert loadpoints[0]["connected"] is False
+    assert loadpoints[0]["plug_state_known"] is False
+
+
+def test_known_plug_state_wins_over_later_unknown_generic_row():
+    known = build_generic_charger_observation(
+        vehicle_name="EV", switch_state="off", status_state="disconnected",
+    )
+    unknown = build_generic_charger_observation(vehicle_name="EV", switch_state="off")
+
+    loadpoints = build_loadpoint_status({}, [known, unknown])
+
+    assert len(loadpoints) == 1
+    assert "plug_state_known" not in loadpoints[0]

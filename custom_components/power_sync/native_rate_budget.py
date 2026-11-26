@@ -8,11 +8,20 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
+import logging
 import math
 import time
 from uuid import uuid4
 
+_LOGGER = logging.getLogger(__name__)
+
 RUNTIME_KEY = "power_sync_native_rate_budget"
+
+
+def vin_label(vin):
+    """Short vehicle label for support logs; never the full VIN."""
+    text = str(vin or "")
+    return f"...{text[-4:]}" if len(text) > 4 else (text or "unknown")
 
 
 def site_identity(entry):
@@ -320,10 +329,20 @@ class SharedRateBudget:
 
     def blocks_cloud_tariff_charge(self, site):
         """Whether cloud tariff control cannot accommodate this site's EV demand."""
-        return (
-            self.site_armed(site) or self.unobserved_w(site) > 0
-            or any(record.get("site") == site for record in self.managed.values())
-        )
+        return bool(self.cloud_tariff_charge_block_reasons(site))
+
+    def cloud_tariff_charge_block_reasons(self, site):
+        """Name each check that refuses cloud tariff charging (diagnostics only)."""
+        reasons = []
+        if self.site_armed(site):
+            reasons.append("native EV rate control is armed")
+        if self.unobserved_w(site) > 0:
+            reasons.append("reserved EV demand is not yet observed")
+        managed = [vin_label(vin) for vin, record in self.managed.items()
+                   if record.get("site") == site]
+        if managed:
+            reasons.append("managed EV reservation retained for " + ", ".join(sorted(managed)))
+        return reasons
 
     def native_claimed(self, vin):
         return any(vin in entry.get("sessions", {}) for entry in self.entries.values())
@@ -513,6 +532,13 @@ class SharedRateBudget:
                     or not 0 <= sample["amps"] <= 80
                     or not isinstance(sample.get("actual_w"), (int, float))
                     or not math.isfinite(sample["actual_w"])):
+                ages = ", ".join(
+                    f"{name}={now-at:.0f}s" if isinstance(at, (int, float)) else f"{name}=missing"
+                    for name, at in zip(("vehicle", "powerwall", "setting"), stamps))
+                _LOGGER.debug(
+                    "EV headroom reservation kept for %s: readings not fresh and aligned "
+                    "(need each <=15s old and within 5s of each other; %s)",
+                    vin_label(vin), ages)
                 return
             self.observe(vin, watts=sample["actual_w"], at=sample["vehicle_at"], meter_at=sample["meter_at"])
             state = (sample["amps"], sample.get("charging"), sample.get("owner_active"),
@@ -524,16 +550,25 @@ class SharedRateBudget:
             if min(stamps)-first[0] < 3:
                 return
             managed = deepcopy(self.managed)
+            released = False
             if (not sample.get("owner_active") and
                     (sample.get("charging") is False or sample["amps"] != record.get("target_amps"))):
                 managed.pop(vin)
+                released = True
             elif (sample["amps"] == record.get("target_amps")
                     and sample["actual_w"] <= record.get("target_w", 0)+250):
                 managed[vin]["reserved_w"] = record["target_w"]
                 managed[vin]["uncertain"] = False
             else:
+                _LOGGER.debug(
+                    "EV headroom reservation kept for %s: car draw %.0f W at %s A does not "
+                    "match the confirmed setting", vin_label(vin), sample["actual_w"], sample["amps"])
                 return
             if managed == self.managed:
+                if sample.get("owner_active"):
+                    _LOGGER.debug(
+                        "EV headroom reservation kept for %s: a charging owner still holds "
+                        "the loadpoint", vin_label(vin))
                 return
             if self.managed.get(vin) is not record or (is_current is not None and is_current() is not True):
                 return
@@ -546,6 +581,10 @@ class SharedRateBudget:
                 return
             self.managed = managed
             self.revision += 1
+            if released:
+                _LOGGER.info(
+                    "EV headroom reservation released for %s: fresh vehicle and Powerwall "
+                    "readings confirm the car stopped", vin_label(vin))
 
 
 class EntryRateJournal:

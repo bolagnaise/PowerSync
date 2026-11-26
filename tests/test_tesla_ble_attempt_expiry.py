@@ -6,6 +6,7 @@ attempt only once a fresh independent vehicle report shows its effect.
 """
 from __future__ import annotations
 
+import asyncio
 from copy import deepcopy
 from dataclasses import replace
 import importlib
@@ -318,7 +319,14 @@ async def test_worker_retires_a_settled_stop_from_one_independent_read(harness, 
 
 
 @pytest.mark.asyncio
-async def test_worker_keeps_hold_without_reading_while_owned_or_settling(harness, monkeypatch):
+async def test_worker_retires_a_settled_stop_while_a_blocked_session_holds_the_lease(
+        harness, monkeypatch):
+    """Live 2026-11-26: a solar-surplus Stop lost its BLE readback at 14:00.
+
+    The session kept its lease while its commands were blocked, and the
+    worker refused to read while any lease existed, so the hold never ended
+    even though the cloud showed the car stopped.
+    """
     hass, entry = harness
     runtime, _ = _seed(hass, entry, incident=_held_incident())
     reads = []
@@ -326,10 +334,28 @@ async def test_worker_keeps_hold_without_reading_while_owned_or_settling(harness
 
     await worker.async_tick()
 
+    assert len(reads) == 1
+    assert recovery.get_vehicle_route(hass, entry, VIN_A) is None
+    assert restarts == []
+    assert runtime["_tesla_ev_recovery_sidecar"]["incidents"]["incident-1"]["phase"] == "released"
+
+
+@pytest.mark.asyncio
+async def test_worker_keeps_hold_without_reading_while_writing_or_settling(harness, monkeypatch):
+    hass, entry = harness
+    runtime, _ = _seed(hass, entry, incident=_held_incident())
+    reads = []
+    worker, restarts = _worker(hass, entry, runtime, monkeypatch, reads)
+    in_flight = asyncio.get_running_loop().create_future()
+    runtime[recovery._SUBMISSIONS_KEY] = {"submission-1": {"task": in_flight}}
+
+    await worker.async_tick()
+
     assert reads == []
     assert recovery.get_vehicle_route(hass, entry, VIN_A)["reason"] == "ble_recovery"
     assert restarts == [VIN_A]
-    assert worker.held_logged[VIN_A][0] == "a command writer or charging owner is active"
+    assert worker.held_logged[VIN_A][0] == "a charging command is in flight"
+    in_flight.cancel()
 
     runtime, _ = _seed(hass, entry, age=60)
     worker, restarts = _worker(hass, entry, runtime, monkeypatch, reads)

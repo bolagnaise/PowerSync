@@ -26,14 +26,14 @@ const PS_DEFAULT_LAYOUT = {
   3: [
     ['controls', 'pwset', 'optset', 'packs', 'local', 'amber', 'curtail', 'acinv', 'hacs'],
     ['scene', 'ai', 'ev', 'forecast', 'bp48', 'health', 'demand', 'aemo', 'pv'],
-    ['tariff', 'today', 'prices', 'energy', 'sl48', 'status', 'lifetime', 'flow', 'globird', 'covau', 'envelope', 'details'],
+    ['tariff', 'today', 'prices', 'fcacc', 'energy', 'sl48', 'status', 'lifetime', 'flow', 'globird', 'covau', 'envelope', 'details'],
   ],
   2: [
     ['controls', 'scene', 'pwset', 'ev', 'optset', 'forecast', 'packs', 'health', 'local', 'amber', 'acinv', 'demand', 'flow', 'covau', 'hacs'],
-    ['tariff', 'today', 'ai', 'prices', 'energy', 'bp48', 'sl48', 'status', 'lifetime', 'curtail', 'pv', 'aemo', 'globird', 'envelope', 'details'],
+    ['tariff', 'today', 'ai', 'prices', 'fcacc', 'energy', 'bp48', 'sl48', 'status', 'lifetime', 'curtail', 'pv', 'aemo', 'globird', 'envelope', 'details'],
   ],
   1: [
-    ['controls', 'tariff', 'today', 'scene', 'ai', 'ev', 'pwset', 'packs', 'optset', 'prices', 'energy', 'forecast', 'bp48', 'sl48', 'health', 'status', 'lifetime', 'local', 'amber', 'curtail', 'acinv', 'pv', 'demand', 'aemo', 'flow', 'globird', 'covau', 'envelope', 'details', 'hacs'],
+    ['controls', 'tariff', 'today', 'scene', 'ai', 'ev', 'pwset', 'packs', 'optset', 'prices', 'fcacc', 'energy', 'forecast', 'bp48', 'sl48', 'health', 'status', 'lifetime', 'local', 'amber', 'curtail', 'acinv', 'pv', 'demand', 'aemo', 'flow', 'globird', 'covau', 'envelope', 'details', 'hacs'],
   ],
 };
 
@@ -745,6 +745,14 @@ function psChart(svg, o) {
       d, fill: 'none', stroke: css(s.c), 'stroke-width': s.w || 1.75,
       'stroke-dasharray': s.dash || 'none', 'stroke-linejoin': 'round', 'stroke-linecap': 'round',
     }, svg);
+  });
+  (o.marks || []).forEach(m => {
+    if (!Number.isFinite(m.x) || !Number.isFinite(m.y) || m.x < o.x0 || m.x > o.x1) return;
+    const dot = psSvg('circle', {
+      cx: x(m.x), cy: y(Math.min(o.y1, Math.max(o.y0, m.y))), r: 4,
+      fill: m.hollow ? css('--card') : css(m.c), stroke: css(m.c), 'stroke-width': 2,
+    }, svg);
+    if (m.title) psSvg('title', {}, dot).textContent = m.title;
   });
   if (o.now != null) {
     psSvg('line', { x1: x(o.now), x2: x(o.now), y1: T, y2: H - B, stroke: css('--fg'), 'stroke-width': 1, opacity: 0.7 }, svg);
@@ -3913,6 +3921,104 @@ class PsSolarLoadCard extends PsCardBase {
   }
 }
 
+// ─── Amber forecast accuracy ─────────────────────────────────────
+
+const PS_FCACC_LEAD_KEY = 'power-sync-forecast-accuracy-lead-v1';
+const PS_FCACC_ADVICE = {
+  collecting: ['cyan', 'Still collecting', 'Advice appears after 2 days and at least 3 forecast spikes. Keep PowerSync running with normal prices.'],
+  consider_confidence: ['amber', 'Most forecast spikes didn’t happen', 'Amber Forecast Confidence may suit you. It relies less on uncertain export spikes, but may export earlier and miss a later higher price.'],
+  confidence_suits: ['green', 'Amber Forecast Confidence suits these results', 'Most forecast spikes didn’t happen, and the setting is on.'],
+  keep_off: ['green', 'Most forecast spikes happened', 'Leave Amber Forecast Confidence off so the plan can hold energy for them.'],
+  consider_off: ['amber', 'Most forecast spikes happened', 'Amber Forecast Confidence is on. Turning it off lets the plan hold energy for these spikes.'],
+};
+
+class PsForecastAccuracyCard extends PsCardBase {
+  constructor() {
+    super();
+    this._wantsResize = true;
+    this._lead = psStore(PS_FCACC_LEAD_KEY, '60') === '240' ? '240' : '60';
+    this.addEventListener('click', e => {
+      const btn = e.target?.closest?.('button[data-lead]');
+      if (!btn || btn.dataset.lead === this._lead) return;
+      this._lead = btn.dataset.lead === '240' ? '240' : '60';
+      psStoreSet(PS_FCACC_LEAD_KEY, this._lead);
+      this._invalidate();
+    });
+  }
+
+  _signature() { return `${super._signature()}#${this._lead}`; }
+
+  _render() {
+    const hass = this._hass, en = this.ents;
+    const attrs = psState(hass, en.accuracy)?.attributes || {};
+    const lead = (attrs.leads || {})[this._lead] || {};
+    const unit = psMinorUnit(hass);
+    const baseline = Number(attrs.baseline_per_kwh);
+    const switchState = psState(hass, en.confidence)?.state;
+    const advice = PS_FCACC_ADVICE[lead.advice] || PS_FCACC_ADVICE.collecting;
+    const n = v => (Number.isFinite(Number(v)) ? Number(v) : 0);
+    const stat = (k, v, color, small = '') => `<div class="stat"><span class="k">${psEsc(k)}</span><span class="v"${color ? ` style="color:${color}"` : ''}>${v}${small ? `<small>${small}</small>` : ''}</span></div>`;
+    const days = n(attrs.hours_tracked) / 24;
+    const tracked = days >= 1 ? `${Math.floor(days)} day${Math.floor(days) === 1 ? '' : 's'}` : `${Math.round(n(attrs.hours_tracked))} h`;
+    const hasPoints = Array.isArray(attrs.points) && attrs.points.length > 1;
+    const hitRate = lead.hit_rate === null || lead.hit_rate === undefined || !Number.isFinite(Number(lead.hit_rate)) ? null : Number(lead.hit_rate);
+    this.innerHTML = `
+      <div class="seg" style="--n:2" role="group" aria-label="Forecast made">
+        <button type="button" data-lead="60" aria-pressed="${this._lead === '60'}">1 h before</button>
+        <button type="button" data-lead="240" aria-pressed="${this._lead === '240'}">4 h before</button>
+      </div>
+      <div class="stat-grid">
+        ${stat('Forecast spikes', n(lead.predicted_spikes))}
+        ${stat('Happened', n(lead.happened), 'var(--green)')}
+        ${stat('Didn’t happen', n(lead.missed), 'var(--red)')}
+        ${hitRate === null ? stat('Hit rate', '–') : stat('Hit rate', hitRate, '', '%')}
+      </div>
+      ${hasPoints ? '<svg class="chart" role="img" aria-label="Forecast and settled export prices for the last 48 hours"></svg>' : '<p class="empty">The chart fills in as forecast periods settle.</p>'}
+      <div class="legend">
+        <span><i class="line" style="--c:var(--red)"></i>Settled export price</span>
+        <span><i class="dash" style="--c:var(--amber)"></i>Forecast ${this._lead === '240' ? '4 h' : '1 h'} before</span>
+        <span><i style="--c:var(--green);width:8px;border-radius:50%"></i>Spike happened</span>
+        <span><i style="--c:var(--red);width:8px;border-radius:50%"></i>Spike didn’t happen</span>
+      </div>
+      <div class="callout ${advice[0]}"><b>${psEsc(advice[1])}</b><span>${psEsc(advice[2])}</span></div>
+      <p class="hint">Counts cover the last 7 days (${psEsc(tracked)} tracked so far). The chart shows the last 48 hours, with each forecast drawn at the time it predicted.${Number.isFinite(baseline) ? ` A spike is a forecast above ${psFix(baseline * 100)}${unit}/kWh, your usual export price plus a margin. It counts as happened when at least half of the forecast rise settled.` : ''}${switchState ? ` Amber Forecast Confidence is ${switchState === 'on' ? 'on' : 'off'} in Optimiser settings.` : ''}</p>`;
+  }
+
+  _draw() {
+    const svg = this.querySelector('svg.chart');
+    if (!svg) return;
+    const hass = this._hass, attrs = psState(hass, this.ents.accuracy)?.attributes || {};
+    const now = new Date(), nowH = psHoursFromMidnight(now, now);
+    const field = `f${this._lead}`;
+    const points = Array.isArray(attrs.points) ? attrs.points : [];
+    // Each value covers a 30-minute period; plot it at the period's middle.
+    const at = t => psHoursFromMidnight(new Date(Date.parse(t) + 15 * 60_000), now);
+    const toPts = key => points.filter(p => Number.isFinite(Number(p[key]))).map(p => [at(p.t), Number(p[key]) * 100]);
+    const actual = toPts('actual'), forecast = toPts(field);
+    const marks = (attrs.events || []).filter(e => String(e.lead_minutes) === this._lead).map(e => ({
+      x: (psHoursFromMidnight(new Date(e.start), now) + psHoursFromMidnight(new Date(e.end), now)) / 2,
+      y: Number(e.forecast_peak_per_kwh) * 100,
+      c: e.happened ? '--green' : '--red',
+      title: `${psWhen(hass, new Date(e.start))}: forecast ${psFix(Number(e.forecast_peak_per_kwh) * 100)}, settled ${psFix(Number(e.actual_peak_per_kwh) * 100)}`,
+    }));
+    const vals = [...actual, ...forecast].map(p => p[1]).concat(marks.map(m => m.y));
+    const y1 = psNiceMax(vals, 20);
+    const lo = Math.min(0, ...vals.filter(Number.isFinite));
+    const u = psMinorUnit(hass);
+    psChart(svg, {
+      unit: `${u}/kWh`,
+      x0: nowH - 48, x1: nowH, y0: lo < 0 ? lo * 1.1 : -y1 * 0.03, y1, yTicks: psTicks(Math.min(0, lo), y1, 3), yFmt: v => `${v}${u}`,
+      xFmt: h => psFmtHour(hass, h, now),
+      tooltipTime: h => psWhen(hass, new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, h * 60)),
+      series: [
+        { name: 'Settled', pts: actual, c: '--red', w: 1.75 },
+        { name: 'Forecast', pts: forecast, c: '--amber', dash: '4 3', w: 1.5 },
+      ],
+      marks,
+    });
+  }
+}
+
 // ─── Registration ────────────────────────────────────────────────
 
 const PS_ELEMENTS = {
@@ -3933,6 +4039,7 @@ const PS_ELEMENTS = {
   'ps-load-forecast-card': PsLoadForecastCard,
   'ps-battery-plan-card': PsBatteryPlanCard,
   'ps-solar-load-card': PsSolarLoadCard,
+  'ps-forecast-accuracy-card': PsForecastAccuracyCard,
 };
 for (const [tag, cls] of Object.entries(PS_ELEMENTS)) {
   if (!customElements.get(tag)) customElements.define(tag, cls);
